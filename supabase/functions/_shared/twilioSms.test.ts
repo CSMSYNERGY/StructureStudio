@@ -4,7 +4,7 @@
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  smsPhoneKey, isDamagedPhoneKey, smsE164US, smsSegments, validateTwilioSignature,
+  sendSms, smsPhoneKey, isDamagedPhoneKey, smsE164US, smsSegments, validateTwilioSignature, SmsNotConfigured,
 } from "./twilioSms.ts";
 
 Deno.test("smsPhoneKey matches crm_phone_key: 11 digits leading 1 loses the 1", () => {
@@ -86,5 +86,51 @@ Deno.test("validateTwilioSignature accepts a correctly-signed request and reject
     assert(!await validateTwilioSignature(url + "x", params, sig));
   } finally {
     if (had === undefined) Deno.env.delete("TWILIO_AUTH_TOKEN"); else Deno.env.set("TWILIO_AUTH_TOKEN", had);
+  }
+});
+
+// ── Workstream 2: the sending account is passed in, never read from the environment ───────────
+Deno.test("validateTwilioSignature checks with the token it is GIVEN (the sending account's), else TWILIO_AUTH_TOKEN", async () => {
+  const had = Deno.env.get("TWILIO_AUTH_TOKEN");
+  Deno.env.set("TWILIO_AUTH_TOKEN", "parent-token");
+  try {
+    const url = "https://example.supabase.co/functions/v1/sms-inbound?key=s3cret";
+    const params = { AccountSid: "AC" + "5".repeat(32), Body: "hi" };
+    const sign = async (token: string) => {
+      const data = url + Object.keys(params).sort().map((k) => k + (params as Record<string, string>)[k]).join("");
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(token), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+      return btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data)))));
+    };
+    const subSig = await sign("sub-token");
+    assert(await validateTwilioSignature(url, params, subSig, "sub-token"), "the sub's own token validates its signature");
+    assert(!await validateTwilioSignature(url, params, subSig), "the parent's (the default) does not");
+    assert(await validateTwilioSignature(url, params, await sign("parent-token")), "no token argument = TWILIO_AUTH_TOKEN, as before");
+    assertEquals(await validateTwilioSignature(url, params, subSig, null), false, "an explicit missing token never validates");
+  } finally {
+    if (had === undefined) Deno.env.delete("TWILIO_AUTH_TOKEN"); else Deno.env.set("TWILIO_AUTH_TOKEN", had);
+  }
+});
+
+Deno.test("sendSms sends from the account it is given: its path and its pair; with none, it refuses", async () => {
+  const realFetch = globalThis.fetch;
+  const seen: { url: string; auth: string | null }[] = [];
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
+    return Promise.resolve(new Response(JSON.stringify({ sid: "SM" + "0".repeat(32), num_segments: "1", status: "queued" }), { status: 201 }));
+  }) as typeof fetch;
+  try {
+    const creds = { accountSid: "AC" + "5".repeat(32), user: "SK" + "5".repeat(32), pass: "subkeysecret" };
+    const out = await sendSms({ to: "+15555550142", from: "+15555550100", messagingServiceSid: "MG" + "5".repeat(32), body: "hi", creds });
+    assertEquals(out.sid, "SM" + "0".repeat(32));
+    assertEquals(seen, [{ url: `https://api.twilio.com/2010-04-01/Accounts/${creds.accountSid}/Messages.json`, auth: `Basic ${btoa(`${creds.user}:${creds.pass}`)}` }]);
+    let refused: unknown = null;
+    try {
+      await sendSms({ to: "+15555550142", from: "+15555550100", messagingServiceSid: "MG" + "5".repeat(32), body: "hi", creds: null });
+    } catch (e) { refused = e; }
+    assert(refused instanceof SmsNotConfigured, "no account, no send");
+    assertEquals(seen.length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
   }
 });

@@ -20,4 +20,18 @@
 // (structurestudio.app is being sunset behind a redirect). Until the Supabase
 // allow-list contains this URL, Supabase substitutes Site URL — i.e. the old
 // behavior — so deploying this ahead of the allow-list change is safe.
+//
+// STILL /portal ON 2026-10-13, ON PURPOSE. The app's addresses lost their /portal segment
+// that day (Carolyn 2026-10-12, "let's remove portal from anywhere") and the bare app
+// address is /login now, but this constant does not follow yet. An edge deploy goes live
+// for PRODUCTION at once, and production serves the old _redirects until main is
+// promoted: there /login is the 404 page and the token in the link is lost. /portal works
+// on both hosts: the old one serves the app at it, the new one 301s it to /login, and the
+// browser keeps the #access_token fragment across the redirect (a PKCE ?code= rides the
+// 301's query). So every function that imports this can deploy any time.
+// FLIP IT TO /login (with the Forgot-password redirectTo in portal/01-core.jsx) only once
+// production serves the root-address _redirects AND
+// https://app.structurestudiosuite.com/login is on the Supabase Auth redirect allow-list.
+// (Listing /login early does no harm while nothing asks for it.) scripts/redirects.test.mjs
+// holds this address to "works on the old host and the new one".
 export const AUTH_PORTAL_URL = "https://app.structurestudiosuite.com/portal";

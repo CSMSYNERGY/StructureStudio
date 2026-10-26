@@ -38,6 +38,16 @@
 //                         printed at the end — set it as the PM_MERGE_ITEM_ID repo variable
 //                         for the merge workflow's new reporting leg (plan phase 6).
 
+// ⛔ RETIRED FOR GOOD (2026-10-09, migration 293). Status labels are matched by TEXT ("Awaiting
+// Review" -> l_awaiting) and each item's whole `values` is written back. Migration 293 replaced the
+// boards' labels with one canonical list (New, Planned, In Progress, On Beta, Done, ...), so a re-run
+// would match nothing and blank the status of every imported item; its assignee mapping has been
+// wrong since migration 148 too (operator user ids, where the boards now hold pm_people ids). It
+// refuses to start, the dry run included. The code below stays as the record of the mapping.
+console.error("import-monday is retired: migration 293 replaced the boards' status labels, so a re-run "
+  + "would blank every imported item's status. Nothing was read or written.");
+process.exit(1);
+
 const MONDAY_API = "https://api.monday.com/v2";
 const BOARDS = [
   { mondayId: "18419456589", slug: "bugs", statusCol: "bug_status", severityCol: "priority_1", clientCol: "text_mm5n4fhh" },

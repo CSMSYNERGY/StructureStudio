@@ -69,9 +69,26 @@ async function fetchBoardItems(token: string, boardId: string): Promise<any[]> {
   return items;
 }
 
+// ⛔ RETIRED FOR GOOD (2026-10-09, migration 293). The import matches Monday's status label TEXT
+// ("Awaiting Review", "Fixing", "Completed") onto the boards' labels and then writes each item's
+// WHOLE `values` back. Migration 293 replaced those labels with one canonical list (New, Planned,
+// In Progress, On Beta, Done, ...), so nothing would match any more and a re-run would blank the
+// status of every imported item. Its assignee mapping has also been wrong since 148 (it writes
+// operator user ids where the boards now hold pm_people ids). So it refuses every action, the
+// dry run included, before it reads or writes anything. The mapping code below stays as the
+// record of what the 2026-08-27 import did. This was found still deployed (ACTIVE) on 2026-10-09:
+// deploy this refusal, or delete the function from the project.
+const RETIRED = true;
+
 Deno.serve(withErrorLog("admin-import-monday", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+  if (RETIRED) {
+    return json({
+      error: "The Monday import is retired: the boards' status labels were replaced by one list (migration 293), "
+        + "so a re-run would blank every imported item's status. Nothing was read or written.",
+    }, 410);
+  }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;

@@ -27,11 +27,22 @@
 //      catches an over-bright regression.
 //   8. a near-white metal roof does not blow out: at most 2% of its pixels at luma 250 or above.
 //
+// THE DESIGN'S OWN PICK (2026-10-06, Carolyn: "there is no standard it is per individual design"). A
+// rep picks AG Panel or Standing Seam per design in the portal; the style's value is only where a
+// design starts. Saved designs opened by their link on the public page (load_design answered here,
+// with metal and shingle colours in the config), measured in the docked panel AND the full viewer:
+//   9. an AG Panel style whose design picked Standing Seam draws Standing Seam: 6 ft, no drawn ribs;
+//  10. a Standing Seam style whose design picked AG Panel draws AG Panel: 3 ft, 4 drawn ribs;
+//  11. a Shingle roof with a Standing Seam pick is shingle, untouched;
+//  12. the public page never shows the Profile field.
+// Against the tree before the pick (git archive ea0a0de0, run 2026-10-07) 9 and 10 fail, all 12 of
+// their tile, bump and rib checks (each draws its STYLE's profile), and every other check holds.
+//
 //   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/metalRoof.mjs                             (SS_SHOTS=<dir> for the PNGs)
 //
 // Exit 0 = every assertion held.
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE } from "./lib.mjs";
 
 const W = 12, L = 24, SIZE = `${W}x${L}`, H = 8;
 const CLADS = ["panel", "lap", "batten", "agpanel"].map((id) => ({ id, rate: 0, basis: "sqft_option", label: null, charged: false }));
@@ -262,6 +273,70 @@ function checkSurface(R, name, m, s) {
   }
 }
 
+// ── 9-12. The design's own pick ──────────────────────────────────────────────────────────────────
+const PICK_CLIENT = "harness-metal-pick";
+const PICK_CODE = "SS-HARNESSMP1";
+const PICK_CONFIG = {
+  ...CONFIG,
+  clientId: PICK_CLIENT,
+  colors: [
+    { id: "m1", label: "Slate", hex: "#6B7078", metal: true, shingle: false, siding: false, trim: false, rate: 0, isDefault: true },
+    { id: "s1", label: "Weathered Wood", hex: "#6B7078", metal: false, shingle: true, siding: false, trim: false, rate: 0, isDefault: true },
+  ],
+};
+const pickRow = (style, selections) => ({
+  short_code: PICK_CODE, client_id: PICK_CLIENT, status: "sent", version: 1,
+  selections: { style, size: SIZE, cladding: "", ...selections },
+  items: [], paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
+  contact: { name: "Pat Example", email: "pat@example.test", phone: "5550100100", street: "", city: "", state: "", zip: "" },
+  bldg_w: W, bldg_h: L,
+});
+const PICK_CASES = [
+  { name: "AG Shed, design picked Standing Seam", row: pickRow("shed", { roofType: "Metal", roofColor: "Slate", roofProfile: "standingseam" }),
+    expect: { tileU: 6, tileV: 8, bump: 0.5, surface: METAL, ribs: 0 } },
+  { name: "Post Frame, design picked AG Panel", row: pickRow("postframe", { roofType: "Metal", roofColor: "Slate", roofProfile: "agpanel" }),
+    expect: { tileU: 3, tileV: 8, bump: 0.6, surface: METAL, ribs: 4 } },
+  { name: "Post Frame, Shingle roof with a Standing Seam pick", row: pickRow("postframe", { roofType: "Shingle", roofColor: "Weathered Wood", roofProfile: "standingseam" }),
+    expect: { tileU: 6, tileV: 4, bump: 0.35, surface: SHINGLE, ribs: null } },
+];
+function checkProfile(R, name, m, e) {
+  R.ok(`${name}: tile ${e.tileU} ft along the ridge`, near(m.repeat[0], 1 / e.tileU), `repeat.x ${m.repeat[0]}`);
+  R.ok(`${name}: tile ${e.tileV} ft down the slope`, near(m.repeat[1], 1 / e.tileV), `repeat.y ${m.repeat[1]}`);
+  R.ok(`${name}: bump ${e.bump}`, near(m.bump, e.bump), String(m.bump));
+  if (e.ribs !== null) R.ok(`${name}: ${e.ribs} drawn ribs per tile`, m.ribs === e.ribs, String(m.ribs));
+  checkSurface(R, name, m, e.surface);
+}
+async function runPicks(R, ctx, dir) {
+  for (const c of PICK_CASES) {
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    try {
+      await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+      await stubSupabase(page, { config: PICK_CONFIG, fixtures: FIXTURES, rpc: { load_design: [c.row] } });
+      await openDesigner(page, PICK_CLIENT);
+      await page.goto(`${BASE}/?client=${PICK_CLIENT}&id=${PICK_CODE}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+      await page.waitForFunction((l) => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === `${l} ft`), L, { timeout: 30000 });
+      await settle(page, 800);
+      R.ok(`${c.name}: the public page shows no Profile field`, (await page.locator("select[data-ss-roof-profile]").count()) === 0);
+      await openDock(page);
+      const pm = await measure(page, "__ss3dPanel");
+      R.ok(`${c.name} (docked panel): roof slab found`, !!pm, JSON.stringify(pm));
+      if (pm) checkProfile(R, `${c.name} (docked panel)`, pm, c.expect);
+      await openEditor(page);
+      const m = await measure(page);
+      R.ok(`${c.name}: roof slab found`, !!m, JSON.stringify(m));
+      if (m) checkProfile(R, c.name, m, c.expect);
+      await shot(page, `${dir}/pick-${c.row.selections.style}-${c.row.selections.roofProfile}-${c.row.selections.roofType}-roof-close.png`, [W * 0.55, H + 6.5, L * 0.18], [0, H + 1.4, 0]);
+      R.ok(`${c.name}: no page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+    } catch (err) {
+      R.ok(`${c.name}: ran`, false, err && err.message ? err.message.split("\n")[0] : String(err));
+    } finally {
+      await page.close();
+    }
+  }
+}
+
 async function main() {
   const R = reporter();
   const dir = shotsDir("metal-roof");
@@ -315,6 +390,7 @@ async function main() {
       R.ok(`${c.st.label}: no page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
       await page.close();
     }
+    await runPicks(R, ctx, dir);
   } finally {
     await browser.close();
   }

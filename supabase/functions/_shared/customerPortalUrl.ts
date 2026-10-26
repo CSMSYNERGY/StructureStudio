@@ -33,6 +33,26 @@ function hostFor(req?: Request | null): string {
   return CANONICAL_HOST;
 }
 
+/** The builder's Inventory tab, for the Online Shop's purchase-request email (2026-10-17).
+ *  /portal/inventory on purpose, for the same two-host reason as portalOrderUrl below. */
+export function portalInventoryUrl(req?: Request | null): string {
+  return `https://${hostFor(req)}/portal/inventory`;
+}
+
+/**
+ * Where a customer manages one booking: `/book?manage=<token>` (migration 327).
+ *
+ * The token IS the authentication — the same capability model a design short_code uses — so
+ * this link goes only to the person who booked, in their own confirmation. It carries no
+ * client id: book-public reads the tenant off the booking the token names, and putting the
+ * slug in the URL as well would only invite someone to edit it.
+ *
+ * Same host rule as every link here, so a confirmation sent from beta points at beta.
+ */
+export function bookManageUrl(token: string, req?: Request | null): string {
+  return `https://${hostFor(req)}/book?manage=${encodeURIComponent(token)}`;
+}
+
 export function myQuotesUrl(clientId: string, req?: Request | null): string {
   return `https://${hostFor(req)}/my-quotes?client=${encodeURIComponent(clientId)}`;
 }
@@ -73,6 +93,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * The builder's order page: /portal/orders/o-<orders.id> (the deep link portal/12-shell.jsx
  * reads — keyed on the UUID, not order_no).
+ *
+ * STILL /portal ON 2026-10-13, ON PURPOSE. The app's addresses lost their /portal segment that
+ * day and the page's own address is /orders/o-<id> now, but an edge deploy goes live for
+ * PRODUCTION at once, and production serves the old _redirects until main is promoted (there
+ * /orders/… is the 404 page). /portal/orders/… works on both hosts: the old one serves the app
+ * at it, the new one 301s it to /orders/… in one hop. Flip it to /orders once production serves
+ * the root-address _redirects (CLAUDE.md, "App addresses"; scripts/redirects.test.mjs checks
+ * both hosts).
  *
  * Used by the "Invoice to approve" email (migration 229), which customer-accept sends while
  * answering a CUSTOMER's request — so the Origin here is the customer's page, and a quote

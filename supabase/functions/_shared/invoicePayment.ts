@@ -15,6 +15,7 @@
 //    money on a DIFFERENT processor for a DIFFERENT merchant of record. If you change the
 //    double-charge posture in one, change all three.
 //    Importers: customer-pay/index.ts, portal-payments/index.ts
+//    It imports _shared/cardpointe.ts and _shared/paymentSettings.ts: a change to either redeploys both.
 //
 // THE ORDERING RULE, which is the whole point of this file: the charge attempt exists in OUR
 // records BEFORE the card is touched, and the balance is credited only AFTER the sale is
@@ -23,17 +24,26 @@
 
 import {
   cpAuth,
+  cpAuthFieldNames,
+  type CpAuthRequest,
+  type CpBilling,
+  cpBillingFields,
   cpCents,
+  cpDeclineVerification,
   cpInquireByOrderId,
   cpSummary,
+  type CpVerification,
+  cpVerification,
   cpVoid,
   isGatewayConfig,
   isGatewayThrottled,
   isGatewayUnknown,
   throttledRetryAfter,
 } from "./cardpointe.ts";
+import { cpEnvOf, type CpMerchant, isMissingColumn } from "./paymentSettings.ts";
 import { amountOwed } from "./estimateLines.ts";
 import { agreedBaseline } from "./changeOrderDiff.ts";
+import { addressFrom } from "./contactAddress.ts";
 
 /** $1 floor — below it the card fee exceeds the payment. $50,000 ceiling: above that a
  *  figure is more likely a typo than a shed, and "call your builder" is the right answer.
@@ -62,7 +72,23 @@ export type PaymentResult =
     balanceCents: number;
     already: boolean;
   }
-  | { ok: false; error: string; blocking: boolean; status: number };
+  | {
+    ok: false;
+    error: string;
+    blocking: boolean;
+    status: number;
+    /**
+     * true ONLY when the attempt reached /auth and did not stand as a payment: a card decline, or a
+     * partial approval that was voided. The token has been used, and Fiserv (CardPointe
+     * integrations), 2026-10-14, says its CVV stays linked to it for 2 minutes; the first auth
+     * very likely uses it up. So the page asks for the card again rather than re-sending a token
+     * with no security code behind it. Never set on a refusal made before /auth (amount, block,
+     * race, throttle, configuration) or on a BLOCKING failure (an unknown outcome, a partial whose
+     * void failed, a charge not recorded): those keep or block, they never invite a retry. Both
+     * callers put it in the JSON body as `newCardNeeded: true`, and only when it is true.
+     */
+    newCardNeeded?: true;
+  };
 
 // ─────────────────────────────────────────────────────────────────────────────────────
 // The amount, decided in one pure place.
@@ -241,7 +267,8 @@ export async function readOrderMoney(
 
 export type ChargeOpts = {
   clientId: string;
-  merchid: string;
+  /** The tenant's own account and its system (paymentSettings.ts cpMerchant). Never a default. */
+  merchant: CpMerchant;
   orderId: string;
   shortCode: string | null;
   amountCents: number;
@@ -249,14 +276,188 @@ export type ChargeOpts = {
   /** CardSecure token from the iFrame, or raw encrypted track data from the VP3350. */
   account: string;
   expiry?: string;
+  /** Billing name, street and ZIP for AVS — billingFromRequest's answer. All optional. */
   postal?: string;
   name?: string;
-  /** "E" online, "R" card present at the counter. */
-  ecomind?: "E" | "R";
+  address?: string;
+  // There is no `ecomind` here any more (2026-10-14): ecomindFor decides it from rail, entry and
+  // actorKind, so no caller can pick it and no caller can forget it.
+  /** "swipe" = read by the card reader, card physically present: the auth carries NO ecomind
+   *  (CardPointe's "R" means RECURRING, which is what swipes used to be sent as), and the
+   *  payment's entry_mode still says it was a swipe when the gateway does not. Read ONLY on a
+   *  card: a bank payment is never a swipe, whatever the page sent (rail "ach" ignores it). */
+  entry?: "keyed" | "swipe";
+  /** Who is paying, for the audit trail, and since 2026-10-14 also what the auth says: the shopper
+   *  ("customer") keying their own card sends ecomind E, anyone else keying one sends T
+   *  (ecomindFor). It also picks the wording of the partial-approval messages. */
   actorKind: "customer" | "operator" | "staff";
   actorRef?: string | null;
   createdBy?: string | null;
 };
+
+/**
+ * The ecomind every /auth carries, decided HERE and nowhere else. cpAuth has one caller (below), so
+ * a rule in this function is a rule for every sale, and no caller can drift from it: the two near-
+ * identical callers have drifted before.
+ *
+ *   card, swiped                 null, none sent. The track data says the card was there; Fiserv
+ *                                (CardPointe integrations), 2026-10-14, confirmed a swipe may omit it.
+ *   card, the shopper keyed it   "E": the cardholder typed their own card online (my-quotes).
+ *   card, anyone else keyed it   "T": a builder's staff typed it in. Fiserv (CardPointe
+ *                                integrations), 2026-10-14: with the customer not present that is
+ *                                T, "not an electronic transaction". It was E until then.
+ *   ach                          "E", whoever keyed it, and `entry` is ignored. UNCHANGED, and only
+ *                                until the SEC-code work: if the gateway takes the SEC code from
+ *                                ecomind, T on a bank payment would read as TEL (recorded verbal
+ *                                consent, which nothing here collects). So bank payments keep
+ *                                today's bytes until Fiserv names the SEC field and that change
+ *                                decides the code per surface.
+ *
+ * R (recurring in CardPointe's API) is never returned.
+ */
+export function ecomindFor(
+  o: { rail: "card" | "ach"; entry?: "keyed" | "swipe"; actorKind: ChargeOpts["actorKind"] },
+): "E" | "T" | null {
+  if (o.rail === "ach") return "E";
+  if (o.entry === "swipe") return null;
+  return o.actorKind === "customer" ? "E" : "T";
+}
+
+/**
+ * payments.entry_mode when the gateway gives no `entrymode` of its own, read from what /auth was
+ * SENT and the rail, never from what the page said. Until 2026-10-14 it was read off `entry`, so a
+ * modal left on Swipe and switched to Bank posted a BANK payment labelled "Swipe".
+ *
+ *   card, no ecomind (a swipe)   "Swipe"
+ *   card, T                      "Moto", mail/telephone order, which is what T means (not "Keyed",
+ *                                which reads as a card-present keyed sale)
+ *   everything else              "ECommerce": a card keyed with E, and every bank payment
+ */
+export function entryModeFor(rail: "card" | "ach", sentEcomind: "E" | "T" | null): string {
+  if (rail === "card" && sentEcomind === null) return "Swipe";
+  if (rail === "card" && sentEcomind === "T") return "Moto";
+  return "ECommerce";
+}
+
+/** The two partial-approval sentences, worded for whoever is reading. A builder reads them in the
+ *  Record-a-payment modal, so "your card" and "contact your builder" are the shopper's words only.
+ *  Neither promises the hold is released: after a void the card's bank may still show the pending
+ *  amount for a few days, and only the bank decides when it drops off. */
+export function partialApprovalText(
+  actorKind: ChargeOpts["actorKind"],
+  approvedCents: number,
+  requestedCents: number,
+  voided: boolean,
+): string {
+  const a = `$${(approvedCents / 100).toFixed(2)}`;
+  const b = `$${(requestedCents / 100).toFixed(2)}`;
+  const shopper = actorKind === "customer";
+  if (voided) {
+    return shopper
+      ? `Your card only approved ${a} of ${b}, so the payment was cancelled and nothing was taken. ` +
+        `If your bank shows a pending ${a}, it drops off on its own. Try another card.`
+      : `The card only approved ${a} of ${b}, so the sale was cancelled and nothing was taken. ` +
+        `If the cardholder's bank shows a pending ${a}, it drops off on its own. Try another card.`;
+  }
+  return shopper
+    ? "Your card only approved part of the amount and we could not release the hold. Do NOT try again — contact your builder."
+    : "The card only approved part of the amount and the hold could not be released. Don't run it again; CSM Synergy has been alerted.";
+}
+
+/**
+ * Gateway text with every run of five or more digits cut to its last four ("…1808").
+ *
+ * Fiserv (CardPointe integrations), 2026-10-14: a bank payment with a routing number that is not a
+ * bank's declines with resptext "The RoutingNumber (<bankaba>) is not a valid routing number.", so
+ * a decline's sentence can carry the number the payer typed. That sentence is stored on the attempt,
+ * shown to the payer, and, as the 4xx body, filed into app_errors by withErrorLog; a routing or
+ * account number may be in none of those. Five digits is the floor because a routing number is
+ * nine, a card thirteen to nineteen and most account numbers longer than four; a ZIP masked on the
+ * way is the cost. The last four are what the payer needs to see which number it meant.
+ */
+export function maskDigitRuns(s: string): string {
+  return s.replace(/[0-9]{5,}/g, (run) => "…" + run.slice(-4));
+}
+
+/**
+ * The billing name, street and ZIP for a charge, from the request body and the design's contact.
+ *
+ *   body `name` / `address` / `postal`   what was typed, through cpBillingFields
+ *   body `billing: "delivery"`           "Billing address is my delivery address": the street and
+ *                                        ZIP come from the design's contact (addressFrom) and
+ *                                        whatever was typed for them is ignored
+ *
+ * The name falls back to the contact's, which is what both functions always sent. Every field
+ * stays optional: production's pages send none of these, and get exactly the auth they got before.
+ *
+ * ⚠️ THE DELIVERY ADDRESS NEVER GOES BACK TO THE PAGE. The customer ticks a box and the server
+ * fills it in; nothing here is echoed (the migration-048 lesson: a contact's address is not
+ * something a payment endpoint hands out).
+ */
+// deno-lint-ignore no-explicit-any
+export function billingFromRequest(body: any, contact: any): CpBilling {
+  const typed = cpBillingFields(body);
+  const c = (contact && typeof contact === "object" ? contact : {}) as Record<string, unknown>;
+  const name = typed.name ?? cpBillingFields({ name: c.name }).name;
+  if (body?.billing !== "delivery") return { ...typed, ...(name ? { name } : {}) };
+  const a = addressFrom(c);
+  const d = cpBillingFields({ address: a.street ?? undefined, postal: a.zip ?? undefined });
+  return { ...(name ? { name } : {}), ...d };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Migration 291's columns, written so a deploy AHEAD of the migration still takes money.
+//
+// sent_fields and ecomind go on the attempt INSERT, which is the concurrency guard, and the
+// AVS/CVV answers go on the attempt's CLOSE. PostgREST refuses the WHOLE statement when one key
+// names a column it cannot find (PGRST204; 42703 from Postgres), so without this a function
+// deployed before 291 would refuse every charge at the insert ("already going through"), and
+// worse, a close that failed would leave a charged attempt `open` until the stale sweep turned
+// it closed_unknown and blocked the order. On that error the write is tried once more without
+// the 291 keys (emailSend.ts and sms-inbound do the same for their own migrations). A failed
+// statement wrote nothing, so the retried insert is still the guard.
+//
+// Migration 296's `cp_env` joins the same rule, NEWEST FIRST: a missing column drops cp_env alone
+// and tries again, and only if that still fails are the 291 keys dropped too. So a database with
+// 291 and without 296 (live, between this deploy and that apply) keeps every 291 field, and the
+// attempt reads as UAT (cp_env null), which is what it is: production secrets cannot be used for
+// a tenant until 296 gives the tenant a column to say so.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+const M291_KEYS = ["sent_fields", "ecomind", "avsresp", "cvvresp"];
+const M296_KEYS = ["cp_env"];
+/** The keys a missing-column error drops, in order: the newest migration's first. */
+const LATE_KEY_SETS = [M296_KEYS, M291_KEYS];
+const LATE_KEYS = LATE_KEY_SETS.flat();
+
+function without(row: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([k]) => !keys.includes(k)));
+}
+
+/** Run a write; while it fails on a missing column, drop the next set of late keys and run it
+ *  again. Stops at the first answer that is not a missing column, or when nothing is left to drop. */
+// deno-lint-ignore no-explicit-any
+async function writeTolerant(write: (row: Record<string, unknown>) => Promise<any>, row: Record<string, unknown>) {
+  let cur = row;
+  let r = await write(cur);
+  for (const keys of LATE_KEY_SETS) {
+    if (!(r?.error && isMissingColumn(r.error))) break;
+    if (!Object.keys(cur).some((k) => keys.includes(k))) continue;
+    cur = without(cur, keys);
+    r = await write(cur);
+  }
+  return r;
+}
+
+/** The verification codes as attempt columns, each only when the gateway gave one, so a close
+ *  that has none of them writes exactly the row it wrote before 291. */
+function verificationColumns(v: CpVerification | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (v?.respcode) out.respcode = v.respcode;
+  if (v?.avsresp) out.avsresp = v.avsresp;
+  if (v?.cvvresp) out.cvvresp = v.cvvresp;
+  return out;
+}
 
 /** A durable, unguessable order reference minted BEFORE the attempt row exists — which is
  *  what makes /inquireByOrderid able to answer for a charge whose response we never saw.
@@ -338,19 +539,41 @@ export async function chargeInvoicePayment(
   //    HERE, before any money moves. Two tabs, a double-tap, or a customer paying while a
   //    rep charges the same balance all land on this.
   const orderRef = mintOrderRef();
-  const { data: attempt, error: attErr } = await admin.from("payment_attempts")
-    .insert({
-      client_id: clientId,
-      order_id: orderId,
-      short_code: opts.shortCode ?? null,
-      amount_cents: amountCents,
-      rail,
-      merchid: opts.merchid,
-      orderid: orderRef,
-      actor_kind: opts.actorKind,
-      actor_ref: opts.actorRef ?? null,
-    })
-    .select("id").maybeSingle();
+  // The request is built BEFORE the attempt row, so the row can say which fields the sale
+  // carries. ecomindFor is the only source of the ecomind: none on a card swipe, E for the
+  // shopper's own card, T for a card a builder keyed, E on every bank payment.
+  const authReq: CpAuthRequest = {
+    merchant: opts.merchant,
+    amountCents,
+    account: opts.account,
+    expiry: opts.expiry,
+    orderid: orderRef,
+    postal: opts.postal,
+    name: opts.name,
+    address: opts.address,
+    ecomind: ecomindFor({ rail, entry: opts.entry, actorKind: opts.actorKind }),
+    rail,
+  };
+  const attemptRow: Record<string, unknown> = {
+    client_id: clientId,
+    order_id: orderId,
+    short_code: opts.shortCode ?? null,
+    amount_cents: amountCents,
+    rail,
+    merchid: opts.merchant.merchid,
+    orderid: orderRef,
+    actor_kind: opts.actorKind,
+    actor_ref: opts.actorRef ?? null,
+    // Migration 291: field NAMES only, never a value, and the ecomind actually sent (null = none).
+    sent_fields: cpAuthFieldNames(authReq),
+    ecomind: authReq.ecomind ?? null,
+    // Migration 296: the system the sale goes to. Void, refund, settlestat and the recovery inquire
+    // read it back (merchantOfRecord), so they ask the system that holds the transaction.
+    cp_env: opts.merchant.env,
+  };
+  const insertAttempt = (row: Record<string, unknown>) =>
+    admin.from("payment_attempts").insert(row).select("id").maybeSingle();
+  const { data: attempt, error: attErr } = await writeTolerant(insertAttempt, attemptRow);
   if (attErr || !attempt) {
     return {
       ok: false,
@@ -360,16 +583,23 @@ export async function chargeInvoicePayment(
     };
   }
 
-  // Closing the ledger must never become a second failure — it swallows its own errors,
-  // exactly as walletTopup's does.
+  // Writing to the ledger after the insert must never become a second failure — it swallows
+  // its own errors, exactly as walletTopup's does. A database without 291's columns gets the
+  // same write without them (see LATE_KEY_SETS).
+  const updateAttempt = async (patch: Record<string, unknown>) => {
+    try {
+      if (!Object.keys(patch).some((k) => LATE_KEYS.includes(k))) {
+        await admin.from("payment_attempts").update(patch).eq("id", attempt.id);
+        return;
+      }
+      await writeTolerant((p) => admin.from("payment_attempts").update(p).eq("id", attempt.id), patch);
+    } catch { /* see above */ }
+  };
   const closeAttempt = (
     state: string,
     detail: string | null,
     extra: Record<string, unknown> = {},
-  ) =>
-    admin.from("payment_attempts")
-      .update({ state, detail, closed_at: new Date().toISOString(), ...extra })
-      .eq("id", attempt.id).then(() => undefined, () => undefined);
+  ) => updateAttempt({ state, detail, closed_at: new Date().toISOString(), ...extra });
 
   const logFault = (code: string, message: string) =>
     admin.from("app_errors").insert({
@@ -383,19 +613,12 @@ export async function chargeInvoicePayment(
   // 4. The sale.
   let auth;
   try {
-    auth = await cpAuth({
-      merchid: opts.merchid,
-      amountCents,
-      account: opts.account,
-      expiry: opts.expiry,
-      orderid: orderRef,
-      postal: opts.postal,
-      name: opts.name,
-      ecomind: opts.ecomind ?? "E",
-      rail,
-    });
+    auth = await cpAuth(authReq);
   } catch (se) {
-    const msg = String((se as Error).message ?? "");
+    // Masked before it goes ANYWHERE (the attempt's detail, a fault row, the decline sentence, which
+    // the caller returns as a 4xx body that withErrorLog files): gateway text can carry a number the
+    // payer typed (maskDigitRuns).
+    const msg = maskDigitRuns(String((se as Error).message ?? ""));
 
     if (isGatewayUnknown(se)) {
       // The card MAY have been charged and we cannot know. Do not record, do not retry.
@@ -404,7 +627,7 @@ export async function chargeInvoicePayment(
       await logFault(
         "payment_charge_unknown",
         `${clientId}: ${amountCents} cent ${rail} charge on order ${orderId} is UNVERIFIABLE. ` +
-          `Resolve with /inquireByOrderid orderid=${orderRef} merchid=${opts.merchid} before allowing another attempt. ${msg}`,
+          `Resolve with /inquireByOrderid orderid=${orderRef} merchid=${opts.merchant.merchid} (${opts.merchant.env}) before allowing another attempt. ${msg}`,
       );
       return {
         ok: false,
@@ -443,10 +666,13 @@ export async function chargeInvoicePayment(
 
     // A plain decline: the gateway answered, nothing was charged. Safe to say so, and the
     // reason is the one thing the customer can act on. Capped and stripped — it is still
-    // third-party text.
-    await closeAttempt("closed_declined", msg);
+    // third-party text. The AVS/CVV answer is kept on the attempt (291): a decline writes no
+    // payments row, and a mismatching street or CVV is exactly the decline worth reading back.
+    const v = cpDeclineVerification(se);
+    await closeAttempt("closed_declined", msg, { ...(v ? { respstat: "C" } : {}), ...verificationColumns(v) });
     const clean = msg.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 200);
-    return { ok: false, error: clean || "The payment was declined.", blocking: false, status: 402 };
+    // The token went to /auth: the page asks for the card again (PaymentResult.newCardNeeded).
+    return { ok: false, error: clean || "The payment was declined.", blocking: false, status: 402, newCardNeeded: true };
   }
 
   // 4e. PARTIAL APPROVAL. Neither an approval nor a decline: it takes some of the money
@@ -454,12 +680,15 @@ export async function chargeInvoicePayment(
   //     retref FIRST so the void has a durable subject even if what follows fails, then
   //     release the hold. There is never a payments row for a partial.
   if (auth.kind === "partial") {
-    await admin.from("payment_attempts")
-      .update({ retref: auth.retref, respstat: "A", detail: "partial approval - voiding" })
-      .eq("id", attempt.id).then(() => undefined, () => undefined);
+    await updateAttempt({
+      retref: auth.retref,
+      respstat: "A",
+      detail: "partial approval - voiding",
+      ...verificationColumns(cpVerification(auth.raw)),
+    });
     let voided = false;
     try {
-      voided = await cpVoid(opts.merchid, auth.retref);
+      voided = await cpVoid(opts.merchant, auth.retref);
     } catch {
       voided = false;
     }
@@ -467,13 +696,14 @@ export async function chargeInvoicePayment(
       await closeAttempt("closed_declined", `partial approval voided (approved ${auth.approvedCents} of ${auth.requestedCents})`, {
         retref: auth.retref,
       });
+      // Worded for whoever is reading (partialApprovalText). It used to say "That hold has been
+      // released", which only the card's bank decides, and it said "Your card" to a builder.
       return {
         ok: false,
-        error:
-          `Your card only approved $${(auth.approvedCents / 100).toFixed(2)} of $${(auth.requestedCents / 100).toFixed(2)}. ` +
-          "That hold has been released — nothing was taken. Try another card.",
+        error: partialApprovalText(opts.actorKind, auth.approvedCents, auth.requestedCents, true),
         blocking: false,
         status: 402,
+        newCardNeeded: true,
       };
     }
     await closeAttempt("closed_unknown", `partial approval and the void FAILED (retref ${auth.retref})`, {
@@ -483,10 +713,10 @@ export async function chargeInvoicePayment(
       "payment_partial_void_failed",
       `${clientId}: partial approval ${auth.approvedCents} of ${auth.requestedCents} on order ${orderId}, retref ${auth.retref}, and the void failed. Release it by hand at the gateway.`,
     );
+    // Blocking, so no newCardNeeded: the order is held until a person releases the partial.
     return {
       ok: false,
-      error:
-        "Your card only approved part of the amount and we could not release the hold. Do NOT try again — contact your builder.",
+      error: partialApprovalText(opts.actorKind, auth.approvedCents, auth.requestedCents, false),
       blocking: true,
       status: 409,
     };
@@ -495,6 +725,8 @@ export async function chargeInvoicePayment(
   // 5. Record it. ACH is money three days from now, so it lands `pending` and counts toward
   //    nothing until the reconcile sweep says otherwise.
   const fundingState: "settled" | "pending" = rail === "ach" ? "pending" : "settled";
+  // On every close from here on: the sale was approved, so its AVS/CVV answer is known.
+  const verified = verificationColumns(cpVerification(auth.raw));
   const nowIso = new Date().toISOString();
   const row = {
     client_id: clientId,
@@ -511,7 +743,11 @@ export async function chargeInvoicePayment(
     gateway_authcode: auth.authcode,
     instrument_brand: auth.brand ?? (rail === "ach" ? "ACH" : null),
     instrument_last4: auth.last4,
-    entry_mode: auth.entrymode ?? (opts.ecomind === "R" ? "Retail" : "ECommerce"),
+    // The gateway's own word when it gives one. Otherwise what WE sent (entryModeFor): a card
+    // swipe, a card a builder keyed (T, "Moto"), or ECommerce for the shopper's card and every
+    // bank payment. (This read "Retail" for a swipe, the label of the "R" ecomind swipes used to
+    // send, which CardPointe defines as recurring.)
+    entry_mode: auth.entrymode ?? entryModeFor(rail, authReq.ecomind),
     avs_result: auth.avsresp,
     cvv_result: auth.cvvresp,
     surcharge_cents: auth.surchargeCents,
@@ -535,6 +771,7 @@ export async function chargeInvoicePayment(
         retref: auth.retref,
         payment_id: existing?.id ?? null,
         respstat: "A",
+        ...verified,
       });
       const after = await readOrderMoney(admin, clientId, orderId);
       return {
@@ -565,6 +802,7 @@ export async function chargeInvoicePayment(
     await closeAttempt("closed_unknown", `charge ${auth.retref} succeeded but the payments insert failed: ${msg}`, {
       retref: auth.retref,
       respstat: "A",
+      ...verified,
     });
     await logFault(
       "payment_recorded_failed",
@@ -586,6 +824,7 @@ export async function chargeInvoicePayment(
     retref: auth.retref,
     payment_id: payment.id,
     respstat: "A",
+    ...verified,
   });
 
   const after = await readOrderMoney(admin, clientId, orderId);
@@ -601,6 +840,56 @@ export async function chargeInvoicePayment(
     balanceCents: after ? (after.owedCents ?? 0) - after.settledCents : 0,
     already: false,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// The merchant a charge was taken on.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** The merchant account one charge was taken on, and the system (test or live) it lives on. */
+export type MerchantOfRecord = CpMerchant;
+
+/**
+ * The MID and system each charge was TAKEN ON, keyed by String(attempt id), read off the attempt
+ * rows (payment_attempts.merchid and, since migration 296, cp_env, both written before the card was
+ * touched).
+ *
+ * Void, refund, settlestat and the recovery inquire must ask the account that HOLDS the
+ * transaction. Until 2026-10 they asked the tenant's CURRENT one (client_settings, or the
+ * deployment default when that was blank), so a builder whose MID changed after a sale could no
+ * longer void, refund or reconcile it: the gateway was asked about a retref on an account that
+ * never saw it. The same holds for the SYSTEM: a sale taken in test mode is asked about on the test
+ * system after the builder goes live, and the reverse.
+ *
+ * cp_env NULL is UAT (paymentSettings.ts cpEnvOf): every attempt written before 296 went to the
+ * CARDPOINTE_* secrets, which are the UAT set. A database without 296 is read the same way.
+ *
+ * An id with no row, a row with a blank MID, or a cp_env that is neither 'uat' nor 'prod' is simply
+ * ABSENT from the map. The caller refuses and logs; nothing here or there falls back to the current
+ * MID or guesses a system. Throws on a read error, so "the database did not answer" can never be
+ * mistaken for "no such attempt".
+ */
+export async function merchantOfRecord(
+  admin: Admin,
+  clientId: string,
+  attemptIds: unknown[],
+): Promise<Map<string, MerchantOfRecord>> {
+  const out = new Map<string, MerchantOfRecord>();
+  // payment_attempts.id is a bigint: anything else is not an attempt id, and asking Postgres to
+  // cast it would fail the whole read.
+  const ids = [...new Set(attemptIds.map((v) => (v == null ? "" : String(v).trim())).filter((v) => /^\d{1,19}$/.test(v)))];
+  if (!ids.length) return out;
+  const read = (cols: string) => admin.from("payment_attempts").select(cols).eq("client_id", clientId).in("id", ids);
+  let { data, error } = await read("id, merchid, cp_env");
+  // Deployed ahead of migration 296: the column is not there, and every attempt is UAT.
+  if (error && isMissingColumn(error)) ({ data, error } = await read("id, merchid"));
+  if (error) throw new Error(`merchantOfRecord: ${String(error.message ?? error.code ?? "read failed")}`);
+  for (const row of Array.isArray(data) ? data : []) {
+    const merchid = typeof row?.merchid === "string" ? row.merchid.trim() : "";
+    const env = cpEnvOf(row?.cp_env);
+    if (row?.id != null && merchid && env) out.set(String(row.id), { merchid, env });
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────
@@ -622,7 +911,7 @@ export async function resolveUnknownAttempt(
   attemptId: number,
 ): Promise<ResolveResult> {
   const { data: att } = await admin.from("payment_attempts")
-    .select("id, order_id, short_code, amount_cents, rail, merchid, orderid, state, retref, created_at")
+    .select("id, order_id, short_code, amount_cents, rail, orderid, state, retref, created_at")
     .eq("client_id", clientId).eq("id", attemptId).maybeSingle();
   if (!att) return { resolved: false, reason: "not_found" };
   if (att.state !== "closed_unknown" && att.state !== "open") {
@@ -639,9 +928,19 @@ export async function resolveUnknownAttempt(
     if (!(ageMs > STALE_OPEN_MS)) return { resolved: false, reason: "in_flight" };
   }
 
+  // The orderid lives on the account the attempt was made on (merchantOfRecord), which is not
+  // necessarily the tenant's account today. No merchant, no question: the block stays.
+  let merchant: MerchantOfRecord | undefined;
+  try {
+    merchant = (await merchantOfRecord(admin, clientId, [att.id])).get(String(att.id));
+  } catch {
+    return { resolved: false, reason: "merchant_unreadable" };
+  }
+  if (!merchant) return { resolved: false, reason: "no_merchant" };
+
   let found: Record<string, unknown> | null;
   try {
-    found = await cpInquireByOrderId(att.merchid, att.orderid);
+    found = await cpInquireByOrderId(merchant, att.orderid);
   } catch (e) {
     return { resolved: false, reason: isGatewayUnknown(e) ? "gateway_unreachable" : "inquire_failed" };
   }
@@ -659,10 +958,34 @@ export async function resolveUnknownAttempt(
     return { resolved: true, outcome: "not_charged" };
   }
 
+  // The gateway holds a transaction under that orderid. Two things must be true before it is booked
+  // as a payment (2026-10-14), and each failure LEAVES THE BLOCK for a human, never lifts it:
+  const retref = String(found.retref);
+  const leaveBlocked = async (reason: "not_approved" | "amount_unreadable", why: string): Promise<ResolveResult> => {
+    await admin.from("app_errors").insert({
+      source: "edge:invoice-payment",
+      severity: "error",
+      code: `payment_recovery_${reason}`,
+      message:
+        `${clientId}: reconciliation found retref ${retref} on order ${att.order_id} for attempt ${att.id}, but ${why}. ` +
+        `Not recorded — check it at the gateway, then close attempt ${att.id} by hand. The attempt stays blocking until then, on purpose.`,
+      client_id: clientId,
+    }).then(() => undefined, () => undefined);
+    return { resolved: false, reason };
+  };
+  //   1. It was APPROVED. Nothing read respstat here before: if inquireByOrderid also answers with a
+  //      declined transaction (not yet seen live), a decline whose answer we lost would have been
+  //      booked as a payment and the order marked paid.
+  const stat = typeof found.respstat === "string" ? found.respstat.trim().toUpperCase() : "";
+  if (stat !== "A") return await leaveBlocked("not_approved", `its respstat is "${stat.slice(0, 4) || "none"}", not A`);
+  //   2. Its amount can be READ. This used to fall back to att.amount_cents, the WHOLE ask, so a
+  //      partial approval found by an inquire with no readable amount skipped the partial guard
+  //      below and marked the order paid in full. cpAuth throws UNKNOWN on the same answer.
+  const chargedCents = cpCents(found.amount);
+  if (chargedCents === null) return await leaveBlocked("amount_unreadable", "its amount could not be read");
+
   // It DID charge. Complete the choreography that was interrupted. The insert is idempotent
   // via payments_gateway_txn_uniq, so this is safe to run more than once.
-  const retref = String(found.retref);
-  const chargedCents = cpCents(found.amount) ?? Number(att.amount_cents);
 
   // A RECORD SHORT OF THE ASK IS NOT THE PAYMENT THIS ATTEMPT WAS FOR. The charge path never
   // turns a partial approval into a payment (4e: it voids it, and a void that fails closes the

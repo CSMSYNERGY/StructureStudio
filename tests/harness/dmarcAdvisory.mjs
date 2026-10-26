@@ -113,7 +113,7 @@ async function scenario(browser, { name, dom = DOM, st = "pending", dmarc }) {
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
-  await page.evaluate(() => { history.pushState({}, "", "/portal/settings/email"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await page.evaluate(() => { history.pushState({}, "", "/settings/email"); window.dispatchEvent(new PopStateEvent("popstate")); });
   const ready = st === "verified" ? "Send a test email" : "Add these records at your DNS host";
   const shown = await page.waitForFunction((x) => document.body.innerText.includes(x), ready, { timeout: 20000 }).then(() => true, () => false);
   await page.waitForTimeout(300);

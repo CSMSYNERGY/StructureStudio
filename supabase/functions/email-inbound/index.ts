@@ -6,6 +6,7 @@ import {
   envelopeRecipients, parseThreadMessageId, UNATTRIBUTED_CLIENT_ID, senderVerdict,
 } from "../_shared/emailInbound.ts";
 import { rsGetReceivedEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
+import { attachmentNote, type ContactLink, followMerged } from "../_shared/inboundFiling.ts";
 
 // Inbound email → the CRM conversation. The return leg that makes a conversation two-way.
 //
@@ -326,6 +327,19 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   // design, no contact and no threading id, so an unattributed message is stored with both
   // links empty rather than filed by a signal no tenant vouched for.
 
+  // ⚠️ A CONTACT TOKEN OUTLIVES A MERGE (2026-10-07). c.<contactId> names the contact the
+  // email was written from, and crm_merge_contacts (migration 254) moves only the rows that
+  // already exist; it can't move a reply that arrives later. Filed on the merged-away contact,
+  // the reply sat on a record every read in the product filters out, and until reply copies
+  // became opt-in the rep's inbox copy was the only place anyone saw it. So B1 and B2 follow
+  // merged_into to the live contact (_shared/inboundFiling.ts), and every read stays scoped to
+  // the tenant Stage A proved: a merged_into pointing anywhere else is simply not found.
+  const liveContact = (id: string) => followMerged(async (cid: string) => {
+    const { data } = await admin.from("crm_contacts")
+      .select("id, merged_into").eq("id", cid).eq("client_id", clientId).maybeSingle();
+    return (data as ContactLink | null) ?? null;
+  }, id);
+
   // B1. The reply token in the address it actually arrived at. Strongest signal: we chose
   //     that address when we sent, so there is nothing to infer, and it survives the header
   //     mangling that Outlook does to References.
@@ -340,10 +354,9 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
       if (d) { shortCode = d.short_code ?? token.id; contactId = d.contact_id ?? null; }
     } else {
       // Same rule for a contact uuid: email_inbound.contact_id has no foreign key, so an
-      // unchecked token would write a dangling id onto the tenant's feed.
-      const { data: c } = await admin.from("crm_contacts")
-        .select("id").eq("id", token.id).eq("client_id", clientId).maybeSingle();
-      if (c) contactId = c.id;
+      // unchecked token would write a dangling id onto the tenant's feed. A contact merged
+      // away since the email went out is followed to the one it was folded into (liveContact).
+      contactId = await liveContact(token.id);
     }
   }
 
@@ -363,9 +376,8 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
           .eq("short_code", t.id).eq("client_id", clientId).maybeSingle();
         if (d) { shortCode = d.short_code ?? t.id; contactId = d.contact_id ?? null; break; }
       } else {
-        const { data: c } = await admin.from("crm_contacts")
-          .select("id").eq("id", t.id).eq("client_id", clientId).maybeSingle();
-        if (c) { contactId = c.id; break; }
+        const c = await liveContact(t.id);
+        if (c) { contactId = c; break; }
       }
     }
   }
@@ -389,6 +401,15 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   }
 
   const bodyText = stripQuoted(String(m.text ?? m.body_plain ?? m.plain ?? ""));
+  // ⚠️ ATTACHED FILES ARE NOT STORED, AND THE REPLY SAYS SO (2026-10-07). email_inbound has no
+  // column for them and nothing here writes them to storage or crm_files, so a customer's site
+  // photos or PDF never reach the record. While every reply also went to the rep's inbox that
+  // copy had them; with reply copies opt-in, most reps see only the record. Until attachments
+  // are ingested properly, the stored text ends with a line naming what wasn't kept, and a
+  // `warn` row below is the repair ticket. The webhook's own list is read (Resend sends the
+  // descriptors with the metadata; another provider may post `Attachments`).
+  const files = attachmentNote(m.attachments ?? m.Attachments);
+  const storedText = [bodyText.slice(0, 40000), files.note].filter(Boolean).join("\n\n");
   const { error } = await admin.from("email_inbound").insert({
     // The sentinel enters here and nowhere else — client_id is NOT NULL, and a row we cannot
     // attribute is still a row. See the Stage A comment above.
@@ -399,7 +420,7 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
     from_name: from.name,
     to_email: to.email || null,
     subject: String(m.subject ?? "").slice(0, 500) || null,
-    body_text: bodyText.slice(0, 40000) || null,
+    body_text: storedText || null,
     body_html: String(m.html ?? m.body_html ?? "").slice(0, 200000) || null,
     message_id: ownMessageId,
     in_reply_to: messageIds(inReplyTo)[0] ?? null,
@@ -427,6 +448,19 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
       },
     });
     return json({ ok: true, stored: false });
+  }
+
+  // Only for a fresh row: a provider retry (23505 above) already filed its ticket.
+  if (!error && files.count) {
+    await logEdgeError({
+      fn: "email-inbound", req, clientId, code: "inbound_attachments_not_stored",
+      message: `an inbound email carried ${files.count} attached file(s); they are not stored anywhere`,
+      // Not a fault to triage (`error`), but kept: `receivedId` is what a human reads the files
+      // back from (GET /emails/receiving/{id}) if the builder needs them. Count and id only,
+      // never file names: inbound mail is customer content.
+      severity: "warn",
+      context: { receivedId: receivedId || null, count: files.count },
+    });
   }
 
   return json({

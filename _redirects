@@ -1,26 +1,136 @@
 # Parsed by Cloudflare Workers static assets (and by Netlify — the syntax is shared and
 # every rule below behaves identically on both platforms, so this one file serves both
-# hosts during the migration). First match wins; static rules stay above the splat.
+# hosts during the migration). First match wins, top to bottom.
+#
+# ⚠️ KEEP EVERY STATIC RULE (no * and no :placeholder) ABOVE THE FIRST DYNAMIC ONE. Workers
+# looks static rules up by exact path before it tries any dynamic rule, but only the ones
+# above the first * or : line; anything below it counts as dynamic, and there may be no
+# more than 100 dynamic rules (2,000 static). Ordered this way, the file means the same
+# thing on both hosts. scripts/redirects.test.mjs reads this file the way the host does and
+# fails the gate when it and the app's router (portal/01-core.jsx) disagree.
 
 # Workers runs with html_handling "none" (see wrangler.jsonc), so the implicit
 # / -> index.html mapping other hosts do for free must be explicit here.
 /            /index.html    200
 
-# The bare /portal rule stays FIRST and separate: it is the oldest link we hand out
-# and it must keep resolving exactly as it always has.
-/portal      /portal.html   200
 # Netlify 301-normalizes trailing slashes BEFORE _redirects runs (probed 2026-08-05:
-# /portal/ -> 301 /portal, /admin/ -> 301 /admin), so these two 301 rules are inert on
-# Netlify and exist to make Workers behave byte-identically instead of depending on
+# /portal/ -> 301 /portal, /admin/ -> 301 /admin), so the trailing-slash 301 rules are inert
+# on Netlify and exist to make Workers behave byte-identically instead of depending on
 # html_handling slash rules.
-/portal/     /portal        301
 /admin       /admin.html    200
 /admin/      /admin         301
 
 /my-quotes   /my-quotes.html  200
 /my-quotes/  /my-quotes       301
 
-# Every portal page has its own URL (/portal/settings/colors, /portal/admin/clients). The
-# splat rewrites them all to the same document — 200, never 301, so the address the user
-# typed is the address they keep and the SPA can read the path on boot.
-/portal/*    /portal.html   200
+# The Online Shop (2026-10-17): a builder's lot buildings, public and embeddable on their own
+# website (shop-embed.js). ?client= picks the builder, ?unit= one building; no sub-paths, so no
+# /shop/* rule. Deliberately NO X-Frame-Options in _headers: framing is the point.
+/shop        /shop.html       200
+/shop/       /shop            301
+
+# Website lead forms (migration 325, 2026-10-22): a builder's form, public and embeddable on their
+# own website (form-embed.js). ?client= picks the builder, ?id= the form; no sub-paths, so no
+# /form/* rule. Deliberately NO X-Frame-Options in _headers: framing is the point.
+/form        /form.html       200
+/form/       /form            301
+
+# MEETINGS (migration 326, 2026-10-22): a person's public booking page. ?client= picks the
+# builder, ?with= the person, ?type= skips straight to one meeting type; no sub-paths, so no
+# /book/* rule. Like /shop, deliberately NO X-Frame-Options in _headers — a builder embeds
+# this in their own site, which is the point of it.
+/book        /book.html       200
+/book/       /book            301
+
+# ── THE APP'S ADDRESSES: /<page>[/<sub>], NO /portal (Carolyn 2026-10-12) ─────────────────
+# "It's app.structurestudiosuite.com forward slash advance. Like, so let's remove portal from
+# anywhere." Every page of the app is portal.html, rewritten — 200, never 301, so the address
+# the user typed is the address they keep and the app reads the path on boot.
+#
+# ONE PAIR OF RULES PER PAGE, ON PURPOSE: `/<slug>` here and `/<slug>/*` in the dynamic block
+# below. A root catch-all (`/* /portal.html 200`) would swallow the public designer at / and
+# /?client=…, /my-quotes, /admin and every asset (the vendored libraries, the compiled
+# bundles, sw.js, the manifest, the icons). Every page the router knows (TAB_META in
+# portal/01-core.jsx, and the old names it still reads) needs its pair here and in _headers;
+# scripts/redirects.test.mjs fails when one is missing or a rule names a slug the router
+# does not know.
+#
+# /login is the bare app address (the old bare /portal): the sign-in form, or for someone
+# signed in their landing page. /console is the Admin page, because /admin stays admin.html.
+# /login has no sub-pages, so no /login/* rule; its trailing-slash spelling 301s to it, the way
+# /admin/ and /my-quotes/ do (every other page answers /<slug>/ through its /<slug>/* rule).
+/login                         /portal.html   200
+/login/                        /login         301
+/designer                      /portal.html   200
+/advanced                      /portal.html   200
+/contacts                      /portal.html   200
+/conversations                 /portal.html   200
+/inventory                     /portal.html   200
+/orders                        /portal.html   200
+/build-schedule                /portal.html   200
+/delivery-schedule             /portal.html   200
+/repairs                       /portal.html   200
+/commissions                   /portal.html   200
+/calls                         /portal.html   200
+/rent-to-own-contracts         /portal.html   200
+/reports                       /portal.html   200
+/self-serve-display-units      /portal.html   200
+/support                       /portal.html   200
+/settings                      /portal.html   200
+/quickbooks                    /portal.html   200
+/on-demand-pricing             /portal.html   200
+/view-3d                       /portal.html   200
+/accounts                      /portal.html   200
+/console                       /portal.html   200
+/projects                      /portal.html   200
+# Old page names the router still reads and rewrites in the address bar (SS_TAB_ALIASES and
+# ssCanonRoute): Leads became Contacts, Releases became Support, and the Pipeline page and
+# the Leads tab's boards are views inside the Contacts hub now.
+/leads                         /portal.html   200
+/releases                      /portal.html   200
+/designs                       /portal.html   200
+/pipelines                     /portal.html   200
+
+# ── EVERY OLD /portal ADDRESS, PERMANENTLY, TO ITS ROOT FORM ──────────────────────────────
+# /portal/<page>[/<sub>] was the app's address from 2026-07-29 to 2026-10-13, and those links
+# live on in emails already sent (orders, password resets, invites), the phone apps' "Open in
+# Structure Studio", bookmarks and the installed app. The query string rides along (the host
+# keeps the request's own when the target names none), so ?view=<builder> operator links and a
+# reset link's ?code= arrive whole; a #fragment never reaches the host and the browser keeps it
+# across the redirect. ssRootPath in portal/01-core.jsx makes the same mapping in the browser.
+#
+# Bare /portal and /portal/ are the sign-in form, /login (the splat rule below would send
+# /portal/ to `/`, the designer, so both are spelled out). /portal/admin was the Admin page.
+/portal                        /login         301
+/portal/                       /login         301
+/portal/admin                  /console       301
+
+# ── DYNAMIC RULES: nothing static below this line ────────────────────────────────────────
+/designer/*                    /portal.html   200
+/advanced/*                    /portal.html   200
+/contacts/*                    /portal.html   200
+/conversations/*               /portal.html   200
+/inventory/*                   /portal.html   200
+/orders/*                      /portal.html   200
+/build-schedule/*              /portal.html   200
+/delivery-schedule/*           /portal.html   200
+/repairs/*                     /portal.html   200
+/commissions/*                 /portal.html   200
+/calls/*                       /portal.html   200
+/rent-to-own-contracts/*       /portal.html   200
+/reports/*                     /portal.html   200
+/self-serve-display-units/*    /portal.html   200
+/support/*                     /portal.html   200
+/settings/*                    /portal.html   200
+/quickbooks/*                  /portal.html   200
+/on-demand-pricing/*           /portal.html   200
+/view-3d/*                     /portal.html   200
+/accounts/*                    /portal.html   200
+/console/*                     /portal.html   200
+/projects/*                    /portal.html   200
+/leads/*                       /portal.html   200
+/releases/*                    /portal.html   200
+/designs/*                     /portal.html   200
+/pipelines/*                   /portal.html   200
+/portal/admin/*                /console/:splat  301
+/portal/*                      /:splat        301

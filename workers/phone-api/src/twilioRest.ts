@@ -165,11 +165,40 @@ export async function listRecordings(env: Env, since: string, max = 200): Promis
   return out.slice(0, max);
 }
 
-/** Delete a recording at Twilio. A recording already gone counts as deleted. */
-export async function deleteRecording(env: Env, recordingSid: string): Promise<void> {
+/**
+ * Delete a recording at Twilio. True: deleted. False: this account has no such recording (404),
+ * which counts as deleted where only one account can hold it (greeting.ts); retention then also
+ * asks the parent (cron/retention.ts deleteWherever).
+ */
+export async function deleteRecording(env: Env, recordingSid: string): Promise<boolean> {
   const res = await call(env, "delete recording", `/Recordings/${encodeURIComponent(recordingSid)}.json`, { method: "DELETE" });
-  if (res.status === 204 || res.status === 404) return;
+  if (res.status === 204) return true;
+  if (res.status === 404) return false;
   throw new TwilioError("delete recording", res.status, await codeOf(res));
+}
+
+/**
+ * Delete Twilio's own copy of a voicemail's transcript (<Record transcribe>, env TRANSCRIBE):
+ * every Transcription under the recording. Twilio keeps that text in the account until it is
+ * deleted, and its docs don't say that deleting the recording takes it too, so retention calls
+ * this BEFORE deleteRecording (the list is reached through the recording). A recording Twilio
+ * no longer has (404) has nothing left to list; a transcription already gone counts as deleted.
+ * The listing carries the text: it is read for the sids and nothing else, never logged.
+ * One page of 50 is far more than a recording ever has. Returns how many were deleted.
+ */
+export async function deleteRecordingTranscriptions(env: Env, recordingSid: string): Promise<number> {
+  const res = await call(env, "list transcriptions", `/Recordings/${encodeURIComponent(recordingSid)}/Transcriptions.json?PageSize=50`);
+  if (res.status === 404) return 0;
+  if (!res.ok) throw new TwilioError("list transcriptions", res.status, await codeOf(res));
+  const body = (await res.json()) as { transcriptions?: { sid?: string }[] };
+  let deleted = 0;
+  for (const t of body.transcriptions ?? []) {
+    if (!t.sid) continue;
+    const del = await call(env, "delete transcription", `/Transcriptions/${encodeURIComponent(t.sid)}.json`, { method: "DELETE" });
+    if (del.status !== 204 && del.status !== 404) throw new TwilioError("delete transcription", del.status, await codeOf(del));
+    deleted++;
+  }
+  return deleted;
 }
 
 /**
@@ -189,7 +218,7 @@ export async function recordingMedia(env: Env, recordingSid: string, range: stri
 //
 // Started, paused, resumed and stopped through the REST API on one call leg (the customer's),
 // never by a TwiML `record` attribute: that is how one recording follows the call through hold,
-// transfers and a device switch, and how nothing records a call that did not hear the notice.
+// transfers and a device switch, and how nothing records a call the Worker did not arm.
 
 export interface StartedRecording {
   sid: string;
@@ -492,6 +521,8 @@ export const USAGE_CATEGORIES = new Set([
 ]);
 
 export interface TwilioUsageRecord {
+  /** The UTC day the record is for (its start_date; the day asked for when Twilio leaves it out). */
+  day: string;
   category: string;
   count: number | null;
   usage: number | null;
@@ -501,18 +532,25 @@ export interface TwilioUsageRecord {
 }
 
 /**
- * One UTC day's Usage Records (Daily.json, StartDate = EndDate = day), the categories above
- * only. Every category comes back on one or two pages, so this follows next_page_uri a few
- * times at most.
+ * One account's Daily Usage Records (Daily.json), the categories above only, for `day` (or from
+ * `opts.from` to `day`, one record per category per day). Every category comes back on one or two
+ * pages, so this follows next_page_uri a few times at most.
+ *
+ * Workstream 2, phase 7: `includeSubaccounts: false` sends IncludeSubaccounts=false. Twilio's
+ * default (true) folds every sub-account's usage into the PARENT's records, so with sub-accounts
+ * the parent's snapshot would count each builder twice once their own rows are stored too. Asked
+ * for the parent (and for each sub, where it changes nothing), so each row is one account's own.
  */
-export async function listUsageDaily(env: Env, day: string): Promise<TwilioUsageRecord[]> {
+export async function listUsageDaily(env: Env, day: string, opts: { from?: string; includeSubaccounts?: boolean } = {}): Promise<TwilioUsageRecord[]> {
   const out: TwilioUsageRecord[] = [];
-  let path: string | null = `/Usage/Records/Daily.json?${new URLSearchParams({ StartDate: day, EndDate: day, PageSize: "1000" })}`;
+  const q: Record<string, string> = { StartDate: opts.from ?? day, EndDate: day, PageSize: "1000" };
+  if (opts.includeSubaccounts === false) q.IncludeSubaccounts = "false";
+  let path: string | null = `/Usage/Records/Daily.json?${new URLSearchParams(q)}`;
   for (let page = 0; path && page < 5; page++) {
     const res: Response = await call(env, "list usage", path);
     if (!res.ok) throw new TwilioError("list usage", res.status, await codeOf(res));
     const body = (await res.json()) as {
-      usage_records?: { category?: string; count?: string | number | null; usage?: string | number | null; price?: string | null; price_unit?: string | null }[];
+      usage_records?: { category?: string; start_date?: string | null; count?: string | number | null; usage?: string | number | null; price?: string | null; price_unit?: string | null }[];
       next_page_uri?: string | null;
     };
     for (const r of body.usage_records ?? []) {
@@ -520,7 +558,10 @@ export async function listUsageDaily(env: Env, day: string): Promise<TwilioUsage
       if (!USAGE_CATEGORIES.has(category) && !/conference/i.test(category)) continue;
       const count = Number(r.count);
       const usage = Number(r.usage);
+      // One day asked for: that day, exactly as before. A window: each record's own day.
+      const start = String(r.start_date ?? "").slice(0, 10);
       out.push({
+        day: opts.from && opts.from !== day && /^\d{4}-\d{2}-\d{2}$/.test(start) ? start : day,
         category,
         count: r.count === null || r.count === undefined || !Number.isFinite(count) ? null : count,
         usage: r.usage === null || r.usage === undefined || !Number.isFinite(usage) ? null : usage,

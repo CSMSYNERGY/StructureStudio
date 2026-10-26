@@ -10,14 +10,14 @@
 //   B. the filter bar narrows the rows, sends `channel`, and puts the filter in the address bar
 //   C. Load more sends the cursor, adds the next page, and never lists a customer twice
 //   D. Mine sends mine:true and is remembered across a reload (this tab's session)
-//   E. a row opens /portal/contacts/c-<id> on the matching History chip (email → Emails, text →
+//   E. a row opens /contacts/c-<id> on the matching History chip (email → Emails, text →
 //      Messages, call → Calls); the record's Back returns to Conversations on the same filter and
 //      paints at once, with Load more waiting until the refresh lands; the browser's Back does
 //      too; after a hop away and the browser's Back onto the record, the chip and the record's
 //      Back are still Conversations'; the name is a real link (right-click / new tab) and Enter
 //      on it opens the record
 //   F. a server error is shown, with no rows and no endless skeleton
-//   G. without the CRM: no Conversations in the rail, and a typed /portal/conversations shows the
+//   G. without the CRM: no Conversations in the rail, and a typed /conversations shows the
 //      CRM card and never asks the server
 //   H. the filter offers: no Texts while the account can't text and has no texts; no Calls for
 //      someone who can't see calls; on a production address with calling off, Calls only once
@@ -236,7 +236,7 @@ try {
       return !!card && !card.querySelector("[data-ss-inbox-row]") && card.querySelectorAll("tbody tr").length >= 3;
     });
     ok("A2 a skeleton shows while it loads", skel);
-    ok("A3 the address is /portal/conversations", (await path(s.page)) === "/portal/conversations", await path(s.page));
+    ok("A3 the address is /conversations", (await path(s.page)) === "/conversations", await path(s.page));
     await rowsReady(s.page);
     ok("A4 one row per customer, newest first", same(await rowIds(s.page), [C_EMAIL, C_TEXT, C_CALL]), JSON.stringify(await rowIds(s.page)));
     const cells = await s.page.evaluate(() => [...document.querySelectorAll("[data-ss-inbox-row]")].map((r) => ({
@@ -253,7 +253,7 @@ try {
       same(cells.map((c) => c.waiting), [true, false, true]));
     const first = inboxCalls(s)[0] || {};
     ok("A8 the request: crm_inbox, channel all, Mine off, no cursor", first.channel === "all" && first.mine === false && !("cursor" in first), JSON.stringify(first));
-    ok("A9 the name is a real link to the record", cells[0].href === `/portal/contacts/c-${C_EMAIL}`, cells[0].href);
+    ok("A9 the name is a real link to the record", cells[0].href === `/contacts/c-${C_EMAIL}`, cells[0].href);
     ok("A10 the filters on offer: All, Email, Texts, Calls", same(await filters(s.page), ["all", "email", "sms", "calls"]), JSON.stringify(await filters(s.page)));
     const wide = await s.page.evaluate(() => ({
       narrow: (document.querySelector("[data-ss-inbox]") || { getAttribute: () => null }).getAttribute("data-ss-inbox-narrow"),
@@ -268,14 +268,14 @@ try {
       await rowsReady(s.page);
       await s.page.waitForFunction((w) => [...document.querySelectorAll("[data-ss-inbox-row]")].map((r) => r.getAttribute("data-ss-inbox-row")).join() === w.join(), want, { timeout: 8000 }).catch(() => {});
       ok(`B ${ch}: narrows the rows, sends channel "${ch}", and the address says /${slug}`,
-        same(await rowIds(s.page), want) && (lastInbox(s) || {}).channel === ch && (await path(s.page)) === `/portal/conversations/${slug}`
+        same(await rowIds(s.page), want) && (lastInbox(s) || {}).channel === ch && (await path(s.page)) === `/conversations/${slug}`
         && (await pressed(s.page, `[data-ss-inbox-filter="${ch}"]`)) === "true",
         JSON.stringify({ rows: await rowIds(s.page), sent: (lastInbox(s) || {}).channel, at: await path(s.page) }));
     }
     await tap(s.page.locator('[data-ss-inbox-filter="all"]'));
     await rowsReady(s.page);
     await s.page.waitForTimeout(300);
-    ok("B all: back to everyone, at /portal/conversations", same(await rowIds(s.page), [C_EMAIL, C_TEXT, C_CALL]) && (await path(s.page)) === "/portal/conversations", await path(s.page));
+    ok("B all: back to everyone, at /conversations", same(await rowIds(s.page), [C_EMAIL, C_TEXT, C_CALL]) && (await path(s.page)) === "/conversations", await path(s.page));
 
     // ── C. Load more ──
     const more = s.page.locator("[data-ss-inbox-more]");
@@ -289,7 +289,7 @@ try {
 
     // ── E. Into a record and back ──
     await openRow(s, C_EMAIL);
-    ok("E1 an email row opens the contact's record", (await path(s.page)) === `/portal/contacts/c-${C_EMAIL}`, await path(s.page));
+    ok("E1 an email row opens the contact's record", (await path(s.page)) === `/contacts/c-${C_EMAIL}`, await path(s.page));
     const rec = s.calls.filter((c) => c.action === "crm_record").pop() || {};
     ok("E2 (that customer's record)", rec.kind === "contact" && rec.id === C_EMAIL, JSON.stringify(rec));
     ok("E3 on the Emails chip", (await activeChip(s.page)) === "emails", await activeChip(s.page));
@@ -299,7 +299,7 @@ try {
     const before = inboxCalls(s).length;
     await recordBack(s);
     const painted = await s.page.evaluate(() => document.querySelectorAll("[data-ss-inbox-row]").length);
-    ok("E5 the record's Back returns to Conversations", (await path(s.page)) === "/portal/conversations", await path(s.page));
+    ok("E5 the record's Back returns to Conversations", (await path(s.page)) === "/conversations", await path(s.page));
     ok("E6 and paints the list at once, from the last load", painted >= 3, `rows ${painted}`);
     // Load more against the cached rows would mix them into the fresh page (review 2026-10-05).
     const moreState = () => s.page.evaluate(() => { const b = document.querySelector("[data-ss-inbox-more]"); return b ? { off: b.disabled, text: b.textContent } : null; });
@@ -315,20 +315,20 @@ try {
     await rowsReady(s.page);
     await s.page.waitForTimeout(300);
     await openRow(s, C_TEXT);
-    ok("E8 a text row opens the record on the Messages chip", (await activeChip(s.page)) === "messages" && (await path(s.page)) === `/portal/contacts/c-${C_TEXT}`, await activeChip(s.page));
+    ok("E8 a text row opens the record on the Messages chip", (await activeChip(s.page)) === "messages" && (await path(s.page)) === `/contacts/c-${C_TEXT}`, await activeChip(s.page));
     // A hop away by the rail, then the browser's Back onto the record (review 2026-10-05): the chip
     // and the record's Back used to be spent the moment the address moved, so it came back on All
     // with a Back to Contacts while the browser's Back still went to Conversations.
-    await tap(s.page.locator(".ss-ws-nav .ss-nav a", { hasText: "Pipeline" }));
+    await tap(s.page.locator(".ss-ws-nav .ss-nav a", { hasText: "Inventory" }));
     await s.page.waitForTimeout(400);
-    ok("E8b the rail leaves the record", (await path(s.page)) === "/portal/designs", await path(s.page));
+    ok("E8b the rail leaves the record", (await path(s.page)) === "/inventory", await path(s.page));
     await s.page.goBack();
     await s.page.waitForFunction(() => !!document.querySelector("[data-ss-crm-chip]"), null, { timeout: 20000 }).catch(() => {});
     await s.page.waitForTimeout(300);
-    ok("E8c the browser's Back reopens the record on Messages", (await path(s.page)) === `/portal/contacts/c-${C_TEXT}` && (await activeChip(s.page)) === "messages",
+    ok("E8c the browser's Back reopens the record on Messages", (await path(s.page)) === `/contacts/c-${C_TEXT}` && (await activeChip(s.page)) === "messages",
       `${await path(s.page)} ${await activeChip(s.page)}`);
     await recordBack(s);
-    ok("E9 and the record's Back (after that hop) returns to the Texts filter", (await path(s.page)) === "/portal/conversations/texts", await path(s.page));
+    ok("E9 and the record's Back (after that hop) returns to the Texts filter", (await path(s.page)) === "/conversations/texts", await path(s.page));
     await rowsReady(s.page);
     ok("E10 (the Texts filter is on)", (await pressed(s.page, '[data-ss-inbox-filter="sms"]')) === "true");
 
@@ -339,34 +339,34 @@ try {
     ok("E11 a call row opens the record on the Calls chip", (await activeChip(s.page)) === "calls", await activeChip(s.page));
     await s.page.goBack();
     await s.page.waitForTimeout(500);
-    ok("E12 the browser's Back returns to the Calls filter too", (await path(s.page)) === "/portal/conversations/calls", await path(s.page));
+    ok("E12 the browser's Back returns to the Calls filter too", (await path(s.page)) === "/conversations/calls", await path(s.page));
     await rowsReady(s.page);
 
     // A record opened another way keeps its old Back (Contacts) and its All chip.
-    await s.go(`/portal/contacts/c-${C_CALL}`);
+    await s.go(`/contacts/c-${C_CALL}`);
     await s.page.waitForFunction(() => !!document.querySelector("[data-ss-crm-chip]"), null, { timeout: 20000 }).catch(() => {});
     ok("E13 a record opened from elsewhere opens on All", (await activeChip(s.page)) === "all", await activeChip(s.page));
     await recordBack(s);
-    ok("E14 and its Back still goes to Contacts", (await path(s.page)) === "/portal/contacts", await path(s.page));
+    ok("E14 and its Back still goes to Contacts", (await path(s.page)) === "/contacts/people", await path(s.page));
 
     // Keyboard: Enter on a name opens the record.
-    await s.go("/portal/conversations/email");
+    await s.go("/conversations/email");
     await rowsReady(s.page);
     await s.page.locator(`[data-ss-inbox-row="${C_EMAIL}"] a`).focus();
     await s.page.keyboard.press("Enter");
     await s.page.waitForFunction(() => !!document.querySelector("[data-ss-crm-chip]"), null, { timeout: 20000 }).catch(() => {});
-    ok("E15 Enter on a customer's name opens their record, on Emails", (await path(s.page)) === `/portal/contacts/c-${C_EMAIL}` && (await activeChip(s.page)) === "emails",
+    ok("E15 Enter on a customer's name opens their record, on Emails", (await path(s.page)) === `/contacts/c-${C_EMAIL}` && (await activeChip(s.page)) === "emails",
       `${await path(s.page)} ${await activeChip(s.page)}`);
 
     // ── D. Mine ──
-    await s.go("/portal/conversations");
+    await s.go("/conversations");
     await rowsReady(s.page);
     await tap(s.page.locator('[data-ss-inbox-mine="1"]'));
     await s.page.waitForTimeout(400);
     await rowsReady(s.page);
     ok("D1 Mine sends mine:true and narrows the list", (lastInbox(s) || {}).mine === true && same(await rowIds(s.page), [C_EMAIL, C_CALL]), JSON.stringify(await rowIds(s.page)));
     await s.boot();                              // a fresh load, in the same tab
-    await s.go("/portal/conversations");
+    await s.go("/conversations");
     await rowsReady(s.page);
     ok("D2 and is remembered across a reload", (await pressed(s.page, '[data-ss-inbox-mine="1"]')) === "true" && (lastInbox(s) || {}).mine === true);
     await tap(s.page.locator('[data-ss-inbox-mine="0"]'));
@@ -379,7 +379,7 @@ try {
 
   // ── F. A server error ────────────────────────────────────────────────────────────────────────
   {
-    const s = await scenario(browser, { name: "error", inboxFail: true, path: "/portal/conversations" });
+    const s = await scenario(browser, { name: "error", inboxFail: true, path: "/conversations" });
     await s.page.waitForFunction(() => /load your conversations/.test(document.body.innerText), null, { timeout: 15000 }).catch(() => {});
     const t = await s.page.evaluate(() => (document.querySelector("[data-ss-inbox]") || {}).innerText || "");
     ok("F1 the error is shown, with no rows and no skeleton left spinning",
@@ -393,10 +393,10 @@ try {
     const s = await scenario(browser, { name: "no-crm", crm: false });
     const labels = await navLabels(s.page);
     ok("G1 no Conversations in the rail (Contacts stays, to sell the CRM)", !labels.includes("Conversations") && labels.includes("Contacts"), JSON.stringify(labels));
-    await s.go("/portal/conversations");
+    await s.go("/conversations");
     await s.page.waitForTimeout(500);
     const t = await s.page.evaluate(() => document.body.innerText);
-    ok("G2 a typed /portal/conversations shows the CRM card", /Every email, text and call with your customers in one list/.test(t) && /Add the CRM/.test(t), t.slice(0, 120));
+    ok("G2 a typed /conversations shows the CRM card", /Every email, text and call with your customers in one list/.test(t) && /Add the CRM/.test(t), t.slice(0, 120));
     ok("G3 and never asks the server", inboxCalls(s).length === 0, `${inboxCalls(s).length} calls`);
     await s.page.screenshot({ path: join(shots, "G-no-crm-1440.png") });
     await s.ctx.close();
@@ -404,25 +404,25 @@ try {
 
   // ── H. Which filters are offered ─────────────────────────────────────────────────────────────
   {
-    const s = await scenario(browser, { name: "offers-local", smsReady: false, hasTexts: false, seesCalls: false, hasCalls: false, path: "/portal/conversations" });
+    const s = await scenario(browser, { name: "offers-local", smsReady: false, hasTexts: false, seesCalls: false, hasCalls: false, path: "/conversations" });
     await rowsReady(s.page);
     ok("H1 can't text and no texts, can't see calls: All and Email only", same(await filters(s.page), ["all", "email"]), JSON.stringify(await filters(s.page)));
     await s.ctx.close();
   }
   {
-    const s = await scenario(browser, { name: "offers-texts", smsReady: false, hasTexts: true, seesCalls: true, hasCalls: false, path: "/portal/conversations" });
+    const s = await scenario(browser, { name: "offers-texts", smsReady: false, hasTexts: true, seesCalls: true, hasCalls: false, path: "/conversations" });
     await rowsReady(s.page);
     ok("H2 texting off but texts on file: Texts is offered (history never hides)", (await filters(s.page)).includes("sms"), JSON.stringify(await filters(s.page)));
     await s.ctx.close();
   }
   {
-    const s = await scenario(browser, { name: "offers-prod", base: PROD_BASE, phoneStatus: "off", seesCalls: true, hasCalls: false, path: "/portal/conversations" });
+    const s = await scenario(browser, { name: "offers-prod", base: PROD_BASE, phoneStatus: "off", seesCalls: true, hasCalls: false, path: "/conversations" });
     await rowsReady(s.page);
     ok("H3 a production address with calling off and no calls: no Calls filter", !(await filters(s.page)).includes("calls"), JSON.stringify(await filters(s.page)));
     await s.ctx.close();
   }
   {
-    const s = await scenario(browser, { name: "offers-prod-calls", base: PROD_BASE, phoneStatus: "off", seesCalls: true, hasCalls: true, path: "/portal/conversations" });
+    const s = await scenario(browser, { name: "offers-prod-calls", base: PROD_BASE, phoneStatus: "off", seesCalls: true, hasCalls: true, path: "/conversations" });
     await rowsReady(s.page);
     ok("H4 the same with calls on file: Calls is offered", (await filters(s.page)).includes("calls"), JSON.stringify(await filters(s.page)));
     await s.ctx.close();
@@ -431,7 +431,7 @@ try {
   // ── I. View-as ───────────────────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "view-as", operator: true });
-    await s.go("/portal/conversations");
+    await s.go("/conversations");
     await rowsReady(s.page);
     const req = inboxCalls(s).pop() || {};
     ok("I1 the request carries the viewed builder", req.targetClientId === VIEWED, JSON.stringify(req));
@@ -444,7 +444,7 @@ try {
 
   // ── J. A phone's width ───────────────────────────────────────────────────────────────────────
   {
-    const s = await scenario(browser, { name: "narrow", viewport: { width: 390, height: 844 }, path: "/portal/conversations" });
+    const s = await scenario(browser, { name: "narrow", viewport: { width: 390, height: 844 }, path: "/conversations" });
     await rowsReady(s.page);
     await s.page.waitForTimeout(300);
     const fit = await s.page.evaluate(() => {

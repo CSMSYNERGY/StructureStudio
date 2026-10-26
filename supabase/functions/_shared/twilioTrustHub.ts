@@ -7,11 +7,20 @@
  * reason — this is the path that spends real money, and it must be testable without doing so.
  *
  * ═══════════════════════════════════════════════════════════════════════════════
- * ARCHITECTURE: Twilio ISV "architecture #4" — ONE parent account, one Secondary Customer
- * Profile + Brand + Campaign + Messaging Service PER BUILDER. Not subaccounts: main-account
- * API keys are denied on subaccount resources, and every endpoint below lives on a subdomain
- * (trusthub. / messaging.), so under subaccounts none of our credentials would reach any of
- * this. Twilio's ISV API guide never mentions subaccounts.
+ * ARCHITECTURE: Twilio ISV "architecture #1" — ONE SUB-ACCOUNT PER BUILDER, billed to the
+ * parent, each holding that builder's Secondary Customer Profile, Brand, Campaign, Messaging
+ * Service and numbers (Workstream 2; until 2026-10 this was "architecture #4", everything on the
+ * parent). structure-studio stays ON THE PARENT (the pilot number, the primary profile, its own
+ * brand), with Verify, the setup-test app and NTS.
+ *
+ * ⚠️ EVERY CALL RUNS WITH ONE ACCOUNT'S OWN CREDENTIALS. Main-account API keys are denied on
+ * sub-account resources, and every endpoint below except the /Accounts/{sid} ones lives on a
+ * subdomain (trusthub. / messaging.) that only the account's own credentials reach. So each
+ * export takes the account it runs as (TrustHubCreds: the SID for the path, the pair for the
+ * header), resolved per tenant by _shared/twilioAccount.ts. Omitted, it is the parent from the
+ * environment: exactly what every call did before, and all any call does while
+ * TWILIO_SUBACCOUNTS is not "on". The secondary profile's EntityAssignment still names the
+ * PARENT's primary profile (TWILIO_PRIMARY_PROFILE_SID), across accounts.
  * ═══════════════════════════════════════════════════════════════════════════════
  *
  * ⚠️ EVERY BrandRegistration POST COSTS MONEY. Twilio: "This API request incurs fees on your
@@ -46,6 +55,24 @@ function basicAuthPair(): { user: string; pass: string } | null {
   const a = accountSid(), t = authToken();
   if (a && t) return { user: a, pass: t };
   return null;
+}
+
+/**
+ * The account a call runs as: its SID (the /Accounts/{sid} path) and the Basic pair every request
+ * carries. Same shape as _shared/twilioAccount.ts's TwilioCreds (this file keeps zero imports), so
+ * a resolved account is passed straight in. null / omitted = the parent from the environment.
+ */
+export type TrustHubCreds = { accountSid: string; user: string; pass: string };
+
+/** The Basic pair for these credentials, or the environment's when there are none. */
+function pairFor(creds: TrustHubCreds | null | undefined): { user: string; pass: string } | null {
+  if (!creds) return basicAuthPair();
+  return creds.user && creds.pass ? { user: creds.user, pass: creds.pass } : null;
+}
+
+/** The /Accounts/{sid} segment for these credentials, or the environment's. */
+function acctOf(creds: TrustHubCreds | null | undefined): string | null {
+  return creds ? (creds.accountSid || null) : accountSid();
 }
 
 export function trustHubConfigured(): boolean {
@@ -94,8 +121,9 @@ async function call(
   url: string,
   form?: Record<string, string>,
   extraHeaders?: Record<string, string>,
+  creds?: TrustHubCreds | null,
 ): Promise<any> {
-  const pair = basicAuthPair();
+  const pair = pairFor(creds);
   if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
   await throttle();
 
@@ -316,12 +344,13 @@ export function validateCampaignCopy(copy: Partial<CampaignCopy>): string[] {
  *  BrandRegistrations takes one of each. */
 export async function createSecondaryCustomerProfile(opts: {
   intake: BuilderIntake;
-  primaryProfileSid: string;   // OUR approved primary BU…
+  primaryProfileSid: string;   // OUR approved primary BU… (on the PARENT account, always)
   friendlyName: string;
-}): Promise<{ profileSid: string; endUserSid: string; addressSid: string; repSid: string }> {
+}, creds?: TrustHubCreds | null): Promise<{ profileSid: string; endUserSid: string; addressSid: string; repSid: string }> {
   const { intake } = opts;
+  const as = (method: "GET" | "POST", url: string, form?: Record<string, string>) => call(method, url, form, undefined, creds);
 
-  const business = await call("POST", `${TRUSTHUB}/EndUsers`, {
+  const business = await as("POST", `${TRUSTHUB}/EndUsers`, {
     FriendlyName: `${opts.friendlyName} — business info`,
     Type: "customer_profile_business_information",
     "Attributes": JSON.stringify({
@@ -337,7 +366,7 @@ export async function createSecondaryCustomerProfile(opts: {
     }),
   });
 
-  const rep = await call("POST", `${TRUSTHUB}/EndUsers`, {
+  const rep = await as("POST", `${TRUSTHUB}/EndUsers`, {
     FriendlyName: `${opts.friendlyName} — authorized rep`,
     Type: "authorized_representative_1",
     "Attributes": JSON.stringify({
@@ -350,8 +379,8 @@ export async function createSecondaryCustomerProfile(opts: {
     }),
   });
 
-  const acct = accountSid();
-  const address = await call("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/Addresses.json`, {
+  const acct = acctOf(creds);
+  const address = await as("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/Addresses.json`, {
     CustomerName: intake.legalBusinessName,
     Street: intake.street,
     City: intake.city,
@@ -361,13 +390,13 @@ export async function createSecondaryCustomerProfile(opts: {
   });
   const addressSid = String(address?.sid ?? "");
 
-  const doc = await call("POST", `${TRUSTHUB}/SupportingDocuments`, {
+  const doc = await as("POST", `${TRUSTHUB}/SupportingDocuments`, {
     FriendlyName: `${opts.friendlyName} — address`,
     Type: "customer_profile_address",
     "Attributes": JSON.stringify({ address_sids: addressSid }),
   });
 
-  const profile = await call("POST", `${TRUSTHUB}/CustomerProfiles`, {
+  const profile = await as("POST", `${TRUSTHUB}/CustomerProfiles`, {
     FriendlyName: opts.friendlyName,
     Email: intake.repEmail,
     PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE,
@@ -376,22 +405,132 @@ export async function createSecondaryCustomerProfile(opts: {
 
   for (const objectSid of [business?.sid, rep?.sid, doc?.sid]) {
     if (!objectSid) continue;
-    await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
+    await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
       ObjectSid: String(objectSid),
     });
   }
   // ⚠️ The PRIMARY profile is assigned onto the secondary. This is the step that says
-  // "this builder is a customer of ours" and it is what makes the ISV relationship real.
-  await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
-    ObjectSid: opts.primaryProfileSid,
-  });
+  // "this builder is a customer of ours" and it is what makes the ISV relationship real. In a
+  // sub-account the primary is the PARENT's, so this assignment crosses accounts. Twilio's ISV
+  // guide documents it (architecture #1), but it had not been tried on our account when this
+  // was written: the phase 6 spike (scripts/twilio-a2p-spike.ts) proves it on a test sub before
+  // any builder depends on it. A refusal (or no answer) here is a PrimaryProfileLinkError carrying
+  // the profile it stopped on, so a caller in a SUB-account can write that profile down and FINISH
+  // it on the next press (finishSecondaryCustomerProfile) instead of making a second set of
+  // objects; `refused` says whether Twilio said no or never answered. Same request as always:
+  // nothing new is sent on a profile that is created in one go.
+  try {
+    await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, {
+      ObjectSid: opts.primaryProfileSid,
+    });
+  } catch (e) {
+    if (e instanceof TrustHubError) throw new PrimaryProfileLinkError(e, profileSid, crossAccount(creds));
+    throw e;
+  }
 
-  await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, {
+  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, {
     PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE,
   });
-  await call("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
+  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
 
   return { profileSid, endUserSid: String(business?.sid ?? ""), addressSid, repSid: String(rep?.sid ?? "") };
+}
+
+/** The marker a PrimaryProfileLinkError's message starts with when Twilio REFUSED the link (a
+ *  permanent answer: a 4xx other than 429, or a code in PERMANENT_CODES). */
+export const PRIMARY_LINK_REFUSED = "primary_profile_link_refused";
+/** ...and when it did not answer it (no response, a 5xx or a 429): nothing was judged, so the same
+ *  link can simply be asked again. Review 2026-10-09: these used to share the "refused" marker, so
+ *  a timeout read as "Twilio will not link across accounts". */
+export const PRIMARY_LINK_UNANSWERED = "primary_profile_link_unanswered";
+
+/**
+ * Twilio refused (or never answered) the EntityAssignment that puts the platform's PRIMARY
+ * customer profile onto a builder's SECONDARY one: the ISV link. A TrustHubError, so every
+ * existing catch still handles it; typed, so a caller can tell this one apart:
+ *   profileSid    the secondary profile that WAS made and is now waiting for the link. In a
+ *                 sub-account, record it, and the next press finishes it
+ *                 (finishSecondaryCustomerProfile) rather than making a second profile.
+ *   crossAccount  the secondary lives in a SUB-account (the primary is always the parent's), i.e.
+ *                 the cross-account assignment phase 6's spike proves. false = both in one account
+ *                 (today's flow, where this has never failed).
+ *   refused       Twilio answered and said no (the cause was `permanent`). false = it never
+ *                 answered (network, 5xx, 429): a retry is the whole fix, and nothing about the
+ *                 cross-account link has been learned.
+ * Codes only travel outward (this file's header rule); `detail` keeps Twilio's body for app_errors.
+ */
+export class PrimaryProfileLinkError extends TrustHubError {
+  readonly profileSid: string;
+  readonly crossAccount: boolean;
+  readonly refused: boolean;
+  constructor(cause: TrustHubError, profileSid: string, crossAccount: boolean) {
+    const where = crossAccount ? " across accounts" : "";
+    super({
+      message: cause.permanent
+        ? `${PRIMARY_LINK_REFUSED}: Twilio refused to link the primary customer profile to the secondary one${where} (HTTP ${cause.status}, code ${cause.code}).`
+        : `${PRIMARY_LINK_UNANSWERED}: Twilio did not answer the link of the primary customer profile to the secondary one${where} (HTTP ${cause.status}, code ${cause.code}).`,
+      status: cause.status, code: cause.code, permanent: cause.permanent, detail: cause.detail,
+    });
+    this.name = "PrimaryProfileLinkError";
+    this.profileSid = profileSid;
+    this.crossAccount = crossAccount;
+    this.refused = cause.permanent;
+  }
+}
+
+/** Do these credentials name an account other than the environment's own (the parent)? */
+function crossAccount(creds: TrustHubCreds | null | undefined): boolean {
+  if (!creds || !creds.accountSid) return false;
+  let parent = "";
+  try { parent = accountSid() ?? ""; } catch { parent = ""; }
+  return creds.accountSid !== parent;
+}
+
+/** The objects assigned onto a customer profile (its EntityAssignments' object_sid), GET only. */
+async function profileObjects(profileSid: string, http: TrustHubHttp): Promise<string[]> {
+  const r = await http("GET", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments?PageSize=50`);
+  const rows = Array.isArray(r?.results) ? r.results : [];
+  return rows.map((a: any) => String(a?.object_sid ?? "")).filter(Boolean);
+}
+
+/** Is the platform's primary profile assigned onto this secondary profile? GET only: what the
+ *  phase 6 spike prints, and what finishSecondaryCustomerProfile asks before it links. */
+export async function primaryProfileLinked(profileSid: string, primaryProfileSid: string, http: TrustHubHttp = viaCall): Promise<boolean> {
+  if (!SID.bundle.test(profileSid) || !SID.bundle.test(primaryProfileSid)) throw badInput("A customer profile SID is malformed.");
+  return (await profileObjects(profileSid, http)).includes(primaryProfileSid);
+}
+
+/**
+ * Finish a secondary customer profile whose creation stopped at, or before, the primary link (a
+ * PrimaryProfileLinkError, or a lost response): link the primary if it is not linked yet, then
+ * evaluate and submit the profile if it is still a draft. Every step is read first, so pressing it
+ * again on a finished profile sends nothing. A refused link is a PrimaryProfileLinkError again.
+ * `crossAccount` only labels that error (see PrimaryProfileLinkError).
+ */
+export async function finishSecondaryCustomerProfile(
+  profileSid: string, primaryProfileSid: string, http: TrustHubHttp = viaCall, opts: { crossAccount?: boolean } = {},
+): Promise<{ linked: boolean; submitted: boolean; status: TrustProductStatus | null }> {
+  if (!SID.bundle.test(profileSid) || !SID.bundle.test(primaryProfileSid)) throw badInput("A customer profile SID is malformed.");
+  let linked = false;
+  if (!(await profileObjects(profileSid, http)).includes(primaryProfileSid)) {
+    try {
+      await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, { ObjectSid: primaryProfileSid });
+    } catch (e) {
+      if (e instanceof TrustHubError) throw new PrimaryProfileLinkError(e, profileSid, opts.crossAccount === true);
+      throw e;
+    }
+    linked = true;
+  }
+  const p = await http("GET", `${TRUSTHUB}/CustomerProfiles/${profileSid}`);
+  let status = trustProductStatus(p?.status);
+  let submitted = false;
+  if (status === "draft") {
+    await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, { PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE });
+    const s = await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
+    status = trustProductStatus(s?.status) ?? "pending-review";
+    submitted = true;
+  }
+  return { linked, submitted, status };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -403,8 +542,9 @@ export async function createA2pTrustProduct(opts: {
   email: string;
   friendlyName: string;
   companyType?: "private" | "public" | "non-profit" | "government";
-}): Promise<{ a2pProfileSid: string }> {
-  const messagingProfile = await call("POST", `${TRUSTHUB}/EndUsers`, {
+}, creds?: TrustHubCreds | null): Promise<{ a2pProfileSid: string }> {
+  const as = (method: "GET" | "POST", url: string, form?: Record<string, string>) => call(method, url, form, undefined, creds);
+  const messagingProfile = await as("POST", `${TRUSTHUB}/EndUsers`, {
     FriendlyName: `${opts.friendlyName} — A2P profile`,
     Type: "us_a2p_messaging_profile_information",
     "Attributes": JSON.stringify({
@@ -414,24 +554,24 @@ export async function createA2pTrustProduct(opts: {
     }),
   });
 
-  const tp = await call("POST", `${TRUSTHUB}/TrustProducts`, {
+  const tp = await as("POST", `${TRUSTHUB}/TrustProducts`, {
     FriendlyName: opts.friendlyName,
     Email: opts.email,
     PolicySid: POLICY_A2P_TRUST_PRODUCT,
   });
   const a2pProfileSid = String(tp?.sid ?? "");
 
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
     ObjectSid: String(messagingProfile?.sid ?? ""),
   });
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, {
     ObjectSid: opts.profileSid,
   });
 
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/Evaluations`, {
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/Evaluations`, {
     PolicySid: POLICY_A2P_TRUST_PRODUCT,
   });
-  await call("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}`, { Status: "pending-review" });
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}`, { Status: "pending-review" });
 
   return { a2pProfileSid };
 }
@@ -455,7 +595,7 @@ export async function registerBrand(opts: {
    *  Only ever true for an internal account — the database trigger in migration 170 makes
    *  that an invariant rather than a convention. */
   mock?: boolean;
-}): Promise<{ brandSid: string; status: string; identityStatus: string | null; mock: boolean }> {
+}, creds?: TrustHubCreds | null): Promise<{ brandSid: string; status: string; identityStatus: string | null; mock: boolean }> {
   const form: Record<string, string> = {
     CustomerProfileBundleSid: opts.customerProfileBundleSid,
     A2PProfileBundleSid: opts.a2pProfileBundleSid,
@@ -473,7 +613,7 @@ export async function registerBrand(opts: {
   // safer way to say "real".
   if (opts.mock) form.Mock = "true";
 
-  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations`, form);
+  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations`, form, undefined, creds);
   // ⚠️ TRUST TWILIO'S ANSWER, NOT OUR REQUEST. The response carries `mock`, so the row
   // records what was actually created rather than what we asked for. If the parameter were
   // ever ignored we would have registered a REAL brand while believing otherwise, and the
@@ -486,10 +626,10 @@ export async function registerBrand(opts: {
   };
 }
 
-export async function fetchBrand(brandSid: string): Promise<{
+export async function fetchBrand(brandSid: string, creds?: TrustHubCreds | null): Promise<{
   status: string; identityStatus: string | null; tcrId: string | null; errors: unknown[];
 }> {
-  const b = await call("GET", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`);
+  const b = await call("GET", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`, undefined, undefined, creds);
   return {
     status: String(b?.status ?? ""),
     identityStatus: b?.identity_status ? String(b.identity_status) : null,
@@ -503,8 +643,8 @@ export async function fetchBrand(brandSid: string): Promise<{
 /** Resubmit a failed brand. Twilio allows THREE free retries; the fourth returns HTTP 400
  *  with error 21724. Whatever is actually being fixed lives upstream in the bundle's
  *  EndUsers — PATCH those first; this call takes only the SID. */
-export async function updateBrand(brandSid: string): Promise<{ status: string }> {
-  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`, {});
+export async function updateBrand(brandSid: string, creds?: TrustHubCreds | null): Promise<{ status: string }> {
+  const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`, {}, undefined, creds);
   return { status: String(b?.status ?? "") };
 }
 
@@ -516,7 +656,7 @@ export async function createMessagingService(opts: {
   friendlyName: string;
   inboundWebhookUrl: string;
   statusCallbackUrl: string;
-}): Promise<{ serviceSid: string }> {
+}, creds?: TrustHubCreds | null): Promise<{ serviceSid: string }> {
   const s = await call("POST", `${MESSAGING}/Services`, {
     FriendlyName: opts.friendlyName,
     InboundRequestUrl: opts.inboundWebhookUrl,
@@ -524,16 +664,16 @@ export async function createMessagingService(opts: {
     // Twilio answers STOP/HELP itself on the service. Our own ledger still records it —
     // the carrier block and our block must agree, and ours is what the composer reads.
     UseInboundWebhookOnNumber: "false",
-  });
+  }, undefined, creds);
   return { serviceSid: String(s?.sid ?? "") };
 }
 
 /** ⚠️ NEVER HARDCODE A USE CASE. What a brand may register depends on the brand, and the
  *  eligible list is only knowable after approval. */
-export async function fetchEligibleUseCases(serviceSid: string, brandSid: string): Promise<Array<{
+export async function fetchEligibleUseCases(serviceSid: string, brandSid: string, creds?: TrustHubCreds | null): Promise<Array<{
   code: string; name: string; description: string; postApprovalRequired: boolean;
 }>> {
-  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/Usecases?BrandRegistrationSid=${encodeURIComponent(brandSid)}`);
+  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/Usecases?BrandRegistrationSid=${encodeURIComponent(brandSid)}`, undefined, undefined, creds);
   const list = Array.isArray(r?.us_app_to_person_usecases) ? r.us_app_to_person_usecases : [];
   return list.map((u: any) => ({
     code: String(u?.code ?? ""),
@@ -578,7 +718,7 @@ export type CampaignCopy = {
  *  fields visible on the Usa2p resource at all — the plain v1 view drops them, which is
  *  precisely how they stayed null and unnoticed through two rejections. Proven against the
  *  live API with this header on both the write and the read-back. */
-async function campaignPost(url: string, params: URLSearchParams): Promise<any> {
+async function campaignPost(url: string, params: URLSearchParams, creds?: TrustHubCreds | null): Promise<any> {
   // ⚠️ ASSERT THE WIRE, NOT THE ARGUMENTS — this is the check that would have caught the
   // 2026-09-02 rejection and `requirePolicyUrls` would not have. The arguments were correct
   // that day: both URLs were typed, validated, stored and echoed back on the form. What was
@@ -593,7 +733,7 @@ async function campaignPost(url: string, params: URLSearchParams): Promise<any> 
       });
     }
   }
-  const pair = basicAuthPair();
+  const pair = pairFor(creds);
   if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
   await throttle();
   const res = await fetch(url, {
@@ -637,7 +777,7 @@ export async function createCampaign(opts: {
   termsUrl: string;
   hasEmbeddedLinks?: boolean;
   hasEmbeddedPhone?: boolean;
-}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
+}, creds?: TrustHubCreds | null): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
   requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
   const form: Record<string, string> = {
     BrandRegistrationSid: opts.brandSid,
@@ -662,7 +802,7 @@ export async function createCampaign(opts: {
   if (opts.copy.optOutMessage) params.append("OptOutMessage", opts.copy.optOutMessage);
   if (opts.copy.helpMessage) params.append("HelpMessage", opts.copy.helpMessage);
 
-  const body = await campaignPost(`${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p`, params);
+  const body = await campaignPost(`${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p`, params, creds);
   return {
     campaignSid: String(body?.sid ?? ""),
     status: String(body?.campaign_status ?? body?.status ?? "PENDING"),
@@ -694,7 +834,7 @@ export async function updateCampaign(opts: {
   termsUrl: string;
   hasEmbeddedLinks?: boolean;
   hasEmbeddedPhone?: boolean;
-}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
+}, creds?: TrustHubCreds | null): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
   requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
   const params = new URLSearchParams();
   params.append("Description", opts.copy.description);
@@ -710,6 +850,7 @@ export async function updateCampaign(opts: {
   const body = await campaignPost(
     `${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p/${opts.campaignSid}`,
     params,
+    creds,
   );
   return {
     campaignSid: String(body?.sid ?? opts.campaignSid),
@@ -739,6 +880,7 @@ function policyUrlsEchoed(body: any): boolean {
  *  — a missed webhook, a sink that was never wired — simply never recovered. */
 export async function fetchCampaign(
   serviceSid: string,
+  creds?: TrustHubCreds | null,
 ): Promise<{
   status: string; sid: string | null; privacyPolicyUrl: string; termsUrl: string;
   errors: unknown[]; description: string; messageFlow: string; messageSamples: string[];
@@ -750,7 +892,7 @@ export async function fetchCampaign(
   // check reads them from here rather than from our own row.
   const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p`, undefined, {
     "X-Twilio-Api-Version": "v1.2",
-  });
+  }, creds);
   const one = Array.isArray(r?.compliance) ? r.compliance[0] : r;
   return {
     privacyPolicyUrl: String(one?.privacy_policy_url ?? ""),
@@ -781,8 +923,8 @@ export async function fetchCampaign(
  *
  *  Pass the QE… sid the REST API returns, NOT the CM… one from Event Streams — they are
  *  different SID spaces and the CM sid matches nothing here. */
-export async function deleteCampaign(serviceSid: string, campaignSid: string): Promise<void> {
-  await call("DELETE", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/${campaignSid}`);
+export async function deleteCampaign(serviceSid: string, campaignSid: string, creds?: TrustHubCreds | null): Promise<void> {
+  await call("DELETE", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/${campaignSid}`, undefined, undefined, creds);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -794,8 +936,8 @@ export async function searchAvailableNumbers(opts: {
   contains?: string;
   inRegion?: string;
   limit?: number;
-}): Promise<Array<{ phoneNumber: string; friendlyName: string; locality: string | null; region: string | null }>> {
-  const acct = accountSid();
+}, creds?: TrustHubCreds | null): Promise<Array<{ phoneNumber: string; friendlyName: string; locality: string | null; region: string | null }>> {
+  const acct = acctOf(creds);
   const p = new URLSearchParams({
     SmsEnabled: "true",
     MmsEnabled: "true",
@@ -809,7 +951,7 @@ export async function searchAvailableNumbers(opts: {
   if (opts.contains) p.append("Contains", opts.contains);
   if (opts.inRegion) p.append("InRegion", opts.inRegion);
 
-  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/AvailablePhoneNumbers/US/Local.json?${p.toString()}`);
+  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/AvailablePhoneNumbers/US/Local.json?${p.toString()}`, undefined, undefined, creds);
   const list = Array.isArray(r?.available_phone_numbers) ? r.available_phone_numbers : [];
   return list.map((n: any) => ({
     phoneNumber: String(n?.phone_number ?? ""),
@@ -831,16 +973,16 @@ export async function purchaseNumber(opts: {
   phoneNumber: string;
   clientId: string;
   messagingServiceSid?: string | null;
-}): Promise<{ sid: string; phoneNumber: string }> {
-  const acct = accountSid();
+}, creds?: TrustHubCreds | null): Promise<{ sid: string; phoneNumber: string }> {
+  const acct = acctOf(creds);
   const form: Record<string, string> = {
     PhoneNumber: opts.phoneNumber,
     FriendlyName: opts.clientId,
   };
-  const r = await call("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json`, form);
+  const r = await call("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json`, form, undefined, creds);
   const sid = String(r?.sid ?? "");
   if (opts.messagingServiceSid && sid) {
-    await attachNumberToService(opts.messagingServiceSid, sid);
+    await attachNumberToService(opts.messagingServiceSid, sid, trustHubHttp(creds));
   }
   return { sid, phoneNumber: String(r?.phone_number ?? opts.phoneNumber) };
 }
@@ -857,6 +999,15 @@ export type TrustHubHttp = (
   form?: Record<string, string>,
 ) => Promise<any>;
 const viaCall: TrustHubHttp = (method, url, form) => call(method, url, form);
+
+/**
+ * The transport bound to one account's credentials, for the helpers that take `http`: pass it with
+ * that account's SID as `acct` where a helper also takes one. null / omitted = the environment's
+ * (viaCall), today's behaviour.
+ */
+export function trustHubHttp(creds?: TrustHubCreds | null): TrustHubHttp {
+  return creds ? (method, url, form) => call(method, url, form, undefined, creds) : viaCall;
+}
 
 const SID = {
   service: /^MG[0-9a-f]{32}$/i,
@@ -920,11 +1071,12 @@ export async function clearNumberSmsUrl(numberSid: string, http: TrustHubHttp = 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Caller ID trust — SHAKEN/STIR and Voice Integrity (My Synergy Phone, plan §14, phase 6)
+// Caller ID trust — SHAKEN/STIR, Voice Integrity and CNAM (My Synergy Phone, plan §14, phase 6;
+// CNAM is Workstream 2's phase 6, POLICY_CNAM_TRUST_PRODUCT below)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Two Trust Products per builder number, both built on the business profile the texting
-// registration already created (stage 1 above), and both OPERATOR-ONLY: portal-settings'
+// Two Trust Products per builder number (three with CNAM), all built on the business profile the texting
+// registration already created (stage 1 above), and all OPERATOR-ONLY: portal-settings'
 // phone_trust_setup is the one caller, behind an app_operators check, and nothing runs this on
 // a timer or a webhook.
 //
@@ -933,6 +1085,8 @@ export async function clearNumberSmsUrl(numberSid: string, http: TrustHubHttp = 
 //                     SHAKEN/STIR Trust Product.
 //   Voice Integrity   registers the number with the carriers' spam engines (T-Mobile, Verizon,
 //                     AT&T), which is what fights "Spam Likely". Level A alone does not.
+//   CNAM              the business's name (up to 15 characters) on the called party's screen,
+//                     where their carrier looks CNAM up; 48-72 hours after approval.
 //
 // The flow, verbatim from Twilio's ISV guides (checked 2026-09-29; the Voice Integrity one says
 // "The API flow for Voice Integrity Private Beta is subject to change"):
@@ -963,16 +1117,60 @@ export const POLICY_SHAKEN_STIR_TRUST_PRODUCT = "RN7a97559effdf62d00f4298208492a
 /** Twilio's Voice Integrity Trust Product policy (the Voice Integrity ISV guide, same wording). */
 export const POLICY_VOICE_INTEGRITY_TRUST_PRODUCT = "RN5b3660f9598883b1df4e77f77acefba0";
 
-export type VoiceTrustKind = "shaken_stir" | "voice_integrity";
+/**
+ * Twilio's CNAM Trust Product policy (Workstream 2, phase 6), "Do not change the policy_sid", from
+ * "Brand your calls using CNAM" (https://www.twilio.com/docs/voice/brand-your-calls-using-cnam,
+ * checked 2026-10-09). The same Trust Hub steps as SHAKEN/STIR, plus one EndUser of type
+ * `cnam_information` carrying the display name, in that guide's order:
+ *   the number on the business profile (ChannelEndpointAssignments) → POST TrustProducts
+ *   {FriendlyName, Email, PolicySid} → assign the business profile → POST EndUsers {Type:
+ *   cnam_information, Attributes: {cnam_display_name}} and assign it → assign the number → POST
+ *   TrustProducts/{BU} {Status: pending-review}. No Evaluation.
+ * What it needs: the business profile tied to an EIN or a DUNS number (ours carry the EIN), a US
+ * local long-code number already on that profile (not Canadian, not toll-free), and a display name
+ * (parseCnamDisplayName). After Twilio approves it, the name takes 48-72 hours to reach every US
+ * carrier, and only carriers that look CNAM up show it. In a builder's sub-account it runs with the
+ * sub's credentials like everything else here.
+ */
+export const POLICY_CNAM_TRUST_PRODUCT = "RNf3db3cd1fe25fcfd3c3ded065c8fea53";
+
+export type VoiceTrustKind = "shaken_stir" | "voice_integrity" | "cnam";
 export const VOICE_TRUST_POLICY: Record<VoiceTrustKind, string> = {
   shaken_stir: POLICY_SHAKEN_STIR_TRUST_PRODUCT,
   voice_integrity: POLICY_VOICE_INTEGRITY_TRUST_PRODUCT,
+  cnam: POLICY_CNAM_TRUST_PRODUCT,
 };
 /** The FriendlyName suffix each product is created with, after the client_id. */
 export const VOICE_TRUST_NAME: Record<VoiceTrustKind, string> = {
   shaken_stir: "SHAKEN/STIR",
   voice_integrity: "Voice Integrity",
+  cnam: "CNAM",
 };
+
+/** The longest CNAM display name the carriers' databases hold (Twilio's guide: 15 characters). */
+export const CNAM_MAX = 15;
+
+/**
+ * An operator's CNAM display name → what Twilio is sent, or a sentence. Twilio's rules: at most 15
+ * characters; letters, numbers, periods, commas and spaces only; it should begin with a letter (we
+ * require it); unique to the business, and never a generic City/State (the default when no name is
+ * set). Spaces are collapsed, so what is checked is what is sent.
+ */
+export function parseCnamDisplayName(raw: unknown): { ok: true; name: string } | { ok: false; error: string } {
+  const name = String(raw ?? "").replace(/\s+/g, " ").trim();
+  if (!name) return { ok: false, error: "Enter the name callers should see, up to 15 characters." };
+  if (name.length > CNAM_MAX) return { ok: false, error: `That name is ${name.length} characters; the carriers keep at most ${CNAM_MAX}. Shorten it.` };
+  if (!/^[A-Za-z]/.test(name)) return { ok: false, error: "The name has to start with a letter." };
+  if (!/^[A-Za-z0-9., ]+$/.test(name)) return { ok: false, error: "Use only letters, numbers, spaces, periods and commas." };
+  return { ok: true, name };
+}
+
+/** Thrown by setupVoiceTrust when a CNAM product still needs its EndUser and the caller sent no
+ *  display name. Matched by message, like VOICE_INTEGRITY_INFO_REQUIRED. */
+export const CNAM_INFO_REQUIRED = "cnam_display_name_required";
+
+/** The EndUser type CNAM's policy asks for, verbatim ("must stay as cnam_information"). */
+const CNAM_END_USER_TYPE = "cnam_information";
 export function voiceTrustFriendlyName(clientId: string, kind: VoiceTrustKind): string {
   return `${clientId} — ${VOICE_TRUST_NAME[kind]}`;
 }
@@ -1102,6 +1300,10 @@ export type VoiceTrustSetup = {
    *  does and the product is draft or twilio-rejected, they REPLACE its attributes before the
    *  product is resubmitted (an operator's "Submit again" sends corrected answers). */
   voiceIntegrity?: VoiceIntegrityInfo | null;
+  /** CNAM's display name (parseCnamDisplayName's). Required when the product has no
+   *  cnam_information EndUser yet; on a draft or twilio-rejected product it REPLACES the name the
+   *  EndUser carries before the resubmit, exactly like Voice Integrity's answers. */
+  cnam?: { displayName: string } | null;
   /** Called with the Trust Product the moment it is known (found or created), BEFORE any later
    *  step can throw, so the caller writes it down and a retry reuses it. */
   onTrustProduct?: (sid: string, status: TrustProductStatus | null) => Promise<void>;
@@ -1115,7 +1317,7 @@ export type VoiceTrustResult = {
   numberOnProfile: boolean;
   profileLinked: boolean;
   endUserCreated: boolean;
-  /** Voice Integrity only: the existing EndUser was given the answers this run sent. */
+  /** Voice Integrity and CNAM: the existing EndUser was given the answers this run sent. */
   endUserUpdated: boolean;
   numberLinked: boolean;
   submitted: boolean;
@@ -1201,34 +1403,42 @@ export async function setupVoiceTrust(o: VoiceTrustSetup, http: TrustHubHttp = v
   out.status = tp.status;
   if (o.onTrustProduct) await o.onTrustProduct(tp.sid, tp.status);
 
-  // 3 + 4. What the product carries: Voice Integrity's EndUser, and the business profile.
+  // 3 + 4. What the product carries: its EndUser (Voice Integrity's answers, CNAM's display name;
+  //        SHAKEN/STIR has none), and the business profile.
   const ents = await listResults(http, `${TRUSTHUB}/TrustProducts/${tp.sid}/EntityAssignments?PageSize=50`);
   const objects = ents.map((e) => String(e?.object_sid ?? ""));
-  if (o.kind === "voice_integrity") {
-    const vi = o.voiceIntegrity ?? null;
+  const spec = o.kind === "voice_integrity"
+    ? { type: VOICE_INTEGRITY_END_USER_TYPE, attributes: o.voiceIntegrity ? voiceIntegrityAttributes(o.voiceIntegrity) : null,
+        required: VOICE_INTEGRITY_INFO_REQUIRED, friendlyName: `${o.friendlyName} information` }
+    : o.kind === "cnam"
+    ? { type: CNAM_END_USER_TYPE, attributes: o.cnam?.displayName ? JSON.stringify({ cnam_display_name: o.cnam.displayName }) : null,
+        required: CNAM_INFO_REQUIRED, friendlyName: `${o.friendlyName} display name` }
+    : null;
+  if (spec) {
+    const attributes = spec.attributes;
     const linked = objects.filter((s) => SID.endUser.test(s));
     // Answers sent for a product that already carries EndUsers, and that is going to be
-    // (re)submitted: find ITS voice_integrity_information one (read, so another kind of EndUser
-    // a Console-made product may carry is never overwritten with these fields) and replace its
+    // (re)submitted: find ITS EndUser of this kind's type (read, so another kind of EndUser a
+    // Console-made product may carry is never overwritten with these fields) and replace its
     // attributes. Under review or approved, nothing is changed: step 6 sends nothing either.
     let viEndUser: string | null = null;
-    const correcting = !!vi && linked.length > 0 && resubmittable(out.status);
+    const correcting = !!attributes && linked.length > 0 && resubmittable(out.status);
     if (correcting) {
       for (const s of linked.slice(0, 5)) {
         const eu = await http("GET", `${TRUSTHUB}/EndUsers/${s}`);
-        if (String(eu?.type ?? "") === VOICE_INTEGRITY_END_USER_TYPE) { viEndUser = s; break; }
+        if (String(eu?.type ?? "") === spec.type) { viEndUser = s; break; }
       }
     }
     if (viEndUser) {
-      await http("POST", `${TRUSTHUB}/EndUsers/${viEndUser}`, { Attributes: voiceIntegrityAttributes(vi!) });
+      await http("POST", `${TRUSTHUB}/EndUsers/${viEndUser}`, { Attributes: attributes! });
       out.endUserUpdated = true;
     } else if (!linked.length || correcting) {
       // None yet (or, correcting, none of the right type): create it and assign it.
-      if (!vi) throw badInput(VOICE_INTEGRITY_INFO_REQUIRED);
+      if (!attributes) throw badInput(spec.required);
       const eu = await http("POST", `${TRUSTHUB}/EndUsers`, {
-        FriendlyName: `${o.friendlyName} information`,
-        Type: VOICE_INTEGRITY_END_USER_TYPE,
-        Attributes: voiceIntegrityAttributes(vi),
+        FriendlyName: spec.friendlyName,
+        Type: spec.type,
+        Attributes: attributes,
       });
       const euSid = String(eu?.sid ?? "");
       if (!SID.endUser.test(euSid)) {
@@ -1264,16 +1474,16 @@ export async function setupVoiceTrust(o: VoiceTrustSetup, http: TrustHubHttp = v
 }
 
 /** Reconcile a purchase whose response we never saw. */
-export async function findPurchasedNumbers(clientId: string): Promise<Array<{ sid: string; phoneNumber: string }>> {
-  const acct = accountSid();
-  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json?FriendlyName=${encodeURIComponent(clientId)}&PageSize=50`);
+export async function findPurchasedNumbers(clientId: string, creds?: TrustHubCreds | null): Promise<Array<{ sid: string; phoneNumber: string }>> {
+  const acct = acctOf(creds);
+  const r = await call("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json?FriendlyName=${encodeURIComponent(clientId)}&PageSize=50`, undefined, undefined, creds);
   const list = Array.isArray(r?.incoming_phone_numbers) ? r.incoming_phone_numbers : [];
   return list.map((n: any) => ({ sid: String(n?.sid ?? ""), phoneNumber: String(n?.phone_number ?? "") }));
 }
 
-export async function releaseNumber(numberSid: string): Promise<void> {
-  const acct = accountSid();
-  await call("DELETE", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers/${numberSid}.json`);
+export async function releaseNumber(numberSid: string, creds?: TrustHubCreds | null): Promise<void> {
+  const acct = acctOf(creds);
+  await call("DELETE", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers/${numberSid}.json`, undefined, undefined, creds);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

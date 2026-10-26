@@ -20,6 +20,7 @@ import {
 } from "./http";
 import { logFault } from "./log";
 import { verifyTwilioRequest } from "./twilioSignature";
+import { webhookAccountLookup, webhookEnv } from "./twilioAccount";
 import { afterDial, applyStatus, inbound, outbound, screen, transcription, voicemail } from "./routes/voice";
 import { conferenceEvent } from "./conference";
 import { greetingAudio, voiceGreeting } from "./greeting";
@@ -30,8 +31,8 @@ import { events, transfer, voicemailAudio } from "./routes/calls";
 import { hold, resume, warmTransfer } from "./routes/conference";
 import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
-import { getThread, listCalls, listThreads, search, team } from "./routes/reads";
-import { devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
+import { getThread, listCalls, listContacts, listThreads, search, searchCalls, searchThreads, team } from "./routes/reads";
+import { aiTranscriptsMe, devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
 import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
 import { pushEmail, pushText } from "./routes/push";
 import { clearGreeting, myGreetingAudio, recordGreeting } from "./routes/greeting";
@@ -43,6 +44,7 @@ import { chargeMonthlyLineFees } from "./cron/lineFee";
 import { chargeMonthlyNumberFees } from "./cron/numberFee";
 import { runTranscriptions } from "./cron/transcribe";
 import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
+import { runMeetingReminders } from "./cron/meetingReminders";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_DAILY = "0 9 * * *";
@@ -55,6 +57,16 @@ export const CRON_DAILY = "0 9 * * *";
 export const CRON_TICK = "* * * * *";
 /** The minute (mod 5) the usage charges run on. */
 export const USAGE_MINUTE_MOD5 = 2;
+/**
+ * Meeting reminders (migration 327), every five minutes.
+ *
+ * A DIFFERENT offset from USAGE_MINUTE_MOD5 on purpose: the usage job asks Twilio for
+ * per-subaccount totals and can spend much of one invocation's subrequest budget, and the
+ * comment on that job already says the billing work must never be the thing starved of it.
+ * Five minutes is well inside the reminder runner's own lateness grace, so a missed tick
+ * costs nothing.
+ */
+export const MEETINGS_MINUTE_MOD5 = 4;
 
 // ── Twilio ──────────────────────────────────────────────────────────────────────────
 
@@ -64,18 +76,26 @@ const VOICE_PATHS = new Set([
   "/voice/greeting",
 ]);
 
-async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
+async function handleTwilio(req: Request, envIn: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
-  const check = await verifyTwilioRequest(env, req);
+  // Workstream 2, phase 4: the account lookup is handed over but only used while
+  // TWILIO_SUBACCOUNTS is "on" (twilioSignature.ts); off, this is the parent check it always was.
+  const check = await verifyTwilioRequest(envIn, req, { accountBySid: webhookAccountLookup(envIn, () => adminClient(envIn)) });
   if (!check.ok) {
-    const misconfigured = check.reason === "no_webhook_secret";
+    // A missing secret, an account lookup that failed, or (sub-accounts on) a missing parent token
+    // is OUR fault: an error. A bad key or signature is someone else's request being correctly
+    // refused: info, and throttled.
+    const misconfigured = check.reason === "no_webhook_secret" || check.reason === "account_lookup_failed"
+      || check.reason === "parent_token_missing";
     ec.waitUntil(logFault({
       code: `twilio_${check.reason}`,
-      // A missing secret is OUR fault and stops every call: an error. A bad key or signature is
-      // someone else's request being correctly refused: info, and throttled.
       severity: misconfigured ? "error" : "info",
-      message: misconfigured
+      message: check.reason === "no_webhook_secret"
         ? "Refusing every Twilio request: PHONE_WEBHOOK_SECRET is not set."
+        : check.reason === "account_lookup_failed"
+        ? `Refused a Twilio webhook on ${path}: the account its AccountSid names could not be looked up.`
+        : check.reason === "parent_token_missing"
+        ? `Refused the parent account's Twilio webhook on ${path}: TWILIO_SUBACCOUNTS is on (or manual) but TWILIO_AUTH_TOKEN is not set, and with sub-accounts every webhook must be signed.`
         : `Refused a Twilio webhook (${check.reason}) on ${path}.`,
       req,
       throttleMs: misconfigured ? 5 * 60_000 : 60_000,
@@ -90,6 +110,12 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
       message: "TWILIO_AUTH_TOKEN is not set: Twilio webhooks are accepted on the ?key= secret alone, without checking X-Twilio-Signature.",
     }));
   }
+  // The account the webhook came from rides on the handler's Env while the switch is on, so a handler
+  // that resolves a tenant can refuse one in another account (twilioAccount.ts tenantMatchesWebhook),
+  // and a SUB's webhook runs every Twilio REST call of its handler in that sub, with the SID and auth
+  // token its signature was just checked with (phase 5; no lookup). The parent's runs as the parent.
+  // Off: `check.account` is absent and this is the same env object.
+  const env = webhookEnv(envIn, check.account);
   const p = check.params;
   const url = new URL(req.url);
   switch (path) {
@@ -160,14 +186,21 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/handoff\/pending$/, h: (r, env) => pendingHandoff(env, r) },
   { method: "POST", re: /^\/sms\/send$/, h: (r, env, ec) => sendSms(env, ec, r) },
   { method: "GET", re: /^\/threads$/, h: (r, env) => listThreads(env, r) },
+  // List search (2026-10-13): the term only ever in the POST body. Before /threads/:key, so the
+  // key route can never take it.
+  { method: "POST", re: /^\/threads\/search$/, h: (r, env) => searchThreads(env, r) },
   { method: "GET", re: /^\/threads\/([^/]+)$/, h: (r, env, _ec, m) => getThread(env, r, m[1]) },
   { method: "GET", re: /^\/calls$/, h: (r, env) => listCalls(env, r) },
+  { method: "POST", re: /^\/calls\/search$/, h: (r, env) => searchCalls(env, r) },
   { method: "GET", re: /^\/search$/, h: (r, env) => search(env, r) },
+  { method: "GET", re: /^\/contacts$/, h: (r, env) => listContacts(env, r) },
   { method: "GET", re: /^\/team$/, h: (r, env) => team(env, r) },
-  { method: "POST", re: /^\/settings\/me$/, h: (r, env) => settingsMe(env, r) },
+  { method: "POST", re: /^\/settings\/me$/, h: (r, env, ec) => settingsMe(env, ec, r) },
   // Your own settings for the portal's "Your calls" card (the apps read them from /token, and
   // here again to see a greeting they just recorded).
   { method: "GET", re: /^\/settings\/me$/, h: (r, env) => mySettings(env, r) },
+  // Your answer to the apps' transcripts notice (migration 307, ../aiConsent.ts).
+  { method: "POST", re: /^\/settings\/me\/ai-transcripts$/, h: (r, env) => aiTranscriptsMe(env, r) },
   // Your own voicemail greeting (routes/greeting.ts): ring to record it, hear it, drop it.
   { method: "POST", re: /^\/settings\/me\/greeting\/record$/, h: (r, env, ec) => recordGreeting(env, ec, r) },
   { method: "GET", re: /^\/settings\/me\/greeting\/audio$/, h: (r, env) => myGreetingAudio(env, r) },
@@ -273,6 +306,7 @@ export default {
     const sweepDue = event.cron === CRON_SWEEP || (tick && at.getUTCMinutes() % 15 === 0);
     const dailyDue = event.cron === CRON_DAILY || (tick && at.getUTCHours() === 9 && at.getUTCMinutes() === 0);
     const usageDue = tick && at.getUTCMinutes() % 5 === USAGE_MINUTE_MOD5;
+    const meetingsDue = tick && at.getUTCMinutes() % 5 === MEETINGS_MINUTE_MOD5;
     const run = async () => {
       if (tick) await job("keep_warm", () => keepWarm(env));
       if (sweepDue) {
@@ -284,16 +318,25 @@ export default {
         // Each call and text, one wallet line each (or a shadow cost row while disarmed).
         await job("usage_charges", () => runUsageCharges(env, adminClient(env), at));
       }
+      if (meetingsDue) {
+        // Booking reminders (migration 327). This Worker's tick is the only real scheduler on
+        // the project — pg_cron is not installed — so the meeting feature borrows it. The work
+        // is done by the meeting-reminders edge function; see that file's header.
+        await job("meeting_reminders", () => runMeetingReminders(env));
+      }
       if (dailyDue) {
         await job("retention", () => retention(env));
         // Each business's own retention; runs whatever CALL_RECORDING says, so recordings made
         // while it was on still expire after it is switched off.
         await job("recording_retention", () => recordingRetention(env, at));
-        await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
         await job("line_fee", () => chargeMonthlyLineFees(env, adminClient(env)));
         // Each number's own fee from its second month on (the purchase took the first). Its only
         // rail is the sms_number_monthly meter, the switch month 1 is charged on.
         await job("number_fee", () => chargeMonthlyNumberFees(env, adminClient(env), at));
+        // Twilio's daily totals LAST (review 2026-10-09): with sub-accounts it asks each one (up to
+        // USAGE_SUBS_PER_RUN), so it may use many of this invocation's subrequests; the billing jobs
+        // above must never be the ones starved of them. It changes nothing they read.
+        await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
       }
       if (tick && callTranscribeOn(env)) {
         await job("transcribe", () => runTranscriptions(env, adminClient(env), at));

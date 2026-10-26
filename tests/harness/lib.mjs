@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bypassGate, showOptTab, revealTool } from "../e2e/helpers.mjs";
+import { parseRedirects, resolveRequest } from "../../scripts/hostRules.mjs";
 
 export { bypassGate, showOptTab, revealTool };
 // Vents are ONE "Vent" button since 2026-09-16: it arms the only vent at once, or opens "Choose a vent",
@@ -78,7 +79,7 @@ const json = (route, body, status = 200) =>
 export const PASS_THROUGH_GET = /^https:\/\/esm\.sh\//;
 export async function stubSupabase(page, { config, fixtures = [], rpc = {} } = {}) {
   const calls = [];
-  await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => {
+  await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|(?:[a-z0-9-]+\.)*localhost)(:\d+)?\//.test(u.href), (route) => {
     const req = route.request();
     if (req.method() === "GET" && PASS_THROUGH_GET.test(req.url())) return route.continue();
     calls.push({ method: req.method(), url: req.url(), aborted: true });
@@ -230,6 +231,47 @@ export async function buildingRect(page) {
   });
 }
 
+// THE HOST'S ROUTING, ON A PLAIN STATIC SERVER (2026-10-13). `python -m http.server` ignores
+// _redirects, so on it only /portal.html opens the app. This answers the way the host does, from
+// the same file (scripts/hostRules.mjs reads it): every address _redirects rewrites to an app page
+// gets that page (`html` stands in for portal.html when given, e.g. a test's own copy), and every
+// address it redirects is sent to the same Location, so a harness can open the app at its real
+// root address (/contacts, /settings/colors, /console) and prove an old /portal one still lands.
+// Anything with no rule (assets, /portal.html itself) is left to the server. Local origins only.
+// `target` is a page or a browser context.
+//
+// { legacy: true } is the host as it was BEFORE 2026-10-13 (only /portal and /portal/* are the
+// app), for a harness's "before" run on an older portal.app.compiled.js, which reads /portal
+// addresses only; open it at legacyAppPath(path).
+const HOST_RULES = parseRedirects(readFileSync(new URL("../../_redirects", import.meta.url), "utf8"));
+const LEGACY_HOST_RULES = parseRedirects("/portal /portal.html 200\n/portal/* /portal.html 200\n");
+export const legacyAppPath = (path) => "/portal" + String(path).replace(/^\/console(?=[/?#]|$)/, "/admin");
+export async function serveAppRoutes(target, html = null, { legacy = false } = {}) {
+  const rules = legacy ? LEGACY_HOST_RULES : HOST_RULES;
+  const local = (u) => /^https?:\/\/(127\.0\.0\.1|(?:[a-z0-9-]+\.)*localhost)(:\d+)?\//.test(u.href);
+  const answer = (u) => {
+    if (!local(u)) return null;
+    const r = resolveRequest(rules, u.pathname + u.search);
+    return r.kind === "asset" ? null : r;
+  };
+  await target.route((u) => answer(u) !== null, async (route) => {
+    const req = route.request();
+    const r = answer(new URL(req.url()));
+    if (!r) return route.fallback();
+    if (r.kind === "redirect") {
+      // A navigation that Chrome follows from a FULFILLED 301 is not routed again (the follow-up
+      // goes straight to the static server, which 404s it), so a page is sent on with
+      // location.replace instead: a new navigation to the same Location, the #fragment kept as a
+      // browser keeps it across a redirect, and no extra history entry. Other requests get the 301.
+      if (!req.isNavigationRequest()) return route.fulfill({ status: r.status, headers: { location: r.location }, body: "" });
+      return route.fulfill({ status: 200, contentType: "text/html",
+        body: `<!doctype html><meta charset="utf-8"><script>location.replace(${JSON.stringify(r.location)} + location.hash)</script>` });
+    }
+    const body = r.asset === "/portal.html" && html != null ? html : readFileSync(new URL("../.." + r.asset, import.meta.url), "utf8");
+    return route.fulfill({ status: 200, contentType: "text/html", body });
+  });
+}
+
 // Screenshots go to SS_SHOTS, else the OS temp dir — never into the checkout. test-results/ is
 // kept off the web host by .assetsignore but is NOT in .gitignore, so a default inside the repo
 // leaves untracked PNGs for the next `git status` (and a careless add) to find.
@@ -253,6 +295,8 @@ export function purePorch() {
   };
   const regions = [
     ["const D3 = {", "// The casing reveal every opening"],
+    // D3_CLADDING and d3CladdingFor: the corner boards' face the recessed porch's posts stand on (2026-10-07).
+    ["const D3_CLADDING = {", "// ── METAL ROOF PROFILE"],
     ["function d3RoofAxes(", "function d3FtIn("],
     ["function ssPorchTrussWall(", "// Where a vent sits in the gable above"],
     ["function d3DefaultOverhangStyle(", "// ── THE PROJECTING PORCH'S NUMBERS"],
@@ -260,5 +304,6 @@ export function purePorch() {
     ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
   ];
   const body = regions.map(([a, b]) => lift(a, b)).join("\n");
-  return new Function(`${body}; return { d3PorchReadout, d3PorchCapFt, d3PorchGeom, d3PorchSpan, d3RecessedPorchFrame, d3RecessedPorchReadout, d3LeanTosReadout, d3PorchJoins };`)();
+  return new Function(`${body}; return { d3PorchReadout, d3PorchCapFt, d3PorchGeom, d3PorchSpan, d3RecessedPorchFrame, d3RecessedPorchReadout, d3LeanTosReadout, d3PorchJoins, ` +
+    `d3RecessedSideStepsWhy, D3_RECESSED_SIDE_STEPS_MIN_FT };`)();
 }

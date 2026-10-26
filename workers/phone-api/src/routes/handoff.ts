@@ -38,6 +38,7 @@ import { visibleContactIds } from "../scope";
 import { createCall, updateCall, type TwilioError } from "../twilioRest";
 import { hook } from "../urls";
 import { resolveCall } from "./calls";
+import { callerTwilioEnv } from "../twilioAccount";
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -92,6 +93,8 @@ const NO_DEVICE: Record<HandoffTo, string> = {
 
 export async function startHandoff(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
   const c = await requireCaller(env, req);
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const body = await readJson(req);
   const to = body.to;
   if (!isHandoffTo(to)) throw new ApiError("bad_request", "Pick where to move the call.");
@@ -189,6 +192,8 @@ function whichApp(req: Request): "extension" | "mobile" {
 
 export async function cancelHandoff(env: Env, req: Request, idParam: string): Promise<Response> {
   const c = await requireCaller(env, req);
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const body = await readJson(req);
   const key = String(body.key ?? "");
   if (!UUID_RE.test(key)) throw new ApiError("bad_request", "That move isn't valid.");

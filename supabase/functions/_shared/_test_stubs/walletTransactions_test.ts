@@ -294,18 +294,32 @@ Deno.test("an owner reads their own posted and held lines, newest first, with no
   assertEquals(r.trace.errors, []);
 });
 
-Deno.test("each chip narrows to its lines, and the four chips add up to All", async () => {
-  const want: Record<string, number[]> = { calls: [3, 2], texts: [5, 4], funds: [8, 1], other: [7, 6] };
+// Two sales-tax lines (2026-10-21): their own Tax chip, with the memo taxMeter.ts writes.
+const WITH_TAX = [
+  ...MIXED,
+  line(11, { meter_kind: "tax_lookup", memo: "Tax verification · SST-5021 · Minnesota", amount_cents: -10, amount_exact_micros: -100_000 }),
+  line(12, { meter_kind: "tax_invoice", memo: "Invoice tax check · Invoice 1042 · Missouri", amount_cents: -10, amount_exact_micros: -100_000 }),
+];
+
+Deno.test("each chip narrows to its lines, and the five chips add up to All", async () => {
+  const want: Record<string, number[]> = { calls: [3, 2], texts: [5, 4], tax: [12, 11], funds: [8, 1], other: [7, 6] };
   const seen: number[] = [];
   for (const [filter, ids] of Object.entries(want)) {
-    const r = await drive({ action: "wallet_transactions", filter }, { ledger: MIXED });
+    const r = await drive({ action: "wallet_transactions", filter }, { ledger: WITH_TAX });
     assertEquals(r.status, 200, JSON.stringify(r.body));
     assertCleanLedgerReads(r.trace);
     assertEquals(r.body.rows.map((x: any) => x.id), ids, `filter ${filter}`);
     assert(r.body.rows.every((x: any) => x.category === filter), `a ${filter} row is labelled another category`);
     seen.push(...ids);
   }
-  assertEquals(seen.sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8], "the chips partition the ledger");
+  assertEquals(seen.sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 11, 12], "the chips partition the ledger");
+  const all = await drive({ action: "wallet_transactions" }, { ledger: WITH_TAX });
+  assertEquals(all.body.rows.map((x: any) => x.id).sort((a: number, b: number) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 11, 12], "All is their sum");
+  const tax = await drive({ action: "wallet_transactions", filter: "tax" }, { ledger: WITH_TAX });
+  assertEquals(tax.body.rows.map((x: any) => x.description),
+    ["Invoice tax check · Invoice 1042 · Missouri", "Tax verification · SST-5021 · Minnesota"], "a tax line reads its memo: the document and the state");
+  assertEquals(allOf(tax.trace.ledgerReads[0], "in").map((o) => o.slice(1)),
+    [["state", ["posted", "held"]], ["meter_kind", ["tax_lookup", "tax_invoice"]]], "the Tax chip is the two tax meters");
 });
 
 Deno.test("the date range is from-inclusive, to-exclusive, on created_at", async () => {

@@ -440,7 +440,7 @@ Deno.test("the card saves to the tenant on screen, then asks the shell to re-rea
   assert(/const needs3d = !on && !has3d;/.test(card), "the 3D rule changed");
   assert(/const disabled = busy \|\| !!advanced\.locked \|\| needs3d;/.test(card), "the disabled rule changed");
   assert(/if \(!want && advanced\.confirmOff && !advanced\.confirmOff\(\)\) return;/.test(card), "turning off must ask the shell first");
-  assert(CARD_SRC.includes("Adds an Advanced page under Designer for designing a building from scratch with every shape control."), "the card's words");
+  assert(CARD_SRC.includes("Adds an Advanced page under Shed Designer for designing a building from scratch with every shape control."), "the card's words");
   assert(CARD_SRC.includes(">Needs 3D<"), "the Needs 3D badge");
 });
 

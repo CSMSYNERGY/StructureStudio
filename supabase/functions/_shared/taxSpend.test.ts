@@ -89,13 +89,25 @@ function fakeAdmin(opts: {
   closeFails?: boolean;
   price?: { active: boolean; price_cents: number } | null;
   exempt?: boolean;
+  /** Migration 319's columns are missing: every charge-state write errors 42703. */
+  pre319?: boolean;
+  /** The wallet row id the debit's key reads back. */
+  txId?: number;
 } = {}) {
   const rows = new Map<string, Record<string, unknown>>();
+  // Charge-state writes (migration 319), per ledger row id, in order: what chargeLookup recorded.
+  const chargeWrites: [string, Record<string, unknown>, unknown[][]][] = [];
   const chains: { table: string; ops: unknown[][] }[] = [];
   const rpcs: [string, Record<string, unknown>][] = [];
   const answer = (table: string, ops: unknown[][]): Answer => {
     const first = ops[0]?.[0];
     if (table === "tax_lookups") {
+      if (first === "update" && "charge_state" in (ops[0][1] as Record<string, unknown>)) {
+        if (opts.pre319) return { error: { code: "42703", message: "column \"charge_state\" does not exist" } };
+        const id = String((ops.find((o) => o[0] === "eq" && o[1] === "id") ?? [])[2]);
+        chargeWrites.push([id, ops[0][1] as Record<string, unknown>, ops.slice(1)]);
+        return { data: [{ id }] };
+      }
       if (first === "update") {
         if (opts.closeFails) return { error: { message: "down" } };
         const id = String((ops.find((o) => o[0] === "eq" && o[1] === "id") ?? [])[2]);
@@ -107,6 +119,7 @@ function fakeAdmin(opts: {
     }
     if (table === "usage_prices") return { data: opts.price === undefined ? { active: false, price_cents: 0 } : opts.price };
     if (table === "wallet_accounts") return { data: { metered_exempt: opts.exempt === true } };
+    if (table === "wallet_transactions") return { data: opts.txId == null ? null : { id: opts.txId } };
     return {};
   };
   const admin = {
@@ -115,7 +128,7 @@ function fakeAdmin(opts: {
       chains.push(rec);
       // deno-lint-ignore no-explicit-any
       const chain: any = {};
-      for (const m of ["insert", "update", "upsert", "select", "eq", "is", "in", "gt", "single", "maybeSingle"]) {
+      for (const m of ["insert", "update", "upsert", "select", "eq", "is", "in", "gt", "or", "single", "maybeSingle"]) {
         chain[m] = (...args: unknown[]) => { rec.ops.push([m, ...args]); return chain; };
       }
       chain.then = (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
@@ -142,7 +155,7 @@ function fakeAdmin(opts: {
     },
   };
   const touched = (table: string, op: string) => chains.some((c) => c.table === table && c.ops[0]?.[0] === op);
-  return { admin, rows, chains, rpcs, touched };
+  return { admin, rows, chains, rpcs, touched, chargeWrites };
 }
 
 /** One paidLookup against a fetch stub: the outcome and how many requests it made. */
@@ -392,7 +405,7 @@ Deno.test("chargeLookup: the charge is keyed on the ledger row — two presses a
   const first: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: "Bibb, GA", ledgerClosed: true };
   const second: PaidLookup = { ...first, lookupId: crypto.randomUUID() }; // same answer, a second real request
 
-  assertEquals(await chargeLookup(f.admin, first, chargeOpts), { charged: true, priceCents: 10, balanceAfterCents: 4900 });
+  assertEquals(await chargeLookup(f.admin, first, chargeOpts), { charged: true, priceCents: 10, balanceAfterCents: 4900, walletTxId: null });
   await chargeLookup(f.admin, second, chargeOpts);
   await chargeLookup(f.admin, first, chargeOpts); // a retried charge for the first press
 
@@ -411,6 +424,95 @@ Deno.test("chargeLookup: with the meters as they are live (disarmed) a verified 
   assertEquals(await chargeLookup(f.admin, ok, chargeOpts), { charged: false, reason: "inactive" });
   assertEquals(await chargeLookup(f.admin, ok, { ...chargeOpts, kind: "tax_invoice" }), { charged: false, reason: "inactive" });
   assertEquals(f.rpcs.length, 0);
+});
+
+// ── chargeLookup records what the charge did on the ledger row (migration 319) ─────────────────
+
+const states = (f: ReturnType<typeof fakeAdmin>, id: string) => f.chargeWrites.filter(([w]) => w === id).map(([, patch]) => patch.charge_state);
+
+Deno.test("chargeLookup: pending (with the price) once the rail has passed, then charged with its cents and wallet row, on ITS row", async () => {
+  const f = fakeAdmin({ price: ARMED, txId: 77 });
+  const lookup: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: "Bibb, GA", ledgerClosed: true };
+  const r = await chargeLookup(f.admin, lookup, chargeOpts);
+  assertEquals(r, { charged: true, priceCents: 10, balanceAfterCents: 4900, walletTxId: 77 });
+  assertEquals(states(f, lookup.lookupId), ["pending", "charged"]);
+  const [, pending, pendingOps] = f.chargeWrites[0];
+  assertEquals(pending, { charge_state: "pending", charge_cents: 10, wallet_tx_id: null, charged_at: null });
+  assertEquals(pendingOps.filter((o) => o[0] !== "select"), [["eq", "id", lookup.lookupId], ["is", "charge_state", null]], "only a row with no state yet");
+  const [, done, doneOps] = f.chargeWrites[1];
+  assertEquals([done.charge_cents, done.wallet_tx_id, typeof done.charged_at], [10, 77, "string"]);
+  assert(doneOps.some((o) => o[0] === "or" && o[1] === "charge_state.is.null,charge_state.in.(pending,error)"), "never over a charged row");
+  // The pending write comes AFTER the meter and both exemptions are read (so a call made while a
+  // meter is off can never be left in a state tax_charge_retry bills), and before the debit's
+  // read-back; the outcome last.
+  const order = f.chains.map((c) => c.table === "tax_lookups" ? `tax_lookups:${c.ops[0]?.[0]}` : c.table);
+  assertEquals(order, ["usage_prices", "wallet_accounts", "client_settings", "tax_lookups:update", "wallet_transactions", "tax_lookups:update"]);
+});
+
+Deno.test("chargeLookup: every uncharged outcome is recorded too — inactive, unpriced, exempt, error, no_rate", async () => {
+  const ok = (): PaidLookup => ({ ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: null, ledgerClosed: true });
+  const cases: [Parameters<typeof fakeAdmin>[0], string][] = [
+    [{}, "inactive"],                                          // the live meters
+    [{ price: { active: true, price_cents: 0 } }, "unpriced"],
+    [{ price: ARMED, exempt: true }, "exempt"],
+    [{ price: null }, "inactive"],                             // no usage_prices row
+  ];
+  for (const [opts, want] of cases) {
+    const f = fakeAdmin(opts);
+    const l = ok();
+    await chargeLookup(f.admin, l, chargeOpts);
+    assertEquals(states(f, l.lookupId!), [want], `${JSON.stringify(opts)}: straight to ${want}, never through pending`);
+    assertEquals(f.chargeWrites[0][1].charge_cents, null, `${want}: no price on an uncharged row`);
+  }
+  // A failed lookup: no_rate on its row, and still nothing read against the meter.
+  const f = fakeAdmin({ price: ARMED });
+  const failed: PaidLookup = { ok: false, failure: "timeout", lookupId: crypto.randomUUID(), ledgerClosed: true };
+  assertEquals(await chargeLookup(f.admin, failed, chargeOpts), { charged: false, reason: "no_rate" });
+  assertEquals(states(f, failed.lookupId!), ["no_rate"]);
+  assertEquals([f.rpcs.length, f.touched("usage_prices", "select")], [0, false]);
+  // A refused claim wrote no row, so there is nothing to record.
+  const g = fakeAdmin({ price: ARMED });
+  await chargeLookup(g.admin, { ok: false, failure: "daily_cap", lookupId: null, ledgerClosed: true }, chargeOpts);
+  assertEquals(g.chargeWrites.length, 0);
+});
+
+Deno.test("chargeLookup: a failed debit is recorded error — what tax_charge_retry replays", async () => {
+  const f = fakeAdmin({ price: ARMED });
+  const rpc = f.admin.rpc;
+  f.admin.rpc = (name: string, args: Record<string, unknown>) =>
+    name === "wallet_credit" ? Promise.resolve({ data: null, error: { message: "deadlock" } }) : rpc(name, args);
+  const l: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: null, ledgerClosed: true };
+  assertEquals(await chargeLookup(f.admin, l, chargeOpts), { charged: false, reason: "error", attemptCents: 10 });
+  assertEquals(states(f, l.lookupId), ["pending", "error"]);
+  assertEquals(f.chargeWrites.map(([, p]) => p.charge_cents), [10, 10], "the error keeps the price it attempted: what the retry replays at");
+});
+
+Deno.test("chargeLookup: a price read that fails is an error with NO price, which tax_charge_retry never replays", async () => {
+  // Nothing said the meter was armed, so nothing may ever bill this call later.
+  const f = fakeAdmin({ price: ARMED });
+  const from = f.admin.from;
+  f.admin.from = (table: string) => {
+    if (table !== "usage_prices") return from(table);
+    // deno-lint-ignore no-explicit-any
+    const q: any = {};
+    for (const m of ["select", "eq"]) q[m] = () => q;
+    q.maybeSingle = () => Promise.resolve({ data: null, error: { message: "down" } });
+    return q;
+  };
+  const l: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: null, ledgerClosed: true };
+  assertEquals(await chargeLookup(f.admin, l, chargeOpts), { charged: false, reason: "error" });
+  assertEquals(f.chargeWrites.map(([, p]) => [p.charge_state, p.charge_cents]), [["error", null]], "no pending, no price");
+  assertEquals(f.rpcs.length, 0);
+});
+
+Deno.test("chargeLookup: before migration 319 the state writes fail quietly and the charge is unchanged", async () => {
+  const f = fakeAdmin({ price: ARMED, pre319: true });
+  const l: PaidLookup = { ok: true, lookupId: crypto.randomUUID(), rate: 0.08, jurisdiction: null, ledgerClosed: true };
+  assertEquals(await chargeLookup(f.admin, l, chargeOpts), { charged: true, priceCents: 10, balanceAfterCents: 4900, walletTxId: null });
+  assertEquals(f.rpcs.filter(([n]) => n === "wallet_credit").length, 1, "one debit, whatever the bookkeeping did");
+  // And a client that throws on every call is still an answer, never an exception.
+  const throwing = { from: () => { throw new Error("socket"); }, rpc: () => { throw new Error("socket"); } };
+  assertEquals(await chargeLookup(throwing, l, chargeOpts), { charged: false, reason: "error" });
 });
 
 // ── verifiedTax ──────────────────────────────────────────────────────────────────────────────

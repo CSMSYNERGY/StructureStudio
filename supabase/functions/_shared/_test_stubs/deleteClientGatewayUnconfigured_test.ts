@@ -8,6 +8,8 @@
 //      reached: wiping them would leave the subscription charging with nothing on our side to show it.
 //   2. A builder with nothing at the gateway IS still deletable. Test and demo tenants have no
 //      billing at all, and a missing key must not make them undeletable.
+//   3. (Workstream 2, review M1) The builder's Twilio sub-account is closed only AFTER this refusal
+//      could happen: a 503 here leaves it open, because a closed Twilio account cannot be reopened.
 
 import { assert, assertEquals } from "jsr:@std/assert";
 import { deleteClient, loadAdminCatalog, TENANT } from "./deleteClientHarness.ts";
@@ -34,12 +36,25 @@ Deno.test("an open subscription or a saved card, no gateway: 503 and nothing del
 
 Deno.test("nothing at the gateway, no gateway needed: the builder is still deleted", async () => {
   for (const subs of [[], [{ id: "4200000002", status: "cancelled" }]]) {
-    const r = await deleteClient(HANDLER, { subs, vault: null, rows: { wallet_accounts: 1 } });
+    const r = await deleteClient(HANDLER, { subs, vault: null, purge: { purged: { wallet_accounts: 1, client_configs: 1 } } });
     assertEquals(r.status, 200, r.raw);
     assertEquals(r.gatewayCalls, []);
-    assertEquals(r.wipes.slice(0, 3), ["tax_code_assignments", "wallet_accounts", "client_feature_grants"]);
-    assert(r.wipes.includes("client_configs"));
+    assertEquals(r.wipes, ["tenant_purge"], "the purge takes the tenant, the wallet with it");
+    assertEquals([r.body.deleted.wallet_accounts, r.body.deleted.client_configs], [1, 1]);
     assertEquals(r.body.gateway, { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 });
-    assertEquals(r.audits.map((a) => a.target_client_id), [TENANT]);
+    assertEquals(r.audits.map((a) => a.target_client_id), [TENANT, TENANT], "the gateway's audit row, then the purge's");
   }
+});
+
+Deno.test("a sub-account and no gateway: 503 BEFORE the irreversible Twilio close (its numbers were only read)", async () => {
+  const SUB = "AC" + "7".repeat(32);
+  const r = await deleteClient(HANDLER, {
+    subs: [{ id: "4200000001", status: "active" }], vault: null,
+    twilio: { row: { kind: "sub", status: "active", account_sid: SUB } },
+  });
+  assertEquals(r.status, 503, r.raw);
+  assertEquals(r.body, { error: "Can't reach the payment gateway; nothing was deleted." });
+  assertEquals(r.twilioCalls, [`GET /2010-04-01/Accounts/${SUB}/IncomingPhoneNumbers.json`], "read, never closed");
+  assertEquals(r.wipes, []);
+  assert(!r.log.includes("db rpc twilio_account_forget"), "the account row is kept with its open sub");
 });

@@ -23,7 +23,14 @@
 // so a value carrying a newline can never smuggle in an extra header.
 //
 // ⚠️ Importers, ALL of which must be redeployed together when this changes (_shared
-//    bundles PER function): portal-settings, submit-estimate, customer-accept.
+//    bundles PER function): portal-settings, submit-estimate, customer-accept, shop-checkout.
+//
+// THE CUSTOMER'S NAME AND COMPANY (2026-10-21, quote to a business entity). {first} is the
+// PERSON's first name through _shared/customerNaming.ts, and {company} is the business (both
+// from the design's contact). With no company on the contact {first} is exactly the first word
+// of the name it always was, so every email without one is unchanged (the golden test).
+
+import { companyOf, greetingFirst } from "./customerNaming.ts";
 
 export interface EmailContent {
   subject: string;
@@ -36,13 +43,19 @@ export interface EstimateEmailInput {
    *  closing message, button text and the photo switch. Untyped jsonb by nature; tenantCopy()
    *  validates and drops anything unusable. */
   templateCopy?: unknown;
-  /** Used only by the {customer} token in tenant copy: the name on the design's contact. */
+  /** Used only by the {customer} and {first} tokens in tenant copy: the name on the design's contact. */
   customerName?: string;
+  /** The business on the design's contact (designs.contact.company), for the {company} token. With
+   *  one, {first} greets the person, never the company's first word. Absent = no company. */
+  customerCompany?: string | null;
   /** The building's photo: the builder's own style photo, and only when that style's "show on
    *  estimate" switch is on (callers use tenantStylePhotoUrl). Drawn above the detail rows when
    *  it is an https:// address and the builder hasn't switched the photo off in their wording.
    *  Absent renders nothing, so a caller that passes none sends exactly what it always did. */
   pictureUrl?: string | null;
+  /** The business address: client_settings.business_address (jsonb) or a line of text. Only the
+   *  photo design's signature draws it; the classic card never has. */
+  address?: unknown;
 
   businessName: string;
   logoUrl?: string | null;
@@ -116,6 +129,8 @@ export interface InvoiceEmailInput {
   templateCopy?: unknown;
   /** Used only by the {customer} token in tenant copy: the name on the design's contact. */
   customerName?: string;
+  /** The business on the design's contact, for {company} (see EstimateEmailInput). */
+  customerCompany?: string | null;
 
   businessName: string;
   logoUrl?: string | null;
@@ -153,7 +168,7 @@ export interface InvoiceRequestEmailInput {
   total?: string | number | null;
   /** ISO timestamp of the acceptance; rendered as a plain date. */
   acceptedAtIso: string;
-  /** The order in the portal (/portal/orders/o-<id>), where "Approve & send invoice" lives. */
+  /** The order in the portal (/portal/orders/o-<id>, which the host 301s to /orders/o-<id>), where "Approve & send invoice" lives. */
   reviewUrl: string;
 }
 
@@ -189,8 +204,8 @@ export function formatMoney(total: string | number): string {
 function oneLine(v: unknown): string {
   return String(v ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
 }
-
-const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+export const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 /** A bare domain becomes an https:// href; real http(s) URLs pass through. */
 function websiteHref(website: string): string {
@@ -200,8 +215,8 @@ function websiteHref(website: string): string {
 /**
  * The one primary CTA. Padding lives on the <td>, not the <a>: Outlook ignores <a>
  * padding. Explicit bgcolor so a dark-mode inversion cannot render white-on-white.
- */
-function ctaButton(url: string, label: string): string {
+ */
+export function ctaButton(url: string, label: string): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:24px auto 4px auto;">
   <tr>
     <td align="center" bgcolor="#1F2937" style="background-color:#1F2937;border-radius:8px;padding:15px 36px;">
@@ -211,15 +226,19 @@ function ctaButton(url: string, label: string): string {
 </table>`;
 }
 
-/** One label/value row of the summary table. `valueHtml` is ALREADY escaped by the caller. */
-function detailRow(label: string, valueHtml: string): string {
+/** One label/value row of the summary table. `valueHtml` is ALREADY escaped by the caller. */
+// Exported since 2026-10-22 so the meeting emails (_shared/meetingEmails.ts) render in the
+// SAME 600px card as an estimate or an invoice, with the same button and the same tenant
+// footer. A second house style for the same business is how a product starts looking like
+// two products.
+export function detailRow(label: string, valueHtml: string): string {
   return `<tr>
   <td style="padding:8px 0;font-family:${FONT};font-size:13px;color:#64748B;white-space:nowrap;">${esc(label)}</td>
   <td align="right" style="padding:8px 0 8px 18px;font-family:${FONT};font-size:14px;font-weight:600;color:#1F2937;">${valueHtml}</td>
 </tr>`;
 }
-
-interface ShellInput {
+
+export interface ShellInput {
   businessName: string;
   logoUrl?: string | null;
   phone?: string | null;
@@ -230,8 +249,8 @@ interface ShellInput {
   bodyHtml: string;
 }
 
-/** The shared 600px card: tenant header, body, tenant contact footer + quote terms. */
-function htmlShell(s: ShellInput): string {
+/** The shared 600px card: tenant header, body, tenant contact footer + quote terms. */
+export function htmlShell(s: ShellInput): string {
   const logo = s.logoUrl
     ? `<img src="${esc(s.logoUrl)}" alt="${esc(s.businessName)}" width="170" style="display:block;max-width:170px;max-height:64px;width:auto;height:auto;border:0;margin:0 auto 10px auto;" />`
     : "";
@@ -313,6 +332,35 @@ export type TemplateCopy = {
   button?: string;
   /** false = leave the building photo out. Absent = show it (when there is one). */
   picture?: boolean;
+
+  // ── The PHOTO-HEADER design (Carolyn, 2026-10-14) ───────────────────────────────────────
+  // "I really want that template inside Structure Studio for sending out the quote. It has a
+  // nice truck on it." Her GHL quote email: a big photo across the top, an orange rule, "We're
+  // getting closer, Ahsan", a few short paragraphs, one wide green "VIEW SHED QUOTE" button, a
+  // slogan, and a signature (name, company, title, logo card, address, phone). layout "photo"
+  // switches a quote or estimate to that shape; everything below is only read while it is on, so
+  // a builder can flip back to the classic card without losing what they typed. Estimate and
+  // quote only: the invoice keeps one design.
+  /** "photo" = the photo-header design. Absent = the classic card. */
+  layout?: "photo";
+  /** The photo across the top (https://). Absent = the building photo when there is one, else
+   *  the logo and name the classic card opens with. */
+  hero?: string;
+  /** The big line under the photo, e.g. "We're getting closer, {first}". */
+  heading?: string;
+  /** The paragraphs above the button. Blank lines split paragraphs; **bold** and *italic*. */
+  message?: string;
+  /** A slogan between the button and the signature. *words* draw in a script face. */
+  tagline?: string;
+  /** The signature: the person's name (large) and their title (under the company name). */
+  signName?: string;
+  signTitle?: string;
+  /** A banner across the bottom (https://). Absent = a thin rule in the accent colour. */
+  footer?: string;
+  /** #rrggbb. The rules either side of the heading (and the bottom rule). */
+  accent?: string;
+  /** #rrggbb. The button. Its words turn dark on a light colour so they stay readable. */
+  buttonColor?: string;
 };
 
 /** The three kinds the wording screen has a tab for. */
@@ -321,16 +369,40 @@ export type TemplateKind = typeof TEMPLATE_KINDS[number];
 
 /** The longest each field may be, in characters (code points). The editor's boxes stop at the
  *  same lengths, so what is saved is what was typed. */
-export const TEMPLATE_LIMITS = { subject: 300, intro: 300, closing: 1000, button: 40 } as const;
+export const TEMPLATE_LIMITS = {
+  subject: 300, intro: 300, closing: 1000, button: 40,
+  heading: 150, message: 1500, tagline: 150, signName: 80, signTitle: 80,
+} as const;
 type CopyField = keyof typeof TEMPLATE_LIMITS;
-const COPY_FIELDS: CopyField[] = ["subject", "intro", "closing", "button"];
+const COPY_FIELDS: CopyField[] = ["subject", "intro", "closing", "button", "heading", "message", "tagline", "signName", "signTitle"];
+/** The photo design's words: estimate and quote only, never the invoice. */
+const PHOTO_FIELDS: CopyField[] = ["heading", "message", "tagline", "signName", "signTitle"];
+/** Fields that keep their line breaks (the rest are one line). */
+const MULTILINE_FIELDS: CopyField[] = ["closing", "message"];
 /** How a refusal names each field, in the editor's own words. */
 const FIELD_WORDS: Record<CopyField, string> = {
   subject: "subject",
   intro: "opening line",
   closing: "closing message",
   button: "button text",
+  heading: "heading",
+  message: "message",
+  tagline: "slogan",
+  signName: "signature name",
+  signTitle: "signature title",
 };
+/** Each kind as the wording screen's tab names it, for refusals: the "quote" key is StructureStudio's
+ *  own paperwork, which every reader calls an estimate (Carolyn 2026-10-06, Q12). */
+const KIND_WORDS: Record<TemplateKind, string> = { estimate: "CRM estimate", quote: "estimate", invoice: "invoice" };
+/** The photo design's two pictures, as a refusal names them. */
+const PHOTO_IMAGES = [["hero", "top photo"], ["footer", "bottom banner"]] as const;
+/** The photo design's two colours, as a refusal names them. */
+const PHOTO_COLORS = [["accent", "accent colour"], ["buttonColor", "button colour"]] as const;
+/** A colour the photo design accepts: #rrggbb, nothing else (no names, no gradients, no url()). */
+function hexColor(v: unknown): string {
+  const s = typeof v === "string" ? v.trim() : "";
+  return /^#[0-9a-f]{6}$/i.test(s) ? s.toLowerCase() : "";
+}
 
 /**
  * One field as it is stored and sent: "" when there is nothing usable. Control characters go
@@ -342,7 +414,7 @@ const FIELD_WORDS: Record<CopyField, string> = {
 function copyField(field: CopyField, v: unknown): string {
   if (typeof v !== "string") return "";
   let s = v.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
-  if (field === "closing") {
+  if (MULTILINE_FIELDS.includes(field)) {
     s = s.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, "").trim();
   } else {
     s = s.replace(/[\u0000-\u0008\u000E-\u001F\u007F]/g, "").replace(/\s+/g, " ").trim();
@@ -360,13 +432,30 @@ export function tenantCopy(raw: unknown, kind: string): TemplateCopy {
   const o = byKind as Record<string, unknown>;
   const out: TemplateCopy = {};
   for (const f of COPY_FIELDS) {
+    if (kind === "invoice" && PHOTO_FIELDS.includes(f)) continue;
     const t = copyField(f, o[f]);
     // Anything with a tag in it is a builder pasting HTML in; drop the whole field rather
     // than half-escaping it into gibberish, so the shipped wording shows instead.
     if (t && !/[<>]/.test(t)) out[f] = t;
   }
   if (o.picture === false && kind !== "invoice") out.picture = false;
+  if (kind !== "invoice") photoDesign(o, out);
   return out;
+}
+
+/** The photo design's switch, pictures and colours onto `out`, keeping only usable values. The
+ *  words went through copyField with the rest. Shared by tenantCopy (quietly drops what it can't
+ *  use) and cleanTemplateCopy (which has already refused anything unusable out loud). */
+function photoDesign(o: Record<string, unknown>, out: TemplateCopy): void {
+  if (o.layout === "photo") out.layout = "photo";
+  for (const [f] of PHOTO_IMAGES) {
+    const u = emailPictureUrl(o[f]);
+    if (u) out[f] = u;
+  }
+  for (const [f] of PHOTO_COLORS) {
+    const c = hexColor(o[f]);
+    if (c) out[f] = c;
+  }
 }
 
 /**
@@ -386,12 +475,26 @@ export function cleanTemplateCopy(raw: unknown): { copy: Partial<Record<Template
     const o = v as Record<string, unknown>;
     const out: TemplateCopy = {};
     for (const f of COPY_FIELDS) {
+      if (kind === "invoice" && PHOTO_FIELDS.includes(f)) continue;
       const t = copyField(f, o[f]);
       if (!t) continue;
-      if (/[<>]/.test(t)) return { error: `Remove the < > characters from the ${kind} ${FIELD_WORDS[f]} — this is plain text, not HTML.` };
+      if (/[<>]/.test(t)) return { error: `Remove the < > characters from the ${KIND_WORDS[kind]} ${FIELD_WORDS[f]} — this is plain text, not HTML.` };
       out[f] = t;
     }
     if (o.picture === false && kind !== "invoice") out.picture = false;
+    if (kind !== "invoice") {
+      // A picture or colour that was given but can't be used is refused, not dropped: the
+      // builder would otherwise see "Saved." and a design without the photo they just chose.
+      for (const [f, words] of PHOTO_IMAGES) {
+        const v = typeof o[f] === "string" ? String(o[f]).trim() : "";
+        if (v && !emailPictureUrl(v)) return { error: `The ${KIND_WORDS[kind]} ${words} must be an https:// web address (upload the picture instead).` };
+      }
+      for (const [f, words] of PHOTO_COLORS) {
+        const v = typeof o[f] === "string" ? String(o[f]).trim() : "";
+        if (v && !hexColor(v)) return { error: `The ${KIND_WORDS[kind]} ${words} must be a colour like #2cab05.` };
+      }
+      photoDesign(o, out);
+    }
     if (Object.keys(out).length) copy[kind] = out;
   }
   return { copy };
@@ -456,6 +559,319 @@ export function fillTokens(tpl: string, vals: Record<string, string>): string {
     Object.prototype.hasOwnProperty.call(vals, k) ? String(vals[k] ?? "") : whole);
 }
 
+// ── THE PHOTO-HEADER DESIGN (Carolyn, 2026-10-14) ──────────────────────────────────────────
+// Her GHL quote email, rebuilt from the bytes it sent (Junior Barns' "Your shed quote is
+// here!", 2026-07-08): photo, orange rule, heading, rule, paragraphs, a full-width green button,
+// a slogan, then "Thanks," and a signature card. Same email-client rules as the classic card:
+// nested tables and inline styles only, explicit bgcolor everywhere, 600px wide.
+
+const PHOTO_ACCENT = "#f47b2a";
+/** Holds a token value's "*" out of the marker patterns while the photo design is built. */
+const HELD_STAR = "\uE000";
+/** Stands where {first} or {customer} had no name to give, until the gap around it is closed. */
+const NO_NAME = "\uE001";
+const PHOTO_BUTTON = "#2cab05";
+/** Her GHL email's body face. */
+const PHOTO_FONT = "Arial,Helvetica,sans-serif";
+
+/** The customer tokens every document email fills: {customer} (the name as typed), {first} (the
+ *  person's first name, through customerNaming.ts: "" when only a company is known) and {company}.
+ *  With no company these are the name and its first word, as they always were. */
+function customerTokens(name: unknown, company: unknown): { customer: string; first: string; company: string } {
+  const c = { name: oneLine(name), company: typeof company === "string" ? company : "" };
+  return { customer: oneLine(name), first: greetingFirst(c), company: companyOf(c) };
+}
+
+/** The business address on one line ("1645 Bethany Rd, Cottage Grove, TN 38224"), from the
+ *  client_settings.business_address jsonb or a plain string. Anything else is "". */
+function addressLine(a: unknown): string {
+  if (typeof a === "string") return oneLine(a);
+  if (!a || typeof a !== "object") return "";
+  const o = a as Record<string, unknown>;
+  const s = (v: unknown) => (typeof v === "string" ? oneLine(v) : "");
+  const stateZip = [s(o.state), s(o.postalCode)].filter(Boolean).join(" ");
+  return [s(o.addressLine1), s(o.city), stateZip].filter(Boolean).join(", ");
+}
+
+/** Wording that used {first} or {customer} when the design has no name on it would read "Hi ," or
+ *  "We're getting closer, ". The missing name was filled as NO_NAME; this closes the gap around
+ *  it and touches nothing else the builder wrote (their own "Thanks," keeps its comma). */
+function closeGap(s: string): string {
+  return s
+    .replace(/\*\*\uE001\*\*|\*\uE001\*/g, NO_NAME)                // **{first}** with nothing in it
+    .replace(/,[ \t]*\uE001(?=[ \t]*(?:[.!?]|$|\n))/g, "")          // "closer, {first}!" -> "closer!"
+    .replace(/[ \t]+\uE001/g, "")                                   // "Hi {first}," -> "Hi,"
+    .replace(/\uE001[ \t]*,?[ \t]*/g, "");                          // "{first}, see..." -> "see..."
+}
+
+// The builder's **bold** and *italic*. A marker counts only where it opens and closes a run of
+// words, the way people write it: "**Call *today***", "*If you have any changes*". An asterisk
+// inside a word ("8*10") or standing alone ("delivery* within") stays a plain "*". Bold may hold
+// italic. The HTML, the slogan and the text half all read the markers with these two patterns,
+// so the two halves never disagree.
+const BOLD_MARK = /(^|[^*\w])\*\*(?=\S)([^\n]*?\S)\*\*(?![*\w])/g;
+const ITALIC_MARK = /(^|[^*\w])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![*\w])/g;
+
+/** Escaped text with the builder's **bold** and *italic*; line breaks become <br>. */
+function richText(s: string): string {
+  return esc(s)
+    .replace(BOLD_MARK, "$1<strong>$2</strong>")
+    .replace(ITALIC_MARK, "$1<em>$2</em>")
+    .replace(/\n/g, "<br>");
+}
+
+/** The same text as the plain-text half reads it: the markers dropped. */
+function plainText(s: string): string {
+  return s.replace(BOLD_MARK, "$1$2").replace(ITALIC_MARK, "$1$2");
+}
+
+/** Paragraphs: split on blank lines. */
+function paragraphs(s: string): string[] {
+  return s.split(/\n[ \t]*\n+/).map((p) => p.trim()).filter(Boolean);
+}
+
+/** The slogan: *words* in a script face, the rest bold capitals' size — her "EVERYONE NEEDS
+ *  *a little space* IN THEIR LIFE". Mail apps without the face fall back to a cursive one. */
+function taglineHtml(t: string): string {
+  return esc(t)
+    .replace(BOLD_MARK, "$1<strong>$2</strong>")
+    .replace(ITALIC_MARK, `$1<span style="font-family:Lobster,'Brush Script MT','Segoe Script',cursive;font-size:26px;font-weight:400;color:#000000;">$2</span>`);
+}
+
+/** A website the way people write it: no scheme, no trailing slash. The link keeps the full address. */
+function websiteText(w: string): string {
+  return w.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
+
+/** Ten bare digits read as a US number. Anything typed with its own punctuation stays as typed. */
+function phoneText(p: string): string {
+  return /^\d{10}$/.test(p) ? `(${p.slice(0, 3)}) ${p.slice(3, 6)}-${p.slice(6)}` : p;
+}
+
+/** Readable words on the builder's button colour: white, or near-black on a light colour. */
+function inkOn(hex: string): string {
+  const n = parseInt(hex.slice(1), 16);
+  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.6 ? "#111111" : "#FFFFFF";
+}
+
+/** The rule either side of the heading: a 2px cell in the accent colour (a border would be
+ *  dropped by some mail apps; a filled cell never is). */
+function accentRule(color: string, px: number): string {
+  return `<tr>
+          <td style="padding:0 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td height="${px}" bgcolor="${color}" style="background-color:${color};height:${px}px;line-height:${px}px;font-size:1px;">&nbsp;</td></tr></table>
+          </td>
+        </tr>`;
+}
+
+/** Her GHL wording, the floor plan sentence only when there is a floor plan to point at. Her
+ *  email said the drawing was ATTACHED; ours links it, so the sentence says so. And "everything
+ *  you chose", not her "everything we discussed": a shopper on the public designer talked to nobody. */
+function defaultPhotoMessage(word: string, first: string, hasPlan: boolean): string {
+  return [
+    `Hi ${first || "there"},`,
+    `Here is the ${word} for your new building! Please click the button below to review and approve it.`,
+    ...(hasPlan ? [`Your floor plan, with everything you chose, is linked below. *If you have any changes or questions, please let me know so we can get it dialed in for you.*`] : []),
+    `**View your ${word} below, and click "Accept" to move this order forward!**`,
+  ].join("\n\n");
+}
+
+interface PhotoParts {
+  name: string;
+  num: string;
+  /** The document's name as the reader sees it ("estimate"), and capitalised. */
+  word: string;
+  Word: string;
+  building: string;
+  money: string;
+  showTotal: boolean;
+  tokens: Record<string, string>;
+  /** The building photo the classic card would show, already allowed (or null). */
+  picture: string | null;
+  preheader: string;
+  /** Ours, for when the builder wrote no subject. */
+  subject: string;
+}
+
+function photoEstimateEmail(input: EstimateEmailInput, copy: TemplateCopy, p: PhotoParts): EmailContent {
+  const { name, num, word, Word, building, tokens } = p;
+  const accent = copy.accent || PHOTO_ACCENT;
+  const btnBg = copy.buttonColor || PHOTO_BUTTON;
+  const noName = !tokens.first;
+  // A customer's or a catalog's own "*" (a name, a style label) must never pair with the
+  // builder's **bold** and *italic* markers. Values go in with each "*" held as a private-use
+  // character the marker patterns can't match, and it turns back into "*" once the email is built.
+  const safe: Record<string, string> = {};
+  for (const [k, v] of Object.entries(tokens)) safe[k] = String(v).replace(/\*/g, HELD_STAR);
+  // Every builder field is filled the same way here, the subject, button and sign-off included,
+  // so a missing name closes up wherever it was used. (The classic card fills its own; this
+  // design never touches it.)
+  if (noName) { safe.first = NO_NAME; safe.customer = NO_NAME; }
+  const fill = (tpl: string) => closeGap(fillTokens(tpl, safe));
+
+  const hero = copy.hero || p.picture || null;
+  // A heading that fills to nothing (only {first}, no name) gets ours, not an empty band.
+  const heading = (copy.heading ? oneLine(fill(copy.heading)) : "") || oneLine(fill("We're getting closer, {first}"));
+  const message = copy.message ? fill(copy.message) : defaultPhotoMessage(word, noName ? "" : safe.first, Boolean(input.pdfUrl));
+  const paras = paragraphs(message);
+  const ctaLabel = (copy.button ? oneLine(fill(copy.button)) : "") || `VIEW YOUR ${word.toUpperCase()}`;
+  const tagline = copy.tagline ? oneLine(fill(copy.tagline)) : "";
+  const signName = copy.signName ? oneLine(fill(copy.signName)) : "";
+  const signTitle = copy.signTitle ? oneLine(fill(copy.signTitle)) : "";
+  const closing = (copy.closing ? fill(copy.closing).trim() : "") || "Thanks,";
+  const subject = (copy.subject ? oneLine(fill(copy.subject)) : "") || p.subject;
+  const address = addressLine(input.address);
+  const phone = phoneText(oneLine(input.phone ?? ""));
+  const website = oneLine(input.website ?? "");
+  const terms = input.quoteTerms ? String(input.quoteTerms).replace(/\r\n/g, "\n").trim() : "";
+  const year = new Date().getUTCFullYear();
+
+  const details = [`${Word} #${num}`];
+  if (building) details.push(building);
+  if (p.showTotal) details.push(p.money);
+  const links: string[] = [];
+  if (input.pdfUrl) links.push(`<a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your floor plan (PDF)</a>`);
+  if (input.formalPdfUrl) links.push(`<a href="${esc(input.formalPdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your ${word} (PDF)</a>`);
+
+  // ── Top: the photo, linked to the quote the way hers is; without one, the logo and name. ──
+  const heroImg = hero
+    ? `<img src="${esc(hero)}" alt="${esc(name)}" width="560" style="display:block;width:100%;max-width:560px;height:auto;border:0;" />`
+    : "";
+  const logo = input.logoUrl
+    ? `<img src="${esc(input.logoUrl)}" alt="${esc(name)}" width="170" style="display:block;max-width:170px;max-height:64px;width:auto;height:auto;border:0;margin:0 auto 10px auto;" />`
+    : "";
+  const top = hero
+    ? `<tr>
+          <td style="padding:20px 20px 12px 20px;">${input.estimateUrl ? `<a href="${esc(input.estimateUrl)}" target="_blank" style="text-decoration:none;">${heroImg}</a>` : heroImg}</td>
+        </tr>`
+    : `<tr>
+          <td align="center" style="padding:28px 20px 16px 20px;">
+            ${logo}<div style="font-family:${FONT};font-size:20px;font-weight:800;color:#1F2937;line-height:1.3;">${esc(name)}</div>
+          </td>
+        </tr>`;
+
+  const bodyParas = paras.map((t) =>
+    `<p style="margin:0 0 14px 0;font-family:${PHOTO_FONT};font-size:16px;line-height:1.5;color:#000000;">${richText(t)}</p>`
+  ).join("\n            ");
+
+  const button = input.estimateUrl
+    ? `<tr>
+          <td style="padding:6px 20px 4px 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td align="center" bgcolor="${btnBg}" style="background-color:${btnBg};padding:14px 25px;">
+                  <a href="${esc(input.estimateUrl)}" target="_blank" style="display:block;font-family:${PHOTO_FONT};font-size:16px;font-weight:700;line-height:1.25;color:${inkOn(btnBg)};text-decoration:none;">${esc(ctaLabel)}</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>`
+    : "";
+
+  const detailRowHtml = `<tr>
+          <td align="center" style="padding:10px 20px 4px 20px;">
+            <p style="margin:0;font-family:${FONT};font-size:13px;line-height:1.7;color:#475569;">${esc(details.join(" · "))}${links.length ? `<br>${links.join(" &middot; ")}` : ""}</p>
+          </td>
+        </tr>`;
+
+  const taglineRow = tagline
+    ? `<tr>
+          <td align="center" style="padding:22px 24px 4px 24px;">
+            <p style="margin:0;font-family:${PHOTO_FONT};font-size:16px;font-weight:700;line-height:1.3;color:#000000;">${taglineHtml(tagline)}</p>
+          </td>
+        </tr>`
+    : "";
+
+  // ── The signature: hers is "Thanks," then the owner's name large, the company in bold grey,
+  // the title in italics, the logo card, then address, email and phone. ──
+  const sig: string[] = [
+    `<p style="margin:0 0 6px 0;font-family:${PHOTO_FONT};font-size:14px;line-height:1.4;color:#000000;">${esc(closing).replace(/\n/g, "<br>")}</p>`,
+  ];
+  if (signName) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:26px;font-weight:700;line-height:1.15;color:#000000;">${esc(signName)}</p>`);
+  sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:18px;font-weight:700;line-height:1.2;color:#595959;">${esc(name)}</p>`);
+  if (signTitle) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:18px;font-style:italic;text-decoration:underline;line-height:1.2;color:#7F7F7F;">${esc(signTitle)}</p>`);
+  if (input.logoUrl) sig.push(`<img src="${esc(input.logoUrl)}" alt="${esc(name)}" width="203" style="display:block;max-width:203px;max-height:130px;width:auto;height:auto;border:0;margin:12px 0 10px 0;" />`);
+  if (address) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:14px;font-weight:700;line-height:1.3;color:#000000;">${esc(address)}</p>`);
+  if (website) sig.push(`<p style="margin:0 0 4px 0;font-family:${PHOTO_FONT};font-size:14px;line-height:1.3;"><a href="${esc(websiteHref(website))}" target="_blank" style="color:#0000EE;text-decoration:underline;">${esc(websiteText(website))}</a></p>`);
+  if (phone) sig.push(`<p style="margin:0;font-family:${PHOTO_FONT};font-size:20px;line-height:1.3;color:#000000;">${esc(phone)}</p>`);
+
+  const footerRow = copy.footer
+    ? `<tr>
+          <td style="padding:10px 20px 0 20px;"><img src="${esc(copy.footer)}" alt="" width="560" style="display:block;width:100%;max-width:560px;height:auto;border:0;" /></td>
+        </tr>`
+    : accentRule(accent, 6);
+
+  const termsHtml = terms
+    ? `<p style="margin:10px 0 0 0;font-family:${FONT};font-size:11px;line-height:1.6;color:#94A3B8;">${esc(terms).replace(/\n/g, "<br>")}</p>`
+    : "";
+
+  // Outlook on Windows ignores max-width, so a width:100% card would stretch across its whole
+  // reading pane: it alone reads the [if mso] table, a fixed 600px column. Everything else skips
+  // that and lets width:100%;max-width:600px shrink the card to a phone's width (the classic card
+  // scrolls sideways there; hers didn't). A width:600px card can't do both: inside a table cell,
+  // max-width:100% resolves against the 600px it asked for.
+  const html = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#EAF0F6" style="background-color:#EAF0F6;margin:0;padding:0;">
+  <tr>
+    <td align="center" style="padding:24px 12px;">
+      <div style="display:none;font-size:1px;color:#EAF0F6;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${esc(p.preheader)}</div>
+      <!--[if mso]><table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" bgcolor="#FFFFFF" style="width:100%;max-width:600px;background-color:#FFFFFF;">
+        ${top}
+        ${accentRule(accent, 2)}
+        <tr>
+          <td style="padding:4px 20px;">
+            <h2 style="margin:10px 0;font-family:${PHOTO_FONT};font-size:22px;font-weight:700;line-height:1.4;color:#000000;">${esc(heading)}</h2>
+          </td>
+        </tr>
+        ${accentRule(accent, 2)}
+        <tr>
+          <td style="padding:16px 20px 2px 20px;">
+            ${bodyParas}
+          </td>
+        </tr>
+        ${button}
+        ${detailRowHtml}
+        ${taglineRow}
+        <tr>
+          <td style="padding:20px 24px 12px 24px;">
+            ${sig.join("\n            ")}
+          </td>
+        </tr>
+        ${footerRow}
+        <tr>
+          <td style="padding:12px 20px 20px 20px;">
+            <p style="margin:0;font-family:${PHOTO_FONT};font-size:12px;line-height:1.6;color:#000000;"><em>Copyright &copy; ${year} ${esc(name)}. All rights reserved.</em></p>${termsHtml}
+          </td>
+        </tr>
+      </table>
+      <!--[if mso]></td></tr></table><![endif]-->
+    </td>
+  </tr>
+</table>`;
+
+  const text: string[] = [heading, ""];
+  for (const t of paras) text.push(plainText(t), "");
+  if (input.estimateUrl) text.push(`${ctaLabel}: ${input.estimateUrl}`);
+  text.push(`${Word} #: ${num}`);
+  if (building) text.push(`Building: ${building}`);
+  if (p.showTotal) text.push(`${Word} total: ${p.money}`);
+  if (input.pdfUrl) text.push(`Floor plan (PDF): ${input.pdfUrl}`);
+  if (input.formalPdfUrl) text.push(`${Word} (PDF): ${input.formalPdfUrl}`);
+  if (tagline) text.push("", plainText(tagline));
+  text.push("", closing);
+  if (signName) text.push(signName);
+  text.push(name);
+  if (signTitle) text.push(signTitle);
+  if (address) text.push(address);
+  const contact = [phone, websiteText(website)].filter(Boolean).join(" | ");
+  if (contact) text.push(contact);
+  if (terms) text.push("", terms);
+
+  const unhold = (s: string) => s.replace(/\uE000/g, "*").replace(/\uE001/g, "");
+  return { subject: unhold(subject), html: unhold(html), text: unhold(text.join("\n") + "\n") };
+}
+
 export function estimateEmail(input: EstimateEmailInput): EmailContent {
   const name = oneLine(input.businessName);
   const num = oneLine(input.estimateNumber);
@@ -489,7 +905,7 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // a Subject header — the one thing tenantCopy() already strips from the template. The
   // detail row and the plain-text line keep the raw value; a break there is only ugly.
   const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
-  const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? "") };
+  const tokens = { business: name, number: num, total: money, building: oneLine(building), ...customerTokens(input.customerName, input.customerCompany) };
   // The builder's button words, filled. Blank once filled (a lone {customer} with no name on the
   // design) falls back to ours rather than drawing an empty button.
   const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
@@ -497,6 +913,19 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
   // The building photo: above the details, the way her GHL quote email has it. Absent unless the
   // caller passed a usable https:// address AND the builder hasn't switched it off.
   const picture = copy.picture === false ? null : emailPictureUrl(input.pictureUrl);
+
+  // The photo-header design, when the builder switched it on for this kind. Nothing below this
+  // line runs for it, so the classic card is byte-for-byte what it was (the golden test). Every
+  // word a person reads in it says "estimate" (Carolyn 2026-10-06, Q12): it is new, so it starts
+  // there rather than waiting for the held server rewording. docWord still decides which wording
+  // tab it reads and whether the total shows.
+  if (copy.layout === "photo") {
+    return photoEstimateEmail(input, copy, {
+      name, num, word: "estimate", Word: "Estimate", building, money, showTotal, tokens, picture,
+      preheader: showTotal ? `Your estimate from ${name} is ready - ${money}.` : `Your estimate from ${name} is ready.`,
+      subject: `Your estimate ${num} from ${name}`,
+    });
+  }
   const pictureHtml = picture
     ? `
             <img src="${esc(picture)}" alt="${esc(building || name)}" width="536" style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:8px;margin:0 0 16px 0;" />`
@@ -707,7 +1136,7 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
   // has no value for: fillTokens leaves an UNKNOWN token verbatim on purpose, so omitting
   // {building} here would ship a literal "{building}" to a customer's inbox.
   const copy = tenantCopy(input.templateCopy, "invoice");
-  const tokens = { business: name, number: num, total: money, building: "", customer: oneLine(input.customerName ?? "") };
+  const tokens = { business: name, number: num, total: money, building: "", ...customerTokens(input.customerName, input.customerCompany) };
   const buttonText = copy.button ? oneLine(fillTokens(copy.button, tokens)) : "";
   const closing = copy.closing ? fillTokens(copy.closing, tokens).trim() : "";
   const cta = toSign
@@ -833,10 +1262,75 @@ export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailConte
   };
 }
 
+// ── Online Shop purchase request (2026-10-17) ──────────────────────────────────────────────
+// To the builder's owners/admins when a shopper checks out a cart and online payment is not on.
+// Nothing was charged; the builder follows up. Read by the builder, so their name heads it.
+export interface ShopRequestEmailInput {
+  businessName: string;
+  customerName: string;
+  phone: string;
+  email?: string | null;
+  deliverTo?: string | null;
+  message?: string | null;
+  items: { label: string; totalCents: number | null; note?: string | null }[];
+  totalCents: number | null;
+  dueNowCents: number | null;
+  payInFull: boolean;
+  reviewUrl: string;
+  /** Set for a PAID online purchase (phase 4): what was charged. Absent = a purchase request. */
+  paidCents?: number | null;
+}
+
+export function shopRequestEmail(input: ShopRequestEmailInput): EmailContent {
+  const name = oneLine(input.businessName);
+  const who = oneLine(input.customerName) || "A shopper";
+  const cents = (c: number | null) => (c == null ? "" : formatMoney(c / 100));
+  const n = input.items.length;
+  const paid = input.paidCents != null;
+  const leadText = paid
+    ? `${who} bought ${n === 1 ? "a building" : n + " buildings"} from your Online Inventory and paid ${cents(input.paidCents!)} by card. The invoice is waiting for your approval — approve it and the customer gets it to sign.`
+    : `${who} wants to buy ${n === 1 ? "a building" : n + " buildings"} from your Online Inventory. Nothing has been charged — reach out to confirm, then send the estimate from your Inventory tab.`;
+  const rows = [detailRow("Customer", esc(who)), detailRow("Phone", esc(oneLine(input.phone)))];
+  if (input.email) rows.push(detailRow("Email", esc(oneLine(input.email))));
+  if (input.deliverTo) rows.push(detailRow("Deliver to", esc(oneLine(input.deliverTo))));
+  for (const it of input.items) {
+    rows.push(detailRow(esc(oneLine(it.label)), esc([cents(it.totalCents), oneLine(it.note ?? "")].filter(Boolean).join(" · ")) || "—"));
+  }
+  if (input.totalCents != null) rows.push(detailRow("Total (est.)", esc(cents(input.totalCents))));
+  if (paid) rows.push(detailRow("Paid online", esc(cents(input.paidCents!))));
+  else if (input.dueNowCents != null) rows.push(detailRow(input.payInFull ? "They chose to pay in full" : "Deposit due", esc(cents(input.dueNowCents))));
+  const msg = oneLine(input.message ?? "");
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${esc(leadText)}</p>
+            ${msg ? `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><strong>They wrote:</strong> ${esc(msg)}</p>` : ""}
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+              ${rows.join("\n")}
+            </table>
+            ${ctaButton(input.reviewUrl, paid ? "Review & send invoice" : "Open your Inventory")}`;
+  const text: string[] = [name, "", leadText, ""];
+  if (msg) text.push(`They wrote: ${msg}`, "");
+  text.push(`Customer: ${who}`, `Phone: ${oneLine(input.phone)}`);
+  if (input.email) text.push(`Email: ${oneLine(input.email)}`);
+  if (input.deliverTo) text.push(`Deliver to: ${oneLine(input.deliverTo)}`);
+  for (const it of input.items) text.push(`${oneLine(it.label)}: ${[cents(it.totalCents), oneLine(it.note ?? "")].filter(Boolean).join(" · ")}`);
+  if (input.totalCents != null) text.push(`Total (est.): ${cents(input.totalCents)}`);
+  if (paid) text.push(`Paid online: ${cents(input.paidCents!)}`);
+  else if (input.dueNowCents != null) text.push(`${input.payInFull ? "Pay in full" : "Deposit due"}: ${cents(input.dueNowCents)}`);
+  text.push("", `${paid ? "Review & send invoice" : "Open your Inventory"}: ${input.reviewUrl}`);
+  return {
+    subject: paid
+      ? `Online Inventory: ${who} bought ${n === 1 ? input.items[0]?.label || "a building" : n + " buildings"} — invoice to approve`
+      : `Online Inventory: ${who} wants to buy ${n === 1 ? input.items[0]?.label || "a building" : n + " buildings"}`,
+    html: htmlShell({ businessName: name, preheader: leadText, bodyHtml }),
+    text: text.join("\n"),
+  };
+}
+
 /** The made-up customer and document the wording screen's Preview shows. Everything else in a
  *  preview is the builder's own: their name, logo, phone, website, terms and style photo. */
 export const PREVIEW_SAMPLE = {
   customerName: "Alex Smith",
+  /** So a {company} in the wording previews as a business, not as nothing. */
+  customerCompany: "Smith Family Farm",
   number: "1001",
   total: 12500,
   styleLabel: "Lofted Barn",
@@ -856,6 +1350,8 @@ export interface TemplatePreviewInput {
   pictureUrl?: string | null;
   /** That style's name, so the photo and the Building row agree. */
   styleLabel?: string | null;
+  /** client_settings.business_address, for the photo design's signature. */
+  address?: unknown;
   /** True when invoices are signed on the customer page (StructureStudio invoicing): the button
    *  then asks for a signature, as the real email does. False: it opens the invoice. */
   invoiceToSign?: boolean;
@@ -872,6 +1368,7 @@ export function templatePreviewEmail(p: TemplatePreviewInput): EmailContent {
   const shared = {
     templateCopy,
     customerName: PREVIEW_SAMPLE.customerName,
+    customerCompany: PREVIEW_SAMPLE.customerCompany,
     businessName: p.businessName,
     logoUrl: p.logoUrl ?? null,
     phone: p.phone ?? null,
@@ -898,6 +1395,7 @@ export function templatePreviewEmail(p: TemplatePreviewInput): EmailContent {
     formalPdfUrl: "#",
     docWord: p.kind === "quote" ? "quote" : "estimate",
     pictureUrl: p.pictureUrl ?? null,
+    address: p.address ?? null,
   });
 }
 

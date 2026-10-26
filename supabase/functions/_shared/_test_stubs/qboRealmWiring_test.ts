@@ -9,7 +9,9 @@
 //   1. THE PUSH bills only from the connected company's mappings. A row stamped with another
 //      company, or with none, is NOT MAPPED: the push stops with "unmapped … then Retry" before a
 //      single request reaches QuickBooks. A row for the connected company still bills, and the
-//      invoice row records which company it went into (create and adopt alike). A layout item
+//      invoice row records which company it went into (create and adopt alike). Only an invoice
+//      under the same number AND for the same customer is adopted (283): another customer's is
+//      refused as `rejected:` and listed for Retry. A layout item
 //      with no row of its own goes to the fallback (the dead `layout_item||` step is gone). A
 //      mapping read that fails says so, rather than reading as every line unmapped.
 //   2. THE CALLBACK clears, after the connection saves, every row not stamped with the company
@@ -267,10 +269,20 @@ type Intuit = {
   calls: { method: string; url: string; body: any }[];
   companyName?: string;
   existingInvoiceId?: string | null;   // the DocNumber idempotency query finds this one
+  existingCustomerId?: string;         // …made for this customer (default: the one the lookup finds, "77")
   // Automated Sales Tax, as Preferences reports it. On (the default, as for most US companies)
   // the push sends no line-level tax codes; off is the one case delivery's NON code is sent.
   automatedSalesTax?: boolean;
+  // A real customer list (quote to a business entity, 2026-10-21). Absent = every customer lookup
+  // finds "77", as above. Present: lookups by email or DisplayName search it, and POST /customer
+  // adds to it, or answers QuickBooks' 6240 Duplicate Name for a name it or `takenNames` holds.
+  customers?: { Id: string; DisplayName: string; email?: string }[];
+  /** Display names a VENDOR, an employee or an inactive customer holds: lookups never see them. */
+  takenNames?: string[];
 };
+
+/** A QBO query literal back to its value (qboInvoice's q() escaping, undone). */
+const unq = (s: string) => s.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
 
 function intuitFetch(w: Intuit): typeof fetch {
   return ((input: string | URL | Request, init?: RequestInit) => {
@@ -298,11 +310,29 @@ function intuitFetch(w: Intuit): typeof fetch {
         if (rest.startsWith("companyinfo/")) return ok({ CompanyInfo: { CompanyName: w.companyName ?? "Harness Books" } });
         if (rest === "query") {
           const q = u.searchParams.get("query") ?? "";
+          if (/from Customer/i.test(q) && w.customers) {
+            const byEmail = q.match(/PrimaryEmailAddr = '((?:[^'\\]|\\.)*)'/);
+            const byName = q.match(/DisplayName = '((?:[^'\\]|\\.)*)'/);
+            const hit = w.customers.find((c) => byEmail ? c.email === unq(byEmail[1]) : byName ? c.DisplayName === unq(byName[1]) : false);
+            return ok({ QueryResponse: hit ? { Customer: [{ Id: hit.Id }] } : {} });
+          }
           if (/from Customer/i.test(q)) return ok({ QueryResponse: { Customer: [{ Id: "77" }] } });
           if (/from Invoice/i.test(q)) {
-            return ok({ QueryResponse: w.existingInvoiceId ? { Invoice: [{ Id: w.existingInvoiceId, DocNumber: "INV-1", TotalAmt: 100 }] } : {} });
+            return ok({ QueryResponse: w.existingInvoiceId
+              ? { Invoice: [{ Id: w.existingInvoiceId, DocNumber: "INV-1", TotalAmt: 100, CustomerRef: { value: w.existingCustomerId ?? "77" } }] }
+              : {} });
           }
           if (/from Preferences/i.test(q)) return ok({ QueryResponse: { Preferences: [{ TaxPrefs: { PartnerTaxEnabled: w.automatedSalesTax !== false } }] } });
+        }
+        if (rest === "customer" && method === "POST" && w.customers) {
+          const name = String(body?.DisplayName ?? "");
+          if (w.customers.some((c) => c.DisplayName === name) || (w.takenNames ?? []).includes(name)) {
+            return Promise.resolve(new Response(JSON.stringify({ Fault: { type: "ValidationFault", Error: [{ code: "6240", Message: "Duplicate Name Exists Error" }] } }),
+              { status: 400, headers: { "intuit_tid": "harness-tid" } }));
+          }
+          const made = { Id: String(500 + w.customers.length), DisplayName: name, email: body?.PrimaryEmailAddr?.Address };
+          w.customers.push(made);
+          return ok({ Customer: { Id: made.Id, DisplayName: name } });
         }
         if (rest === "invoice" && method === "POST") {
           const total = (body?.Line ?? []).reduce((s: number, l: any) => s + (Number(l.Amount) || 0), 0);
@@ -455,6 +485,22 @@ Deno.test("push: an invoice adopted after a crashed run records its company too"
   assertEquals(row.qbo_invoice_id, "4444");
   assertEquals(row.qbo_realm_id, BOOKS_B);
   assert(!apiCalls(w).some((c) => c.method === "POST"), "an adopted invoice was created a second time");
+});
+
+// Since 283 a blank invoice start numbers from 1000, so a company connected later (or whose own
+// numbering began at 1001) can already hold an UNRELATED invoice under the same number. Adopted on
+// its Id alone, it was linked to ours, nothing reached the books and qbo_error stayed empty.
+Deno.test("push: an invoice with the same number for ANOTHER customer is not adopted, and the push is listed for Retry", async () => {
+  const db = pushWorld(BOOKS_B, [map(TENANT, "fallback", "29", BOOKS_B)], LINES);
+  const w: Intuit = { calls: [], existingInvoiceId: "4444", existingCustomerId: "12" };
+  await push(db, w);
+  const row = ledger(db);
+  assertEquals(row.qbo_invoice_id, null, "someone else's QuickBooks invoice was linked to this one");
+  assertEquals(row.qbo_realm_id, null);
+  assert(String(row.qbo_error).startsWith("rejected: QuickBooks already has an invoice numbered INV-1 for a different customer"), row.qbo_error);
+  assert(String(row.qbo_error).length <= 300, "qbo_pending shows 300 characters");
+  assertEquals(row.qbo_attempts, 1);
+  assert(!apiCalls(w).some((c) => c.method === "POST" && /\/invoice\?/.test(c.url)), "an invoice was created under a number QuickBooks already uses");
 });
 
 Deno.test("push: a mapping read that FAILS says so, and is never reported as unmapped lines", async () => {
@@ -1016,4 +1062,88 @@ Deno.test("line kinds: a row saved with no company is ignored, and its line fall
   ]);
   // And the grid shows them as not mapped, which is what the push did with them.
   assertEquals((await call(db, { action: "list_item_map" })).body.mappings.length, 21);
+});
+
+// ─── 5. Quote to a business entity (2026-10-21) ─────────────────────────────────────────────────
+// designs.contact.company: the QuickBooks customer is the BUSINESS (DisplayName + CompanyName), the
+// person is GivenName/FamilyName, email-first lookup is unchanged, and a DisplayName QuickBooks
+// refuses as a duplicate (a vendor's, an inactive customer's) falls back to "Company (Person)".
+// Without a company the customer is created exactly as before.
+function companyWorld(contact: Row): FakeDb {
+  const db = pushWorld(BOOKS_A, [map(TENANT, "fallback", "29", BOOKS_A)], LINES);
+  db.rows("designs")[0].contact = contact;
+  return db;
+}
+const THOMAS = { name: "Thomas Example", company: "Bear River Band", email: "thomas@example.test", phone: "(555) 010-0142" };
+const customerPosts = (w: Intuit) => apiCalls(w).filter((c) => c.method === "POST" && /\/customer\?/.test(c.url));
+const invoiceFor = (w: Intuit) => apiCalls(w).find((c) => c.method === "POST" && /\/invoice\?/.test(c.url))?.body?.CustomerRef?.value;
+
+Deno.test("company: a new customer is the business, with the person as Given/Family name", async () => {
+  const db = companyWorld(THOMAS);
+  const w: Intuit = { calls: [], customers: [] };
+  await push(db, w);
+  assertEquals(ledger(db).qbo_error, null, "a clean push");
+  const posts = customerPosts(w);
+  assertEquals(posts.length, 1);
+  assertEquals(posts[0].body, {
+    DisplayName: "Bear River Band", CompanyName: "Bear River Band", GivenName: "Thomas", FamilyName: "Example",
+    PrimaryEmailAddr: { Address: "thomas@example.test" }, PrimaryPhone: { FreeFormNumber: "(555) 010-0142" },
+  });
+  assertEquals(invoiceFor(w), posts.length ? w.customers![0].Id : null, "the invoice bills that customer");
+});
+
+Deno.test("company: email first, unchanged — an existing customer with the email is reused", async () => {
+  const db = companyWorld(THOMAS);
+  const w: Intuit = { calls: [], customers: [{ Id: "31", DisplayName: "Thomas Example", email: "thomas@example.test" }] };
+  await push(db, w);
+  assertEquals(customerPosts(w), [], "no second customer");
+  assertEquals(invoiceFor(w), "31");
+});
+
+Deno.test("company: a customer already named for the business is reused by name", async () => {
+  const db = companyWorld({ ...THOMAS, email: "" });
+  const w: Intuit = { calls: [], customers: [{ Id: "32", DisplayName: "Bear River Band" }] };
+  await push(db, w);
+  assertEquals(customerPosts(w), []);
+  assertEquals(invoiceFor(w), "32");
+});
+
+Deno.test("company: a DisplayName QuickBooks refuses as a duplicate falls back to Company (Person)", async () => {
+  const db = companyWorld(THOMAS);
+  const w: Intuit = { calls: [], customers: [], takenNames: ["Bear River Band"] };   // a vendor holds it
+  await push(db, w);
+  assertEquals(ledger(db).qbo_error, null, "the clash is not a failure");
+  assertEquals(customerPosts(w).map((c) => c.body.DisplayName), ["Bear River Band", "Bear River Band (Thomas Example)"]);
+  assertEquals(customerPosts(w)[1].body.CompanyName, "Bear River Band", "still the business");
+  assertEquals(invoiceFor(w), w.customers![0].Id);
+  // A retried push finds the customer it made (by email, first) instead of making another.
+  db.rows("invoice_sends")[0].qbo_invoice_id = null;
+  const again: Intuit = { calls: [], customers: w.customers, takenNames: ["Bear River Band"] };
+  await push(db, again);
+  assertEquals(customerPosts(again), [], "found by email");
+  assertEquals(invoiceFor(again), w.customers![0].Id);
+  // With no email to find it by, the retry looks the fallback name up after the refusal.
+  const noEmail = companyWorld({ ...THOMAS, email: "" });
+  const w2: Intuit = { calls: [], customers: [{ Id: "40", DisplayName: "Bear River Band (Thomas Example)" }], takenNames: ["Bear River Band"] };
+  await push(noEmail, w2);
+  assertEquals(customerPosts(w2).map((c) => c.body.DisplayName), ["Bear River Band"], "only the refused try, then the lookup");
+  assertEquals(invoiceFor(w2), "40");
+});
+
+Deno.test("company: with no person there is no second name, so a clash is the failure it always was", async () => {
+  const db = companyWorld({ name: "Bear River Band", company: "Bear River Band", email: "" });
+  const w: Intuit = { calls: [], customers: [], takenNames: ["Bear River Band"] };
+  await push(db, w);
+  assertEquals(customerPosts(w).length, 1);
+  assert(String(ledger(db).qbo_error).includes("6240"), String(ledger(db).qbo_error));
+});
+
+Deno.test("company: none on the contact creates the customer exactly as before", async () => {
+  for (const contact of [{ name: "Pat Example", email: "pat@example.test" }, { name: "Pat Example", company: "", email: "pat@example.test" }, { name: "Pat Example", company: "  ", email: "pat@example.test" }]) {
+    const db = companyWorld(contact);
+    const w: Intuit = { calls: [], customers: [], takenNames: ["Pat Example"] };
+    await push(db, w);
+    assertEquals(customerPosts(w).map((c) => c.body), [{ DisplayName: "Pat Example", PrimaryEmailAddr: { Address: "pat@example.test" } }], JSON.stringify(contact));
+    assert(String(ledger(db).qbo_error).includes("6240"), "no fallback without a company");
+  }
 });

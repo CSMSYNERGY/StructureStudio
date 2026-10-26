@@ -31,9 +31,16 @@ function between(src: string, start: string, end: string, label: string): string
 }
 
 const CLAMP_BLOCK = between(CORE, "function ssIsBetaHost()", "const ACCENT =", "the clamp block in 01-core.jsx");
-const { ssAdvancedOn } = new Function("window", `${CLAMP_BLOCK}; return { ssAdvancedOn };`)(
+// The builder switch is NOT LAUNCHED (SS_ADVANCED_FOR_BUILDERS = false, 2026-10-27). Every test
+// runs the shipped rule unless it asks for `launched`, which lifts the same block with that one
+// line flipped, so the switch built on 10-05 stays pinned for launch day.
+const LAUNCH_LINE = "const SS_ADVANCED_FOR_BUILDERS = false;";
+assert(CLAMP_BLOCK.includes(LAUNCH_LINE), "the builder-switch launch line moved or changed; re-point this test");
+const lift = (block: string) => (new Function("window", `${block}; return { ssAdvancedOn };`)(
   { location: { hostname: "app.structurestudiosuite.com" } },
-) as { ssAdvancedOn: (e: unknown) => boolean };
+) as { ssAdvancedOn: (e: unknown) => boolean }).ssAdvancedOn;
+const ssAdvancedOn = lift(CLAMP_BLOCK);
+const ssAdvancedOnLaunched = lift(CLAMP_BLOCK.replace(LAUNCH_LINE, "const SS_ADVANCED_FOR_BUILDERS = true;"));
 
 // advancedCtx … advancedClampOn, whole, ending where the URL clamp begins.
 const GATE = between(SHELL, "const advancedCtx =", "const resolvedTab = ssClampTab(", "the Advanced gate in 12-shell.jsx");
@@ -46,11 +53,12 @@ for (const name of ["advancedCtx", "advancedEnt", "advancedMayRun", "advancedOn"
 interface W {
   viewing?: { clientId: string } | null; viewedCtx?: { entitlement: unknown; clientId?: string } | null; entitlement?: unknown; tab?: string;
   canAdminForUrl?: boolean; isOperator?: boolean; isSupportOp?: boolean | null; advancedHoldOver?: boolean;
+  launched?: boolean;
 }
 function gate(w: W) {
   const f = new Function("ssAdvancedOn", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver",
     `${GATE}\nreturn { advancedOn, advancedAsked, advancedClampOn };`);
-  return f(ssAdvancedOn, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
+  return f(w.launched ? ssAdvancedOnLaunched : ssAdvancedOn, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
     w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, w.advancedHoldOver ?? false) as
     { advancedOn: boolean; advancedAsked: boolean; advancedClampOn: boolean };
 }
@@ -82,72 +90,92 @@ Deno.test("any other builder: off, and refused once answered — exempt included
 const SWITCHED_ON = { reason: "active", granted: [], paid: ["simple_layout", "view_3d"], advancedMode: true };
 const SWITCHED_OFF = { ...SWITCHED_ON, advancedMode: false };
 
-Deno.test("a builder who turned Advanced mode on: on for an owner or admin, held and then opened on a cold link", () => {
-  assertEquals(gate({ entitlement: SWITCHED_ON }), { advancedOn: true, advancedAsked: true, advancedClampOn: true });
-  assertEquals(gate({ entitlement: SWITCHED_ON, tab: "advanced" }).advancedClampOn, true);
+Deno.test("NOT LAUNCHED (2026-10-27): a builder who turned Advanced mode on is off and refused; ours is still on", () => {
+  assertEquals(gate({ entitlement: SWITCHED_ON, tab: "advanced" }), { advancedOn: false, advancedAsked: true, advancedClampOn: false });
+  assertEquals(gate({ entitlement: { ...EXEMPT, advancedMode: true }, tab: "advanced" }).advancedClampOn, false);
+  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON) }).advancedOn, false, "an operator viewing them: off too");
+  assertEquals(gate({ entitlement: { ...INTERNAL, advancedMode: false } }).advancedOn, true);
+});
+
+Deno.test("launched: a builder who turned Advanced mode on: on for an owner or admin, held and then opened on a cold link", () => {
+  assertEquals(gate({ entitlement: SWITCHED_ON, launched: true }), { advancedOn: true, advancedAsked: true, advancedClampOn: true });
+  assertEquals(gate({ entitlement: SWITCHED_ON, tab: "advanced", launched: true }).advancedClampOn, true);
   // Exempt with the switch on is on too: the switch is the builder's, not a billing state.
-  assertEquals(gate({ entitlement: { ...EXEMPT, advancedMode: true } }).advancedOn, true);
+  assertEquals(gate({ entitlement: { ...EXEMPT, advancedMode: true }, launched: true }).advancedOn, true);
 });
 
 Deno.test("a builder with the switch off (or a server that predates it): off, and refused once answered", () => {
-  for (const e of [SWITCHED_OFF, { reason: "active", granted: [], paid: ["view_3d"] }]) {
-    assertEquals(gate({ entitlement: e, tab: "advanced" }), { advancedOn: false, advancedAsked: true, advancedClampOn: false }, JSON.stringify(e));
+  for (const launched of [false, true]) {
+    for (const e of [SWITCHED_OFF, { reason: "active", granted: [], paid: ["view_3d"] }]) {
+      assertEquals(gate({ entitlement: e, tab: "advanced", launched }), { advancedOn: false, advancedAsked: true, advancedClampOn: false }, JSON.stringify(e));
+    }
   }
 });
 
-Deno.test("the switch does not widen WHO gets the page: still owner/admin, or a platform operator in view-as", () => {
+Deno.test("launched: the switch does not widen WHO gets the page: still owner/admin, or a platform operator in view-as", () => {
+  const launched = true;
   // A team member of a builder who turned it on: off, and a cold link is refused.
-  assertEquals(gate({ entitlement: SWITCHED_ON, canAdminForUrl: false, tab: "advanced" }), { advancedOn: false, advancedAsked: true, advancedClampOn: false });
+  assertEquals(gate({ entitlement: SWITCHED_ON, canAdminForUrl: false, tab: "advanced", launched }), { advancedOn: false, advancedAsked: true, advancedClampOn: false });
   // A platform operator viewing that builder: on. A support operator: off.
-  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON) }).advancedOn, true);
-  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON), isSupportOp: true }).advancedOn, false);
+  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON), launched }).advancedOn, true);
+  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON), isSupportOp: true, launched }).advancedOn, false);
   // An operator whose OWN account switched it on, viewing a builder who did not: off.
-  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_OFF), entitlement: SWITCHED_ON }).advancedOn, false);
+  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_OFF), entitlement: SWITCHED_ON, launched }).advancedOn, false);
   // The last builder's "on" is not the next one's.
-  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON, "another-builder") }).advancedOn, false);
+  assertEquals(gate({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON, "another-builder"), launched }).advancedOn, false);
 });
 
 // The Settings switch is built from the SAME three values (12-shell.jsx advancedSwitch), so the card
 // and the menu item cannot disagree about whose answer it is or who may change it.
 const SWITCH = between(SHELL, "const advancedSwitch =", "// Accounts and Admin moved INTO this rail", "advancedSwitch in 12-shell.jsx");
 function switchFor(w: W & { advancedDirty?: boolean; confirmAnswer?: boolean }) {
-  const g = new Function("ssAdvancedOn", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver", "advancedDirtyRef", "navigate", "window",
+  const g = new Function("ssAdvancedOn", "SS_ADVANCED_FOR_BUILDERS", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver", "advancedDirtyRef", "navigate", "window",
     `${GATE}\n${SWITCH}\nreturn advancedSwitch;`);
   const nav: string[] = [];
   const asked: string[] = [];
-  const s = g(ssAdvancedOn, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
+  const s = g(w.launched ? ssAdvancedOnLaunched : ssAdvancedOn, !!w.launched, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
     w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, false,
     { current: !!w.advancedDirty }, (p: string) => nav.push(p), { confirm: (m: string) => { asked.push(m); return w.confirmAnswer ?? true; } });
   return { s, nav, asked };
 }
 
-Deno.test("advancedSwitch: shown to whoever may run the account, for the tenant on screen, once it has answered", () => {
-  assertEquals(switchFor({ entitlement: SWITCHED_ON }).s?.on, true);
-  assertEquals(switchFor({ entitlement: SWITCHED_OFF }).s?.on, false);
-  assertEquals(switchFor({ entitlement: SWITCHED_OFF }).s?.locked, false);
-  // Our own account: on and locked, whatever its column says.
+Deno.test("NOT LAUNCHED (2026-10-27): no switch for any builder; our own account still shows it on and locked", () => {
+  for (const e of [SWITCHED_ON, SWITCHED_OFF, { ...EXEMPT, advancedMode: true }]) {
+    assertEquals(switchFor({ entitlement: e }).s, null, JSON.stringify(e));
+    assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(e) }).s, null, `view-as ${JSON.stringify(e)}`);
+  }
   const ours = switchFor({ entitlement: { ...INTERNAL, advancedMode: false } }).s;
   assertEquals([ours?.on, ours?.locked], [true, true]);
-  // Not answered, a server with no field, a team member, a support operator: no card at all.
-  assertEquals(switchFor({ entitlement: null }).s, null);
-  assertEquals(switchFor({ entitlement: { reason: "active", granted: ["view_3d"] } }).s, null, "a server that predates advancedMode");
-  assertEquals(switchFor({ entitlement: SWITCHED_ON, canAdminForUrl: false }).s, null);
-  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON), isSupportOp: true }).s, null);
-  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON), isSupportOp: null }).s, null, "still asking whether this operator is support");
-  // View-as: the viewed builder's answer, never the operator's own or the last builder's.
-  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_OFF), entitlement: SWITCHED_ON }).s?.on, false);
-  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON, "another-builder"), entitlement: SWITCHED_ON }).s, null);
 });
 
-Deno.test("advancedSwitch: turning it off asks first only when the Advanced page holds unsaved work", () => {
-  const clean = switchFor({ entitlement: SWITCHED_ON });
+Deno.test("launched: advancedSwitch shown to whoever may run the account, for the tenant on screen, once it has answered", () => {
+  const launched = true;
+  assertEquals(switchFor({ entitlement: SWITCHED_ON, launched }).s?.on, true);
+  assertEquals(switchFor({ entitlement: SWITCHED_OFF, launched }).s?.on, false);
+  assertEquals(switchFor({ entitlement: SWITCHED_OFF, launched }).s?.locked, false);
+  // Our own account: on and locked, whatever its column says.
+  const ours = switchFor({ entitlement: { ...INTERNAL, advancedMode: false }, launched }).s;
+  assertEquals([ours?.on, ours?.locked], [true, true]);
+  // Not answered, a server with no field, a team member, a support operator: no card at all.
+  assertEquals(switchFor({ entitlement: null, launched }).s, null);
+  assertEquals(switchFor({ entitlement: { reason: "active", granted: ["view_3d"] }, launched }).s, null, "a server that predates advancedMode");
+  assertEquals(switchFor({ entitlement: SWITCHED_ON, canAdminForUrl: false, launched }).s, null);
+  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON), isSupportOp: true, launched }).s, null);
+  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON), isSupportOp: null, launched }).s, null, "still asking whether this operator is support");
+  // View-as: the viewed builder's answer, never the operator's own or the last builder's.
+  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_OFF), entitlement: SWITCHED_ON, launched }).s?.on, false);
+  assertEquals(switchFor({ viewing: VIEW, viewedCtx: ctx(SWITCHED_ON, "another-builder"), entitlement: SWITCHED_ON, launched }).s, null);
+});
+
+Deno.test("launched: advancedSwitch: turning it off asks first only when the Advanced page holds unsaved work", () => {
+  const clean = switchFor({ launched: true, entitlement: SWITCHED_ON });
   assertEquals(clean.s?.confirmOff(), true);
   assertEquals(clean.asked.length, 0, "nothing unsaved: no question");
-  const dirtyNo = switchFor({ entitlement: SWITCHED_ON, advancedDirty: true, confirmAnswer: false });
+  const dirtyNo = switchFor({ launched: true, entitlement: SWITCHED_ON, advancedDirty: true, confirmAnswer: false });
   assertEquals(dirtyNo.s?.confirmOff(), false, "No keeps it on");
   assert(/discard the building you haven't saved on the Advanced page/.test(dirtyNo.asked[0] ?? ""), dirtyNo.asked.join(" | "));
-  assertEquals(switchFor({ entitlement: SWITCHED_ON, advancedDirty: true, confirmAnswer: true }).s?.confirmOff(), true);
-  const open = switchFor({ entitlement: SWITCHED_ON });
+  assertEquals(switchFor({ launched: true, entitlement: SWITCHED_ON, advancedDirty: true, confirmAnswer: true }).s?.confirmOff(), true);
+  const open = switchFor({ launched: true, entitlement: SWITCHED_ON });
   open.s?.onOpen();
   assertEquals(open.nav, ["advanced"]);
 });
@@ -198,9 +226,9 @@ Deno.test("the nav item and the page mount both ask advancedOn, never the held c
   // advancedClampOn is true while still asking; drawing from it would flash the item for everyone.
   assert(/\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL), "the nav item must be gated on advancedOn");
   assert(/\{advancedOpened && advancedOn && !gateLocked && \(/.test(SHELL), "the page mount must be gated on advancedOn");
-  // …and the item sits directly under Designer.
-  assert(/\{navItem\("designer", "Designer"\)\}\s*(\{\/\*[\s\S]*?\*\/\}\s*)?\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL),
-    "the Advanced item must come straight after Designer");
+  // …and the item sits directly under Sheds (the Designer nav item was relabelled Sheds on 2026-10-24).
+  assert(/\{navItem\("designer", "Shed Designer"\)\}\s*(\{\/\*[\s\S]*?\*\/\}\s*)?\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL),
+    "the Advanced item must come straight after Shed Designer");
 });
 
 Deno.test("both route clamps are handed the gate", () => {

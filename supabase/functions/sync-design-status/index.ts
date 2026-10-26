@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
+import { companyOf, greetingFirst } from "../_shared/customerNaming.ts";
 import { addPhase, timedFetch, withServerTiming, type ServerTiming } from "../_shared/serverTiming.ts";
 import {
   eachLimited, estimateTotalsById, listEstimates, listOpportunities, listOpportunitiesAtStages, type OppRead, planGhlReads,
@@ -335,8 +336,11 @@ Deno.serve(withErrorLog("sync-design-status", withServerTiming(async (req: Reque
       const now = new Date().toISOString();
       // The buyer's first name for the "SOLD — Dave" label. contact.name is one flat field in
       // this product; this is the same split submit-estimate uses to title an estimate.
+      // A quote to a BUSINESS (designs.contact.company): the person's first name, else the company
+      // (portal-settings' firstNameOf, the same rule). Without a company, as always.
+      const company = companyOf(d.contact);
       const full = String((d.contact as Record<string, unknown>)?.name ?? "").trim();
-      const firstName = full ? full.split(/\s+/)[0] || null : null;
+      const firstName = company ? (greetingFirst(d.contact) || company.slice(0, 80)) : full ? full.split(/\s+/)[0] || null : null;
       // The same compare-and-swap the other two claim paths use: the `sale_state` predicate is
       // re-evaluated against the committed row, so of two concurrent claims exactly one matches
       // a row. `won === null` means somebody else already owns this sale, or it was released —

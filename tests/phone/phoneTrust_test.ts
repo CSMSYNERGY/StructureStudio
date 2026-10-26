@@ -112,9 +112,11 @@ Deno.test("chooseTrustProfile asks Twilio ONLY when it decides: internal, with b
 
 Deno.test("the handler takes the profile from chooseTrustProfile, and no read of Twilio is swallowed into a guess", () => {
   const b = slice(SRC, 'if (action === "phone_trust_setup") {', "\n  }\n", "phone_trust_setup branch");
-  assert(/const prof = await chooseTrustProfile\(\{[\s\S]*?numberSid: sidRes\.sid,\s*\}, \{ numberOnProfile: \(p, num\) => numberOnProfile\(p, num\) \}\);/.test(b));
+  // Every Twilio read in the tenant's own account (Workstream 2: tenantTwilio, the parent while the switch is off).
+  assert(/const prof = await chooseTrustProfile\(\{[\s\S]*?numberSid: sidRes\.sid,\s*\}, \{ numberOnProfile: \(p, num\) => numberOnProfile\(p, num, trustHubHttp\(creds\)\) \}\);/.test(b));
   assert(!/\.catch\(\(\) => false\)/.test(b), "a failed read must not become 'no'");
-  assert(/if \(prof\.kind === "refused"\) return json\(\{ error: prof\.error \}, prof\.status\);/.test(b));
+  // The refusal carries its code (no_business_profile: the Phone tab offers the profile form).
+  assert(/if \(prof\.kind === "refused"\) return json\(\{ error: prof\.error, \.\.\.\(prof\.code \? \{ code: prof\.code \} : \{\}\) \}, prof\.status\);/.test(b));
   assert(/return filedHere\(json\(\{ error: prof\.error, code: prof\.code \|\| null \}, prof\.status\)\);/.test(b));
   assert(b.indexOf("chooseTrustProfile(") < b.indexOf("runTrustSetup("), "nothing is claimed or sent before the profile is known");
 });
@@ -160,9 +162,9 @@ Deno.test("only an approved business profile goes forward, and the refusal says 
   assert(/don't recognise/.test(profileRefusal(null)!));
 });
 
-Deno.test("the product is SHAKEN/STIR unless Voice Integrity is asked for; nothing else is accepted", () => {
-  assertEquals([parseTrustProduct(undefined), parseTrustProduct(""), parseTrustProduct("shaken_stir"), parseTrustProduct("voice_integrity")],
-    ["shaken_stir", "shaken_stir", "shaken_stir", "voice_integrity"]);
+Deno.test("the product is SHAKEN/STIR unless Voice Integrity or CNAM is asked for; nothing else is accepted", () => {
+  assertEquals([parseTrustProduct(undefined), parseTrustProduct(""), parseTrustProduct("shaken_stir"), parseTrustProduct("voice_integrity"), parseTrustProduct("cnam")],
+    ["shaken_stir", "shaken_stir", "shaken_stir", "voice_integrity", "cnam"]);
   assertEquals(parseTrustProduct("branded_calling"), null);
 });
 
@@ -172,6 +174,8 @@ Deno.test("callerIdView tells the Phone tab where each stands, with no SIDs", ()
     available: true,
     shakenStir: { registered: true, status: "in-review" },
     voiceIntegrity: { registered: false, status: null },
+    // A row read without migration 297's columns: CNAM alone is "not available yet".
+    cnam: { available: false, registered: false, status: null, displayName: null },
     checkedAt: "2026-09-29T12:00:00Z",
   });
   assert(!JSON.stringify(v).includes(TP));
@@ -347,7 +351,7 @@ Deno.test("status: each recorded product is read and stored; a deleted one is cl
   }]);
   assertEquals(out.ok && out.view.shakenStir, { registered: true, status: "twilio-rejected" });
   assertEquals(out.ok && out.view.voiceIntegrity, { registered: false, status: null });
-  assertEquals(out.ok && out.errorCodes, { shakenStir: [22215], voiceIntegrity: [] });
+  assertEquals(out.ok && out.errorCodes, { shakenStir: [22215], voiceIntegrity: [], cnam: [] });
   // Nothing recorded: nothing asked, nothing written.
   const none = await runTrustStatus({}, { fetchTrustProduct: () => Promise.reject(new Error("must not be called")), write: () => Promise.reject(new Error("must not be called")) });
   assert(none.ok && !none.changed);
@@ -381,18 +385,23 @@ Deno.test("setup: the profile comes from the texting registration (or, internal 
   assert(/\.from\("sms_registrations"\)\s*\.select\("customer_profile_sid"\)/.test(b));
   assert(/isInternalTenant\(admin, clientId\)/.test(b));
   assert(/const primaryProfileSid = Deno\.env\.get\("TWILIO_PRIMARY_PROFILE_SID"\) \?\? null;/.test(b));
-  assert(/runTrustSetup\(\{/.test(b) && /setup: \(s\) => setupVoiceTrust\(s\)/.test(b) && /fetchProfile: \(sid\) => fetchCustomerProfile\(sid\)/.test(b));
+  assert(/runTrustSetup\(\{/.test(b) && /setup: \(s\) => setupVoiceTrust\(s, trustHubHttp\(creds\)\)/.test(b)
+    && /fetchProfile: \(sid\) => fetchCustomerProfile\(sid, trustHubHttp\(creds\)\)/.test(b));
+  assert(b.indexOf("await tenantTwilio()") > b.indexOf("phoneOperatorGate") && b.indexOf("await tenantTwilio()") < b.indexOf("runTrustSetup("),
+    "the tenant's account is resolved after the operator gate and before anything is sent");
   assert(/parseVoiceIntegrityInfo\(payload\.voiceIntegrity\)/.test(b));
   assert(b.indexOf("phoneOperatorGate") < b.indexOf("trustHubConfigured()"), "a non-operator learns nothing about the server's setup");
   assert(!/wallet_hold|takeNumberHold/.test(b), "nothing here spends the builder's wallet");
   const st = slice(SRC, 'if (action === "phone_trust_status") {', "\n  }\n", "phone_trust_status branch");
-  assert(/runTrustStatus\(/.test(st) && /fetchTrustProduct: \(sid\) => fetchTrustProduct\(sid\)/.test(st));
+  assert(/runTrustStatus\(/.test(st) && /fetchTrustProduct: \(sid\) => fetchTrustProduct\(sid, trustHubHttp\(creds\)\)/.test(st));
 });
 
 Deno.test("phone_settings_get reports the caller ID from its OWN select, and who may change it", () => {
   const get = slice(SRC, 'if (action === "phone_settings_get") {', 'if (action === "phone_settings_save") {', "phone_settings_get");
   // Migration 266: ONE read of every number's caller-ID columns, in their own select, on this tenant.
-  assert(/const tr = await admin\.from\("sms_numbers"\)\.select\(TRUST_COLUMNS\)\.eq\("client_id", clientId\)\.in\("id", rows\.map\(\(r\) => r\.id\)\)/.test(get));
+  assert(/const readTrust = \(cols: string\) => admin\.from\("sms_numbers"\)\.select\(cols\)\.eq\("client_id", clientId\)\.in\("id", rows\.map\(\(r\) => r\.id\)\)/.test(get));
+  // Workstream 2, phase 6: CNAM's columns in the same read; without 297, the 255 read as before.
+  assert(/let tr = await readTrust\(`\$\{TRUST_COLUMNS\}, \$\{CNAM_COLUMNS\}`\);\s*if \(tr\.error && phoneNotReady\(tr\.error\)\) tr = await readTrust\(TRUST_COLUMNS\);/.test(get), get);
   assert(/trustAvailable = !tr\.error;/.test(get) && /trustAvailable \? callerIdView\(/.test(get) && /: callerIdView\(null, false\);/.test(get),
     "a server without 255 shows 'not available', never a failed screen");
   assert(/callerId: callerIdOf\(String\(r\.id\)\)/.test(get), "each number carries its own caller ID");
@@ -401,7 +410,8 @@ Deno.test("phone_settings_get reports the caller ID from its OWN select, and who
   const numberRead = slice(SRC, "const phoneNumberRows = async ()", "\n  };\n", "phoneNumberRows");
   assert(!/shaken|voice_integrity|caller_id/.test(numberRead));
   assert(!/shaken|voice_integrity|caller_id/.test(slice(SRC, "const NUMBER_COLUMNS = ", ";", "NUMBER_COLUMNS")));
-  assert(/\.select\(TRUST_COLUMNS\)/.test(SRC));
+  assert(/readTrust\(TRUST_COLUMNS\)/.test(SRC) && /return res\.error && phoneNotReady\(res\.error\) \? await read\(TRUST_COLUMNS\) : res;/.test(SRC),
+    "both caller-ID reads fall back to 255's columns alone when 297 is not applied");
 });
 
 Deno.test("migration 255 has every column phoneTrust reads, and the same status vocabulary", () => {
@@ -428,9 +438,9 @@ Deno.test("the Caller ID card: status words for Twilio's enum, Twilio's use case
   const card = slice(SMS, "const callerIdCard = ", ") : null;", "callerIdCard");
   const row = slice(SMS, "const trustRow = (key, label, blurb, product) => {", "\n  };\n", "trustRow");
   assert(/data\.canManageCallerId && canSend &&/.test(row), "Register only for an operator, and only while there is something to send");
-  assert(/data\.canManageCallerId && \(cid\.shakenStir\.registered \|\| cid\.voiceIntegrity\.registered\) &&/.test(card), "Check status only for an operator");
+  assert(/data\.canManageCallerId && \(cid\.shakenStir\.registered \|\| cid\.voiceIntegrity\.registered \|\| !!\(cid\.cnam && cid\.cnam\.registered\)\) &&/.test(card), "Check status only for an operator");
   // Migration 266: each press names the number that is open (caller ID is per number).
-  assert(/phoneAction\("phone_trust_setup", \{ product, numberId: sel\.id,/.test(SMS) && /phoneAction\("phone_trust_status", \{ numberId: sel\.id \}\)/.test(SMS));
+  assert(/phoneAction\("phone_trust_setup", \{\s*product, numberId: sel\.id,/.test(SMS) && /phoneAction\("phone_trust_status", \{ numberId: sel\.id \}\)/.test(SMS));
   assert(/const cid = \(sel && sel\.callerId\) \|\| null;/.test(SMS), "the card reads the open number's registrations");
   // Under the number on the team screen; since migration 266 the number's name and person come first.
   assert(/\{numberCard\}\n\s*\{thisNumberCard\}\n\s*\{callerIdCard\}/.test(SMS), "the card sits under the number on the team screen");

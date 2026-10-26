@@ -33,7 +33,7 @@ function ssLogError(source, message, code, context, severity) {
         // Origin + path + query, never location.href: Supabase delivers auth-email outcomes
         // in the FRAGMENT, and whenever a link's redirect_to is not allow-listed Supabase
         // falls back to Site URL, so `#access_token=<JWT>&refresh_token=…` lands on THIS page
-        // before the module forwards it to /portal. Logging the href wrote a live session into
+        // before the module forwards it to /login. Logging the href wrote a live session into
         // app_errors, which an anon caller can never redact. The query stays — triage reads
         // ?client= / ?id= off it — and the 600-char cap stays.
         // ⚠️ split("#"), NOT origin+pathname+search. `location.origin` serializes to the

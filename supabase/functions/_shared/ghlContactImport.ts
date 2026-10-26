@@ -62,6 +62,9 @@ const EMAIL_MAX = 254;
  *  GoHighLevel's texting do-not-disturb, which the function keeps as an opt-out on the phone. */
 export type ImportRow = {
   name: string | null;
+  /** GoHighLevel's companyName (migration 318 fills a blank crm_contacts.company with it). Only
+   *  when there is one, so a row without a company is the row it always was. */
+  company?: string;
   phone: string | null;
   email: string | null;
   tags: string[];
@@ -125,7 +128,10 @@ export function capitaliseLowercaseName(s: string | null): string | null {
 
 /**
  * One GoHighLevel contact as the import row, or null when it is not an object at all. The name is
- * the first and last name, else the contact or company name GoHighLevel holds; the fields GoHighLevel
+ * the first and last name, else the contact name GoHighLevel holds. The COMPANY is its own field
+ * (quote to a business entity, 2026-10-21): it used to stand in as the name of a contact with no
+ * person's name, which is how a business ended up greeted by its first word ("Hi Bear" for Bear
+ * River Band). Migration 318 is what stores it, so apply 318 before deploying this. The fields GoHighLevel
  * keeps lowercased (firstNameLowerCase, lastNameLowerCase, contactName) are capitalised when that is
  * all there is. An email that is not shaped like one is dropped rather than stored. The phone is kept
  * as GoHighLevel wrote it; the database matches on its digits (crm_phone_key, whose rule phoneKey
@@ -139,13 +145,14 @@ export function parseGhlContact(raw: unknown): ParsedContact | null {
   const last = text(r.lastName, NAME_MAX) ?? text(r.lastNameRaw, NAME_MAX)
     ?? capitaliseLowercaseName(text(r.lastNameLowerCase, NAME_MAX));
   const name = text([first, last].filter(Boolean).join(" "), NAME_MAX)
-    ?? capitaliseLowercaseName(text(r.contactName, NAME_MAX)) ?? text(r.name, NAME_MAX) ?? text(r.companyName, NAME_MAX);
+    ?? capitaliseLowercaseName(text(r.contactName, NAME_MAX)) ?? text(r.name, NAME_MAX);
+  const company = text(r.companyName, NAME_MAX);
   const phone = text(r.phone, PHONE_MAX);
   const rawEmail = text(r.email, EMAIL_MAX);
   const email = rawEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : null;
   const smsDnd = smsDoNotDisturb(r);
   return {
-    row: { name, phone, email, tags: cleanTags(r.tags), added_at: addedAt(r.dateAdded), sms_dnd: smsDnd },
+    row: { name, ...(company ? { company } : {}), phone, email, tags: cleanTags(r.tags), added_at: addedAt(r.dateAdded), sms_dnd: smsDnd },
     phoneKey: phone ? phoneKey(phone) : "",
     emailKey: email ? email.toLowerCase() : "",
     smsDnd,

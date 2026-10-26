@@ -1,3 +1,436 @@
+// ── THE CONTACTS HUB (Carolyn 2026-10-12) ───────────────────────────────────────────────────
+// "Let's have one tab and we can have contacts, and we can have this instead of list is designs,
+// and then we have pipelines." And for the row itself: "this whole thing will have always
+// contacts, always on the left side, and then always design list, and then every pipeline that
+// they create will be next, next, next, next."
+//
+// So the sidebar's Contacts opens this, and this is a tab row over one view:
+//   Contacts      the contact list (LeadsTable)                 contacts area + the built-in CRM
+//   Design list   the old Pipeline page's List view             designs area, never the CRM
+//   <pipeline>…   one board per pipeline, in the account's order contacts area + the built-in CRM
+// It replaced the List | Pipeline toggle and the board's pipeline <select>, both of which sat
+// where the row sits now (she drew the arrow from "26 cards" to the toggle: "up here").
+//
+// WHERE CONTACTS AND DESIGN LIST SIT (Ahsan 2026-10-13, after testing the sandbox): "design and
+// contacts should be different from the pipelines visually so its easier to see and they should be
+// on the right side of the screen may be with a bubble". So the pipelines are the underline tabs,
+// from the left, and Contacts | Design list is a rounded two-part bubble at the row's far right
+// (SsHubTabs; on a line of its own above the pipelines in a narrow window). That reverses the
+// order Carolyn gave above. Putting the two back first is one flex order (.ss-hub-lists in
+// portal.html).
+//
+// HOW MANY PIPELINE TABS (C27, C29): "let's say they can display five pipelines ... And then if
+// they have more, the very last pipeline will have a drop down and they have to click down." And
+// on Ahsan's scroll-left/right idea: "I just don't like a scroll bar." So at most five pipeline
+// positions, and with more than five the fifth is the last pipeline WITH a drop-down: its name
+// opens that pipeline in one click, its ▾ lists the rest, and while one of the rest is open the
+// fifth tab wears that one's name. Where the row is narrower than that, more pipelines fold into
+// the drop-down (ssHubFit); the row never scrolls. The order is the account's, the same for
+// everyone (C28, per-person ordering, was Ahsan's idea and was not taken up).
+//
+// WHICH TAB IT OPENS ON (C24, C25): "by default, when they come here, they are going to be looking
+// at Pipeline first ... as long as they have the CRM", then "we need them to set the default of
+// what they want the default to be". So the person's own pick from My Profile (contactsView, or the
+// old Pipeline tab's choice) when they made one, else the first pipeline with the CRM, else the
+// Design list (C14: "we need to keep the list view for those not using the CRM"). A view the
+// person cannot open is never shown: a Crew Leader holding designs:view and no contacts gets the
+// Design list and nothing else. Every view has its own address (/contacts/<sub>, see
+// SS_HUB_* in 01-core), and the hub keeps the address on the view it shows.
+const SS_HUB_MAX_PIPES = 5;
+
+// The account's pipelines as the tab row needs them, in the order crm_pipelines_list sends them
+// (crm_pipelines.position).
+const ssHubPipes = (ps) => (Array.isArray(ps) ? ps : [])
+  .filter((p) => p && p.id)
+  .map((p) => ({ id: String(p.id).toLowerCase(), name: String(p.name || "Pipeline") }));
+
+// Which view the hub shows. Pure, so it is tested without a browser (contactsHub_test.ts).
+//   sub        the address's sub under /contacts (null, a SS_HUB_* value, "p-<uuid>", junk)
+//   saved      ssSavedHubView: the person's own pick, or null
+//   reach      { people, designs }: ssHubCan's answers for this person
+//   crm        the built-in CRM is on; crmKnown: the answer has landed (own portal), so "off" is real
+//   pipelines  ssHubPipes(...), or null while they load (or when they are not asked for)
+//   remembered the pipeline picked last on this browser, for "the board" (SS_HUB_PIPELINE)
+// Returns { view, pipeId?, canon }. view: "people" | "designs" | "pipe" | "locked" | "loading" |
+// "none". canon is the sub the address should carry for it (null: leave the address alone).
+function ssHubResolve({ sub = null, saved = null, reach, crm, crmKnown, pipelines, remembered = null }) {
+  const has = (id) => !!pipelines && pipelines.some((p) => p.id === id);
+  // One candidate: the address (explicit) or the saved pick. Null = this one can't be shown here.
+  const take = (want, explicit) => {
+    if (!want) return null;
+    if (want === SS_HUB_DESIGNS) return reach.designs ? { view: "designs", canon: want } : null;
+    const pid = ssHubPipeId(want);
+    if (want !== SS_HUB_PEOPLE && want !== SS_HUB_PIPELINE && !pid) return null;   // not a hub view
+    if (!reach.people) return null;
+    // Contacts and the boards are the CRM's. Until the answer is in, wait rather than paint the
+    // Design list and snap away from it; once it is in and says no, an address that asked for one
+    // gets the card that sells it, and a saved pick quietly falls back to the default.
+    if (!crmKnown) return { view: "loading", canon: explicit ? want : null };
+    if (!crm) return explicit ? { view: "locked", canon: pid ? SS_HUB_PIPELINE : want } : null;
+    if (want === SS_HUB_PEOPLE) return { view: "people", canon: want };
+    // A named pipeline opens at once, before the list has said it exists; a pipeline that turns out
+    // to be gone (removed, or another account's) falls through to the default.
+    if (pid) return (!pipelines || has(pid)) ? { view: "pipe", pipeId: pid, canon: want } : null;
+    if (!pipelines) return { view: "loading", canon: null };
+    const id = remembered && has(remembered) ? remembered : (pipelines[0] ? pipelines[0].id : null);
+    return id ? { view: "pipe", pipeId: id, canon: "p-" + id } : null;
+  };
+  const picked = take(sub, true) || take(saved, false);
+  if (picked) return picked;
+  // THE DEFAULT: the first pipeline with the CRM, else the Design list, else the contact list.
+  if (reach.people && !crmKnown) return { view: "loading", canon: null };
+  if (reach.people && crm) {
+    if (!pipelines) return { view: "loading", canon: null };
+    if (pipelines.length) return { view: "pipe", pipeId: pipelines[0].id, canon: "p-" + pipelines[0].id };
+  }
+  if (reach.designs) return { view: "designs", canon: SS_HUB_DESIGNS };
+  if (reach.people) return crm ? { view: "people", canon: SS_HUB_PEOPLE } : { view: "locked", canon: SS_HUB_PEOPLE };
+  return { view: "none", canon: null };
+}
+
+// How many pipeline tabs fit in the row inline. Pure, tested with contactsHub_test.ts.
+//   avail    the row's width; fixedW: what else shares the pipelines' line, which is the
+//            Contacts | Design list bubble and the gap before it (ssHubLayout), or 0 when the
+//            bubble has a line of its own
+//   pipeW    each pipeline tab's width, in order; caretW: the drop-down's ▾
+//   activeIdx  the open pipeline's index, or -1: the drop-down wears its name when it holds it
+// Returns k: pipelines [0, k) are tabs, and when k < pipeW.length the rest sit in the drop-down,
+// whose own tab is the (k+1)th position. At most SS_HUB_MAX_PIPES positions in all.
+function ssHubFit({ avail, fixedW, pipeW, caretW, activeIdx = -1, max = SS_HUB_MAX_PIPES, gap = 2 }) {
+  const n = pipeW.length;
+  const run = (k) => pipeW.slice(0, k).reduce((a, w) => a + w + gap, 0);
+  if (n <= max && fixedW + run(n) <= avail) return n;
+  for (let k = Math.min(n - 1, max - 1); k > 0; k--) {
+    const shown = activeIdx >= k ? activeIdx : k;
+    if (fixedW + run(k) + pipeW[shown] + caretW + gap <= avail) return k;
+  }
+  return 0;
+}
+
+// Below this row width (a window narrower than about 720px, where the sidebar is icons) the bubble
+// takes a line of its own above the pipelines, still at the right, and the pipelines get the
+// whole width.
+const SS_HUB_STACK_W = 620;
+
+// Where the Contacts | Design list bubble goes, and how much of the row it leaves the pipelines.
+// Pure, tested with contactsHub_test.ts.
+//   rowW      the row's width; listsW: the bubble's own width (0 when there is no bubble)
+//   gap       the space between the pipelines and the bubble (.ss-hub-row's column-gap)
+//   hasPipes  any pipeline tab at all (with none, the bubble just sits at the right, never alone
+//             on a line above an empty one)
+// Returns { stacked, fixedW }: stacked = the bubble is on its own line; fixedW = the room it
+// takes from the pipelines' line, which ssHubFit takes off before any pipeline gets a tab, so the
+// pipelines fold into the drop-down before anything can overlap.
+function ssHubLayout({ rowW, listsW, gap = 0, hasPipes = true, stackBelow = SS_HUB_STACK_W }) {
+  if (!(listsW > 0)) return { stacked: false, fixedW: 0 };
+  const stacked = !!hasPipes && rowW < stackBelow;
+  return { stacked, fixedW: stacked ? 0 : Math.ceil(listsW + gap) };
+}
+
+// The account's pipelines, for the tab row and for My Profile's picker. Cached like a tab
+// (ssTabCache), so coming back to Contacts paints the row at once and refreshes behind it.
+// `replace` takes a fresh list from the board itself (SalesPipelines' onPipelines), so a pipeline
+// added or removed there reaches the row without a second read. Not asked for at all when `enabled`
+// is false: crm_pipelines_list is the CRM's, and the contacts area's.
+function useSsPipelineList(clientId, enabled) {
+  const [list, setList] = useState(null);   // null = not loaded (or not asked)
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    if (!enabled) { setList(null); setErr(null); return undefined; }
+    const hit = ssCacheGet("portal-settings", "crm_pipelines_list", clientId);
+    if (hit) setList(hit);
+    let off = false;
+    ssPipeCall("crm_pipelines_list").then((r) => {
+      if (off) return;
+      const ps = ssHubPipes(r.pipelines);
+      ssCachePut("portal-settings", "crm_pipelines_list", clientId, ps);
+      setList(ps); setErr(null);
+    }, (e) => { if (!off) { setErr(e.message || String(e)); setList((cur) => cur || []); } });
+    return () => { off = true; };
+  }, [clientId, enabled]);
+  const replace = useCallback((raw) => {
+    const ps = ssHubPipes(raw);
+    ssCachePut("portal-settings", "crm_pipelines_list", clientId, ps);
+    setList(ps); setErr(null);
+  }, [clientId]);
+  return { pipelines: enabled ? list : null, error: enabled ? err : null, replace };
+}
+
+// One pipeline tab's look. The underline strip Settings' hubs use (SubTabs, 08-integrations), so
+// the two kinds of sub-navigation read alike; the active tab carries the accent underline.
+// Contacts and Design list are not drawn with this: they are the bubble (.ss-hub-seg).
+const ssHubTabStyle = (on, locked) => ({
+  display: "inline-flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer",
+  fontFamily: "inherit", padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+  whiteSpace: "nowrap", textDecoration: "none", boxSizing: "border-box",
+  color: on ? ACCENT : (locked ? "#94A3B8" : "#64748B"),
+  borderBottom: on ? `2px solid ${ACCENT}` : "2px solid transparent", marginBottom: -2,
+});
+// A pipeline's name is capped, so one long name cannot take the row from the others.
+const SS_HUB_NAME = { display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", verticalAlign: "bottom" };
+const SS_HUB_CRM_TITLE = "Part of the built-in CRM";
+// The bubble's two glyphs, built once (the rail's ICONS reasoning, 12-shell): people for Contacts
+// (the rail's own Contacts glyph), a page with lines for the Design list.
+const SS_HUB_ICONS = {
+  [SS_HUB_PEOPLE]: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  [SS_HUB_DESIGNS]: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>,
+};
+
+// The row. Real links (Carolyn 2026-09-11: every nav button opens in a new tab on a right or
+// middle click), one click per tab. `lists` (Contacts, Design list) and `pipes` are
+// [{ id, label, locked? }]; `active` is the open tab's id, and only that one looks picked, in
+// whichever group it is.
+//
+// TWO GROUPS, TWO TABLISTS (Ahsan 2026-10-13): the pipelines are underline tabs from the left, and
+// the lists are a rounded bubble pushed to the far right (.ss-hub-row and friends in portal.html).
+// Arrow keys walk one group at a time. The bubble's width comes off the row before the pipelines
+// are fitted (ssHubLayout, then ssHubFit), so the pipelines fold into the drop-down instead of
+// running under it; in a narrow row it takes a line of its own above them (data-ss-hub-stacked).
+function SsHubTabs({ lists, pipes, active, onPick, hrefFor }) {
+  const boxRef = useRef(null);
+  const listsRef = useRef(null);
+  const measRef = useRef(null);
+  const ddRef = useRef(null);
+  const menuRef = useRef(null);
+  const [room, setRoom] = useState(null);       // { row, lists, gap } in px, or null before the first read
+  const [widths, setWidths] = useState(null);   // { pipes: [], caret } in px, or null
+  const [menu, setMenu] = useState(null);       // { top, left } in viewport px, or null = shut
+  const labelKey = pipes.map((t) => (t.locked ? "!" : "") + t.label).join("\u0001");
+  const hasLists = lists.length > 0;
+  // Every pipeline label measured in an invisible copy of the row (same type, same padding), so the
+  // fit is decided before the first paint and never by trial and error on screen. Again once the
+  // page's font has loaded, since a label is wider in it than in the fallback.
+  React.useLayoutEffect(() => {
+    let off = false;
+    const measure = () => {
+      const m = measRef.current;
+      if (off || !m) return;
+      const w = Array.from(m.children).map((x) => Math.ceil(x.getBoundingClientRect().width));
+      setWidths({ pipes: w.slice(0, pipes.length), caret: w[w.length - 1] || 24 });
+    };
+    measure();
+    try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure, () => {}); } catch (_e) { /* no font API */ }
+    return () => { off = true; };
+  }, [labelKey]);
+  // The row's width and the bubble's, read together, and again whenever either changes (a resize,
+  // the font arriving, Contacts gaining or losing its padlock). The gap is the stylesheet's own.
+  React.useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!el) return undefined;
+    const read = () => {
+      const b = listsRef.current;
+      let gap = 0;
+      try { gap = parseFloat(window.getComputedStyle(el).columnGap) || 0; } catch (_e) { /* no computed style */ }
+      const next = { row: el.clientWidth, lists: b ? Math.ceil(b.getBoundingClientRect().width) : 0, gap };
+      setRoom((cur) => (cur && cur.row === next.row && cur.lists === next.lists && cur.gap === next.gap ? cur : next));
+    };
+    read();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", read);
+      return () => window.removeEventListener("resize", read);
+    }
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    if (listsRef.current) ro.observe(listsRef.current);
+    return () => ro.disconnect();
+  }, [hasLists]);
+  // The drop-down's list: painted in viewport coordinates (RowMenu's reason: nothing it sits in
+  // may clip it or grow a scroll bar for it), and shut by a click away, Escape, a scroll or a resize.
+  useEffect(() => {
+    if (!menu) return undefined;
+    const away = (e) => {
+      if (ddRef.current && ddRef.current.contains(e.target)) return;
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      setMenu(null);
+    };
+    const key = (e) => { if (e.key === "Escape") setMenu(null); };
+    const shut = () => setMenu(null);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", key);
+    window.addEventListener("scroll", shut, true);
+    window.addEventListener("resize", shut);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", shut, true);
+      window.removeEventListener("resize", shut);
+    };
+  }, [menu]);
+
+  const n = pipes.length;
+  const activeIdx = pipes.findIndex((t) => t.id === active);
+  const lay = room ? ssHubLayout({ rowW: room.row, listsW: room.lists, gap: room.gap, hasPipes: n > 0 }) : { stacked: false, fixedW: 0 };
+  const k = (widths && room && room.row)
+    ? ssHubFit({ avail: room.row, fixedW: lay.fixedW, pipeW: widths.pipes, caretW: widths.caret, activeIdx })
+    : (n <= SS_HUB_MAX_PIPES ? n : SS_HUB_MAX_PIPES - 1);
+  const inline = pipes.slice(0, k);
+  const rest = pipes.slice(k);
+  const shownRest = rest.length ? (activeIdx >= k ? pipes[activeIdx] : rest[0]) : null;
+
+  // Arrow keys move along ONE group (the pipelines, or the bubble) and wrap at its ends; Home and
+  // End go to its first and last. Focus only: Enter opens the focused one, as on any link.
+  const onArrows = (e) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (!step && e.key !== "Home" && e.key !== "End") return;
+    const items = Array.from(e.currentTarget.querySelectorAll("[data-ss-hub-key]"));
+    const i = items.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault();
+    const j = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : (i + step + items.length) % items.length;
+    items[j].focus();
+  };
+  const pick = (id) => ssNavClick(() => { setMenu(null); onPick(id); });
+  const tab = (t, extra = null) => {
+    const on = t.id === active;
+    return (
+      <a key={t.id} href={hrefFor(t.id)} role="tab" aria-selected={on ? "true" : "false"} data-ss-hub-tab={t.id} data-ss-hub-key=""
+        title={t.locked ? SS_HUB_CRM_TITLE : t.label}
+        onClick={pick(t.id)}
+        style={{ ...ssHubTabStyle(on, t.locked), ...(extra || {}) }}>
+        {t.locked && <span aria-hidden="true">🔒</span>}
+        <span style={SS_HUB_NAME}>{t.label}</span>
+      </a>
+    );
+  };
+  // One part of the bubble. Its look is the stylesheet's (.ss-hub-seg), keyed on aria-selected, so
+  // what a screen reader is told is picked and what looks picked cannot disagree. A padlocked one
+  // wears the padlock where its glyph would be, and still opens the card that sells the CRM.
+  const seg = (t) => (
+    <a key={t.id} href={hrefFor(t.id)} role="tab" aria-selected={t.id === active ? "true" : "false"} data-ss-hub-tab={t.id} data-ss-hub-key=""
+      className={"ss-hub-seg" + (t.locked ? " locked" : "")} title={t.locked ? SS_HUB_CRM_TITLE : t.label}
+      onClick={pick(t.id)}>
+      {t.locked ? <span aria-hidden="true">🔒</span> : <span className="ico" aria-hidden="true">{SS_HUB_ICONS[t.id] || null}</span>}
+      <span>{t.label}</span>
+    </a>
+  );
+  const openMenu = () => {
+    const r = ddRef.current.getBoundingClientRect();
+    const W = 240;
+    setMenu({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left, window.innerWidth - W - 8)), width: W });
+  };
+  return (
+    <div ref={boxRef} className="ss-hub-row" data-ss-hub-tabs="" data-ss-hub-stacked={lay.stacked ? "" : undefined}>
+      {/* The measuring copy: no size of its own and clipped, so it can never widen the page. */}
+      <div aria-hidden="true" style={{ position: "absolute", left: 0, top: 0, width: 0, height: 0, overflow: "hidden", visibility: "hidden", pointerEvents: "none" }}>
+        <div ref={measRef} style={{ display: "flex", width: "max-content" }}>
+          {pipes.map((t) => (
+            <span key={t.id} style={ssHubTabStyle(false, t.locked)}>
+              {t.locked && <span>🔒</span>}
+              <span style={SS_HUB_NAME}>{t.label}</span>
+            </span>
+          ))}
+          <span style={{ ...ssHubTabStyle(false, false), padding: "12px 8px 10px" }}>▾</span>
+        </div>
+      </div>
+      {/* The pipelines, from the left. Always drawn, so the bubble keeps the right edge even with
+          no pipeline to show; a tablist only when it holds a tab. */}
+      <div className="ss-hub-pipes" data-ss-hub-pipes="" role={n ? "tablist" : undefined} aria-label={n ? "Pipelines" : undefined}
+        onKeyDown={onArrows}>
+        {inline.map((t) => tab(t))}
+        {shownRest && (
+          <span ref={ddRef} data-ss-hub-more="" style={{ display: "inline-flex", alignItems: "flex-end" }}>
+            {tab(shownRest, { paddingRight: 4 })}
+            <button type="button" aria-haspopup="menu" aria-expanded={menu ? "true" : "false"} data-ss-hub-key=""
+              aria-label={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`} title={`${rest.length} more pipeline${rest.length === 1 ? "" : "s"}`}
+              onClick={() => (menu ? setMenu(null) : openMenu())}
+              style={{ ...ssHubTabStyle(shownRest.id === active, false), padding: "12px 8px 10px", fontSize: 12 }}>▾</button>
+          </span>
+        )}
+      </div>
+      {/* The bubble: Contacts and Design list, at the far right (Ahsan 2026-10-13). */}
+      {hasLists && (
+        <div ref={listsRef} className="ss-hub-lists" data-ss-hub-lists="" role="tablist" aria-label={lists.map((t) => t.label).join(" and ")}
+          onKeyDown={onArrows}>
+          {lists.map(seg)}
+        </div>
+      )}
+      {menu && (
+        <div ref={menuRef} role="menu" data-ss-hub-menu=""
+          style={{ position: "fixed", top: menu.top, left: menu.left, width: menu.width, zIndex: 60, background: "#FFF",
+            border: "1px solid #E2E8F0", borderRadius: 8, padding: 5, boxShadow: "0 10px 26px rgba(15,23,42,0.16)", maxHeight: "60vh", overflowY: "auto" }}>
+          {rest.map((t) => {
+            const on = t.id === active;
+            return (
+              <a key={t.id} href={hrefFor(t.id)} role="menuitem" aria-current={on ? "page" : undefined}
+                onClick={pick(t.id)}
+                style={{ display: "block", padding: "7px 9px", borderRadius: 6, fontSize: 13, fontWeight: on ? 800 : 700, textDecoration: "none",
+                  color: on ? ACCENT : "#334155", background: on ? "#EEF2FF" : "transparent", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {t.label}
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The hub. The shell builds the three views it cannot (they need its routing, phone and access
+// wiring) and hands them in as elements; the boards are built here.
+//   sub          the address's sub under /contacts (records never reach here)
+//   onRoute(sub, replace)              moves the address (navigate("contacts", sub, replace))
+//   onOpenRecord(code, contactId, fromSub)  opens a card's customer or design, Back to `fromSub`
+function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked = false, crmKnown = true, saved = null, refreshKey = 0,
+  onRoute, onOpenRecord, people = null, designs = null, locked = null }) {
+  const canPipes = !!crmUnlocked && !!reach.people;
+  const { pipelines, error, replace } = useSsPipelineList(clientId, canPipes);
+  let remembered = null;
+  try { remembered = localStorage.getItem(SS_PIPE_LAST + ":" + clientId); } catch (_e) { /* private mode */ }
+  const r = ssHubResolve({ sub, saved, reach, crm: !!crmUnlocked, crmKnown, pipelines, remembered });
+  // Keep the address on the view that shows (a bare /contacts, "the board", or a view this
+  // person cannot open), without a history entry, so a refresh or a copied link lands right back.
+  useEffect(() => {
+    if (r.canon && r.canon !== (sub || null)) onRoute(r.canon, true);
+  }, [r.canon, sub]);
+  // The board last looked at, for "the board" (/contacts/pipeline and every old Pipeline
+  // address).
+  useEffect(() => {
+    if (r.view !== "pipe" || !r.pipeId) return;
+    try { localStorage.setItem(SS_PIPE_LAST + ":" + clientId, r.pipeId); } catch (_e) { /* private mode */ }
+  }, [r.view, r.pipeId, clientId]);
+
+  const crmOff = crmKnown && !crmUnlocked;
+  // The bubble at the row's right (Ahsan 2026-10-13): only what this person may open.
+  const lists = [];
+  if (reach.people) lists.push({ id: SS_HUB_PEOPLE, label: "Contacts", locked: crmOff });
+  if (reach.designs) lists.push({ id: SS_HUB_DESIGNS, label: "Design list" });
+  // Without the CRM there are no boards to list, and one padlocked "Pipeline" tab stays to say
+  // they exist, where the padlocked Pipeline button used to.
+  const pipes = canPipes ? (pipelines || []).map((p) => ({ id: "p-" + p.id, label: p.name }))
+    : (reach.people && crmOff ? [{ id: SS_HUB_PIPELINE, label: "Pipeline", locked: true }] : []);
+  const active = r.view === "people" ? SS_HUB_PEOPLE
+    : r.view === "designs" ? SS_HUB_DESIGNS
+    : r.view === "pipe" ? "p-" + r.pipeId
+    : r.canon;
+  const fromPipe = r.view === "pipe" ? "p-" + r.pipeId : null;
+
+  return (
+    <div data-ss-contacts-hub="">
+      <SsHubTabs lists={lists} pipes={pipes} active={active}
+        hrefFor={(id) => ssPagePath("contacts", id)}
+        onPick={(id) => onRoute(id, false)} />
+      {error && canPipes && (pipelines || []).length === 0 && <div style={S.err}>{error}</div>}
+      {r.view === "loading" && (
+        <div style={S.card} data-ss-hub-view="loading" aria-busy="true">
+          <table style={{ width: "100%", borderCollapse: "collapse" }}><tbody><SkelRows cols={5} rows={6} /></tbody></table>
+        </div>
+      )}
+      {r.view === "people" && <div data-ss-hub-view="people">{people}</div>}
+      {r.view === "designs" && <div data-ss-hub-view="designs">{designs}</div>}
+      {r.view === "locked" && <div data-ss-hub-view="locked">{locked}</div>}
+      {r.view === "pipe" && (
+        <div style={S.card} data-ss-hub-view="pipe">
+          <SalesPipelines embedded hosted clientId={clientId} viewing={viewing} refreshKey={refreshKey}
+            urlPipelineId={r.pipeId}
+            onPickPipeline={(id) => onRoute("p-" + String(id).toLowerCase(), false)}
+            onPipelines={replace}
+            onOpenRecord={(code, contactId, dealId) => onOpenRecord(code, contactId, fromPipe, dealId)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── "⋯" — THE ROW ACTIONS THAT DON'T FIT ────────────────────────────────────────────────
 // Ahsan, 2026-08-28: "the pipeline view is floating off the screen from the right side. So
 // under actions just add two options, Open and PDF … I'll add three dot options, so when I
@@ -145,43 +578,14 @@ async function ssReadAllRows(page, keyOf) {
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null, urlView = null, defaultView = null, onViewChange = null }) {
-  // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
-  // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
-  // pipelines ... this may become the pipeline view."
-  //
-  // It is a VIEW over rows this table already loads, not a second data path — which is
-  // exactly why it is cheap and why it lives here rather than in its own tab. The same
-  // search, the same facets and the same status chips narrow both renderings, so a filter a
-  // builder sets in the list is still set when they flip to the board.
-  // The BOARD is part of the built-in CRM ($400/mo, migration 160); the LIST is not, and
-  // never becomes so — Carolyn 2026-08-29: "they only get the list view". crmUnlocked
-  // defaults TRUE so that any caller that has not been taught about the prop (or an operator
-  // path) behaves exactly as before rather than silently locking a tab.
-  // ── WHICH VIEW, AND WHO DECIDES ───────────────────────────────────────────────────
-  // Two separate asks, and they compose. Carolyn, 2026-08-28 @42:00: "I'm trying to think
-  // which I want to have the default. I want them to be able to decide if they want the
-  // default. I don't want it to always be list. They can decide to set their default to be
-  // pipeline or list, whichever one that they want." And @41:03, on the back button: "if
-  // you hit the back button, you lost everything on that screen ... I just don't want it to
-  // be like, oh no, you can't click that back button."
-  //
-  // So: the URL wins when it names a view, the SAVED PREFERENCE fills a bare URL, and list
-  // is the fallback for someone who has never set one. Flipping the toggle navigates, which
-  // is what makes Back walk between the two instead of leaving the tab.
-  //
-  // Local state stays as the fallback for any host that does not supply a router, so this
-  // component still works mounted anywhere -- the same shape OrdersView uses for openId.
-  const [viewLocal, setViewLocal] = useState(null);
-  const routed = !!onViewChange;
-  const view = routed
-    ? (urlView === "pipeline" || urlView === "list" ? urlView : (defaultView === "pipeline" ? "pipeline" : "list"))
-    : (viewLocal || (defaultView === "pipeline" ? "pipeline" : "list"));
-  const setView = (v) => { if (routed) onViewChange(v); else setViewLocal(v); };
-  // A locked tenant can hold no view but "list". Enforced here rather than only at the
-  // toggle: `view` also survives in this component across a refresh of the entitlement, and
-  // a builder who was mid-board when their subscription lapsed must not keep the board.
-  const shownView = crmUnlocked ? view : "list";
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null }) {
+  // THE DESIGN LIST (Carolyn 2026-10-12): "instead of list is designs". This was the Pipeline
+  // page's List view, with a List | Pipeline toggle beside it that flipped the same card to the
+  // board. The page is now one tab of the Contacts hub (ContactsHub, top of this file), and the
+  // boards are tabs of their own beside it, one per pipeline, so the toggle and the board it drew
+  // are gone from here and this is the list only. It never needs the CRM — Carolyn 2026-08-29:
+  // "they only get the list view" — which is why it is the tab an account without the CRM opens
+  // on (C14). Which tab opens, and the person's own choice of it, is the hub's business now.
   // Cache-seeded so returning to Designs paints at once and refreshes behind it (see
   // ssTabCache in 01-core, and LeadsTable/Orders which already do this). Operator view-as
   // reads through a service-role path and is left uncached, same rule as Contacts.
@@ -196,14 +600,6 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // has ever stocked: a lot with hundreds of buildings was read in full to label the handful
   // of designs that came from one. Nothing here is a filter — an id with no serial yet just
   // renders the chip without a number, exactly as it does before this resolves.
-  // EXPECTED CLOSE DATE, edited from the card (Carolyn, 2026-09-07: "editable straight from
-  // the card"). `closeEdit` is the short_code whose date input is open — one at a time, so a
-  // stray click elsewhere on the board closes it rather than leaving several open.
-  //
-  // Operator view-as is READ-ONLY here: the write goes through portal-settings under the
-  // tenant's own JWT, and an operator's save would be attributed to the wrong tenant.
-  const [closeEdit, setCloseEdit] = useState(null);
-  const canEditClose = !viewingLabel && !fetchDesigns;
   const [unitSerials, setUnitSerials] = useState({});
   const unitIdKey = useMemo(() => {
     const ids = new Set();
@@ -327,34 +723,6 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // so the list refetches without a manual Refresh click.
   useEffect(() => { load(); }, [load, refreshKey]);
 
-  // Save an expected close date from the board (migration 206).
-  //
-  // Through portal-settings, NOT sb.from("designs").update(): the board READS designs over
-  // direct PostgREST, but the restrictive policies from 154/193 are select-only — there is no
-  // update policy on that table for a tenant, and there should not be one. Writes go through
-  // an action that resolves the tenant server-side.
-  //
-  // OPTIMISTIC, and deliberately so: this is one date on a card someone is scanning, and a
-  // full reload to show it would throw away their scroll position on a board they are reading.
-  // A failure repaints the old value and says so.
-  const saveCloseDate = useCallback(async (shortCode, value) => {
-    const iso = value || null;
-    setCloseEdit(null);
-    const prev = (rows || []).find((x) => x.short_code === shortCode)?.expected_close_date ?? null;
-    if (iso === prev) return;
-    setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: iso } : x)));
-    try {
-      const { data: r, error: e } = await sb.functions.invoke("portal-settings", {
-        body: { action: "set_expected_close", shortCode, expectedCloseDate: iso },
-      });
-      if (e) throw new Error(await fnError(e));
-      if (r && r.error) throw new Error(r.error);
-    } catch (err) {
-      setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: prev } : x)));
-      setError(err.message || "That close date did not save.");
-    }
-  }, [rows]);
-
   // Status chips. Counts are taken over ALL loaded rows (not the searched subset) so the
   // numbers don't shuffle while someone types — the chips describe the dataset, the search
   // narrows within it.
@@ -459,8 +827,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     if (err) { setInvMsg({ err: await fnError(err) }); return; }
     if (data && data.error) { setInvMsg({ err: data.error }); return; }
     setInvMsg(data && data.sent
-      ? { ok: `Quote ${r.ss_quote_number || ""} emailed to the customer.` }
-      : { err: `Quote email not sent${data && data.reason ? ` — ${data.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+      ? { ok: `Estimate ${r.ss_quote_number || ""} emailed to the customer.` }
+      : { err: `Estimate email not sent${data && data.reason ? ` — ${data.reason}` : ""}. Print the PDF or copy the customer link instead.` });
   };
 
   // Chip filter first, then facets, then the free-text search over what survives.
@@ -500,45 +868,23 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   };
   const sorted = sortRows(filtered, sortVal, sortDir);
 
-  // Paging applies to the LIST only. A board showing "30 of 400" cards is not a pipeline —
-  // the whole point of the board is seeing where everything sits at once, and a column that
-  // silently holds back its tail would be read as an empty stage.
+  // Paged. (The board this list used to flip to never was: a board showing "30 of 400" cards is
+  // not a pipeline. The boards are the hub's pipeline tabs now.)
   const [pageSize, setPageSize] = usePageSize("designs");
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, shownView]);
+  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions]);
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
   const curPage = Math.min(page, pageCount);
   const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
 
   return (
     <div style={S.card}>
+      {/* The hub's tab row names this view "Design list"; the card keeps the count it always
+          had. The List | Pipeline toggle that sat on the right is the hub's tab row now. */}
       <CardHead
         title="Designs"
         count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
-        right={(
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
-              {/* The Pipeline button stays VISIBLE when locked, with a padlock, and routes to
-                  Billing instead of switching view. Hiding it would make the thing being sold
-                  invisible to the only people who might buy it. */}
-              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => {
-                const locked = k === "pipeline" && !crmUnlocked;
-                return (
-                  <button key={k}
-                    title={locked ? "The pipeline board is part of the built-in CRM" : undefined}
-                    onClick={() => { if (!locked) { setView(k); } else if (onSeeBilling) { onSeeBilling(); } }}
-                    style={{
-                      background: shownView === k ? ACCENT : "#FFF",
-                      color: shownView === k ? "#FFF" : (locked ? "#94A3B8" : "#334155"),
-                      border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700,
-                      cursor: locked && !onSeeBilling ? "default" : "pointer", fontFamily: "inherit",
-                    }}>{locked ? `🔒 ${label}` : label}</button>
-                );
-              })}
-            </div>
-            <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
-          </div>
-        )}
+        right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       />
       {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -567,7 +913,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
           see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
       {rows === null && !error && (
-        <div style={{ overflowX: "auto" }}>
+        <div style={{ overflowX: "auto" }} data-ss-designs-view="loading">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
               {["Date", "Customer", "Contact", "Building", "Estimate #", "Status", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
@@ -588,125 +934,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
               : <>No designs are <strong>{STATUS_LABELS[statusFilter]}</strong> yet.</>}
         </p>
       )}
-      {/* ── PIPELINE BOARD ──────────────────────────────────────────────────────────
-          Columns are the stage KINDS, and a design's column is DERIVED from the status the
-          system can prove — accepted is won, invoiced is invoiced. There is no drag here on
-          purpose: dragging implies the rep sets the stage, and `designs.status` is a
-          read-only projection that sync-design-status overwrites on every list load, so a
-          dragged card would snap back and look broken. Moving a deal by hand needs the
-          local crm_stages table, which is the next increment, not this one. */}
-      {rows && filtered.length > 0 && shownView === "pipeline" && (
-        <div style={{ overflowX: "auto", paddingBottom: 4 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
-            {CRM_STAGES.map((st) => {
-              const cards = sorted.filter((r) => (CRM_STAGE_FOR_STATUS[normStatus(r.status)] || "new") === st.kind);
-              // 240px, up from 190 (Carolyn, 2026-09-07). The card carries a value, a status, a
-              // close date and two dated lines now; at 190px the labelled date row wraps —
-              // "Created Sep 2, 26 · Updated Sep 4, 26" needs ~187px of text against 172px of
-              // content box, measured.
-              //
-              // ⚠️ THE BOARD NOW SCROLLS SIDEWAYS ON A LAPTOP, and the claim that it would not
-              // (made when this width was proposed) was wrong. Six columns at 240 plus five
-              // 10px gaps is 1490px; the sidebar is 240px (.ss-side), so a 1500px screen leaves
-              // about 1260px of main. Five stages are visible and Delivered needs a scroll.
-              // That is not fixable by picking a smaller number — anything above ~195px has the
-              // same problem, so the real choice was "all six visible and cramped" or "roomy
-              // and scrolled", and Carolyn chose roomy. The board has always had overflowX
-              // auto, and every kanban she compared this to (Pipedrive) scrolls the same way.
-              return (
-                <div key={st.kind} style={{ flex: "1 0 240px", minWidth: 240, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
-                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569" }}>{st.name}</span>
-                    <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8" }}>{cards.length}</span>
-                  </div>
-                  {cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
-                  {cards.map((r) => {
-                    const c = r.contact || {}; const s = r.selections || {};
-                    const money = fmtMoneyWhole(r.total_cents);
-                    const closeIso = r.expected_close_date || null;
-                    // Local-midnight compare, not Date.parse of the bare yyyy-mm-dd (which is
-                    // parsed as UTC and reads as yesterday for anyone west of Greenwich — every
-                    // one of these builders). A date closing TODAY is not late.
-                    const overdue = !!closeIso && closeIso < new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-                    const editingClose = closeEdit === r.short_code;
-                    return (
-                      <div key={r.short_code} style={{ position: "relative", marginBottom: 6 }}>
-                      <button type="button"
-                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code, r.contact_id) : (onOpenDesign && onOpenDesign(r.short_code)))}
-                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", cursor: "pointer", fontFamily: "inherit" }}>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-                          <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {c.name || c.email || c.phone || "—"}
-                          </span>
-                          {/* NULL is "No quote yet", never $0 — 104 of the 153 designs on the
-                              platform have no estimate lines at all (drafts, browsing leads), and
-                              a $0 pipeline card is a lie about a real deal. */}
-                          <span style={{ fontSize: 13, fontWeight: money ? 800 : 600, color: money ? "#1E293B" : "#94A3B8", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
-                            {money || "No quote yet"}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {[titleCase(s.style), s.size].filter(Boolean).join(" ") || r.short_code}
-                        </div>
-                        {/* Status pill on every card (Carolyn, 2026-09-07). Note it repeats
-                            the column: CRM_STAGE_FOR_STATUS is 1:1, so every card in
-                            "Proposal Made" is Sent and every card in "Contract Signed" is
-                            Accepted. It earns its place as a TRANSLATION — the columns carry
-                            Carolyn's Pipedrive stage names, the pill carries the status the
-                            rest of the product shows — and it stops being redundant the day a
-                            second status maps into one stage. */}
-                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5, display: "flex", alignItems: "center", gap: 6 }}>
-                          <StatusPill status={r.status} small />
-                          {r.ss_quote_number || r.ghl_estimate_number ? <span>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
-                          {/* The close date is the reason this field exists: teal while there is
-                              still time, red the moment it passes. A date nobody is warned about
-                              is a date nobody acts on. Spacer only — the real control is the
-                              sibling button below, because a <button> inside a <button> is
-                              invalid HTML and swallows the card's own click. */}
-                          <span style={{ marginLeft: "auto", visibility: "hidden" }} aria-hidden="true">
-                            {closeIso ? fmtDateShort(closeIso) : "Set close"}
-                          </span>
-                        </div>
-                        <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #F1F5F9", fontSize: 10, color: "#94A3B8", display: "flex", gap: 5, fontVariantNumeric: "tabular-nums" }}>
-                          <span>Created {fmtDateShort(r.created_at)}</span>
-                          <span style={{ opacity: 0.55 }}>·</span>
-                          <span>Updated {fmtDateShort(r.updated_at)}</span>
-                        </div>
-                      </button>
-                      {/* THE CLOSE-DATE CONTROL, a SIBLING of the card button and positioned over
-                          the spacer above it. Nesting it would be invalid HTML and every click on
-                          the date would also open the customer record. */}
-                      {editingClose ? (
-                        <input type="date" autoFocus defaultValue={closeIso || ""}
-                          onClick={(e) => e.stopPropagation()}
-                          onBlur={(e) => saveCloseDate(r.short_code, e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setCloseEdit(null); }}
-                          style={{ position: "absolute", right: 7, top: 46, zIndex: 2, border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
-                      ) : (
-                        <button type="button" title={closeIso ? "Expected close — click to change" : "Set an expected close date"}
-                          onClick={(e) => { e.stopPropagation(); setCloseEdit(r.short_code); }}
-                          disabled={!canEditClose}
-                          style={{
-                            position: "absolute", right: 7, top: 47, zIndex: 2, border: "none", borderRadius: 4,
-                            padding: closeIso ? "0 4px" : "0 3px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit",
-                            cursor: canEditClose ? "pointer" : "default",
-                            background: overdue ? "#FEF2F2" : "transparent",
-                            color: closeIso ? (overdue ? "#DC2626" : "#1B7895") : "#CBD5E1",
-                          }}>
-                          {closeIso ? fmtDateShort(closeIso) : (canEditClose ? "+ close" : "—")}
-                        </button>
-                      )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-      {rows && filtered.length > 0 && shownView === "list" && (
-        <div style={{ overflowX: "auto" }}>
+      {rows && filtered.length > 0 && (
+        <div style={{ overflowX: "auto" }} data-ss-designs-view="list">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
               <SortTh label="Date" col="date" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -765,8 +994,9 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                       {/* Opens IN THE PORTAL designer — never the public page, which now
                           silently captures leads and saves drafts; staff browsing a
                           customer's design there would corrupt that activity. */}
-                      <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code)}
-                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
+                      {/* A real link (ssDesignHref): the wheel, a new tab and a reload open it too. */}
+                      <a href={ssDesignHref(r.short_code)} onClick={ssNavClick(() => onOpenDesign && onOpenDesign(r.short_code))} data-ss-open-design="1"
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10, textDecoration: "none" }}>Open</a>
                       {/* Pop-up, not a new tab — Carolyn 2026-08-26. See PdfModal. */}
                       {ssSafeUrl(r.image_url) && (
                         <button type="button" onClick={() => setPdf({ url: r.image_url, title: `Floor plan — ${c.name || r.short_code}` })}
@@ -782,8 +1012,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           // the two hand-delivery tools — most lot customers want paper, and a
                           // design with no email address never blocks.
                           r.ss_quote_number && ssSafeUrl(r.ss_quote_pdf_url) && {
-                            key: "quote", label: "Quote PDF", title: "Open the printable quote document",
-                            onClick: () => setPdf({ url: r.ss_quote_pdf_url, title: `Quote ${r.ss_quote_number} — ${c.name || r.short_code}` }),
+                            key: "quote", label: "Estimate PDF", title: "Open the printable estimate document",
+                            onClick: () => setPdf({ url: r.ss_quote_pdf_url, title: `Estimate ${r.ss_quote_number} — ${c.name || r.short_code}` }),
                           },
                           // keepOpen, because "Copied ✓" IS the confirmation and it is drawn on
                           // this very item — closing the menu on click would take the only
@@ -791,7 +1021,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           r.ss_quote_number && {
                             key: "copy", keepOpen: true,
                             label: copiedKey === r.short_code ? "Copied ✓" : "Copy link",
-                            title: "Copy the customer's link to this quote (they log in with a code to accept it)",
+                            title: "Copy the customer's link to this estimate (they log in with a code to accept it)",
                             onClick: () => copyCustomerLink(r.short_code),
                           },
                           // These two report through the invMsg banner above the table, which is
@@ -799,7 +1029,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           r.ss_quote_number && {
                             key: "resend", disabled: resendBusyKey === r.short_code,
                             label: resendBusyKey === r.short_code ? "Sending…" : "Resend email",
-                            title: "Re-send the quote email to the customer",
+                            title: "Re-send the estimate email to the customer",
                             onClick: () => resendQuoteEmail(r),
                           },
                           // Only on an ACCEPTED design — that is the one state where an invoice
@@ -836,8 +1066,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <td style={S.td}></td>
                         <td style={S.td}></td>
                         <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                          <button type="button" onClick={() => onOpenDesign && onOpenDesign(r.short_code, v.version)}
-                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10 }}>Open</button>
+                          <a href={ssDesignHref(r.short_code, v.version)} onClick={ssNavClick(() => onOpenDesign && onOpenDesign(r.short_code, v.version))} data-ss-open-design="1"
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, marginRight: 10, textDecoration: "none" }}>Open</a>
                           {ssSafeUrl(v.image_url) && (
                             <button type="button" onClick={() => setPdf({ url: v.image_url, title: `Floor plan v${v.version} — ${r.short_code}` })}
                               style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#334155", fontWeight: 700 }}>PDF</button>
@@ -875,7 +1105,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
             // CRM estimate from before the switch to StructureStudio paperwork, then a quote). A
             // server older than this page sends no `quote`, and every message then reads exactly
             // as before.
-            const quote = res.quoteNumber ? `Quote ${res.quoteNumber}` : null;
+            const quote = res.quoteNumber ? `Estimate ${res.quoteNumber}` : null;
             const quoteLine = !quote ? ""
               : res.quote === "removed" ? ` ${quote} and its PDF were deleted too.`
               : res.quote === "kept" ? ` ${quote} and its PDF were kept, because an invoice was made from it.`
@@ -912,13 +1142,16 @@ function diffVersionSelections(va, vb) {
   // selections.cladding holds the designer's stable id; show the label the customer
   // picked (mirrors D3_CLADDING in structure-studio.component.js). Unknown ids pass
   // through raw — a cryptic diff beats a silent one.
-  const CLADDING_LABELS = { lap: "Lap Siding", panel: "Panel Siding", agpanel: "AG Panel", batten: "Board & Batten" };
-  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"], ["cladding", "cladding"]];
+  const CLADDING_LABELS = { lap: "7\" LP Lap Siding", vinyl: "4.5\" Vinyl Siding", panel: "Panel Siding", agpanel: "AG Panel", batten: "Board & Batten" };
+  // The metal roof profile, a design's own pick since 2026-10-06 (the Designer's Roof options card).
+  const ROOF_PROFILE_LABELS = { agpanel: "AG Panel", standingseam: "Standing Seam" };
+  const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"], ["roofProfile", "roof profile"], ["cladding", "cladding"]];
   const parts = [];
   const push = (lbl, av, bv) => { if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`); };
   for (const [k, lbl] of KEYS) {
     let av = String(a[k] || ""), bv = String(b[k] || "");
     if (k === "cladding") { av = CLADDING_LABELS[av] || av; bv = CLADDING_LABELS[bv] || bv; }
+    if (k === "roofProfile") { av = ROOF_PROFILE_LABELS[av] || av; bv = ROOF_PROFILE_LABELS[bv] || bv; }
     push(lbl, av, bv);
   }
   const pa = (va && va.paint_colors) || {}, pb = (vb && vb.paint_colors) || {};
@@ -935,7 +1168,7 @@ function buildContactTimeline(act) {
     const vers = (act.versions || []).filter((v) => v.short_code === d.short_code); // ascending
     if (vers.length === 0) ev.push({ t: d.created_at, code: d.short_code, text: `Started ${label}` });
     vers.forEach((v, i) => {
-      if (i === 0) { ev.push({ t: v.created_at, code: d.short_code, text: `Designed ${label} and requested a quote (v1)` }); return; }
+      if (i === 0) { ev.push({ t: v.created_at, code: d.short_code, text: `Designed ${label} and requested an estimate (v1)` }); return; }
       const diff = diffVersionSelections(vers[i - 1], v); // whole rows — paint_colors sits beside selections
       ev.push({ t: v.created_at, code: d.short_code, text: `Changed the design and resubmitted (v${v.version})${diff ? " — " + diff : ""}` });
     });
@@ -983,7 +1216,72 @@ function buildContactTimeline(act) {
 // whole import would otherwise sit above every real customer. Page size and columns are
 // _shared/contactListPage.ts's, which the operator path reads with; its test fails on drift.
 const SS_CONTACT_LIST_PAGE = 500;
-const SS_CONTACT_LIST_COLS = "id, name, phone, email, source, first_seen_at, created_at";
+const SS_CONTACT_LIST_COLS = "id, name, company, phone, email, source, first_seen_at, created_at";
+// THE COMPANY (Carolyn, 2026-10-14). A lead she entered with a company was listed under the
+// person's name alone, as "Added by hand": "It should show" the company. Every row now carries the
+// company of the contact its name opens, from crm_contacts (301; editable since 308) and nowhere
+// else: a design's contact blob has no company field, so it can never put back a company that was
+// changed or cleared. A design's or a visit's contact can sit on a page not read yet, so for
+// EXACTLY those contacts (linked by a design or a visit, not on a page in hand) the list reads
+// them on its own, AFTER the first paint, and repaints when it lands. Not every contact that has a
+// company: an imported call list (Pipelines' Import CSV) gives every row one, and that read would be
+// the whole contact list again on every load. A tenant whose linked contacts are all on the first
+// page reads nothing more. Columns, chunk, lanes and bound are contactListPage.ts's
+// (contactIdsNeedingCompany, readContactCompanies: the operator path's copy); its test fails on drift.
+// The same read brings each of those contacts' name, phone and email too (2026-10-15), with or
+// without a company: a design's row shows its contact's details from the record (LeadsTable's
+// paint), and a contact on a page not read yet would otherwise keep the design's old ones until
+// "Show more" happened to bring it in, changing the row under the user's eyes.
+const SS_CONTACT_COMPANY_COLS = "id, name, company, phone, email";
+const SS_CONTACT_COMPANY_CHUNK = 100;     // ids per request: they ride in the URL
+const SS_CONTACT_COMPANY_LANES = 4;       // requests in flight at once
+const SS_CONTACT_COMPANY_MAX_IDS = 5000;  // per load, the newest rows' first; the same on both paths
+// The contacts whose row has to be read on its own: each id in `linked` (designs', then visits'
+// contact_id, newest first) that `have` (the contacts read so far) does not hold, once, in order.
+function ssContactIdsNeedingCompany(linked, have) {
+  const out = [];
+  const seen = new Set();
+  for (const id of linked) {
+    if (out.length >= SS_CONTACT_COMPANY_MAX_IDS) break;
+    if (typeof id !== "string" || !id || seen.has(id) || have.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+// Those contacts' rows, under RLS with the caller's own token: Map id -> the contact's row for every
+// id asked, null for one the read did not answer (merged, gone, or not this person's to see), so the
+// answer outranks what the last load showed. Throws on a failed chunk.
+async function ssReadContactCompanies(clientId, ids) {
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += SS_CONTACT_COMPANY_CHUNK) chunks.push(ids.slice(i, i + SS_CONTACT_COMPANY_CHUNK));
+  const out = new Map(ids.map((id) => [id, null]));
+  let next = 0;
+  let failed = false;
+  const lane = async () => {
+    while (!failed && next < chunks.length) {
+      const part = chunks[next++];
+      const { data, error } = await sb.from("crm_contacts").select(SS_CONTACT_COMPANY_COLS)
+        .eq("client_id", clientId).is("merged_into", null).in("id", part);
+      if (error) { failed = true; throw error; }
+      (data || []).forEach((c) => { if (c && out.has(c.id)) out.set(c.id, c); });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(SS_CONTACT_COMPANY_LANES, chunks.length) }, lane));
+  return out;
+}
+// What a row's Customer cell leads with, and so what sorting by Customer sorts on: the company
+// when there is one (the pipeline card's rule), else the person's name; a contact with no design
+// and no name shows its phone or email, so the one link to its record is never a dash.
+function ssContactRowHead(g) {
+  return g.company || g.name || (g.contactOnly ? (g.phone ? phoneDisplay(g.phone) : g.email) : "") || "";
+}
+// What a row showed of the contact its name opens: kept as that contact's hint for the next load
+// (LeadsTable's contactHintRef), so a row whose contact's own row is not read yet shows the same
+// company and details until that read answers, instead of dropping back to the design's.
+function ssContactRowHint(g) {
+  return { company: g.company || "", name: g.name || "", email: g.email || "", phone: g.phone || "" };
+}
 // "Show more" keeps reading pages until it has this many new rows to show, so a press never
 // comes back empty because the next page held only people who already have a design. Bounded,
 // so one press is never the whole table.
@@ -1024,8 +1322,15 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   // `fetched` how many rows the pages have answered (the next page's offset), `total` how many live
   // contacts the tenant has for this person. `lastPaint` is the last paint's inputs, so "Show more"
   // can add rows without reading the designs again. `loadGen` lets a Refresh outrank a Show more
-  // that is still in flight.
-  const contactsRef = useRef({ byId: new Map(), fetched: 0, total: 0 });
+  // that is still in flight. `offPage` is contact id -> that contact's row for the linked contacts
+  // no page carries (SS_CONTACT_COMPANY_COLS: the company, name, phone and email), or null until that
+  // read answers (or when it fails). `hint` is what the last paint showed for each contact
+  // (ssContactRowHint), used only until then, so a Refresh or a return to the list never drops a
+  // company back to the name, or the record's details back to a design's, for the moment the read takes.
+  const contactsRef = useRef({ byId: new Map(), fetched: 0, total: 0, offPage: null, hint: null });
+  // contact id -> what the last paint showed of it (the cached rows' before the first one). The
+  // builder's own list only: view-as gets those contacts with the rows, before its one paint.
+  const contactHintRef = useRef(null);
   const lastPaintRef = useRef(null);
   const loadGenRef = useRef(0);
   // The rows the last "Show more" added, so the table can go to the page they start on (below).
@@ -1065,11 +1370,27 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     cr.fetched = from + page.rows.length;
     cr.total = page.rows.length ? Math.max(page.total, cr.fetched) : cr.fetched;
   };
+  // View-as's linked contacts no page carries (get_portal's crmContactCompanies): id -> that row, or
+  // null when the answer has none (a failed read, an operator-portal from before it), so each row
+  // falls back to its own contact row, if read, and to the name and the design's details otherwise.
+  // An operator-portal from before the details came sends { id, company } for the contacts that
+  // have one: their rows take the company and keep the design's details.
+  const takeCompanies = (list) => {
+    contactsRef.current.offPage = Array.isArray(list)
+      ? new Map(list.filter((c) => c && typeof c.id === "string" && c.id).map((c) => [c.id, c]))
+      : null;
+  };
 
   const load = useCallback(async () => {
     setError(null);
     loadGenRef.current += 1;
-    contactsRef.current = { byId: new Map(), fetched: 0, total: 0 };
+    if (!fetchDesigns && !contactHintRef.current) {
+      // The first load: what the cached rows (on screen now) show.
+      const cached = ssCacheGet("rest", "contacts", clientId);
+      contactHintRef.current = new Map();
+      (Array.isArray(cached) ? cached : []).forEach((g) => { if (g && g.contactId) contactHintRef.current.set(g.contactId, ssContactRowHint(g)); });
+    }
+    contactsRef.current = { byId: new Map(), fetched: 0, total: 0, offPage: null, hint: fetchDesigns ? null : contactHintRef.current };
     setMoreErr(null); setMoreBusy(false);   // a Show more still in flight is dropped (loadGen)
     // And none can start until this load paints: the previous paint's designs are not this load's,
     // and a failed Refresh must not leave a Show more that repaints the list from before it.
@@ -1160,7 +1481,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           if (l.created_at && l.created_at < kept.firstSeen) kept.firstSeen = l.created_at;
           if (l.source === "details" && kept.source !== "details") {
             kept.source = "details";
-            kept.search = " browsing lead viewed pricing quote details";
+            kept.search = " browsing lead viewed pricing estimate details";
           }
           return;
         }
@@ -1174,7 +1495,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           name: l.name || "", email: l.email || "", phone: l.phone || "",
           count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
           latestCode: null, topStatus: "browsing",
-          search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
+          search: " browsing lead" + (l.source === "details" ? " viewed pricing estimate details" : ""),
           codes: [],
         };
         groups.set(lead.key, lead);
@@ -1190,6 +1511,90 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       rowsIn.forEach((r) => { if (r.contact_id) linked.add(r.contact_id); });
       browsingIn.forEach((l) => { if (l.contact_id) linked.add(l.contact_id); });
       const cr = contactsRef.current;
+      // WHAT THE RECORD SAYS, one field at a time, for the contact a row's name opens: the contact's
+      // own row when a page has brought it in (the newest read of it), else the read of the linked
+      // contacts no page holds (`offPage`, which answers every contact it was asked for), else, until
+      // that read answers, what the last paint showed (`hint`). null when nothing says.
+      const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
+      const known = (id, k) => {
+        if (!id) return null;
+        const row = cr.byId.get(id);
+        if (has(row, k)) return row[k];
+        const more = cr.offPage ? cr.offPage.get(id) : null;
+        if (has(more, k)) return more[k];
+        if (cr.offPage && cr.offPage.has(id)) return null;   // asked, and the read did not have it
+        const shown = cr.hint ? cr.hint.get(id) : null;
+        return has(shown, k) ? shown[k] : null;
+      };
+      const str = (v) => (typeof v === "string" ? v.trim() : "");
+      // THE COMPANY of the contact a row's name opens, from the record only: never a design's blob,
+      // which has no company. A row with no contact has none.
+      const companyOf = (id) => str(known(id, "company"));
+      // Every design and browsing row so far, by the contact id its name opens. Rows with no
+      // contact id (a design saved before its contact existed) have no company.
+      groups.forEach((g) => { g.company = companyOf(g.contactId); });
+      // THE PERSON'S DETAILS, from that same record (2026-10-15). A design row took its name, email and
+      // phone from the newest design's contact blob, so once someone edited the contact, or sent a
+      // design under another email, the list said what the record no longer did. The record wins
+      // wherever it has a value; where it has none the blob's stays. Every blob value it replaces goes
+      // into the row's search text, so a search that found the row by what it used to show still finds
+      // it. A value written differently but the same (the same phone number, an email in other capitals)
+      // keeps the blob's spelling: a row nobody edited does not move. Browsing rows too, since their
+      // name opens the same record. A contact on a page not read yet has its details from the read of
+      // those contacts, as its company does; operator view-as gets both with get_portal's first page.
+      groups.forEach((g) => {
+        if (!g.contactId) return;
+        const was = [];
+        const nm = str(known(g.contactId, "name"));
+        if (nm && nm !== str(g.name)) { if (g.name) was.push(g.name); g.name = nm; }
+        const em = str(known(g.contactId, "email"));
+        if (em && em.toLowerCase() !== str(g.email).toLowerCase()) { if (g.email) was.push(g.email); g.email = em; }
+        const ph = str(known(g.contactId, "phone"));
+        if (ph && normPhone(ph) !== normPhone(g.phone)) {
+          if (g.phone) was.push(g.phone);
+          // Shown the way a contact-only row shows its phone (and searchable that way, being a field).
+          g.phone = ph; g.phoneShown = phoneDisplay(ph);
+        }
+        if (was.length) g.search += " " + was.join(" ");
+      });
+      // ONE ROW PER RECORD (2026-10-15). Design rows are grouped by the phone or email each design was
+      // saved with, so two groups can open the same record: after a merge (192 moves the loser's designs
+      // to the winner), or after a phone edit and then a design under the new number. With the record's
+      // details on both they read as one person listed twice. So groups that share a contact id become
+      // one row, the first of them: design groups come before visits, newest design first, so it is the
+      // one whose design is the latest ("Open latest" keeps opening it). It takes the others' designs,
+      // count, earliest first seen, latest activity and highest status, fills in what it lacks, and keeps
+      // what they showed searchable. A visit whose contact already has a design row goes, as a visit
+      // matched by phone or email always has; two visits to one contact become one, as two by the same
+      // phone do. Rows with no contact id are left as they are.
+      const firstFor = new Map();
+      const grew = new Set();
+      [...groups.entries()].forEach(([key, g]) => {
+        if (!g.contactId) return;
+        const top = firstFor.get(g.contactId);
+        if (!top) { firstFor.set(g.contactId, g); return; }
+        groups.delete(key);
+        if (g.browsing && !top.browsing) return;
+        if (!top.name && g.name) top.name = g.name;
+        if (!top.email && g.email) top.email = g.email;
+        if (!top.phone && g.phone) { top.phone = g.phone; if (g.phoneShown) top.phoneShown = g.phoneShown; }
+        top.search += " " + [g.key, g.name, g.email, g.phone, g.phoneShown].filter(Boolean).join(" ") + g.search;
+        if (g.firstSeen < top.firstSeen) top.firstSeen = g.firstSeen;
+        if (g.lastActivity > top.lastActivity) top.lastActivity = g.lastActivity;
+        if (top.browsing) {
+          if (g.source === "details" && top.source !== "details") { top.source = "details"; top.search += " viewed pricing estimate details"; }
+          return;
+        }
+        top.count += g.count;
+        top.codes = top.codes.concat(g.codes);
+        if (STATUS_RANK[g.topStatus] > STATUS_RANK[top.topStatus]) top.topStatus = g.topStatus;
+        grew.add(top);
+      });
+      // A grown row's codes newest first, as one group's always are (contact_activity reads the first 50).
+      if (grew.size) {
+        const at = new Map(rowsIn.map((r, i) => [r.short_code, i]));
+        grew.forEach((g) => g.codes.sort((a, b) => at.get(a) - at.get(b)));
+      }
       cr.byId.forEach((c) => {
         if (linked.has(c.id)) return;
         // First seen for both dates: the import's own run time is not activity (see the header).
@@ -1197,7 +1602,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         groups.set("contact-" + c.id, {
           key: "contact-" + c.id, contactOnly: true, source: c.source || "",
           contactId: c.id,
-          name: c.name || "", email: c.email || "", phone: c.phone || "",
+          name: c.name || "", company: companyOf(c.id), email: c.email || "", phone: c.phone || "",
           count: 0, firstSeen: seen, lastActivity: seen,
           latestCode: null, topStatus: "contact",
           search: " " + ssContactSourceLabel(c.source) + " no design yet",
@@ -1216,6 +1621,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       setMoreContacts(left ? Math.max(0, cr.total - cr.byId.size - linkedUnread) : 0);
       lastPaintRef.current = { linked, repaint: () => paint(rowsIn, browsingIn) };
       const out = [...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0));
+      if (!fetchDesigns) {
+        const hint = new Map();
+        out.forEach((g) => { if (g.contactId) hint.set(g.contactId, ssContactRowHint(g)); });
+        contactHintRef.current = hint;
+      }
       setRows(out);
       // Cache the GROUPED result, not the raw reads: regrouping is the expensive part of
       // this function and the shape the table renders from. Operator view-as is excluded —
@@ -1229,6 +1639,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       try {
         const res = await fetchDesigns({ withContacts: true }); list = (res.designs || []).filter(notInventoryLead); browsing = res.capturedLeads || [];
         takeContacts(0, { rows: res.crmContacts || [], total: res.crmContactsTotal || 0 });
+        // The contacts a design or a visit links to that the page does not carry come with the first
+        // page too, with their companies and details (operator-portal reads them the way the
+        // builder's list does, below). An operator-portal without them answers none, and those rows
+        // show names and the designs' details, as they did before.
+        takeCompanies(res.crmContactCompanies);
       }
       catch (e) { setError(e.message || String(e)); setRows([]); return; }
     } else {
@@ -1265,6 +1680,22 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     if (ccRes) takeContacts(0, ccRes);
     // PAINT NOW, on the cached statuses. Everything below only ever improves them.
     paint(list, browsing);
+    // THE CONTACTS a design or a visit links to that the page does not hold, their companies and
+    // details (SS_CONTACT_COMPANY_COLS), read now the rows are on screen and painted in when they
+    // land, over the newest paint (the GoHighLevel sync below may have repainted meanwhile). Nothing
+    // to read when every linked contact is on the page. Additive: if it fails, those rows keep what
+    // the last paint showed for them, and the name and the designs' details otherwise.
+    const need = ssContactIdsNeedingCompany(
+      [...list.map((r) => r.contact_id), ...browsing.map((l) => l.contact_id)], contactsRef.current.byId);
+    if (need.length) {
+      const gen = loadGenRef.current;
+      const cr = contactsRef.current;
+      ssReadContactCompanies(clientId, need).then((rowsRead) => {
+        if (gen !== loadGenRef.current) return;   // a Refresh started meanwhile; its read wins
+        cr.offPage = rowsRead;
+        if (lastPaintRef.current) lastPaintRef.current.repaint();
+      }, () => {});
+    }
     // Freshen fulfillment status from GHL (read-only projection); non-fatal. The rows
     // are already on screen by now — this only repaints them, at the tail below.
     if (list.length > 0) {
@@ -1350,7 +1781,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
   const sortVal = (g) => {
     switch (sortKey) {
-      case "customer":     return g.name;
+      case "customer":     return ssContactRowHead(g);   // what the cell shows: the company first
       case "contact":      return g.email || g.phone;
       case "designs":      return g.count;
       case "firstSeen":    return g.firstSeen;
@@ -1454,7 +1885,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           </FilterBar>
           <div style={{ ...FCTRL, flex: "1 1 320px", minWidth: 260 }}>
             <span style={FLBL_SPACER} aria-hidden="true">Search</span>
-            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />
+            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — company, name, email, phone, status…" />
           </div>
         </div>
       )}
@@ -1521,29 +1952,45 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                           A contact with no design and no name (an import, a saved number) shows
                           its phone or email instead, so the one link to its record is not a dash.
                           The phone is crm_contacts' +1 form, so it is written the way people read
-                          one, as the rest of the portal writes it. */}
-                      {g.contactId && onOpenRecord ? (
-                        <button type="button" onClick={() => onOpenRecord(g.contactId)}
-                          title="Open this contact's record"
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left" }}>
-                          {g.name || (g.contactOnly && (g.phone ? phoneDisplay(g.phone) : g.email)) || "—"}
-                        </button>
-                      ) : (g.name || "—")}
+                          one, as the rest of the portal writes it.
+                          THE COMPANY LEADS when the contact has one (Carolyn, 2026-10-14), with the
+                          person under it, as on a pipeline card (ssContactRowHead). The second line
+                          is the name only: the Contact column already carries the phone and email.
+                          It sits INSIDE the link, so it starts where the company starts wherever the
+                          link wraps (on a phone the link drops below the dot), and the link is
+                          top-aligned so the dot stays level with the company, not the name.
+                          A row with no company renders exactly as it did before. */}
+                      {(() => {
+                        const person = g.company && g.name
+                          ? <span data-ss-contact-person="" style={{ display: "block", marginTop: 1, fontSize: 12, fontWeight: 400, color: "#64748B" }}>{g.name}</span>
+                          : null;
+                        if (g.contactId && onOpenRecord) return (
+                          <button type="button" onClick={() => onOpenRecord(g.contactId)}
+                            title="Open this contact's record"
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left", ...(person ? { verticalAlign: "top" } : null) }}>
+                            {ssContactRowHead(g) || "—"}
+                            {person}
+                          </button>
+                        );
+                        return person
+                          ? <span style={{ display: "inline-block", verticalAlign: "top" }}>{ssContactRowHead(g)}{person}</span>
+                          : (ssContactRowHead(g) || "—");
+                      })()}
                     </td>
                     <td style={S.td}>
                       <div>{g.email || ""}</div>
-                      <div style={{ color: "#64748B", fontSize: 12 }}>{g.contactOnly && g.phone ? phoneDisplay(g.phone) : (g.phone || "")}</div>
+                      <div style={{ color: "#64748B", fontSize: 12 }}>{g.phoneShown || (g.contactOnly && g.phone ? phoneDisplay(g.phone) : (g.phone || ""))}</div>
                     </td>
                     <td style={S.td}>{g.browsing || g.contactOnly ? "—" : g.count}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.firstSeen)}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.lastActivity)}</td>
-                    <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed quote details" : g.browsing ? "Entered name and phone at the designer gate" : g.contactOnly ? "In your contacts, with no design or designer visit yet. Click their name to open their record." : undefined}
+                    <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed estimate details" : g.browsing ? "Entered name and phone at the designer gate" : g.contactOnly ? "In your contacts, with no design or designer visit yet. Click their name to open their record." : undefined}
                       style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{g.browsing ? (g.source === "details" ? "Browsing · saw pricing" : "Browsing") : g.contactOnly ? ssContactSourceLabel(g.source) : STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       {(g.browsing || g.contactOnly) && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
                       {/* In-portal open — same rule as DesignsTable: never the public page. */}
-                      {!g.browsing && !g.contactOnly && <button type="button" onClick={() => onOpenDesign && onOpenDesign(g.latestCode)}
-                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Open latest</button>}
+                      {!g.browsing && !g.contactOnly && <a href={ssDesignHref(g.latestCode)} onClick={ssNavClick(() => onOpenDesign && onOpenDesign(g.latestCode))} data-ss-open-design="1"
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>}
                       {/* The "Open record" button that stood here is gone: the customer NAME
                           is the link now, which is what Carolyn demonstrated. "Details" stays
                           as the quick inline peek that does not leave the list. */}
@@ -1607,7 +2054,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                           return (
                             <div style={{ padding: "6px 4px" }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>
-                                Activity — {g.name || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
+                                Activity — {g.name || g.company || "contact"} · {g.count} design{g.count > 1 ? "s" : ""}
                               </div>
                               {/* An invoice that exists in the CRM but was never emailed —
                                   otherwise this design just looks Invoiced. Send invoice now
@@ -1685,7 +2132,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
 // or a call from them nobody picked up). Replying is what clears it, so there is no read/unread
 // state to keep.
 //
-// The filter lives in the URL (/portal/conversations/email|texts|calls), so the browser's Back
+// The filter lives in the URL (/conversations/email|texts|calls), so the browser's Back
 // from a record lands on the same filter. Mine/Everyone is remembered for the tab's session.
 //
 // Texts and Calls are offered the way the record's History chips are (CRM_CHIPS `when`): Texts
@@ -2046,6 +2493,12 @@ const CRM_SECTIONS = [
   // ── THE RECIPROCAL EMBED. This pair IS Carolyn's "here is the contact, and the deal is
   // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
   // its Person. Same shell, mirrored.
+  //
+  // ONE Deals card since 2026-10-12. Migration 301 added a second "Sales pipelines" card for the
+  // pipeline cards, and Carolyn: "I'm still confused about this deals and sales pipeline ... So
+  // this also has to be merged." Each design row now carries its card's status, stage and
+  // pipeline, and a deal with no design is a row here too (crmDealRows). A saved card order that
+  // still names "salesPipelines" is harmless: crmOrderSections skips keys this build doesn't draw.
   { key: "deals", title: "Deals", kinds: ["contact"], when: (c) => c.kind === "contact" },
   // ORDERS. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a contact, I feel like
   // you should see the deal. You should see the orders." Deals were already here; orders
@@ -2059,7 +2512,7 @@ const CRM_SECTIONS = [
   // `note` is the line My Profile shows under it, so nobody arranging their cards wonders why
   // this one is missing from most records.
   { key: "tax", title: "Sales tax", kinds: ["contact", "design"], when: (c) => !!crmSsQuoteDesign(c),
-    note: "Shows for a deal with a StructureStudio quote" },
+    note: "Shows for a deal with a StructureStudio estimate" },
   // BUILD, DELIVERY, REPAIRS. Carolyn, 2026-08-28 @37:48: "whether you're in a contact or
   // whether you're in a deal, it doesn't matter, you want to be able to see the contact
   // details, the deals, the orders, the build schedule, the delivery schedule ... Repairs
@@ -2155,15 +2608,29 @@ const CRM_TABS = [
   // leaves Email disabled, so leading with "pick a deal" would be a lie by omission and send
   // the reader off doing something that changes nothing. Ordered this way the hint always
   // names a reason that is STILL TRUE once the reader has acted on every reason above it.
-  { key: "activity", label: "Activity", enabled: (c) => c.canEdit && !c.needsPick,
+  { key: "activity", label: "Create Task", enabled: (c) => c.canEdit && !c.needsPick,
     hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
       : !c.canEdit ? "You don't have permission to log activities."
       : CRM_PICK_HINT("activity")) },
-  { key: "note", label: "Notes", enabled: (c) => c.canEdit && !c.needsPick,
+  { key: "note", label: "Write Note", enabled: (c) => c.canEdit && !c.needsPick,
     hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
       : !c.canEdit ? "You don't have permission to add notes."
       : CRM_PICK_HINT("note")) },
-  { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
+  // MEETING SCHEDULER — BUILT NOW (migration 326, 2026-10-22), so it no longer says "arrives
+  // with the calendar integration". Booking here goes through the same book_meeting() path the
+  // public page uses, which is what keeps Carolyn's 2026-08-26 rule true: this is the ONLY way
+  // a meeting is created, which is why the Activity composer has no "meeting" chip.
+  //
+  // Needs its own area (`meetings`), not contacts:edit — a rep may work a customer without
+  // having a calendar, and an office manager may run the diary without being the one who
+  // books. `needsPick` is deliberately NOT a condition: a meeting is with the PERSON, not
+  // about one quote, the same reasoning the Call tab's comment gives. A deal that IS picked
+  // gets filed against the booking anyway (shortCode), so nothing is lost by not requiring one.
+  { key: "scheduler", label: "Schedule Meeting",
+    enabled: (c) => c.crmUnlocked && !!c.canMeet && !!(c.contact && c.contact.id),
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
+      : !c.canMeet ? "You don't have permission to book meetings."
+      : "This contact needs saving before a meeting can be booked against them.") },
   // CALL — My Synergy Phone (2026-09-29). Built now, so it no longer says "arrives with the phone
   // integration". Pressing it hands the number to the My Synergy Phone extension on this computer (or
   // the app, on a phone) and the call runs THERE; this page never moves. See startCall.
@@ -2177,7 +2644,7 @@ const CRM_TABS = [
   // Hint order: view-as first (nothing on the page can fix it), then permission, then the
   // account's switch, then the contact's own data — each still true once the ones above it
   // are acted on.
-  { key: "call", label: "Call",
+  { key: "call", label: "Make Call",
     enabled: (c) => !c.viewing && !!c.canCall && !!(c.phone && c.phone.on) && !!(c.contact && c.contact.phone),
     hint: (c) => (c.viewing
       ? CRM_VIEWING_CALL_HINT
@@ -2218,7 +2685,7 @@ const CRM_TABS = [
   // fallback for everyone else. Its gates are unchanged — the extension's send runs the same
   // registration, consent and STOP rules — except the operator view-as, which now greys it.
   {
-    key: "sms", label: "SMS",
+    key: "sms", label: "Send SMS",
     enabled: (c) => !c.viewing && c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready) && !c.needsPick,
     hint: (c) => (c.viewing
       ? CRM_VIEWING_TEXT_HINT
@@ -2247,7 +2714,7 @@ const CRM_TABS = [
   // email address" while the address sat rendered directly above it. A tooltip that blames
   // the data for a permissions problem sends someone off editing a contact that is fine.
   {
-    key: "email", label: "Email",
+    key: "email", label: "Send Email",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.email) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
@@ -2284,7 +2751,7 @@ const CRM_TABS = [
   // promise, and this is it kept. Only a contact record has somewhere to put a file: a
   // design's uploads belong to the person, not to one of their quotes.
   {
-    key: "files", label: "Uploads",
+    key: "files", label: "Upload File",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.id) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
@@ -2322,11 +2789,17 @@ const CRM_CHIPS = [
   // Texts, both directions, one chip — the Emails-chip precedent, and for the same reason.
   // Shown only once the account can actually text: a permanently empty filter teaches
   // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
-  { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
+  { key: "messages", label: "SMS", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
   // Calls, voicemails and missed calls — My Synergy Phone. Mirrors CRM_FEED_TYPES.call in
   // _shared/crmFeed.ts; keep the two identical. Shown once the account can call, OR once this
   // record has any call on it, so switching calling off later never hides history that exists.
   { key: "calls", label: "Calls", types: ["call", "call_missed", "voicemail"], when: (c) => !!(c.phone && c.phone.on) || !!c.hasCalls },
+  // MEETINGS — booked, cancelled, and how it went (Carolyn 2026-10-26, "Add Meetings").
+  // What is still ahead of you is Planned; this is the same meeting's history. Mirrors
+  // CRM_FEED_TYPES.meeting in _shared/crmFeed.ts; keep the two identical. No `when`: unlike
+  // SMS and Calls this needs nothing switched on for the account, and the chip prints its
+  // own (0) when a customer has never been booked.
+  { key: "meetings", label: "Meetings", types: ["meeting_booked", "meeting_cancelled", "meeting_done"] },
   // Where the documents live now — ours AND theirs, one list, because "I don't want it all
   // mixed together" was about the two NAMES being interchangeable, not about them being far
   // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.
@@ -2466,6 +2939,21 @@ function CrmOwnerPicker({ edit, setEdit, team }) {
     </>
   );
 }
+// THE COMPANY (migration 308). Carolyn, 2026-10-14 @11:08: "+ Add lead" asks for a company
+// name, "but there's no places … for me to edit that company name later, because I got the
+// company name wrong." One component for the same two editors CrmAddressFields serves. "" is a
+// real answer (the server clears the field), like every input here.
+function CrmCompanyField({ edit, setEdit, label = "Company" }) {
+  return (
+    <>
+      {/* The label is the caller's since migration 330: a builder may rename this field, and both
+          editors read the same override through CrmRecord's cLbl. */}
+      <span style={S.lbl}>{label}</span>
+      <input style={{ ...S.input, marginBottom: 7 }} value={edit.company || ""} placeholder="Acme Sheds" maxLength={200}
+        data-ss-edit-company="" onChange={(e) => setEdit((p) => ({ ...p, company: e.target.value }))} />
+    </>
+  );
+}
 // Titles are stored as slugs (`sales_rep`); this is the only place the record page shows one.
 function ssTitleLabel(t) {
   return String(t || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -2483,6 +2971,286 @@ function CrmEditHead({ children, hint }) {
       <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#475569", whiteSpace: "nowrap" }}>{children}</span>
       {hint && <span style={{ fontSize: 11, color: "#94A3B8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hint}</span>}
     </div>
+  );
+}
+
+// ── A BUILDER'S OWN FIELDS, ON THE RECORD (migration 330, Carolyn 2026-10-22) ───────────
+// Settings → Customer Hub → Fields defines them; this is where they are filled in. `crm_record`
+// sends the live definitions with the record (`data.fields`), already stripped of the hidden ones
+// and with every relabel of OURS folded in, so nothing here knows which columns exist or what the
+// override rule is — the Fields tab and the card cannot drift apart because they read one answer.
+//
+// ⚠️ ABSENT IS NOT EMPTY, the same distinction the three fulfilment cards draw a few hundred lines
+// down: `data.fields` is undefined on a server that predates this (and on a failed read, where it
+// sends fieldsError instead), and an EMPTY array means this builder genuinely has no fields of
+// their own. The first draws nothing; the second also draws nothing, but for a different reason,
+// and neither may draw an empty "Your fields" heading.
+const ssCrmDefs = (data, entity) => {
+  const f = data && data.fields;
+  const list = f && f[entity];
+  return Array.isArray(list) ? list : [];
+};
+// One of OUR labels, as this builder renamed it, else ours. `key` is the catalogue's id, which for
+// every field here is the column name (_shared/crmFields.ts says so, and says why).
+const ssCrmLabel = (data, entity, key, dflt) => {
+  const f = data && data.fields;
+  const o = f && f[entity === "contact" ? "contactLabels" : "dealLabels"];
+  const row = o && o[key];
+  return row && String(row.label || "").trim() ? String(row.label) : dflt;
+};
+// Did this builder take one of OURS off the card? A field nobody has touched has no row at all.
+const ssCrmOff = (data, entity, key) => {
+  const f = data && data.fields;
+  const o = f && f[entity === "contact" ? "contactLabels" : "dealLabels"];
+  const row = o && o[key];
+  return !!(row && row.hidden);
+};
+// The two currencies, and nothing else (migration 332, Carolyn 2026-10-23: "Only USD and Canada
+// dollar"). The CODE rides with the symbol because both print "$".
+const SS_CRM_CUR = { USD: "US$", CAD: "CA$" };
+// A number, as its field says to show it. Both settings are DISPLAY ONLY — the jsonb holds a plain
+// number — so this is the only place the comma and the currency exist, and changing either never
+// touches a stored value. `thousands` is true unless it is exactly false, so a field stored before
+// 332 reads 100,000 rather than changing under a card somebody is looking at.
+function ssCrmNumberText(field, raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return String(raw);          // a value typed before a retype to number
+  const body = field.thousands === false ? String(n) : n.toLocaleString("en-US");
+  const pre = SS_CRM_CUR[String(field.currency || "")] || "";
+  return pre ? pre + " " + body : body;
+}
+// What one stored value reads as. A missing key, a JSON null and "" are all the same thing — empty
+// — which is what makes "clear this field" work without a second path to strip keys out (330).
+function ssCrmValueText(field, raw) {
+  if (raw === null || raw === undefined || raw === "") return "";
+  if (field.type === "checkbox") return raw === true || raw === "true" ? "Yes" : "No";
+  if (field.type === "date") return fmtDate(String(raw));
+  if (field.type === "number") return ssCrmNumberText(field, raw);
+  return String(raw);
+}
+
+// ── A STORED LINK IS UNTRUSTED, EVERY TIME IT IS DRAWN ──────────────────────────────────
+// A `url` field's value goes into an `<a href>` in every team member's browser, and `javascript:`,
+// `data:` and `vbscript:` hrefs all EXECUTE. portal-settings already refuses anything but http and
+// https on the way in (_shared/crmFields.ts cleanUrl) — this is the second gate, on the way out,
+// because a value stored before that check existed, written by a future import, or inserted by
+// hand during support never passed it. Returns null and the value is drawn as plain text.
+//
+// ⛔ Do not "simplify" this to `href={value}`. One of these two checks is not enough; the whole
+// point is that neither trusts the other.
+function ssCrmHref(field, raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (field.type === "phone") return "tel:" + s.replace(/[^\d+]/g, "");
+  if (field.type !== "url") return null;
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : "https://" + s);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.toString() : null;
+  } catch (_e) { return null; }
+}
+
+// One stored value, drawn: a link where the field is a link, plain text otherwise. `rel` is
+// load-bearing on an external link — without noopener the opened page can reach back through
+// window.opener, and the href came from a text box.
+function CrmCustomValue({ field, value }) {
+  const text = ssCrmValueText(field, value);
+  if (!text) return <span style={{ color: "#94A3B8" }}>—</span>;
+  const href = ssCrmHref(field, value);
+  if (!href) return <>{text}</>;
+  return (
+    <a href={href} target={field.type === "phone" ? undefined : "_blank"} rel="noopener noreferrer"
+      style={{ color: ACCENT, fontWeight: 600, wordBreak: "break-all" }}>{text}</a>
+  );
+}
+
+// ── THE GOOGLE MAPS LINK (Carolyn 2026-10-23) ───────────────────────────────────────────
+// "a baked in google maps field that automatically creates a hyperlink to google maps using the
+// address fields created." BUILT, never stored: it reads the four address columns every time the
+// card draws, so it can never disagree with the address and editing one needs no second save.
+//
+// ⚠️ The STREET is the test, not "any part filled in": a contact with only a state would otherwise
+// get a link to the middle of Missouri, which reads as an address we hold. Mirrors mapsUrlFor in
+// _shared/crmFields.ts — the two must agree, and the server's copy is the one a future export or
+// email would use.
+const SS_CRM_MAPS = {
+  maps_delivery: { label: "Map it", street: "street", city: "city", state: "state", zip: "zip" },
+  maps_billing: { label: "Map it", street: "billing_street", city: "billing_city", state: "billing_state", zip: "billing_zip" },
+};
+// The link for four address parts, whatever they are called where they came from. Taking the
+// PARTS and not a contact row is what lets the EDITOR build one from the boxes as they are being
+// typed — `edit` spells the billing keys `billingStreet`, the row spells them `billing_street`,
+// and neither has to know about the other.
+function ssCrmMapsFrom({ street, city, state, zip }) {
+  const s = String(street || "").trim();
+  if (!s) return "";
+  const q = [s, city, state, zip].map((v) => String(v || "").trim()).filter(Boolean).join(", ");
+  return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
+}
+function ssCrmMapsUrl(contact, which) {
+  const m = SS_CRM_MAPS[which];
+  if (!m || !contact) return "";
+  return ssCrmMapsFrom({ street: contact[m.street], city: contact[m.city], state: contact[m.state], zip: contact[m.zip] });
+}
+
+// One input, by type. Deliberately the same S.input the rest of the editor uses, so a builder's
+// own field does not look bolted on beside Name and Phone.
+function CrmCustomInput({ field, value, onChange, disabled = false }) {
+  const v = value === null || value === undefined ? "" : value;
+  if (field.type === "checkbox") {
+    return (
+      <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155", marginBottom: 7 }}>
+        <input type="checkbox" checked={v === true || v === "true"} disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)} />
+        {field.help || "Yes"}
+      </label>
+    );
+  }
+  if (field.type === "select") {
+    return (
+      <select style={{ ...S.input, marginBottom: 7 }} value={String(v)} disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}>
+        {/* "" is a real answer — the server reads it as "clear this field". */}
+        <option value="">—</option>
+        {(field.choices || []).map((c) => <option key={c} value={c}>{c}</option>)}
+      </select>
+    );
+  }
+  if (field.type === "textarea") {
+    return (
+      <textarea style={{ ...S.input, marginBottom: 7, minHeight: 64, fontFamily: "inherit" }}
+        value={String(v)} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
+    );
+  }
+  // date, number, phone, url and text. ⚠️ `type="url"` is NOT used, deliberately: it makes the
+  // browser refuse "example.com" as invalid, and that is exactly what people type — the server
+  // puts https:// in front of it (cleanUrl). `inputMode` still gets a phone its own keypad.
+  return (
+    <input style={{ ...S.input, marginBottom: 7 }}
+      type={field.type === "date" ? "date" : field.type === "number" ? "number" : field.type === "phone" ? "tel" : "text"}
+      inputMode={field.type === "url" ? "url" : undefined}
+      placeholder={field.type === "url" ? "example.com" : undefined}
+      value={String(v)} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
+  );
+}
+
+// ONE OF THE BAKED-IN MAPS LINKS, on the contact card. Nothing when the address is empty: a "Map
+// it" that opens a search for nothing is worse than no link. `which` is the catalogue's id
+// (maps_delivery / maps_billing), so the label override and Hide from the Fields tab key on the
+// same string the register shows.
+// ── THE LINK UNDER THE ADDRESS IN THE EDITOR (Carolyn 2026-10-23) ───────────────────────
+// "The map hyperlink doesn't show when I open the card ... it should be right under the address."
+// It shipped on the read-only card only, which is the one place the address ITSELF is not shown —
+// so it read as floating under the phone number, and the screen where she was actually looking at
+// an address had no link at all.
+//
+// Built from the BOXES, not from the saved row, so it follows what is being typed: paste an
+// address and the link is right there to check it before saving. Same rule as everywhere else —
+// no street, no link — so it appears as soon as the street has something in it.
+//
+// `keys` is the same CRM_ADDR_DELIVERY / CRM_ADDR_BILLING map CrmAddressFields takes, so the two
+// cannot disagree about which boxes make up which address.
+function CrmEditMapsLink({ edit, keys, label }) {
+  const url = ssCrmMapsFrom({
+    street: edit[keys.street], city: edit[keys.city], state: edit[keys.state], zip: edit[keys.zip],
+  });
+  if (!url) return null;
+  return (
+    <div style={{ margin: "-2px 0 9px" }}>
+      <a href={url} target="_blank" rel="noopener noreferrer" data-ss-maps-edit={keys.street}
+        style={{ display: "inline-flex", alignItems: "center", gap: 4, color: ACCENT, fontWeight: 700, fontSize: 12 }}>
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2"
+          strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" />
+        </svg>
+        {label}
+      </a>
+    </div>
+  );
+}
+
+function CrmMapsLink({ contact, which, label }) {
+  const url = ssCrmMapsUrl(contact, which);
+  if (!url) return null;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" data-ss-maps-link={which}
+      style={{ display: "inline-flex", alignItems: "center", gap: 4, color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" />
+      </svg>
+      {label}
+    </a>
+  );
+}
+
+// The stack of them inside the contact editor, under a heading of its own so it is obvious which
+// fields are the builder's. Nothing at all when they have none — see the absent/empty note above.
+function CrmCustomFields({ fields, values, onChange, disabled = false }) {
+  if (!fields.length) return null;
+  const get = (k) => (values && Object.prototype.hasOwnProperty.call(values, k) ? values[k] : null);
+  return (
+    <>
+      <CrmEditHead hint="from Settings → Customer Hub → Fields">Your fields</CrmEditHead>
+      {fields.map((f) => (
+        <div key={f.key}>
+          <span style={S.lbl}>
+            {f.label}
+            {f.required && <span title="Asked for every time" style={{ color: "#DC2626", marginLeft: 3 }}>*</span>}
+          </span>
+          <CrmCustomInput field={f} value={get(f.key)} disabled={disabled}
+            onChange={(v) => onChange(f.key, v)} />
+          {f.help && f.type !== "checkbox" && (
+            <div style={{ fontSize: 11, color: "#94A3B8", margin: "-4px 0 7px" }}>{f.help}</div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ONE OF THE BUILDER'S FIELDS, INSIDE THE DEAL PANEL (migration 330). Compact, to sit in the same
+// grid as Expected close and Total, and saved the way that close date is: on BLUR or Enter, never
+// on change. A date input fires change once per keystroke with whatever its segments hold so far
+// (typing "12" reports January first), and a number input does the same mid-number — so a
+// change-save stores a wrong value and then disables the box before the rest can land. Keyed on
+// the stored value so a save or a reload repaints it; Escape puts it back.
+//
+// A drop-down and a tick box commit on CHANGE, because neither has an intermediate state to get
+// wrong and waiting for a blur after picking from a list reads as nothing having happened.
+function CrmDealCustomCell({ field, value, canEdit, busy, onCommit }) {
+  const stored = value === null || value === undefined ? "" : String(value);
+  const ctl = { ...S.input, padding: "4px 7px", fontSize: 12.5, width: field.type === "textarea" ? 260 : 170, marginBottom: 0 };
+  if (!canEdit) return <CrmCustomValue field={field} value={value} />;
+  if (field.type === "checkbox") {
+    return (
+      <input type="checkbox" checked={value === true || value === "true"} disabled={busy}
+        onChange={(e) => onCommit(e.target.checked)} />
+    );
+  }
+  if (field.type === "select") {
+    return (
+      <select key={stored} style={{ ...ctl, cursor: "pointer" }} defaultValue={stored} disabled={busy}
+        onChange={(e) => onCommit(e.target.value)}>
+        <option value="">—</option>
+        {(field.choices || []).map((c) => <option key={c} value={c}>{c}</option>)}
+      </select>
+    );
+  }
+  const commitOnBlur = (e) => { if (e.target.value !== stored) onCommit(e.target.value); };
+  const keys = (e) => {
+    if (e.key === "Enter" && field.type !== "textarea") e.currentTarget.blur();
+    if (e.key === "Escape") { e.currentTarget.value = stored; e.currentTarget.blur(); }
+  };
+  if (field.type === "textarea") {
+    return (
+      <textarea key={stored} style={{ ...ctl, minHeight: 48, fontFamily: "inherit" }} defaultValue={stored}
+        disabled={busy} onBlur={commitOnBlur} onKeyDown={keys} />
+    );
+  }
+  return (
+    <input key={stored} style={ctl} defaultValue={stored} disabled={busy}
+      type={field.type === "date" ? "date" : field.type === "number" ? "number" : "text"}
+      onBlur={commitOnBlur} onKeyDown={keys} />
   );
 }
 
@@ -2566,8 +3334,14 @@ const CRM_CHEVRON_CLIP = "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% -
 // ⚠️ idx === null is NOT STARTED, which is not stage zero -- every chevron stays idle
 // rather than filling the first one, because filling it would claim the building is in it.
 // A building that has never been scheduled is not "in the first stage".
-function CrmChevronRail({ stages, idx = null, tone, title = null }) {
+//
+// `only` lights the current chevron and nothing before it. A pipeline's stages are moved by
+// hand, back as well as forward ("Nurturing - Hot", then "Gone Cold Again"), so the stages to the
+// left of a deal's are not stages it has been through. Build and delivery do run in order and
+// keep the filled-in trail.
+function CrmChevronRail({ stages, idx = null, tone, title = null, only = false }) {
   const t = tone || CRM_RAIL_TONES.sales;
+  const past = (i) => !only && i < idx;
   return (
     <div style={{ display: "flex", gap: 2, flexWrap: "wrap", flex: "1 1 auto", minWidth: 0 }}>
       {stages.map((s, i) => (
@@ -2577,7 +3351,9 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
         // The dot version carried title={s.name} for exactly that reason and the first draft
         // of this rail dropped it, keeping only the status word.
         <div key={i}
-          title={`${s.name} — ${idx == null ? (title || "Not started") : i <= idx ? "Reached" : "Not yet"}`}
+          title={only
+            ? (idx != null && i === idx ? `${s.name} — the stage it is in` : s.name)
+            : `${s.name} — ${idx == null ? (title || "Not started") : i <= idx ? "Reached" : "Not yet"}`}
           style={{
             // ⚠️ NO minWidth HERE ON PURPOSE. `min-width: 0` would let a chevron shrink past
             // its longest word, and since clipPath crops rather than scrolls, the word would
@@ -2585,8 +3361,8 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
             // min-content floor: the rail wraps to another line instead of cropping. The
             // original CrmStageBar never set it either, so this is parity, not a new rule.
             flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
-            background: idx == null ? CRM_RAIL_IDLE.bg : i < idx ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
-            color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : i < idx ? t.on : CRM_RAIL_IDLE.fg,
+            background: idx == null ? CRM_RAIL_IDLE.bg : past(i) ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
+            color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : past(i) ? t.on : CRM_RAIL_IDLE.fg,
             clipPath: CRM_CHEVRON_CLIP,
           }}>
           {s.name}
@@ -2607,22 +3383,32 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
 // so there it carries all three.
 //
 // The name is kept from the dot era so every caller and every grep still finds it.
+//
+// THE FIRST ROW'S LABEL IS THE DEAL'S PIPELINE NOW (Carolyn 2026-10-12: "Instead of this saying
+// sales ... I want this up here to say shed deals"), and a pipeline name is the builder's own
+// and can be long. A grid, so the label column is as wide as the widest label (capped, the rest
+// on hover) and every rail still starts at the same left edge and ends at the same right one.
 function CrmStageDots({ rows }) {
   const live = (rows || []).filter((r) => r && r.stages && r.stages.length);
   if (!live.length) return null;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+    <div data-ss-stage-rows="" style={{ display: "grid", gridTemplateColumns: "minmax(58px, max-content) minmax(0, 1fr)", columnGap: 8, rowGap: 4, alignItems: "center", marginBottom: 12 }}>
       {live.map((r) => (
-        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 58, flexShrink: 0, fontSize: 11, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
-          <CrmChevronRail stages={r.stages} idx={r.idx} tone={CRM_RAIL_TONES[r.key]}
+        <React.Fragment key={r.key}>
+          <span data-ss-stage-label={r.key} title={r.label}
+            style={{ maxWidth: 170, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
+          <CrmChevronRail stages={r.stages} idx={r.idx} tone={CRM_RAIL_TONES[r.key]} only={!!r.only}
             title={r.idx == null ? (r.emptyLabel || "Not started") : null} />
-        </div>
+        </React.Fragment>
       ))}
     </div>
   );
 }
 
+// The status-derived ladder above. Since 2026-10-12 it draws only when crm_record sent no
+// `pipeline` block: an account without the CRM (the free design record), a reader who may not
+// see contacts, or a server from before the pipeline bar. Everywhere else the bar is the deal's
+// own pipeline (crmPipeBarRow below).
 function CrmStageBar({ status }) {
   const at = CRM_STAGE_FOR_STATUS[normStatus(status)] || "new";
   const idx = Math.max(0, CRM_STAGES.findIndex((s) => s.kind === at));
@@ -2630,6 +3416,88 @@ function CrmStageBar({ status }) {
     <div style={{ display: "flex", marginBottom: 12 }}>
       <CrmChevronRail stages={CRM_STAGES} idx={idx} tone={CRM_RAIL_TONES.sales} />
     </div>
+  );
+}
+
+// ── THE DEAL'S PIPELINE ON THE RECORD (Carolyn, 2026-10-12) ─────────────────────────────────
+// `pipe` is crm_record's `pipeline` block: { pipelines: [{ id, name, lostReasons, stages }],
+// statuses: [{ id, name, color }], deals: [crm_deals rows] }, or undefined when the server did
+// not send one. Pure functions, so crmRecordPipeline_test can run them as they ship.
+//
+// What she asked for, and where each piece lives:
+//   * ONE "Deals" section. "I'm still confused about this deals and sales pipeline ... So this
+//     also has to be merged." The rows are this person's designs, each joined to its pipeline
+//     card by short code, plus any deal with no design (a lead added straight to a pipeline).
+//     crmDealRows.
+//   * The status ONCE, on the row's top line: "If you put the status ... up there, we don't need
+//     the status down here at all." crmPipeStatus. Read only: "the statuses are system-driven,
+//     100%".
+//   * Inside the opened deal, by "Open in designer": the stage, from THAT pipeline's stages only
+//     ("I don't like how big it is"), and moving it to another pipeline ("To move a pipeline, you
+//     can put that right here"). A deal is in one pipeline ("these cards can only be in one
+//     pipeline"), so a move is one crm_deal_move to the new pipeline's first open stage:
+//     crmPipeFirstOpen and crmPipeMoveTargets.
+//   * The top bar names the deal's pipeline and shows its own stages: "I want this up here to
+//     say shed deals with the stage that it's in." crmPipeBarRow.
+const crmPipeDealFor = (pipe, code) =>
+  (pipe && code ? (pipe.deals || []).find((d) => d.short_code === code) : null) || null;
+const crmPipeOf = (pipe, deal) =>
+  (pipe && deal ? (pipe.pipelines || []).find((p) => p.id === deal.pipeline_id) : null) || null;
+const crmPipeStatus = (pipe, deal) =>
+  (pipe && deal && deal.status_id ? (pipe.statuses || []).find((t) => t.id === deal.status_id) : null) || null;
+// The stage a deal lands in when it moves to `pipeline`: the first OPEN one, the way a new card
+// starts. A pipeline with no open stage falls back to its first won one; never a lost stage, which
+// needs a reason the reader has not given.
+function crmPipeFirstOpen(pipeline) {
+  const st = (pipeline && pipeline.stages) || [];
+  return st.find((s) => s.kind === "open") || st.find((s) => s.kind !== "lost") || null;
+}
+// The pipelines a deal can move to: every live one except its own, and only ones it could land in.
+const crmPipeMoveTargets = (pipe, deal) =>
+  ((pipe && pipe.pipelines) || []).filter((p) => (!deal || p.id !== deal.pipeline_id) && !!crmPipeFirstOpen(p));
+// The rows of the one Deals section, newest first. A design keeps its row whether or not it has
+// a pipeline card (inventory and very old designs may not); a card with no design here is a row
+// of its own, keyed by the card's id. `key` is also what picking the row stores.
+function crmDealRows(designs, pipe) {
+  const ds = designs || [];
+  const codes = new Set(ds.map((d) => d.short_code));
+  const rows = ds.map((d) => ({ key: d.short_code, design: d, deal: crmPipeDealFor(pipe, d.short_code), at: d.created_at }));
+  for (const deal of ((pipe && pipe.deals) || [])) {
+    if (deal.short_code && codes.has(deal.short_code)) continue;
+    rows.push({ key: deal.id, design: null, deal, at: deal.created_at });
+  }
+  return rows.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+}
+// The top bar's first row for the deal on screen: the pipeline's name in place of "Sales", its
+// own stages, the one the deal is in lit. Null when there is no deal or its pipeline is gone.
+function crmPipeBarRow(pipe, deal) {
+  const p = crmPipeOf(pipe, deal);
+  if (!p || !(p.stages || []).length) return null;
+  const i = p.stages.findIndex((s) => s.id === deal.stage_id);
+  return { key: "sales", label: p.name, stages: p.stages.map((s) => ({ name: s.name })), idx: i < 0 ? null : i,
+    only: true, emptyLabel: "Stage removed" };
+}
+// A deal's row after a move, painted before the server answers. The pipeline is the stage's.
+function crmPipeMoved(pipe, dealId, stage, lostReason) {
+  if (!pipe || !stage) return pipe;
+  const owner = (pipe.pipelines || []).find((p) => (p.stages || []).some((s) => s.id === stage.id));
+  return {
+    ...pipe,
+    deals: (pipe.deals || []).map((d) => (d.id !== dealId ? d : {
+      ...d, stage_id: stage.id, pipeline_id: owner ? owner.id : d.pipeline_id,
+      stage_entered_at: new Date().toISOString(), lost_reason: stage.kind === "lost" ? (lostReason || null) : null,
+    })),
+  };
+}
+// A deal's status on its Deals row: the board's own pill (SsStatusPill, a plain label since the
+// statuses became the system's on 2026-10-12), so the record and the board draw one status one
+// way. The wrapper marks it for the record's checks and keeps it from shrinking in the row.
+function CrmDealStatusPill({ status }) {
+  if (!status) return null;
+  return (
+    <span data-ss-deal-status="" style={{ flexShrink: 0, alignSelf: "center", display: "inline-flex", minWidth: 0 }}>
+      <SsStatusPill statuses={[status]} value={status.id} style={{ maxWidth: 130 }} />
+    </span>
   );
 }
 
@@ -2729,7 +3597,7 @@ async function ssTaxOutcome(res) {
 // button in the estimate and it creates the taxes for them." It shows the tax line the quote
 // carries and which rate priced it, lets whoever may edit the design move it to another sales
 // location, and offers the one deliberate, billed lookup — only when the account's lookups are
-// switched on and the reader may edit CRM Connection settings, the area that owns the company
+// switched on and the reader may edit GHL Connection settings, the area that owns the company
 // rate.
 //
 // ⚠️ IT READS THE DESIGN ITSELF, which the record page above it deliberately never does. The
@@ -2774,12 +3642,12 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         // Before migration 244 the column does not exist and PostgREST refuses the whole select.
         // The tax line still has something true to say without it.
         if (r.error && /sales_location_id/.test(String(r.error.message || ""))) r = await direct(false);
-        if (r.error) return { err: r.error.message || "Couldn't load this quote's tax." };
+        if (r.error) return { err: r.error.message || "Couldn't load this estimate's tax." };
         if (!r.data) return { err: "Not shown for your role." };
         return { row: r.data, known: Object.prototype.hasOwnProperty.call(r.data, "sales_location_id") };
       }
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: [shortCode], detail: true } });
-      if (error || !data || data.error) return { err: (data && data.error) || (error && error.message) || "Couldn't load this quote's tax." };
+      if (error || !data || data.error) return { err: (data && data.error) || (error && error.message) || "Couldn't load this estimate's tax." };
       const d = (data.designs || [])[0];
       if (!d) return { err: "Not shown for your role." };
       // No total_cents in that projection; crm_record's own read of the same row carries it.
@@ -2821,7 +3689,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   const snap = row.estimate_lines || null;
   const tax = snap && snap.tax ? snap.tax : null;
   const basisText = ssTaxBasisText(tax);
-  const quoteNo = row.ss_quote_number || "this quote";
+  const quoteNo = row.ss_quote_number || "this estimate";
   // Signed means the tax is the customer's agreement now. Both server actions refuse
   // (accepted / ordered); not offering them is the courtesy half. The status arm is the server's
   // own agreed test (sync-design-status can re-project a status with accepted_at still null). An
@@ -2854,7 +3722,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   // address or a failed send, and a customer who got the quote by text or on paper may only
   // hear the new total from the rep. `resent` means it went out by email, the only re-send there is.
   const notResentText = (d) => { const why = String(d.resendReason || "").trim(); return why ? ` ${why}` : ""; };
-  const resentText = (d) => d.resent ? " The updated quote was emailed to the customer." : notResentText(d);
+  const resentText = (d) => d.resent ? " The updated estimate was emailed to the customer." : notResentText(d);
 
   const changeLocation = async (value) => {
     if (value === "__current") return;
@@ -2874,7 +3742,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         applyTax(d, { sales_location_id: d.salesLocationId !== undefined ? d.salesLocationId : locationId });
         setLocKnown(true);
         const name = locationId ? ((locs || []).find((l) => l.id === locationId) || {}).name : null;
-        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${resentText(d)}` });
+        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — estimate total ${ssTaxMoney(d.totalCents)}` : ""}.${resentText(d)}` });
         if (onChanged) onChanged();
         break;
       }
@@ -2887,7 +3755,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
           ? `its total will change from ${ssTaxMoney(b.totalCents)} to ${ssTaxMoney(b.newTotalCents)}`
           : "its total will change";
         const qn = b.quoteNumber || row.ss_quote_number;
-        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}. If you change the sales location, ${moves}.\n\nChange it anyway?`)) break;
+        if (!window.confirm(`The customer already has ${qn ? `estimate ${qn}` : "this estimate"}. If you change the sales location, ${moves}.\n\nChange it anyway?`)) break;
         confirmResend = true;
         continue;
       }
@@ -2907,7 +3775,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
     const cost = quoted != null
       ? `Each verification is a paid lookup: this one costs ${ssTaxMoney(quoted)} from your wallet.`
       : "Avalara bills each verification.";
-    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\n${cost} If the verified rate is different, the quote's tax and total change to it.`)) return;
+    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\n${cost} If the verified rate is different, the estimate's tax and total change to it.`)) return;
     setBusy("verify"); setMsg(null);
     const flags = {};
     // The server asks for each confirmation in turn — view-as first, then a quote the customer
@@ -2927,13 +3795,13 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         const t = d.tax || {};
         const moved = d.previousTotalCents != null && d.totalCents != null && d.previousTotalCents !== d.totalCents;
         setMsg({ ok: `Verified: ${ssTaxPct(t.rate) || "the rate"} for ${String(t.jurisdiction || "").trim() || "the delivery address"}.`
-          + (moved ? ` The quote total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The quote total didn't change.")
+          + (moved ? ` The estimate total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The estimate total didn't change.")
           + resentText(d) });
         if (onChanged) onChanged();
         break;
       }
       if (out.reason === "confirm_operator" && !flags.confirmVerify) {
-        if (!window.confirm(`You are doing this AS ${viewingLabel || "this builder"}.\n\nThis runs a billed Avalara lookup on their customer's quote. Verify anyway?`)) break;
+        if (!window.confirm(`You are doing this AS ${viewingLabel || "this builder"}.\n\nThis runs a billed Avalara lookup on their customer's estimate. Verify anyway?`)) break;
         flags.confirmVerify = true;
         continue;
       }
@@ -2943,7 +3811,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         // verified rate differs. Same rules as the location confirm — "already has", no promised
         // re-send.
         const qn = b.quoteNumber || row.ss_quote_number;
-        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}. If the verified tax rate is different, its total will change.\n\nVerify anyway?`)) break;
+        if (!window.confirm(`The customer already has ${qn ? `estimate ${qn}` : "this estimate"}${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}. If the verified tax rate is different, its total will change.\n\nVerify anyway?`)) break;
         flags.confirmResend = true;
         continue;
       }
@@ -2979,14 +3847,14 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
           {/* A staff resubmit to a different state or ZIP gives up a verified rate (the carry-over
               rule). The stamp says so in `reason`; the reader should know a verify would help. */}
           {tax.basis !== "avalara" && /address changed/i.test(String(tax.reason || "")) && (
-            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 3 }}>The delivery address changed after the rate was verified, so this quote is back on the default rate.</div>
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 3 }}>The delivery address changed after the rate was verified, so this estimate is back on the default rate.</div>
           )}
         </>
       ) : (
-        <div style={{ fontSize: 12.5, color: "#64748B" }}>No sales tax on this quote.</div>
+        <div style={{ fontSize: 12.5, color: "#64748B" }}>No sales tax on this estimate.</div>
       )}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, color: "#475569", marginTop: 6, paddingTop: 6, borderTop: "1px solid #F1F5F9" }}>
-        <span>Quote total</span><strong style={{ color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(row.total_cents)}</strong>
+        <span>Estimate total</span><strong style={{ color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(row.total_cents)}</strong>
       </div>
 
       <div style={{ marginTop: 10 }}>
@@ -3004,12 +3872,12 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         ) : (
           <div style={{ fontSize: 13, color: "#1E293B" }}>{locUnknown ? "—" : (curLocName || "None")}</div>
         )}
-        {busy === "location" && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Updating the quote…</div>}
+        {busy === "location" && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Updating the estimate…</div>}
       </div>
 
       {locked && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
-          Accepted — this quote keeps the tax the customer agreed to.
+          Accepted — this estimate keeps the tax the customer agreed to.
         </div>
       )}
 
@@ -3045,8 +3913,9 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
 // number) are NOT claimed — a skeleton that overstates the answer is the thing skeletons
 // exist to avoid, and this page's shape varies more by kind than any other.
 //
-// ⚠️ THE CHEVRON RAIL IS DRAWN FOR A DESIGN ONLY. CrmStageBar renders unconditionally on a
-// deal, so a rail is certain there. On a CONTACT the rails appear only once a deal has been
+// ⚠️ THE CHEVRON RAIL IS DRAWN FOR A DESIGN ONLY. A deal record almost always has one (its
+// pipeline card's stages, or CrmStageBar's ladder where there is no pipeline block; only a
+// design with no card at all has neither). On a CONTACT the rails appear only once a deal has been
 // picked, and nothing is picked on first paint (Carolyn 2026-09-02: "you have to have one of
 // these selected for anything to show up here") — so drawing one would promise a ladder that
 // never arrives. Blocks, not an idle CrmChevronRail: an idle rail carries the real stage
@@ -3197,7 +4066,9 @@ function SsRecordingPlayer({ recordingId, durationS }) {
 // The transcript is NOT in the feed: it is read from the Worker on the press
 // (ssPhoneFetchTranscript), which applies the same visibility rule as the audio. `canListen` is
 // the voicemail player's rule: phone access, calling on, not an operator in view-as (whose
-// sign-in is not on this builder's team, so the Worker would refuse it).
+// sign-in is not on this builder's team, so the Worker would refuse it). Our side's lines show
+// the team member's name (meta.teamSpeaker, ssTranscriptNamed) instead of "Team" when the feed
+// knows the one person who was on the call.
 function SsCallRecording({ callId, meta, canListen }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(null);
@@ -3244,7 +4115,7 @@ function SsCallRecording({ callId, meta, canListen }) {
           </button>
           {open && text && (
             <div data-ss-transcript style={{ fontSize: 12.5, color: "#1E293B", whiteSpace: "pre-wrap", lineHeight: 1.5, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", marginTop: 4, maxHeight: 320, overflowY: "auto" }}>
-              {text}
+              {ssTranscriptNamed(text, meta.teamSpeaker)}
             </div>
           )}
           {open && err && <div style={{ fontSize: 12, color: "#B91C1C", marginTop: 4 }}>{err}</div>}
@@ -3387,15 +4258,466 @@ function CrmQuickSendPicker({ channel, quick, onOpen, onInsert, fill }) {
 // targetClientId and app_operators for free, and there is no second code path to keep true.
 // (The Sales tax card it renders is the one exception, and carries its own reasons and its own
 // view-as path — see QuoteSalesTaxCard.)
+// ── The Meeting scheduler tab (migration 326, Carolyn 2026-10-22) ────────────────────────
+// The slot CRM_TABS reserved in August, filled in. Two halves, in the order Carolyn set for
+// this whole page on 2026-08-26: "the top part is about things to do. The bottom part is
+// about history" — so booking is up top and the meetings this customer has had are below it.
+//
+// ⚠️ BOOKING HERE TAKES THE SAME PATH AS THE PUBLIC PAGE. portal-meetings' `book` calls
+// book_meeting() exactly as book-public does, buffers and advisory lock included. That is
+// what makes "two ways to book the same thing is how a calendar drifts out of sync with
+// itself" survive having an internal booker at all: there are two DOORS, and one path.
+//
+// Why a rep books from here rather than sending a link: they are on the phone with the
+// customer. Sending a link and hoping is the thing a CRM is supposed to replace.
+// The BOOKING form. The customer's meetings used to be listed here too; they belong to
+// Planned now (ContactPlannedMeetings), because this panel only renders under its own tab
+// and a meeting is a planned thing whichever tab you are looking at (Carolyn 2026-10-26).
+// `onBooked` is how this says a new one exists: the list is somebody else's state now.
+function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked = null }) {
+  const [over, setOver] = useState(null);
+  const [hostId, setHostId] = useState(null);
+  const [typeId, setTypeId] = useState(null);
+  const [avail, setAvail] = useState(null);
+  const [slot, setSlot] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [notes, setNotes] = useState("");
+
+  const call = useCallback(async (action, body) => {
+    const { data, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !data || data.error) throw new Error((data && data.error) || (error ? await fnError(error) : "That didn't work."));
+    return data;
+  }, []);
+
+  // ── What can be booked, and by whom ─────────────────────────────────────────────────────
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const d = await call("overview", {});
+        if (!live) return;
+        setOver(d);
+        // Me first — a rep booking their own time is the common case. An operator in view-as
+        // has no host row on this tenant, so they fall through to the team's first bookable
+        // person, which is the only sensible default for somebody helping over the phone.
+        const candidates = d.myHost ? [d.myHost].concat(d.team || []) : (d.team || []);
+        const first = candidates.find((h) => h.accepting && (h.typeIds || []).length) || candidates[0] || null;
+        if (first) {
+          setHostId(first.id);
+          setTypeId((first.typeIds || [])[0] || null);
+        }
+      } catch (e) { if (live) setMsg({ err: e.message }); }
+    })();
+    return () => { live = false; };
+  }, [call, clientId]);
+
+  // ── Open times ──────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let live = true;
+    if (!hostId || !typeId) { setAvail(null); return undefined; }
+    setAvail(null);
+    setSlot(null);
+    (async () => {
+      try {
+        const today = new Date();
+        const to = new Date(today.getTime() + 21 * 86400000);
+        const d = await call("availability", {
+          hostId, typeId,
+          fromDate: today.toISOString().slice(0, 10),
+          toDate: to.toISOString().slice(0, 10),
+        });
+        if (!live) return;
+        setAvail(d);
+      } catch (e) { if (live) { setMsg({ err: e.message }); setAvail({ days: [] }); } }
+    })();
+    return () => { live = false; };
+  }, [call, hostId, typeId]);
+
+  if (msg && msg.err && !over) return <div style={S.err}>{msg.err}</div>;
+  if (!over) return <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading the scheduler…</div>;
+
+  const hosts = over.myHost ? [over.myHost].concat((over.team || []).filter((h) => h.id !== over.myHost.id)) : (over.team || []);
+  const host = hosts.find((h) => h.id === hostId) || null;
+  const offered = host ? (over.types || []).filter((t) => t.active && (host.typeIds || []).indexOf(t.id) !== -1) : [];
+  const type = offered.find((t) => t.id === typeId) || null;
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+
+  // The first handful of open times, flattened across days — a rep on the phone wants "how
+  // about Thursday at 2?", not a month to navigate. The full calendar is the customer's job
+  // on the public page.
+  const flat = [];
+  for (const d of ((avail && avail.days) || [])) {
+    for (const s of d.slots) {
+      if (flat.length < 12) flat.push({ date: d.date, startsAt: s.startsAt });
+    }
+    if (flat.length >= 12) break;
+  }
+
+  const tz = (avail && avail.timeZone) || (host && host.timeZone) || "UTC";
+  const fmtT = (iso) => {
+    try { return new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(iso)); }
+    catch (_e) { return iso; }
+  };
+  const fmtDay = (day) => {
+    const p = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+    if (!p) return day;
+    try {
+      return new Intl.DateTimeFormat(undefined, { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" })
+        .format(new Date(Date.UTC(+p[1], +p[2] - 1, +p[3])));
+    } catch (_e) { return day; }
+  };
+  const fmtWhen = (iso, zone) => {
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        timeZone: zone || tz, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit",
+      }).format(new Date(iso));
+    } catch (_e) { return iso; }
+  };
+
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+
+  const book = () => run(async () => {
+    if (!slot || !host || !type) return;
+    try {
+      await call("book", {
+        hostId: host.id, typeId: type.id, startsAt: slot.startsAt,
+        contactId: contact.id,
+        // The deal the record has picked, when it has one. A meeting is with the person, so a
+        // pick is never required — but when there is one, file against it.
+        shortCode: shortCode || undefined,
+        customerName: contact.name || contact.company || "Customer",
+        customerEmail: contact.email || undefined,
+        customerPhone: contact.phone || undefined,
+        notes: notes.trim() || undefined,
+      });
+    } catch (e) {
+      // A slot that went while the rep was talking is the one failure with a next step, so
+      // reload the times rather than leaving a dead button.
+      setSlot(null);
+      const d = await call("availability", {
+        hostId: host.id, typeId: type.id,
+        fromDate: new Date().toISOString().slice(0, 10),
+        toDate: new Date(Date.now() + 21 * 86400000).toISOString().slice(0, 10),
+      }).catch(() => null);
+      if (d) setAvail(d);
+      throw e;
+    }
+    setSlot(null);
+    setNotes("");
+    setMsg({ ok: "Booked." });
+    // It lands in Planned, which owns the list now.
+    if (onBooked) onBooked();
+  });
+
+  return (
+    <div>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && (
+        <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "8px 12px", color: "#065F46", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{msg.ok}</div>
+      )}
+
+      {/* ── BOOK ───────────────────────────────────────────────────────────────────────── */}
+      {hosts.length === 0 && (
+        <div style={{ ...sub, marginBottom: 12 }}>
+          Nobody on this account has a booking calendar yet. Set one up under{" "}
+          <strong>My Profile → My meetings</strong> and this tab can book against it.
+        </div>
+      )}
+
+      {hosts.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ flex: "1 1 170px" }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>With</span>
+              <select value={hostId || ""} onChange={(e) => { setHostId(e.target.value); const h = hosts.find((x) => x.id === e.target.value); setTypeId(((h && h.typeIds) || [])[0] || null); }}
+                style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+                {hosts.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.publicName}{over.myHost && h.id === over.myHost.id ? " (me)" : ""}{h.accepting ? "" : " — away"}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div style={{ flex: "1 1 190px" }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>Meeting type</span>
+              <select value={typeId || ""} onChange={(e) => setTypeId(e.target.value)} disabled={!offered.length}
+                style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+                {!offered.length && <option value="">Nothing offered</option>}
+                {offered.map((t) => <option key={t.id} value={t.id}>{t.name} — {t.durationMinutes} min</option>)}
+              </select>
+            </div>
+          </div>
+
+          {host && !host.accepting && (
+            <div style={{ ...sub, marginBottom: 10, color: "#92400E" }}>
+              {host.publicName} has booking switched off at the moment, so there are no times to offer.
+            </div>
+          )}
+          {host && host.accepting && !offered.length && (
+            <div style={{ ...sub, marginBottom: 10 }}>
+              {host.publicName} hasn't picked any meeting types yet — that's in their My Profile → My meetings.
+            </div>
+          )}
+
+          {host && host.accepting && !!offered.length && (
+            <>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", marginBottom: 6 }}>
+                Next times open{type ? ` · ${type.durationMinutes} min` : ""}
+                <span style={{ fontWeight: 600, color: "#94A3B8" }}>{` · ${String(tz).replace(/_/g, " ")}`}</span>
+              </div>
+              {!avail && <div style={{ ...sub, marginBottom: 10 }}>Checking the calendar…</div>}
+              {avail && !flat.length && (
+                <div style={{ ...sub, marginBottom: 10 }}>
+                  Nothing open in the next three weeks. Their hours and days off are in their My Profile → My meetings.
+                </div>
+              )}
+              {!!flat.length && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                  {flat.map((s) => {
+                    const on = slot && slot.startsAt === s.startsAt;
+                    return (
+                      <button key={s.startsAt} type="button" onClick={() => setSlot(on ? null : s)}
+                        style={{
+                          background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#92400E",
+                          border: `1.5px solid ${on ? ACCENT : "#FCD34D"}`, borderRadius: 8,
+                          padding: "6px 10px", cursor: "pointer", textAlign: "center", lineHeight: 1.25,
+                        }}>
+                        <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, opacity: 0.8 }}>{fmtDay(s.date)}</span>
+                        <span style={{ display: "block", fontSize: 12.5, fontWeight: 800 }}>{fmtT(s.startsAt)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {slot && (
+                <div style={{ marginBottom: 10 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>
+                    Anything they should know? (optional)
+                  </span>
+                  <textarea value={notes} rows={2} maxLength={2000} onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Wants to see a 12×24 with a loft."
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !slot || viewing} onClick={book}>
+                  {busy ? "Booking…" : slot ? `Book ${fmtDay(slot.date)} at ${fmtT(slot.startsAt)}` : "Pick a time"}
+                </button>
+                {host.slug && (
+                  <a href={`${shopPublicOrigin()}/book?client=${encodeURIComponent(clientId)}&with=${encodeURIComponent(host.slug)}`}
+                    target="_blank" rel="noopener noreferrer"
+                    style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", textDecoration: "none" }}>
+                    Open their booking page
+                  </a>
+                )}
+              </div>
+              {/* An operator in view-as is not a member of this team, and a meeting booked from
+                  here would go out under the builder's name with the builder's customer. Greyed
+                  for the same reason Call and Text are. */}
+              {viewing && (
+                <div style={{ ...sub, marginTop: 7 }}>Booking isn't available while viewing another account.</div>
+              )}
+              <div style={{ ...sub, marginTop: 7 }}>
+                Booking this is the same as the customer doing it on the booking page — one diary, one
+                set of rules, and they get the same confirmation and calendar invite. There's no
+                separate "log a meeting", on purpose.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+
+// ─── What is PLANNED with this customer: the meetings ────────────────────────────────────
+// Carolyn 2026-10-26, pointing at a "Meetings with this customer" block sitting above Focus:
+// "Meetings should simply be under FOCUS ... anything that is scheduled, planned such as
+// activity, meeting, Build and Delivery it should be listed under Focus. And we probably
+// should change focus and call it planned." So the record has ONE place for everything that
+// is still ahead of you, and it is called Planned. See CLAUDE.md, "Planned".
+//
+// It lives in its own component, not in the record body, because every action on a meeting is
+// a portal-meetings call with its own gating — and not in MeetingSchedulerPanel any more,
+// because that panel is the BOOKING form and only renders under its own tab, while Planned
+// has to show the meetings whichever tab is open.
+//
+// `rev` is how the booking form says "I just booked one": the panel no longer holds this list,
+// so it bumps a counter the record body owns and this re-reads. `onCount` lets the body know
+// whether to print its own "nothing planned yet" line — only this component knows how many
+// meetings there are, and two components each printing an empty state is how a section ends up
+// saying it is empty underneath a list of things.
+function ContactPlannedMeetings({ contact, viewing = false, rev = 0, onCount = null }) {
+  const [mine, setMine] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const call = useCallback(async (action, body) => {
+    const { data, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !data || data.error) throw new Error((data && data.error) || (error ? await fnError(error) : "That didn't work."));
+    return data;
+  }, []);
+
+  const contactId = contact && contact.id;
+  const loadMine = useCallback(async () => {
+    if (!contactId) { setMine([]); return; }
+    try {
+      const d = await call("contact_meetings", { contactId });
+      setMine(d.meetings || []);
+    } catch (e) { setMsg({ err: e.message }); setMine([]); }
+  }, [call, contactId]);
+  useEffect(() => { loadMine(); }, [loadMine, rev]);
+  // The count is reported from an effect, never from render: telling a parent to set state
+  // while this one is rendering is the "cannot update a component while rendering another"
+  // warning, and in a list that reloads on every action it would fire constantly.
+  useEffect(() => { if (onCount) onCount(mine ? mine.length : 0); }, [mine, onCount]);
+
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+
+  const cancel = (m) => run(async () => {
+    if (!window.confirm(`Cancel the ${m.typeName || "meeting"} on ${fmtWhen(m.startsAt, m.timeZone)}?`)) return;
+    await call("cancel", { id: m.id });
+    setMsg({ ok: "Cancelled." });
+    await loadMine();
+  });
+
+  const mark = (m, status) => run(async () => {
+    await call("set_status", { id: m.id, status });
+    await loadMine();
+  });
+
+  // "They never got the email." Goes to the address already on the booking and nowhere else —
+  // portal-meetings refuses an address from the request body, because that would be a way to
+  // have the platform mail a stranger under the builder's domain.
+  const resend = (m) => run(async () => {
+    const d = await call("resend", { id: m.id });
+    setMsg({ ok: d.sentTo ? `Sent again to ${d.sentTo}.` : "Sent again." });
+  });
+
+  // VIDEO (migration 333): a fresh Zoom link that could not be made when they booked. Tries
+  // again; when it works the customer is sent the confirmation again with the link in it.
+  const makeLink = (m) => run(async () => {
+    const d = await call("make_link", { id: m.id });
+    setMsg({ ok: d.emailSent ? "Zoom link made and sent to the customer." : "Zoom link made." });
+    await loadMine();
+  });
+
+  const STATUS = {
+    booked: ["#B45309", "Upcoming"],
+    completed: ["#047857", "Completed"],
+    no_show: ["#B91C1C", "No-show"],
+    cancelled: ["#94A3B8", "Cancelled"],
+  };
+  // A booked meeting whose time has GONE is not "Upcoming" (Carolyn 2026-10-25). Nothing
+  // sweeps these rows — `booked` is where a meeting stays until a person marks it done or a
+  // no-show — so a chip read straight off the status told a host that last week's meeting was
+  // still ahead of them, on the very screen they use to spot what needs marking.
+  //
+  // Derived from the CLOCK at render, never stored: a status the server would have to age
+  // would need a sweep nobody runs, and this list already re-renders whenever it is opened.
+  // It keys on endsAt, not startsAt, so a meeting in progress still reads as upcoming; a row
+  // without one (there should be none) falls back to the plain status rather than guessing.
+  const statusOf = (m) => (
+    m.status === "booked" && m.endsAt && new Date(m.endsAt).getTime() < Date.now()
+      ? ["#475569", "Past"]
+      : STATUS[m.status] || ["#94A3B8", m.status]
+  );
+
+  if (!mine || !mine.length) {
+    // Nothing of its own to say: the Planned section prints one empty line for every kind of
+    // planned thing at once, and an error still has to be seen.
+    return msg && msg.err ? <div style={{ ...S.err, marginBottom: 8 }}>{msg.err}</div> : null;
+  }
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      {msg && msg.err && <div style={{ ...S.err, marginBottom: 8 }}>{msg.err}</div>}
+      {msg && msg.ok && (
+        <div style={{ fontSize: 12, color: "#15803D", fontWeight: 700, marginBottom: 8 }}>{msg.ok}</div>
+      )}
+        {(mine || []).map((m) => {
+          const [colour, label] = statusOf(m);
+          return (
+            <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 9 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: colour, marginTop: 6, flex: "0 0 auto" }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: "#0F172A" }}>
+                  {m.typeName || "Meeting"}
+                  <span style={{ fontWeight: 600, color: colour }}>{` · ${label}`}</span>
+                </div>
+                <div style={{ fontSize: 12, color: "#64748B" }}>
+                  {fmtWhen(m.startsAt, m.timeZone)}
+                  {m.hostName ? ` · with ${m.hostName}` : ""}
+                  {m.locationDetail ? ` · ${m.locationDetail}` : ""}
+                </div>
+                {m.notes && <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{m.notes}</div>}
+                {m.status === "booked" && m.conferenceUrl && (
+                  <div style={{ fontSize: 12, marginTop: 2 }}>
+                    <a href={m.conferenceUrl} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontWeight: 700 }}>
+                      {m.conferenceStatus === "generated" ? "Join the Zoom meeting" : "Join link"}
+                    </a>
+                  </div>
+                )}
+                {m.status === "booked" && (m.conferenceStatus === "failed" || m.conferenceStatus === "fallback") && (
+                  <div style={{ fontSize: 12, color: "#92400E", marginTop: 2 }}>
+                    {m.conferenceStatus === "failed"
+                      ? "No Zoom link yet — the customer was told one will follow."
+                      : "A new Zoom meeting couldn't be made, so this uses your room link."}
+                    {m.conferenceError === "not_connected" ? " The host hasn't connected Zoom." : m.conferenceError === "needs_reconnect" ? " The host's Zoom connection needs reconnecting." : ""}
+                    {!viewing && (
+                      <button type="button" disabled={busy} onClick={() => makeLink(m)}
+                        style={{ background: "none", border: "none", padding: 0, marginLeft: 6, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Make the link</button>
+                    )}
+                  </div>
+                )}
+                {m.status === "booked" && !viewing && (
+                  <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                    <button type="button" disabled={busy} onClick={() => mark(m, "completed")}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Mark done</button>
+                    <button type="button" disabled={busy} onClick={() => mark(m, "no_show")}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>No-show</button>
+                    <button type="button" disabled={busy} onClick={() => resend(m)}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Resend email</button>
+                    <button type="button" disabled={busy} onClick={() => cancel(m)}
+                      style={{ background: "none", border: "none", padding: 0, color: "#B91C1C", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+    </div>
+  );
+}
+
 function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null,
   clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false,
   // My Synergy Phone: the signed-in person (the extension refuses a call for anybody else), whether
   // their access includes calling, and whether calling is switched on for the account.
   userId = null, canCall = false, phoneOn = false,
+  // Meetings (migration 326): whether this person's access lets them run a diary at all.
+  // ssCanWrite, not a literal compare — `meetings:'own'` writes (OWN_WRITE_AREAS), and the
+  // server narrows an own-only caller to their own host rather than refusing.
+  canMeet = false,
   // The signed-in person's email signature (My Profile), shown under the Email box because the
   // server adds it to what they send: "" when they have none, null when it isn't known (view-as),
   // which shows nothing. onEditProfile opens My Profile, where it is changed.
   emailSignature = null, onEditProfile = null,
+  // Whether the signed-in person switched reply copies on (My Profile): true, false, or null in
+  // view-as. It only changes the line above the Email box; the server decides what goes out.
+  replyCopy = null,
   // Quick sends (the signed-in person's saved messages, the list My Synergy Phone keeps) beside
   // the Email and SMS boxes. Off in view-as: the list would be the OPERATOR's own, and the server
   // refuses it there too.
@@ -3470,6 +4792,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // so a note error can't surface under Focus too. Every new attempt clears it first, so a
   // stale failure never outlives the action that follows it.
   const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus" | "contact", msg }
+  // PLANNED: the meetings are ContactPlannedMeetings' own state, so this end holds the two
+  // things the section needs from it — a counter the booking form bumps to say "re-read", and
+  // how many it found, which decides whether the empty line prints.
+  const [plannedRev, setPlannedRev] = useState(0);
+  const [plannedMeetings, setPlannedMeetings] = useState(0);
   const [pdf, setPdf] = useState(null);     // { url, title } — the pop-up viewer
   // The person editor's state. ⚠️ IT MUST BE DECLARED HERE, ABOVE the `if (err)` and
   // `if (!data)` early returns below. A useState placed after them is skipped on the first
@@ -3524,8 +4851,13 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // hoist, so declaring them above would be a TDZ throw rather than a subtle bug.
   const [dealOpen, setDealOpen] = useState(null);
   const [dealBusy, setDealBusy] = useState(false);
+  // The Deals card's pipeline controls (2026-10-12): the lost-reason picker a move into a lost
+  // stage needs ({ deal, stage, reasons, key }), and "+ Add to a pipeline" while it is open (the
+  // pipeline id it will add to). Up here with the rest, above the early returns (React #310).
+  const [dealLost, setDealLost] = useState(null);
+  const [dealAdd, setDealAdd] = useState(null);
 
-  // Optimistic, and deliberately the SAME action the Pipeline board's saveCloseDate calls:
+  // Optimistic, and deliberately the SAME action the Pipeline board's close-date control calls:
   // one write path means the board and the contact record cannot disagree about what a close
   // date is. `designs` has no tenant UPDATE policy (154/193 are SELECT-only), so the edge
   // function is not a convenience here — it is the only way in.
@@ -3585,16 +4917,44 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     ? ((data.designs || []).find((d) => d.short_code === activeCode) || null)
     : null;
 
+  // THE PIPELINE CARDS (crm_record's `pipeline` block, 2026-10-12): undefined for a reader who may
+  // not see contacts (a design record without the CRM, or a designs-only role), and then the design
+  // record is what it was.
+  const pipe = data.pipeline || null;
+  // THE READ FAILED (2026-10-13): crm_record says so with pipelineError. A contact's record with no
+  // block counts too, because a contact reader always gets one when the read works. Then the record
+  // says it couldn't load the deal's pipeline and draws NO ladder: the old hard-coded SALES ladder
+  // there would be a guess about this deal dressed up as an answer.
+  const pipeFailed = !pipe && (!!data.pipelineError || kind === "contact");
+  // A Deals row with no design is picked by its card's id (crmDealRows' key), never a short code,
+  // so activeCode stays null for it: every tab that files against a design still waits for one,
+  // and only the top bar follows the pick. Re-checked against this contact's own cards for the
+  // same reason activeCode is re-checked against knownCodes.
+  const pickedLead = kind === "contact" && pipe && selCode && !knownCodes.has(selCode)
+    ? (crmDealRows(data.designs, pipe).find((r) => !r.design && r.key === selCode) || {}).deal || null
+    : null;
+  // The card the top bar is about: a design record's own, or the picked row's.
+  const barDeal = kind === "design" ? crmPipeDealFor(pipe, recordId)
+    : activeCode ? crmPipeDealFor(pipe, activeCode) : pickedLead;
+
   // needsPick is derived and redundant, and that is the point: it puts the `kind ===
   // "contact"` half in ONE place, so no tab can accidentally gate itself on a design record
   // — which would break the free Pipeline list that opens design records without a CRM.
-  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
-    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode,
+  // A picked LEAD (a card with no design, so no short code) counts as picked (integration review
+  // 2026-10-13): a lead card on the board opens its customer with the lead picked, and the tabs
+  // said "Pick a deal or order on the left first" under a picked deal. Its notes, activities,
+  // texts, emails and uploads file against the customer alone (shortCode null, which every one of
+  // those actions takes), so nothing can land on another deal's history.
+  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, canMeet, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
+    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode && !pickedLead,
     // My Synergy Phone. `viewing` is operator view-as (the shell passes viewingLabel only then), and
     // greys Call and Text first; see CRM_VIEWING_CALL_HINT.
     viewing: !!viewingLabel, canCall: !!canCall, phone: { on: !!phoneOn },
     hasCalls: (data.feed || []).some((e) => e.type === "call" || e.type === "call_missed" || e.type === "voicemail") };
-  const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
+  // The company comes before the email and phone because "+ Add lead" accepts a company with no
+  // contact name (crm_create_lead needs one or the other), and the board card already heads
+  // such a lead with it; the record used to title it with an email instead.
+  const cname = (data.contact && (data.contact.name || data.contact.company || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
     ? ([sel.style, sel.size].filter(Boolean).join(" ") || (record && record.short_code) || "Design")
@@ -3646,6 +5006,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // `edit` itself is declared with the other hooks at the top of this component — see the
   // warning there; it cannot live at this line, below the early returns.
   const startEdit = () => setEdit({
+    // COMPANY (308). Carolyn, 2026-10-14 @11:08: "+ Add lead" asks for it, "but there's no
+    // places … for me to edit that company name later, because I got the company name wrong."
+    company: (data.contact && data.contact.company) || "",
     name: (data.contact && data.contact.name) || "",
     phone: (data.contact && data.contact.phone) || "",
     email: (data.contact && data.contact.email) || "",
@@ -3685,6 +5048,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     billingCity: (data.contact && data.contact.billing_city) || "",
     billingState: (data.contact && data.contact.billing_state) || "",
     billingZip: (data.contact && data.contact.billing_zip) || "",
+    // THE BUILDER'S OWN FIELDS (migration 330). A COPY of the stored object, so Cancel really
+    // cancels; the keys are the field definitions', and a field with nothing filled in yet simply
+    // has no key here (ssCrmValueText and the inputs read a missing key as empty).
+    custom: { ...((data.contact && data.contact.custom) || {}) },
   });
   const saveContact = async () => {
     if (!edit) return;
@@ -3695,19 +5062,58 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         id: (data.contact && data.contact.id) || null,
         // Sent as-typed, including "" — the server reads an empty string as "clear this
         // field", which is the one thing the anonymous-submission path cannot do.
-        name: edit.name, phone: edit.phone, email: edit.email, owner: edit.owner,
+        company: edit.company, name: edit.name, phone: edit.phone, email: edit.email, owner: edit.owner,
         street: edit.street, city: edit.city, state: edit.state, zip: edit.zip,
         billingStreet: edit.billingStreet, billingCity: edit.billingCity,
         billingState: edit.billingState, billingZip: edit.billingZip,
       },
     });
+    // THE BUILDER'S OWN FIELDS (migration 330), in a SECOND call, and only when they have some.
+    //
+    // ⚠️ Two calls on purpose, and in this order. crm_save_contact writes real columns through
+    // crm_update_contact, a named RPC whose argument list is pinned by every database it has ever
+    // run against (the p_company note above it says what adding one costs); the custom values are
+    // a jsonb merge with its own refusals, its own 404 and its own row-scope rule. Folding them
+    // into that RPC would mean a signature change for a feature that does not need one, and a
+    // failure in either half would then report as the other. The built-ins go first because they
+    // are the ones a duplicate phone can refuse: a refused save leaves nothing written at all.
+    let customErr = null;
+    if (!(r && r.error) && !error) {
+      const defs = ssCrmDefs(data, "contact");
+      if (defs.length && data.contact && data.contact.id) {
+        const values = {};
+        // Only the keys the definitions know, and only the ones this form actually holds — a
+        // stale tab must not blank a field somebody added while it was open.
+        defs.forEach((f) => { values[f.key] = edit.custom && Object.prototype.hasOwnProperty.call(edit.custom, f.key) ? edit.custom[f.key] : null; });
+        const { data: cr, error: ce } = await sb.functions.invoke("portal-settings", {
+          body: { action: "crm_contact_custom_save", id: data.contact.id, values },
+        });
+        customErr = (cr && cr.error) || (ce ? await fnError(ce) : null);
+      }
+    }
     setBusy(false);
     // Keep the form open on failure. Closing it would throw away what they typed, and the
     // duplicate-phone case is one they can actually act on once they have read it.
-    const failMsg = (r && r.error) || (error ? await fnError(error) : null);
+    const failMsg = (r && r.error) || (error ? await fnError(error) : null) || customErr;
     if (failMsg) { setOpErr({ where: "contact", msg: failMsg }); return; }
     setEdit(null); load();
   };
+
+  // ── WHAT THIS BUILDER CALLS OUR FIELDS, AND WHICH ONES THEY TOOK OFF THE CARD ─────────
+  // Settings → Customer Hub → Fields (migration 330) lets a builder relabel or hide one of OURS.
+  // `crm_record` sends the overrides with the record, so these three read them and every surface
+  // below goes through them rather than printing a hard-coded word. A field nobody has touched has
+  // no override row at all, so the default is what these return — which is why this is safe to put
+  // in front of a label that has always been a literal.
+  const cLbl = (key, dflt) => ssCrmLabel(data, "contact", key, dflt);
+  const cOff = (key) => ssCrmOff(data, "contact", key);
+  const dLbl = (key, dflt) => ssCrmLabel(data, "deal", key, dflt);
+  const dOff = (key) => ssCrmOff(data, "deal", key);
+  const contactDefs = ssCrmDefs(data, "contact");
+  const dealDefs = ssCrmDefs(data, "deal");
+  // One key of the contact editor's draft. Written straight into `edit.custom`, so Cancel throws
+  // the whole lot away with everything else on the form and Save sends it in one call.
+  const setCustom = (key, v) => setEdit((prev) => (!prev ? prev : { ...prev, custom: { ...(prev.custom || {}), [key]: v } }));
 
   // The Activity tab's write. `crm_save_activity` has existed on the server (and been gated)
   // since 131, with `crm_complete_activity` to tick one off and a Focus block promising
@@ -3902,7 +5308,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       });
       return;
     }
-    const out = await ssPhoneSend("sss.text", msg);
+    // The name rides along (optional, SPEC section 5) so the extension's Quick sends fill
+    // {first_name} as this page's own do; an older extension ignores it.
+    const out = await ssPhoneSend("sss.text", { ...msg, name: (data.contact && data.contact.name) || null });
     if (out.reply && out.reply.ok) { setPhoneUi({ what: "text", kind: "texting", to: msg.to_e164 }); return; }
     setPhoneUi({ what: "text", kind: "elsewhere", text: `${ssPhoneRefusal(out.reply)} You can still text from here.` });
   };
@@ -3956,7 +5364,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const insertQuickSend = (q, channel) => {
     if (!quick || !quick.list || !q) return;
     const email = channel === "email";
-    const fill = { contactName: data.contact && data.contact.name, myName: quick.myName };
+    // The PERSON's name (ssPersonName): a record whose name only repeats its company has no first
+    // name to fill, so {first_name} drops out instead of greeting "Hi Bear" for Bear River Band.
+    const fill = { contactName: ssPersonName(data.contact), myName: quick.myName };
     const next = ssInsertQuickSend(email ? mail.body : text, q, fill, channel);
     const say = email ? setMailMsg : setTextMsg;
     if (next === null) { say({ err: ssQuickSendTooLong(channel) }); return; }
@@ -3979,6 +5389,82 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       .catch(() => { /* only a count */ });
   };
 
+  // ── A DEAL'S STAGE AND PIPELINE, FROM THE DEALS CARD (Carolyn 2026-10-12) ───────────────────
+  // The SAME action the Pipeline board's drag calls, so the board and the record cannot disagree
+  // about where a card is. Moving to another pipeline is a move to a stage IN it (crm_move_deal
+  // takes the pipeline from the stage), which is what keeps a deal in one pipeline at a time.
+  // Painted at once; a refusal reloads the record and says why under that deal. The status is
+  // never painted here: it is the system's, and the server's answer carries it.
+  const moveDeal = async (deal, stage, rowKey, lostReason) => {
+    if (!deal || !stage || stage.id === deal.stage_id) return;
+    setOpErr(null);
+    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: crmPipeMoved(d.pipeline, deal.id, stage, lostReason) }));
+    try {
+      const r = await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id, lostReason: lostReason || null });
+      if (r && r.status_id) {
+        setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: { ...d.pipeline,
+          deals: (d.pipeline.deals || []).map((x) => (x.id === deal.id ? { ...x, status_id: r.status_id } : x)) } }));
+      }
+    } catch (e2) {
+      await load();
+      setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That move did not save." });
+    }
+  };
+  // A stage from the deal's own pipeline. A lost stage asks for the reason first, as the board does.
+  const pickDealStage = (deal, stageId, rowKey) => {
+    const p = crmPipeOf(pipe, deal);
+    const stage = p ? (p.stages || []).find((s) => s.id === stageId) : null;
+    if (!stage) return;
+    if (stage.kind === "lost") { setDealLost({ deal, stage, reasons: p.lostReasons || [], key: rowKey }); return; }
+    moveDeal(deal, stage, rowKey);
+  };
+  // To another pipeline: it lands in that pipeline's first open stage, and the stage drop-down,
+  // which now lists the new pipeline's stages, picks any other.
+  const moveDealToPipeline = (deal, pipelineId, rowKey) => {
+    const target = crmPipeMoveTargets(pipe, deal).find((p) => p.id === pipelineId);
+    if (target) moveDeal(deal, crmPipeFirstOpen(target), rowKey);
+  };
+  // A card's own close date, for a deal with no design (a design's is the design's: saveDealClose).
+  const saveLeadClose = async (deal, value, rowKey) => {
+    const iso = value || null;
+    setDealBusy(true); setOpErr(null);
+    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: { ...d.pipeline,
+      deals: (d.pipeline.deals || []).map((x) => (x.id === deal.id ? { ...x, expected_close_date: iso } : x)) } }));
+    try { await ssPipeCall("crm_deal_update", { id: deal.id, expectedCloseDate: iso || "" }); }
+    catch (e2) { await load(); setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That close date did not save." }); }
+    finally { setDealBusy(false); }
+  };
+  // One of the builder's own fields on this card (migration 330). Painted first and written after,
+  // the shape saveLeadClose above settled on: a field typed into and then re-read from the server
+  // flickers back to its old value for the length of the round trip. A FAILURE reloads, so the
+  // card goes back to what is really stored rather than keeping an optimistic lie on screen.
+  const saveDealCustom = async (deal, key, value, rowKey) => {
+    setDealBusy(true); setOpErr(null);
+    setData((dd) => (!dd || !dd.pipeline ? dd : { ...dd, pipeline: { ...dd.pipeline,
+      deals: (dd.pipeline.deals || []).map((x) => (x.id === deal.id ? { ...x, custom: { ...(x.custom || {}), [key]: value } } : x)) } }));
+    try { await ssPipeCall("crm_deal_custom_save", { id: deal.id, values: { [key]: value } }); }
+    catch (e2) { await load(); setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That did not save." }); }
+    finally { setDealBusy(false); }
+  };
+  // "+ Add to a pipeline", kept from the Sales pipelines card it replaced: a new deal for this
+  // person (not one of their designs, which have their cards already), in that pipeline's first
+  // open stage. Reloaded rather than painted, because the new card's id comes from the server.
+  const addDealToPipeline = async () => {
+    const p = ((pipe && pipe.pipelines) || []).find((x) => x.id === dealAdd);
+    const stage = crmPipeFirstOpen(p);
+    if (!stage || !(data.contact && data.contact.id)) return;
+    setDealBusy(true); setOpErr(null);
+    try {
+      await ssPipeCall("crm_deal_create", { contactId: data.contact.id, stageId: stage.id });
+      setDealAdd(null);
+      await load();
+    } catch (e2) {
+      setOpErr({ where: "dealAdd", msg: e2.message || "That deal was not added." });
+    } finally {
+      setDealBusy(false);
+    }
+  };
+
   const renderSection = (key) => {
     if (key === "summary") {
       // Editing needs a REAL contact row. On an old design record predating the 130
@@ -3989,13 +5475,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       return kind === "contact" ? (
         edit ? (
           <div style={{ fontSize: 13 }}>
-            <span style={S.lbl}>Name</span>
+            {/* Company first, the order "+ Add lead" asks in. Every label here goes through cLbl
+                (migration 330), so a builder who renamed one of ours sees their own word. A field
+                they HID still appears in the editor — hiding takes it off the card, and a field
+                nobody can reach is a field nobody can correct. */}
+            <CrmCompanyField edit={edit} setEdit={setEdit} label={cLbl("company", "Company")} />
+            <span style={S.lbl}>{cLbl("name", "Name")}</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
               onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
-            <span style={S.lbl}>Email</span>
+            <span style={S.lbl}>{cLbl("email", "Email")}</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
               onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
-            <span style={S.lbl}>Phone</span>
+            <span style={S.lbl}>{cLbl("phone", "Phone")}</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
               onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
             <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
@@ -4005,8 +5496,13 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 would re-point live stops at a billing address with nothing raising. */}
             <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
             <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+            {/* Right under the address she is looking at (Carolyn 2026-10-23), and live as
+                it is typed. Honours the same Hide and relabel as the card's own link. */}
+            {!cOff("maps_delivery") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_DELIVERY} label={cLbl("maps_delivery", "Map it")} />}
             <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
             <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
+            {!cOff("maps_billing") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_BILLING} label={cLbl("maps_billing", "Map it")} />}
+            <CrmCustomFields fields={contactDefs} values={edit.custom} onChange={setCustom} disabled={busy} />
             {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
             <div style={{ display: "flex", gap: 7 }}>
               <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -4020,11 +5516,30 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           </div>
         ) : (
           <div style={{ fontSize: 13, color: "#475569" }}>
-            <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>
-            <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>
+            {/* Only when there is one: most contacts are homeowners who came through the designer,
+                and a "No company" line on every one of them would be noise. ✎ Edit offers the
+                field either way. */}
+            {data.contact.company && !cOff("company") && <div data-ss-contact-company="" style={{ fontWeight: 700, color: "#1E293B" }}>{data.contact.company}</div>}
+            {!cOff("email") && <div>{data.contact.email || <span style={{ color: "#94A3B8" }}>No email</span>}</div>}
+            {!cOff("phone") && <div>{data.contact.phone || <span style={{ color: "#94A3B8" }}>No phone</span>}</div>}
+            {/* The builder's own fields (migration 330), the filled-in ones only: this is the
+                three-line summary at the top of the record, not the whole card, and a run of
+                "Gate code —" lines is what the Person panel below is for. */}
+            {contactDefs.filter((f) => ssCrmValueText(f, (data.contact.custom || {})[f.key])).map((f) => (
+              <div key={f.key} data-ss-contact-custom={f.key}>
+                <span style={{ color: "#94A3B8" }}>{f.label}: </span>
+                <CrmCustomValue field={f} value={(data.contact.custom || {})[f.key]} />
+              </div>
+            ))}
+            {/* The baked-in maps links (migration 332). Each draws only when its address has a
+                street, and each honours its own Hide and relabel from the Fields tab. */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 4 }}>
+              {!cOff("maps_delivery") && <CrmMapsLink contact={data.contact} which="maps_delivery" label={cLbl("maps_delivery", "Map it")} />}
+              {!cOff("maps_billing") && <CrmMapsLink contact={data.contact} which="maps_billing" label={cLbl("maps_billing", "Map the billing address")} />}
+            </div>
             {canEditContact && (
               <button type="button" onClick={startEdit}
-                title="Edit this contact's name, email and phone"
+                title="Edit this contact's company, name, email and phone"
                 style={{ background: "none", border: "none", padding: 0, marginTop: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
                 ✎ Edit
               </button>
@@ -4045,13 +5560,22 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       );
     }
     if (key === "deals") {
+      // ONE SECTION (Carolyn 2026-10-12, C34). The rows are this person's designs, each joined to
+      // its pipeline card, plus any card with no design; crmDealRows says how. Without a pipeline
+      // block from the server this is the designs list it always was.
+      const rows = crmDealRows(data.designs, pipe);
+      const pipes = (pipe && pipe.pipelines) || [];
+      // Compact, so the controls sit beside "Open in designer" inside the card: "I don't like how
+      // big it is ... this drop down can be in here."
+      const ctl = { border: "1px solid #CBD5E1", borderRadius: 6, padding: "4px 6px", fontSize: 12, fontWeight: 600,
+        fontFamily: "inherit", color: "#1E293B", background: "#FFF", maxWidth: 150, minWidth: 0, cursor: "pointer" };
       return (
         <div>
-          <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>OPEN DEALS ({(data.designs || []).length})</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>OPEN DEALS ({rows.length})</div>
           {/* Shown only until something is picked, so it stops nagging the moment it has
               been acted on. Without it the page is a contact whose stages, build, delivery
               and every write tab are all silently off with nothing saying why. */}
-          {kind === "contact" && !activeCode && (data.designs || []).length > 0 && (
+          {kind === "contact" && !activeCode && !pickedLead && rows.length > 0 && (
             <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>
               Pick a deal to see its stages, build and delivery.
             </div>
@@ -4059,7 +5583,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           {/* ⚠️ TWO SIBLING BUTTONS, NEVER NESTED — the Person card carries the same shape
               and the same warning: a button inside a button is invalid HTML and React will
               not render it. THE ROW SELECTS; THE CHEVRON EXPANDS. Both stay on this page.
-              The ● / ○ glyph is there because colour alone is not a state indicator.
+              The ● / ○ glyph is there because colour alone is not a state indicator. The
+              status pill sits INSIDE the row button as a plain span, so the row still has
+              exactly two buttons (crmContactDeal.mjs counts them).
 
               ⚠️ THERE IS DELIBERATELY NO "open this deal's own record" ARROW. Ahsan, 2026-09-20:
               "remove this own record arrow in there i want every thing in the contact page."
@@ -4069,86 +5595,177 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               Fix the gate; the arrow was the workaround, not the feature. The design record
               itself still exists and the Pipeline still opens it directly — it is only no
               longer somewhere a contact has to send you. */}
-          {(data.designs || []).map((d) => {
-            const sel = activeCode === d.short_code;
-            // `!!d.short_code` because dealOpen starts null: without it a row whose code is
-            // missing matches, renders EXPANDED on arrival, and its arrow cannot close it —
-            // clicking sets dealOpen back to null, which still matches.
-            const open = !!d.short_code && dealOpen === d.short_code;
-            const s = d.selections || {};
+          {rows.map((row) => {
+            const d = row.design;
+            const deal = row.deal;
+            const sel = d ? activeCode === d.short_code : !!(pickedLead && pickedLead.id === deal.id);
+            // `!!row.key` because dealOpen starts null: without it a row whose key is missing
+            // matches, renders EXPANDED on arrival, and its arrow cannot close it — clicking
+            // sets dealOpen back to null, which still matches.
+            const open = !!row.key && dealOpen === row.key;
+            const s = (d && d.selections) || {};
             const pc = s.paint_colors || s.paintColors || {};
             const colour = [pc.body, pc.trim].filter(Boolean).join(" / ") || s.paint || "—";
+            const inPipe = crmPipeOf(pipe, deal);
+            const targets = deal ? crmPipeMoveTargets(pipe, deal) : [];
+            const name = d ? ([s.style, s.size].filter(Boolean).join(" ") || d.short_code)
+              : (deal.title || (inPipe ? inPipe.name : "Deal"));
             const fieldRow = (label, node) => (
               <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
                 <div style={{ width: 96, flexShrink: 0, fontSize: 10.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
                 <div style={{ minWidth: 0, fontSize: 12.5, color: "#334155" }}>{node}</div>
               </div>
             );
+            // Saved on blur or Enter, the way the Pipeline card's close date is — NOT on
+            // change. A date input fires change once per keystroke with whatever its segments
+            // hold so far: typing the month "12" reports January first and the first digit of
+            // a year reports year 0002, so a change-save stored January (and the save disabled
+            // the box before the "2" could land). Keyed on the stored value so a save or a
+            // reload repaints it; Escape puts it back. A design's date is the design's
+            // (set_expected_close); a card with no design keeps its own (crm_deal_update).
+            const closeStored = String((d ? d.expected_close_date : deal.expected_close_date) || "").slice(0, 10);
+            const closeField = canEdit ? (
+              <input type="date" key={`${row.key}:${closeStored}`} defaultValue={closeStored} disabled={dealBusy}
+                onBlur={(e) => {
+                  if (e.target.value === closeStored) return;
+                  if (d) saveDealClose(d.short_code, e.target.value); else saveLeadClose(deal, e.target.value, row.key);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                  if (e.key === "Escape") { e.currentTarget.value = closeStored; e.currentTarget.blur(); }
+                }}
+                style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
+            ) : (closeStored ? fmtDate(closeStored) : "—");
             return (
-              <div key={d.short_code} style={{ marginBottom: 5 }}>
+              <div key={row.key} data-ss-deal-row={row.key} style={{ marginBottom: 5 }}>
                 <div style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
                   border: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
                   borderRadius: open ? "6px 6px 0 0" : 6, overflow: "hidden" }}>
-                  <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
+                  <button onClick={() => setSelCode(sel ? null : row.key)} aria-pressed={sel}
                     title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
-                    style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
-                      padding: "7px 9px", cursor: "pointer" }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
-                      <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
-                      {[s.style, s.size].filter(Boolean).join(" ") || d.short_code}
+                    style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, textAlign: "left",
+                      background: "transparent", border: "none", padding: "7px 9px", cursor: "pointer" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                        <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                        {name}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(row.at)}</div>
                     </div>
-                    <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
+                    {/* THE STATUS, ONCE, ON THE TOP LINE (C36). Carolyn, 2026-10-12, boxing the
+                        space right of the name: "If you put the status ... up there, we don't
+                        need the status down here at all." Shown, never set (C40). */}
+                    <CrmDealStatusPill status={crmPipeStatus(pipe, deal)} />
                   </button>
                   {/* ⚠️ A THIRD SIBLING, never a child of the row button. Same rule the two
                       buttons beside it already carry: a <button> inside a <button> is invalid
                       HTML and React will not render it, so an "expand" chevron nested in the
                       row is the one obvious way to build this and it does not work. */}
-                  <button onClick={() => setDealOpen(open ? null : d.short_code)} aria-expanded={open}
+                  <button onClick={() => setDealOpen(open ? null : row.key)} aria-expanded={open}
                     title={open ? "Hide this deal's details" : "Show this deal's details"}
                     style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
                       padding: "0 9px", fontSize: 12, color: "#94A3B8", cursor: "pointer" }}>{open ? "▾" : "▸"}</button>
                 </div>
                 {open && (
-                  <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
+                  <div data-ss-deal-panel={row.key} style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
                     borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
-                    {/* Saved on blur or Enter, the way the Pipeline card's close date is — NOT on
-                        change. A date input fires change once per keystroke with whatever its
-                        segments hold so far: typing the month "12" reports January first and the
-                        first digit of a year reports year 0002, so a change-save stored January
-                        (and the save disabled the box before the "2" could land). Keyed on the
-                        stored value so a save or a reload repaints it; Escape puts it back. */}
-                    {fieldRow("Expected close", canEdit ? (() => {
-                      const stored = String(d.expected_close_date || "").slice(0, 10);
-                      return (
-                        <input type="date" key={`${d.short_code}:${stored}`} defaultValue={stored} disabled={dealBusy}
-                          onBlur={(e) => { if (e.target.value !== stored) saveDealClose(d.short_code, e.target.value); }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") e.currentTarget.blur();
-                            if (e.key === "Escape") { e.currentTarget.value = stored; e.currentTarget.blur(); }
-                          }}
-                          style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
-                      );
-                    })() : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
-                    {fieldRow("Style", s.style || "—")}
-                    {fieldRow("Size", s.size || "—")}
-                    {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
-                    {fieldRow("Colour", colour)}
-                    {/* The SAME in-portal handler the record header uses. Deliberately NOT a
-                        link to the public ?id= page: signed-in staff browsing there fire
-                        capture-lead and draft saves and corrupt the very activity this record
-                        reports on. openInDesigner also clamps on the designer area, so a Crew
-                        Leader gets a refusal instead of a button that silently does nothing. */}
-                    {onOpenDesign && (
-                      <button style={{ ...S.btn(), marginTop: 7, padding: "5px 10px", fontSize: 12 }}
-                        onClick={() => onOpenDesign(d.short_code)}>Open in designer</button>
-                    )}
-                    {opErr && opErr.where === "deals" && opErr.code === d.short_code && <div style={{ ...S.err, marginTop: 7 }}>{opErr.msg}</div>}
+                    {/* Every label goes through dLbl and every row through dOff (migration 330):
+                        a builder may rename one of these or take it off the panel, and the Fields
+                        tab is where they do it. The defaults are the words that were literals here. */}
+                    {!dOff("expected_close_date") && fieldRow(dLbl("expected_close_date", "Expected close"), closeField)}
+                    {d ? (
+                      <>
+                        {!dOff("design_style") && fieldRow(dLbl("design_style", "Style"), s.style || "—")}
+                        {!dOff("design_size") && fieldRow(dLbl("design_size", "Size"), s.size || "—")}
+                        {!dOff("design_total") && fieldRow(dLbl("design_total", "Total"), d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
+                        {!dOff("design_colour") && fieldRow(dLbl("design_colour", "Colour"), colour)}
+                      </>
+                    ) : (!dOff("value_cents") && fieldRow(dLbl("value_cents", "Value"), deal.value_cents != null ? fmtMoneyWhole(deal.value_cents) : "—"))}
+                    {/* THE BUILDER'S OWN FIELDS ON THIS CARD (migration 330). Only where there IS
+                        a card: the values live on crm_deals, so a design with no card yet has
+                        nowhere to put them — which is every design on an account whose pipelines
+                        have not been seeded. They appear the moment the card does. */}
+                    {deal && dealDefs.map((f) => (
+                      <div key={f.key} data-ss-deal-custom={f.key}>
+                        {fieldRow(
+                          f.label + (f.required ? " *" : ""),
+                          <CrmDealCustomCell field={f} value={(deal.custom || {})[f.key]}
+                            canEdit={canEdit} busy={dealBusy}
+                            onCommit={(v) => saveDealCustom(deal, f.key, v, row.key)} />,
+                        )}
+                      </div>
+                    ))}
+                    {deal && deal.lost_reason && <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>Lost: {deal.lost_reason}</div>}
+                    {/* "Open in designer" on the left and, at the bottom right where Carolyn
+                        bracketed it, the stage and the move (C37, C38). Wraps under itself in a
+                        narrow column rather than squeezing the controls. */}
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 6, marginTop: 7 }}>
+                      {/* The SAME in-portal handler the record header uses. Deliberately NOT a
+                          link to the public ?id= page: signed-in staff browsing there fire
+                          capture-lead and draft saves and corrupt the very activity this record
+                          reports on. openInDesigner also clamps on the designer area, so a Crew
+                          Leader gets a refusal instead of a button that silently does nothing. */}
+                      {d && onOpenDesign && (
+                        <a href={ssDesignHref(d.short_code)} data-ss-open-design="1"
+                          style={{ ...S.btn("#EFEFEF", "#1E293B"), padding: "5px 10px", fontSize: 12, marginRight: "auto", display: "inline-block", textDecoration: "none" }}
+                          onClick={ssNavClick(() => onOpenDesign(d.short_code))}>Open in designer</a>
+                      )}
+                      {/* THIS pipeline's stages and nobody else's: "no list of every pipeline's
+                          stages" (C37). Read only for someone who can't edit contacts. */}
+                      {deal && inPipe && (
+                        <select aria-label="Stage" title={`Stage in ${inPipe.name}`} value={deal.stage_id || ""}
+                          disabled={!canEdit} onChange={(e) => pickDealStage(deal, e.target.value, row.key)}
+                          style={{ ...ctl, borderLeft: "4px solid " + (((inPipe.stages || []).find((x) => x.id === deal.stage_id) || {}).color || "#CBD5E1"),
+                            cursor: canEdit ? "pointer" : "default" }}>
+                          {!(inPipe.stages || []).some((x) => x.id === deal.stage_id) && <option value="">Pick a stage</option>}
+                          {(inPipe.stages || []).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                        </select>
+                      )}
+                      {/* Another pipeline (C38). The deal leaves this one: a deal is in exactly one
+                          pipeline (C41). It lands in the new pipeline's first open stage, and the
+                          stage drop-down beside it then lists that pipeline's stages. */}
+                      {deal && canEdit && targets.length > 0 && (
+                        <select aria-label="Move to another pipeline" value=""
+                          title={inPipe ? `Move out of ${inPipe.name} into another pipeline` : "Move into a pipeline"}
+                          onChange={(e) => { if (e.target.value) moveDealToPipeline(deal, e.target.value, row.key); }}
+                          style={ctl}>
+                          <option value="">{inPipe ? "Move to pipeline…" : "Put in a pipeline…"}</option>
+                          {targets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                      )}
+                    </div>
+                    {opErr && opErr.where === "deals" && opErr.code === row.key && <div style={{ ...S.err, marginTop: 7, marginBottom: 0 }}>{opErr.msg}</div>}
                   </div>
                 )}
               </div>
             );
           })}
-          {(data.designs || []).length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No designs yet.</div>}
+          {rows.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No deals yet.</div>}
+          {/* "+ Add to a pipeline", from the Sales pipelines card this one replaced. */}
+          {kind === "contact" && canEdit && pipes.length > 0 && data.contact && data.contact.id && (
+            dealAdd ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
+                <select aria-label="Pipeline for the new deal" value={dealAdd} onChange={(e) => setDealAdd(e.target.value)}
+                  style={{ ...ctl, maxWidth: "none", flex: "1 1 140px" }}>
+                  {pipes.filter((p) => !!crmPipeFirstOpen(p)).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <button type="button" disabled={dealBusy} onClick={addDealToPipeline}
+                  style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 10px", fontSize: 12, opacity: dealBusy ? 0.6 : 1 }}>Add</button>
+                <button type="button" disabled={dealBusy} onClick={() => { setDealAdd(null); setOpErr(null); }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Cancel</button>
+                {opErr && opErr.where === "dealAdd" && <div style={{ ...S.err, flexBasis: "100%", marginBottom: 0 }}>{opErr.msg}</div>}
+              </div>
+            ) : (
+              <button type="button"
+                onClick={() => { const p = pipes.find((x) => !!crmPipeFirstOpen(x)); if (p) { setOpErr(null); setDealAdd(p.id); } }}
+                title="Start a new deal for this person in one of your pipelines"
+                style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, marginTop: 4, fontFamily: "inherit" }}>＋ Add to a pipeline</button>
+            )
+          )}
+          {dealLost && (
+            <SsLostReasonDialog reasons={dealLost.reasons} onCancel={() => setDealLost(null)}
+              onPick={(reason) => { const l = dealLost; setDealLost(null); moveDeal(l.deal, l.stage, l.key, reason); }} />
+          )}
         </div>
       );
     }
@@ -4172,14 +5789,17 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     // The cards THEMSELVES stay — she settled that on 2026-08-28 ("the card just is going to
     // be blank. It'll say build schedule. And it just is nothing"), and hiding the Build card
     // would remove the place a builder goes to SCHEDULE the build. Only the rails hide.
+    // A picked lead has no design, so nothing was built, delivered or repaired for it: say that,
+    // rather than "pick a deal" under a picked one, and show none of the customer's other deals'.
     const pickFirst = (what) => (
-      <div style={{ fontSize: 12, color: "#94A3B8" }}>Pick a deal or order above to see its {what}.</div>
+      <div style={{ fontSize: 12, color: "#94A3B8" }}>{pickedLead ? `This lead has no design yet, so it has no ${what}.` : `Pick a deal or order above to see its ${what}.`}</div>
     );
+    const railNeedsPick = kind === "contact" && !activeCode;
     const railSubject = kind === "contact" ? activeDeal : record;
     if (key === "build") {
       if (!data.build) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      const bJobs = activeCode ? data.build.filter((j) => j.design_short_code === activeCode) : data.build;
-      if (!bJobs.length && ctx.needsPick) return pickFirst("build schedule");
+      const bJobs = activeCode ? data.build.filter((j) => j.design_short_code === activeCode) : pickedLead ? [] : data.build;
+      if (!bJobs.length && railNeedsPick) return pickFirst("build schedule");
       if (!bJobs.length && !crmHasInvoice(railSubject)) {
         return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
       }
@@ -4205,8 +5825,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     }
     if (key === "delivery") {
       if (!data.delivery) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      const dStops = activeCode ? data.delivery.filter((s) => s.design_short_code === activeCode) : data.delivery;
-      if (!dStops.length && ctx.needsPick) return pickFirst("deliveries");
+      const dStops = activeCode ? data.delivery.filter((s) => s.design_short_code === activeCode) : pickedLead ? [] : data.delivery;
+      if (!dStops.length && railNeedsPick) return pickFirst("deliveries");
       if (!dStops.length && !crmHasInvoice(railSubject)) {
         return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
       }
@@ -4233,8 +5853,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       // Scoped to the pick like its siblings, but ⚠️ NO INVOICE GATE. A repair is not
       // gated on billing — repairs key on design_short_code and have no invoice
       // relationship at all, so "invoice first" would be a sentence that never becomes true.
-      const reps = activeCode ? data.repairs.filter((r) => r.design_short_code === activeCode) : data.repairs;
-      if (!reps.length && ctx.needsPick) return pickFirst("repairs");
+      const reps = activeCode ? data.repairs.filter((r) => r.design_short_code === activeCode) : pickedLead ? [] : data.repairs;
+      if (!reps.length && railNeedsPick) return pickFirst("repairs");
       if (!reps.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No repairs.</div>;
       return (
         <div>
@@ -4262,7 +5882,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       }
       const os = data.orders;
       // No link out yet: Orders is its own tab with its own row-click detail, and there is
-      // no /portal/orders/<id> route to deep-link to. Showing the order number, what it was
+      // no /orders/<id> route to deep-link to. Showing the order number, what it was
       // for and where it stands answers her question ("have they bought anything, and is it
       // paid") without inventing a route that would then need its own back button.
       return (
@@ -4271,7 +5891,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             const d = (data.designs || []).find((x) => x.short_code === o.short_code);
             const what = d ? [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") : "";
             // THE LINK OUT EXISTS NOW. This card used to carry a comment explaining why it
-            // could not link anywhere -- "there is no /portal/orders/<id> route to deep-link
+            // could not link anywhere -- "there is no /orders/<id> route to deep-link
             // to" -- which was true until the order detail got its own URL in this change.
             // SELECTING AN ORDER AND SELECTING ITS DEAL ARE THE SAME SELECTION, which is
             // why selCode holds a SHORT CODE and not an order id. Carolyn asked for "a deal,
@@ -4305,7 +5925,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               </div>
             );
           })}
-          {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}
+          {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when an estimate is signed.</div>}
         </div>
       );
     }
@@ -4368,13 +5988,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             <div style={{ border: "1px solid #E2E8F0", borderTop: "none", borderRadius: "0 0 6px 6px", padding: "9px 9px 8px", marginTop: -1 }}>
               {edit && canEditContact ? (
                 <div style={{ fontSize: 13 }}>
-                  <span style={S.lbl}>Name</span>
+                  <CrmCompanyField edit={edit} setEdit={setEdit} label={cLbl("company", "Company")} />
+                  <span style={S.lbl}>{cLbl("name", "Name")}</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.name} placeholder="Their name"
                     onChange={(e) => setEdit((p) => ({ ...p, name: e.target.value }))} />
-                  <span style={S.lbl}>Email</span>
+                  <span style={S.lbl}>{cLbl("email", "Email")}</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.email} placeholder="name@example.com"
                     onChange={(e) => setEdit((p) => ({ ...p, email: e.target.value }))} />
-                  <span style={S.lbl}>Phone</span>
+                  <span style={S.lbl}>{cLbl("phone", "Phone")}</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
                     onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
                   <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
@@ -4384,8 +6005,13 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       would re-point live stops at a billing address with nothing raising. */}
                   <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
                   <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+                  {/* Right under the address she is looking at (Carolyn 2026-10-23), and live as
+                      it is typed. Honours the same Hide and relabel as the card's own link. */}
+                  {!cOff("maps_delivery") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_DELIVERY} label={cLbl("maps_delivery", "Map it")} />}
                   <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
                   <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
+                  {!cOff("maps_billing") && <CrmEditMapsLink edit={edit} keys={CRM_ADDR_BILLING} label={cLbl("maps_billing", "Map it")} />}
+                  <CrmCustomFields fields={contactDefs} values={edit.custom} onChange={setCustom} disabled={busy} />
                   {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
                   <div style={{ display: "flex", gap: 7 }}>
                     <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -4399,10 +6025,24 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 </div>
               ) : (
                 <div>
-                  {ro("Name", data.contact.name)}
-                  {ro("Email", data.contact.email)}
-                  {ro("Phone", data.contact.phone)}
-                  {data.contact.first_seen_at && ro("First seen", fmtDate(data.contact.first_seen_at))}
+                  {data.contact.company && !cOff("company") && ro(cLbl("company", "Company"), data.contact.company)}
+                  {ro(cLbl("name", "Name"), data.contact.name)}
+                  {!cOff("email") && ro(cLbl("email", "Email"), data.contact.email)}
+                  {!cOff("phone") && ro(cLbl("phone", "Phone"), data.contact.phone)}
+                  {data.contact.first_seen_at && !cOff("first_seen_at") && ro(cLbl("first_seen_at", "First seen"), fmtDate(data.contact.first_seen_at))}
+                  {/* The builder's own fields (migration 330). ALL of them here, empty ones
+                      included: this is the panel that answers "what do we know about them?", and
+                      a field that vanishes when it is blank is one nobody remembers to fill in. */}
+                  {contactDefs.map((f) => (
+                    <div key={f.key} data-ss-contact-custom={f.key}>
+                      {ro(f.label, <CrmCustomValue field={f} value={(data.contact.custom || {})[f.key]} />)}
+                    </div>
+                  ))}
+                  {/* The baked-in maps links (migration 332), the same pair the Summary draws. */}
+                  {!cOff("maps_delivery") && ssCrmMapsUrl(data.contact, "maps_delivery")
+                    && ro(cLbl("maps_delivery", "Map it"), <CrmMapsLink contact={data.contact} which="maps_delivery" label="Open in Google Maps" />)}
+                  {!cOff("maps_billing") && ssCrmMapsUrl(data.contact, "maps_billing")
+                    && ro(cLbl("maps_billing", "Map the billing address"), <CrmMapsLink contact={data.contact} which="maps_billing" label="Open in Google Maps" />)}
                   {/* Reached two ways: no permission / no contact row (the messages), or a
                       save that just landed — `saveContact` clears `edit` and reloads, so the
                       panel stays open showing the NEW values. That re-read is the receipt;
@@ -4410,7 +6050,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       and re-opened. */}
                   {canEditContact ? (
                     <button type="button" onClick={startEdit}
-                      title="Edit this contact's name, email and phone"
+                      title="Edit this contact's company, name, email and phone"
                       style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT }}>
                       ✎ Edit
                     </button>
@@ -4461,30 +6101,40 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           <div style={{ marginLeft: "auto" }}>
             {/* IN-PORTAL ONLY. Linking to the public ?id= page fires capture-lead and draft
                 saves, corrupting the very activity this page reports on. */}
-            <button style={S.btn(ACCENT, "#FFF")} onClick={() => onOpenDesign(recordId)}>Open in designer</button>
+            <a href={ssDesignHref(recordId)} data-ss-open-design="1" style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none" }}
+              onClick={ssNavClick(() => onOpenDesign(recordId))}>Open in designer</a>
           </div>
         )}
       </div>
-      {kind === "design" && <CrmStageBar status={record.status} />}
+      {/* The old status ladder, only where there is no pipeline block (CrmStageBar says when), and
+          never in place of a pipeline that failed to load. */}
+      {kind === "design" && !pipe && !pipeFailed && <CrmStageBar status={record.status} />}
+      {pipeFailed && (kind === "design" || activeDeal) && (
+        <div data-ss-pipe-error="" role="status" style={{ fontSize: 12.5, fontWeight: 600, color: "#B45309", background: "#FFFBEB",
+          border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>
+          Couldn't load this deal's pipeline. Refresh to try again.
+        </div>
+      )}
       {(() => {
         // The design these rails are about: the record itself on a deal, the PICKED deal on
         // a contact. Null on a contact with nothing picked, which reads as "no invoice" and
         // hides Build/Delivery — correct, and the sales row is gone for the same reason.
         const railDesign = kind === "contact" ? activeDeal : record;
 
-        // SALES: on a contact only (the deal already has its chevron rail above), and only
-        // once a deal is PICKED.
+        // THE DEAL'S PIPELINE (C35, Carolyn 2026-10-12): "Instead of this saying sales ... I
+        // want this up here to say shed deals with the stage that it's in." The first row is
+        // named after the pipeline the picked deal is in and draws THAT pipeline's stages, the
+        // one it is in lit; picking a deal in another pipeline switches it. On a design record
+        // it is the design's own card. The status ladder above (CrmStageBar) is only for a design
+        // record with no pipeline block that didn't fail to load (pipeFailed).
         //
-        // ⚠️ THIS USED TO AUTO-PICK designs[0], "the newest deal", and that auto-pick IS the
-        // bug. Carolyn, 2026-09-02, on a contact holding four quotes: "there's three, four
-        // quotes in here. Which one the heck is it when I'm in a contact? ... what is it
-        // displaying up here? ... this should not show up here, unless one of these is
-        // selected, so you know which one you're seeing." A ladder drawn for a deal the
-        // reader did not choose and cannot identify is worse than no ladder: it looks like
-        // an answer. Defaulting to the newest would be the same bug with a nicer comment.
-        const salesIdx = activeDeal
-          ? Math.max(0, CRM_STAGES.findIndex((s) => s.kind === (CRM_STAGE_FOR_STATUS[normStatus(activeDeal.status)] || "new")))
-          : null;
+        // ON A CONTACT THE ROW IS ONLY EVER THE PICKED DEAL'S PIPELINE. It used to fall back to
+        // the hard-coded SALES ladder when there was no pipeline block, and since every contact
+        // reader gets one, that fallback only ever drew when the read FAILED: a ladder that
+        // looked like an answer. pipeFailed says so above instead (2026-10-13). Nothing is
+        // auto-picked either (Carolyn, 2026-09-02: "this should not show up here, unless one of
+        // these is selected, so you know which one you're seeing").
+        const pipeRow = pipe ? crmPipeBarRow(pipe, barDeal) : null;
 
         // Scope build/delivery to the picked deal. crm_record computes both over EVERY code
         // this contact owns, so without this the rails would mix four buildings into one
@@ -4521,7 +6171,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         const invoiced = crmHasInvoice(railDesign);
         return (
           <CrmStageDots rows={[
-            kind === "contact" && activeDeal ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null,
+            pipeRow,
             data.build && invoiced ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
             data.delivery && invoiced ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
           ].filter(Boolean)} />
@@ -4575,7 +6225,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {!crmUnlocked && (
               <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
                 Notes, activities, email, texts and customer files are part of the <strong>built-in CRM</strong>,
-                which isn&rsquo;t on this subscription yet. This design, its quotes, its documents and its
+                which isn&rsquo;t on this subscription yet. This design, its estimates, its documents and its
                 build and delivery schedule are unaffected.
                 {onSeeBilling ? (
                   <>{" "}
@@ -4646,11 +6296,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   {data.sms && data.sms.from ? <> — they see <strong>{data.sms.from}</strong>, this account&rsquo;s number.</> : null}
                 </div>
                 {/* Opted out is not an error state to discover by pressing Send. STOP is a
-                    legal instruction, so the composer says so and offers no box. */}
+                    legal instruction, so the composer says so and offers no box. Worded by why
+                    (crm_record's optOutReason, 2026-10-13): an opt-out the team recorded or an
+                    import brought in is not a STOP, and saying so would be untrue. A server
+                    without the field says STOP, as before. */}
                 {data.sms && data.sms.optedOut ? (
                   <div style={{ ...S.err, marginBottom: 0 }}>
-                    This customer replied STOP, so we can&rsquo;t text them. They can reply START to that
-                    same number to opt back in.
+                    {data.sms.optOutReason === "team"
+                      ? <>Your team recorded that this customer doesn&rsquo;t want texts, so we can&rsquo;t text them.</>
+                      : data.sms.optOutReason === "other"
+                        ? <>This customer opted out of texts, so we can&rsquo;t text them.</>
+                        : <>This customer replied STOP, so we can&rsquo;t text them.</>}
+                    {" "}They can reply START to that same number to opt back in.
                   </div>
                 ) : (data.sms && !data.sms.consented) ? (
                   /* ⚠️ NO PERMISSION ON FILE — say so BEFORE they type, not on Send. Every
@@ -4715,7 +6372,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       {quickSendsOn && (
                         <CrmQuickSendPicker channel="sms" quick={quick} onOpen={loadQuickSends}
                           onInsert={(q) => insertQuickSend(q, "sms")}
-                          fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                          fill={{ contactName: ssPersonName(data.contact), myName: quick && quick.myName }} />
                       )}
                       <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !text.trim()} onClick={sendSms}>
                         {busy ? "Sending…" : "Send text"}
@@ -4754,11 +6411,22 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     own address, except in view-as, where CSM Synergy staff are never put on a
                     builder's email and the copy goes to the customer's assigned rep instead (or the
                     send is refused when no reply could reach anyone). viewingLabel is set only in
-                    view-as. */}
+                    view-as. Since 2026-10-07 the inbox copy is opt-in per person (replyCopy, My
+                    Profile), so with it off this line never promises the inbox: the reply comes
+                    back to the record, and to the inbox only while the company hasn't set up
+                    replies (the server keeps the address then, so a reply reaches somebody).
+                    ⚠️ ALL THREE LINES CARRY THAT "UNTIL REPLIES ARE SET UP" (review 2026-10-07).
+                    This page can't see the email settings, and on an account without them the
+                    record never gets the reply: it goes to the writer's inbox alone, and in
+                    view-as to the assigned rep whatever their switch says. And the OFF line says
+                    files aren't kept on the record (email-inbound stores the words only), the same
+                    sentence as the My Profile card in 08-integrations.jsx. */}
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
                   {viewingLabel
-                    ? <>To <strong>{data.contact.email}</strong> — you're viewing as {viewingLabel}, so replies won't come to you. They go to this customer's assigned rep, if they have one.</>
-                    : <>To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.</>}
+                    ? <>To <strong>{data.contact.email}</strong> — you're viewing as {viewingLabel}, so replies won't come to you. They come back to this record, and to this customer's assigned rep if they've switched reply copies on (until this company sets up replies, to the rep only).</>
+                    : replyCopy === true
+                      ? <>To <strong>{data.contact.email}</strong> — replies come back here and to your inbox (just your inbox until your company sets up replies).</>
+                      : <>To <strong>{data.contact.email}</strong> — replies come back to this record (your inbox until your company sets up replies). Files a customer attaches aren't kept on the record yet: switch on reply copies in My Profile if you need them.</>}
                 </div>
                 <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
                   placeholder="Subject" style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
@@ -4797,7 +6465,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   {quickSendsOn && (
                     <CrmQuickSendPicker channel="email" quick={quick} onOpen={loadQuickSends}
                       onInsert={(q) => insertQuickSend(q, "email")}
-                      fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                      fill={{ contactName: ssPersonName(data.contact), myName: quick && quick.myName }} />
                   )}
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}
@@ -4821,6 +6489,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 untouched. Tenants have meeting and lunch rows already logged, and a chip
                 the composer no longer offers is not the same thing as a kind the history
                 can no longer render. Removing them server-side would blank those rows. */}
+            {/* MEETING SCHEDULER (migration 326). Gated on tabOn, like every composer here,
+                so it can never render for somebody the tab is greyed for. */}
+            {tab === "scheduler" && tabOn("scheduler") && (
+              <div style={{ marginBottom: 12 }}>
+                <MeetingSchedulerPanel clientId={clientId} contact={data.contact}
+                  shortCode={activeCode} viewing={!!viewingLabel}
+                  onBooked={() => setPlannedRev((n) => n + 1)} />
+              </div>
+            )}
             {tab === "activity" && tabOn("activity") && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
@@ -4881,7 +6558,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {tab === "invoice" && tabOn("invoice") && (kind === "design" ? record : activeDeal) && (
               <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "#475569" }}>
-                  This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the
+                  This estimate is accepted, so it can be invoiced. Invoicing happens on the order — with the
                   payments, change orders and build schedule for the same building.
                 </div>
                 <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
@@ -4891,7 +6568,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     Dashboard (09-shell) and is not in scope in this part — calling it here
                     would throw on click. The route is real, so an anchor is both correct
                     and survives someone reorganising the shell. */}
-                <a href="/portal/orders"
+                <a href={ssPagePath("orders", null)}
                   style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 8, display: "inline-block", textDecoration: "none" }}>
                   Open Orders
                 </a>
@@ -4918,17 +6595,37 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               </div>
             )}
 
-            <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 6 }}>Focus</div>
+            {/* PLANNED — everything still ahead of you on this customer, in one place.
+                Carolyn 2026-10-26: "anything that is scheduled, planned such as activity,
+                meeting, Build and Delivery it should be listed under Focus. And we probably
+                should change focus and call it planned." It was "Focus", with meetings in a
+                block of their own above it. Builds and deliveries are NOT here yet — they
+                hang off a design rather than a contact. See CLAUDE.md, "Planned". */}
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 6 }}>Planned</div>
             {opErr && opErr.where === "focus" && <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginBottom: 6 }}>{opErr.msg}</div>}
+            {/* Meetings first, then the ticked-off activities: two lists in one section, each
+                in its own time order. One merged ordering would mean this component owning
+                the meetings too, and every action on one is a portal-meetings call. */}
+            <ContactPlannedMeetings contact={data.contact} viewing={!!viewingLabel}
+              rev={plannedRev} onCount={setPlannedMeetings} />
             {(data.focus || []).length === 0 ? (
-              <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>
-                No focus items yet. Scheduled activities and pinned notes appear here.
-              </div>
+              plannedMeetings === 0 ? (
+                <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>
+                  Nothing planned yet. Meetings, scheduled activities and pinned notes appear here.
+                </div>
+              ) : null
             ) : (
               <div style={{ marginBottom: 12 }}>
                 {(data.focus || []).map((f) => (
                   <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 0" }}>
-                    <input type="checkbox" onChange={async (e) => {
+                    {/* Completing an activity is a contacts:'edit' write (crm_complete_activity), so
+                        it is offered only to someone who may change this customer — not to a
+                        View holder or someone on Own · View (migration 286), who used to get a
+                        live box that 403'd on click. */}
+                    <input type="checkbox" disabled={!canEdit}
+                      title={canEdit ? undefined : (!crmUnlocked ? CRM_LOCKED_HINT : "You don't have permission to complete activities.")}
+                      style={canEdit ? undefined : { cursor: "not-allowed" }}
+                      onChange={async (e) => {
                       // The box is uncontrolled, so a failed complete would leave it ticked
                       // while the item stays in Focus — looking done when it isn't. Untick
                       // it and say what happened instead of failing silently.
@@ -5127,5 +6824,955 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       </div>
       {pdf && <PdfModal url={pdf.url} title={pdf.title} onClose={() => setPdf(null)} />}
     </div>
+  );
+}
+
+// ══ SALES PIPELINES (migration 301) ═══════════════════════════════════════════════════════
+// Hand-moved boards of deals, for every CRM builder. Carolyn 2026-10-09: her reps cold-calling
+// shed manufacturers work those prospects in a pipeline inside Structure Studio, and every
+// prospect lands in Contacts. Her first one is our own account's "Manufacturer Outreach".
+//
+// NOT the Pipeline tab. That board (DesignsTable above) is DERIVED from designs.status and cannot
+// be dragged; this one is the "local crm_stages table" its comment called the next increment.
+// Different data, different tab: /pipelines[/<pipeline id>].
+//
+// A DEAL HAS NO OWNER (Carolyn 2026-09-04: "we do not ever assign deals. We only assign contacts
+// and followers"). A card shows its CONTACT's owner, and the server returns only the deals whose
+// contact this person may see, so a rep limited to their own customers sees their own cards.
+//
+// Every read and write goes through portal-settings: the tables have no browser path at all.
+
+// One call, answering the data or throwing an Error that carries the server's JSON body as
+// `.body`, so a 409 can hand back `existingContactId` beside its sentence.
+async function ssPipeCall(action, body) {
+  const { data, error } = await sb.functions.invoke("portal-settings", { body: { action, ...(body || {}) } });
+  if (error) {
+    let b = null;
+    try {
+      const ctx = error.context;
+      if (ctx && typeof ctx.json === "function") b = await (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
+    } catch (_e) { /* no body */ }
+    const e = new Error((b && b.error) || (await fnError(error)));
+    e.body = b;
+    throw e;
+  }
+  if (data && data.error) { const e = new Error(data.error); e.body = data; throw e; }
+  return data || {};
+}
+
+const SS_PIPE_LAST = "ss_pipeline_last";
+const ssPipeInitials = (name) => String(name || "").trim().split(/\s+/).slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join("") || "?";
+// Whole days since an instant, for "4d in stage". A duration, so no local-date handling is needed.
+const ssDaysSince = (iso) => (iso ? Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 86400000)) : null);
+const SS_STAGE_COLORS = ["#64748B", "#0EA5E9", "#14B8A6", "#6366F1", "#8B5CF6", "#EC4899", "#F59E0B", "#F97316", "#94A3B8", "#16A34A", "#DC2626"];
+
+// ── THE BOARD'S STATUS FILTER (Carolyn 2026-10-12) ── "We need to have a dropdown of the
+// statuses up here that they can quickly filter ... I want to see all my estimates and want to see
+// all my payments, a filter of one or many, and also a filter to exclude." { mode, ids }: "inc"
+// shows only the cards whose status is ticked, "exc" hides them. A card has exactly ONE status, so
+// a mix of the two says nothing that one of them alone can't (ticking A and B already leaves out
+// everything else); one list and a switch is the whole of it. SS_NO_STATUS stands for a card that
+// has no status yet.
+const SS_NO_STATUS = "none";
+const SS_STATUS_FILTER_OFF = { mode: "inc", ids: [] };
+function ssStatusFilterKeep(statusId, f) {
+  if (!f || !f.ids || !f.ids.length) return true;
+  const on = f.ids.indexOf(statusId || SS_NO_STATUS) !== -1;
+  return f.mode === "exc" ? !on : on;
+}
+function ssStatusFilterToggle(f, id) {
+  const cur = f || SS_STATUS_FILTER_OFF;
+  const ids = cur.ids.indexOf(id) !== -1 ? cur.ids.filter((x) => x !== id) : cur.ids.concat([id]);
+  return { mode: cur.mode === "exc" ? "exc" : "inc", ids };
+}
+// What the closed control says: "All statuses", "Estimate Sent", "Estimate Sent +1", and
+// "All but Payment Received" when it hides. Names come from the account's list, so a renamed
+// status reads its new name.
+function ssStatusFilterLabel(f, statuses) {
+  if (!f || !f.ids || !f.ids.length) return "All statuses";
+  const nameOf = (id) => {
+    if (id === SS_NO_STATUS) return "No status";
+    const t = (statuses || []).find((x) => x.id === id);
+    return t ? t.name : "Removed status";
+  };
+  const names = nameOf(f.ids[0]) + (f.ids.length > 1 ? ` +${f.ids.length - 1}` : "");
+  return f.mode === "exc" ? `All but ${names}` : names;
+}
+
+// ── THE BOARD'S VIEW OUTLIVES OPENING A CARD (C22 with C42, integration review 2026-10-13) ──
+// Carolyn, 2026-10-12, on opening a card and coming back: "wait where what was I". A card opens
+// its customer INSIDE the Contacts tab, and the shell draws the hub only while no record is open,
+// so the board unmounts on every card click and its search, Owner and Status filter went with it:
+// Back landed on an unfiltered board. Each pipeline's view is kept here instead, per signed-in
+// person and account, until it is cleared (the ×, Clear, an emptied search) or the page reloads.
+// IN MEMORY, never sessionStorage, for ssTabCache's reason (01-core): a search is a customer's
+// name or number, and a shared shop computer must not keep it past a sign-out.
+const SS_BOARD_VIEW_OFF = { query: "", owner: "all", status: SS_STATUS_FILTER_OFF };
+const ssBoardViews = new Map();
+const ssBoardViewKey = (clientId, pipelineId, user) => `${user || "anon"}|${clientId || "own"}|${pipelineId || ""}`;
+// The view a pipeline's board opens on: the one left on it, else nothing filtered. `key` says
+// which board it belongs to, so a view kept in React state is never applied to another pipeline.
+function ssBoardViewOf(clientId, pipelineId, user = ssCurrentUserId) {
+  const key = ssBoardViewKey(clientId, pipelineId, user);
+  const kept = pipelineId ? ssBoardViews.get(key) : null;
+  return { ...(kept || SS_BOARD_VIEW_OFF), key };
+}
+// Keep a board's view (nothing is kept once every part of it is back to "all").
+function ssBoardViewPut(clientId, pipelineId, v, user = ssCurrentUserId) {
+  const key = ssBoardViewKey(clientId, pipelineId, user);
+  const st = v && v.status && Array.isArray(v.status.ids) ? v.status : SS_STATUS_FILTER_OFF;
+  const next = { query: (v && typeof v.query === "string") ? v.query : "", owner: (v && v.owner) || "all", status: st };
+  if (pipelineId) {
+    if (!next.query && next.owner === "all" && !next.status.ids.length) ssBoardViews.delete(key);
+    else ssBoardViews.set(key, next);
+  }
+  return { ...next, key };
+}
+
+// ── THE BOARD IS AS WIDE AS THE PAGE, NEVER WIDER (Carolyn 2026-10-12) ── "This scroll bar is
+// not going to be there. I am going to make this like the designer where it can be as wide as it
+// needs to be." The board used to be a fixed-width strip of 230px columns inside a sideways
+// scroller, inside the page's 1240px cap. Now the page drops that cap while the board shows
+// (portal.html, `.ss-inner:has([data-ss-board-wide])`) and the stages share the width. When they
+// will not all fit at SS_BOARD_COL_MIN, as many go across as fit and the rest wrap onto the next
+// row in the same columns: the first row keeps the most stages side by side, which is what a board
+// is for (an even 4 + 4 split would put half of them below the longest column). 140px
+// keeps a six-stage pipeline in one row on a 1280 screen with a scroll bar. Columns stop growing at
+// SS_BOARD_COL_MAX, so a three-stage pipeline on a wide screen does not stretch its cards across it.
+const SS_BOARD_COL_MIN = 140;
+const SS_BOARD_COL_MAX = 360;
+const SS_BOARD_GAP = 8;
+function ssBoardColumns(stages, width, min = SS_BOARD_COL_MIN, gap = SS_BOARD_GAP) {
+  const n = Math.max(1, Math.floor(Number(stages) || 0));
+  // Not measured yet: every stage in one row, columns shrinking to fit (they never overflow).
+  if (!(width > 0)) return n;
+  return Math.min(n, Math.max(1, Math.floor((width + gap) / (min + gap))));
+}
+
+// The filter's control, beside the board's search: a heading like the Owner one, a button that
+// says what is filtered, and a list of the account's statuses with how many of this pipeline's
+// cards have each. A tick applies at once; the × beside the button clears it in one click.
+function SsStatusFilter({ statuses, deals, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [place, setPlace] = useState({ left: 0, width: 280 });
+  const wrap = useRef(null);
+  const button = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const down = (e) => { if (wrap.current && !wrap.current.contains(e.target)) setOpen(false); };
+    const key = (e) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      if (button.current) button.current.focus();
+    };
+    document.addEventListener("mousedown", down);
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("mousedown", down); document.removeEventListener("keydown", key); };
+  }, [open]);
+  const f = value || SS_STATUS_FILTER_OFF;
+  const active = f.ids.length > 0;
+  const counts = {};
+  (deals || []).forEach((d) => { const k = d.status_id || SS_NO_STATUS; counts[k] = (counts[k] || 0) + 1; });
+  // "No status" is offered only while a card has none (or it is already ticked): every card the
+  // system has touched has one, so most accounts never see the row.
+  const rows = (statuses || []).map((t) => ({ id: t.id, name: t.name, color: t.color }))
+    .concat(counts[SS_NO_STATUS] || f.ids.indexOf(SS_NO_STATUS) !== -1 ? [{ id: SS_NO_STATUS, name: "No status", color: "#94A3B8" }] : []);
+  const label = ssStatusFilterLabel(f, statuses);
+  const toggle = () => {
+    if (!open) {
+      const vw = document.documentElement.clientWidth || window.innerWidth || 0;
+      const at = button.current ? button.current.getBoundingClientRect().left : 0;
+      const width = Math.max(220, Math.min(300, vw - 16));
+      // 8px inside the right edge if it can, and never past 8px from the left.
+      setPlace({ left: Math.max(8 - at, Math.min(0, vw - 8 - at - width)), width });
+    }
+    setOpen(!open);
+  };
+  const seg = (on) => ({
+    flex: 1, background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", border: "none",
+    padding: "5px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+  });
+  return (
+    <div ref={wrap} style={{ ...FCTRL, position: "relative" }} data-ss-status-filter="">
+      <span style={FLBL}>Status</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <button ref={button} type="button" onClick={toggle} aria-haspopup="dialog" aria-expanded={open}
+          title={active ? label : "Filter the cards by status"} data-ss-status-filter-button=""
+          style={{
+            ...S.input, width: "auto", minWidth: 140, maxWidth: 240, padding: "6px 26px 6px 8px", textAlign: "left", cursor: "pointer",
+            position: "relative", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+            borderColor: active ? ACCENT : "#CBD5E1", background: active ? "#EEF2FF" : "#FFF", color: active ? ACCENT : "#1E293B",
+          }}>
+          {label}
+          <span aria-hidden="true" style={{ position: "absolute", right: 9, top: "50%", transform: "translateY(-50%)", fontSize: 10, color: "#64748B" }}>▾</span>
+        </button>
+        {active && (
+          <button type="button" onClick={() => onChange(SS_STATUS_FILTER_OFF)} title="Show every status" aria-label="Clear the status filter"
+            style={{ background: "transparent", border: "none", cursor: "pointer", color: "#64748B", fontSize: 18, lineHeight: 1, padding: "2px 4px", fontFamily: "inherit" }}>×</button>
+        )}
+      </div>
+      {open && (
+        <div role="dialog" aria-label="Filter by status" data-ss-status-filter-menu=""
+          style={{
+            position: "absolute", left: place.left, top: "calc(100% + 6px)", zIndex: 30, width: place.width,
+            background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, boxShadow: "0 10px 28px rgba(15,23,42,0.16)",
+          }}>
+          <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden", margin: "10px 10px 6px" }}>
+            <button type="button" aria-pressed={f.mode !== "exc"} onClick={() => onChange({ ...f, mode: "inc" })} style={seg(f.mode !== "exc")}>Show only</button>
+            <button type="button" aria-pressed={f.mode === "exc"} onClick={() => onChange({ ...f, mode: "exc" })} style={seg(f.mode === "exc")}>Hide</button>
+          </div>
+          <div style={{ fontSize: 11.5, color: "#64748B", padding: "0 12px 6px", lineHeight: 1.4 }}>
+            {f.mode === "exc" ? "Cards with a ticked status are hidden." : "Only cards with a ticked status show."}
+          </div>
+          <div style={{ borderTop: "1px solid #F1F5F9", padding: "4px 0" }}>
+            {rows.length === 0 && <div style={{ padding: "8px 12px", fontSize: 12.5, color: "#64748B" }}>No statuses yet.</div>}
+            {rows.map((t) => {
+              const on = f.ids.indexOf(t.id) !== -1;
+              return (
+                <label key={t.id} data-ss-status-option={t.id}
+                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 12px", cursor: "pointer", fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+                  <input type="checkbox" checked={on} onChange={() => onChange(ssStatusFilterToggle(f, t.id))} />
+                  <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: "50%", background: t.color || "#64748B", flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: on && f.mode === "exc" ? "line-through" : "none" }}>{t.name}</span>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "#94A3B8", fontVariantNumeric: "tabular-nums" }}>{counts[t.id] || 0}</span>
+                </label>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "8px 10px", borderTop: "1px solid #F1F5F9" }}>
+            <button type="button" disabled={!active} onClick={() => onChange({ ...f, ids: [] })}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 12px", fontSize: 12.5, opacity: active ? 1 : 0.5, cursor: active ? "pointer" : "default" }}>Clear</button>
+            <button type="button" onClick={() => setOpen(false)} style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 14px", fontSize: 12.5 }}>Done</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── CARD STATUS (migration 302) ── Carolyn 2026-10-11: "a STATUS for all Pipeline cards ... All
+// of these status's should show on the card as a pill and all have their own color."
+// READ-ONLY since 2026-10-12: "those statuses are automatically set, like, it is not even possible
+// for them to make the changes, it is system-driven, okay, the statuses are system-driven, 100%."
+// It used to be a <select> dressed as a pill; it is a plain label now, wherever it is drawn, and
+// `onChange` / `disabled` from older callers are ignored. Tinted the way StatusPill is: the colour
+// at ~12% behind the colour itself.
+const ssStatusTint = (hex) => (/^#[0-9A-Fa-f]{6}$/.test(hex || "") ? hex + "1F" : "#F1F5F9");
+function SsStatusPill({ statuses, value, style = null }) {
+  const cur = (statuses || []).find((x) => x.id === value) || null;
+  const color = cur ? cur.color : "#64748B";
+  return (
+    <span data-ss-status-pill={value || ""} title={cur ? `${cur.name}: set automatically` : "No status yet"}
+      style={{
+        display: "inline-block", boxSizing: "border-box", verticalAlign: "middle",
+        background: ssStatusTint(color), color, border: "1px solid " + color + "55", borderRadius: 999,
+        padding: "1px 9px", fontSize: 10.5, fontWeight: 800, fontFamily: "inherit", lineHeight: "16px",
+        maxWidth: 150, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        ...(style || {}),
+      }}>
+      {cur ? cur.name : "No status"}
+    </span>
+  );
+}
+
+function SsPipeModal({ title, onClose, children, width = 460 }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    const unlock = ssLockBodyScroll();
+    return () => { window.removeEventListener("keydown", onKey); unlock(); };
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="presentation"
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+      <div role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, width: `min(${width}px, 100%)`, maxHeight: "90vh", overflowY: "auto", padding: 20, boxShadow: "0 20px 50px rgba(0,0,0,0.3)", boxSizing: "border-box" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "#1E293B", flex: 1 }}>{title}</div>
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ background: "none", border: "none", fontSize: 20, lineHeight: 1, color: "#94A3B8", cursor: "pointer" }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// "+ Add lead": a contact and a deal in one step. A phone or email that is already a contact is
+// refused with a way to open them, rather than a silent second deal on someone else's customer.
+function SsAddLeadDialog({ pipelines, defaultPipelineId, team, ownOnly, me, onClose, onAdded, onOpenRecord }) {
+  const [f, setF] = useState({ company: "", name: "", phone: "", email: "", title: "", value: "",
+    pipelineId: defaultPipelineId || (pipelines[0] && pipelines[0].id) || "", stageId: "", ownerUserId: "" });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [existing, setExisting] = useState(null);
+  const pipe = pipelines.find((p) => p.id === f.pipelineId) || pipelines[0];
+  const openStages = pipe ? pipe.stages.filter((s) => s.kind !== "lost") : [];
+  const stageId = f.stageId && openStages.some((s) => s.id === f.stageId) ? f.stageId : (openStages[0] && openStages[0].id) || "";
+  const set = (k) => (e) => { const v = e.target.value; setF((p) => ({ ...p, [k]: v })); };
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(null); setExisting(null);
+    try {
+      const r = await ssPipeCall("crm_create_lead", {
+        company: f.company, name: f.name, phone: f.phone, email: f.email, title: f.title, value: f.value,
+        stageId, ownerUserId: f.ownerUserId || null,
+      });
+      onAdded(r);
+    } catch (e2) {
+      setErr(e2.message);
+      if (e2.body && e2.body.existingContactId) setExisting(e2.body.existingContactId);
+    } finally { setBusy(false); }
+  };
+  const row = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10, marginBottom: 10 };
+  return (
+    <SsPipeModal title="Add a lead" onClose={onClose} width={520}>
+      <form onSubmit={submit}>
+        <div style={row}>
+          <label><span style={S.lbl}>Company</span><input style={S.input} value={f.company} onChange={set("company")} autoFocus placeholder="Acme Sheds" /></label>
+          <label><span style={S.lbl}>Contact name</span><input style={S.input} value={f.name} onChange={set("name")} placeholder="Pat Jones" /></label>
+        </div>
+        <div style={row}>
+          <label><span style={S.lbl}>Phone</span><input style={S.input} value={f.phone} onChange={set("phone")} inputMode="tel" placeholder="(816) 555-0100" /></label>
+          <label><span style={S.lbl}>Email</span><input style={S.input} value={f.email} onChange={set("email")} type="email" placeholder="pat@acmesheds.com" /></label>
+        </div>
+        <div style={row}>
+          <label><span style={S.lbl}>Pipeline</span>
+            <select style={S.input} value={f.pipelineId} onChange={(e) => { const v = e.target.value; setF((p) => ({ ...p, pipelineId: v, stageId: "" })); }}>
+              {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
+          <label><span style={S.lbl}>Stage</span>
+            <select style={S.input} value={stageId} onChange={set("stageId")}>
+              {openStages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div style={row}>
+          <label><span style={S.lbl}>Deal name (optional)</span><input style={S.input} value={f.title} onChange={set("title")} placeholder="Annual subscription" /></label>
+          <label><span style={S.lbl}>Value (optional)</span><input style={S.input} value={f.value} onChange={set("value")} inputMode="decimal" placeholder="$2,500" /></label>
+        </div>
+        {/* Someone limited to their own customers always owns what they add (the server enforces
+            it too), so the picker is offered only to people who can assign. */}
+        {!ownOnly && (
+          <label style={{ display: "block", marginBottom: 12 }}><span style={S.lbl}>Owner</span>
+            <select style={S.input} value={f.ownerUserId} onChange={set("ownerUserId")}>
+              <option value="">Unassigned</option>
+              {(team || []).map((m) => <option key={m.userId} value={m.userId}>{m.name || "Team member"}{m.userId === me ? " (me)" : ""}</option>)}
+            </select>
+          </label>
+        )}
+        {err && (
+          <div style={S.err}>
+            {err}
+            {existing && onOpenRecord && (
+              <> <button type="button" onClick={() => onOpenRecord(existing)}
+                style={{ background: "none", border: "none", color: "#DC2626", textDecoration: "underline", fontWeight: 800, cursor: "pointer", fontFamily: "inherit", fontSize: 13, padding: 0 }}>Open them</button></>
+            )}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+          <button type="submit" disabled={busy || !stageId} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Adding…" : "Add lead"}</button>
+        </div>
+      </form>
+    </SsPipeModal>
+  );
+}
+
+// Moving a deal to a LOST stage asks why: the pipeline's own list first, then "Other".
+function SsLostReasonDialog({ reasons, onCancel, onPick }) {
+  const list = reasons || [];
+  const [pick, setPick] = useState(list[0] || "__other");
+  const [other, setOther] = useState("");
+  const useOther = pick === "__other";
+  const value = useOther ? other.trim() : pick;
+  return (
+    <SsPipeModal title="Why was it lost?" onClose={onCancel} width={400}>
+      {list.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+          {list.concat(["__other"]).map((r) => (
+            <label key={r} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 600, color: "#1E293B", cursor: "pointer" }}>
+              <input type="radio" name="ss-lost" checked={pick === r} onChange={() => setPick(r)} />
+              {r === "__other" ? "Other…" : r}
+            </label>
+          ))}
+        </div>
+      )}
+      {useOther && <input style={{ ...S.input, marginBottom: 12 }} autoFocus value={other} onChange={(e) => setOther(e.target.value)} placeholder="What happened?" maxLength={200} />}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button type="button" onClick={onCancel} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+        <button type="button" disabled={!value} onClick={() => onPick(value)} style={{ ...S.btn("#DC2626", "#FFF"), opacity: value ? 1 : 0.5 }}>Mark lost</button>
+      </div>
+    </SsPipeModal>
+  );
+}
+
+// Stages, colours, kinds and lost reasons for one pipeline, or a new pipeline. settings_crm:edit
+// (owner/admin by preset); the server refuses everyone else whatever this shows. Stages are the
+// builder's to shape (Carolyn 2026-10-12: "they can make them whatever they want"). A stage never
+// sets a card's status: statuses are system-driven (migration 303 retired 302's stage link).
+function SsPipelineEditor({ pipeline, onClose, onCreated }) {
+  const [name, setName] = useState(pipeline ? pipeline.name : "");
+  const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
+  const [reasons, setReasons] = useState(pipeline ? (pipeline.lostReasons || []).join("\n") : "");
+  const [newStage, setNewStage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const run = async (fn) => { setBusy(true); setErr(null); try { await fn(); } catch (e) { setErr(e.message); } finally { setBusy(false); } };
+
+  if (!pipeline) {
+    return (
+      <SsPipeModal title="New pipeline" onClose={onClose} width={400}>
+        <label style={{ display: "block", marginBottom: 12 }}><span style={S.lbl}>Name</span>
+          <input style={S.input} autoFocus value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="Dealer recruiting" /></label>
+        <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px" }}>It starts with New, Won and Lost. Rename them and add stages next.</p>
+        {err && <div style={S.err}>{err}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+          <button type="button" disabled={busy || !name.trim()} style={S.btn(ACCENT, "#FFF")}
+            onClick={() => run(async () => { const r = await ssPipeCall("crm_pipeline_save", { name }); onCreated(r.id); })}>Create</button>
+        </div>
+      </SsPipeModal>
+    );
+  }
+
+  const saveStage = (s, patch) => run(async () => {
+    await ssPipeCall("crm_stage_save", { id: s.id, ...patch });
+    setStages((all) => all.map((x) => (x.id === s.id ? { ...x, ...patch } : x)));
+  });
+  const move = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= stages.length) return;
+    const next = stages.slice(); const t = next[i]; next[i] = next[j]; next[j] = t;
+    setStages(next);
+    run(() => ssPipeCall("crm_stages_reorder", { pipelineId: pipeline.id, ids: next.map((s) => s.id) }));
+  };
+  const addStage = () => run(async () => {
+    const label = newStage.trim();
+    const r = await ssPipeCall("crm_stage_save", { pipelineId: pipeline.id, name: label, kind: "open" });
+    // The server adds it last; an open stage belongs before the first won/lost one.
+    const next = stages.slice();
+    const at = next.findIndex((x) => x.kind !== "open");
+    next.splice(at < 0 ? next.length : at, 0, { id: r.id, name: label, color: "#64748B", kind: "open" });
+    setStages(next); setNewStage("");
+    if (at >= 0) await ssPipeCall("crm_stages_reorder", { pipelineId: pipeline.id, ids: next.map((s) => s.id) });
+  });
+  const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
+  return (
+    <SsPipeModal title={`Edit “${pipeline.name}”`} onClose={onClose} width={560}>
+      <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Pipeline name</span>
+        <input style={S.input} value={name} maxLength={80} onChange={(e) => setName(e.target.value)}
+          onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, name })); }} /></label>
+      <span style={S.lbl}>Stages</span>
+      <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
+        {pipeline.feedsDesigns ? "New designs land in this pipeline, in its first open stage. " : ""}
+        Name, colour and order the stages however you work. Moving a card between stages never changes its
+        status: statuses are set automatically (see Settings → Pipelines).
+      </p>
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
+        {stages.map((s, i) => (
+          <div key={s.id} style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 8px", borderBottom: i < stages.length - 1 ? "1px solid #F1F5F9" : "none" }}>
+            <select aria-label="Colour" value={s.color} onChange={(e) => saveStage(s, { color: e.target.value })}
+              style={{ width: 34, height: 28, flexShrink: 0, border: "1px solid #CBD5E1", borderRadius: 6, background: s.color, color: "transparent", cursor: "pointer" }}>
+              {SS_STAGE_COLORS.concat(SS_STAGE_COLORS.includes(s.color) ? [] : [s.color]).map((c) => <option key={c} value={c} style={{ background: c, color: "#FFF" }}>{c}</option>)}
+            </select>
+            <input aria-label="Stage name" style={{ ...S.input, flex: 1, minWidth: 0, padding: "5px 8px" }} defaultValue={s.name} maxLength={60}
+              onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.name) saveStage(s, { name: v }); }} />
+            <select aria-label="Kind" value={s.kind} onChange={(e) => saveStage(s, { kind: e.target.value })} style={{ ...S.input, width: 80, padding: "5px 6px" }}>
+              <option value="open">Open</option><option value="won">Won</option><option value="lost">Lost</option>
+            </select>
+            <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>
+            <button type="button" title="Move down" disabled={busy || i === stages.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>
+            <button type="button" title="Remove stage" disabled={busy}
+              onClick={() => { if (window.confirm(`Remove the “${s.name}” stage?`)) run(async () => { await ssPipeCall("crm_stage_save", { id: s.id, archive: true }); setStages((all) => all.filter((x) => x.id !== s.id)); }); }}
+              style={{ ...small, background: "#FEF2F2", color: "#DC2626" }}>✕</button>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        <input style={{ ...S.input, flex: 1 }} value={newStage} maxLength={60} onChange={(e) => setNewStage(e.target.value)} placeholder="New stage name"
+          onKeyDown={(e) => { if (e.key === "Enter" && newStage.trim()) { e.preventDefault(); addStage(); } }} />
+        <button type="button" disabled={busy || !newStage.trim()} style={S.btn(ACCENT, "#FFF")} onClick={addStage}>Add stage</button>
+      </div>
+      <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Lost reasons, one per line</span>
+        <textarea style={{ ...S.input, minHeight: 90 }} value={reasons} onChange={(e) => setReasons(e.target.value)}
+          onBlur={() => run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, lostReasons: reasons.split("\n") }))} /></label>
+      {err && <div style={S.err}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        {/* The pipeline new designs land in can't be removed (the server refuses it too): without it
+            a new design would get no card. */}
+        {pipeline.feedsDesigns ? <span /> : (
+          <button type="button" disabled={busy}
+            onClick={() => { if (window.confirm(`Remove the “${pipeline.name}” pipeline? It must have no deals left.`)) run(async () => { await ssPipeCall("crm_pipeline_save", { id: pipeline.id, archive: true }); onClose(); }); }}
+            style={S.btn("#FEF2F2", "#DC2626")}>Remove pipeline</button>
+        )}
+        <button type="button" disabled={busy} onClick={onClose} style={S.btn(ACCENT, "#FFF")}>Done</button>
+      </div>
+    </SsPipeModal>
+  );
+}
+
+// `embedded`: drawn inside a card its host owns, so no card or title of its own. onOpenRecord
+// (shortCode, contactId): a design card opens its customer with that deal picked, a lead card (no
+// design) opens its contact.
+// HOSTED BY THE CONTACTS HUB (2026-10-12): `hosted` hides the pipeline picker, because the hub's tab
+// row IS the picker now (one tab per pipeline, Carolyn: "every pipeline that they create will be
+// next, next, next"), and urlPipelineId names the tab's pipeline. `onPipelines` hands the hub every
+// fresh list this board loads, so a pipeline added, renamed or removed from "+ Pipeline" or "Edit
+// stages" shows in the tab row at once.
+function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = false, refreshKey = 0, urlPipelineId = null, onPickPipeline = null, onPipelines = null, onOpenRecord = null }) {
+  const [meta, setMeta] = useState(null);      // { pipelines, team, canManage, canWrite, ownOnly, me }
+  const [deals, setDeals] = useState(null);    // null = loading
+  const [err, setErr] = useState(null);
+  // The search, Owner and Status filter as last changed here; `view` below reads it (C22 + C42).
+  const [viewEdit, setViewEdit] = useState(null);
+  // The board's own width, for how many stage columns go across (ssBoardColumns). A ref callback,
+  // not an effect, because the board mounts only once the pipelines are in, after the early return
+  // below. Measured on a full-width wrapper, never on the grid it sizes (whose width it caps).
+  const [boardW, setBoardW] = useState(0);
+  const boardRO = useRef(null);
+  const boardRef = useCallback((el) => {
+    if (boardRO.current) { boardRO.current.disconnect(); boardRO.current = null; }
+    if (!el) return;
+    setBoardW(Math.round(el.getBoundingClientRect().width));
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => setBoardW(Math.round(el.getBoundingClientRect().width)));
+      ro.observe(el);
+      boardRO.current = ro;
+    }
+  }, []);
+  const [dialog, setDialog] = useState(null);  // "add" | "edit" | "new" | { lost: { deal, stage } }
+  const [dragId, setDragId] = useState(null);
+  const [overStage, setOverStage] = useState(null);
+  const [pickedLocal, setPickedLocal] = useState(null);
+  const [closeEdit, setCloseEdit] = useState(null);  // deal id whose close-date input is open
+
+  const loadMeta = useCallback(async () => {
+    try {
+      const m = await ssPipeCall("crm_pipelines_list");
+      setMeta(m); setErr(null);
+      if (onPipelines) onPipelines(m.pipelines || []);
+    }
+    catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [], team: [] }); }
+  }, [clientId]);
+  useEffect(() => { loadMeta(); }, [loadMeta]);
+
+  const pipelines = (meta && meta.pipelines) || [];
+  let remembered = null;
+  try { remembered = localStorage.getItem(SS_PIPE_LAST + ":" + clientId); } catch (_e) { /* private mode */ }
+  const want = urlPipelineId || pickedLocal || remembered;
+  const pipe = pipelines.find((p) => p.id === want) || pipelines[0] || null;
+  const pipeId = pipe ? pipe.id : null;
+  const pick = (id) => {
+    try { localStorage.setItem(SS_PIPE_LAST + ":" + clientId, id); } catch (_e) { /* private mode */ }
+    setPickedLocal(id);
+    if (onPickPipeline) onPickPipeline(id);
+  };
+  // This pipeline's view: as changed here, else as it was left the last time this board showed
+  // (opening a card unmounts the board; see ssBoardViewOf). One object keyed by its pipeline, so
+  // switching pipelines never carries the last one's filter across.
+  const view = useMemo(() => {
+    const kept = ssBoardViewOf(clientId, pipeId);
+    return viewEdit && viewEdit.key === kept.key ? viewEdit : kept;
+  }, [viewEdit, clientId, pipeId]);
+  const setView = (patch) => setViewEdit(ssBoardViewPut(clientId, pipeId, { ...view, ...patch }));
+  const { query, owner } = view;
+  const statusFilter = view.status;  // { mode, ids }, see ssStatusFilterKeep
+  const setQuery = (v) => setView({ query: v });
+  const setOwner = (v) => setView({ owner: v });
+  const setStatusFilter = (v) => setView({ status: v });
+
+  const loadDeals = useCallback(async () => {
+    if (!pipeId) return;
+    setDeals(null);
+    try { const r = await ssPipeCall("crm_deals_list", { pipelineId: pipeId }); setDeals(r.deals || []); setErr(null); }
+    catch (e) { setErr(e.message); setDeals([]); }
+  }, [pipeId]);
+  useEffect(() => { loadDeals(); }, [loadDeals, refreshKey]);
+
+  // Operator view-as is read-only here, as on the Pipeline board: a write would go under the
+  // tenant's account with the operator's session.
+  const canWrite = !!(meta && meta.canWrite) && !viewing;
+  const team = (meta && meta.team) || [];
+  const statuses = (meta && meta.statuses) || [];
+  const teamName = (id) => { const m = team.find((x) => x.userId === id); return m ? (m.name || "Team member") : null; };
+
+  // Optimistic: the card jumps at once, and a refusal puts it back and says why.
+  // EXPECTED CLOSE DATE, from the card (Carolyn 2026-09-07: "editable straight from the card").
+  // A design card's date lives on the design (set_expected_close, migration 206, the same field
+  // the record shows); a lead's lives on its deal. Optimistic, like the move.
+  const saveClose = async (deal, value) => {
+    setCloseEdit(null);
+    const iso = value || null;
+    if (iso === (deal.expected_close_date || null)) return;
+    const prev = deals;
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, expected_close_date: iso } : d)));
+    try {
+      if (deal.short_code) await ssPipeCall("set_expected_close", { shortCode: deal.short_code, expectedCloseDate: iso });
+      else await ssPipeCall("crm_deal_update", { id: deal.id, expectedCloseDate: iso || "" });
+    } catch (e) { setDeals(prev); setErr(e.message); }
+  };
+
+  // A drag moves the STAGE only. The status is the system's (Carolyn 2026-10-12: "the statuses are
+  // system-driven, 100%"), so the card keeps the one it has and shows whatever status the server
+  // answers with, rather than painting one of its own. There is no way to set a status by hand here.
+  const moveDeal = async (deal, stage, lostReason) => {
+    const prev = deals;
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, stage_entered_at: new Date().toISOString(), lost_reason: lostReason || null } : d)));
+    try {
+      const r = await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id, lostReason: lostReason || null });
+      if (r && typeof r.status_id === "string") setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, status_id: r.status_id } : d)));
+    } catch (e) { setDeals(prev); setErr(e.message); }
+  };
+  const onDrop = (stage) => {
+    const deal = (deals || []).find((d) => d.id === dragId);
+    setDragId(null); setOverStage(null);
+    if (!deal || deal.stage_id === stage.id) return;
+    if (stage.kind === "lost") { setDialog({ lost: { deal, stage } }); return; }
+    moveDeal(deal, stage);
+  };
+
+  const q = query.trim().toLowerCase();
+  // A status that was removed since it was ticked filters nothing, so it cannot leave the board
+  // blank with no way to see why.
+  const statusF = {
+    mode: statusFilter.mode,
+    ids: statusFilter.ids.filter((id) => id === SS_NO_STATUS || statuses.some((t) => t.id === id)),
+  };
+  const shown = (deals || []).filter((d) => {
+    const c = d.contact || {};
+    if (!ssStatusFilterKeep(d.status_id, statusF)) return false;
+    if (owner === "none" && c.ownerUserId) return false;
+    if (owner !== "all" && owner !== "none" && c.ownerUserId !== owner) return false;
+    if (!q) return true;
+    const g = d.design || {};
+    return [c.company, c.name, c.phone, c.email, d.title, g.estimateNumber, g.style, g.size, d.short_code].some((v) => v && String(v).toLowerCase().includes(q));
+  });
+  const ghost = { ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" };
+
+  if (!meta) return embedded
+    ? <p style={{ fontSize: 13, color: "#64748B" }}>Loading pipelines…</p>
+    : <div style={S.card}><CardHead title="Leads" /><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
+
+  const toolbar = (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            {pipelines.length > 0 && !hosted && (
+              <select aria-label="Pipeline" value={pipeId || ""} onChange={(e) => pick(e.target.value)}
+                style={{ ...S.input, width: "auto", padding: "6px 10px", fontWeight: 700 }}>
+                {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            )}
+            {meta.canManage && !viewing && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
+            {meta.canManage && !viewing && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
+            {canWrite && pipe && <button type="button" onClick={() => setDialog("add")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px" }}>＋ Add lead</button>}
+            {/* REFRESH ON EVERY BOARD (2026-10-13). It used to show only when not embedded, and the
+                board is only ever drawn embedded now (a Contacts hub tab), so there was no way to
+                reload the cards short of reloading the page ("Refresh does nothing"). One press
+                reloads the pipelines (the hub's tab row follows through onPipelines) and this
+                board's cards. */}
+            <button type="button" data-ss-board-refresh="" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>
+          </div>
+  );
+  const count = deals ? (q || owner !== "all" || statusF.ids.length ? `${shown.length} of ${deals.length}` : deals.length) : null;
+  const boardCols = pipe ? ssBoardColumns(pipe.stages.length, boardW) : 1;
+
+  return (
+    <div style={embedded ? undefined : S.card} data-ss-sales-pipelines="">
+      {embedded
+        ? <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            {toolbar}
+            {count !== null && <span style={{ fontSize: 12, fontWeight: 700, color: "#94A3B8" }}>{count} {count === 1 ? "card" : "cards"}</span>}
+          </div>
+        : <CardHead title="Leads" count={count} right={toolbar} />}
+      {/* Search, then the STATUS filter beside it (Carolyn 2026-10-12: "a dropdown of the statuses
+          up here ... beside the search"), then Owner. Tops aligned the way the Design list's bar
+          is: the search wears a heading-shaped spacer so every box sits on one line. */}
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ ...FCTRL, flex: "1 1 280px", minWidth: 220 }}>
+          <span style={FLBL_SPACER} aria-hidden="true">Search</span>
+          <SearchInput value={query} onChange={setQuery} placeholder="Search: company, name, phone, email…" />
+        </div>
+        {pipe && <SsStatusFilter statuses={statuses} deals={deals} value={statusFilter} onChange={setStatusFilter} />}
+        {!meta.ownOnly && team.length > 0 && (
+          <FacetSelect label="Owner" value={owner} onChange={setOwner} allLabel="Everyone"
+            options={[{ value: "none", label: "Unassigned" }].concat(team.map((m) => ({ value: m.userId, label: m.name || "Team member" })))} />
+        )}
+      </div>
+      {meta.ownOnly && <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 10 }}>You see the leads assigned to you or that you follow.</div>}
+      {err && <div style={S.err}>{err}</div>}
+      {!pipe && !err && <p style={{ fontSize: 13, color: "#64748B" }}>No pipelines yet.</p>}
+      {/* THE BOARD: no scroller of its own, sideways or down (Carolyn 2026-10-12, see
+          ssBoardColumns). data-ss-board-wide lifts the page's width cap while it shows. */}
+      {pipe && (
+        <div ref={boardRef} data-ss-board-wide="" data-ss-board-cols={boardCols}>
+          <div style={{
+            display: "grid", gridTemplateColumns: `repeat(${boardCols}, minmax(0, 1fr))`, gap: SS_BOARD_GAP, alignItems: "start",
+            maxWidth: boardCols * SS_BOARD_COL_MAX + (boardCols - 1) * SS_BOARD_GAP,
+          }}>
+            {pipe.stages.map((st) => {
+              const cards = shown.filter((d) => d.stage_id === st.id);
+              const total = cards.reduce((a, d) => a + (Number(d.value_cents) || 0), 0);
+              const over = overStage === st.id && !!dragId;
+              return (
+                <div key={st.id} data-ss-stage={st.id}
+                  onDragOver={canWrite ? (e) => { e.preventDefault(); if (overStage !== st.id) setOverStage(st.id); } : undefined}
+                  onDrop={canWrite ? (e) => { e.preventDefault(); onDrop(st); } : undefined}
+                  style={{ minWidth: 0, background: over ? "#EEF2FF" : "#F8FAFC", border: "1px solid " + (over ? ACCENT : "#E2E8F0"), borderTop: "3px solid " + st.color, borderRadius: 10, padding: 7, minHeight: 120 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", marginBottom: 7, columnGap: 6, rowGap: 2 }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569", minWidth: 0, overflowWrap: "anywhere" }}>{st.name}</span>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", whiteSpace: "nowrap" }}>{deals ? cards.length : "…"}{total ? ` · ${fmtMoneyWhole(total)}` : ""}</span>
+                  </div>
+                  {deals === null && <div style={{ height: 54, background: "#EEF2F7", borderRadius: 8 }} />}
+                  {deals && cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
+                  {cards.map((d) => {
+                    const c = d.contact || {};
+                    const g = d.design;
+                    const head = c.company || c.name || c.phone || c.email || "—";
+                    const building = g ? [titleCase(g.style), g.size].filter(Boolean).join(" ") : "";
+                    const sub = g
+                      ? (building || d.short_code)
+                      : (c.company ? (c.name || c.phone || c.email) : (d.title || null));
+                    const closeIso = d.expected_close_date || null;
+                    const closeLate = !!closeIso && closeIso < ssLocalIso(new Date());
+                    const days = ssDaysSince(d.stage_entered_at);
+                    const ownerName = teamName(c.ownerUserId);
+                    const follow = d.next_follow_up_at ? Date.parse(d.next_follow_up_at) : null;
+                    const late = follow !== null && follow < Date.now();
+                    const openCard = () => { if (onOpenRecord) onOpenRecord(d.short_code || null, d.contact_id || null, d.id); };
+                    return (
+                      // THE CARD is a focusable div acting as a button (Enter or Space opens it, like a
+                      // click), not a <button>: the close date below is a control of its own, and a
+                      // control inside a <button> is invalid HTML that swallows the card's click. That
+                      // used to force the close date out of the card into a sibling pinned over it at
+                      // fixed pixel offsets; inside the card it sits in the status row and simply wraps
+                      // under the pill when the column is narrow, as columns now can be.
+                      // Not draggable while its close date is being typed, so the mouse works in the field.
+                      <div key={d.id} role="button" tabIndex={0} draggable={canWrite && closeEdit !== d.id} data-ss-deal={d.id}
+                        onDragStart={(e) => { setDragId(d.id); try { e.dataTransfer.setData("text/plain", d.id); e.dataTransfer.effectAllowed = "move"; } catch (_e) { /* old browsers */ } }}
+                        onDragEnd={() => { setDragId(null); setOverStage(null); }}
+                        onClick={openCard}
+                        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openCard(); } }}
+                        style={{ display: "block", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", marginBottom: 6, cursor: canWrite ? "grab" : "pointer", fontFamily: "inherit", opacity: dragId === d.id ? 0.5 : 1 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                          <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{head}</span>
+                          {d.value_cents != null && <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{fmtMoneyWhole(d.value_cents)}</span>}
+                        </div>
+                        {sub && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
+                        {/* The STATUS PILL (left; a label, statuses are the system's) and the close date
+                            (right; Carolyn 2026-09-07: "editable straight from the card"). */}
+                        <div style={{ marginTop: 5, minHeight: 20, display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 6, rowGap: 3 }}>
+                          <SsStatusPill statuses={statuses} value={d.status_id} style={{ maxWidth: "100%" }} />
+                          {closeEdit === d.id ? (
+                            <input type="date" autoFocus defaultValue={closeIso || ""} aria-label="Expected close date"
+                              onClick={(e) => e.stopPropagation()}
+                              onBlur={(e) => saveClose(d, e.target.value)}
+                              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setCloseEdit(null); }}
+                              style={{ marginLeft: "auto", maxWidth: "100%", boxSizing: "border-box", border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
+                          ) : (closeIso || canWrite) && (
+                            <button type="button" title={closeIso ? "Expected close: click to change" : "Set an expected close date"}
+                              onClick={(e) => { e.stopPropagation(); setCloseEdit(d.id); }} disabled={!canWrite}
+                              style={{ marginLeft: "auto", border: "none", borderRadius: 4, padding: "0 4px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit", whiteSpace: "nowrap",
+                                cursor: canWrite ? "pointer" : "default", background: closeLate ? "#FEF2F2" : "transparent",
+                                color: closeIso ? (closeLate ? "#DC2626" : "#1B7895") : "#CBD5E1" }}>
+                              {closeIso ? fmtDateShort(closeIso) : "+ close"}
+                            </button>
+                          )}
+                        </div>
+                        {/* THE OLD BOARD'S DETAILS on a design card (Carolyn 2026-10-11, pointing at it:
+                            "I want this to be listed on the cards of the newly created pipeline"):
+                            the ESTIMATE's own status and number. The pill above is the card's status,
+                            which the system sets; this one is what the estimate really is. */}
+                        {g && (
+                          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4, display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 6, rowGap: 2 }}>
+                            <StatusPill status={g.status} small />
+                            {g.estimateNumber && <span>#{g.estimateNumber}</span>}
+                          </div>
+                        )}
+                        {st.kind === "lost" && d.lost_reason && <div style={{ fontSize: 11, color: "#DC2626", marginTop: 3 }}>{d.lost_reason}</div>}
+                        <div style={{ marginTop: 6, display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 6, rowGap: 3, fontSize: 10.5, color: "#94A3B8" }}>
+                          <span title={ownerName ? `Owner: ${ownerName}` : "Unassigned"}
+                            style={{ width: 20, height: 20, flexShrink: 0, borderRadius: "50%", background: ownerName ? "#E0E7FF" : "#F1F5F9", color: ownerName ? ACCENT : "#94A3B8", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 800 }}>
+                            {ownerName ? ssPipeInitials(ownerName) : "–"}
+                          </span>
+                          {days !== null && <span>{days === 0 ? "New today" : `${days}d in stage`}</span>}
+                          {follow !== null && (
+                            <span style={{ marginLeft: "auto", fontWeight: 700, color: late ? "#DC2626" : "#1B7895", background: late ? "#FEF2F2" : "transparent", borderRadius: 4, padding: "0 4px", whiteSpace: "nowrap" }}>
+                              {late ? "Overdue " : "Follow up "}{fmtDateShort(d.next_follow_up_at)}
+                            </span>
+                          )}
+                        </div>
+                        {/* Created · Updated, as on the old board: the design's own dates on a design
+                            card, the card's on a lead. */}
+                        <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #F1F5F9", fontSize: 10, color: "#94A3B8", display: "flex", flexWrap: "wrap", columnGap: 5, fontVariantNumeric: "tabular-nums" }}>
+                          <span style={{ whiteSpace: "nowrap" }}>Created {fmtDateShort(g ? g.createdAt : d.created_at)}</span>
+                          <span style={{ opacity: 0.55 }}>·</span>
+                          <span style={{ whiteSpace: "nowrap" }}>Updated {fmtDateShort(g ? g.updatedAt : d.updated_at)}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {canWrite && pipe && <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "8px 0 0" }}>Drag a card to move it to another stage. Click a card to open the customer. Statuses are set automatically.{pipe.feedsDesigns ? " New designs appear here on their own." : ""}</p>}
+      {dialog === "add" && (
+        <SsAddLeadDialog pipelines={pipelines} defaultPipelineId={pipeId} team={team} ownOnly={!!meta.ownOnly} me={meta.me}
+          onClose={() => setDialog(null)} onOpenRecord={onOpenRecord ? (contactId) => onOpenRecord(null, contactId) : null}
+          onAdded={(r) => { setDialog(null); loadDeals(); }} />
+      )}
+      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} onClose={() => { setDialog(null); loadMeta(); loadDeals(); }} />}
+      {dialog === "new" && <SsPipelineEditor pipeline={null} onClose={() => setDialog(null)}
+        onCreated={async (id) => { setDialog(null); await loadMeta(); pick(id); }} />}
+      {dialog && dialog.lost && (
+        <SsLostReasonDialog reasons={pipe ? pipe.lostReasons : []} onCancel={() => setDialog(null)}
+          onPick={(reason) => { const { deal, stage } = dialog.lost; setDialog(null); moveDeal(deal, stage, reason); }} />
+      )}
+    </div>
+  );
+}
+
+// ── SETTINGS → PIPELINES (migration 302) ─────────────────────────────────────────────────────
+// Carolyn 2026-10-11: "I do want to have these stages in the settings, so that each builder can
+// then rename them if they want and we also want them to add others if they want and they will set
+// up When they get that stage such as when an estimate is accepted then it gets that stage. so we
+// need a drop down similar to how we have it in GHL settings."
+// The STATUSES card is that list; each one's "Set automatically when" drop-down names the system
+// event that sets it (one status per event). The PIPELINES card opens each pipeline's stage editor.
+// Carolyn 2026-10-12 (migration 303): statuses are "system-driven, 100%": nobody sets one on a
+// card, so nothing here offers a hand-set or a stage link, and Quotes is gone (new designs land in
+// Shed Deals, the pipeline marked "new designs").
+// settings_crm:edit to change anything (owner/admin by preset); the server refuses everyone else.
+const SS_STATUS_EVENTS = [
+  ["design_submitted", "A design is submitted"],
+  ["estimate_sent", "The estimate is sent"],
+  ["estimate_accepted", "The estimate is accepted"],
+  ["invoiced", "The invoice is sent"],
+  ["paid_in_full", "It is paid in full"],
+  ["build_scheduled", "It is added to the build schedule"],
+  ["delivered", "It is delivered"],
+];
+function PipelineSettings({ viewing = false }) {
+  const [meta, setMeta] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [newName, setNewName] = useState("");
+  // The event a new status is set by. Required: a status no event sets never reaches a card.
+  const [newEvent, setNewEvent] = useState("");
+  const [editing, setEditing] = useState(null);   // pipeline object | "new"
+  const load = useCallback(async () => {
+    try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
+    catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [], statuses: [] }); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const run = async (fn) => { setBusy(true); setErr(null); try { await fn(); await load(); } catch (e) { setErr(e.message); await load(); } finally { setBusy(false); } };
+  if (!meta) return <div style={S.card}><div style={S.h2}>Pipelines &amp; Statuses</div><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
+  const can = !!meta.canManage && !viewing;
+  const statuses = meta.statuses || [];
+  const save = (t, patch) => run(() => ssPipeCall("crm_status_save", { id: t.id, ...patch }));
+  const move = (i, d) => {
+    const j = i + d; if (j < 0 || j >= statuses.length) return;
+    const ids = statuses.map((t) => t.id); const x = ids[i]; ids[i] = ids[j]; ids[j] = x;
+    run(() => ssPipeCall("crm_statuses_reorder", { ids }));
+  };
+  const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
+  const usedBy = (ev, id) => statuses.some((t) => t.triggerEvent === ev && t.id !== id);
+  // A NEW STATUS NEEDS ITS EVENT (2026-10-13). Statuses are the system's, so a status no event sets
+  // is one no card can ever get (Appt Set, as seeded). Adding one asks for the event that sets it,
+  // from the events no other status has (one status per event, crm_statuses' unique index); with
+  // none free, the card says so instead of offering a status that would sit unused.
+  const freeEvents = SS_STATUS_EVENTS.filter(([k]) => !usedBy(k, null));
+  const addEvent = freeEvents.some(([k]) => k === newEvent) ? newEvent : "";
+  const canAdd = !busy && !!newName.trim() && !!addEvent;
+  const add = () => run(async () => {
+    await ssPipeCall("crm_status_save", { name: newName.trim(), triggerEvent: addEvent });
+    setNewName(""); setNewEvent("");
+  });
+  return (
+    <>
+      <div style={S.card} data-ss-pipeline-settings="">
+        <div style={S.h2}>Statuses</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+          Every card on every pipeline shows its status as a coloured pill, and the system sets it: each status
+          is set automatically when its event happens (<b>Set automatically when</b>). A status only ever moves
+          forward in this order, and nobody changes one by hand. You can rename them, recolour them and put them
+          in order. A status with no event never reaches a card, so a new status needs an event of its own.
+        </p>
+        {err && <div style={S.err}>{err}</div>}
+        <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 10 }}>
+          {statuses.map((t, i) => (
+            <div key={t.id} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "7px 9px", borderBottom: i < statuses.length - 1 ? "1px solid #F1F5F9" : "none" }}>
+              <select aria-label="Colour" disabled={!can || busy} value={t.color} onChange={(e) => save(t, { color: e.target.value })}
+                style={{ width: 34, height: 28, flexShrink: 0, border: "1px solid #CBD5E1", borderRadius: 6, background: t.color, color: "transparent", cursor: can ? "pointer" : "default" }}>
+                {SS_STAGE_COLORS.concat(["#84CC16", "#0F766E", "#60A5FA", "#EF4444"]).concat(SS_STAGE_COLORS.includes(t.color) ? [] : [t.color])
+                  .filter((c, k, a) => a.indexOf(c) === k).map((c) => <option key={c} value={c} style={{ background: c, color: "#FFF" }}>{c}</option>)}
+              </select>
+              <input key={t.id + t.name} aria-label="Status name" disabled={!can || busy} style={{ ...S.input, flex: "1 1 150px", minWidth: 120, padding: "5px 8px" }}
+                defaultValue={t.name} maxLength={40}
+                onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== t.name) save(t, { name: v }); }} />
+              <label style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 230px", fontSize: 11.5, color: "#64748B", fontWeight: 700 }}>
+                Set automatically when
+                <select aria-label="Set automatically when" disabled={!can || busy} value={t.triggerEvent || ""}
+                  onChange={(e) => save(t, { triggerEvent: e.target.value })} style={{ ...S.input, flex: 1, padding: "5px 6px" }}>
+                  <option value="">No event</option>
+                  {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k} disabled={usedBy(k, t.id)}>{label}{usedBy(k, t.id) ? " (used)" : ""}</option>)}
+                </select>
+              </label>
+              {can && <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>}
+              {can && <button type="button" title="Move down" disabled={busy || i === statuses.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>}
+              {can && <button type="button" title="Remove status" disabled={busy}
+                onClick={() => { if (window.confirm(`Remove the “${t.name}” status? Only a status no card has can be removed.`)) save(t, { archive: true }); }}
+                style={{ ...small, background: "#FEF2F2", color: "#DC2626" }}>✕</button>}
+              {!t.triggerEvent && (
+                <div data-ss-status-no-event="" style={{ flexBasis: "100%", fontSize: 11.5, fontWeight: 600, color: "#B45309", paddingLeft: 40 }}>
+                  No event yet, so no card will get this status.
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        {can && (freeEvents.length > 0 ? (
+          <div data-ss-status-add="" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <input style={{ ...S.input, flex: "1 1 160px", minWidth: 140 }} value={newName} maxLength={40} onChange={(e) => setNewName(e.target.value)}
+              placeholder="New status name" aria-label="New status name"
+              onKeyDown={(e) => { if (e.key === "Enter" && canAdd) { e.preventDefault(); add(); } }} />
+            <select aria-label="New status is set automatically when" value={addEvent} onChange={(e) => setNewEvent(e.target.value)}
+              style={{ ...S.input, flex: "1 1 200px", minWidth: 170, padding: "6px 8px" }}>
+              <option value="">Set automatically when…</option>
+              {freeEvents.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            <button type="button" disabled={!canAdd} style={S.btn(ACCENT, "#FFF")} onClick={add}>Add status</button>
+          </div>
+        ) : (
+          <p data-ss-status-add-none="" style={{ fontSize: 12, color: "#64748B", margin: 0, lineHeight: 1.5 }}>
+            Every event already sets a status, so a new one would never reach a card. Rename a status instead, or
+            free an event by setting a status to <b>No event</b>.
+          </p>
+        ))}
+      </div>
+      <div style={S.card}>
+        <div style={S.h2}>Pipelines</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+          New designs land in the pipeline marked <b>new designs</b>, in its first open stage. Open a pipeline to
+          rename, reorder and add stages and set its lost reasons.
+        </p>
+        {(meta.pipelines || []).map((p) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid #F1F5F9" }}>
+            <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+              {p.name}
+              {p.feedsDesigns && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: "#1B7895", background: "#E0F2FE", borderRadius: 999, padding: "1px 8px" }}>new designs</span>}
+              <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 600, color: "#94A3B8" }}>{p.stages.length} stages</span>
+            </span>
+            {can && <button type="button" onClick={() => setEditing(p)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>Edit stages</button>}
+          </div>
+        ))}
+        {can && <button type="button" onClick={() => setEditing("new")} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 10 }}>＋ New pipeline</button>}
+      </div>
+      {editing && editing !== "new" && <SsPipelineEditor pipeline={editing} onClose={() => { setEditing(null); load(); }} />}
+      {editing === "new" && <SsPipelineEditor pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}
+    </>
   );
 }

@@ -20,6 +20,7 @@ import { recordingMedia, TwilioError, updateCall } from "../twilioRest";
 import { hook } from "../urls";
 import { voicemailTwiml } from "../voicemail";
 import { awayFromSettings } from "./voice";
+import { callerTwilioEnv } from "../twilioAccount";
 
 /** The call, on the caller's own tenant, by id or by either leg's CallSid. */
 export async function resolveCall(c: Caller, idOrSid: string): Promise<CallRow | null> {
@@ -81,6 +82,8 @@ async function transferCover(c: Caller, coverId: unknown, routeTz: string): Prom
  */
 export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
   const c = await requireCaller(env, req);
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const body = await readJson(req);
   const target = String(body.to_user_id ?? "");
   if (!UUID_RE.test(target)) throw new ApiError("bad_request", "Pick a teammate to transfer to.");
@@ -240,6 +243,8 @@ export async function voicemailAudio(env: Env, ec: Ctx, req: Request, id: string
   // <audio src> with the token in the query. Drop this once those builds are gone (SPEC
   // section 3); nothing in the code is left to change first.
   const c = await requireCaller(env, req, { allowQueryToken: true, needOn: false });
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   if (!UUID_RE.test(id)) throw new ApiError("not_found", "That voicemail wasn't found.");
   const vm = must(
     await c.admin.from("phone_voicemails").select("id, call_id, client_id, recording_sid, deleted_at, listened_at").eq("id", id).maybeSingle(),

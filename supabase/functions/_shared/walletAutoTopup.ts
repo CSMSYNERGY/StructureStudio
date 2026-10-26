@@ -32,9 +32,26 @@
 //      Add funds while a text refusal asked for a top-up would find auto top-up disabled with
 //      that sentence as the reason. Now it is left on and logged as info.
 
+//
+// STORED CREDENTIALS (migration 317). An automatic top-up is the textbook merchant-initiated,
+// unscheduled charge on a stored card, so it now goes out as one (mit_unscheduled: merchant +
+// used + initial_transaction_id), and it only goes out at all when both halves of the agreement
+// exist: the builder's own first top-up (billing_customers.unscheduled_initial_txn, the id the
+// card networks link this charge to) and the sentence they ticked when switching it on
+// (wallet_accounts.auto_topup_consent_id). Missing either, it is SWITCHED OFF with a reason the
+// Billing tab shows, never charged. That is how a tenant who turned it on before 317 is moved
+// over: at their first trigger, without a card being touched. After a charge, the owners get a
+// receipt (_shared/walletReceipt.ts), which the agreement promises.
+
 import { autoTopupDecision, AUTO_TOPUP_COOLDOWN_MS, chargeTopup } from "./walletTopup.ts";
 import { logEdgeError } from "./logError.ts";
 import { timingSafeEqual } from "./emailInbound.ts";
+import { AUTO_TOPUP_DAILY_MAX } from "./cofConsent.ts";
+import { sendTopupReceipt } from "./walletReceipt.ts";
+
+/** What the Billing tab shows when an auto top-up from before 317 is moved over. */
+export const AUTO_TOPUP_NEEDS_AGREEMENT =
+  "Automatic top-ups now need your agreement and one top-up you make yourself. Add funds once, then switch them back on and tick the box.";
 
 // deno-lint-ignore no-explicit-any
 type Admin = any;
@@ -45,9 +62,10 @@ export type AutoTopupOutcome = {
   /** Nothing went wrong. True for a considered decision not to fire. */
   ok: boolean;
   /**
-   * autoTopupDecision's reason when it did not fire ("not enabled", "cooling down", …), or one
-   * of: charged | claimed_elsewhere | stamp_failed | in_progress | declined | needs_review |
-   * crashed. Fixed strings only — never the gateway's text, which goes to app_errors.
+   * autoTopupDecision's reason when it did not fire ("not enabled", "cooling down", "daily limit
+   * reached", …), or one of: needs_agreement | cap_unreadable | charged | claimed_elsewhere |
+   * stamp_failed | in_progress | declined | needs_review | crashed. Fixed strings only — never the gateway's
+   * text, which goes to app_errors.
    */
   reason: string;
 };
@@ -59,6 +77,7 @@ export type AutoTopupDeps = {
   chargeTopup?: typeof chargeTopup;
   logError?: typeof logEdgeError;
   now?: () => number;
+  sendReceipt?: typeof sendTopupReceipt;
 };
 
 /** Matches chargeTopup's two "already in progress" refusals (walletTopup.ts, steps 2 and 3). */
@@ -80,21 +99,53 @@ export async function runAutoTopup(
   const log = deps.logError ?? logEdgeError;
   const charge = deps.chargeTopup ?? chargeTopup;
   const now = deps.now ?? Date.now;
+  const receipt = deps.sendReceipt ?? sendTopupReceipt;
   try {
+    const t = now();
+    // A database without 317's columns refuses these selects whole; acct/cust then read as
+    // missing and nothing fires, which is the safe way for that to fail.
     const [{ data: acct }, { data: cust }] = await Promise.all([
       admin.from("wallet_accounts")
-        .select("balance_cents, held_cents, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at")
+        .select("balance_cents, held_cents, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at, auto_topup_consent_id")
         .eq("client_id", clientId).maybeSingle(),
-      admin.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
+      admin.from("billing_customers").select("vault_id, unscheduled_initial_txn, card_last4").eq("client_id", clientId).maybeSingle(),
     ]);
     // Bind the vault id BEFORE the decision so its presence is provable rather than
     // implied: autoTopupDecision refuses without a card, but the type checker cannot know
     // that, and a non-null assertion on a money path is a comment pretending to be code.
     const vaultId = cust?.vault_id ? String(cust.vault_id) : "";
-    const t = now();
-    const decision = autoTopupDecision(acct, Boolean(vaultId), t);
+    let decision = autoTopupDecision(acct, Boolean(vaultId), t);
     if (!decision.fire) return { fired: false, ok: true, reason: decision.reason };
     if (!vaultId) return { fired: false, ok: true, reason: "no card on file" };
+
+    // THE AGREEMENT (header). Checked only once it would really fire, so a tenant above their
+    // threshold is never switched off over it. Both halves or nothing.
+    const initialTxn = cust?.unscheduled_initial_txn ? String(cust.unscheduled_initial_txn) : "";
+    if (!initialTxn || !acct?.auto_topup_consent_id) {
+      await admin.from("wallet_accounts")
+        .update({ auto_topup_enabled: false, auto_topup_consent_id: null, auto_topup_disabled_reason: AUTO_TOPUP_NEEDS_AGREEMENT })
+        .eq("client_id", clientId);
+      await log({
+        fn, req, clientId, code: "auto_topup_needs_agreement", severity: "info",
+        message: `Auto top-up switched off instead of charging: ${!initialTxn ? "no unscheduled initial transaction" : "no recorded agreement"} on file.`,
+      });
+      return { fired: false, ok: true, reason: "needs_agreement" };
+    }
+
+    // THE DAILY CAP, read only now that a charge is otherwise due: this runs on every 3D hold,
+    // usage charge and refused text, and almost all of them stop above. Every merchant-initiated
+    // top-up counts, an operator's included: the cap is about how often the card is charged
+    // without its owner pressing anything. A count that cannot be read charges nothing.
+    const { data: recent, error: recentErr } = await admin.from("billing_charge_attempts").select("id")
+      .eq("client_id", clientId).eq("cof", "mit_unscheduled")
+      .gte("created_at", new Date(t - 24 * 60 * 60 * 1000).toISOString())
+      .limit(AUTO_TOPUP_DAILY_MAX + 1);
+    if (recentErr) {
+      await log({ fn, req, clientId, code: "auto_topup_cap_unreadable", message: `Auto top-up not attempted: the daily count could not be read: ${recentErr.message}` });
+      return { fired: false, ok: false, reason: "cap_unreadable" };
+    }
+    decision = autoTopupDecision(acct, true, t, Array.isArray(recent) ? recent.length : 0);
+    if (!decision.fire) return { fired: false, ok: true, reason: decision.reason };
 
     // Stamp the cooldown BEFORE charging, not after. A burst can cross the threshold several
     // times in seconds; the failure to design against is five recharges, not a late one. If the
@@ -123,8 +174,17 @@ export async function runAutoTopup(
     const r = await charge(admin, {
       clientId, vaultId, amountCents: decision.amountCents,
       actorUserId: null, auto: true,
+      cof: "mit_unscheduled", initialTxn,
     });
-    if (r.ok) return { fired: true, ok: true, reason: "charged" };
+    if (r.ok) {
+      // The receipt the agreement promises. Never fails the charge: sendTopupReceipt records its
+      // own outcome on the attempt row and files a miss.
+      await receipt(admin, clientId, r.attemptId, {
+        amountCents: decision.amountCents, balanceCents: r.balanceCents, last4: cust?.card_last4 ?? null,
+        saleTxn: r.saleTxn, at: new Date(t), trigger: "auto", thresholdCents: Number(acct?.auto_topup_threshold_cents) || null,
+      }, req ?? null, { fn }).catch(() => undefined);
+      return { fired: true, ok: true, reason: "charged" };
+    }
 
     if (!r.blocking && IN_PROGRESS.test(String(r.error))) {
       // Difference 2 in the header: someone else's top-up holds the attempt slot. Nothing was
@@ -137,11 +197,24 @@ export async function runAutoTopup(
       // expired card declines identically every time, and a loop against it earns real
       // declines on the merchant account. The Billing tab shows this reason; turning it
       // back on is a human act.
+      // The agreement goes with it: switching back on is a new agreement, with the card it names.
       await admin.from("wallet_accounts")
-        .update({ auto_topup_enabled: false, auto_topup_disabled_reason: String(r.error).slice(0, 300) })
+        .update({
+          auto_topup_enabled: false, auto_topup_consent_id: null,
+          auto_topup_disabled_reason: `The card was declined (${String(r.error).slice(0, 200)}). Replace the card, then switch them back on.`,
+        })
         .eq("client_id", clientId);
       await log({ fn, req, clientId, code: "auto_topup_declined", message: `Auto top-up declined, switched off: ${r.error}` });
       return { fired: true, ok: false, reason: "declined" };
+    }
+    // Charged but not credited: the card moved, so the receipt the agreement promises still goes
+    // out (without a balance, which is exactly what is wrong). Then the blocking handling below.
+    if (r.chargedTxn) {
+      await receipt(admin, clientId, r.attemptId ?? null, {
+        amountCents: decision.amountCents, balanceCents: null, last4: cust?.card_last4 ?? null,
+        saleTxn: r.chargedTxn, at: new Date(t), trigger: "auto", thresholdCents: Number(acct?.auto_topup_threshold_cents) || null,
+        pendingCredit: true,
+      }, req ?? null, { fn }).catch(() => undefined);
     }
     // Blocking (gateway-unknown, or charged-but-not-credited). Leave it ENABLED:
     // the closed_unknown attempt row already blocks every further top-up, and

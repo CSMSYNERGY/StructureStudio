@@ -10,6 +10,8 @@
 //   3. a shelf clicked onto the wall above an outlet is placed
 //   4. a flood light placed from the electrical picker over that workbench is placed
 //   5. the selected-item toolbar says "Remove", not "Delete"
+//   6. a ceiling Light clicked 1.5 ft from a wall lands on no wall, stamped (2026-10-06: it used to
+//      become an unstamped WALL item, free on the quote and not drawn as a light)
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/electrical.mjs              (exit 0 = every check held)
@@ -213,6 +215,34 @@ export async function main() {
       const deleteN = await page.getByRole("button", { name: /Delete/ }).count();
       ok("no \"Delete\" beside Rotate on the selected-item toolbar", rotateN === 1 && deleteN === 0, `rotate ${rotateN}, delete ${deleteN}`);
       await page.screenshot({ path: `${shots}/5-remove-toolbar.png` });
+    }
+
+    // ── 6. A ceiling Light clicked beside a wall stays a ceiling Light ───────
+    // 1.5 ft in from the west wall is inside getWallFromClick's 80 px reach (about 3.6 ft here). Until
+    // 2026-10-06 that click took the WALL branch: ssWallItemAt put an item on the west wall with neither
+    // stamp, so it was on the plan, free on the quote and never drawn as a light in 3D. A ceiling device
+    // has no wall; it takes the free branch, where it was clicked, stamped like any other.
+    {
+      if (await page.getByText("Add an electrical item").count()) await page.keyboard.press("Escape");
+      const before = new Set(((await readItems(page)) || []).map((i) => i.id));
+      await (await revealTool(page, /Electrical Items/)).click();
+      await settle(page, 300);
+      await page.getByText("Light", { exact: true }).first().click();
+      await settle(page, 300);
+      const r = await buildingRect(page);
+      const fx = r.w / W;
+      const p = await svgPoint(page, r.x + 1.5 * fx, r.y + 15 * (r.h / L));
+      await page.mouse.click(p.x, p.y);
+      await settle(page);
+      items = await readItems(page);
+      const added = items.filter((i) => !before.has(i.id));
+      const lt = added[0];
+      const show = (i) => i && { type: i.type, wall: i.wall, electricalItemId: i.electricalItemId, heightOffFloorIn: i.heightOffFloorIn, xFt: +((i.x - r.x) / fx).toFixed(2) };
+      ok("a Light clicked 1.5 ft from the west wall adds one item", added.length === 1, JSON.stringify(added.map(show)));
+      ok("...on NO wall, stamped e-lt at the builder's 96in (drawn and priced as a light)",
+        !!lt && lt.type === "e-lt" && lt.wall === null && lt.electricalItemId === "e-lt" && lt.heightOffFloorIn === 96, JSON.stringify(show(lt)));
+      ok("...where it was clicked, 1.5 ft in from the west wall", !!lt && Math.abs((lt.x - r.x) / fx - 1.5) < 0.1, JSON.stringify(show(lt)));
+      await page.screenshot({ path: `${shots}/6-light-beside-wall.png` });
     }
 
     ok("no uncaught page errors", errors.length === 0, errors.slice(0, 3).join(" | "));

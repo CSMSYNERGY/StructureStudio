@@ -6,7 +6,10 @@
 # without a full inventory of those origins would blank real customer traffic.
 #
 # Rules match the REQUESTED path, before _redirects rewrites — so the pretty routes
-# (/admin, /portal, /portal/*) need their own rules alongside the .html filenames.
+# (/admin, /login, /contacts, /settings/*, …) need their own rules alongside the .html
+# filenames. Limit: 100 rules. Two rules matching one path JOIN their values with a comma,
+# and "DENY, DENY" is not a value X-Frame-Options defines, so no path may match two of the
+# rules that set it (`/x` and `/x/*` never overlap; scripts/redirects.test.mjs checks).
 
 /*
   X-Content-Type-Options: nosniff
@@ -24,12 +27,137 @@
   X-Frame-Options: DENY
 /admin.html
   X-Frame-Options: DENY
-/portal
-  X-Frame-Options: DENY
 /portal.html
   X-Frame-Options: DENY
+# /portal and /portal/* answer with a 301 to the root form now (_redirects), but they keep
+# their rule: a redirect carries no page, and if that 301 is ever rolled back the old
+# addresses serve the app again and must not be frameable.
+#
+# Cache-Control: no-store, so a rollback IS clean (2026-10-13). A browser keeps a 301 that
+# says nothing about caching, and then jumps from its own cache to the root address without
+# asking the host again (seen in real Chrome against the asset worker: the second and third
+# requests never reached it). Roll the redirects back, or get one mapping wrong, and every
+# browser that once followed a /portal link would keep landing on a root address that no longer
+# exists, until its cache was cleared. no-store makes the host answer every /portal request
+# itself. These paths serve nothing but redirects now, so nothing else is affected. Keep it at
+# least until production has served the 301s without trouble for a few weeks;
+# scripts/redirects.test.mjs fails if it goes missing.
+/portal
+  X-Frame-Options: DENY
+  Cache-Control: no-store
 /portal/*
   X-Frame-Options: DENY
+  Cache-Control: no-store
+# Every app page at its root address, one pair per page, the same list as _redirects
+# (scripts/redirects.test.mjs fails when the two disagree).
+# >>> app pages (one pair per page, mirrors _redirects)
+/login
+  X-Frame-Options: DENY
+/designer
+  X-Frame-Options: DENY
+/designer/*
+  X-Frame-Options: DENY
+/advanced
+  X-Frame-Options: DENY
+/advanced/*
+  X-Frame-Options: DENY
+/contacts
+  X-Frame-Options: DENY
+/contacts/*
+  X-Frame-Options: DENY
+/conversations
+  X-Frame-Options: DENY
+/conversations/*
+  X-Frame-Options: DENY
+/inventory
+  X-Frame-Options: DENY
+/inventory/*
+  X-Frame-Options: DENY
+/orders
+  X-Frame-Options: DENY
+/orders/*
+  X-Frame-Options: DENY
+/build-schedule
+  X-Frame-Options: DENY
+/build-schedule/*
+  X-Frame-Options: DENY
+/delivery-schedule
+  X-Frame-Options: DENY
+/delivery-schedule/*
+  X-Frame-Options: DENY
+/repairs
+  X-Frame-Options: DENY
+/repairs/*
+  X-Frame-Options: DENY
+/commissions
+  X-Frame-Options: DENY
+/commissions/*
+  X-Frame-Options: DENY
+/calls
+  X-Frame-Options: DENY
+/calls/*
+  X-Frame-Options: DENY
+/rent-to-own-contracts
+  X-Frame-Options: DENY
+/rent-to-own-contracts/*
+  X-Frame-Options: DENY
+/reports
+  X-Frame-Options: DENY
+/reports/*
+  X-Frame-Options: DENY
+/self-serve-display-units
+  X-Frame-Options: DENY
+/self-serve-display-units/*
+  X-Frame-Options: DENY
+/support
+  X-Frame-Options: DENY
+/support/*
+  X-Frame-Options: DENY
+/settings
+  X-Frame-Options: DENY
+/settings/*
+  X-Frame-Options: DENY
+/quickbooks
+  X-Frame-Options: DENY
+/quickbooks/*
+  X-Frame-Options: DENY
+/on-demand-pricing
+  X-Frame-Options: DENY
+/on-demand-pricing/*
+  X-Frame-Options: DENY
+/view-3d
+  X-Frame-Options: DENY
+/view-3d/*
+  X-Frame-Options: DENY
+/accounts
+  X-Frame-Options: DENY
+/accounts/*
+  X-Frame-Options: DENY
+/console
+  X-Frame-Options: DENY
+/console/*
+  X-Frame-Options: DENY
+/projects
+  X-Frame-Options: DENY
+/projects/*
+  X-Frame-Options: DENY
+/leads
+  X-Frame-Options: DENY
+/leads/*
+  X-Frame-Options: DENY
+/releases
+  X-Frame-Options: DENY
+/releases/*
+  X-Frame-Options: DENY
+/designs
+  X-Frame-Options: DENY
+/designs/*
+  X-Frame-Options: DENY
+/pipelines
+  X-Frame-Options: DENY
+/pipelines/*
+  X-Frame-Options: DENY
+# <<< app pages
 
 # my-quotes has no framing use either, and it carries customer actions (Accept/Sign)
 # behind a localStorage token — exactly the shape clickjacking targets. Both the

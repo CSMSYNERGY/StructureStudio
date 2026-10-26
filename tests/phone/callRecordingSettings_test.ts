@@ -1,5 +1,9 @@
 // My Synergy Phone — call recording's settings in portal-settings (migration 263): parseRecording
 // and recordingView (phone.ts), and that phone_recording_save is the owner's alone and gated.
+// Since migration 287 (Carolyn, 2026-10-06) the standard sentence is "This call may be recorded."
+// and the card mentions transcripts only while the Worker's CALL_TRANSCRIBE rail is really on.
+// Since 2026-10-21 (Carolyn's 10-20 ask) the owner can turn the announcement off, and a save
+// without `notice` (the shipped apps' transcripts switch) keeps what is stored.
 //
 // Run: deno test --node-modules-dir=none --allow-read tests/phone/
 //
@@ -8,7 +12,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   DEFAULT_RECORDING_RETENTION_DAYS, NOTICE_MAX, NOTICE_MIN, parseRecording, RECORDING_RETENTION_DAYS, recordingServerOn, recordingView,
-  STANDARD_NOTICE, STANDARD_NOTICE_TRANSCRIBED,
+  STANDARD_NOTICE, STANDARD_NOTICE_TRANSCRIBED, standardNotice, transcribeServerOn,
 } from "../../supabase/functions/portal-settings/phone.ts";
 
 const refused = (p: Record<string, unknown>): string => {
@@ -17,11 +21,11 @@ const refused = (p: Record<string, unknown>): string => {
   return (r as { error: string }).error;
 };
 
-Deno.test("recording: the defaults are announcement on, transcripts on, 365 days, the standard wording", () => {
+Deno.test("recording: the defaults are transcripts on, 365 days, the standard wording, and the announcement left as stored", () => {
   const r = parseRecording({ on: true });
   assert(r.ok);
   assertEquals(r.ok && r.row, {
-    phone_record_calls: true, phone_recording_notice: true, phone_recording_notice_text: null,
+    phone_record_calls: true, phone_recording_notice_text: null,
     phone_transcribe_calls: true, phone_recording_retention_days: 365,
   });
   assertEquals(DEFAULT_RECORDING_RETENTION_DAYS, 365);
@@ -31,11 +35,31 @@ Deno.test("recording: the defaults are announcement on, transcripts on, 365 days
   assertEquals(off.ok && off.row.phone_transcribe_calls, false);
 });
 
-Deno.test("recording: on/off must be said; the announcement cannot be turned off", () => {
+Deno.test("recording: on/off must be said", () => {
   assert(/Say whether calls should be recorded/.test(refused({})));
   assert(/Say whether calls should be recorded/.test(refused({ on: "yes" })));
-  assert(/announcement can't be turned off/.test(refused({ on: true, notice: false })));
-  assert(parseRecording({ on: true, notice: true }).ok);
+});
+
+Deno.test("the announcement is the owner's (2026-10-21): true or false is written, anything else refused", () => {
+  const on = parseRecording({ on: true, notice: true });
+  assert(on.ok && on.row.phone_recording_notice === true);
+  const off = parseRecording({ on: true, notice: false });
+  assert(off.ok && off.row.phone_recording_notice === false, "turning it off is no longer refused");
+  // Off with recording off too, and off with an own wording kept for when it's back on.
+  const both = parseRecording({ on: false, notice: false, noticeText: "Calls are recorded for training." });
+  assert(both.ok && both.row.phone_recording_notice === false && both.row.phone_recording_notice_text === "Calls are recorded for training.");
+  for (const bad of ["false", 0, 1, "off", {}, []]) {
+    assert(/Say whether callers should hear the announcement/.test(refused({ on: true, notice: bad })), JSON.stringify(bad));
+  }
+});
+
+Deno.test("a save without `notice` keeps the stored announcement: the shipped apps' transcripts switch never turns it back on", () => {
+  // phone-core transcriptsOffSave (iOS build 9, Android vc7, extension 0.1.4) sends exactly this.
+  const shipped = parseRecording({ on: true, noticeText: "", transcribe: false, retentionDays: 365 });
+  assert(shipped.ok);
+  assert(shipped.ok && !("phone_recording_notice" in shipped.row), "the column must not be in the write at all");
+  const nul = parseRecording({ on: true, notice: null });
+  assert(nul.ok && !("phone_recording_notice" in nul.row), "null reads as absent");
 });
 
 Deno.test("recording: retention is one of the five lengths, and nothing else", () => {
@@ -76,11 +100,34 @@ Deno.test("recording: the wording is tidied, 10-300 characters, one line, and mu
   assert(/Say whether recorded calls should be transcribed/.test(refused({ on: true, transcribe: "no" })));
 });
 
+Deno.test("the standard sentence is Carolyn's: 'This call may be recorded.' (2026-10-06, migration 287)", () => {
+  assertEquals(STANDARD_NOTICE, "This call may be recorded.");
+  assertEquals(STANDARD_NOTICE_TRANSCRIBED, "This call may be recorded and transcribed.");
+  assertEquals(standardNotice(false), STANDARD_NOTICE);
+  assertEquals(standardNotice(true), STANDARD_NOTICE_TRANSCRIBED);
+  // Either new sentence in the box is the standard wording (stored NULL, so it follows the switch)...
+  for (const std of ["This call may be recorded.", "  This call may be  recorded and transcribed. "]) {
+    const r = parseRecording({ on: true, noticeText: std });
+    assert(r.ok && r.row.phone_recording_notice_text === null, std);
+  }
+  // ...and the sentence 263 shipped is now a business's own wording like any other: it says "recorded".
+  for (const old of ["This call will be recorded.", "This call will be recorded and transcribed."]) {
+    const r = parseRecording({ on: true, noticeText: old });
+    assert(r.ok && r.row.phone_recording_notice_text === old, old);
+  }
+});
+
 Deno.test("recording view: what the card shows, with the defaults for a business that never saved it", () => {
+  // No row at all: not recorded (the RPCs read coalesce(..., false)), and with the transcripts rail
+  // off the standard sentence is the plain one, as the Worker says it.
   assertEquals(recordingView(null), {
-    on: false, serverOn: false, notice: true, noticeText: null, standardText: STANDARD_NOTICE_TRANSCRIBED, transcribe: true,
+    on: false, serverOn: false, transcribeServerOn: false, notice: true, noticeText: null, standardText: STANDARD_NOTICE, transcribe: true,
     retentionDays: 365, retentionChoices: [30, 90, 180, 365, 730], updatedAt: null, updatedBy: null,
   });
+  // A row 287 turned on: on, never an owner's choice.
+  const byDefault = recordingView({ phone_record_calls: true, phone_transcribe_calls: true, phone_recording_retention_days: 365,
+    phone_recording_updated_at: null, phone_recording_updated_by: null }, true);
+  assertEquals([byDefault.on, byDefault.serverOn, byDefault.updatedAt, byDefault.updatedBy], [true, true, null, null]);
   const v = recordingView({
     phone_record_calls: true, phone_recording_notice_text: "Calls are recorded for training.", phone_transcribe_calls: false,
     phone_recording_retention_days: 90, phone_recording_updated_at: "2026-10-04T12:00:00Z", phone_recording_updated_by: "00000000-0000-4000-8000-000000000001",
@@ -90,13 +137,38 @@ Deno.test("recording view: what the card shows, with the defaults for a business
   assertEquals(v.retentionDays, 90);
   assertEquals(v.noticeText, "Calls are recorded for training.");
   assertEquals(v.serverOn, false, "the server's switch is off unless said");
+  assertEquals(v.transcribeServerOn, false, "the transcripts rail is off unless said");
   assertEquals(recordingView({ phone_record_calls: true }, true).serverOn, true);
+  // The announcement: on unless the column says false (its default is true), as the Worker reads it.
+  assertEquals(recordingView({ phone_record_calls: true, phone_recording_notice: false }, true).notice, false);
+  assertEquals(recordingView({ phone_record_calls: true, phone_recording_notice: true }, true).notice, true);
+  assertEquals(recordingView({ phone_record_calls: true, phone_recording_notice: null }, true).notice, true);
+});
+
+Deno.test("recording view: \"and transcribed\" only while the business's transcripts AND the server's are on", () => {
+  const row = { phone_record_calls: true, phone_transcribe_calls: true };
+  const off = recordingView(row, true);
+  assertEquals([off.transcribe, off.transcribeServerOn, off.standardText], [true, false, STANDARD_NOTICE],
+    "the owner's choice is kept, but the sentence and the card do not promise a transcript");
+  const on = recordingView(row, true, true);
+  assertEquals([on.transcribe, on.transcribeServerOn, on.standardText], [true, true, STANDARD_NOTICE_TRANSCRIBED]);
+  const ownerOff = recordingView({ ...row, phone_transcribe_calls: false }, true, true);
+  assertEquals([ownerOff.transcribe, ownerOff.transcribeServerOn, ownerOff.standardText], [false, true, STANDARD_NOTICE]);
+  assertEquals(recordingView(row, true, "on" as unknown as boolean).transcribeServerOn, false, "only a real true counts");
 });
 
 Deno.test("the server's switch is the Worker's CALL_RECORDING rail, exactly 'on'", () => {
   const env = (v: string | undefined) => (k: string) => (k === "CALL_RECORDING" ? v : undefined);
   assertEquals(recordingServerOn(env("on")), true);
   for (const v of [undefined, "", "off", "ON", "on ", "true", "1"]) assertEquals(recordingServerOn(env(v)), false, String(v));
+});
+
+Deno.test("the transcripts switch is the Worker's CALL_TRANSCRIBE rail, exactly 'on', and unset is off", () => {
+  const env = (v: string | undefined) => (k: string) => (k === "CALL_TRANSCRIBE" ? v : undefined);
+  assertEquals(transcribeServerOn(env("on")), true);
+  for (const v of [undefined, "", "off", "ON", "on ", "true", "1"]) assertEquals(transcribeServerOn(env(v)), false, String(v));
+  // The two rails are read apart: recording on says nothing about transcripts.
+  assertEquals(transcribeServerOn((k) => (k === "CALL_RECORDING" ? "on" : undefined)), false);
 });
 
 // ── portal-settings itself: the source, as phoneBillingGate_test reads admin-catalog ─────────
@@ -121,13 +193,21 @@ Deno.test("phone_recording_save refuses anyone but the owner BEFORE it parses or
   assert(body.includes('.eq("client_id", clientId)'), "the write is scoped to the caller's tenant");
 });
 
-Deno.test("phone_settings_get hands an own-level caller only whether calls are recorded", () => {
+Deno.test("both recording reads and the save read the announcement column back", () => {
+  const cols = "phone_record_calls, phone_recording_notice, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by";
+  const get = SRC.slice(SRC.indexOf('if (action === "phone_settings_get")'));
+  assert(get.includes(`.select("${cols}")`), "phone_settings_get no longer reads phone_recording_notice");
+  const save = SRC.slice(SRC.indexOf('if (action === "phone_recording_save")'));
+  assert(save.slice(0, save.indexOf("\n  }\n")).includes(`.select("${cols}")`), "the save no longer reads phone_recording_notice back");
+});
+
+Deno.test("phone_settings_get hands an own-level caller only whether calls are recorded, and announced", () => {
   const get = SRC.slice(SRC.indexOf('if (action === "phone_settings_get")'));
   const own = get.slice(get.indexOf("if (ownPhoneOnly(access))"), get.indexOf("const [teamOut, routeRes"));
-  assert(own.includes("recording: recording ? { on: recording.on, serverOn: recording.serverOn } : null"));
-  // The card can only tell the truth if both reads and the save carry the server's switch.
-  assert(get.includes("recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)))"));
+  assert(own.includes("recording: recording ? { on: recording.on, serverOn: recording.serverOn, notice: recording.notice } : null"));
+  // The card can only tell the truth if both reads and the save carry the server's two switches.
+  assert(get.includes("recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)), transcribeServerOn((k) => Deno.env.get(k)))"));
   const save = SRC.slice(SRC.indexOf('if (action === "phone_recording_save")'));
-  assert(save.slice(0, save.indexOf("\n  }\n")).includes("recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k)))"));
+  assert(save.slice(0, save.indexOf("\n  }\n")).includes("recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k)), transcribeServerOn((k) => Deno.env.get(k)))"));
   assert(get.includes('canChangeRecording: !!recording && canEdit("phone") && role === "owner"'));
 });

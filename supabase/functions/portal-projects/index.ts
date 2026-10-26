@@ -5,8 +5,10 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
+import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
-import { buildOverlayItems, columnIdMap, overlaySlugs } from "../_shared/pmOverlay.ts";
+import { buildOverlayItems, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
+import { boardsForAction, loadBoardPrivacy, projectsAudience } from "../_shared/pmBoardPrivacy.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -59,10 +61,8 @@ function json(body: unknown, status = 200) {
 const COLUMN_TYPES = new Set([
   "status", "text", "long_text", "number", "date", "people", "dropdown", "checkbox", "link",
 ]);
-// The tenant-facing ladder from migration 054 — the ONLY values client_status may hold.
-const CLIENT_STATUSES = new Set([
-  "submitted", "in_review", "planned", "in_progress", "needs_info", "shipped", "declined", "duplicate",
-]);
+// The tenant-facing ladder (CLIENT_STATUSES, migration 054) lives in _shared/pmStatus.ts with
+// propagateStatus, which release-ci shares.
 const LABEL_KINDS = new Set(["done", "working", "stuck"]);
 
 // ── Where an item came from ──────────────────────────────────────────────────
@@ -378,7 +378,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   catch { return json({ error: "Invalid JSON" }, 400); }
   const action = String(payload?.action || "");
 
-  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "setup_template", "setup_overview", "setup_client_items"]);
+  // `board_access` reads: a view-only operator must be able to see who is on a board without
+  // being able to change it. The write half (set_board_visibility, add/remove_board_member)
+  // is not here and so falls under the writer check below, then the owner check at the action.
+  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "board_access", "setup_template", "setup_overview", "setup_client_items"]);
 
   // ── THREE CLASSES OF ACTION, AND THE SPLIT IS THE SECURITY DESIGN ───────────────────────
   //
@@ -413,6 +416,28 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const canWrite = op ? !!op.can_write : accCanEdit(teamAcc as Record<string, Level>, "projects");
   if (!READ_ACTIONS.has(action) && !canWrite) {
     return json({ error: op ? "This operator account is read-only." : "You have view-only access to Projects." }, 403);
+  }
+
+  // ── THE THIRD DOOR: A PRIVATE BOARD (migration 334) ─────────────────────────────────────
+  // The two doors above decide whether you may open Projects AT ALL, and whether you may
+  // write. This one decides which boards you may touch, and it has to run here rather than
+  // inside the handful of actions that mention a board: most of them do not. See
+  // _shared/pmBoardPrivacy.ts for why the resolver is fail-closed.
+  //
+  // Carolyn's rule is VISIBLE BUT LOCKED, so the refusal names who to ask. It deliberately
+  // does not say whether the id exists — a board you cannot see and a board that was never
+  // there read the same from outside.
+  const privacy = await loadBoardPrivacy(admin, user.id);
+  const touched = await boardsForAction(admin, action, payload);
+  if (!touched.ok) return json({ error: touched.error }, 400);
+  for (const bid of touched.boardIds) {
+    if (privacy.canSee(bid)) continue;
+    const owners = privacy.locked.get(bid) || [];
+    return json({
+      error: owners.length
+        ? `That board is private. Ask ${owners.join(" or ")} to add you to it.`
+        : "That board is private, and nobody on it can add you — an operator will have to reopen it.",
+    }, 403);
   }
 
   const actorEmail = (op && op.email) || user.email || user.id;
@@ -592,37 +617,36 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   };
 
   // Propagate a status change to the tenant mirror when the label maps to a client
-  // status and the item is linked to a feedback submission.
+  // status and the item is linked to a feedback submission. The rule lives in
+  // _shared/pmStatus.ts (release-ci moves items through the same one); this only binds
+  // this request's service-role client and activity logger.
   // deno-lint-ignore no-explicit-any
-  const propagateStatus = async (item: any, columns: any[], newValues: Record<string, unknown>, oldValues: Record<string, unknown>) => {
-    if (!item.feedback_submission_id) return;
-    for (const col of columns) {
-      if (col.type !== "status" || !(col.id in newValues)) continue;
-      if (newValues[col.id] === oldValues?.[col.id]) continue;
-      // deno-lint-ignore no-explicit-any
-      const label = (col.settings?.labels || []).find((l: any) => l.id === newValues[col.id]);
-      if (!label) continue;
-      if (label.client_status && CLIENT_STATUSES.has(label.client_status)) {
-        const { error } = await admin.from("feedback_submissions")
-          .update({ status: label.client_status, status_changed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq("id", item.feedback_submission_id);
-        if (error) throw error;
-        await act(item.board_id, item.id, "client_status", { to: label.client_status, label: label.label });
-      } else {
-        await act(item.board_id, item.id, "status", { label: label.label });
-      }
-    }
-  };
+  const propagateStatus = (item: any, columns: any[], newValues: Record<string, unknown>, oldValues: Record<string, unknown>) =>
+    propagateStatusShared(admin, act, item, columns, newValues, oldValues);
 
   try {
     switch (action) {
       // ── Reads ─────────────────────────────────────────────────────────────
       case "list_boards": {
-        const { data: boards, error } = await admin.from("pm_boards").select("*")
+        const { data: allBoards, error } = await admin.from("pm_boards").select("*")
           .is("archived_at", null).order("position");
         if (error) throw error;
+        // A LOCKED BOARD IS A STUB, and the stub is deliberately thin: the tab strip needs
+        // a name to draw a padlock on and the owners' names to say who to ask, and nothing
+        // else about it may leave this function. Rebuilt field by field rather than deleted
+        // from the row — a new column added to pm_boards later (an intake webhook key, a
+        // description) must not start riding along to people who cannot open the board.
+        const boards = (allBoards || []).map((b) => {
+          if (privacy.canSee(b.id)) return b;
+          return {
+            id: b.id, slug: b.slug, name: b.name, position: b.position,
+            visibility: "private", locked: true, owners: privacy.locked.get(b.id) || [],
+            settings: {}, archived_at: null,
+          };
+        });
         const counts: Record<string, number> = {};
-        for (const b of boards || []) {
+        for (const b of boards) {
+          if (b.locked) continue;   // an item count is a fact about the board's contents
           const { count } = await admin.from("pm_items")
             .select("id", { count: "exact", head: true })
             .eq("board_id", b.id).is("archived_at", null);
@@ -633,7 +657,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         // you change the board dropdown. Keyed by board id; `people` is one global list
         // (pm_people has no client_id — see _shared/pmRoster.ts).
         const colsByBoard: Record<string, unknown[]> = {};
-        for (const b of boards || []) colsByBoard[b.id] = await boardColumns(b.id);
+        for (const b of boards) { if (!b.locked) colsByBoard[b.id] = await boardColumns(b.id); }
         const { data: people, error: pErr } = await admin.from("pm_people")
           .select("id, name, email, user_id, active").eq("active", true).order("position");
         if (pErr) throw pErr;
@@ -698,6 +722,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             .select("id, slug, name").in("slug", ovSlugs).is("archived_at", null);
           const sources = [];
           for (const sbd of (srcBoards || [])) {
+            // ⚠️ AN OVERLAY IS A READ ACROSS BOARDS, so it is the one place a private board
+            // can leak without anybody opening it: point a public board's overlay_from at a
+            // private slug and every one of its cards appears on a table the whole team
+            // reads. Skipped PER VIEWER, not per board — someone who IS on the private board
+            // still sees its rows pulled in, which is the behaviour overlays exist for.
+            if (!privacy.canSee(sbd.id)) continue;
             const [sCols, sItems] = await Promise.all([
               boardColumns(sbd.id),
               admin.from("pm_items").select("*").eq("board_id", sbd.id).is("archived_at", null)
@@ -781,13 +811,33 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const { data: clash } = await admin.from("pm_boards").select("id").eq("slug", slug).maybeSingle();
         if (clash || RESERVED_SLUGS.has(slug)) slug = `${slug}-${crypto.randomUUID().slice(0, 4)}`;
         const { data: maxRow } = await admin.from("pm_boards").select("position").order("position", { ascending: false }).limit(1).maybeSingle();
+        // Private from the first row, when that is what was asked for. A board created
+        // public and locked down a moment later is a board whose first few cards were
+        // readable by the whole team, and "a board for myself" is usually created because
+        // of what is about to go on it.
+        const visibility = payload.visibility === "private" ? "private" : "everyone";
         const { data: board, error } = await admin.from("pm_boards")
-          .insert({ slug, name, position: (maxRow?.position || 0) + 1024 }).select().single();
+          .insert({
+            slug, name, position: (maxRow?.position || 0) + 1024,
+            visibility, created_by: user.id,
+          }).select().single();
         if (error) throw error;
+        if (visibility === "private") {
+          const { error: mErr } = await admin.from("pm_board_members").insert({
+            board_id: board.id, user_id: user.id, email: actorEmail,
+            name: (op && op.display_name) || actorEmail, role: "owner", added_by: user.id,
+          });
+          // ⚠️ A private board whose owner row failed to write is a board NOBODY can open,
+          // including the person who just made it. Undo the board rather than leave it.
+          if (mErr) {
+            await admin.from("pm_boards").delete().eq("id", board.id);
+            throw mErr;
+          }
+        }
         const { error: gErr } = await admin.from("pm_groups")
           .insert({ board_id: board.id, name: "Items", color: "#3D3672", position: 1024 });
         if (gErr) throw gErr;
-        await act(board.id, null, "create_board", { name });
+        await act(board.id, null, "create_board", { name, visibility });
         return json({ board });
       }
 
@@ -811,6 +861,195 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .update({ archived_at: new Date().toISOString() }).eq("id", id);
         if (error) throw error;
         await act(id, null, "archive_board", {});
+        return json({ ok: true });
+      }
+
+      // ── Who can see this board (migration 334) ────────────────────────────
+      //
+      // Carolyn, 2026-10-23: "Somehow we need to easily see who all has access to see a
+      // board." The answer has two shapes, and conflating them is the mistake to avoid:
+      //
+      //   * an "everyone" board has NO access list of its own. Everyone who can open
+      //     Projects can read it, so the honest answer is the Projects roster — both doors,
+      //     enumerated, with how each person got in. Inventing a member list for a public
+      //     board would make it look as if removing somebody from it did anything.
+      //   * a "private" board's answer IS its member list.
+      //
+      // One action returns both, labelled, so the screen does not have to guess.
+      case "board_access": {
+        const boardId = str(payload.boardId, 40);
+        const { data: board, error: bErr } = await admin.from("pm_boards")
+          .select("id, name, visibility, created_by").eq("id", boardId).maybeSingle();
+        if (bErr) throw bErr;
+        if (!board) return json({ error: "Board not found." }, 404);
+
+        const audience = await projectsAudience(admin);
+        if (board.visibility !== "private") {
+          return json({ visibility: "everyone", board: board.name, people: audience, iOwn: canWrite });
+        }
+        const { data: mem, error: mErr } = await admin.from("pm_board_members")
+          .select("user_id, name, email, role, added_at").eq("board_id", boardId);
+        if (mErr) throw mErr;
+        // The member rows carry the name as it was when they were added; the roster is the
+        // current truth, so it wins where the two disagree (someone renamed on the Team
+        // screen should not read as their old name here).
+        const byUser = new Map(audience.map((a) => [a.user_id, a]));
+        const people = (mem || []).map((m: Record<string, unknown>) => {
+          const live = byUser.get(String(m.user_id));
+          return {
+            user_id: String(m.user_id),
+            name: live?.name || String(m.name || m.email || "Someone"),
+            email: live?.email ?? (m.email ? String(m.email) : null),
+            via: live?.via || null,     // null = they can no longer open Projects at all
+            level: live?.level || null,
+            role: String(m.role),
+            added_at: m.added_at,
+          };
+        });
+        people.sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "owner" ? -1 : 1));
+        // Everyone who could be added — the roster minus the people already on it.
+        const onIt = new Set(people.map((p) => p.user_id));
+        const addable = audience.filter((a) => !onIt.has(a.user_id));
+        const iOwn = people.some((p) => p.user_id === user.id && p.role === "owner");
+        return json({ visibility: "private", board: board.name, people, addable, iOwn });
+      }
+
+      case "set_board_visibility": {
+        const boardId = str(payload.boardId, 40);
+        const want = payload.visibility === "private" ? "private" : "everyone";
+        const { data: board, error: bErr } = await admin.from("pm_boards")
+          .select("id, name, visibility").eq("id", boardId).maybeSingle();
+        if (bErr) throw bErr;
+        if (!board) return json({ error: "Board not found." }, 404);
+        if (board.visibility === want) return json({ ok: true });
+
+        // Who may flip it: on a board everyone can already see, any writer — there is
+        // nothing to protect yet. On a private board, only an owner, or the person who was
+        // shut out of a board yesterday could reopen it today.
+        if (board.visibility === "private") {
+          const { data: me } = await admin.from("pm_board_members")
+            .select("role").eq("board_id", boardId).eq("user_id", user.id).maybeSingle();
+          if (!me || me.role !== "owner") {
+            return json({ error: "Only an owner of this board can make it visible to everyone." }, 403);
+          }
+        }
+
+        const { error } = await admin.from("pm_boards")
+          .update({ visibility: want, updated_at: new Date().toISOString() }).eq("id", boardId);
+        if (error) throw error;
+
+        if (want === "private") {
+          // Whoever made it private owns it. upsert, not insert: they may already be on an
+          // old member list from a previous private spell, and a duplicate key here would
+          // leave the board private with the person who locked it standing outside.
+          const { error: mErr } = await admin.from("pm_board_members").upsert({
+            board_id: boardId, user_id: user.id, email: actorEmail,
+            name: (op && op.display_name) || actorEmail, role: "owner", added_by: user.id,
+          }, { onConflict: "board_id,user_id" });
+          if (mErr) {
+            await admin.from("pm_boards").update({ visibility: board.visibility }).eq("id", boardId);
+            throw mErr;
+          }
+        }
+        // The member list is KEPT when a board goes public again — making it public for an
+        // afternoon and private again should not silently drop everyone who was on it.
+        await act(boardId, null, "set_board_visibility", { visibility: want });
+        return json({ ok: true });
+      }
+
+      case "add_board_member": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const role = payload.role === "owner" ? "owner" : "member";
+        if (!userId) return json({ error: "Pick somebody to add." }, 400);
+
+        const { data: board } = await admin.from("pm_boards")
+          .select("id, visibility").eq("id", boardId).maybeSingle();
+        if (!board) return json({ error: "Board not found." }, 404);
+        if (board.visibility !== "private") {
+          return json({ error: "This board is visible to everyone — there is no list to add to." }, 400);
+        }
+        const { data: me } = await admin.from("pm_board_members")
+          .select("role").eq("board_id", boardId).eq("user_id", user.id).maybeSingle();
+        if (!me || me.role !== "owner") {
+          return json({ error: "Only an owner of this board can add people to it." }, 403);
+        }
+        // ⚠️ THE ADDABLE SET IS THE PROJECTS ROSTER, AND IT IS CHECKED SERVER-SIDE. The
+        // browser only ever offers these people, but a user id posted straight at this
+        // action would otherwise hand a BUILDER'S login sight of a CSM board — the same
+        // escalation the people editor's tenant check closes from the other direction.
+        const audience = await projectsAudience(admin);
+        const person = audience.find((a) => a.user_id === userId);
+        if (!person) {
+          return json({ error: "That person can't open Projects at all, so adding them here would do nothing. Give them Projects access first." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members").upsert({
+          board_id: boardId, user_id: userId, email: person.email, name: person.name,
+          role, added_by: user.id,
+        }, { onConflict: "board_id,user_id" });
+        if (error) throw error;
+        await act(boardId, null, "add_board_member", { name: person.name, role });
+        return json({ ok: true });
+      }
+
+      // HANDING A PRIVATE BOARD OVER. Without this, the only owner a board ever has is
+      // whoever created it: the last-owner rule in remove_board_member means the board can
+      // never be orphaned, but it also means it can never be passed on — somebody going on
+      // leave, changing role, or leaving altogether took their boards with them, and the
+      // only way out was an operator setting the board back to visible to everyone.
+      //
+      // Promoting is deliberately not the same action as adding. An upsert with role:'owner'
+      // would have done it, and would also silently promote somebody whose membership was
+      // removed a moment earlier by someone else — a write that reads as "change this
+      // person's role" must fail when there is no such person to change.
+      case "set_board_member_role": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const role = payload.role === "owner" ? "owner" : "member";
+        const { data: rows, error: lErr } = await admin.from("pm_board_members")
+          .select("user_id, name, role").eq("board_id", boardId);
+        if (lErr) throw lErr;
+        const me = (rows || []).find((r: { user_id: string }) => String(r.user_id) === user.id);
+        const target = (rows || []).find((r: { user_id: string }) => String(r.user_id) === userId);
+        if (!target) return json({ error: "That person is not on this board." }, 404);
+        if (!me || me.role !== "owner") {
+          return json({ error: "Only an owner of this board can change who owns it." }, 403);
+        }
+        if (target.role === role) return json({ ok: true });
+        // The same fence as removal, for the same reason: a private board with no owner is
+        // a board whose access list nobody can ever open again. An owner stepping down
+        // therefore promotes their replacement FIRST — two clicks, in a safe order.
+        if (role === "member" && (rows || []).filter((r: { role: string }) => r.role === "owner").length <= 1) {
+          return json({ error: "This is the board's last owner. Make somebody else an owner first." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members")
+          .update({ role }).eq("board_id", boardId).eq("user_id", userId);
+        if (error) throw error;
+        await act(boardId, null, "set_board_member_role", { name: target.name, role });
+        return json({ ok: true });
+      }
+
+      case "remove_board_member": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const { data: rows, error: lErr } = await admin.from("pm_board_members")
+          .select("user_id, name, role").eq("board_id", boardId);
+        if (lErr) throw lErr;
+        const me = (rows || []).find((r: { user_id: string }) => String(r.user_id) === user.id);
+        const target = (rows || []).find((r: { user_id: string }) => String(r.user_id) === userId);
+        if (!target) return json({ ok: true });
+        // Leaving a board yourself is always allowed; removing somebody else is an owner's
+        // call. Both still have to clear the last-owner rule below.
+        if (userId !== user.id && (!me || me.role !== "owner")) {
+          return json({ error: "Only an owner of this board can remove people from it." }, 403);
+        }
+        if (target.role === "owner" && (rows || []).filter((r: { role: string }) => r.role === "owner").length <= 1) {
+          return json({ error: "This is the board's last owner. Make somebody else an owner first, or set the board back to visible to everyone." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members")
+          .delete().eq("board_id", boardId).eq("user_id", userId);
+        if (error) throw error;
+        await act(boardId, null, "remove_board_member", { name: target.name });
         return json({ ok: true });
       }
 
@@ -1063,32 +1302,83 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           let incoming = (payload.values || {}) as Record<string, unknown>;
           const fromBoardId = str(payload.fromBoardId, 40);
           const crossBoard = !!fromBoardId && fromBoardId !== item.board_id;
+          // The home-board column each sent cell asked for. The refusal below checks THESE
+          // against what sanitizeValues kept, not the translated object, so a translation that
+          // comes back short is a 400 rather than a 200 that wrote nothing.
+          const asked: string[] = [];
           if (crossBoard) {
             const srcColumns = await boardColumns(fromBoardId);
             const map = columnIdMap(srcColumns, columns);
-            const remapped: Record<string, unknown> = {};
             const unmapped: string[] = [];
-            for (const [k, v] of Object.entries(incoming)) {
+            for (const k of Object.keys(incoming)) {
               const dest = map.get(k);
               // deno-lint-ignore no-explicit-any
               if (!dest) { unmapped.push(((srcColumns as any[]).find((c) => c.id === k)?.name) || k); continue; }
-              remapped[dest] = v;
+              asked.push(dest);
             }
             if (unmapped.length) {
               return json({ error: `"${unmapped.join('", "')}" does not exist on the board this item lives on. Open the item there to change it.` }, 400);
             }
-            incoming = remapped;
+            // THE CHOICE IDS INSIDE A CELL ARE PER-BOARD TOO. The working board offers Bugs' App
+            // ids and Feature Requests seeds its own (o_ss …), so re-keying the column alone
+            // carried an id the home column had never heard of: a status came back as the 400
+            // below, and a Feature row's App was WRITTEN as [] with a 200 (sanitizeValues keeps a
+            // dropdown key with whatever survives). remapValues translates them by label text,
+            // the same translation get_board applies for display.
+            //
+            // ⚠️ GIVE IT THE BROWSER'S ORIGINAL KEYS. remapValues re-keys the column itself; fed
+            // values already re-keyed to this board, every lookup misses and it returns {},
+            // which is the silent no-op all over again (design review, 2026-10-09).
+            incoming = remapValues(payload.values, map, srcColumns, columns);
           }
           const clean = sanitizeValues(columns, incoming, opIds);
           if (crossBoard) {
             // sanitizeValues drops a value its column does not recognise — a status label or a
-            // dropdown option belonging to the board being VIEWED rather than the board the
-            // item lives on. Column names match across boards; the ids inside them do not.
-            const lost = Object.keys(incoming).filter((k) => !(k in clean));
+            // dropdown option of the board being VIEWED with no label of the same words here. A
+            // status goes missing from `clean`; a dropdown stays in it with the option filtered
+            // out, so its entries are checked one by one. An option the row ALREADY holds is let
+            // through: a since-deleted one rides back in every multi-select edit and is dropped
+            // as it always was, and refusing for it would leave the row uneditable from the
+            // working board for a reason nobody can see there. An entry that is no id at all ({…},
+            // null, an empty string, a number) is refused the same way: sanitizeValues turned each
+            // of those into [] with a 200 too. (A whole cell sent as null, "" or [] is a clear.)
+            const asList = (v: unknown) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
+            // deno-lint-ignore no-explicit-any
+            const colOf = (k: string) => (columns as any[]).find((c) => c.id === k);
+            // deno-lint-ignore no-explicit-any
+            const offeredBy = (col: any) => new Set((col.settings?.options || []).map((o: any) => o.id));
+            const lost = asked.filter((k) => {
+              if (!(k in clean)) return true;
+              const col = colOf(k);
+              if (col?.type !== "dropdown") return false;
+              const offered = offeredBy(col);
+              const had = asList((item.values || {})[k]);
+              return asList(incoming[k]).some((x) => {
+                const id = typeof x === "string" ? str(x, 40) : x;
+                return !had.includes(id) && (typeof id !== "string" || !offered.has(id));
+              });
+            });
             if (lost.length) {
-              // deno-lint-ignore no-explicit-any
-              const names = lost.map((k) => ((columns as any[]).find((c) => c.id === k)?.name) || k);
+              const names = lost.map((k) => colOf(k)?.name || k);
               return json({ error: `That choice does not exist on the board this item lives on (${names.join(", ")}). Open the item there to change it.` }, 400);
+            }
+            // ⚠️ A SINGLE-CHOICE COLUMN KEEPS THE FIRST CHOICE AND DROPS THE REST. The page decides
+            // single or multi from the column it is SHOWING, so a multi-select App on the working
+            // board can send two choices to a single-choice App here, and sanitizeValues saved the
+            // first with a 200 while the cell showed both. Every real choice sent must be kept.
+            const crowded = asked.filter((k) => {
+              const col = colOf(k);
+              if (col?.type !== "dropdown") return false;
+              const offered = offeredBy(col);
+              const kept = asList(clean[k]);
+              return asList(incoming[k]).some((x) => typeof x === "string" && offered.has(str(x, 40)) && !kept.includes(str(x, 40)));
+            });
+            if (crowded.length) {
+              const limits = crowded.map((k) => {
+                const col = colOf(k);
+                return `${col?.name || k} takes ${col?.settings?.multi === true ? "fewer choices" : "one choice"}`;
+              });
+              return json({ error: `On the board this item lives on, ${limits.join("; ")}. Open the item there to change it.` }, 400);
             }
           }
           newValues = { ...item.values, ...clean };

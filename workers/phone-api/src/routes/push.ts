@@ -24,6 +24,7 @@ import { phoneDigits } from "../identity";
 import { logFault } from "../log";
 import { contactsLevelOf, phoneLevelOf } from "../scope";
 import { senderVerifiedFrom } from "../../../../supabase/functions/_shared/crmFeed.ts";
+import { ownContactsOnly } from "../../../../supabase/functions/_shared/access.ts";
 
 interface SmsRecord {
   id: string;
@@ -141,7 +142,9 @@ export async function textOwners(
   for (const u of withPhone) {
     const lvl = contactsLevelOf(u);
     if (lvl === "view" || lvl === "edit") owners.push(u.user_id);
-    else if (lvl === "own" && rec.contact_id) narrowed.push(u.user_id);
+    // Both own-scope levels ('own', and since 286 'own_view', own customers view only): a text from
+    // a customer they follow alerts them; reading it is not a write, so view only still hears it.
+    else if (ownContactsOnly({ contacts: lvl }) && rec.contact_id) narrowed.push(u.user_id);
   }
   // Own-scoped people see an unowned contact only if they follow it: the same predicate as RLS.
   if (narrowed.length && rec.contact_id) {

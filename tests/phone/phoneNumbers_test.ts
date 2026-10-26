@@ -209,7 +209,9 @@ Deno.test("phone_settings_get: every number with its own route, caller ID and pe
     "maxNumbers: numRes.perNumber ? MAX_NUMBERS : 1,", "canJoinTexting: rolloutOpen && mayBuyPhoneNumber(),"]) {
     assert(get.includes(k), `phone_settings_get: ${k}`);
   }
-  assert(/const mine = callerNumberFor\(rows, userId,/.test(get), "an own-level caller is told the number THEIR calls show");
+  // selfUserId since 2026-10-23: "THEIR calls" has to mean the person being acted as, or an
+  // operator looking in on a rep is shown the operator's own caller ID as if it were the rep's.
+  assert(/const mine = callerNumberFor\(rows, selfUserId,/.test(get), "an own-level caller is told the number THEIR calls show");
   assertEquals(MAX_NUMBERS, 10);
 });
 
@@ -236,7 +238,10 @@ Deno.test("phone_buy_number: up to MAX_NUMBERS, the tenant's own numbers never a
   assert(/\n\s*phone_number_texting: \{ area: "phone", level: "edit" \},/.test(SRC), "gated phone:edit");
   const svc = slice(SRC, "const textingServiceSid = async ()", "\n  };\n", "textingServiceSid");
   assert(/r\?\.status === "active"/.test(svc) && /\^MG\[0-9a-f\]\{32\}\$/.test(svc));
-  const deps = slice(SRC, "const textingDeps = (numberId: string) => ({", "\n  });\n", "textingDeps");
+  // Workstream 2: bound to the tenant's Twilio account, which the caller resolved once (tenantTwilio).
+  const deps = slice(SRC, "const textingDeps = (numberId: string, creds: TwilioCreds) => ({", "\n  });\n", "textingDeps");
+  assert(/numberInService\(svc, sid, trustHubHttp\(creds\)\)/.test(deps) && /attachNumberToService\(svc, sid, trustHubHttp\(creds\)\)/.test(deps)
+    && /clearNumberSmsUrl\(sid, trustHubHttp\(creds\), creds\.accountSid\)/.test(deps), "every Twilio step in the tenant's account");
   assert(/\.update\(patch\)\s*\.eq\("id", numberId\)\.eq\("client_id", clientId\)\.is\("released_at", null\)\.select\("id"\)/.test(deps));
   // Declared above every action that uses them (a const used before its line is a TDZ throw).
   for (const h of ["const textingServiceSid = async", "const textingDeps = ", "const phoneNumberRows = async"]) {

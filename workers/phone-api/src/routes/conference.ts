@@ -39,6 +39,7 @@ import {
 import { hook } from "../urls";
 import { resolveCall } from "./calls";
 import { awayFromSettings } from "./voice";
+import { callerTwilioEnv } from "../twilioAccount";
 
 /** A warm transfer to someone outside their own hours (migration 264), said as Do Not Disturb is. */
 export const WARM_OFF_HOURS = "That teammate isn't taking calls at this time of day.";
@@ -163,6 +164,8 @@ async function keepCustomerHeld(env: Env, ec: Ctx, c: Caller, call: CallRow): Pr
 
 export async function hold(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
   const c = await requireCaller(env, req);
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const call = await liveCallOf(c, idParam);
   const step = nextTransferState(call.transfer_state, "hold");
   if (!step.ok) throw new ApiError("bad_request", step.message);
@@ -232,6 +235,8 @@ export async function hold(env: Env, ec: Ctx, req: Request, idParam: string): Pr
 
 export async function resume(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
   const c = await requireCaller(env, req);
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const call = await liveCallOf(c, idParam);
   const step = nextTransferState(call.transfer_state, "resume");
   if (!step.ok) throw new ApiError("bad_request", step.message);
@@ -294,6 +299,8 @@ export async function resume(env: Env, ec: Ctx, req: Request, idParam: string): 
  */
 export async function warmTransfer(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
   const c = await requireCaller(env, req);
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const body = await readJson(req);
   const target = String(body.to_user_id ?? "");
   if (!UUID_RE.test(target)) throw new ApiError("bad_request", "Pick a teammate to transfer to.");

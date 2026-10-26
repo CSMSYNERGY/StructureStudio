@@ -206,7 +206,7 @@ async function measure(page, W, L) {
     };
     const hex = (m) => { const mm = Array.isArray(m) ? m[0] : m; return mm && mm.color ? "#" + mm.color.getHexString() : null; };
     const under = (q, anc) => { let n = q; while (n) { if (n === anc) return true; n = n.parent; } return false; };
-    const out = { frame: M.frame || null, porch: M.porch || null, trimHex: hex(M.trimMat), cornerHex: hex(M.cornerMat), fasciaHex: hex(M.fasciaMat), cornerRole: M.cornerRole, fasciaRole: M.fasciaRole };
+    const out = { frame: M.frame || null, porch: M.porch || null, recessedFrame: M.recessedFrame || null, trimHex: hex(M.trimMat), cornerHex: hex(M.cornerMat), fasciaHex: hex(M.fasciaMat), cornerRole: M.cornerRole, fasciaRole: M.fasciaRole };
     // Each wall group: its top, and the proud strips on it (relief boxes: 0.1 deep, under 0.2 wide).
     out.walls = {};
     M.wallsGroup.children.forEach((g) => {
@@ -416,7 +416,10 @@ async function runCase(ctx, c, ok, dir) {
     // ── colours ──
     if (!c.old) {
       const wantCorner = c.colors.corner || c.colors.trim, wantFascia = c.colors.fascia || c.colors.trim;
-      ok(`${id}: corner boards are ${wantCorner}`, m.corners.length === 4 && m.corners.every((k) => k.color === wantCorner), m.corners.map((k) => k.color).join(" "));
+      // A RECESSED porch's wall keeps no board at its two footprint corners (2026-10-07): the porch's end posts
+      // stand there. (A set-back high wall stops at H, so its corners were never tall ones: no board above them.)
+      const wantCorners = c.recessedEave ? 2 : 4;
+      ok(`${id}: corner boards are ${wantCorner}`, m.corners.length === wantCorners && m.corners.every((k) => k.color === wantCorner), `${m.corners.length}: ${m.corners.map((k) => k.color).join(" ")}`);
       ok(`${id}: rake boards are ${wantFascia}`, m.rakes.length >= 2 && m.rakes.every((r) => r.color === wantFascia), m.rakes.map((r) => r.color).join(" "));
       ok(`${id}: the trim material (casings) keeps the trim colour`, m.trimHex === c.colors.trim, m.trimHex);
     }
@@ -512,7 +515,17 @@ async function runCase(ctx, c, ok, dir) {
       // Its face (0.15) or its battens (0.23) stand that far out from the set-back line.
       ok(`${id}: the ${rw} (eave) wall is set back ${c.recessedEave} ft under the roof`, s && face > half - c.recessedEave + 0.14 && face < half - c.recessedEave + 0.27, s && f3(face));
       const posts = m.recessedEave.filter((e) => e.kind === "post"), hdr = m.recessedEave.filter((e) => e.kind === "header");
-      ok(`${id}: posts stand along the eave line with a header over them`, posts.length === Math.ceil((c.ux ? L : W) / 10) + 1 && hdr.length === 1 && posts.every((q) => near(across(q), sg * (half - 0.21), 0.01)), `${posts.length} posts, ${hdr.length} header`);
+      // In the porch frame's plane since 2026-10-07: their front faces where the corner boards' are, 3.5 in deep,
+      // the end two at the corners (outer faces on the end walls' corner boards), the header on top of them.
+      const rf = m.recessedFrame;
+      const lineAt = rf ? sg * (half + (rf.front + rf.back) / 2) : NaN;
+      const along = (q) => (ns ? [q.mn[0], q.mx[0]] : [q.mn[2], q.mx[2]]);
+      const run = ns ? W : L;
+      const ends = posts.length ? [Math.min(...posts.map((q) => along(q)[0])), Math.max(...posts.map((q) => along(q)[1]))] : [NaN, NaN];
+      ok(`${id}: posts stand along the eave line with a header over them`, posts.length === Math.ceil((c.ux ? L : W) / 10) + 1 && hdr.length === 1 && posts.every((q) => near(across(q), lineAt, 0.01)), `${posts.length} posts, ${hdr.length} header, at ${posts.map((q) => f3(across(q))).join(" ")} want ${f3(lineAt)}`);
+      ok(`${id}: the end posts stand at the corners, one upright each`, !!rf && near(ends[0], -run / 2 - rf.face, 0.01) && near(ends[1], run / 2 + rf.face, 0.01)
+        && hdr.length === 1 && near(hdr[0].mn[1], H - 0.46, 0.01) && near(hdr[0].mx[1], H, 0.01) && posts.every((q) => near(q.mx[1], H - 0.46, 0.01)),
+        `ends ${ends.map(f3).join("..")} face ${rf && f3(rf.face)}`);
       if (!ns) ok(`${id}: on a side wall, the front (south) wall stands full height to the front corners, not set back`, m.walls.south && near(m.walls.south.mx[2], L / 2, 0.3), m.walls.south && f3(m.walls.south.mx[2]));
       if (c.recessedHigh) {
         ok(`${id}: the set-back high wall stops at H, under the roof`, near(s.top, H, 0.011) && m.frame && m.frame.tops[rw] === H, `${f3(s.top)} frame ${m.frame && m.frame.tops[rw]}`);

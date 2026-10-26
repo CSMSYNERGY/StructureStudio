@@ -11,11 +11,15 @@
 // Gone (404) once retention has deleted the audio; the transcript goes with it.
 
 import type { Ctx, Env } from "../env";
-import { requireCaller } from "../context";
-import { CALL_COLUMNS, must, type CallRow } from "../db";
+import { requireCaller, type Caller } from "../context";
+import { withTeamName } from "../cron/transcribe";
+import { CALL_COLUMNS, DbError, must, type CallRow } from "../db";
 import { ApiError, ok, UUID_RE } from "../http";
+import { logFault } from "../log";
 import { recordingMedia } from "../twilioRest";
 import { mayViewCall, resolveCall } from "./calls";
+import { callerTwilioEnv } from "../twilioAccount";
+import { transcriptTeamUser } from "../../../../supabase/functions/_shared/crmFeed.ts";
 
 interface RecordingRead {
   id: string;
@@ -28,6 +32,8 @@ interface RecordingRead {
 
 export async function recordingAudio(env: Env, _ec: Ctx, req: Request, id: string): Promise<Response> {
   const c = await requireCaller(env, req, { needOn: false });
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const notFound = () => new ApiError("not_found", "That recording wasn't found.");
   if (!UUID_RE.test(id)) throw notFound();
   const rec = must(
@@ -77,5 +83,39 @@ export async function callTranscript(env: Env, req: Request, idParam: string): P
     "read call transcript",
   ) as { id: string; transcript: string | null; summary: string | null; deleted_at: string | null } | null;
   if (!rec || rec.deleted_at || !rec.transcript) throw new ApiError("not_found", "This call has no transcript.");
-  return ok({ call_id: call.id, recording_id: rec.id, transcript: rec.transcript, summary: rec.summary ?? null });
+  const transcript = await namedTranscript(c, call, rec.transcript);
+  return ok({ call_id: call.id, recording_id: rec.id, transcript, summary: rec.summary ?? null });
+}
+
+/**
+ * The stored transcript with our side's lines under the team member's name (Carolyn 2026-10-23,
+ * 24:13; withTeamName), from their client_users full_name in this business. WHO is the portal's
+ * own rule, the same function (crmFeed.ts transcriptTeamUser), so the record page and the apps
+ * name the same person: the team channel is everyone on our side of the call, so it is one person
+ * only when one person was on it, who placed it (outbound) or answered it (inbound). A transfer,
+ * a message left on the call (the greeting plays on that channel), nobody answering, or no name
+ * set keeps "Team". The two reads only happen for a transcript that has a "Team" line on a call
+ * with one person on it. A failed read still returns the transcript, with "Team", and logs the
+ * database's code, never the text.
+ */
+async function namedTranscript(c: Caller, call: CallRow, text: string): Promise<string> {
+  const who = transcriptTeamUser({ ...call, phone_voicemails: null });
+  if (!who || !/^Team: /m.test(text)) return text;
+  try {
+    const [vm, person] = await Promise.all([
+      c.admin.from("phone_voicemails").select("id").eq("call_id", call.id).limit(1),
+      c.admin.from("client_users").select("full_name").eq("client_id", call.client_id).eq("user_id", who).maybeSingle(),
+    ]);
+    const left = (must(vm, "read call voicemail") as { id: string }[] | null) ?? [];
+    const row = must(person, "read team member name") as { full_name: string | null } | null;
+    if (transcriptTeamUser({ ...call, phone_voicemails: left }) !== who) return text;
+    return withTeamName(text, row?.full_name);
+  } catch (e) {
+    await logFault({
+      code: "transcript_name_read_failed",
+      message: `The team member's name for a transcript could not be read (${e instanceof DbError ? `${e.op}: ${e.pgCode ?? "no code"}` : "unexpected"}); "Team" kept.`,
+      context: { route: "GET /calls/:id/transcript" }, clientId: c.ctx.client_id, severity: "warn", throttleMs: 60_000,
+    });
+    return text;
+  }
 }

@@ -9,13 +9,15 @@
 //      tenant that OFFERS partition walls. SS_PARTITIONS_SNAPSHOT=<file> writes them; with
 //      SS_PARTITIONS_BASELINE=<file> (the same capture from the tree before this change) they must be
 //      byte-identical. SS_PARTITIONS_ONLY_A=1 runs nothing else, for the baseline run on the old tree.
-//      A1 also proves the public page offers the "Partition Wall" button under Interior.
+//      A1 also proves the public page offers the "Interior wall" button under Interior.
 //   B. PLACE: the button, then a click inside the building, puts a wall ACROSS the short span, wall
-//      to wall, at the click, full height, and selects it.
+//      to wall, at the click, at stud wall height, and selects it. No framing control for someone
+//      without the price-override grant (B3).
 //   C. MOVE: dragging the wall moves it across the building, to the inch.
 //   D. STRETCH: an end grip shortens it; dragged near the wall again it lands on the wall.
-//   E. HEIGHT: Custom gives it a height in inches; a typed height sticks; Full height goes back. Once a
-//      door is in it (after F), a typed height refused back to the one it has shows that height (E4).
+//   E. HEIGHT: Custom gives it a height in inches; a typed height sticks; Stud wall height goes back.
+//      Once a door is in it (after F), a typed height refused back to the one it has shows that
+//      height (E4).
 //   F. + DOOR: the door picker (floor-standing doors only: the loft door is not offered) puts the door
 //      IN the wall, centred; it slides along the wall; Flip swing turns it; + Window adds a window at
 //      the nearest free spot; a window dragged onto the door is refused, with a reason.
@@ -26,10 +28,31 @@
 //      wall to wall — and does not offer it in the 3D palette. A "Look inside" shot.
 //   J. QUOTE: Get Quote sends itemSummary.partitions with the length, the height and the door by its
 //      catalog id, and floorPlanItems carries the wall with no `wall`.
-//   K. THE PORTAL'S Interior items card: the Partition Wall row is "Not offered yet", its rate starts
-//      blank, its method list is each / per foot / per sq ft of wall, a Save made for something else
-//      does not send it (so it never appears free), and a rate typed in is sent. Every catalog read asks
-//      for the unpriced items (withUnpriced) and every Save says it knows the partition (partitionAware).
+//   K. THE PORTAL (313): Interior items no longer lists the wall and its Save never sends one; the
+//      Interior walls tab shows the saved 2x4 rate, offers exactly two methods ("Per lineal ft of
+//      wall" / "Per sq ft of wall", no each), sends the framing, the door/window and electrical ticks
+//      and the ordered coverings on Save, and refuses a blank standard rate before sending. A builder
+//      who has never saved the tab (interiorWalls null; nothing is seeded) is told walls are not
+//      offered until they save, and saving per sq ft sends sqft_option (K9-K11). Every catalog read
+//      asks for the unpriced items (withUnpriced).
+//   U. NOT SET UP (2026-10-17): get_config's interiorWalls is null (the builder never saved the tab),
+//      even though the 278 layout row is priced. The public designer and a rep's designer offer NO
+//      Interior wall button; a saved design that already holds a wall still loads it and draws it,
+//      and (in the rep's) Details prices it at $0. A builder who saved the tab but never priced the 278 row (its
+//      layout item hidden until priced) IS offered the button: the tab decides. SS_PARTITIONS_ONLY_U=1 runs only this (and L).
+//   M. INTERIOR WALLS V2 (2026-10-17), on a rep's designer (canOverridePrice): press-drag draws a wall
+//      that snaps to 45 degrees; with Shift it keeps its own angle; a wall drawn up to another's body
+//      lands on it (a T); every wall is two parallel lines turned to its angle on the plan, and the PDF
+//      draws the diagonal along its own line; the rep sees "Framing 2x4 / 2x6" and 2x6 sticks.
+//   N. TO THE RAFTERS under the style's gable: the 3D wall's top follows the roof's underside along
+//      its whole length (no gap, no poke-through) and, under a loft on the plate, stops at the loft's
+//      floor framing; its per-sq-ft Details row is the true face area.
+//   O. DOORS AND WINDOWS IN THE PARTITION'S OWN THICKNESS (2026-10-17): a saved design with a diagonal
+//      2x4 wall (a plank door, a Classic trim door and a window) and a straight 2x6 wall (a roll-up, a
+//      double plank door and a window). In 3D every opening's door or window (leaf, hardware, sash,
+//      glass) lies within the wall's thickness and is centred on its line, and its casing within the
+//      thickness plus the casing's own reach; shots from both faces and from above.
+//      SS_PARTITIONS_ONLY_O=1 runs only this (and L).
 //   L. zero page errors.
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
@@ -41,7 +64,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool, BASE, REF,
+  launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool, showOptTab, BASE, REF,
 } from "./lib.mjs";
 
 const CLIENT = "harness-partitions";
@@ -71,6 +94,24 @@ export const CONFIG = {
   layoutPricing: { partitionWall: { rate: 22, method: "lineal_ft" }, loft: { rate: 6, method: "sqft_option" }, workbench: { rate: 12, method: "lineal_ft" } },
   layoutPrices: {},
   electrical: null, electricalItems: [], insulation: [],
+};
+// The same tenant once the Interior walls tab exists: 2x4 the standard at the 278 row's $22 a foot,
+// 2x6 offered at $28. B-J use it, so the framing control has two sizes to offer (and must still be
+// hidden there: that designer has no price-override grant).
+export const CONFIG_IW = {
+  ...CONFIG,
+  interiorWalls: { offered: true, standardStud: "2x4", method: "lineal_ft", standardHeight: "plate", allowRafters: true, allowRo: true,
+    studs: { "2x4": { rate: 22 }, "2x6": { rate: 28 } }, coverings: [] },
+};
+// get_config after 313 for a builder who never saved the Interior walls tab: interiorWalls null, the
+// 278 layout row still priced (as two live tenants' are). No wall may be offered.
+export const CONFIG_UNSET = { ...CONFIG, interiorWalls: null };
+// A builder who saved the tab but never priced the 278 row: get_config marks that layout item
+// noPalette (hidden until priced) and has no partitionWall rate. The tab must still offer the wall.
+export const CONFIG_TAB_ONLY = {
+  ...CONFIG_IW,
+  layoutItems: { ...CONFIG.layoutItems, partitionWall: { ...CONFIG.layoutItems.partitionWall, noPalette: true } },
+  layoutPricing: { loft: CONFIG.layoutPricing.loft, workbench: CONFIG.layoutPricing.workbench },
 };
 const fx = (o) => ({ colorMode: "fixed", sortOrder: 0, imageUrl: null, opLeft: false, opRight: false, opDouble: false, opSlideUp: false, opDefault: null,
   swingIn: false, swingOut: false, swingDefault: null, hasTrimColor: false, sillIn: null, ...o });
@@ -137,10 +178,24 @@ async function pixelAt(page, dataUrl, x, y) {
 }
 const hexRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const close = (a, b, tol = 24) => a.every((v, k) => Math.abs(v - b[k]) <= tol);
+/** A wall drawn as two parallel lines: some pixel within 5 page px of (x, y), stepping along the
+ *  normal (nx, ny), is the wall's colour. The pixel found, or null. */
+async function lineNear(page, dataUrl, x, y, nx, ny, hex, tol = 40) {
+  return page.evaluate(async ({ dataUrl, x, y, nx, ny, want, tol }) => {
+    const im = new Image(); im.src = dataUrl; await im.decode();
+    const c = document.createElement("canvas"); c.width = im.width; c.height = im.height;
+    const g = c.getContext("2d"); g.drawImage(im, 0, 0);
+    for (let k = -10; k <= 10; k++) {
+      const px = Array.from(g.getImageData(Math.round((x + nx * k / 2) * 2), Math.round((y + ny * k / 2) * 2), 1, 1).data.slice(0, 3));
+      if (px.every((v, i) => Math.abs(v - want[i]) <= tol)) return px;
+    }
+    return null;
+  }, { dataUrl, x, y, nx, ny, want: hexRgb(hex), tol });
+}
 
 /** The portal's mount, minus the portal: the vendored libraries and the compiled component, the way
  *  portal.html loads them, and one <StructureStudio embedded …/> opening `CODE`. */
-function embeddedPage() {
+function embeddedPage(extra = {}) {
   const idx = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
   const buster = (/structure-studio\.component\.compiled\.js\?v=([a-f0-9]+)/.exec(idx) || [])[1] || "x";
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -154,7 +209,7 @@ function embeddedPage() {
   window.__SS3D_DEBUG = true;
   ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(window.StructureStudio, {
     clientId: ${JSON.stringify(CLIENT)}, embedded: true, view3d: true,
-    openDesign: { code: ${JSON.stringify(CODE)}, clientId: ${JSON.stringify(CLIENT)} },
+    openDesign: { code: ${JSON.stringify(CODE)}, clientId: ${JSON.stringify(CLIENT)} }, ...${JSON.stringify(extra)},
   }));
 </script></body></html>`;
 }
@@ -194,18 +249,20 @@ const run = async () => {
         ok("A3 no partition: the Floorplan PDF image is byte-identical to the tree before this change", base.pngSha === out.pngSha, `${base.pngSha.slice(0, 12)} vs ${out.pngSha.slice(0, 12)}`);
       }
       if (!process.env.SS_PARTITIONS_ONLY_A) {
-        const btn = await revealTool(page, /Partition Wall/);
-        ok("A1 the public designer offers the Partition Wall button (under Interior)", await btn.isVisible().catch(() => false));
+        const btn = await revealTool(page, /Interior wall/);
+        ok("A1 the public designer offers the Interior wall button (under Interior)", await btn.isVisible().catch(() => false));
       }
       allErrors.push(...errors.map((e) => "A: " + e));
       await page.close();
     }
     if (process.env.SS_PARTITIONS_ONLY_A) return;
+    if (process.env.SS_PARTITIONS_ONLY_U) { await unsetRun(ctx, ok, allErrors); ok("L zero page errors", allErrors.length === 0, allErrors.slice(0, 5).join(" | ")); return; }
+    if (process.env.SS_PARTITIONS_ONLY_O) { await openingsRun(ctx, ok, shots, allErrors); ok("L zero page errors", allErrors.length === 0, allErrors.slice(0, 5).join(" | ")); return; }
 
     // ── B-J. The portal's designer, a blank 12 x 32 ──────────────────────────────────────────
     const page = await ctx.newPage();
     const errors = collectErrors(page);
-    const calls = await stubSupabase(page, { config: CONFIG, fixtures: FIXTURES, rpc: { load_design: [designRow([])] } });
+    const calls = await stubSupabase(page, { config: CONFIG_IW, fixtures: FIXTURES, rpc: { load_design: [designRow([])] } });
     await page.route(`**/${REF}.supabase.co/storage/v1/**`, (route) => {
       const hdr = { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*" };
       if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: hdr, body: "" });
@@ -222,7 +279,7 @@ const run = async () => {
     const at = (xFt, yFt) => svgPoint(page, r.x + xFt * sc, r.y + yFt * sc);
 
     // B. place
-    await (await revealTool(page, /Partition Wall/)).click();
+    await (await revealTool(page, /Interior wall/)).click();
     await settle(page, 250);
     const hint = await page.locator(".ssd-tb-hint").first().innerText().catch(() => "");
     ok("B0 the armed tool says where to click", /inside the building/.test(hint), hint);
@@ -230,40 +287,43 @@ const run = async () => {
     await page.mouse.click(p0.x, p0.y);
     await settle(page);
     let ps = await partitions(page);
-    ok("B1 one partition, across the short span, wall to wall, at the click to the inch, full height",
-      ps.length === 1 && ps[0].axis === "x" && near(ps[0].atFt, 12) && ps[0].fromFt === 0 && ps[0].toFt === 12 && ps[0].heightIn === null && ps[0].wall === null,
+    ok("B1 one partition, across the short span, wall to wall, at the click to the inch, at stud wall height",
+      ps.length === 1 && ps[0].x1Ft === 0 && near(ps[0].y1Ft, 12) && ps[0].x2Ft === 12 && near(ps[0].y2Ft, 12) && ps[0].heightMode === "plate"
+        && ps[0].heightIn === null && ps[0].stud === null && ps[0].wall === null,
       JSON.stringify(ps[0]));
     const selTxt = await page.locator(".ssd-tb").first().innerText().catch(() => "");
-    ok("B2 ...and it is selected, with its controls in the toolbar", /Selected: Partition Wall/i.test(selTxt) && /Full height/.test(selTxt) && /\+ Door/.test(selTxt), selTxt.replace(/\s+/g, " ").slice(0, 200));
+    ok("B2 ...and it is selected, with its controls in the toolbar", /Selected: Interior wall/i.test(selTxt) && /Stud wall height/.test(selTxt) && /To the rafters/.test(selTxt) && /\+ Door/.test(selTxt), selTxt.replace(/\s+/g, " ").slice(0, 200));
+    ok("B3 ...and no framing control: this designer has no price-override grant (a customer never sees it)",
+      (await page.locator("[data-ss-partition-stud]").count()) === 0 && !/Framing 2x6/.test(selTxt));
 
     // C. move it across the building
     await drag(page, await at(1, 12), await at(1, 16.5));
     ps = await partitions(page);
-    ok("C1 dragging the wall moves it across the building, to the inch", near(ps[0].atFt, 16.5, 1 / 12 + 1e-6) && ps[0].fromFt === 0 && ps[0].toFt === 12, JSON.stringify(ps[0]));
-    const atFt = ps[0].atFt;
+    ok("C1 dragging the wall moves it across the building, to the inch", near(ps[0].y1Ft, 16.5, 1 / 12 + 1e-6) && ps[0].y2Ft === ps[0].y1Ft && ps[0].x1Ft === 0 && ps[0].x2Ft === 12, JSON.stringify(ps[0]));
+    const atFt = ps[0].y1Ft;
 
     // D. stretch
     await drag(page, await centerOf(page.locator('[data-ss-partition-end="to"]').first()), await at(8, atFt));
     ps = await partitions(page);
-    ok("D1 the end grip shortens it", near(ps[0].toFt, 8, 1 / 12 + 1e-6), String(ps[0].toFt));
+    ok("D1 the end grip shortens it", near(ps[0].x2Ft, 8, 1 / 12 + 1e-6) && ps[0].y2Ft === atFt, `${ps[0].x2Ft}, ${ps[0].y2Ft}`);
     await drag(page, await centerOf(page.locator('[data-ss-partition-end="to"]').first()), await at(11.7, atFt));
     ps = await partitions(page);
-    ok("D2 dragged back near the wall it lands ON the wall", ps[0].toFt === 12, String(ps[0].toFt));
+    ok("D2 dragged back near the wall it lands ON the wall", ps[0].x2Ft === 12 && ps[0].y2Ft === atFt, `${ps[0].x2Ft}, ${ps[0].y2Ft}`);
 
     // E. height
     await page.getByRole("button", { name: "Custom" }).first().click();
     await settle(page, 300);
     ps = await partitions(page);
-    ok("E1 Custom gives it a height in inches (a foot under the 7'6\" wall)", ps[0].heightIn === 78, String(ps[0].heightIn));
+    ok("E1 Custom gives it a height in inches (a foot under the 7'6\" wall)", ps[0].heightMode === "custom" && ps[0].heightIn === 78, String(ps[0].heightIn));
     await page.locator("[data-ss-partition-height]").fill("84");
     await page.locator("[data-ss-partition-height]").press("Enter");
     await settle(page, 300);
     ps = await partitions(page);
     ok("E2 a typed height sticks", ps[0].heightIn === 84, String(ps[0].heightIn));
-    await page.getByRole("button", { name: "Full height" }).first().click();
+    await page.getByRole("button", { name: "Stud wall height" }).first().click();
     await settle(page, 300);
     ps = await partitions(page);
-    ok("E3 Full height goes back to the wall's own height", ps[0].heightIn === null, String(ps[0].heightIn));
+    ok("E3 Stud wall height goes back to the wall's own height", ps[0].heightMode === "plate" && ps[0].heightIn === null, `${ps[0].heightMode} ${ps[0].heightIn}`);
 
     // F. + Door, slide, flip, + Window, overlap refused
     await page.getByRole("button", { name: "+ Door" }).first().click();
@@ -318,23 +378,23 @@ const run = async () => {
     const shownIn = await page.locator("[data-ss-partition-height]").inputValue();
     ok("E4 a refused height clamped to the one it has: the field shows the height kept, not the one typed",
       keptIn === 83 && ps[0].heightIn === 83 && shownIn === "83", `${keptIn} / ${ps[0].heightIn} / field ${shownIn}`);
-    await page.getByRole("button", { name: "Full height" }).first().click();
+    await page.getByRole("button", { name: "Stud wall height" }).first().click();
     await settle(page, 300);
 
     // G. Details
     const dtTog = page.locator(".ssd-dt-tog").first();
     if (!(await page.locator(".ssd-dt").count()) && await dtTog.count()) { await dtTog.click(); await settle(page, 400); }
     const dt = (await page.locator(".ssd-dt").first().innerText().catch(() => "")).replace(/\s+/g, " ");
-    ok("G1 Details: the wall at 12 ft x $22.00 / ft = $264.00", dt.includes("Partition Wall") && dt.includes("12' long, full height (7'6\")") && dt.includes("$264.00"), dt.slice(0, 400));
-    ok("G2 Details: the door and the window in it at their catalog prices", dt.includes("Interior Door (in partition)") && dt.includes("$300.00") && dt.includes("2x3 Window (in partition)") && dt.includes("$120.00"));
+    ok("G1 Details: the wall at 12 ft x $22.00 / ft (the 2x4 rate) = $264.00", dt.includes("Interior wall") && dt.includes("12' long, stud wall height (7'6\")") && dt.includes("2x4 framing") && dt.includes("$264.00"), dt.slice(0, 400));
+    ok("G2 Details: the door and the window in it at their catalog prices", dt.includes("Interior Door (in interior wall)") && dt.includes("$300.00") && dt.includes("2x3 Window (in interior wall)") && dt.includes("$120.00"));
 
     // H. the Floorplan PDF
     const shot = await captureAB(page);
     const pyFt = r.y + atFt * sc;
-    const onWall = await pixelAt(page, shot.png, r.x + 1.5 * sc, pyFt);
+    const onWall = await lineNear(page, shot.png, r.x + 1.5 * sc, pyFt, 0, 1, PARTITION_COLOR);
     const offWall = await pixelAt(page, shot.png, r.x + 1.5 * sc, pyFt + 0.75 * sc);
     const onDoor = await pixelAt(page, shot.png, r.x + 8.5 * sc, pyFt);
-    ok("H1 the PDF draws the partition on its line", close(onWall, hexRgb(PARTITION_COLOR)), JSON.stringify(onWall));
+    ok("H1 the PDF draws the partition's two lines on its line", !!onWall, JSON.stringify(onWall));
     ok("H2 ...and not beside it", !close(offWall, hexRgb(PARTITION_COLOR), 40), JSON.stringify(offWall));
     ok("H3 ...and the door in it", close(onDoor, hexRgb("#D97706"), 40), JSON.stringify(onDoor));
 
@@ -344,7 +404,7 @@ const run = async () => {
       const show = page.getByRole("button", { name: /Show 3D/ });
       if (await show.count()) { await show.first().click(); await settle(page, 800); }
     }
-    const before3d = await page.getByRole("button", { name: /Partition Wall/ }).count();
+    const before3d = await page.getByRole("button", { name: /Interior wall/ }).count();
     await editBtn.first().click();
     await page.waitForFunction(() => {
       const E = window.__ss3dEngine;
@@ -373,7 +433,7 @@ const run = async () => {
     ok("I2 ...wall to wall across the 12 ft width, full height, with its door and window", near(m.mn[0], -W / 2, 0.25) && near(m.mx[0], W / 2, 0.25)
       && near(m.mx[1], WALL_FT, 0.3) && m.meshes > 20, `x ${m.mn[0].toFixed(2)}..${m.mx[0].toFixed(2)} top ${m.mx[1].toFixed(2)} meshes ${m.meshes}`);
     ok("I3 ...where the plan has it", near((m.mn[2] + m.mx[2]) / 2, atFt - L / 2, 0.3), `${((m.mn[2] + m.mx[2]) / 2).toFixed(2)} vs ${(atFt - L / 2).toFixed(2)}`);
-    ok("I4 the 3D palette does not offer it (placed on the plan only)", (await page.getByRole("button", { name: /Partition Wall/ }).count()) <= before3d);
+    ok("I4 the 3D palette does not offer it (placed on the plan only)", (await page.getByRole("button", { name: /Interior wall/ }).count()) <= before3d);
     const inside = page.getByRole("button", { name: /Look inside/ });
     if (await inside.count()) { await inside.first().click(); await settle(page, 1500); }
     // Aim the camera at the partition (the window size stays put), from the door's swing side.
@@ -396,7 +456,7 @@ const run = async () => {
 
     // J. the quote
     const before = calls.length;
-    const submit = page.getByRole("button", { name: /^(Get Quote|Resubmit Quote|Resubmit)$/ }).last();
+    const submit = page.getByRole("button", { name: /^(Get Estimate|Resubmit Quote|Resubmit)$/ }).last();
     let payload = null;
     if (await submit.count()) {
       await submit.click().catch(() => {});
@@ -409,8 +469,9 @@ const run = async () => {
     ok("J0 Get Quote reached submit-estimate", !!payload);
     if (payload) {
       const parts = payload.itemSummary && payload.itemSummary.partitions;
-      ok("J1 itemSummary.partitions: the length, full height, and the door and window by catalog id",
-        Array.isArray(parts) && parts.length === 1 && parts[0].lengthFt === 12 && parts[0].heightIn === null && parts[0].heightFt === WALL_FT
+      ok("J1 itemSummary.partitions: the ends, the length, stud wall height, and the door and window by catalog id",
+        Array.isArray(parts) && parts.length === 1 && parts[0].lengthFt === 12 && parts[0].x1Ft === 0 && parts[0].x2Ft === 12 && near(parts[0].y1Ft, atFt, 1e-3)
+          && parts[0].heightMode === "plate" && parts[0].heightIn === null && parts[0].heightFt === WALL_FT && parts[0].stud === null && parts[0].faceAreaSqFt === 90
           && parts[0].openings.map((o) => `${o.kind}:${o.fixtureItemId}`).join(",") === "door:d-int,window:w-23", JSON.stringify(parts));
       const fpi = (payload.floorPlanItems || []).filter((i) => i.type === "partitionWall");
       ok("J2 floorPlanItems carries the wall, with no `wall`", fpi.length === 1 && fpi[0].wall === null && fpi[0].lengthFt === 12, JSON.stringify(fpi));
@@ -419,7 +480,16 @@ const run = async () => {
     allErrors.push(...errors.map((e) => "B-J: " + e));
     await page.close();
 
-    // ── K. The portal's Interior items card ───────────────────────────────────────────────────
+    // ── M, N. Interior walls v2 on a rep's designer ─────────────────────────────────────────────
+    await v2Run(ctx, ok, shots, allErrors);
+
+    // ── O. Doors and windows centred in a partition's own thickness ────────────────────────────
+    await openingsRun(ctx, ok, shots, allErrors);
+
+    // ── U. A builder who has not set interior walls up ────────────────────────────────────────────
+    await unsetRun(ctx, ok, allErrors);
+
+    // ── K. The portal's Interior items card and Interior walls tab ───────────────────────────────────────────────────
     await portalRun(browser, ok, shots, allErrors);
 
     ok("L zero page errors", allErrors.length === 0, allErrors.slice(0, 5).join(" | "));
@@ -427,6 +497,383 @@ const run = async () => {
     await browser.close();
   }
 };
+
+// ── M, N ──────────────────────────────────────────────────────────────────────────────────────
+// A rep's designer (embedded, canOverridePrice) on the Interior walls tab's tenant, priced per square
+// foot of wall so a wall to the rafters is charged its face: $2 (2x4), $3 (2x6). One loft on the plate
+// across the north end (y 2..6). The roof is D3_SPEC's gable: across the 12 ft width, 7'6" at the walls
+// and 7'6" + 6 x 0.42 = 10.02 ft at the ridge down the middle.
+const CONFIG_SQFT = { ...CONFIG_IW, interiorWalls: { ...CONFIG_IW.interiorWalls, method: "sqft_option", studs: { "2x4": { rate: 2 }, "2x6": { rate: 3 } } } };
+const LOFT = { id: 201, type: "loft", x: MX + 6 * SC, y: MY + 4 * SC, rotation: 0, wall: null, widthFt: 12, heightFt: 4, onPlate: true };
+const ROOF_AT = (xPlan) => WALL_FT + 0.42 * (6 - Math.abs(xPlan - 6));
+const LOFT_BOTTOM = WALL_FT - 0.02 - 0.35;   // D3_LOFT_PLATE_GAP, D3.LOFT_T
+async function v2Run(ctx, ok, shots, allErrors) {
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await stubSupabase(page, { config: CONFIG_SQFT, fixtures: FIXTURES, rpc: { load_design: [designRow([LOFT])] } });
+  const url = `${BASE}/__harness_partitions_v2.html`;
+  await page.route(url, (route) => route.fulfill({ status: 200, contentType: "text/html", body: embeddedPage({ canOverridePrice: true }) }));
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => typeof window.StructureStudio === "function", null, { timeout: 60000 });
+    await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 60000 });
+    await settle(page, 1500);
+    const r = await buildingRect(page);
+    const sc = r.w / W;
+    const at = (xFt, yFt) => svgPoint(page, r.x + xFt * sc, r.y + yFt * sc);
+    const arm = async () => { await (await revealTool(page, /Interior wall/)).click(); await settle(page, 250); };
+    const newest = async (n0) => { const ps = await partitions(page); return ps.length > n0 ? ps[ps.length - 1] : null; };
+
+    // M1. Press-drag draws a wall, and 44 degrees is 45.
+    await arm();
+    await drag(page, await at(2, 14), await at(8.1, 19.9), 12);
+    const d45 = await newest(0);
+    ok("M1 press-drag draws a wall from the press point, and an angle within 5 degrees of 45 snaps to it",
+      !!d45 && near(d45.x1Ft, 2, 1 / 12 + 1e-6) && near(d45.y1Ft, 14, 1 / 12 + 1e-6) && near(d45.x2Ft - d45.x1Ft, d45.y2Ft - d45.y1Ft, 1e-9) && near(d45.x2Ft, 8, 2 / 12 + 1e-6), JSON.stringify(d45));
+    const g45 = d45 ? await page.evaluate((id) => {
+      const g = document.querySelector(`[data-ss-partition="${id}"] > g`);
+      return g ? { t: g.getAttribute("transform"), lines: [...g.querySelectorAll("line")].filter((l) => l.getAttribute("stroke") === "#57534E").length } : null;
+    }, d45.id) : null;
+    ok("M2 the plan draws it as two parallel lines, turned to its 45 degrees", !!g45 && near(Number((/rotate\(([-\d.e]+)\)/.exec(g45.t) || [])[1]), 45, 1e-6) && g45.lines >= 4, JSON.stringify(g45));
+
+    // M3. Shift keeps the angle it is dragged to (133 degrees would snap to 135 without it).
+    await arm();
+    await page.keyboard.down("Shift");
+    await drag(page, await at(10, 22), await at(5.2, 27.1), 12);
+    await page.keyboard.up("Shift");
+    const free = await newest(1);
+    ok("M3 with Shift held, a wall keeps its own angle", !!free && !near(Math.abs(free.x2Ft - free.x1Ft), Math.abs(free.y2Ft - free.y1Ft), 0.05), JSON.stringify(free));
+
+    // M4. A click still places today's short-span wall; a wall drawn up to its body lands on it (a T).
+    await arm();
+    const c24 = await at(3, 24);
+    await page.mouse.click(c24.x, c24.y);
+    await settle(page);
+    const across = await newest(2);
+    ok("M4 a click still places the short-span wall", !!across && across.x1Ft === 0 && across.x2Ft === 12 && near(across.y1Ft, 24, 1 / 12 + 1e-6) && across.y2Ft === across.y1Ft, JSON.stringify(across));
+    await arm();
+    await drag(page, await at(6, 29), await at(6.1, 24.3), 12);
+    const stem = await newest(3);
+    ok("M5 a wall drawn up to another's body lands on it: a T, and no clash", !!stem && near(stem.x1Ft, 6, 1 / 12 + 1e-6) && stem.x2Ft === stem.x1Ft && near(stem.y2Ft, across.y1Ft, 1e-9) && (await partitions(page)).length === 4, JSON.stringify(stem));
+
+    // M6. The rep's framing control: shown here, and 2x6 sticks.
+    const mid45 = await at(5, 17);
+    await page.mouse.click(mid45.x, mid45.y);
+    await settle(page, 300);
+    const studBtns = await page.locator("[data-ss-partition-stud] button").allTextContents();
+    ok("M6 a rep sees the framing control, with the sizes the builder offers", JSON.stringify(studBtns) === JSON.stringify(["Framing 2x4", "Framing 2x6"]), JSON.stringify(studBtns));
+    await page.getByRole("button", { name: "Framing 2x6" }).first().click();
+    await settle(page, 300);
+    const d6 = (await partitions(page)).find((p) => p.id === d45.id);
+    const lbl = await page.evaluate((id) => [...document.querySelectorAll(`[data-ss-partition="${id}"] text`)].map((t) => t.textContent).join(" | "), d45.id);
+    ok("M7 ...2x6 sticks, and the plan's label says so", !!d6 && d6.stud === "2x6" && /INTERIOR .* · 2x6 · 7'6" tall/.test(lbl), `${d6 && d6.stud} ${lbl}`);
+    await page.locator("svg").filter({ has: page.locator('rect[stroke="#1E293B"]') }).first().screenshot({ path: join(shots, "M-plan-v2.png") });
+
+    // M8. The Floorplan PDF draws the diagonal along its own line.
+    const shot = await captureAB(page);
+    const n = [Math.SQRT1_2, -Math.SQRT1_2];
+    // 2 ft along it from end 1, clear of its label (which stands off side a at the middle).
+    const px45 = 2 + 2 * Math.SQRT1_2, py45 = 14 + 2 * Math.SQRT1_2;
+    const on45 = await lineNear(page, shot.png, r.x + px45 * sc, r.y + py45 * sc, n[0], n[1], PARTITION_COLOR);
+    const off45 = await pixelAt(page, shot.png, r.x + (px45 - 0.9 * n[0]) * sc, r.y + (py45 - 0.9 * n[1]) * sc);
+    ok("M8 the PDF draws the 45 degree wall on its line, and not beside it", !!on45 && !close(off45, hexRgb(PARTITION_COLOR), 40), `${JSON.stringify(on45)} / ${JSON.stringify(off45)}`);
+
+    // N1. To the rafters: the wall across the width, and a wall running north under the loft. (The PDF
+    // modal moved the page, so the point is asked for again.)
+    const c24b = await at(3, across.y1Ft);
+    await page.mouse.click(c24b.x, c24b.y);
+    await settle(page, 300);
+    await page.getByRole("button", { name: "To the rafters" }).first().click();
+    await settle(page, 300);
+    await arm();
+    await drag(page, await at(3, 9), await at(3.05, 1.3), 12);
+    const under = await newest(4);
+    await page.getByRole("button", { name: "To the rafters" }).first().click();
+    await settle(page, 300);
+    const ps = await partitions(page);
+    ok("N1 To the rafters sticks on both walls", ps.find((p) => p.id === across.id).heightMode === "rafters" && !!under && ps.find((p) => p.id === under.id).heightMode === "rafters",
+      JSON.stringify(ps.map((p) => [p.id, p.heightMode])));
+    // N2. Details: the wall across the gable is its true face, 12 x 7'6" plus the gable's triangle.
+    const dtTog = page.locator(".ssd-dt-tog").first();
+    if (!(await page.locator(".ssd-dt").count()) && await dtTog.count()) { await dtTog.click(); await settle(page, 400); }
+    const dt = (await page.locator(".ssd-dt").first().innerText().catch(() => "")).replace(/\s+/g, " ");
+    ok("N2 Details prices the wall to the rafters per sq ft of its true face: 12 x 7.5 + 12 x 2.52 / 2 = 105.12 sq ft at $2 = $210.24",
+      dt.includes("12' long, to the rafters") && dt.includes("$210.24"), dt.slice(0, 600));
+    // N3-N4. The 3D: every top vertex of each wall to the rafters on the roof's underside, or the loft's floor.
+    const editBtn = page.getByRole("button", { name: /Edit in 3D/ });
+    if (!(await editBtn.count()) || !(await editBtn.first().isVisible().catch(() => false))) {
+      const show = page.getByRole("button", { name: /Show 3D/ });
+      if (await show.count()) { await show.first().click(); await settle(page, 800); }
+    }
+    await editBtn.first().click();
+    await page.waitForFunction(() => {
+      const E = window.__ss3dEngine;
+      return !!(E && E.model && E.model.interiorGroup && E.model.interiorGroup.children.filter((g) => g.userData && g.userData.partition).length >= 4);
+    }, null, { timeout: 90000 });
+    await settle(page, 1500);
+    const tops = await page.evaluate(() => {
+      const E = window.__ss3dEngine;
+      E.scene.updateMatrixWorld(true);
+      const V = E.camera.position.constructor;
+      return E.model.interiorGroup.children.filter((g) => g.userData && g.userData.partition).map((g) => {
+        const pts = [];
+        let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+        g.traverse((o) => {
+          if (!o.isMesh) return;
+          const pos = o.geometry.attributes.position;
+          for (let i = 0; i < pos.count; i++) {
+            const v = new V(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(o.matrixWorld);
+            [v.x, v.y, v.z].forEach((c, k) => { mn[k] = Math.min(mn[k], c); mx[k] = Math.max(mx[k], c); });
+            if (v.y > 6) pts.push([v.x, v.y, v.z]);
+          }
+        });
+        return { mn, mx, pts };
+      });
+    });
+    // Which group is which: the across wall stands at z = 24 - 16, the stem under the loft at x = 3 - 6.
+    const acr = tops.find((t) => Math.abs((t.mn[2] + t.mx[2]) / 2 - 8) < 0.5 && t.mx[0] - t.mn[0] > 11);
+    const und = tops.find((t) => Math.abs((t.mn[0] + t.mx[0]) / 2 + 3) < 0.5 && t.mx[2] < -6);
+    // Each top vertex against the roof's underside (or the loft's floor) right above it: [poke, gap], the
+    // worst amount it stands above it and the worst it stops short. Each face follows the roof over it,
+    // so both are nil. A want of null skips the point (the loft's edge, where the top steps down between
+    // two samples).
+    const worst = (t, want) => t ? t.pts.reduce((m, p) => {
+      const w = want(p);
+      return w == null ? m : [Math.max(m[0], p[1] - w), Math.max(m[1], w - p[1])];
+    }, [0, 0]) : [Infinity, Infinity];
+    const acc = worst(acr, (p) => ROOF_AT(p[0] + W / 2));
+    ok("N3 3D: the wall across the gable meets the roof's underside all along it (no gap, no poke-through), peaked at the ridge",
+      !!acr && acc[0] < 0.01 && acc[1] < 0.02 && near(acr.mx[1], ROOF_AT(6), 0.05), `poke ${acc[0].toFixed(3)} gap ${acc[1].toFixed(3)} top ${acr && acr.mx[1].toFixed(3)}`);
+    const und2 = worst(und, (p) => {
+      const yPlan = p[2] + L / 2;
+      if (Math.abs(yPlan - 2) < 0.1 || Math.abs(yPlan - 6) < 0.1) return null;
+      return yPlan > 2 && yPlan < 6 ? LOFT_BOTTOM : ROOF_AT(p[0] + W / 2);
+    });
+    ok("N4 3D: under the loft it stops at the loft's floor framing, and past the loft it meets the roof (no gap, no poke-through)",
+      !!und && und2[0] < 0.01 && und2[1] < 0.02, `poke ${und2[0].toFixed(3)} gap ${und2[1].toFixed(3)}`);
+    const inside = page.getByRole("button", { name: /Look inside/ });
+    if (await inside.count()) { await inside.first().click(); await settle(page, 1500); }
+    await page.evaluate(() => {
+      const E = window.__ss3dEngine;
+      E.controls.target.set(0, 4, 0);
+      E.camera.position.set(14, 12, 18);
+      E.controls.update();
+      E.render();
+    });
+    await settle(page, 600);
+    await page.screenshot({ path: join(shots, "N-3d-rafters.png") });
+  } finally {
+    allErrors.push(...errors.map((e) => "M-N: " + e));
+    await page.close();
+  }
+}
+
+// ── U ───────────────────────────────────────────────────────────────────────────────────────
+// A saved design with one wall across the building at y = 16, on a builder with no Interior walls row.
+const U_WALL = { id: 401, type: "partitionWall", wall: null, x1Ft: 0, y1Ft: 16, x2Ft: 12, y2Ft: 16, heightMode: "plate", heightIn: null,
+  stud: null, covers: { a: null, b: null }, openings: [] };
+async function unsetRun(ctx, ok, allErrors) {
+  // The palette's own tool button (not a Details row's or the selection's), looked for on every
+  // Options tab of the palette.
+  const wallButton = async (page) => {
+    const btn = page.locator("button.ssd-tool").filter({ hasText: /Interior wall/ }).first();
+    if (await btn.isVisible().catch(() => false)) return true;
+    const keys = await page.locator("[data-ss-opt-tab]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-opt-tab")));
+    for (const k of keys) {
+      await showOptTab(page, k);
+      if (await btn.isVisible().catch(() => false)) return true;
+    }
+    return false;
+  };
+  // U1-U2: the public designer, a saved design that already holds a wall.
+  {
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await stubSupabase(page, { config: CONFIG_UNSET, fixtures: FIXTURES, rpc: { load_design: [designRow([U_WALL])] } });
+    try {
+      await openDesigner(page, CLIENT);
+      await page.goto(`${BASE}/?client=${CLIENT}&id=${CODE}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+      await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 30000 });
+      await settle(page, 1500);
+      ok("U1 not set up: the public designer offers no Interior wall button, though the 278 row is priced", !(await wallButton(page)));
+      const ps = await partitions(page);
+      const drawn = await page.locator('[data-ss-partition="401"]').count();
+      ok("U2 ...and a saved design's wall still loads and draws (never dropped)", ps.length === 1 && ps[0].id === 401 && drawn > 0, `${JSON.stringify(ps)} drawn ${drawn}`);
+    } finally {
+      allErrors.push(...errors.map((e) => "U1-2: " + e));
+      await page.close();
+    }
+  }
+  // U3-U4: a rep's designer (embedded, canOverridePrice) on the same builder and design: Details prices
+  // the wall at $0, and no button either.
+  {
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await stubSupabase(page, { config: CONFIG_UNSET, fixtures: FIXTURES, rpc: { load_design: [designRow([U_WALL])] } });
+    const url = `${BASE}/__harness_partitions_unset.html`;
+    await page.route(url, (route) => route.fulfill({ status: 200, contentType: "text/html", body: embeddedPage({ canOverridePrice: true }) }));
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => typeof window.StructureStudio === "function", null, { timeout: 60000 });
+      await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 60000 });
+      await settle(page, 1500);
+      const dtTog = page.locator(".ssd-dt-tog").first();
+      if (!(await page.locator(".ssd-dt").count()) && await dtTog.count()) { await dtTog.click(); await settle(page, 400); }
+      const dt = (await page.locator(".ssd-dt").first().innerText().catch(() => "")).replace(/\s+/g, " ");
+      ok("U3 Details prices the saved wall at $0 (the server's $0 line), never at the 278 row's $22",
+        /Interior wall/.test(dt) && dt.includes("12' long") && dt.includes("$0.00 / ft") && !dt.includes("$22.00 / ft"), dt.slice(0, 500));
+      ok("U4 not set up: a rep's designer offers no Interior wall button either", !(await wallButton(page)));
+    } finally {
+      allErrors.push(...errors.map((e) => "U3-4: " + e));
+      await page.close();
+    }
+  }
+  // U5: the tab saved, the 278 row never priced (its layout item hidden until priced): offered.
+  {
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await stubSupabase(page, { config: CONFIG_TAB_ONLY, fixtures: FIXTURES, rpc: { load_design: [designRow([])] } });
+    try {
+      await openDesigner(page, CLIENT);
+      await page.goto(`${BASE}/?client=${CLIENT}&id=${CODE}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
+      await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 30000 });
+      await settle(page, 1500);
+      ok("U5 the tab saved, the old 278 row never priced: the Interior wall button IS offered (the tab decides)", await wallButton(page));
+    } finally {
+      allErrors.push(...errors.map((e) => "U5: " + e));
+      await page.close();
+    }
+  }
+}
+
+// ── O ───────────────────────────────────────────────────────────────────────────────────────
+// A saved design, so the walls and their openings are exact: a diagonal 2x4 wall from (1, 10) to
+// (11, 20) holding a plank door, a Classic trim door and a window, and a straight 2x6 wall across at
+// y = 26 holding a roll-up, a double plank door and a window. Thickness: 3.5 in and 5.5 in, bare.
+const FIXTURES_O = {
+  ...FIXTURES,
+  items: [...FIXTURES.items,
+    fx({ id: "d-classic", name: "Classic Door", category: "door", price: 450, widthIn: 36, heightIn: 80, planLabel: "CL", doorStyle: "classic", opLeft: true, opRight: true, opDefault: "left" }),
+    fx({ id: "d-roll", name: "Roll-up 4x6", category: "door", price: 700, widthIn: 48, heightIn: 72, planLabel: "RU", doorStyle: "rollup", opSlideUp: true, opDefault: "slideup" }),
+  ],
+};
+const O_DOOR = (id, fxId, name, centerFt, extra = {}) => ({ id, kind: "door", fixtureItemId: fxId, name, planLabel: name.slice(0, 4).toUpperCase(), widthIn: 36, heightIn: 80, swing: "out", operation: "left", price: 300, centerFt, ...extra });
+const O_WIN = (id, centerFt) => ({ id, kind: "window", fixtureItemId: "w-23", name: "2x3 Window", planLabel: "W23", widthIn: 24, heightIn: 36, sillIn: 42, price: 120, centerFt });
+const O_WALLS = [
+  { id: 301, type: "partitionWall", wall: null, x1Ft: 1, y1Ft: 10, x2Ft: 11, y2Ft: 20, heightMode: "plate", heightIn: null, stud: "2x4", covers: { a: null, b: null },
+    openings: [O_DOOR(1, "d-int", "Interior Door", 3), O_DOOR(2, "d-classic", "Classic Door", 7.25, { operation: "right" }), O_WIN(3, 11.25)] },
+  { id: 302, type: "partitionWall", wall: null, x1Ft: 0, y1Ft: 26, x2Ft: 12, y2Ft: 26, heightMode: "plate", heightIn: null, stud: "2x6", covers: { a: null, b: null },
+    openings: [O_DOOR(1, "d-roll", "Roll-up 4x6", 2.75, { widthIn: 48, heightIn: 72, operation: "slideup" }), O_DOOR(2, "d-int", "Interior Door", 6.75, { operation: "double" }), O_WIN(3, 10.25)] },
+];
+const O_T = { 301: 3.5 / 12, 302: 5.5 / 12 };
+async function openingsRun(ctx, ok, shots, allErrors) {
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await stubSupabase(page, { config: CONFIG_IW, fixtures: FIXTURES_O, rpc: { load_design: [designRow(O_WALLS)] } });
+  const url = `${BASE}/__harness_partitions_o.html`;
+  await page.route(url, (route) => route.fulfill({ status: 200, contentType: "text/html", body: embeddedPage() }));
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => typeof window.StructureStudio === "function", null, { timeout: 60000 });
+    await page.waitForFunction(() => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === "32 ft"), null, { timeout: 60000 });
+    await settle(page, 1500);
+    const editBtn = page.getByRole("button", { name: /Edit in 3D/ });
+    if (!(await editBtn.count()) || !(await editBtn.first().isVisible().catch(() => false))) {
+      const show = page.getByRole("button", { name: /Show 3D/ });
+      if (await show.count()) { await show.first().click(); await settle(page, 800); }
+    }
+    await editBtn.first().click();
+    await page.waitForFunction(() => {
+      const E = window.__ss3dEngine;
+      return !!(E && E.model && E.model.interiorGroup && E.model.interiorGroup.children.filter((g) => g.userData && g.userData.partition).length >= 2);
+    }, null, { timeout: 90000 });
+    await settle(page, 1500);
+    // Every mesh's box corners, as offsets across each wall's line (its normal) from the wall's centre
+    // line: per opening group (the door or window) and per trim piece, beside the bare wall's own.
+    const walls = O_WALLS.map((w) => {
+      const len = Math.hypot(w.x2Ft - w.x1Ft, w.y2Ft - w.y1Ft), ux = (w.x2Ft - w.x1Ft) / len, uy = (w.y2Ft - w.y1Ft) / len;
+      return { id: w.id, O: [w.x1Ft - W / 2, w.y1Ft - L / 2], U: [ux, uy], N: [-uy, ux], len };
+    });
+    const got = await page.evaluate((walls) => {
+      const E = window.__ss3dEngine;
+      E.scene.updateMatrixWorld(true);
+      const V = E.camera.position.constructor;
+      const groups = E.model.interiorGroup.children.filter((g) => g.userData && g.userData.partition);
+      return walls.map((w) => {
+        // Which group is this wall: the one whose wall meshes' centres lie on its line.
+        const span = (objs) => {
+          let lo = Infinity, hi = -Infinity, alo = Infinity, ahi = -Infinity;
+          objs.forEach((o) => {
+            if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+            const b = o.geometry.boundingBox;
+            for (let k = 0; k < 8; k++) {
+              const v = new V(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(o.matrixWorld);
+              const n = (v.x - w.O[0]) * w.N[0] + (v.z - w.O[1]) * w.N[1], a = (v.x - w.O[0]) * w.U[0] + (v.z - w.O[1]) * w.U[1];
+              lo = Math.min(lo, n); hi = Math.max(hi, n); alo = Math.min(alo, a); ahi = Math.max(ahi, a);
+            }
+          });
+          return { lo, hi, alo, ahi };
+        };
+        const meshesOf = (g) => { const out = []; g.traverse((o) => { if (o.isMesh) out.push(o); }); return out; };
+        const g = groups.find((gr) => { const s = span(meshesOf(gr)); return Math.abs(s.lo + s.hi) < 0.6 && s.ahi - s.alo > w.len - 0.6 && s.ahi - s.alo < w.len + 0.8; });
+        if (!g) return { id: w.id, found: false };
+        const ops = g.children.filter((c) => c.userData && c.userData.ssPartitionOpening).map((c) => ({ kind: c.userData.ssPartitionOpening, oid: c.userData.oid, meshes: meshesOf(c).length, ...span(meshesOf(c)) }));
+        const trim = meshesOf(g).filter((o) => o.userData && o.userData.ssPartitionTrim);
+        return { id: w.id, found: true, ops, trim: trim.length ? span(trim) : null };
+      });
+    }, walls);
+    for (const w of got) {
+      const T = O_T[w.id], name = w.id === 301 ? "the diagonal 2x4 wall" : "the straight 2x6 wall";
+      ok(`O1 ${name}: three openings each built in a group of their own`, w.found && w.ops.length === 3 && w.ops.every((o) => o.meshes > 0), JSON.stringify(w.ops && w.ops.map((o) => [o.kind, o.oid, o.meshes])));
+      for (const o of (w.ops || [])) {
+        ok(`O2 ${name}: opening ${o.oid} (${o.kind}) lies within the wall's ${(T * 12).toFixed(1)} in thickness, centred on its line`,
+          o.lo >= -T / 2 - 0.005 && o.hi <= T / 2 + 0.005 && Math.abs((o.lo + o.hi) / 2) <= 0.01,
+          `across ${o.lo.toFixed(3)}..${o.hi.toFixed(3)} ft vs ±${(T / 2).toFixed(3)}`);
+      }
+      ok(`O3 ${name}: the casings, sill and stool stand the same on both faces, a casing's reach past them`,
+        !!w.trim && Math.abs(w.trim.lo + w.trim.hi) <= 0.01 && w.trim.hi <= T / 2 + 0.065 && w.trim.hi >= T / 2,
+        w.trim ? `${w.trim.lo.toFixed(3)}..${w.trim.hi.toFixed(3)}` : "none");
+    }
+    // Shots: each wall from side a, from side b and from above, close on its openings.
+    const inside = page.getByRole("button", { name: /Look inside/ });
+    if (await inside.count()) { await inside.first().click(); await settle(page, 1500); }
+    const aim = async (file, target, cam) => {
+      await page.evaluate(({ target, cam }) => {
+        const E = window.__ss3dEngine;
+        E.controls.minDistance = 0.5;   // the viewer keeps an orbit outside the building; these are close-ups
+        E.camera.fov = 62; E.camera.updateProjectionMatrix();
+        E.controls.target.set(...target);
+        E.camera.position.set(...cam);
+        E.controls.update();
+        E.render();
+      }, { target, cam });
+      await settle(page, 700);
+      await page.screenshot({ path: join(shots, file) });
+    };
+    for (const w of walls) {
+      const tag = w.id === 301 ? "diag-2x4" : "straight-2x6";
+      const wall = O_WALLS.find((x) => x.id === w.id);
+      for (const o of wall.openings) {
+        const c = [w.O[0] + w.U[0] * o.centerFt, w.O[1] + w.U[1] * o.centerFt];
+        const what = `${tag}-${o.kind}${o.id}`;
+        const hw = o.widthIn / 24, at = (k, n) => [c[0] + w.U[0] * k + w.N[0] * n, c[1] + w.U[1] * k + w.N[1] * n];
+        const t = at(0, 0), ya = at(1.5, 5.5), yb = at(-1.5, -5.5), ty = o.kind === "window" ? 5 : 3.4;
+        await aim(`O-${what}-side-a.png`, [t[0], ty, t[1]], [ya[0], ty + 1.6, ya[1]]);
+        await aim(`O-${what}-side-b.png`, [t[0], ty, t[1]], [yb[0], ty + 1.6, yb[1]]);
+        // Down the opening at a slant from beyond one end, from each face: the far jamb's return shows
+        // how deep the leaf (or sash) sits behind each face of the wall.
+        const ja = at(-hw + 0.2, 0), ca = at(hw + 3.2, 1.6), cb = at(hw + 3.2, -1.6);
+        await aim(`O-${what}-jamb-a.png`, [ja[0], ty, ja[1]], [ca[0], ty + 0.8, ca[1]]);
+        await aim(`O-${what}-jamb-b.png`, [ja[0], ty, ja[1]], [cb[0], ty + 0.8, cb[1]]);
+      }
+    }
+  } finally {
+    allErrors.push(...errors.map((e) => "O: " + e));
+    await page.close();
+  }
+}
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const EXP = 4102444800;
@@ -452,13 +899,26 @@ async function portalRun(browser, ok, shots, allErrors) {
   page.on("pageerror", (e) => allErrors.push("K: " + e.message));
   const saves = [];
   const catalogs = [];
-  // As portal-settings' catalog answers after 278: the partition is hidden until priced and has no
-  // pricing row; the shelf is priced; the workbench is not hidden and has no row (it shows 0).
-  let lp = [{ item_key: "shelf", pricing_method: "lineal_ft", rate: 18, image_url: null }];
+  // As portal-settings' catalog answers after 313: the partition wall is still an item (priced, so it
+  // is listed), but the Interior items card leaves it out; the Interior walls tab reads its own row,
+  // as the builder saved it ($35 per foot, 2x4), one covering, a door, a window and two electrical
+  // items. K9 onward answers null: a builder who has never saved the tab (nothing is seeded).
+  const lp = [{ item_key: "shelf", pricing_method: "lineal_ft", rate: 18, image_url: null }, { item_key: "partitionWall", pricing_method: "lineal_ft", rate: 35, image_url: null }];
   const items = () => [
     { key: "workbench", label: "Workbench", archived: false, internalOnly: false, taxable: true, wallSnap: true, depthIn: null, heightOffFloorIn: 36, hiddenUntilPriced: false },
     { key: "shelf", label: "Single Shelf", archived: false, internalOnly: false, taxable: true, wallSnap: true, depthIn: 12, heightOffFloorIn: 48, hiddenUntilPriced: true },
     { key: "partitionWall", label: "Partition Wall", archived: false, internalOnly: false, taxable: true, wallSnap: false, depthIn: null, heightOffFloorIn: null, hiddenUntilPriced: true },
+  ];
+  const iw = { standard_stud: "2x4", pricing_method: "lineal_ft", rate_2x4: 35, rate_2x6: null, standard_height: "plate", allow_rafters: true, allow_rough_openings: true, taxable: true, internal_only: false };
+  let iwNow = iw;
+  const covers = [{ id: "00000000-0000-4000-8000-0000000000c1", name: "Drywall", pricing_method: "sqft_option", rate: 2.5, taxable: true, internal_only: false, active: true, sort_order: 10 }];
+  const fixtures = [
+    { id: "00000000-0000-4000-8000-0000000000d1", category: "door", name: "Walk door", in_partition: true, archived: false },
+    { id: "00000000-0000-4000-8000-0000000000a1", category: "window", name: "Slider window", in_partition: true, archived: false },
+  ];
+  const elec = [
+    { id: "00000000-0000-4000-8000-0000000000f1", name: "Ceiling fan", icon: "F", interior_wall_ok: true },
+    { id: "00000000-0000-4000-8000-0000000000f2", name: "Outlet", icon: "O", interior_wall_ok: true },
   ];
   await ctx.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
   const handler = async (route) => {
@@ -485,64 +945,102 @@ async function portalRun(browser, ok, shots, allErrors) {
       case "catalog":
         catalogs.push(body);
         return jsonR(route, { ok: true, clientId: CLIENT, styles: [], sizes: [], items: items(), inclusions: [], layoutPricing: lp,
-          colors: [], fixtures: [], wallHeights: [], insulation: [], insulationEnabled: false });
-      case "save_layout_pricing": {
+          colors: [], fixtures, wallHeights: [], insulation: [], insulationEnabled: false, electricalItems: elec,
+          interiorWalls: iwNow, interiorWallCoverings: iwNow ? covers : [] });
+      case "save_layout_pricing":
+      case "save_interior_walls":
+      case "save_interior_wall_coverings":
         saves.push(body);
-        for (const row of body.rows) {
-          const had = lp.find((x) => x.item_key === row.item_key);
-          if (had) Object.assign(had, { pricing_method: row.pricing_method, rate: row.rate });
-          else lp.push({ item_key: row.item_key, pricing_method: row.pricing_method, rate: row.rate, image_url: null });
-        }
-        return jsonR(route, { ok: true, saved: body.rows.length, skipped: [] });
-      }
+        return jsonR(route, { ok: true, saved: (body.rows || []).length, skipped: [] });
       default: return jsonR(route, { ok: true });
     }
   };
   await ctx.route(`**/${REF}.supabase.co/**`, handler);
   await ctx.route(`**/${REF}.functions.supabase.co/**`, handler);
+  const go = async (path) => {
+    await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, path);
+  };
   try {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     await settle(page, 600);
-    await page.evaluate(() => { history.pushState({}, "", "/portal/settings/interior"); window.dispatchEvent(new PopStateEvent("popstate")); });
-    await page.waitForFunction(() => !!document.querySelector('[data-ss-lp-item="partitionWall"]'), null, { timeout: 20000 }).catch(() => {});
+    // K0-K1: Interior items no longer lists the wall; its Save never sends one.
+    await go("/settings/interior");
+    await page.waitForFunction(() => !!document.querySelector('[data-ss-lp-item="shelf"]'), null, { timeout: 20000 }).catch(() => {});
     await settle(page, 600);
-    const row = page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="partitionWall"]') }).first();
-    if (!ok("K0 the Interior items card lists the Partition Wall", await row.count() > 0)) return;
-    ok("K1 its row says it is not offered yet", (await row.innerText()).includes("Not offered yet"));
-    const rate = row.locator('input[type="number"]').first();
-    ok("K2 its rate starts blank, not 0", (await rate.inputValue()) === "" && (await rate.getAttribute("placeholder")) === "not offered");
-    const opts = await row.locator("select").first().locator("option").allTextContents();
-    ok("K3 it is priced each, per foot of wall or per square foot of wall — nothing else",
-      JSON.stringify(opts) === JSON.stringify(["each", "lineal ft — per foot of wall", "sqft option — per sq ft of wall"]), JSON.stringify(opts));
-    const shelfOpts = await page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="shelf"]') }).first().locator("select option").count();
-    ok("K3b every other item keeps the seven methods", shelfOpts === 7, String(shelfOpts));
-    const card = page.locator("div").filter({ has: page.getByText("Interior items", { exact: true }) }).filter({ has: page.locator("table") }).last();
-    await card.screenshot({ path: join(shots, "K-options-card.png") });
-    // A Save for something else: the shelf goes up to $20 a foot.
-    await page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="shelf"]') }).first().locator('input[type="number"]').first().fill("20");
+    ok("K0 the Interior items card lists the shelf but no longer the interior wall",
+      await page.locator('[data-ss-lp-item="shelf"]').count() > 0 && await page.locator('[data-ss-lp-item="partitionWall"]').count() === 0);
     await page.getByRole("button", { name: "Save prices" }).click();
     for (let i = 0; i < 20 && saves.length < 1; i++) await settle(page, 200);
-    await settle(page, 500);
-    const first = saves[0] ? saves[0].rows : [];
-    ok("K4 a Save for another item does not send the partition (it stays unoffered, never free)",
-      first.length > 0 && !first.some((x) => x.item_key === "partitionWall") && first.some((x) => x.item_key === "shelf" && x.rate === 20), JSON.stringify(first));
-    // The builder prices it: $22 per foot of wall.
-    const row2 = page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="partitionWall"]') }).first();
-    await row2.locator("select").first().selectOption("lineal_ft");
-    await row2.locator('input[type="number"]').first().fill("22");
-    await page.getByRole("button", { name: "Save prices" }).click();
-    for (let i = 0; i < 20 && saves.length < 2; i++) await settle(page, 200);
-    await settle(page, 500);
-    const second = saves[1] ? saves[1].rows : [];
-    ok("K5 a rate typed in is sent, per foot", second.some((x) => x.item_key === "partitionWall" && x.pricing_method === "lineal_ft" && x.rate === 22), JSON.stringify(second));
-    const row3 = page.locator("tr").filter({ has: page.locator('[data-ss-lp-item="partitionWall"]') }).first();
-    ok("K6 ...and after the reload it is priced (no longer 'Not offered yet')", !(await row3.innerText()).includes("Not offered yet") && (await row3.locator('input[type="number"]').first().inputValue()) === "22");
-    await card.screenshot({ path: join(shots, "K-options-card-priced.png") });
-    // portal-settings lists an unpriced partition wall only to a read that asks, and lets only a Save
-    // that says it knows the item price one (production's card from before 278 does neither).
-    ok("K7 every catalog read asks for the unpriced items (withUnpriced)", catalogs.length > 0 && catalogs.every((b) => b.withUnpriced === true), JSON.stringify(catalogs.map((b) => b.withUnpriced)));
-    ok("K8 every Save says it knows the partition wall (partitionAware)", saves.length === 2 && saves.every((b) => b.partitionAware === true), JSON.stringify(saves.map((b) => b.partitionAware)));
+    const lpSave = saves.find((b) => b.action === "save_layout_pricing");
+    ok("K1 its Save sends no partition row and no partitionAware flag", !!lpSave && !lpSave.rows.some((r) => r.item_key === "partitionWall") && !("partitionAware" in lpSave), JSON.stringify(lpSave));
+
+    // K2-K8: the Interior walls tab.
+    await go("/settings/interior-walls");
+    await page.waitForFunction(() => document.body.innerText.includes("Framing & price"), null, { timeout: 20000 }).catch(() => {});
+    await settle(page, 600);
+    const text = await page.locator("body").innerText();
+    ok("K2 the Interior walls tab opens on its four cards",
+      ["Framing & price", "Wall coverings", "Doors allowed in interior walls", "Allowed on interior walls", "Save interior walls"].every((t) => text.toLowerCase().includes(t.toLowerCase())));
+    const rate4 = page.locator('input[type="number"]').nth(0);
+    const rate6 = page.locator('input[type="number"]').nth(1);
+    ok("K3 the saved 2x4 rate shows; 2x6 is blank (not offered)", (await rate4.inputValue()) === "35" && (await rate6.inputValue()) === "" && (await rate6.getAttribute("placeholder")) === "not offered");
+    const methodSel = page.locator('select:has(option[value="sqft_option"]):has(option[value="lineal_ft"])').first();
+    const methods = await methodSel.locator("option").evaluateAll((os) => os.map((o) => [o.value, o.textContent]));
+    ok("K3b the wall is priced exactly two ways: per lineal ft or per sq ft of wall (no each)",
+      JSON.stringify(methods) === JSON.stringify([["lineal_ft", "Per lineal ft of wall"], ["sqft_option", "Per sq ft of wall"]]), JSON.stringify(methods));
+    ok("K3c a saved tab says nothing about walls not being offered", !/until you set a price here and save/.test(text));
+    await page.screenshot({ path: join(shots, "K-interior-walls.png"), fullPage: true });
+    // Offer 2x6 at $42, untick the door and the fan, add OSB included, and save.
+    await rate6.fill("42");
+    await page.getByLabel("Walk door").uncheck();
+    await page.getByLabel("Ceiling fan").uncheck();
+    await page.getByRole("button", { name: "+ Add a covering" }).click();
+    const newName = page.locator("tbody tr").filter({ has: page.locator("input:not([type])") }).last().locator("input").first();
+    await newName.fill("OSB");
+    const newRate = page.locator("tbody tr").last().locator('input[type="number"]').first();
+    await newRate.fill("0");
+    const before = saves.length;
+    await page.getByRole("button", { name: "Save interior walls" }).click();
+    for (let i = 0; i < 25 && saves.length < before + 2; i++) await settle(page, 200);
+    const w = saves.find((b) => b.action === "save_interior_walls");
+    const c = saves.find((b) => b.action === "save_interior_wall_coverings");
+    ok("K4 Save sends the framing: 2x4 standard at 35, 2x6 at 42, per foot, plate height",
+      !!w && w.standardStud === "2x4" && w.rate2x4 === "35" && w.rate2x6 === "42" && w.method === "lineal_ft" && w.standardHeight === "plate" && w.allowRafters === true, JSON.stringify(w));
+    ok("K5 ...and the ticks as id → yes/no for every door, window and electrical item",
+      !!w && w.inPartition["00000000-0000-4000-8000-0000000000d1"] === false && w.inPartition["00000000-0000-4000-8000-0000000000a1"] === true
+      && w.interiorWallOk["00000000-0000-4000-8000-0000000000f1"] === false && w.interiorWallOk["00000000-0000-4000-8000-0000000000f2"] === true, JSON.stringify(w && [w.inPartition, w.interiorWallOk]));
+    ok("K6 the coverings go in their order, the new one included at $0",
+      !!c && JSON.stringify(c.rows.map((r) => [r.name, r.rate, r.sortOrder])) === JSON.stringify([["Drywall", "2.5", 10], ["OSB", "0", 20]]), JSON.stringify(c && c.rows));
+    // A blank standard rate is refused in the page, before anything is sent.
+    await rate4.fill("");
+    const n = saves.length;
+    await page.getByRole("button", { name: "Save interior walls" }).click();
+    await settle(page, 600);
+    ok("K7 a blank standard rate is refused before anything is sent", saves.length === n && (await page.locator("body").innerText()).includes("Enter a rate for a 2x4 wall"));
+    ok("K8 every catalog read asks for the unpriced items (withUnpriced)", catalogs.length > 0 && catalogs.every((b) => b.withUnpriced === true), JSON.stringify(catalogs.map((b) => b.withUnpriced)));
+
+    // K9-K11: a builder who has never saved the tab (no row: interiorWalls null, nothing seeded).
+    iwNow = null;
+    await go("/settings/interior");
+    await settle(page, 600);
+    await go("/settings/interior-walls");
+    await page.waitForFunction(() => document.body.innerText.includes("Framing & price"), null, { timeout: 20000 }).catch(() => {});
+    await settle(page, 800);
+    const unsetText = await page.locator("body").innerText();
+    ok("K9 not set up: the tab says interior walls are not offered until a price is saved, and both rates are blank",
+      /aren.t offered to your customers or reps until you set a price here and save/.test(unsetText)
+        && (await page.locator('input[type="number"]').nth(0).inputValue()) === "" && (await page.locator('input[type="number"]').nth(1).inputValue()) === "",
+      unsetText.slice(0, 300));
+    await page.locator('input[type="number"]').nth(0).fill("4.25");
+    await page.locator('select:has(option[value="sqft_option"]):has(option[value="lineal_ft"])').first().selectOption("sqft_option");
+    const s0 = saves.length;
+    await page.getByRole("button", { name: "Save interior walls" }).click();
+    for (let i = 0; i < 25 && saves.length < s0 + 2; i++) await settle(page, 200);
+    const w2 = saves.slice(s0).find((b) => b.action === "save_interior_walls");
+    ok("K10 saving per sq ft sends sqft_option with the 2x4 rate", !!w2 && w2.method === "sqft_option" && w2.rate2x4 === "4.25" && w2.standardStud === "2x4", JSON.stringify(w2));
+    const c2 = saves.slice(s0).find((b) => b.action === "save_interior_wall_coverings");
+    ok("K11 ...with no coverings (none on file)", !!c2 && Array.isArray(c2.rows) && c2.rows.length === 0, JSON.stringify(c2));
   } finally {
     await ctx.close();
   }

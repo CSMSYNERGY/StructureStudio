@@ -24,6 +24,7 @@ import { DbError, must, type Admin } from "../db";
 import { ApiError, UUID_RE } from "../http";
 import { mayReadUnknownNumbers, visibleContactIds } from "../scope";
 import { listMessageMedia, messageMediaContent } from "../twilioRest";
+import { callerTwilioEnv } from "../twilioAccount";
 
 const MESSAGE_SID_RE = /^(MM|SM)[0-9a-f]{32}$/;
 const MEDIA_SID_RE = /^ME[0-9a-f]{32}$/;
@@ -77,6 +78,8 @@ async function readMessage(admin: Admin, clientId: string, id: string): Promise<
 
 export async function mediaFile(env: Env, req: Request, messageId: string, indexRaw: string): Promise<Response> {
   const c = await requireCaller(env, req, { needOn: false });
+  // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
+  env = await callerTwilioEnv(env, c);
   const notFound = () => new ApiError("not_found", "That photo wasn't found.");
   if (!UUID_RE.test(messageId) || !/^\d{1,2}$/.test(indexRaw)) throw notFound();
   const index = Number(indexRaw);

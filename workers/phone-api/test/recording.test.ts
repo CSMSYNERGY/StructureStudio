@@ -1,18 +1,19 @@
 // Call recording (release B2, src/recording.ts): the announcement in every flow's TwiML, the
 // per-call arm, the start on answer (once), pause on hold and resume, the stop before every
-// voicemail redirect, Twilio's recording callback and the outbound whisper. Twilio and the
-// database are stubs (helpers.ts); every id, number and SID is made up.
+// voicemail redirect, Twilio's recording callback and the outbound whisper; and (2026-10-21) a
+// call recorded with the announcement off. Twilio and the database are stubs (helpers.ts); every
+// id, number and SID is made up.
 import { describe, expect, it } from "vitest";
 import type { CallRow } from "../src/db";
 import { adminClient } from "../src/db";
 import { installDenoShim } from "../src/env";
 import {
-  armedFor, noticeText, pauseCallRecording, recordingBackstop, resumeCallRecording, STANDARD_NOTICE, STANDARD_NOTICE_TRANSCRIBED,
-  startCallRecording, stopCallRecording,
+  announcementFor, armedFor, noticeText, pauseCallRecording, recordingBackstop, resumeCallRecording, STANDARD_NOTICE,
+  STANDARD_NOTICE_TRANSCRIBED, startCallRecording, stopCallRecording,
 } from "../src/recording";
 import {
   Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CUSTOMER, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
-  appRequest, attr, call, callerCtx, clientsIn, filter, jsonRes, makeEnv, member, routeInfo, twilioPost, type Seen,
+  appRequest, attr, call, callerCtx, clientsIn, eventRows, filter, jsonRes, makeEnv, member, routeInfo, twilioPost, type Seen,
 } from "./helpers";
 
 const CALL_ID = "00000000-0000-4000-8000-0000000ca777";
@@ -24,6 +25,8 @@ const ACCOUNT = "AC" + "0".repeat(32);
 const IDENTITY_A = `client:u_${USER_A.replace(/-/g, "")}_g1`;
 
 const ON = { on: true, notice: true, notice_text: null, transcribe: true };
+/** Recorded, with the owner's announcement off (2026-10-21). */
+const QUIET = { ...ON, notice: false };
 const recEnv = (over: Record<string, string> = {}) => makeEnv({ CALL_RECORDING: "on", ...over });
 
 function liveCall(over: Partial<CallRow> = {}): CallRow {
@@ -48,12 +51,16 @@ const recUpdates = (net: FakeNet) => net.seen.filter((s) => s.method === "POST" 
 const recPatches = (net: FakeNet) => net.writes("phone_call_recordings", "PATCH").map((s) => s.json);
 const eventTypes = (net: FakeNet) => net.writes("phone_call_events").map((s) => s.json.type);
 
-/** The recording stubs every lifecycle test needs; `existing` is the call's row, if it has one. */
-function recordingNet(net: FakeNet, opts: { existing?: Record<string, unknown> | null; claim?: boolean; startStatus?: number; settings?: unknown[] } = {}) {
+/**
+ * The recording stubs every lifecycle test needs; `existing` is the call's row, if it has one, and
+ * `marks` the call events the start reads (an unannounced call's recording_unannounced).
+ */
+function recordingNet(net: FakeNet, opts: { existing?: Record<string, unknown> | null; claim?: boolean; startStatus?: number; settings?: unknown[]; marks?: string[] } = {}) {
   net.rest("GET", "phone_call_recordings", () => (opts.existing ? [opts.existing] : []));
   net.rest("POST", "phone_call_recordings", () => (opts.claim === false ? [] : [{ id: REC_ID }]));
   net.rest("PATCH", "phone_call_recordings", () => [{ id: REC_ID }]);
   net.rest("GET", "client_settings", () => opts.settings ?? [{ phone_recording_notice_text: null, phone_transcribe_calls: true }]);
+  net.rest("GET", "phone_call_events", eventRows((opts.marks ?? []).map((type) => ({ call_id: CALL_ID, type, at: new Date().toISOString(), data: null }))));
   net.on("POST", isStart, () => (opts.startStatus ? jsonRes({ code: 21220 }, opts.startStatus) : jsonRes({ sid: REC_SID, status: "in-progress", channels: 2 })));
   net.on("POST", isUpdate, () => jsonRes({ sid: REC_SID }));
   net.rest("POST", "phone_call_events", () => []);
@@ -64,13 +71,30 @@ function recordingNet(net: FakeNet, opts: { existing?: Record<string, unknown> |
 // ── The pure rules ──────────────────────────────────────────────────────────────────
 
 describe("armed and the announcement", () => {
-  it("armed needs the rail exactly \"on\", the business on, the announcement on, and no emergency", () => {
+  it("armed needs the rail exactly \"on\", the business on, and no emergency; the announcement is not part of it", () => {
     expect(armedFor(recEnv(), ON)).toBe(true);
     expect(armedFor(makeEnv(), ON)).toBe(false);
     expect(armedFor(makeEnv({ CALL_RECORDING: "On" }), ON)).toBe(false);
     expect(armedFor(recEnv(), { ...ON, on: false })).toBe(false);
-    expect(armedFor(recEnv(), { ...ON, notice: false })).toBe(false); // locked on: no notice, no recording
+    expect(armedFor(recEnv(), QUIET)).toBe(true); // 2026-10-21: recorded, unannounced
     expect(armedFor(recEnv(), ON, true)).toBe(false);
+    expect(armedFor(recEnv(), QUIET, true)).toBe(false);
+    expect(armedFor(makeEnv(), QUIET)).toBe(false);
+  });
+
+  it("the announcement is the sentence while it is on, and nothing while the owner has it off", () => {
+    expect(announcementFor(recEnv(), ON)).toBe(STANDARD_NOTICE);
+    expect(announcementFor(recEnv({ CALL_TRANSCRIBE: "on" }), ON)).toBe(STANDARD_NOTICE_TRANSCRIBED);
+    expect(announcementFor(recEnv(), { ...ON, notice_text: "Demo Sheds records calls." })).toBe("Demo Sheds records calls.");
+    expect(announcementFor(recEnv(), QUIET)).toBeNull();
+    expect(announcementFor(recEnv(), { ...QUIET, notice_text: "Demo Sheds records calls." })).toBeNull();
+  });
+
+  it("the standard sentence is Carolyn's \"may be recorded\" (2026-10-06)", () => {
+    expect(STANDARD_NOTICE).toBe("This call may be recorded.");
+    expect(STANDARD_NOTICE_TRANSCRIBED).toBe("This call may be recorded and transcribed.");
+    // The sentence 263 shipped is now a business's own wording like any other: it says "recorded".
+    expect(noticeText(recEnv(), { ...ON, notice_text: "This call will be recorded." })).toBe("This call will be recorded.");
   });
 
   it("the standard sentence mentions transcription only while it will happen; a business's own wins", () => {
@@ -114,26 +138,43 @@ describe("/voice/outbound", () => {
     expect(attr(text, "Number", "method")).toBe("POST");
     expect(row.recording_armed).toBe(true);
     expect(text).not.toMatch(/record=/i);
+    expect(eventTypes(net)).not.toContain("recording_unannounced");
+  });
+
+  it("the announcement off (2026-10-21): no whisper, but the row is armed and marked unannounced", async () => {
+    const net = setup(callerCtx({ recording: QUIET }));
+    const { text } = await dial();
+    expect(attr(text, "Number", "url")).toBeNull();
+    expect(text).not.toContain("/voice/notice");
+    expect(text).not.toMatch(/record=/i);
+    const row = net.writes("phone_calls", "POST")[0].json;
+    expect(row.recording_armed).toBe(true);
+    const mark = net.writes("phone_call_events").find((w) => w.json.type === "recording_unannounced")!;
+    expect(mark.json).toMatchObject({ call_id: row.id, data: { leg: "out" } });
+    expect(eventTypes(net)).not.toContain("recording_notice");
   });
 
   it.each([
     ["the rail off (the business on)", makeEnv(), callerCtx({ recording: ON })],
+    ["the rail off (the announcement off)", makeEnv(), callerCtx({ recording: QUIET })],
     ["the business off", recEnv(), callerCtx({ recording: { ...ON, on: false } })],
-    ["the announcement off", recEnv(), callerCtx({ recording: { ...ON, notice: false } })],
+    ["the business off (the announcement off)", recEnv(), callerCtx({ recording: { ...QUIET, on: false } })],
     ["a database before 263 (no recording key)", recEnv(), callerCtx()],
-  ])("not armed with %s: no whisper, no arm, no record attribute", async (_l, env, ctx) => {
+  ])("not armed with %s: no whisper, no arm, no mark, no record attribute", async (_l, env, ctx) => {
     const net = setup(ctx as ReturnType<typeof callerCtx>);
     const { text } = await dial(env);
     expect(attr(text, "Number", "url")).toBeNull();
     expect(text).not.toMatch(/record=/i);
     expect(net.writes("phone_calls", "POST")[0].json).not.toHaveProperty("recording_armed");
+    expect(eventTypes(net)).not.toContain("recording_unannounced");
   });
 
-  it("an emergency call is never armed", async () => {
-    const net = setup();
+  it.each([["on", ON], ["off", QUIET]])("an emergency call is never armed (the announcement %s)", async (_l, recording) => {
+    const net = setup(callerCtx({ recording }));
     const { text } = await dial(recEnv({ EMERGENCY_MODE: "allow" }), "911");
     expect(attr(text, "Number", "url")).toBeNull();
     expect(net.writes("phone_calls", "POST")[0].json).not.toHaveProperty("recording_armed");
+    expect(eventTypes(net)).not.toContain("recording_unannounced");
   });
 });
 
@@ -154,7 +195,7 @@ describe("/voice/inbound", () => {
   it("armed: the announcement plays BEFORE the <Dial>, every <Client> says recorded=1, and the row is armed with a notice mark", async () => {
     const net = setup(routeInfo({ recording: ON }));
     const { text } = await ring();
-    expect(text).toMatch(/^<\?xml[^>]*><Response><Say language="en-US">This call will be recorded\.<\/Say><Dial /);
+    expect(text).toMatch(/^<\?xml[^>]*><Response><Say language="en-US">This call may be recorded\.<\/Say><Dial /);
     expect((text.match(/<Parameter name="recorded" value="1"\/>/g) ?? []).length).toBe(3);
     expect(text).not.toMatch(/record=/i);
     expect(net.writes("phone_calls", "POST")[0].json.recording_armed).toBe(true);
@@ -163,7 +204,7 @@ describe("/voice/inbound", () => {
 
   it("says \"and transcribed\" while transcripts will be made, and a business's own sentence escaped", async () => {
     setup(routeInfo({ recording: ON }));
-    expect((await ring(recEnv({ CALL_TRANSCRIBE: "on" }))).text).toContain("<Say language=\"en-US\">This call will be recorded and transcribed.</Say><Dial");
+    expect((await ring(recEnv({ CALL_TRANSCRIBE: "on" }))).text).toContain("<Say language=\"en-US\">This call may be recorded and transcribed.</Say><Dial");
     setup(routeInfo({ recording: { ...ON, notice_text: "Calls with Bob & Sons <Sheds> are recorded." } }));
     expect((await ring()).text).toContain("<Say language=\"en-US\">Calls with Bob &amp; Sons &lt;Sheds&gt; are recorded.</Say><Dial");
   });
@@ -172,15 +213,41 @@ describe("/voice/inbound", () => {
     const closed = { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
     setup(routeInfo({ recording: ON }, { business_hours: closed, after_hours: "forward", forward_to: "+15555550177" }));
     const { text } = await ring();
-    expect(text).toMatch(/<Response><Say language="en-US">This call will be recorded\.<\/Say><Dial /);
+    expect(text).toMatch(/<Response><Say language="en-US">This call may be recorded\.<\/Say><Dial /);
     expect(attr(text, "Number", "url")).toMatch(/\/voice\/screen\?call=[0-9a-f-]{36}&b=Demo%20Sheds&r=1&key=/);
+  });
+
+  it("the announcement off (2026-10-21): no <Say>, every <Client> still says recorded=1, and the row is armed with an unannounced mark", async () => {
+    const net = setup(routeInfo({ recording: { ...QUIET, notice_text: "Demo Sheds records calls." } }));
+    const { text } = await ring(recEnv({ CALL_TRANSCRIBE: "on" }));
+    expect(text).toMatch(/^<\?xml[^>]*><Response><Dial /);
+    expect(text).not.toContain("<Say");
+    expect((text.match(/<Parameter name="recorded" value="1"\/>/g) ?? []).length).toBe(3);
+    expect(text).not.toMatch(/record=/i);
+    expect(net.writes("phone_calls", "POST")[0].json.recording_armed).toBe(true);
+    expect(eventTypes(net)).toEqual(["twiml_served", "recording_unannounced"]);
+    expect(net.writes("phone_call_events")[1].json.data).toEqual({ leg: "in" });
+  });
+
+  it("after hours, forwarding, with the announcement off: no <Say> before the forward, and the cell's screen still knows (r=1)", async () => {
+    const closed = { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] };
+    const net = setup(routeInfo({ recording: QUIET }, { business_hours: closed, after_hours: "forward", forward_to: "+15555550177" }));
+    const { text } = await ring();
+    expect(text).toMatch(/<Response><Dial /);
+    expect(text).not.toContain("<Say");
+    expect(attr(text, "Number", "url")).toMatch(/\/voice\/screen\?call=[0-9a-f-]{36}&b=Demo%20Sheds&r=1&key=/);
+    expect(net.writes("phone_calls", "POST")[0].json.recording_armed).toBe(true);
+    expect(eventTypes(net)).toEqual(["twiml_served", "recording_unannounced"]);
   });
 
   it.each([
     ["nobody can answer (straight to voicemail)", routeInfo({ recording: ON, members: [member(USER_A, { dnd: true })] }), recEnv()],
+    ["nobody can answer, the announcement off", routeInfo({ recording: QUIET, members: [member(USER_A, { dnd: true })] }), recEnv()],
     ["the switch is off (voicemail)", routeInfo({ recording: ON, phone_status: "off" }), recEnv()],
     ["the 911 callback window", routeInfo({ recording: ON, recent_emergency_user: USER_A }), recEnv()],
+    ["the 911 callback window, the announcement off", routeInfo({ recording: QUIET, recent_emergency_user: USER_A }), recEnv()],
     ["the rail off", routeInfo({ recording: ON }), makeEnv()],
+    ["the rail off, the announcement off", routeInfo({ recording: QUIET }), makeEnv()],
     ["the business off", routeInfo({ recording: { ...ON, on: false } }), recEnv()],
   ])("no announcement and no arm when %s", async (_l, info, env) => {
     const net = setup(info);
@@ -189,6 +256,7 @@ describe("/voice/inbound", () => {
     expect(text).not.toMatch(/record=/i);
     expect(net.writes("phone_calls", "POST")[0].json).not.toHaveProperty("recording_armed");
     expect(eventTypes(net)).not.toContain("recording_notice");
+    expect(eventTypes(net)).not.toContain("recording_unannounced");
   });
 });
 
@@ -299,6 +367,37 @@ describe("starting the one recording", () => {
     expect(moved.json).toMatchObject({ status: "recording", recording_sid: REC_SID, channels: 2, channel_map: { 0: "customer", 1: "team" } });
     expect(moved.url.searchParams.get("status")).toBe("eq.starting");
     expect(eventTypes(net)).toContain("recording_started");
+    // The unannounced mark is looked for on this call, and only that mark.
+    const marks = net.reads("phone_call_events")[0].url.searchParams;
+    expect(marks.get("call_id")).toBe(`eq.${CALL_ID}`);
+    expect(marks.get("type")).toBe("eq.recording_unannounced");
+  });
+
+  it.each([
+    ["the call carries the unannounced mark", { marks: ["recording_unannounced"] }],
+    ["the business has the announcement off now", { settings: [{ phone_recording_notice: false, phone_recording_notice_text: null, phone_transcribe_calls: true }] }],
+    ["both", { marks: ["recording_unannounced"], settings: [{ phone_recording_notice: false, phone_recording_notice_text: "Demo Sheds records calls.", phone_transcribe_calls: true }] }],
+    ["the mark can't be read", { marks: [] as string[], marksDown: true }],
+  ])("an unannounced call (2026-10-21) is recorded all the same, and its row keeps no sentence: %s", async (_l, opts) => {
+    const { marksDown, ...rest } = opts as Parameters<typeof recordingNet>[1] & { marksDown?: boolean };
+    const net = setup(liveCall({ status: "ringing", answered_by: null, client_call_sid: null }), rest);
+    if (marksDown) net.rest("GET", "phone_call_events", () => jsonRes({ message: "down" }, 500));
+    const { res } = await answer();
+    expect(res.status).toBe(204);
+    expect(net.writes("phone_call_recordings", "POST")[0].json).toEqual({ call_id: CALL_ID, client_id: CLIENT, status: "starting", notice_text: null });
+    expect(net.seen.filter((s) => isStart(s.url))).toHaveLength(1);
+    expect(recPatches(net)[0]).toMatchObject({ status: "recording", recording_sid: REC_SID });
+    expect(eventTypes(net)).toContain("recording_started");
+  });
+
+  it("another call's mark, or another mark on this call, leaves the sentence on the row", async () => {
+    const net = setup(liveCall({ status: "ringing", answered_by: null, client_call_sid: null }));
+    net.rest("GET", "phone_call_events", eventRows([
+      { call_id: "00000000-0000-4000-8000-0000000ca778", type: "recording_unannounced", at: new Date().toISOString(), data: null },
+      { call_id: CALL_ID, type: "recording_notice", at: new Date().toISOString(), data: { leg: "in" } },
+    ]));
+    await answer();
+    expect(net.writes("phone_call_recordings", "POST")[0].json.notice_text).toBe(STANDARD_NOTICE);
   });
 
   it("a second answer (or a duplicate callback) claims nothing and starts nothing", async () => {
@@ -537,6 +636,12 @@ describe("/voice/recording (Twilio's recording status callback)", () => {
     expect(eventTypes(net)).toContain("recording_completed");
   });
 
+  it("completed with the announcement off (2026-10-21): transcribed as any recorded call", async () => {
+    const net = setup(recRow(), [{ phone_recording_notice: false, phone_transcribe_calls: true }]);
+    await cb({ RecordingStatus: "completed", RecordingDuration: "125" }, recEnv({ CALL_TRANSCRIBE: "on" }));
+    expect(recPatches(net)[0]).toMatchObject({ status: "completed", duration_s: 125, transcript_status: "pending" });
+  });
+
   it.each([
     ["the rail off", recEnv(), [{ phone_transcribe_calls: true }], "125"],
     ["the business not transcribing", recEnv({ CALL_TRANSCRIBE: "on" }), [{ phone_transcribe_calls: false }], "125"],
@@ -606,6 +711,15 @@ describe("/voice/notice (the outbound whisper)", () => {
     expect(net.writes("phone_call_events")[0].json).toMatchObject({ call_id: CALL_ID, type: "recording_notice", data: { leg: "out" } });
   });
 
+  it("with no business on the URL it says the standard sentence and reads nothing", async () => {
+    const env = recEnv();
+    const net = new FakeNet().install();
+    net.rest("GET", "client_settings", () => []);
+    const { text } = await call(env, await twilioPost(env, "/voice/notice", { CallSid: CALL_SID }, { call: CALL_ID }));
+    expect(text).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-US">This call may be recorded.</Say></Response>');
+    expect(net.reads("client_settings")).toHaveLength(0);
+  });
+
   it("a read that fails still announces, in the standard words", async () => {
     const env = recEnv();
     const net = new FakeNet().install();
@@ -635,7 +749,7 @@ describe("retention (daily): each business's own days", () => {
     net.rest("POST", "app_errors", () => []);
     const now = new Date("2026-10-04T09:00:00Z");
     const { recordingRetention } = await import("../src/cron/retention");
-    expect(await recordingRetention(env, now)).toEqual({ deleted: 3, failed: 1 });
+    expect(await recordingRetention(env, now)).toEqual({ deleted: 3, failed: 1, parent: 0 });
     expect(net.rpcCalls("phone_recordings_expired")[0].json).toEqual({ p_now: now.toISOString(), p_limit: 200 });
     const patches = net.writes("phone_call_recordings", "PATCH");
     expect(patches.map((s) => filter(s, "id"))).toEqual(["r1", "r2", "r4"]);

@@ -24,6 +24,7 @@
 import {
   FROM_NOT_OURS, FROM_NOT_READY, pickReplyNumber, replyFromNumber, sendTenantSms, type ReplyNumberRow, type TenantSms,
 } from "./smsSend.ts";
+import { TWILIO_OPT_OUT_NOTE } from "./smsOptOut.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
   if (!cond) throw new Error(msg);
@@ -43,7 +44,7 @@ const ENV: Record<string, string> = {
 const BUSINESS = "+15550100001";
 const CUSTOMER = "(555) 010-0002";
 
-type Fetched = { url: string; method: string; body: string | null };
+type Fetched = { url: string; method: string; body: string | null; auth: string | null };
 type World = {
   meters: "on" | "off" | undefined;
   /** wallet_usage_gate's reply, or "error" for a PostgREST error. */
@@ -53,10 +54,15 @@ type World = {
   numberRow?: Record<string, unknown> | null;
   /** The sms_numbers read fails. */
   numberReadFails?: boolean;
+  /** Workstream 2: TWILIO_SUBACCOUNTS, and what twilio_account_creds answers ("error" = a PostgREST error). */
+  subaccounts?: "on" | "off";
+  accountRows?: unknown[] | "error";
+  /** Twilio refuses the send with this error code (a 400), e.g. 21610: the customer opted out. */
+  twilioCode?: number;
 };
 
 async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
-  const env = { ...ENV, PHONE_USAGE_METERS: world.meters };
+  const env = { ...ENV, PHONE_USAGE_METERS: world.meters, TWILIO_SUBACCOUNTS: world.subaccounts };
   const saved = Object.fromEntries(Object.keys(env).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(env)) v === undefined ? Deno.env.delete(k) : Deno.env.set(k, v);
 
@@ -64,9 +70,15 @@ async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
   const realFetch = globalThis.fetch;
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    fetched.push({ url, method: (init?.method ?? "GET").toUpperCase(), body: typeof init?.body === "string" ? init.body : null });
+    fetched.push({
+      url, method: (init?.method ?? "GET").toUpperCase(), body: typeof init?.body === "string" ? init.body : null,
+      auth: new Headers(init?.headers).get("authorization"),
+    });
     const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
-    if (url.includes("api.twilio.com")) return Promise.resolve(json({ sid: "SM" + "0".repeat(32), num_segments: "1", status: "queued" }, 201));
+    if (url.includes("api.twilio.com")) {
+      if (world.twilioCode) return Promise.resolve(json({ code: world.twilioCode, message: "refused", status: 400 }, 400));
+      return Promise.resolve(json({ sid: "SM" + "0".repeat(32), num_segments: "1", status: "queued" }, 201));
+    }
     if (url.endsWith("/functions/v1/wallet-autotopup")) return Promise.resolve(json({ fired: true, ok: true, reason: "charged" }));
     if (url.includes("/rest/v1/app_errors")) return Promise.resolve(json([], 201));
     return Promise.resolve(json({ message: `unexpected fetch ${url}` }, 500));
@@ -76,10 +88,16 @@ async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
   /** Every filter each table was read with, e.g. "sms_numbers" → ["eq:client_id=tenant-a", ...]. */
   const filters: Record<string, string[][]> = {};
   const inserted: { table: string; row: Record<string, unknown> }[] = [];
+  /** upsert and update payloads, with the filters the update was narrowed by. */
+  const written: { table: string; op: string; row: Record<string, unknown>; opts?: unknown; filters: string[] }[] = [];
   const rpcs: { name: string; args: unknown }[] = [];
   const admin = {
     rpc(name: string, args: unknown) {
       rpcs.push({ name, args });
+      if (name === "twilio_account_creds") {
+        if (world.accountRows === "error") return Promise.resolve({ data: null, error: { code: "42883", message: "function does not exist" } });
+        return Promise.resolve({ data: world.accountRows ?? [], error: null });
+      }
       if (world.gate === "error") return Promise.resolve({ data: null, error: { message: "function public.wallet_usage_gate does not exist" } });
       return Promise.resolve({ data: world.gate ?? null, error: null });
     },
@@ -88,10 +106,11 @@ async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
       const seen: string[] = [];
       (filters[table] ??= []).push(seen);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "limit", "upsert"]) q[m] = () => { ops.push(m); return q; };
+      for (const m of ["select", "limit"]) q[m] = () => { ops.push(m); return q; };
       for (const m of ["eq", "is"]) q[m] = (col: string, val: unknown) => { ops.push(m); seen.push(`${m}:${col}=${val}`); return q; };
       q.insert = (r: Record<string, unknown>) => { ops.push("insert"); inserted.push({ table, row: r }); return q; };
-      q.update = () => { ops.push("update"); return q; };
+      q.upsert = (r: Record<string, unknown>, opts?: unknown) => { ops.push("upsert"); written.push({ table, op: "upsert", row: r, opts, filters: seen }); return q; };
+      q.update = (r: Record<string, unknown>) => { ops.push("update"); written.push({ table, op: "update", row: r, filters: seen }); return q; };
       const row = (): unknown => {
         switch (table) {
           case "client_settings": return { sms_number: BUSINESS, sms_status: "active" };
@@ -128,7 +147,7 @@ async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
       ...msg,
     });
     await Promise.all(kept); // let the background top-up request finish inside the stubs
-    return { out, fetched, db, rpcs, kept, filters, inserted };
+    return { out, fetched, db, rpcs, kept, filters, inserted, written };
   } finally {
     globalThis.fetch = realFetch;
     for (const [k, v] of Object.entries(saved)) v === undefined ? Deno.env.delete(k) : Deno.env.set(k, v);
@@ -191,6 +210,23 @@ Deno.test("an earlier refusal wins: a STOP is answered as a STOP, never as an em
   assertEquals(w.out.reason, "opted_out");
   assertEquals(w.rpcs.length, 0, "the gate is not even asked");
   assertEquals(topupCalls(w.fetched).length, 0, "and no card is charged for a text that could never go");
+});
+
+Deno.test("Twilio refuses with 21610 at send time: the opt-out is recorded on the number and the contact (smsOptOut.ts), and said in the customer's terms", async () => {
+  const w = await inWorld({ meters: "off", twilioCode: 21610 });
+  assertEquals(w.out, { sent: false, reason: "opted_out", error: "This customer has opted out of texts from this number." });
+  const optOut = w.written.find((x) => x.table === "sms_opt_outs");
+  assertEquals(optOut?.op, "upsert");
+  assertEquals(optOut?.row, { client_id: "tenant-a", phone_digits: "5550100002", reason: "sms_stop", note: TWILIO_OPT_OUT_NOTE });
+  // An opt-out already on record is kept as it is (smsOptOut.test.ts: "adds, never rewrites").
+  assertEquals(optOut?.opts, { onConflict: "client_id,phone_digits", ignoreDuplicates: true });
+  const contact = w.written.find((x) => x.table === "crm_contacts");
+  assert(typeof contact?.row.sms_opt_out_at === "string", "the contact's flag is set");
+  assertEquals(contact?.filters, ["eq:client_id=tenant-a", "eq:id=contact-1", "is:sms_opt_out_at=null"]);
+  // Any other refusal records no opt-out.
+  const other = await inWorld({ meters: "off", twilioCode: 30007 });
+  assertEquals(other.out.reason, "failed");
+  assertEquals(other.written.filter((x) => x.table === "sms_opt_outs" || x.table === "crm_contacts"), []);
 });
 
 // ── The FROM number (migration 266) ─────────────────────────────────────────────────────────
@@ -332,4 +368,57 @@ Deno.test("replyFromNumber: before migration 266, or with no texting setup, it i
   assertEquals(await replyFromNumber(replyAdmin({ service: null }).admin, "tenant-a", { contactId: "c", userId: ME }), null);
   const throws = { from() { throw new Error("boom"); } };
   assertEquals(await replyFromNumber(throws, "tenant-a", { contactId: "c" }), null, "never throws");
+});
+
+// ── Workstream 2: the account the text is sent from ─────────────────────────────────────────
+// sendTenantSms resolves the tenant's Twilio account ONCE and hands it to sendSms as a value.
+// Switch off: the parent from the environment and no lookup (the DISARMED test above already
+// asserts zero RPCs with TWILIO_SUBACCOUNTS unset). On: the sub's path and the sub's key pair.
+const SUB = "AC" + "5".repeat(32);
+const SUB_KEY = "SK" + "5".repeat(32);
+const SUB_SECRET = "subkeysecret" + "x".repeat(20);
+const subRow = (status = "active") => ({
+  client_id: "tenant-a", kind: "sub", account_sid: SUB, status, api_key_sid: SUB_KEY, api_secret: SUB_SECRET,
+  auth_token: "subauthtoken" + "y".repeat(20), twiml_app_sid: null, push_apns_dev_sid: null, push_apns_prod_sid: null, push_fcm_sid: null,
+});
+
+Deno.test("switch OFF: the parent's path and pair, exactly as before, and no account lookup", async () => {
+  for (const subaccounts of [undefined, "off"] as const) {
+    const w = await inWorld({ meters: "off", subaccounts, accountRows: [subRow()] });
+    assertEquals(w.out, { sent: true, id: "msg-1" });
+    assertEquals(w.rpcs.length, 0, "twilio_account_creds is never asked while the switch is off");
+    const tw = twilioCalls(w.fetched);
+    assertEquals(tw.map((c) => c.url), [`https://api.twilio.com/2010-04-01/Accounts/${ENV.TWILIO_ACCOUNT_SID}/Messages.json`]);
+    assertEquals(tw[0].auth, `Basic ${btoa(`${ENV.TWILIO_API_KEY}:${ENV.TWILIO_API_SECRET}`)}`);
+  }
+});
+
+Deno.test("switch ON, a tenant on its own sub-account: sent from the sub's path with the sub's key, after one lookup", async () => {
+  const w = await inWorld({ meters: "off", subaccounts: "on", accountRows: [subRow()] });
+  assertEquals(w.out, { sent: true, id: "msg-1" });
+  assertEquals(w.rpcs, [{ name: "twilio_account_creds", args: { p_client_id: "tenant-a" } }]);
+  const tw = twilioCalls(w.fetched);
+  assertEquals(tw.map((c) => c.url), [`https://api.twilio.com/2010-04-01/Accounts/${SUB}/Messages.json`]);
+  assertEquals(tw[0].auth, `Basic ${btoa(`${SUB_KEY}:${SUB_SECRET}`)}`);
+});
+
+Deno.test("switch ON, no row: still the parent's", async () => {
+  const w = await inWorld({ meters: "off", subaccounts: "on", accountRows: [] });
+  assertEquals(w.out, { sent: true, id: "msg-1" });
+  assertEquals(twilioCalls(w.fetched)[0].url, `https://api.twilio.com/2010-04-01/Accounts/${ENV.TWILIO_ACCOUNT_SID}/Messages.json`);
+});
+
+Deno.test("switch ON, a sub that is not active yet: not switched on, nothing claimed, nothing sent", async () => {
+  const w = await inWorld({ meters: "off", subaccounts: "on", accountRows: [subRow("provisioning")] });
+  assertEquals(w.out, { sent: false, reason: "not_active" });
+  assertEquals(twilioCalls(w.fetched).length, 0);
+  assert(!w.db.includes("sms_messages:insert"));
+});
+
+Deno.test("switch ON, the lookup fails: this tenant's text fails CLOSED (never the parent's credentials) and is logged", async () => {
+  const w = await inWorld({ meters: "off", subaccounts: "on", accountRows: "error" });
+  assertEquals(w.out, { sent: false, reason: "failed", error: "The text could not be sent. Try again." });
+  assertEquals(twilioCalls(w.fetched).length, 0);
+  assert(!w.db.includes("sms_messages:insert"));
+  assertEquals(errorRows(w.fetched).map((r) => r.code), ["twilio_account_lookup_failed"]);
 });

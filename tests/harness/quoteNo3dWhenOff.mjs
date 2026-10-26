@@ -1,13 +1,13 @@
 // A tenant with 3D switched off must not send a 3D view on anything.
 //
-// Nevin Friesen, reported by Carolyn on the 2026-09-21 call: "when he emails a quote, it is still
-// sending the 3D view." He has 3D off.
+// A builder with 3D switched off reported (2026-09-21) that his emailed estimate still carried the 3D
+// view.
 //
 // The cause was one missing condition in submitQuote. An armed snapshot was used when there was one,
-// and when there was NOT one a default 3D view was rendered instead, so "a quote is never
+// and when there was NOT one a default 3D view was rendered instead, so "an estimate is never
 // sent without a picture of the building". For a tenant with 3D off the viewer can never be opened, so
-// there is never an armed snapshot — every quote they sent took the default-render branch and carried
-// a 3D sheet.
+// there is never an armed snapshot — every estimate they sent took the default-render branch and
+// carried a 3D sheet.
 //
 // It reaches BOTH documents from that one place: the estimate and the invoice are built server-side by
 // supabase/functions/_shared/quotePdf.ts, which appends `designs.image_url` — the PDF this harness
@@ -125,7 +125,7 @@ async function run(view3d, ok, shots) {
 async function main() {
   const { ok, failed } = reporter();
   const shots = shotsDir("quoteNo3dWhenOff");
-  await run(false, ok, shots);   // the tenant Nevin is
+  await run(false, ok, shots);   // the builder who reported it
   await run(true, ok, shots);    // and the one who should still get 3D, so the fix is a gate not a delete
   console.log(`\nSHOTS ${shots}`);
   const bad = failed();

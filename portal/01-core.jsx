@@ -73,6 +73,40 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 // stricter they could not save a value the server would happily accept.
 const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
 
+// ssHexColor — any way a person can hand you a color, in; #RRGGBB, out; null when it isn't one.
+// Carolyn 2026-10-25: "in the form colors when I try to paste a color code from somewhere else
+// it doesn't let me paste." Every color control in the portal used to be a bare
+// <input type="color"> — an OS color well, with no text in it to paste into — so this exists to
+// let a hex BOX sit in front of the well and take whatever a brand kit, a screenshot tool or a
+// website's CSS puts on the clipboard: #D97706, d97706, #FFF, rgb(217 119 6), trailing comma.
+//
+// Six digits out, upper case, always, so one color has one spelling: "#fff" and "#FFFFFF" must
+// not be able to sit in a palette looking like two swatches. An 8-digit #RRGGBBAA is REFUSED
+// rather than truncated — these values are painted into emails, where no inbox honours alpha,
+// and a silently-dropped alpha is a color that looks right here and wrong in the inbox.
+// _shared/brandColors.ts normalizeHex is the server's copy of this (minus rgb(), which only a
+// paste produces); they are deliberately the same rule, so nothing the UI accepts is dropped.
+// How many brand colors a builder may keep (migration 336). The same number as
+// _shared/brandColors.ts BRAND_COLOR_MAX, which is the one that actually truncates: twelve
+// swatches still fit one row under a color control in the designer's side panel, and a palette
+// longer than that is a style guide, not a set of quick picks.
+const SS_BRAND_COLOR_MAX = 12;
+
+const ssHexColor = (raw) => {
+  const s = String(raw == null ? "" : raw).trim().replace(/[,;]+$/, "");
+  const m = s.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (m) {
+    const h = m[1];
+    return "#" + (h.length === 3 ? h[0] + h[0] + h[1] + h[1] + h[2] + h[2] : h).toUpperCase();
+  }
+  const rgb = s.match(/^rgba?\(\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})/i);
+  if (rgb) {
+    const p = [rgb[1], rgb[2], rgb[3]].map(Number);
+    if (p.every((n) => n >= 0 && n <= 255)) return "#" + p.map((n) => n.toString(16).padStart(2, "0")).join("").toUpperCase();
+  }
+  return null;
+};
+
 const SS_ERR_SOURCE = "portal";
 // The tenant every row is filed under. This read `window.__SS_CLIENT_ID__`, which nothing in
 // the repo has ever assigned, and the portal's own URLs carry `?view=`, never `?client=` — so
@@ -106,7 +140,7 @@ function ssLogError(source, message, code, context, severity) {
         p_code: code == null ? null : String(code).slice(0, 100),
         p_client_id: ssResolvedClientId || params.get("client") || null,
         // Fragment stripped, never the query string. A password-reset/invite landing is
-        // `/portal#access_token=<jwt>&…&type=recovery`, and supabase-js clears that hash only at
+        // `/login#access_token=<jwt>&…&type=recovery`, and supabase-js clears that hash only at
         // the END of _getSessionFromURL — so a boot_component_missing row, a window.onerror or an
         // unhandledrejection firing first put the account's email, sub and a truncated token in
         // this column. `?view=` MUST survive: it is what tells triage a row was written inside an
@@ -180,7 +214,7 @@ window.ssLoadDesigner = function () {
     // dead for the rest of the session, and the user's retry is a page-level refresh away
     // either way.
     ssDesignerLoad = null;
-    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
+    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Shed Designer does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
   });
   return ssDesignerLoad;
 };
@@ -218,6 +252,14 @@ window.ssLoadDesigner = function () {
 // server-side delete) or send_invoice is unrecoverable and invisible. Here, forgetting is
 // impossible. Same module-level-transport-state pattern as ssOnSessionExpired above.
 let ssTargetClientId = null;   // set by Dashboard during render; null when not viewing
+// ACTING AS one named person inside the viewed account (2026-10-23). Set in the same tick
+// as ssTargetClientId and cleared with it, so the two can never describe different states.
+//
+// ⚠️ IT IS A REQUEST, NOT A DECISION. The server resolves that person's own access map and
+// enforces it (resolveTenant); this only says who to ask about. A browser that sets it to
+// somebody on another tenant gets a 404, and one that sets it without being an operator is
+// ignored entirely — the field is read inside the operator branch and nowhere else.
+let ssTargetUserId = null;
 
 // Allow-list, not a deny-list: a function added later gets NO injection until it is named
 // here. operator-portal is deliberately absent — it passes its own explicit clientId, and
@@ -227,7 +269,13 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // would inject targetClientId and hand operators exactly that. The function itself refuses
 // a targetClientId with a 403, so adding it here would break every operator call rather
 // than quietly widening access — that pairing is intentional, not an oversight to fix.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments"];
+// portal-meetings joined on 2026-10-22 (migration 326). Operator view-as has to reach a
+// builder's booking setup — it is the kind of thing support gets asked about — and the
+// function resolves the caller the standard way, so the injection is all it needs.
+// ⚠️ An operator has no client_users row on the viewed tenant and therefore no host row of
+// their own there: portal-meetings answers `myHost: null` for them, deliberately. A CSM
+// Synergy operator does not have a booking page on a builder's account.
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
@@ -298,7 +346,39 @@ __ssFunctions.invoke = async (name, opts) => {
   ) {
     injected = ssTargetClientId;
     // Never mutate the caller's object — several call sites build a local `body` and reuse it.
-    opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
+    // targetUserId rides with it and ONLY with it: acting as a person is meaningless without
+    // the account they are on, and sending one without the other is a state the server would
+    // have to interpret. Omitted entirely when null, so an ordinary view-as call is byte for
+    // byte what it was before this existed.
+    opts = {
+      ...opts,
+      body: {
+        ...opts.body,
+        targetClientId: injected,
+        ...(ssTargetUserId ? { targetUserId: ssTargetUserId } : {}),
+      },
+    };
+  }
+  // ⛔ THE SECOND DOOR, and leaving it shut was a real hole (2026-10-23). The block above
+  // deliberately stands down when a caller put `targetClientId` on the body itself — and
+  // dozens do, through `scoped()` in 03-catalog.jsx. Those calls were therefore reaching the
+  // server view-as'd but with NO targetUserId, so `ctx.selfUserId` fell back to the operator
+  // and every "my ..." read answered about the wrong person: exactly the bug Carolyn found in
+  // Settings → Meetings, reappearing on whichever screens happen to scope themselves by hand.
+  // Auditing those call sites one at a time is the version of this fix that rots, so the id
+  // rides along here instead, under the same pairing rule: only while a tenant is armed, only
+  // when the body agrees about WHICH tenant, and never over an explicit value.
+  else if (
+    ssTargetUserId && ssTargetClientId &&
+    SS_TENANT_SCOPED_FNS.indexOf(name) !== -1 &&
+    opts && opts.body && typeof opts.body === "object" &&
+    !(opts.body instanceof FormData) && !(opts.body instanceof Blob) && !(opts.body instanceof ArrayBuffer) &&
+    opts.body.targetClientId === ssTargetClientId &&
+    opts.body.targetUserId === undefined
+  ) {
+    // `injected` stays null on purpose: the echo check below is about who armed the TENANT,
+    // and this branch did not — the caller did, which is what the comment above describes.
+    opts = { ...opts, body: { ...opts.body, targetUserId: ssTargetUserId } };
   }
   // Every catalog read asks for the items kept out of the customer's palette until priced (278's
   // partition wall): this portal's Interior items card lists one so it can be priced, and the
@@ -518,41 +598,33 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 // operators still have a password-only way into the console.)
 
 const TAB_META = {
-  designer: ["Designer", "Design a building and build a quote"],
+  designer: ["Shed Designer", "Design a building and build an estimate"],
   // Our own account, and a builder who switched Advanced mode on in Settings — see ssAdvancedOn below.
   advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
   projects: ["Projects", "Internal boards — bugs, feature requests, roadmap. Operators only"],
-  // TWO SECTIONS AGAIN, reversing the 2026-08-24 merge (commit 4a54dad).
+  // ONE SECTION AGAIN: THE CONTACTS HUB (Carolyn 2026-10-12). Contacts and Pipeline were two
+  // sidebar items from 08-26 to 10-12, and on the 10-12 call she asked for one: "Let's have one
+  // tab and we can have contacts, and we can have this instead of list is designs, and then we
+  // have pipelines." The tab keeps the name Contacts. Inside it a tab row: Contacts (the contact
+  // list), Design list (the old Pipeline page's List view), then one tab per pipeline in the
+  // account's own order (ContactsHub, 02-sales.jsx).
   //
-  // She asked for the merge on 08-24 after walking Pipedrive — "these two needs to be
-  // consolidated" — and then, on 08-26 at 12:15, having used it: "I was envisioning it that
-  // we have contacts as one, and then we have another one that says pipeline. I would call
-  // it a pipeline, not opportunities ... I would rather have MORE TABS and one specific
-  // name on it." Ahsan confirmed on the call that they do not need to be one tab.
+  // What she disliked, said on the same call: a card click "goes back to the contact and then
+  // I'm like wait where what was I". A record opened from any of those tabs now opens INSIDE
+  // this one, so the sidebar never moves, and Back returns to the tab it came from.
   //
-  // What she actually disliked on 08-24 turned out to be the two lists looking alike, not
-  // their being separate — she could not find the pipeline board at all until Ahsan pointed
-  // at it ("I didn't see that you had the pipeline thing"). The board is what makes this
-  // section different from a contact list, so the section is now NAMED after it.
-  //
-  // The ids stay `designs` and `leads` so deep links from BOTH eras keep working: these are
-  // native pages again, and the merged era's /portal/designs/people|deals normalise
-  // themselves in the shell. `leads` was already the pre-merge id for Contacts, so this is
-  // a genuine revert rather than a third naming scheme.
-  //
-  // NOT renamed: "Deals". She talked herself out of it at 15:00 — "a quote can also mean you
-  // do more than one quote for one deal, so let's leave it on the deals side right now."
-  designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
-  contacts: ["Contacts", "Everyone who has enquired, and their activity"],
+  // `designs` and `pipelines` are no longer pages. Their old addresses (bookmarks, links already
+  // sent, browser history) all land here through ssCanonRoute below.
+  contacts: ["Contacts", "Everyone who has enquired, their designs, and your pipelines"],
   // Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations
   // would be email, all of it ... I want that bar at the top that shows that I can sort and see
   // just that." One row per customer, from crm_inbox; replying happens on their record.
   conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
-  orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
+  orders: ["Orders", "Track accepted estimates from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
-  settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
+  settings: ["Settings", "Sheds, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
   // Not "— coming soon" any more: RealTime Pricing shipped 2026-08-28 inside Settings →
   // Structures. This string is the page-header subtitle (12-shell.jsx), and it sits directly
@@ -574,9 +646,17 @@ const TAB_META = {
 };
 
 // ── Path routing ─────────────────────────────────────────────────────────────
-// Every page has its own URL: /portal/<page>[/<sub>]. Carolyn, 2026-07-29: "Let's say
+// Every page has its own URL: /<page>[/<sub>]. Carolyn, 2026-07-29: "Let's say
 // I'm right here, and I go and refresh the page — it goes back to designs." / "Every page
 // doesn't have its own link. We should, shouldn't we? That's the problem."
+//
+// NO /portal IN THE ADDRESS (Carolyn 2026-10-12): "It's app.structurestudiosuite.com forward
+// slash advance. Like, so let's remove portal from anywhere." From 2026-07-29 to then every page
+// lived under /portal/<page>. Those addresses are in emails, bookmarks, the phone apps and browser
+// history, so they keep working twice over: the host answers /portal and /portal/* with a 301 to
+// the root form (_redirects), and ssParsePath below still reads the old shape, so a /portal
+// address the host never redirected (a local static server, a tab opened before the redirect
+// shipped) routes anyway and is rewritten in place (ssHealAddress, below the router).
 //
 // TAB_META above is the ONE registry — a page is routable because it has an entry, so
 // there is no second list to keep in sync. `sub` is the Settings/Admin sub-tab.
@@ -584,9 +664,12 @@ const TAB_META = {
 // Everything is same-document pushState. No anchors, no location.assign: the designer and
 // the admin console are keep-mounted, and a real navigation would throw their state away.
 //
-// `_redirects` needs `/portal/* /portal.html 200` for these to survive a cold load. A plain
-// static server ignores _redirects, so deep links only work on beta/production — locally
-// the app still runs, it just always boots at /portal.html.
+// `_redirects` needs one `/<slug> /portal.html 200` and one `/<slug>/* /portal.html 200` rule
+// per page for these to survive a cold load, deliberately NOT a root catch-all: the public
+// designer owns `/` (and `/?client=…`), and /my-quotes, /admin and every asset live at the root
+// too. scripts/redirects.test.mjs fails when a page in TAB_META has no rule. A plain static server
+// ignores _redirects, so deep links only work on beta/production — locally the app still runs,
+// it just always boots at /portal.html.
 const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 // The same idea one level down, for SETTINGS sub-tabs that get renamed. Kept separate from
 // SS_TAB_ALIASES and applied only on the settings page, because a sub slug means nothing on
@@ -595,26 +678,128 @@ const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 // Why it is worth the four lines: an unknown sub does not 404, it CLAMPS to the first tab. So
 // a renamed slug does not announce itself, it silently lands the reader on Structures, which
 // is the one failure mode nobody reports because it looks like they mis-clicked.
-const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile" };
+// `structures` → `sheds` (2026-10-25): the shed catalog moved to /settings/sheds so that
+// /settings/structures can become the post-frame Structures settings page. DELETE this alias
+// the day that page ships; until then old bookmarks and the Client Setup links land on Sheds.
+const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile", structures: "sheds" };
+
+// THE ONE PAGE WHOSE ADDRESS IS NOT ITS ID. /admin has been admin.html, the standalone break-glass
+// operator console, since before the portal had pages of its own, and it stays that: so the
+// portal's Admin page (TAB_META.admin, the same console inside the app) lives at /console. Its
+// old address /portal/admin[/<sub>] goes there (_redirects, and ssRootPath below).
+const SS_PAGE_SLUGS = { admin: "console" };
+// The bare app address, the old bare /portal: the sign-in form for someone signed out, and for
+// someone signed in their own landing page (the shell rewrites it to that page's address). It
+// is where the auth emails end up (AUTH_PORTAL_URL and Forgot password still name /portal until
+// production serves these addresses; the host 301s that here) and where the designer sends a
+// bare product root, so it carries the email link's #access_token / ?code= through untouched.
+const SS_LOGIN_SLUG = "login";
+
+// ── THE CONTACTS HUB'S ADDRESSES (Carolyn 2026-10-12) ───────────────────────────────────────
+// Every view in the hub has its own URL, so a refresh or the browser's Back lands where it says:
+//   /contacts               the view this person opens on (My Profile, else the default)
+//   /contacts/people        the contact list (the tab labelled "Contacts")
+//   /contacts/designs       the Design list
+//   /contacts/p-<uuid>      one pipeline's board
+//   /contacts/pipeline      "the board": the pipeline picked last, else the first one
+//   /contacts/c-… and d-…   a customer or a design record, opened inside the hub
+// The hub (02-sales.jsx) rewrites a bare, a "pipeline" or an unknown sub to the view it shows.
+const SS_HUB_PEOPLE = "people";
+const SS_HUB_DESIGNS = "designs";
+const SS_HUB_PIPELINE = "pipeline";
+const SS_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The pipeline a hub sub names ("p-<uuid>"), or null.
+function ssHubPipeId(sub) {
+  const m = /^p-(.+)$/.exec(String(sub || ""));
+  return m && SS_UUID_RE.test(m[1]) ? m[1].toLowerCase() : null;
+}
+// THE OLD ADDRESSES, all of them, into the hub. One place, so the router, navigate() and the
+// popstate handler cannot disagree. Each holds with or without the old /portal in front.
+//   /designs                 → /contacts (the person's own view)
+//   /designs/list            → the Design list
+//   /designs/pipeline        → the board
+//   /designs/people|deals    → the contact list | the person's own view (the 08-24 era)
+//   /designs/c-…|d-…         → the same record, inside the hub
+//   /pipelines[/<uuid>]      → that pipeline, or the board (the Leads tab, migration 301)
+// /leads[/c-…] reaches /contacts through SS_TAB_ALIASES before this runs.
+function ssCanonRoute(page, sub) {
+  if (page === "designs") {
+    if (sub && /^[cd]-/.test(sub)) return { page: "contacts", sub };
+    switch (sub) {
+      case "list": return { page: "contacts", sub: SS_HUB_DESIGNS };
+      case "pipeline": return { page: "contacts", sub: SS_HUB_PIPELINE };
+      case "people": return { page: "contacts", sub: SS_HUB_PEOPLE };
+      default: return { page: "contacts", sub: null };
+    }
+  }
+  if (page === "pipelines") {
+    return { page: "contacts", sub: sub && SS_UUID_RE.test(sub) ? "p-" + sub.toLowerCase() : SS_HUB_PIPELINE };
+  }
+  return { page, sub };
+}
+// The page a ROOT address's first segment names, or null. Every page's slug is its id except the
+// operator console (SS_PAGE_SLUGS); /admin itself is admin.html's address and never the app's.
+function ssSlugPage(slug) {
+  if (!slug || slug === SS_LOGIN_SLUG || slug === "admin") return null;
+  for (const id in SS_PAGE_SLUGS) if (SS_PAGE_SLUGS[id] === slug) return id;
+  return slug;
+}
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
-  // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
-  if (parts[0] !== "portal" && parts[0] !== "portal.html") return { page: null, sub: null };
+  // Both shapes, read the same way:
+  //   today          ["contacts"] | ["settings","colors"] | ["login"]     (/<slug>[/<sub>])
+  //   before 10-13   ["portal","contacts"] | ["portal","settings","colors"] | ["portal"]
+  // The old one stays readable for the address the host never redirected: a local static server,
+  // a tab left open across the deploy, /portal.html itself. The shell's URL effect (and
+  // ssHealAddress before it) then puts the root form in the address bar.
+  let page, rawSub;
+  if (parts[0] === "portal" || parts[0] === "portal.html") {
+    page = parts[1] || null;
+    rawSub = parts[2] || null;
+  } else {
+    page = ssSlugPage(parts[0] || null);
+    rawSub = page ? parts[1] || null : null;
+  }
   // Old tab ids that must keep resolving. `leads` was renamed to `contacts` on 2026-09-02 so
   // the URL matches the label and the server-side permission area, both already "contacts".
   // `releases` became `support` on 2026-08-30 (Carolyn) — the page had already outgrown its
   // name: it carries the setup checklist and two-way submission threads, not just a changelog.
-  // Its sub-paths ride the alias for free, which matters because /portal/releases/setup and
-  // /portal/releases/mine are both linked from elsewhere in the product.
-  // Three live shapes depend on this: /portal/leads (nav + bookmarks), /portal/leads/c-<uuid>
-  // (record deep links and browser history), and /portal/designs/people (the merged-era alias).
-  // Without it every caller does `TAB_META[p.page] ? p.page : "designs"`, so a stale link would
-  // land silently on Pipeline and a record link would lose its `sub` entirely. The shell's
-  // existing replaceState then rewrites the address bar to the new path, with no history entry.
-  const page = parts[1] || null;
-  const resolved = (page && SS_TAB_ALIASES[page]) || page;
-  const sub = parts[2] || null;
-  return { page: resolved, sub: (resolved === "settings" && sub && SS_SETTINGS_SUB_ALIASES[sub]) || sub };
+  // Its sub-paths ride the alias for free, which matters because /releases/setup and
+  // /releases/mine are both linked from elsewhere in the product.
+  // Live shapes depend on this: /leads (nav + bookmarks), /leads/c-<uuid> (record
+  // deep links and browser history), and every /designs and /pipelines address
+  // (ssCanonRoute above). Without it every caller does `TAB_META[p.page] ? p.page : "contacts"`,
+  // so a stale link would land silently on the default view and a record link would lose its
+  // `sub` entirely. The shell's URL effect then rewrites the address bar to the new path, with
+  // no history entry.
+  const aliased = (page && SS_TAB_ALIASES[page]) || page;
+  const r = ssCanonRoute(aliased, rawSub);
+  return { page: r.page, sub: (r.page === "settings" && r.sub && SS_SETTINGS_SUB_ALIASES[r.sub]) || r.sub };
+}
+// The ROOT form of an old /portal address, or null when `pathname` is not one. The same mapping
+// the host's 301s make (_redirects); scripts/redirects.test.mjs holds the two to each other for
+// every route the smoke suite knows:
+//   /portal, /portal/, /portal.html  → /login
+//   /portal/admin[/…]                → /console[/…]
+//   /portal/<anything else>          → /<anything else>, untouched (the router reads it after)
+function ssRootPath(pathname) {
+  const p = String(pathname || "");
+  if (p === "/portal" || p === "/portal/" || p === "/portal.html") return "/" + SS_LOGIN_SLUG;
+  const m = /^\/portal\/(.+)$/.exec(p);
+  if (!m) return null;
+  const parts = m[1].split("/");
+  if (SS_PAGE_SLUGS[parts[0]]) parts[0] = SS_PAGE_SLUGS[parts[0]];
+  return "/" + parts.join("/");
+}
+// A page's address without the query: /<slug>[/<sub>], or /login for no page.
+function ssPageBase(page, sub) {
+  if (!page) return "/" + SS_LOGIN_SLUG;
+  return "/" + (SS_PAGE_SLUGS[page] || page) + (sub ? "/" + sub : "");
+}
+// Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
+// every navigation) and drops any hash.
+function ssPagePath(page, sub) {
+  return ssPageBase(page, sub) + (window.location.search || "");
 }
 
 // Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
@@ -663,6 +848,8 @@ const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-un
 //     and free. Ahsan on the 09-28 call: they "turn on the advanced mode to access this tab, so
 //     everybody is not going to see"; Carolyn: "Yep, yep, no, that's good." Whether builders are
 //     offered the switch on production waits on her (it ships with the portal's promotion).
+//     NOT LAUNCHED YET (2026-10-27): see SS_ADVANCED_FOR_BUILDERS just below. Until it is true this
+//     second case is off, so only our own account has Advanced.
 // Strictly `=== true`: a server that predates the field sends nothing, and that is off.
 //
 // Pass the EFFECTIVE tenant's entitlement (the viewed one in view-as). null = not answered yet,
@@ -671,16 +858,35 @@ const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-un
 // This is the TENANT half. WHO on that tenant gets the page is the shell's `advancedMayRun`
 // (12-shell.jsx): whoever may run the account, the same bar setup3d — the page's only way to
 // save — already sets. It is not part of the per-tenant setting, so it stays out of here.
+//
+// THE BUILDER SWITCH IS NOT LAUNCHED (Ahsan 2026-10-27). Carolyn on the 10-26 call: "did you not put
+// advanced only in Structure Studio?", the 09-28 rule ("only available in Structure Studio for us
+// yet"). The switch shipped early (10-05), so any owner with 3D could open a page that post-frame
+// work will be built behind. While this is false, only our own account has Advanced: a builder's
+// advanced_mode reads as off, and the shell offers them no switch (12-shell.jsx advancedSwitch).
+// Launching is this one line; the server half (save_advanced_mode, portal-billing's advancedMode)
+// never stopped working, so a builder who switched it on before is back on the day it flips.
+const SS_ADVANCED_FOR_BUILDERS = false;
 function ssAdvancedOn(entitlement) {
-  return !!(entitlement && (entitlement.reason === "internal" || entitlement.advancedMode === true));
+  return !!(entitlement && (entitlement.reason === "internal"
+    || (SS_ADVANCED_FOR_BUILDERS && entitlement.advancedMode === true)));
 }
 
-// Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
-// every navigation) and drops any hash.
-function ssPagePath(page, sub) {
-  const base = "/portal" + (page ? "/" + page : "") + (page && sub ? "/" + sub : "");
-  return base + (window.location.search || "");
-}
+// AN OLD /portal ADDRESS HEALS THE MOMENT THE APP LOADS (2026-10-13). On beta and production the
+// host has already 301'd it, so this only acts where nothing did: a local static server, a tab
+// opened before the redirect shipped, /portal.html itself. The address bar then shows the root
+// form before anything else reads it, so the bookmark or the link someone copies from here on is
+// the new one; the router reads both shapes either way (ssParsePath), so nothing depends on this.
+// The query AND THE HASH ride along: an auth email lands as #access_token=… / #error=… / ?code=…,
+// and the sign-in code below reads them after this has run. replaceState, so no history entry.
+(function ssHealAddress() {
+  try {
+    const healed = ssRootPath(window.location.pathname);
+    if (healed && healed !== window.location.pathname) {
+      window.history.replaceState(window.history.state, "", healed + (window.location.search || "") + (window.location.hash || ""));
+    }
+  } catch (_e) { /* history unavailable: the router still reads the old shape */ }
+})();
 
 // Popout mode: a dedicated small window showing ONLY the Projects boards (?popout=1).
 // Read ONCE at boot on purpose: ssPagePath above carries the whole search string through
@@ -692,12 +898,12 @@ const SS_POPOUT = (() => {
 })();
 if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch (_e) {} }
 
-// Non-admins are confined to the Designs + Leads lists, the Support tab (product news, the
-// setup checklist and their own submissions), and the coming-soon teaser tabs (previews, no
-// data). Everything else is
+// Non-admins are confined to the Contacts hub (contacts, designs and pipelines), the Support tab
+// (product news, the setup checklist and their own submissions), and the coming-soon teaser tabs
+// (previews, no data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
@@ -712,12 +918,12 @@ const TAB_AREA = {
   // The same area as the Designer: it IS the designer, one building at a time. Whether the page
   // exists at all for this tenant is ssAdvancedOn's question, asked by ssClampTab, not this map's.
   advanced: "designer",
-  // Back to one area each, with the 08-26 split: Pipeline is the designs list, Contacts is
-  // the contacts list, and each gates on the area whose data it actually shows. The merged
-  // tab needed EITHER because it showed both; a rep granted only contacts must not get the
-  // customer-designs list back through a tab that no longer contains it.
-  designs: "designs",
-  contacts: "contacts",
+  // THE CONTACTS HUB (2026-10-12) holds the contact list and the pipelines (the contacts area)
+  // AND the Design list (the designs area), so EITHER area opens the tab. Inside it each view
+  // still asks for its own area (ssHubCan below): a Crew Leader holding designs:view and no
+  // contacts gets the hub with the Design list in it and nothing else, and a rep granted only
+  // contacts never gets the customer-designs list through it.
+  contacts: ["contacts", "designs"],
   // The same customers, seen by their latest message: whoever may open Contacts may open this,
   // and crm_inbox narrows contacts:'own' and the calls row by row on the server.
   conversations: "contacts",
@@ -736,11 +942,18 @@ const TAB_AREA = {
 // Which area each Settings sub-tab needs. Same registry idea as TAB_AREA above: a sub-tab
 // missing from this map is not access-controlled.
 const SETTINGS_TAB_AREA = {
-  structures: "settings_structures",
+  sheds: "settings_structures",
   // Designer -> 3D writes building_styles.d3 (save_style_d3 and friends), and every one of
   // those actions is gated settings_structures:edit server-side. Mirror that here or the
   // sub-tab shows up for someone the server will refuse.
   designer: "settings_structures",
+  // Online Inventory (migration 310): shop_settings / save_shop_settings are gated on the
+  // inventory area server-side, so the page follows it — no new area, no access.ts row.
+  "online-inventory": "inventory",
+  // Meetings (migration 326): its own area, because booking really is a new permission
+  // surface — a rep sets their own hours and sees their own diary, which no existing area
+  // could express. portal-meetings gates on the same key.
+  meetings: "meetings",
   options: "settings_options",
   colors: "settings_options",
   // The two tabs Colors was split into on 2026-09-11. Same catalog, same area — a split of
@@ -755,6 +968,8 @@ const SETTINGS_TAB_AREA = {
   ramps: "settings_options",
   cladding: "settings_options",
   interior: "settings_options",
+  // Interior walls (313): its own tab beside Interior items, same area — it was a row on that card.
+  "interior-walls": "settings_options",
   electrical: "settings_options",
   insulation: "settings_options",
   delivery: "settings_options",
@@ -778,12 +993,31 @@ const SETTINGS_TAB_AREA = {
   crews: "settings_team",
   drivers: "settings_team",
   connection: "settings_crm",
+  // Statuses and pipeline stages (migration 302): every write is gated settings_crm:edit.
+  pipelines: "settings_crm",
+  // The Customer login code card (migration 231), lifted off the connection page into the
+  // Customer Hub. Same area it had there — it saves through portal-settings' global `save`,
+  // which is gated settings_crm:edit AND settings_branding:edit, exactly as it was when the
+  // card sat on GHL Connection.
+  "customer-login": "settings_crm",
+  // Website lead forms + their email templates (migration 325), in the Customer Hub beside the two
+  // above. Every crm_form_* / crm_email_tpl_* action is gated settings_crm (view to read, edit to write).
+  forms: "settings_crm",
+  "email-templates": "settings_crm",
+  // Customer Hub → Fields (migration 330): crm_fields_list / crm_field_save are gated settings_crm on
+  // the server. Listed here since 2026-10-23, when the hub began filtering its tabs per area — without
+  // it the tab showed to anyone who could open the hub (a rep with only Phone or Meetings).
+  fields: "settings_crm",
   // Company → Tax (2026-09-17): which Avalara tax code each building style and option heading
   // falls under. settings_crm because tax_codes_get / _search / _save are gated there, beside
   // the company rate and the location rates — a tab on any other area would show someone a
   // mapping the server refuses to read, and a new area would mean a row in _shared/access.ts
   // and its SQL twin area_level_for() for a screen that grants nothing new.
   tax: "settings_crm",
+  // Company → Payments (workstream 1 phase 4): a READ-ONLY summary of the card account the
+  // Structure Studio team sets up (portal-settings payments_status, gated settings_branding:view).
+  // The Company area, so no new area and no row in _shared/access.ts or its SQL twin.
+  payments: "settings_branding",
   quickbooks: "settings_quickbooks",
   email: "settings_email",
   // Texting registers the BUSINESS's legal identity with the carriers and spends real money,
@@ -806,7 +1040,7 @@ const SETTINGS_TAB_AREA = {
 // holders: the sales_rep, dealer and sales_manager presets grant phone 'own'/'view' and no
 // settings_* area at all. Without it they had no Settings tab, so no "Your calls" card to set
 // their own ring hours or greeting on (migration 264), and both apps' "Change in Structure
-// Studio" link (/portal/settings/phone) clamped them to their fallback page. ssSettingsTabs
+// Studio" link (/settings/phone) clamped them to their fallback page. ssSettingsTabs
 // still filters per card, so such a person's rail is Phone (where calling is offered) and My
 // Profile, and nothing else.
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
@@ -814,12 +1048,13 @@ const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_bra
 
 // 'own' counts as read — see canRead in _shared/access.ts. TWO areas speak it now:
 // commissions ("your own payouts") and, since migration 193, contacts ("the customers you
-// own or follow"). Kept deliberately tiny and mirrored rather than imported: portal.html has
-// no module loader, and the SERVER is the enforcement point, so a drift here costs a wrong
-// tab and never wrong access.
+// own or follow"). Contacts' 'own_view' (migration 286, 2026-10-06: own customers, view only)
+// reads too. Kept deliberately tiny and mirrored rather than imported: portal.html has no
+// module loader, and the SERVER is the enforcement point, so a drift here costs a wrong tab and
+// never wrong access.
 function ssCanRead(access, area) {
   const v = access && access[area];
-  return v === "view" || v === "edit" || v === "own";
+  return v === "view" || v === "edit" || v === "own" || v === "own_view";
 }
 // The write half. Mirrored from canEdit in _shared/access.ts for the same reason ssCanRead
 // is — and it has to mirror the ownWrites rule too, not just the 'edit' comparison.
@@ -831,12 +1066,20 @@ function ssCanRead(access, area) {
 //                 (portal-settings' CONTACT_ROW_SCOPE); this only decides what is offered.
 //   commissions — no. 'own' there is "see your own payout", and a rep editing their own
 //                 commission is what the whole feature exists to prevent.
+// Contacts' 'own_view' (migration 286) never writes: it is the same rows as 'own' with this
+// answer reversed, so it is deliberately NOT in the test below, and every write tab on a
+// customer record greys out with the permission reason (CrmRecord's canEdit, 12-shell).
 //
 // OWN_WRITE_AREAS is the browser's copy of that flag. It is small enough to be worth the
 // duplication and dangerous enough to be worth naming: adding an area to it without the
 // server agreeing renders buttons that 403, and the reverse hides a button somebody has
 // every right to press.
-const OWN_WRITE_AREAS = new Set(["contacts"]);
+// `meetings` joined on 2026-10-22 (migration 326). Your own hours, your own booking link and
+// your own diary are yours to change — a rep who has to ask an owner to take a Friday off is
+// the opposite of what a self-service booking link is for. The server agrees (ownWrites on the
+// area in access.ts), and narrows an own-only caller to their OWN host row rather than refusing
+// the write — portal-meetings' HOST_SCOPE, the same shape contacts has in CONTACT_ROW_SCOPE.
+const OWN_WRITE_AREAS = new Set(["contacts", "meetings"]);
 function ssCanWrite(access, area) {
   if (!access) return false;
   const v = access[area];
@@ -1004,6 +1247,17 @@ async function ssPhoneFetchTranscript(callId, accessToken, fetchImpl) {
   if (!j || typeof j.transcript !== "string") throw new Error("The transcript couldn't be loaded. Try again.");
   return { transcript: j.transcript, summary: typeof j.summary === "string" ? j.summary : null };
 }
+// The transcript with the team member's name on our side's lines (Carolyn 2026-10-23, 24:13).
+// The Worker writes every line as "Customer: ..." or "Team: ...", one speaker turn per line; the
+// name is crmFeed's `teamSpeaker`, only when one known person was on our side of the call
+// (transcriptTeamUser). No name keeps "Team". Only a line's own label changes: "Team: " later
+// in a customer's line is their words.
+function ssTranscriptNamed(transcript, teamSpeaker) {
+  const text = String(transcript || "");
+  const name = String(teamSpeaker || "").replace(/\s+/g, " ").trim();
+  if (!name) return text;
+  return text.replace(/^Team: /gm, () => `${name}: `);
+}
 // YOUR CALLS (migration 264): the signed-in person's own phone settings, read and saved on the
 // Worker exactly as My Synergy Phone does (GET and POST /settings/me), with the sign-in in the
 // Authorization header, never the URL. GET /team is who may be chosen. They answer for the
@@ -1142,6 +1396,142 @@ async function ssPhoneSend(type, payload) {
   return { installed: true, reply };
 }
 
+// "OPEN IN STRUCTURE STUDIO" SHOWS THE PAGE IN THIS TAB (Carolyn 2026-10-12, on a new tab opening
+// for every click: "I'm already here? Why would I the first time want to go to a new tab?").
+// My Synergy Phone 0.1.4 keeps a list of the Structure Studio tabs open on this computer: each one
+// keeps ONE port open to it (chrome.runtime.connect, name "sss.portal"). Its "Open in Structure
+// Studio" asks a tab on the address the person is using (beta or app), one already on that contact
+// first, then the one used last, to show the page in place through the router below, and brings
+// that tab forward; only when no tab answers does it open a new one. The protocol is SPEC section 5
+// ("Open in Structure Studio") in the phone repo:
+//   page → extension  { type: "sss.hello" | "sss.seen", visible, seen_at, routable, page, sub }
+//                     { type: "sss.navigated", id, ok, error? }
+//   extension → page  { type: "sss.welcome" }  (it keeps the list)
+//                     { type: "sss.navigate", id, page, sub }
+// An extension older than 0.1.4 has no listener: the port closes at once with no welcome, and this
+// tab asks again only when it comes back into view, at most once a minute. Chrome closes every port
+// when it stops the extension's idle service worker; a welcomed port reconnects a second later, so
+// the tab is never missing from the list for long (a background tab Chrome has frozen reconnects
+// when it wakes). The cost: with a tab open, that worker is restarted about every 30 seconds
+// instead of idling. A tab in view-as (?view=) or the Projects
+// pop-out (?popout=1) says routable:false and refuses: the extension's contact belongs to the
+// person's own account, and routing that tab would drop the account being looked at.
+const SS_PHONE_PORT_RETRY_MS = 60000;
+let ssPhonePort = null;       // { port, welcomed } while one is open
+let ssPhonePortTriedAt = 0;   // the last connect that got no welcome
+let ssPhoneSeenAt = 0;        // when this tab last came forward (this computer's clock)
+
+// The page the extension asks for, checked: a router slug and an optional sub-slug, never a URL.
+// → { page, sub } or null.
+function ssPhoneNavTarget(m) {
+  if (!m || typeof m !== "object") return null;
+  const page = typeof m.page === "string" ? m.page : "";
+  const sub = m.sub == null ? null : (typeof m.sub === "string" ? m.sub : "");
+  if (!/^[a-z][a-z0-9-]{0,39}$/.test(page)) return null;
+  if (sub !== null && !/^[A-Za-z0-9][A-Za-z0-9-]{0,79}$/.test(sub)) return null;
+  return { page, sub };
+}
+
+// May this tab be routed for the extension? Not in view-as, and not the Projects pop-out.
+function ssPhoneRoutable(search) {
+  try {
+    const q = new URLSearchParams(search == null ? window.location.search : search);
+    return !q.get("view") && q.get("popout") !== "1";
+  } catch (_e) { return false; }
+}
+
+// Show the page in this tab the way Back and Forward do: the address moves (pushState), then the
+// shell's own popstate handler routes to it. Nothing reloads, so a design open in the Designer
+// stays open. → false when this tab refuses.
+function ssPhoneShowHere(t) {
+  if (!t || !ssPhoneRoutable()) return false;
+  const url = ssPagePath(t.page, t.sub);
+  if (window.location.pathname + window.location.search !== url) {
+    window.history.pushState({ page: t.page, sub: t.sub }, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+  }
+  return true;
+}
+
+// The page this tab shows, as the router names it (ssParsePath), so the extension can ask a tab
+// already on the contact first (C49, 2026-10-12: "especially one on this contact"). Slugs only, never
+// the address. Said on each hello and seen, and after Back, Forward or a navigate; a click inside
+// the app moves the page without saying so, which only makes this tab a less likely first pick (the
+// extension still asks it to show the page, and a tab already there just stays put).
+function ssPhonePageNow() {
+  try {
+    const t = typeof ssParsePath === "function" ? ssPhoneNavTarget(ssParsePath()) : null;
+    return t || { page: null, sub: null };
+  } catch (_e) { return { page: null, sub: null }; }
+}
+
+function ssPhonePortSay(type) {
+  const p = ssPhonePort && ssPhonePort.port;
+  if (!p) return;
+  const at = ssPhonePageNow();
+  try {
+    p.postMessage({ type, visible: document.visibilityState === "visible", seen_at: ssPhoneSeenAt || null, routable: ssPhoneRoutable(), page: at.page, sub: at.sub });
+  } catch (_e) { /* closed: the next visit opens another */ }
+}
+
+// Open the port, once a My Synergy Phone answers the ping. Never on a phone's browser, and never
+// where chrome.runtime has no connect (another browser, or no extension exposing itself).
+async function ssPhonePortOpen() {
+  const rt = window.chrome && window.chrome.runtime;
+  if (ssPhonePort || !rt || typeof rt.connect !== "function" || ssIsPhoneBrowser()) return;
+  if (ssPhonePortTriedAt && Date.now() - ssPhonePortTriedAt < SS_PHONE_PORT_RETRY_MS) return;
+  ssPhonePortTriedAt = Date.now();
+  const found = await ssPhonePing();
+  if (!found || ssPhonePort) return;
+  let port;
+  try { port = rt.connect(found.id, { name: "sss.portal" }); } catch (_e) { return; }
+  const entry = { port, welcomed: false };
+  ssPhonePort = entry;
+  port.onMessage.addListener((m) => {
+    if (!m || typeof m !== "object") return;
+    if (m.type === "sss.welcome") { entry.welcomed = true; ssPhonePortTriedAt = 0; return; }
+    if (m.type !== "sss.navigate") return;
+    const t = ssPhoneNavTarget(m);
+    let ok = false;
+    try { ok = ssPhoneShowHere(t); } catch (_e) { ok = false; }
+    if (ok) ssPhoneSeenAt = Date.now();
+    try { port.postMessage(ok ? { type: "sss.navigated", id: m.id, ok: true } : { type: "sss.navigated", id: m.id, ok: false, error: t ? "not_here" : "bad_request" }); }
+    catch (_e) { /* closed meanwhile: the extension tries another tab */ }
+  });
+  port.onDisconnect.addListener(() => {
+    // Read it, or Chrome logs "Unchecked runtime.lastError" for an extension with no listener.
+    void (window.chrome && window.chrome.runtime && window.chrome.runtime.lastError);
+    if (ssPhonePort === entry) ssPhonePort = null;
+    if (entry.welcomed) setTimeout(() => { void ssPhonePortOpen(); }, 1000);
+  });
+  ssPhonePortSay("sss.hello");
+}
+
+// This tab came forward or went to the background: say so (the extension asks the tab used last),
+// or open the port if there is none yet.
+function ssPhonePortVisit() {
+  if (document.visibilityState === "visible") ssPhoneSeenAt = Date.now();
+  if (ssPhonePort) ssPhonePortSay("sss.seen");
+  else void ssPhonePortOpen();
+}
+
+// Back, Forward, or a navigate from the extension (it goes through popstate too): say the new page.
+function ssPhonePortMoved() {
+  if (ssPhonePort) ssPhonePortSay("sss.seen");
+}
+
+// Started once, when the app loads in a browser tab (never in the tests that run this block
+// outside a browser, where there is no document).
+if (typeof document !== "undefined" && typeof window.addEventListener === "function") {
+  if (document.visibilityState === "visible") ssPhoneSeenAt = Date.now();
+  document.addEventListener("visibilitychange", ssPhonePortVisit);
+  window.addEventListener("focus", ssPhonePortVisit);
+  // Back from the back-forward cache: Chrome closed the port when the page went in.
+  window.addEventListener("pageshow", (e) => { if (e.persisted) ssPhonePortVisit(); });
+  window.addEventListener("popstate", ssPhonePortMoved);
+  setTimeout(() => { void ssPhonePortOpen(); }, 0);
+}
+
 // What each refusal means, in words a builder can act on. Codes are the extension's (SPEC
 // section 5 plus the bridge's own busy / bad_request / emergency_blocked).
 function ssPhoneRefusal(reply) {
@@ -1235,6 +1625,42 @@ async function ssPhoneStartCall(raw, ids, badNumber) {
   if (out.reply && out.reply.ok) return { kind: "calling", to: msg.to_e164 };
   return { kind: "error", text: ssPhoneRefusal(out.reply) };
 }
+
+// ── CUSTOMER NAMING (quote to a business entity, 2026-10-21) ────────────────────────────────
+// A COPY of companyOf / personName / greetingFirst / displayName / billTo in
+// supabase/functions/_shared/customerNaming.ts, which explains the model: a contact's `name` is
+// the PERSON and its `company` the business, and nothing is ever guessed from the shape of a name
+// ("Bear River Band" with no company is still read as a name). Change both copies together:
+// supabase/functions/_shared/_test_stubs/customerNamingParity_test.ts runs this block (between the
+// two markers) against the shared module. SS_NAMING_GREET_COMPANY is NAMING.greetCompanyWhenNoPerson.
+// ⟦customer-naming:start⟧
+const SS_NAMING_GREET_COMPANY = false;
+function ssNamingLine(v) {
+  return String(v == null ? "" : v).replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
+}
+function ssCompanyOf(c) {
+  const v = c && typeof c === "object" ? c.company : undefined;
+  return typeof v === "string" ? ssNamingLine(v) : "";
+}
+function ssPersonName(c) {
+  const name = ssNamingLine(c && typeof c === "object" ? c.name : undefined);
+  const company = ssCompanyOf(c);
+  if (company && name.toLowerCase() === company.toLowerCase()) return "";
+  return name;
+}
+function ssGreetingFirst(c) {
+  const first = ssPersonName(c).split(" ")[0] || "";
+  if (!first && SS_NAMING_GREET_COMPANY) return ssCompanyOf(c);
+  return first;
+}
+function ssDisplayName(c) {
+  return ssCompanyOf(c) || ssNamingLine(c && typeof c === "object" ? c.name : undefined);
+}
+function ssBillTo(c) {
+  const company = ssCompanyOf(c);
+  return { company, attn: company ? ssPersonName(c) : ssNamingLine(c && typeof c === "object" ? c.name : undefined) };
+}
+// ⟦customer-naming:end⟧
 
 // ── QUICK SENDS: saved messages, in the record's Email and SMS boxes ─────────────────────
 // Carolyn 2026-09-30: "I think I want to call it quick sends, okay, for them to do quick sends on
@@ -1381,10 +1807,15 @@ window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: 
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
 function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
-    ["structures", "Structures", "Building styles, sizes, and base prices", null],
+    ["sheds", "Sheds", "Shed styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
     ["colors", "Colors", "Paint, shingle, and metal palettes", null],
     ["designer", "Designer", "How your styles look in the designer — including their 3D shape", null],
+    // ONLINE INVENTORY (2026-10-17). The public page of lot buildings (shop.html) and its embed.
+    // Carolyn: "Settings are ALWAYS under the settings tab" — it began life as a panel on the
+    // Inventory tab and moved here. Per-building listing (photos, show price) stays on Inventory,
+    // because that is editing a building, not configuring the feature.
+    ["online-inventory", "Online Inventory", "Your public page of lot buildings: switch it on, prices, deposit, tracking and the code for your website", null],
     // COMPANY is a HUB, not a page (Carolyn 2026-09-11). Branding and Team used to be rail
     // items of their own; they are top tabs inside Company now, along with Locations, Crews
     // and Drivers — see ssCompanyTabs below, which is the list that renders in there. So this
@@ -1394,14 +1825,14 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // SETTINGS_TAB_AREA.company, which is settings_branding. Team used to be its own rail
     // item on settings_team; folding it in here under the branding area alone would have left
     // someone granted only Team with no way to reach it: the rail would show them My Profile and
-    // nothing else, while /portal/settings/team still rendered perfectly for anyone who
+    // nothing else, while /settings/team still rendered perfectly for anyone who
     // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
     // settings_crm joined on 2026-09-17 with the Tax tab, for the same reason: someone granted
-    // CRM Connection but neither Branding nor Team would otherwise have a Tax tab they may read
+    // GHL Connection but neither Branding nor Team would otherwise have a Tax tab they may read
     // and no rail item that leads to it.
     ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team")
       || ssCanRead(access, "settings_crm"))
-      ? [["company", "Company", "Your business details, branding, team, locations, crews, drivers and tax codes", null]] : []),
+      ? [["company", "Company", "Your business details, branding, team, locations, crews, drivers and sales tax", null]] : []),
     // BILLING is a hub too (Carolyn 2026-09-11: "create a new nav called billing then I want
     // to move the subscriptions and the wallet in there"). Subscription and Wallet are its
     // tabs — see ssBillingTabs.
@@ -1417,24 +1848,47 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // it towards since she said the catalog four "aren't grouped ... they have their own nav
     // on the side". Only My Profile still carries a heading, because it is the one item on this
     // rail that configures the PERSON rather than the business.
-    ["connection", "CRM Connection", "CRM credentials and pipeline mapping", null],
+    // CUSTOMER HUB is a HUB, not a page (Carolyn 2026-10-22: "a new tab in settings called
+    // Customer Hub for all the CRM Items in SS"). It holds the customer-facing config that is
+    // OURS — the built-in pipelines and card statuses, and how a customer gets their login
+    // code — as against GHL Connection below, which is somebody else's CRM. See
+    // ssCustomerHubTabs for the list that renders inside it.
+    //
+    // ⚠️ THE SLUG STAYS `pipelines`. Only the LABEL is new, which is the shape every hub here
+    // has: the rail id IS the first tab's slug (Billing → "Subscription", Colors → "Paint"), so
+    // the rail item is a real address and /settings/pipelines — the link people hold, and the
+    // path contactsHub_test.ts pins — opens exactly the page it always did. A rail id that is
+    // NOT a slug was tried first and the preflight route-coverage gate refused it, rightly: an
+    // unknown sub clamps to Structures rather than erroring, so such an id is a page that
+    // silently goes somewhere else.
+    //
+    // ⚠️ GATED AS A HUB, like Company, and NOT by SETTINGS_TAB_AREA.pipelines alone. Since
+    // Meetings moved in (2026-10-22) this hub spans TWO areas: settings_crm for its first
+    // three tabs and `meetings` for the fourth. A sales rep or dealer holds no settings_*
+    // area but does hold `meetings`, and gating the rail on settings_crm alone would leave
+    // them with no way to reach their own hours or their own booking link — while
+    // /settings/meetings still rendered perfectly for anyone who happened to have the link.
+    // The exemption in the filter at the bottom of this function is the other half of this;
+    // without it the spread adds the entry and the filter takes it straight back out.
+    // Since 2026-10-23 it also holds Email Settings, Text Messaging and Phone (Carolyn: "These
+    // need to move to customer hub... maintain the current urls"), so it admits their three areas
+    // too — settings_email, settings_billing (texting's area) and `phone` (only where calling is
+    // offered). This condition and ssCustomerHubTabs' filter must admit exactly the same people,
+    // or the rail offers a hub whose tab list comes out empty.
+    ...((isAdmin || !access || ssCanRead(access, "settings_crm") || ssCanRead(access, "meetings")
+      || ssCanRead(access, "settings_email") || ssCanRead(access, "settings_billing")
+      || (phoneOffered && ssCanRead(access, "phone")))
+      ? [["pipelines", "Customer Hub", "Your pipelines, forms, customer emails and texts, your phone, and your meetings", null]] : []),
+    ["connection", "GHL Connection", "GHL credentials and pipeline mapping", null],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
-    // "Email Settings", not "Email Sending" (Carolyn 2026-09-11). The slug stays `email` —
-    // it was already the generic word, so no link moved.
-    ["email", "Email Settings", "Send estimates and invoices from your own email domain", null],
-    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
-    // MY SYNERGY PHONE (2026-09-29) — CALLING ONLY, directly under the texting tab it shares a number
-    // with. The number is bought and registered on Text Messaging; this tab is the owner's
-    // one-time setup of who answers it, plus the install links. `phoneOffered` is
-    // ssPhoneOffered()'s answer for the tenant on screen — see there for why a builder on
-    // production does not see it until calling is switched on for them. The area filter at the
-    // bottom (SETTINGS_TAB_AREA.phone) still applies on top.
-    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps", null]] : []),
+    // EMAIL SETTINGS, TEXT MESSAGING and PHONE were rail items here until 2026-10-23; they are tabs
+    // inside Customer Hub now (ssCustomerHubTabs). Their slugs — `email`, `sms`, `phone` — did NOT
+    // change, so /settings/email, /settings/sms and /settings/phone open exactly what they always did.
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
     // grace banners, the CRM and scheduling upsells, QuickBooksLocked, the Orders page, and
-    // RealTimePricing's onSeeBilling — plus /portal/settings/billing is a link people hold
+    // RealTimePricing's onSeeBilling — plus /settings/billing is a link people hold
     // and SETTINGS_TAB_AREA keys on it. Renaming the id would break every one of them
     // silently, since an unknown slug clamps to the first tab rather than erroring.
     // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
@@ -1463,6 +1917,16 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // settings_team holder had the entry added by the spread and taken straight back out —
     // rail showed My Profile alone, and Team was unreachable for the one person it was granted to.
     if (id === "company") return true;
+    // CUSTOMER HUB gated itself above, over two areas (settings_crm and `meetings`). It must
+    // be exempt here for exactly the reason `company` is: SETTINGS_TAB_AREA.pipelines is
+    // settings_crm, so a rep who holds only `meetings` would have the entry added by the
+    // spread and removed again here — rail shows Phone and My Profile, and the page where they
+    // set their own hours is unreachable.
+    if (id === "pipelines") return true;
+    // ONLINE INVENTORY needs inventory EDIT, not view. A sales rep reads the lot (inventory:view)
+    // but does not configure the public page, and Settings for a rep is Phone and My Profile only
+    // (tests/phone/ringHours_test.ts pins that).
+    if (id === "online-inventory") return access.inventory === "edit";
     const area = SETTINGS_TAB_AREA[id];
     return area ? ssCanRead(access, area) : true;
   });
@@ -1474,8 +1938,8 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
 // navigation inside company"). Her order, verbatim: Business Details, Branding, Team,
 // Locations, Crews, Drivers.
 //
-// ⚠️ THESE ARE REAL SETTINGS SLUGS, not a nested route. /portal/settings/branding and
-// /portal/settings/team are links people hold — the Client Setup checklist points at them —
+// ⚠️ THESE ARE REAL SETTINGS SLUGS, not a nested route. /settings/branding and
+// /settings/team are links people hold — the Client Setup checklist points at them —
 // and ssParsePath only reads two path segments anyway, so nesting them would have meant both
 // a router change and a pile of dead bookmarks. They stay flat: the RAIL draws one item
 // (Company) and highlights it for any of these, while this list draws the tabs inside.
@@ -1504,8 +1968,14 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     // TAX (Ahsan 2026-09-17, from the owner's 2026-09-14 ask that every product, installation
     // and delivery carry an Avalara tax code the builder picks). Last, so the order Carolyn
     // gave for the tabs above is untouched. Gated on settings_crm through SETTINGS_TAB_AREA
-    // like every tab here; the hub gate in ssSettingsTabs admits that area for it.
-    ["tax", "Tax", "Which Avalara tax code each building, option and service falls under"],
+    // like every tab here; the hub gate in ssSettingsTabs admits that area for it. Since
+    // 2026-10-09 it is also where the company sales tax rate is set, and the codes are optional
+    // (the "Use tax codes" switch, migration 290).
+    ["tax", "Tax", "Your sales tax rate, and optional tax codes for each building, option and service"],
+    // PAYMENTS (workstream 1 phase 4): read-only. The card account is set up and managed by the
+    // Structure Studio team, so this tab shows its status and how to ask for a change, and saves
+    // nothing. Last, so every tab above keeps its place. Its area is SETTINGS_TAB_AREA.payments.
+    ["payments", "Payments", "Taking card and bank payments, set up and managed for you by the Structure Studio team"],
   ].filter(([id]) => {
     if (isAdmin || !access) return true;
     const area = SETTINGS_TAB_AREA[id];
@@ -1517,7 +1987,7 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
 // Carolyn 2026-09-11: "in colors I want to split out the paint, shingles and metal colors to
 // their own tab/nav". Same shape as Company — one rail item, a top nav inside.
 //
-// `colors` stays the first tab so /portal/settings/colors, the link that exists today, lands
+// `colors` stays the first tab so /settings/colors, the link that exists today, lands
 // on Paint, which is the section it always opened on. No per-tab gating: all three are the
 // same catalog under settings_options, which is the area that already guarded the rail item.
 //
@@ -1536,7 +2006,7 @@ function ssColorTabs() {
 // charge LEDGER ("we are prepping for logging every charge for the wallet"), which is a table
 // that will fill a screen on its own, and it has nothing to do with which plans are on.
 //
-// `billing` stays the first tab, so /portal/settings/billing — the slug roughly eight CTAs
+// `billing` stays the first tab, so /settings/billing — the slug roughly eight CTAs
 // deep-link to, and the one the billing gate sends people at — still lands on Subscription,
 // exactly the page it has always opened. The wallet card moved off that page, but it was
 // never what those links were pointing at.
@@ -1545,6 +2015,74 @@ function ssBillingTabs() {
     ["billing", "Subscription", "Your plan, payment method, and invoices"],
     ["wallet", "Wallet", "Prepaid credit for usage — top-ups, auto top-up, and what has been charged"],
   ];
+}
+
+// ── Inside Customer Hub ──────────────────────────────────────────────────────────────────
+// Carolyn 2026-10-22: "I want a new tab in settings called Customer Hub for all the CRM Items
+// in SS." The split she chose is by WHOSE CRM it is: this hub is the one we build (pipelines,
+// card statuses, the customer's login code), and GHL Connection stays its own rail item for
+// the credentials and stage mapping of somebody else's.
+//
+// ⚠️ `pipelines` STAYS THE FIRST TAB and keeps its slug — and it is the HUB's own rail id too,
+// the shape every hub here has. It is the address the rail pointed at until today, it is in
+// bookmarks, and tests/.../contactsHub_test.ts pins /settings/pipelines as a routable path — so
+// the hub opens on exactly the page that slug always opened.
+//
+// Both tabs are settings_crm and both were already behind it, so this is a relocation in the
+// UI and not a change of access — the same thing Company's absorption of Team was. No per-tab
+// filter is needed for that reason, but the hub gate in ssSettingsTabs still decides whether
+// the rail item appears at all.
+function ssCustomerHubTabs({ isAdmin = false, access = null, phoneOffered = false } = {}) {
+  return [
+    ["pipelines", "Pipelines & Statuses", "Card statuses, when each is set automatically, and each pipeline's stages"],
+    // Lifted off the connection page, where it sat under the GHL credentials and read as part
+    // of them. It never was: "Every tenant, CRM or not: the login is ours either way" (the
+    // card's own note in 03-catalog.jsx), which is precisely why it belongs here.
+    ["customer-login", "Customer login", "How customers get the code that logs them in to accept estimates and pay invoices"],
+    // Website lead forms and the emails they send (migration 325, Carolyn 2026-10-22: "build out
+    // forms for websites so we can capture leads, and build out email templates ... This should go
+    // into the customer hub settings tab"). settings_crm like the two above, and part of the built-in
+    // CRM (CustomerHubShell shows the teaser without it; the server refuses regardless).
+    ["forms", "Forms", "Lead forms for your website: design, publish, and see who filled them in"],
+    ["email-templates", "Email Templates", "Designed emails your forms send: the lead's auto-reply and your team's alert"],
+    // EMAIL SETTINGS, TEXT MESSAGING, PHONE — rail items until 2026-10-23 (Carolyn: "These need to
+    // move to customer hub... maintain the current urls"). Same slugs, same areas, same pages: the
+    // move changes where they are listed and nothing about who may open them. "Email Settings",
+    // not "Email Sending" (Carolyn 2026-09-11). Phone is offered only where ssPhoneOffered says
+    // (see there for why a builder on production may not see it yet).
+    ["email", "Email Settings", "Send estimates and invoices from your own email domain"],
+    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business"],
+    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps"]] : []),
+    // MEETINGS moved in here on 2026-10-22 at Carolyn's request ("I also want the meetings tab
+    // in Customer hub"). It was a rail item of its own for a few hours.
+    //
+    // ⚠️ IT IS THE ONE TAB IN THIS HUB THAT IS NOT settings_crm — it keys on the `meetings`
+    // area (SETTINGS_TAB_AREA.meetings). Two consequences, and both are load-bearing:
+    //   * the RAIL entry for this hub has to admit `meetings` as well, or a sales rep — who
+    //     holds no settings_* area at all — loses the only page where they set their own hours
+    //     and find their own booking link. That is the trap the Company hub's comment records
+    //     ("folding it in here under the branding area alone would have left someone granted
+    //     only Team with no way to reach it"), one hub along.
+    //   * for such a rep this hub shows exactly ONE tab, labelled "Customer Hub". That reads a
+    //     little oddly for them and is the accepted cost of the grouping owners asked for.
+    ["meetings", "Meetings", "The meeting types your team chooses from, and the booking pages. Your own link and hours are in My Profile"],
+    // FIELDS (migration 330, Carolyn 2026-10-22): "We need to show all the current fields for
+    // contacts and designs/deals in the customer hub tab under its own tab called fields. We need
+    // to allow to add as many custom fields as desired." A register first and an editor second —
+    // it lists what a contact and a design/deal already hold, which nothing in the product has
+    // ever shown in one place, and lets a builder add their own beside them. settings_crm like
+    // every tab here, and behind the built-in CRM (CustomerHubShell shows the teaser without it).
+    ["fields", "Fields", "Every field on a contact and on a design/deal, and your own custom fields"],
+  ]
+  // PER-TAB AREAS (2026-10-23). The hub spans five areas now — settings_crm, meetings,
+  // settings_email, settings_billing and phone — so each tab appears only to someone who can read
+  // its own, the Company hub's rule. A sales rep sees Phone and Meetings here and nothing that is
+  // the business's configuration; an owner, an admin or a null map (an operator in view-as) sees all.
+  .filter(([id]) => {
+    if (isAdmin || !access) return true;
+    const area = SETTINGS_TAB_AREA[id];
+    return area ? ssCanRead(access, area) : true;
+  });
 }
 
 // ── Inside Options ───────────────────────────────────────────────────────────────────────
@@ -1576,6 +2114,8 @@ function ssOptionTabs() {
     // the plan — it is what the walls are made of.
     ["cladding", "Cladding", "Which sidings you offer on each style, and how each is priced", "Exterior"],
     ["interior", "Interior items", "Lofts, workbenches, shelving — anything placed inside", "Interior"],
+    // Interior walls v2 (313): framing, price, coverings, and what may go in or on a wall.
+    ["interior-walls", "Interior walls", "Framing, price, coverings, and what can go in or on a wall", "Interior"],
     ["electrical", "Electrical", "Outlets, switches, lights and panels, and what each adds", "Interior"],
     ["insulation", "Insulation", "Insulation options and how they are priced", "Interior"],
     // SERVICES (Carolyn 2026-09-14, "because we are incorporating tax codes"): things the
@@ -1587,15 +2127,20 @@ function ssOptionTabs() {
 }
 
 // The settings pages that are HUBS: one rail item each, several tabs inside, every tab a
-// real /portal/settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
+// real /settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
 // light nothing in the rail or fall back to Structures on a valid URL.
-function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
+function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false, phoneOffered = false } = {}) {
   return {
     company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked }),
     colors: ssColorTabs(),
     billing: ssBillingTabs(),
     options: ssOptionTabs(),
+    // Keyed on the rail id, like every entry here — which for Customer Hub is `pipelines`,
+    // its first tab's slug. See ssCustomerHubTabs.
+    // phoneOffered rides in because Phone is one of its tabs (2026-10-23); both callers pass the
+    // same ssPhoneOffered answer they give ssSettingsTabs, so the rail and the hub agree.
+    pipelines: ssCustomerHubTabs({ isAdmin, access, phoneOffered }),
   };
 }
 
@@ -1619,8 +2164,8 @@ const SS_SETTINGS_CONTEXT = ["settings", "accounts", "admin"];
 // that split: bail out for a middle click, any modifier, or an already-handled event, and the
 // anchor behaves like the plain link it is.
 //
-// ⚠️ The href only opens correctly where `_redirects` is in force — `/portal/* /portal.html
-// 200` is what makes /portal/settings/colors a real address. A plain static server ignores
+// ⚠️ The href only opens correctly where `_redirects` is in force — `/settings/* /portal.html
+// 200` is what makes /settings/colors a real address. A plain static server ignores
 // that file, so a middle click 404s LOCALLY while left click still works. Beta and production
 // are the places to test this.
 function ssNavClick(fn) {
@@ -1629,6 +2174,39 @@ function ssNavClick(fn) {
     e.preventDefault();
     fn();
   };
+}
+
+// ── "Open design" is a REAL link too (2026-10-21) ────────────────────────────────────────
+// Carolyn 2026-10-20 opens things with the wheel ("I push the middle wheel so it opens up in a new
+// tab"). "Open design" was a button holding the design in memory, so a middle click did nothing,
+// and a new tab or a reload of /designer opened an EMPTY designer ("this link does not work", "there
+// is nothing in there"). Now the Open buttons in Orders and in the Contacts hub (the design list,
+// the contact list's Open latest, a record's Open in designer) are anchors to this address, and
+// their left click still runs the in-app open (ssNavClick). The shell reads ?open= on a cold load,
+// once the tenant and the access clamp have answered (Dashboard, beside openInDesigner), opens the
+// design, and takes ?open= back out of the address bar. ?view= rides along for an operator viewing
+// a builder, as on every other link; nothing else of the current query does.
+function ssDesignHref(code, version = null) {
+  const q = new URLSearchParams();
+  try {
+    const v = new URLSearchParams(window.location.search || "").get("view");
+    if (v) q.set("view", v);
+  } catch (_e) { /* no query */ }
+  q.set("open", String(code || ""));
+  if (version != null && version !== "") q.set("version", String(version));
+  return ssPageBase("designer", null) + "?" + q.toString();
+}
+// The ?open= a cold load arrived with, read once: { code, version } or null. A code is the
+// design's short code, so anything that is not one (a hand-typed address, a mangled paste) is
+// ignored rather than sent to the designer's loader.
+function ssDesignParam() {
+  try {
+    const q = new URLSearchParams(window.location.search || "");
+    const code = String(q.get("open") || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,39}$/.test(code)) return null;
+    const v = String(q.get("version") || "").trim();
+    return { code, version: /^\d{1,6}$/.test(v) ? Number(v) : null };
+  } catch (_e) { return null; }
 }
 
 // ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────
@@ -1661,16 +2239,18 @@ const ROW_SCOPE_AREA = {
   orders: "contacts",      // orders_designs is filtered server-side by the same rule
   inventory: "contacts",   // the ESTIMATES on a lot building; the buildings themselves are not
   conversations: "contacts", // crm_inbox narrows every thread through crm_visible_contact_ids
+  pipelines: "contacts",     // crm_deals_list keeps only deals whose contact this person may see
 };
 
 // Is this person limited to their own rows in this area? The mirror of ownContactsOnly() in
-// _shared/access.ts, and the only place the literal 'own' is compared for a row scope here.
+// _shared/access.ts, and the only place the own-scope literals are compared for a row scope here:
+// 'own' (own customers, can edit) and, since migration 286, 'own_view' (own customers, view only).
 //
 // Owners can never be narrowed and no check for that is needed at this altitude either: the
 // server resolves an owner to 'edit' on every area before consulting their stored map, so
 // `access.contacts` is never 'own' in a map the portal was handed.
 function ssOwnRowsOnly(access, area) {
-  return !!access && access[area] === "own";
+  return !!access && (access[area] === "own" || access[area] === "own_view");
 }
 
 // Is the list on this tab currently showing only the caller's own rows?
@@ -1685,35 +2265,52 @@ function ssRowScoped(access, tab) {
 // It names the RULE ("assigned to you or following") rather than a count, deliberately: a
 // count would have to come from a second, unscoped read, which is the leak this whole
 // feature exists to close.
+//
+// Own · View (migration 286) adds what they may do with them, because it is the first thing a
+// rep on it will wonder about: every write on a customer record is greyed out for them.
 function ssRowScopeNote(access, tab) {
   if (!ssRowScoped(access, tab)) return null;
   return "You're seeing the customers assigned to you or that you're following. "
+    + (access[ROW_SCOPE_AREA[tab]] === "own_view" ? "You can view their details but not change them. " : "")
     + "Ask an owner or admin if you need to see everyone's.";
 }
 function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
   if (tab === "settings") return SETTINGS_AREAS.some((a) => ssCanRead(access, a));
   const area = TAB_AREA[tab];
-  // An ARRAY means "any of these is enough". No entry uses one since the 08-26 split undid
-  // the merged Contacts & Designs tab, but the branch stays: it mirrors the server's
-  // `{ any: [...] }` gate shape, and the next page that needs it should not have to
-  // rediscover that the two must agree.
+  // An ARRAY means "any of these is enough". The Contacts hub uses it (2026-10-12): contacts OR
+  // designs opens it. It mirrors the server's `{ any: [...] }` gate shape (crm_record's), and the
+  // two must agree.
   if (Array.isArray(area)) return area.some((a) => ssCanRead(access, a));
   return area ? ssCanRead(access, area) : NONADMIN_TABS.includes(tab);
+}
+
+// May this person open one VIEW of the Contacts hub? The tab itself is TAB_AREA.contacts (either
+// area); inside it each view needs its own: "people" (the contact list, and with the CRM every
+// pipeline board, since a deal is seen by whoever sees its contact) needs contacts, "designs" (the
+// Design list) needs designs. The same answer ssClampTab gave for the old Contacts and Pipeline
+// pages, which these views were, so nobody gains or loses a list by the merge: owners, admins and
+// operators always (canAdmin), and the pre-migration-100 shape (no map) saw both.
+const SS_HUB_VIEW_AREA = { people: "contacts", designs: "designs" };
+function ssHubCan(view, canAdmin, access) {
+  const area = SS_HUB_VIEW_AREA[view];
+  if (!area) return false;
+  return !!canAdmin || !access || ssCanRead(access, area);
 }
 
 // Where the clamp LANDS someone must itself pass ssCanSeeTab, or the fallback recreates
 // the exact leak the clamp exists to stop: a hardcoded "designs" put every migration-100
 // driver (designs absent from their map = none) on the full customer-designs list at each
-// bare /portal login — a page their own nav hides (audit 2026-08-20). Designs first, so
-// the pre-migration-100 shape lands exactly where it always did; then the first page the
+// bare /login — a page their own nav hides (audit 2026-08-20). The Contacts hub first
+// (it was Pipeline, the designs list, until 2026-10-12), so the pre-migration-100 shape lands
+// where it always did; then the first page the
 // person actually holds an area for (TAB_AREA[x] required — the no-data teaser tabs pass
 // ssCanSeeTab for everyone and would otherwise win over a page they were granted); then
 // "support": product news and one's own submissions, no other tenant data, never refused
 // for any access map — which is why it is the last-resort landing page below.
 function ssFallbackTab(access) {
-  if (ssCanSeeTab("designs", access)) return "designs";
-  const t = NONADMIN_TABS.find((x) => x !== "designs" && TAB_AREA[x] && ssCanSeeTab(x, access));
+  if (ssCanSeeTab("contacts", access)) return "contacts";
+  const t = NONADMIN_TABS.find((x) => x !== "contacts" && TAB_AREA[x] && ssCanSeeTab(x, access));
   return t || "support";
 }
 
@@ -1735,7 +2332,7 @@ function ssFallbackTab(access) {
 // `advancedOn` (2026-09-28) says whether the Advanced page may resolve at all — the shell passes
 // ssAdvancedOn(...) for the tenant on screen. It defaults to FALSE for the same reason as
 // canProjects' default: a call site that forgets it refuses the page rather than offering it.
-// `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /portal/settings/myprofile.
+// `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /settings/myprofile.
 // The shell's two route clamps pass it; every other caller asks about a non-settings tab and
 // leaves it null, which changes nothing for them.
 function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false, sub = null) {
@@ -1743,7 +2340,7 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
-  // role branches on purpose: an admin bookmark to /portal/reports on production should
+  // role branches on purpose: an admin bookmark to /reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.
   if (SS_SOON_TABS.includes(tab) && !ssIsBetaHost()) return ssFallbackTab(access);
   // Accounts is the SWITCHER, and a support operator needs it — it is how they reach the
@@ -1959,9 +2556,18 @@ function LoginView({ onRecoverySent, notice }) {
     // Always the canonical production portal, never window.location.origin. Supabase
     // honours only allow-listed redirects and silently substitutes Site URL otherwise,
     // so a reset started on beta (or localhost) used to produce a link that bounced to
-    // the apex root — see AUTH_PORTAL_URL in supabase/functions/admin-catalog/index.ts.
-    // Safe because beta and production share one Supabase project: the password set
-    // here works on beta immediately.
+    // the apex root — see AUTH_PORTAL_URL in supabase/functions/_shared/authPortalUrl.ts, which
+    // names the same address. Safe because beta and production share one Supabase project:
+    // the password set here works on beta immediately.
+    //
+    // STILL /portal, NOT /login, ON PURPOSE (2026-10-13). This names the PRODUCTION host, so it
+    // has to work on whatever production serves. Until main is promoted onto the root-address
+    // _redirects, production has no /login rule (that address is its 404 page, and the reset
+    // token is lost there). /portal works on both: the old host serves the app at it, the new
+    // one 301s it to /login and the browser keeps the #access_token fragment (a ?code= rides
+    // the 301's query). Flip it to /login together with AUTH_PORTAL_URL only once production
+    // serves these rules AND /login is on the Supabase Auth redirect allow-list
+    // (CLAUDE.md, "App addresses"; scripts/redirects.test.mjs checks it works on both hosts).
     const { error: err } = await sb.auth.resetPasswordForEmail(email.trim(), {
       redirectTo: "https://app.structurestudiosuite.com/portal",
     });
@@ -2162,6 +2768,29 @@ function ssView3dOn(entitlement) {
 const SS_ENTITLEMENT_CHANGED = "ss-entitlement-changed";
 function ssEntitlementChanged() {
   try { window.dispatchEvent(new Event(SS_ENTITLEMENT_CHANGED)); } catch (_e) { /* the next reload catches up */ }
+}
+
+// ─── The Pipeline view this person SAVED (My Profile), or null when they never picked one ───
+// Anything else stored under the key reads as "never picked", so the default fills in for it.
+// Takes anything carrying `prefs` (the shell's tenant, or { prefs }); "none" is the shell's
+// no-mapping sentinel. Superseded by contactsView below (2026-10-12) and read only through it.
+function ssSavedDesignsView(holder) {
+  const v = holder && holder !== "none" && holder.prefs ? holder.prefs.designsView : null;
+  return v === "pipeline" || v === "list" ? v : null;
+}
+
+// ─── Which view the Contacts tab opens on for this person (My Profile, 2026-10-12) ───────────
+// Carolyn on the 10-12 call: "we need them to set the default of what they want the default to
+// be." Saved as prefs.contactsView: "people" (the contact list), "designs" (the Design list) or
+// "p-<uuid>" (one pipeline). Someone who never picked one but chose the old Pipeline tab's view
+// keeps it: "list" was the Design list, "pipeline" was the board. Null = never picked, and the
+// hub's default fills in (the first pipeline with the CRM, else the Design list).
+function ssSavedHubView(holder) {
+  const p = holder && holder !== "none" && holder.prefs ? holder.prefs : null;
+  const v = p ? p.contactsView : null;
+  if (v === SS_HUB_PEOPLE || v === SS_HUB_DESIGNS || ssHubPipeId(v)) return v;
+  const old = ssSavedDesignsView(holder);
+  return old === "list" ? SS_HUB_DESIGNS : old === "pipeline" ? SS_HUB_PIPELINE : null;
 }
 
 // What an operator may tag a setup step with. Mirrors FEATURE_KEYS in
@@ -2837,8 +3466,9 @@ function ssWarmThrottled(name) {
 // What each rail destination calls when it OPENS. Designer/Advanced are absent on purpose: they
 // open on REST plus the designer bundle, and submit-estimate is minutes away.
 const SS_NAV_WARM = {
-  designs: ["sync-design-status"],                      // REST list paints, then the status sync
-  contacts: ["sync-design-status"],
+  // The hub opens on a pipeline board for most CRM accounts (crm_pipelines_list, crm_deals_list),
+  // and its Design list paints from REST and then runs the status sync.
+  contacts: ["portal-settings", "sync-design-status"],
   conversations: ["portal-settings"],                   // crm_inbox
   inventory: ["portal-settings", "sync-design-status"], // list_inventory, then the sync
   orders: ["portal-settings", "portal-schedule"],       // orders_designs; schedule_links
@@ -2856,9 +3486,9 @@ const SS_NAV_WARM = {
 // Settings rail items that open on something other than portal-settings.
 const SS_SETTINGS_WARM = { billing: ["portal-billing"], sms: ["portal-sms"] };
 function ssWarmNav(id, viewing) {
-  // View-as reads Pipeline/Contacts through operator-portal with no status sync, and Commissions
-  // renders a refusal card there.
-  const fns = viewing && (id === "designs" || id === "contacts") ? ["operator-portal"]
+  // View-as reads the hub's lists through operator-portal with no status sync (its pipelines go
+  // through portal-settings), and Commissions renders a refusal card there.
+  const fns = viewing && id === "contacts" ? ["operator-portal", "portal-settings"]
     : viewing && id === "commissions" ? []
     : (SS_NAV_WARM[id] || []);
   fns.forEach(ssWarmThrottled);
@@ -3078,19 +3708,19 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
         {quoteNo ? (
           invoiced ? (
             <div style={{ marginTop: 8, color: "#92400E" }}>
-              Quote {quoteNo} and its PDF are <strong>kept</strong>, because an invoice was made from it.
+              Estimate {quoteNo} and its PDF are <strong>kept</strong>, because an invoice was made from it.
               The invoice stays too.
             </div>
           ) : (
             <div style={{ marginTop: 8, color: "#64748B" }}>
-              Quote {quoteNo} and its PDF are <strong>also deleted</strong>. The link in the customer's
-              quote email will stop working.
+              Estimate {quoteNo} and its PDF are <strong>also deleted</strong>. The link in the customer's
+              estimate email will stop working.
             </div>
           )
         ) : null}
         {!design.ghl_estimate_number && !quoteNo ? (
           <div style={{ marginTop: 8, color: "#64748B" }}>
-            No quote or estimate has been made for this design yet.
+            No estimate has been made for this design yet.
           </div>
         ) : null}
       </div>
@@ -3121,6 +3751,13 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
 // Where a quote's building came from, shown behind the building name (Carolyn, 2026-08-02).
 // PER VERSION, not per design: one customer can be quoted a lot building (v1 = Inventory)
 // and then a fresh custom build (v2 = New) on the same quote.
+// Does this colour appear in a building serial number (316)? Siding, trim and roof colours do;
+// a door-only colour never does. The same predicate as portal-settings' save_colors and
+// get_serial_setup, so the screen and the server agree on which codes are required.
+function ssColorNeedsCode(c) {
+  return !!(c && (c.siding || c.trim || c.shingle || c.metal));
+}
+
 function SourceChip({ unitId, serial, lifecycle = null }) {
   const inv = Boolean(unitId);
   // "already on the lot" became a lie the day a building could be quoted before it was built,
@@ -3129,7 +3766,7 @@ function SourceChip({ unitId, serial, lifecycle = null }) {
   const stageWord = lifecycle && INV_STAGE_LONG[lifecycle] ? INV_STAGE_LONG[lifecycle] : null;
   return (
     <span title={inv
-      ? (stageWord ? `Quoted from building #${serial != null ? serial : "?"} — ${stageWord}` : "Quoted from one of your inventory buildings")
+      ? (stageWord ? `Estimated from building #${serial != null ? serial : "?"} — ${stageWord}` : "Estimated from one of your inventory buildings")
       : "Designed for this customer"}
       style={{ marginLeft: 7, background: inv ? "#DBEAFF" : "#F1F5F9", color: inv ? "#3D3672" : "#475569",
         borderRadius: 12, fontSize: 10.5, fontWeight: 800, padding: "2px 8px", whiteSpace: "nowrap" }}>

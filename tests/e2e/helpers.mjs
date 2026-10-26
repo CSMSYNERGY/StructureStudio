@@ -17,7 +17,7 @@ export const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 //     (/__e2e/rest/v1/rpc/log_error). The product sends these with keepalive, and a keepalive
 //     request from a document that is going away cannot be held by page.route or context.route
 //     when it is cross-origin: context.route lets it straight through to the live project (see
-//     customer-login.spec's save_design redirect). Same-origin, a miss can only reach the static
+//     keepUnloadSaveLocal below). Same-origin, a miss can only reach the static
 //     host, never the database. Body and headers are the product's own.
 //  2. context.route answers it 204 locally. A page.route that matches first still wins (page routes
 //     run before context routes), so customer-login's stubBackend keeps recording and answering its
@@ -83,6 +83,46 @@ export async function guardLogError(context) {
   return guard;
 }
 
+// ── THE UNLOAD DRAFT SAVE NEVER LEAVES THE SUITE ─────────────────────────────────────────────
+// WHY. Once the contact gate is complete (a name and a 10-digit phone), the designer autosaves a
+// draft, and its last-chance save on pagehide or a hidden tab (saveDraftSilently({ unload: true }))
+// is a keepalive fetch straight to <project>/rest/v1/rpc/save_design. NEITHER page.route NOR
+// context.route can hold a cross-origin request from a document that is going away (proven
+// 2026-09-15: page.route aborted it, context.route let it through to the live project), so a test
+// that stubs save_design on the Supabase host still writes a live draft as its page closes.
+//
+// keepUnloadSaveLocal(page) sends that one request to the page's OWN origin (UNLOAD_SAVE_PATH)
+// instead: page.route does catch a same-origin unload keepalive, and a miss can only reach the
+// static host, never the database. Only the destination changes; the body, headers and timing are
+// the product's own. It answers the request itself and returns the bodies it answered.
+//
+// A spec whose own rpc stub matches the path (a pattern with no host, registered AFTER this) answers
+// first and records the call in its own log: customer-login's stubBackend works that way.
+// Once per page: a second call returns the first call's log and installs nothing.
+export const UNLOAD_SAVE_PATH = "/__e2e/rest/v1/rpc/save_design";
+const unloadSaves = new WeakMap();
+export async function keepUnloadSaveLocal(page) {
+  if (unloadSaves.has(page)) return unloadSaves.get(page);
+  const saves = [];
+  unloadSaves.set(page, saves);
+  await page.addInitScript((path) => {
+    const realFetch = window.fetch;
+    window.fetch = function (u, opts) {
+      const href = typeof u === "string" ? u : (u && typeof u.url === "string" ? u.url : String(u));
+      if (opts && opts.keepalive && /\/rest\/v1\/rpc\/save_design(?:[?#]|$)/.test(href)) return realFetch.call(this, path, opts);
+      return realFetch.apply(this, arguments);
+    };
+  }, UNLOAD_SAVE_PATH);
+  await page.route((url) => url.pathname === UNLOAD_SAVE_PATH, (route) => {
+    let body = null;
+    try { body = route.request().postDataJSON(); } catch (_e) { body = route.request().postData(); }
+    saves.push(body);
+    return route.fulfill({ status: 200, contentType: "application/json", body: "null" })
+      .catch(() => { /* the page closed while the call was in flight */ });
+  });
+  return saves;
+}
+
 export const test = base.extend({
   context: async ({ context }, use, testInfo) => {
     const guard = await guardLogError(context);
@@ -99,14 +139,18 @@ export async function anonKey(page) {
   return m[0];
 }
 
-export const CLIENT = process.env.PW_CLIENT || "pw-demo-barns";
+// The public designer tenant the suite drives. support-demo since 2026-10-16: the old default,
+// pw-demo-barns, was deleted on 2026-09-28, so every run without PW_CLIENT booted a designer for
+// a tenant that no longer exists. support-demo is an internal, non-billable test tenant. Which of
+// its catalog entries the unrouted designer tests need is listed at the top of designer.spec.mjs.
+export const CLIENT = process.env.PW_CLIENT || "support-demo";
 
 // Sign the portal in without a password: a one-time magic-link hashed_token minted outside
 // the suite. verifyOtp writes the same sb-<ref>-auth-token localStorage key the portal reads.
 export async function loginWithMagicToken(page) {
   const token = process.env.PW_MAGIC_TOKEN;
   if (!token) throw new Error("PW_MAGIC_TOKEN is not set (mint one with the Auth admin generate_link API for a test owner)");
-  await page.goto("/portal");
+  await page.goto("/login");
   await page.waitForFunction(() => window.supabase && window.__ssAppBooted === true);
   const key = await anonKey(page);
   const result = await page.evaluate(async ({ url, key, token }) => {

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Contact us</title>
+<link rel="icon" type="image/png" href="/assets/favicon.png"/>
+<style>
+/* A builder's website lead form (migration 325, Settings → Customer Hub → Forms), at
+   /form?client=<slug>&id=<form uuid>[&embed=1]. Plain JS like shop.html and my-quotes.html: no React,
+   no /vendor/ scripts, so it loads fast on a phone and inside a builder's own site. forms-render.js
+   draws the form (the same file the portal designer uses); the lead-form edge function loads the
+   PUBLISHED form and takes the submission. */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { background: #F3F4F6; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: #111827; }
+body.embed { background: transparent; }
+.page { padding: 24px 16px 40px; }
+body.embed .page { padding: 2px; }
+.state { max-width: 520px; margin: 40px auto; text-align: center; color: #6B7280; }
+</style>
+</head>
+<body>
+<div class="page"><div id="mount"><div class="state">Loading…</div></div></div>
+<script src="/forms-render.js?v=3"></script>
+<script>
+(function () {
+  "use strict";
+  var SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+  var SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
+  var HEADERS = { "Authorization": "Bearer " + SUPABASE_ANON_KEY, "apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json" };
+  var FN = SUPABASE_URL + "/functions/v1/lead-form?forceFunctionRegion=us-east-1";
+
+  var q = new URLSearchParams(location.search);
+  var clientId = String(q.get("client") || "").trim().toLowerCase();
+  var formId = String(q.get("id") || "").trim();
+  var EMBED = q.get("embed") === "1";
+  if (EMBED) document.body.className = "embed";
+  // The page the form sits on: the host page's address when embedded (form-embed.js passes it),
+  // this page's own otherwise. Kept as evidence of WHERE a texting box was ticked.
+  var pageUrl = EMBED && /^https?:\/\//i.test(q.get("page") || "") ? q.get("page") : location.href;
+  var utm = {};
+  ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"].forEach(function (k) { var v = q.get(k); if (v) utm[k] = v.slice(0, 200); });
+  var mount = document.getElementById("mount");
+
+  function post(msg) { if (EMBED && window.parent !== window) { try { window.parent.postMessage(msg, "*"); } catch (e) {} } }
+  function emit(name, data) { post({ source: "ss-form", type: "event", event: name, data: data || {} }); }
+  // Measured off the content, never the document: inside a 900px frame the document is at least
+  // 900px tall, so a form that gets SHORTER (the thank-you after a submit) would never shrink the frame.
+  var page = document.querySelector(".page");
+  function height() { post({ source: "ss-form", type: "height", height: Math.ceil(page.getBoundingClientRect().height) }); }
+  if (EMBED && window.ResizeObserver) new ResizeObserver(height).observe(page);
+
+  function state(text) { mount.textContent = ""; var d = document.createElement("div"); d.className = "state"; d.textContent = text; mount.appendChild(d); height(); }
+  function call(body) {
+    return fetch(FN, { method: "POST", headers: HEADERS, body: JSON.stringify(body) }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { j.__status = r.status; return j; });
+    });
+  }
+
+  if (!/^[a-z0-9-]{1,64}$/.test(clientId) || !/^[0-9a-f-]{36}$/i.test(formId)) { state("This form link is incomplete."); return; }
+
+  call({ action: "load", clientId: clientId, formId: formId }).then(function (res) {
+    if (!res || !res.ok) { state("This form isn't available."); return; }
+    var f = res.form;
+    document.title = f.name + (res.branding && res.branding.companyName ? " — " + res.branding.companyName : "");
+    if (!EMBED && f.definition.style && f.definition.style.colors && /^#[0-9a-f]{3,6}$/i.test(f.definition.style.colors.pageBg || "")) document.body.style.background = f.definition.style.colors.pageBg;
+    if (f.closed) { state("This form is no longer taking submissions."); return; }
+    var node = window.SSForm.build(f.definition, {
+      consentSentence: res.consentSentence, catalog: res.catalog,
+      onStart: function () { emit("ss_form_start", { formId: formId }); call({ action: "start", clientId: clientId, formId: formId }); },
+      onSubmit: function (answers, meta) {
+        return call({ action: "submit", clientId: clientId, formId: formId, answers: answers, hp: meta.hp, elapsedMs: meta.elapsedMs, pageUrl: pageUrl, referrer: document.referrer || "", utm: utm })
+          .then(function (r) { if (r && r.ok) emit("ss_form_submit", { formId: formId, formName: f.name }); return r; });
+      },
+      onDone: function () { height(); post({ source: "ss-form", type: "scrollTop" }); }
+    });
+    mount.textContent = "";
+    mount.appendChild(node);
+    emit("ss_form_view", { formId: formId, formName: f.name });
+    height();
+  }, function () { state("We couldn't load this form. Check your connection and refresh."); });
+})();
+</script>
+</body>
+</html>

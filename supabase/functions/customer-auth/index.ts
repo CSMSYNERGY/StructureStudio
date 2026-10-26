@@ -5,11 +5,13 @@ import {
   toE164US,
   TwilioApiError,
   TwilioNotConfigured,
+  twBuilderServiceUnusable,
   twCheckVerification,
   twilioConfigured,
   twStartFailureKind,
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
+import { type BuilderVerify, builderVerifyTarget, syncVerifyService } from "../_shared/twilioVerifyService.ts";
 import {
   addIdentity,
   type CustomerIdentity,
@@ -133,9 +135,79 @@ const MSG_EMAIL_CODE_BAD = "That code didn't match or has expired — request a 
 // 503 goes into filedAtReturnSite, so withErrorLog does not add an info row per request either.
 const configFaultLogged = new Set<number>();
 
-/** Tests only: forget which config faults this isolate has already logged. */
+/** Tests only: forget which config faults (and builder-service fallbacks and syncs) this isolate
+ *  has already logged or tried. */
 export function _resetConfigFaultLoggedForTests(): void {
   configFaultLogged.clear();
+  builderFallbackLogged.clear();
+  syncTriedAt.clear();
+  syncFailLogged.clear();
+}
+
+// ── The builder's own Verify service (2026-10-21, migration 323) ──────────────────────────
+// A text code goes out on the BUILDER's Verify service, inside their own Twilio sub-account and
+// named after them, so the text reads "Your <Builder> verification code is …"
+// (_shared/twilioVerifyService.ts). A tenant with none (structure-studio, on the parent; a builder
+// whose service is not made yet; the switch off; any lookup that fails) uses the parent's
+// "Structure Studio" service, exactly as before. The code is CHECKED on the service it was started
+// on, so a builder's "expired" is asked of the parent's once more: a code started there before the
+// builder had a service of their own, or by the fallback below, still works.
+//
+// FALLBACK: when the builder's service refuses as unusable for everyone (twBuilderServiceUnusable:
+// deleted, its credentials rejected, a config code), nothing was sent, so the same request asks the
+// parent's service once instead, under the SAME three send slots (one text, charged once). One warn
+// row per isolate per tenant and code says so; a background sync then repairs what it can.
+//
+// RENAME: a send compares the builder's current name with the one their service was given, and a
+// difference starts syncVerifyService in the background (EdgeRuntime waitUntil), at most once per
+// SYNC_RETRY_MS per tenant per isolate. The customer never waits for it; the text that noticed
+// still carries the old name, the next one the new. A builder with NO service is never given one
+// from here (the console's Create / Sync and a new builder's set-up make them), so clearing
+// twilio_accounts.verify_service_sid puts that builder back on the parent's service for good: the
+// rollback for one builder, or for everyone with no WHERE.
+const builderFallbackLogged = new Set<string>();
+const syncTriedAt = new Map<string, number>();
+const syncFailLogged = new Set<string>();
+const SYNC_RETRY_MS = 10 * 60_000;
+
+/** Start a background sync of the builder's service, unless one was tried here recently. The
+ *  promise is returned for the tests; the handler never waits on it. */
+function syncInBackground(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  req: Request,
+  clientId: string,
+): Promise<void> | null {
+  const now = Date.now();
+  if (now - (syncTriedAt.get(clientId) ?? 0) < SYNC_RETRY_MS) return null;
+  if (syncTriedAt.size > 500) syncTriedAt.clear();
+  syncTriedAt.set(clientId, now);
+  const work = syncVerifyService(sb, clientId, { get: (k) => Deno.env.get(k) }).then(async (r) => {
+    // States that are not faults (another run holds the lock, no usable name, not an active sub,
+    // the switch off) file nothing.
+    if (r.ok || ["busy", "no_name", "not_active", "not_sub", "switch_off"].includes(r.reason)) return;
+    const key = `${clientId}:${r.code}`;
+    if (syncFailLogged.has(key)) return;
+    syncFailLogged.add(key);
+    await logEdgeError({
+      fn: "customer-auth", req, clientId, code: "twilio_verify_sync_failed", severity: "warn",
+      message: `The builder's own login text service could not be made or renamed (${r.reason}, ${r.code}); `
+        + "their codes use the service they had. The console's Twilio account card has \"Sync login text name\".",
+      context: { reason: r.reason, code: r.code },
+    });
+  }).catch(() => {});
+  backgroundWork.push(work);
+  try {
+    // deno-lint-ignore no-explicit-any
+    (globalThis as any).EdgeRuntime?.waitUntil?.(work);
+  } catch { /* the promise runs on either way */ }
+  return work;
+}
+
+/** Tests only: the background syncs started since the last call, to await them. */
+const backgroundWork: Promise<void>[] = [];
+export function _takeBackgroundWorkForTests(): Promise<void>[] {
+  return backgroundWork.splice(0);
 }
 
 // Responses whose app_errors row was decided where they were returned (withErrorLog's
@@ -538,24 +610,11 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       return refusal({ error: MSG_NOT_CONFIGURED });
     }
 
-    // The tenant's own name brands the code text (see twSanitizeBrand). Read here rather
-    // than at the tenant check above so a `verify_code` call never pays for it — only the
-    // send needs it. Best-effort by construction: `client_settings` is service-role-only and
-    // this function holds that role, but a missing row or a blank name simply omits the
-    // override and Twilio falls back to the service default. A customer must never fail to
-    // log in because their builder left a settings field empty.
-    // Falls back to the config row's company_name — the same pair customer-quotes and the
-    // portal shell read — so a tenant with no client_settings row still gets their own name
-    // in the code text instead of ours, matching the header their customer is looking at.
-    let brand = "";
-    {
-      const [bsRes, cfgRes] = await Promise.all([
-        sb.from("client_settings").select("business_name").eq("client_id", clientId).maybeSingle(),
-        sb.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
-      ]);
-      const name = bsRes.data?.business_name || cfgRes.data?.company_name;
-      brand = typeof name === "string" ? name : "";
-    }
+    // Which Verify service the code goes out on: the builder's own, or the parent's (see the
+    // header). Read here rather than at the tenant check above so login_options and the email route
+    // never pay for it. Never throws: a failed lookup is the parent's service.
+    const builder: BuilderVerify = await builderVerifyTarget(sb, clientId, (k) => Deno.env.get(k), { checkName: true });
+    if (builder.needsSync) syncInBackground(sb, req, clientId);
 
     // ── Claim the three send slots, THEN send ──────────────────────────────────────────
     // The cap above is a read-then-check and cannot bind on its own (see reserveSendSlot).
@@ -574,12 +633,27 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     const claimed = [phoneBucketKey, ipBucketKey, tenantBucketKey]
       .filter((_b, i) => slots[i] === "ok");
 
-    // ONE claim covers the whole send, including the transport's single unbranded resend
-    // after a 60204 brand refusal: that refusal sent nothing, so the resend is still one
-    // text and is charged once.
-    let sent: Awaited<ReturnType<typeof twStartVerification>>;
+    // ONE claim covers the whole send, including the one resend on the parent's service after the
+    // builder's refused as unusable: that refusal sent nothing, so the resend is still one text and
+    // is charged once.
     try {
-      sent = await twStartVerification(e164, brand);
+      try {
+        await twStartVerification(e164, builder.target ?? undefined);
+      } catch (e) {
+        if (!(builder.target && e instanceof TwilioApiError && twBuilderServiceUnusable(e))) throw e;
+        const key = `${clientId}:${e.code || e.status}`;
+        if (!builderFallbackLogged.has(key)) {
+          builderFallbackLogged.add(key);
+          await logEdgeError({
+            fn: "customer-auth", req, clientId, code: "twilio_verify_builder_fallback", severity: "warn",
+            message: `The builder's own Verify service refused the login text as unusable (${e.message}); `
+              + "it was sent on the main service instead, under our name.",
+            context: { twilioStatus: e.status, twilioCode: e.code },
+          });
+        }
+        syncInBackground(sb, req, clientId);
+        await twStartVerification(e164);
+      }
     } catch (e) {
       if (e instanceof TwilioNotConfigured) {
         await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
@@ -593,7 +667,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
         //   locked  60203, 60202: ALL THREE go back. Twilio sent nothing, and a cheap,
         //           guaranteed-to-fail request must not spend a real tenant's budget.
         //
-        //   config  60204 (still refused after the unbranded resend), 20404, 21608: ONLY THE
+        //   config  60204, 20404, 21608 (from the parent's service): ONLY THE
         //           PHONE SLOT is kept; the IP and tenant slots go back. The service or account
         //           refuses every text for the tenant until an operator fixes it, so something
         //           has to cap repeat taps, and the phone slot does it: three refused texts per
@@ -628,8 +702,8 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
           return json({ error: "We couldn't text that number." }, 400);
         }
         if (kind === "config") {
-          // The Verify service or account refuses EVERY send (60204 with no brand left to
-          // drop, 20404: the service SID points at nothing, or 21608: the account's messaging
+          // The Verify service or account refuses EVERY send (60204: a feature it is not enabled
+          // for, 20404: the service SID points at nothing, or 21608: the account's messaging
           // compliance profile is missing). Blaming the customer's number
           // or offering "try again" are both wrong, so this is the not-available answer; the
           // designer's login sheet turns a 503 into "keep designing" and the email route.
@@ -662,19 +736,6 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     }
 
     // Sent — and already counted in all three buckets by the claim above.
-
-    // Sent, but under the service's own name: Twilio refused the builder's name (60204,
-    // Custom Company Name not enabled) and the transport resent without it. A warning, not
-    // an error — the customer got their code. The transport reports this only on the call
-    // that discovered it, so it is one row per isolate. No phone in the row.
-    if (sent.brandRefused) {
-      await logEdgeError({
-        fn: "customer-auth", req, clientId, code: "twilio_brand_refused", severity: "warn",
-        message: "Twilio refused the builder name on the login text (60204, Custom Company Name "
-          + "not enabled on the Verify service). The code was sent under the service name instead.",
-        context: { twilioCode: 60204 },
-      });
-    }
 
     // Housekeeping (adminGate.ts's pattern, audit 2026-08-20): an XFF-rotating caller
     // writes one junk 'ip:<forged>' row per request that is never read again — without a
@@ -711,9 +772,22 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     return json({ error: "Too many attempts. Try again in about 15 minutes." }, 429);
   }
 
+  // On the service the code was started on (see the header): the builder's, then the parent's once
+  // more when the builder's says expired or refuses as unusable.
+  const builder: BuilderVerify = await builderVerifyTarget(sb, clientId, (k) => Deno.env.get(k));
   let check: { approved: boolean; status: string };
   try {
-    check = await twCheckVerification(e164, code);
+    if (!builder.target) {
+      check = await twCheckVerification(e164, code);
+    } else {
+      try {
+        check = await twCheckVerification(e164, code, builder.target);
+      } catch (e) {
+        if (!(e instanceof TwilioApiError && twBuilderServiceUnusable(e))) throw e;
+        check = { approved: false, status: "expired" };
+      }
+      if (!check.approved && check.status === "expired") check = await twCheckVerification(e164, code);
+    }
   } catch (e) {
     if (e instanceof TwilioNotConfigured) {
       return refusal({ error: MSG_NOT_CONFIGURED });

@@ -4,6 +4,7 @@
 
 import type { Ctx, Env } from "../env";
 import { WORKER_VERSION } from "../env";
+import { AI_CONSENT_COLUMNS, AI_CONSENT_MAX_VERSION, consentOut, type AiConsentRow } from "../aiConsent";
 import { requireCaller, requireLogin, type Caller } from "../context";
 import { adminClient, callerContext, must } from "../db";
 import { ApiError, ok, readJson, UUID_RE } from "../http";
@@ -11,6 +12,7 @@ import { isPremiumRate, toE164 } from "../identity";
 import { logFault } from "../log";
 import { EXTENSION_LOG_SOURCES, extensionContext, pseudonymKey, reportRefs, scrubText } from "../logPrivacy";
 import { ntsToken } from "../twilioRest";
+import { cellForwardAllowed, GUARD_WORDS, guardFor, logGuardRefusal } from "../dialGuard";
 import { onDnd } from "./voice";
 import { parseBusinessHours, RING_HOURS_WORDS, validTimeZone } from "../../../../supabase/functions/_shared/phoneHours.ts";
 
@@ -43,13 +45,19 @@ export function greetingOut(s: Partial<Pick<SettingsRow, "greeting_recording_sid
   return { set, updated_at: set ? s?.greeting_updated_at ?? null : null };
 }
 
-/** phone-core's MySettings. `dnd` is the effective value: a passed end time reads as off. */
-export function settingsOut(s: Partial<SettingsRow> | null) {
+/**
+ * phone-core's MySettings. `dnd` is the effective value: a passed end time reads as off.
+ * `hideForward`: the caller is under the dial guard (../dialGuard.ts cellForwardAllowed), so their
+ * stored "Forward to my cell" is never rung, and is never shown either: the old reviewer login is
+ * one account that reviewer after reviewer signs in to, and a number one of them (or a teammate
+ * testing on it) saved must not show to the next. /token answers the same way.
+ */
+export function settingsOut(s: Partial<SettingsRow> | null, hideForward = false) {
   const hours = s?.ring_hours;
   return {
     dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
     dnd_until: s?.dnd_until ?? null,
-    forward_to_cell: s?.forward_to_cell ?? null,
+    forward_to_cell: hideForward ? null : s?.forward_to_cell ?? null,
     dnd_cover_user_id: s?.dnd_cover_user_id ?? null,
     ring_hours: hours && typeof hours === "object" && !Array.isArray(hours) ? hours : null,
     ring_hours_tz: s?.ring_hours_tz ?? null,
@@ -112,13 +120,35 @@ export async function mySettings(env: Env, req: Request): Promise<Response> {
     await c.admin.from("phone_user_settings").select(SETTINGS_COLUMNS).eq("user_id", c.userId).maybeSingle(),
     "read phone settings",
   ) as SettingsRow | null;
-  return ok({ settings: settingsOut(row) });
+  return ok({ settings: settingsOut(row, !cellForwardAllowed(env, c.userId, c.ctx.client_id)) });
 }
 
-export async function settingsMe(env: Env, req: Request): Promise<Response> {
+export async function settingsMe(env: Env, ec: Ctx, req: Request): Promise<Response> {
   const c = await requireCaller(env, req, { needOn: false });
   const body = await readJson(req);
   const patch: Record<string, unknown> = {};
+
+  // The dial guard (../dialGuard.ts): a guarded login can't save "Forward to my cell" (clearing
+  // it is fine), checked before anything else is saved so a refused request changes nothing.
+  // A value stored before the guard is never rung (voice.ts memberNouns); an app that sends its
+  // whole settings back with that same stored value (say, to switch DND) is not saving a new
+  // one, so the value is left as it is and the rest is saved.
+  let keepStoredForward = false;
+  if (body.forward_to_cell !== undefined && body.forward_to_cell !== null && body.forward_to_cell !== "") {
+    const guard = guardFor(env, ec, c.userId, c.ctx.client_id);
+    if (guard.mode) {
+      const stored = must(
+        await c.admin.from("phone_user_settings").select("forward_to_cell").eq("user_id", c.userId).maybeSingle(),
+        "read stored forward",
+      ) as { forward_to_cell?: string | null } | null;
+      const asked = toE164(String(body.forward_to_cell));
+      if (!asked || asked !== toE164(stored?.forward_to_cell ?? null)) {
+        logGuardRefusal(ec, { ok: false, mode: guard.mode, counts: {} }, "forward_save", c.ctx.client_id);
+        throw new ApiError("bad_request", GUARD_WORDS.forwardOff);
+      }
+      keepStoredForward = true;
+    }
+  }
 
   if (body.dnd !== undefined) {
     if (typeof body.dnd !== "boolean") throw new ApiError("bad_request", "Do Not Disturb must be on or off.");
@@ -136,7 +166,7 @@ export async function settingsMe(env: Env, req: Request): Promise<Response> {
       patch.dnd_until = new Date(t).toISOString();
     }
   }
-  if (body.forward_to_cell !== undefined) {
+  if (body.forward_to_cell !== undefined && !keepStoredForward) {
     if (body.forward_to_cell === null || body.forward_to_cell === "") {
       patch.forward_to_cell = null;
     } else {
@@ -174,7 +204,40 @@ export async function settingsMe(env: Env, req: Request): Promise<Response> {
       if (cleared?.length) saved = cleared[0];
     }
   }
-  return ok({ settings: settingsOut(saved) });
+  return ok({ settings: settingsOut(saved, !cellForwardAllowed(env, c.userId, c.ctx.client_id)) });
+}
+
+// ── POST /settings/me/ai-transcripts ────────────────────────────────────────────────
+
+const AI_CHOICE_REFUSED = "Choose Allow or Don't allow.";
+const AI_VERSION_REFUSED = "That notice version isn't one we know.";
+
+/**
+ * Your answer to the apps' transcripts notice (migration 307, ../aiConsent.ts): `choice`
+ * "allowed" or "declined", and `version`, the notice you answered (the apps' AI_NOTICE_VERSION).
+ * Saved with the time, so it follows you to every device; the minute tick reads it before it
+ * sends any call you were on to Workers AI or Claude, so "declined" stops every call not yet
+ * sent. Its own route (not POST /settings/me) so /settings/me never depends on migration 307.
+ * → { ai_consent: {choice, version, at} }, the /token shape.
+ */
+export async function aiTranscriptsMe(env: Env, req: Request): Promise<Response> {
+  const c = await requireCaller(env, req, { needOn: false });
+  const body = await readJson(req);
+  const choice = body.choice;
+  if (choice !== "allowed" && choice !== "declined") throw new ApiError("bad_request", AI_CHOICE_REFUSED);
+  const version = body.version;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1 || version > AI_CONSENT_MAX_VERSION) {
+    throw new ApiError("bad_request", AI_VERSION_REFUSED);
+  }
+  const nowIso = new Date().toISOString();
+  const saved = must(
+    await c.admin.from("phone_user_settings").upsert({
+      user_id: c.userId, client_id: c.ctx.client_id, updated_at: nowIso,
+      ai_transcripts: choice, ai_transcripts_version: version, ai_transcripts_at: nowIso,
+    }, { onConflict: "user_id" }).select(AI_CONSENT_COLUMNS).single(),
+    "save transcript consent",
+  ) as AiConsentRow | null;
+  return ok({ ai_consent: consentOut(saved) });
 }
 
 // ── POST /devices ───────────────────────────────────────────────────────────────────

@@ -16,7 +16,27 @@
 //    portal-billing, portal-settings and every payment function to redeploy in lockstep on
 //    any change to either gateway (_shared bundles PER function). The agreement between
 //    the two is pinned by a test case in cardpointe.test.ts, not by this comment.
-//    Importers: _shared/invoicePayment.ts, customer-pay/index.ts, portal-payments/index.ts
+//    Importers: _shared/invoicePayment.ts, customer-pay/index.ts, portal-payments/index.ts,
+//    admin-catalog/index.ts (set_payments / verify_payments, since workstream 1 phase 3)
+//    It imports _shared/paymentSettings.ts (types), so a change there redeploys all of the above.
+//
+// ── TWO SYSTEMS, CHOSEN PER CALL (workstream 1 phase 3, migration 296) ─────────────────────
+// Every operation takes the MERCHANT it acts for, {merchid, env}, and the env picks the base URL,
+// the API credentials and the tokenizer:
+//
+//   env 'uat'   CARDPOINTE_BASE_URL / _API_USER / _API_PASS / _TOKENIZER_BASE        the secrets this
+//               deployment has always had: Fiserv's test system, where the certification runs
+//   env 'prod'  CARDPOINTE_PROD_BASE_URL / _PROD_API_USER / _PROD_API_PASS / _PROD_TOKENIZER_BASE
+//
+// A set with any of its four missing is NOT CONFIGURED, and a call for it throws GATEWAY_CONFIG
+// before anything is sent: a live builder whose production secrets are not set is refused, never
+// sent to the test system, and the reverse. Read per call, not at load, so a secret set or removed
+// takes effect on the next request and a test can drive both systems through one module.
+//
+// ⚠️ NO DEFAULT MERCHANT. The MID comes only from the tenant's own row (paymentSettings.ts
+//    cpMerchant) or from the attempt a charge was taken on (invoicePayment.ts merchantOfRecord).
+//    CARDPOINTE_MERCHID, the deployment-wide fallback that once took a MID-less builder's customers'
+//    cards into the platform's own account, is no longer read by anything.
 //
 // ── WHY THIS NEEDS MORE FAILURE CLASSES THAN nmi.ts ────────────────────────────────
 // nmi.ts splits two ways (decline = known-not-charged, transport = unknown). A JSON/HTTP
@@ -59,19 +79,53 @@
 //    transaction. Written from the documentation alone this would have been a silent
 //    wrong-field bug.
 
-const RAW_BASE = Deno.env.get("CARDPOINTE_BASE_URL") || "";
-export const CP_BASE = RAW_BASE.replace(/\/+$/, "");
-const API_USER = Deno.env.get("CARDPOINTE_API_USER") || "";
-const API_PASS = Deno.env.get("CARDPOINTE_API_PASS") || "";
-export const CP_DEFAULT_MERCHID = Deno.env.get("CARDPOINTE_MERCHID") || "";
-export const CP_TOKENIZER_BASE = Deno.env.get("CARDPOINTE_TOKENIZER_BASE") || "";
+import type { CpEnv, CpMerchant } from "./paymentSettings.ts";
+export type { CpEnv, CpMerchant };
 
-/** Whether this deployment can move money at all. All-or-nothing, the nmiConfigured rule:
- *  a tokenizer base without API credentials mints tokens nobody can charge, and credentials
- *  without a tokenizer base cannot collect an instrument in the first place. */
-export const cardpointeConfigured = Boolean(
-  CP_BASE && API_USER && API_PASS && CP_DEFAULT_MERCHID && CP_TOKENIZER_BASE,
-);
+/** The secret-name prefix of each system. UAT keeps the names the deployment has always had. */
+const CP_SECRET_PREFIX: Record<CpEnv, string> = { uat: "CARDPOINTE_", prod: "CARDPOINTE_PROD_" };
+
+type CpConfig = { base: string; user: string; pass: string; tokenizerBase: string };
+
+/** One system's settings, read now. An env that is neither 'uat' nor 'prod' reads as all-blank,
+ *  which is "not configured": nothing is ever sent for a system this module does not know. */
+function cpConfig(env: unknown): CpConfig {
+  const prefix = env === "uat" || env === "prod" ? CP_SECRET_PREFIX[env] : null;
+  const get = (k: string) => (prefix ? Deno.env.get(prefix + k) || "" : "");
+  return {
+    base: get("BASE_URL").replace(/\/+$/, ""),
+    user: get("API_USER"),
+    pass: get("API_PASS"),
+    tokenizerBase: get("TOKENIZER_BASE"),
+  };
+}
+
+function configComplete(c: CpConfig): boolean {
+  return Boolean(c.base && c.user && c.pass && c.tokenizerBase);
+}
+
+/**
+ * Whether this deployment can move money on one system. All-or-nothing per system, the
+ * nmiConfigured rule: a tokenizer base without API credentials mints tokens nobody can charge, and
+ * credentials without a tokenizer base cannot collect an instrument in the first place.
+ *
+ * The MID is NOT part of it. CARDPOINTE_MERCHID used to be (it was the default merchant), so a
+ * deployment without it read as unconfigured; every merchant now names its own.
+ */
+export function cardpointeConfigured(env: CpEnv): boolean {
+  return configComplete(cpConfig(env));
+}
+
+/** How a person names a system, for refusals and the operator console. */
+export function cpEnvLabel(env: CpEnv): string {
+  return env === "prod" ? "live" : "test (UAT)";
+}
+
+/** The secrets one system needs, by name, for an operator's refusal. Never their values. */
+export function cpEnvSecretNames(env: CpEnv): string[] {
+  const p = CP_SECRET_PREFIX[env];
+  return ["BASE_URL", "API_USER", "API_PASS", "TOKENIZER_BASE"].map((k) => p + k);
+}
 
 const GATEWAY_UNKNOWN = "GATEWAY_UNKNOWN:";
 const GATEWAY_THROTTLED = "GATEWAY_THROTTLED:";
@@ -211,26 +265,32 @@ export type CpPartial = {
 
 export type CpAuthResult = CpApproved | CpPartial;
 
-function authHeader(): string {
-  return "Basic " + btoa(`${API_USER}:${API_PASS}`);
-}
-
-/** One request. Classifies transport and HTTP; does NOT look at respstat — that is the
- *  caller's job, because only the caller knows what it asked for. */
+/** One request, on the system and with the credentials of `merchant.env`. Classifies transport and
+ *  HTTP; does NOT look at respstat — that is the caller's job, because only the caller knows what
+ *  it asked for. A system that is not configured, or a merchant with no MID, throws GATEWAY_CONFIG
+ *  with nothing sent. */
 async function cpPost(
+  merchant: CpMerchant,
   method: "PUT" | "POST" | "GET",
   path: string,
   body?: unknown,
 ): Promise<Record<string, unknown>> {
-  if (!cardpointeConfigured) {
-    throw new Error(`${GATEWAY_CONFIG} CardPointe is not configured for this deployment`);
+  const env = merchant?.env;
+  const cfg = cpConfig(env);
+  if (!configComplete(cfg)) {
+    throw new Error(
+      `${GATEWAY_CONFIG} CardPointe ${env === "uat" || env === "prod" ? cpEnvLabel(env) : `"${String(env)}"`} is not configured for this deployment`,
+    );
+  }
+  if (!String(merchant.merchid ?? "").trim()) {
+    throw new Error(`${GATEWAY_CONFIG} no merchant id`);
   }
   let res: Response;
   let text: string;
   try {
-    res = await fetch(`${CP_BASE}${path}`, {
+    res = await fetch(`${cfg.base}${path}`, {
       method,
-      headers: { "Content-Type": "application/json", "Authorization": authHeader() },
+      headers: { "Content-Type": "application/json", "Authorization": "Basic " + btoa(`${cfg.user}:${cfg.pass}`) },
       body: body === undefined ? undefined : JSON.stringify(body),
       // A redirect off the payment host is not something to follow.
       redirect: "error",
@@ -290,7 +350,8 @@ function requireRespstat(j: Record<string, unknown>): string {
 }
 
 export type CpAuthRequest = {
-  merchid: string;
+  /** The account the sale is taken on, and the system it lives on. Its MID is the body's `merchid`. */
+  merchant: CpMerchant;
   amountCents: number;
   /** A CardSecure token from the iFrame tokenizer, OR raw encrypted track data from the
    *  VP3350 reader. The gateway takes either in `account`, which is exactly why the reader
@@ -298,13 +359,135 @@ export type CpAuthRequest = {
   account: string;
   expiry?: string;
   orderid: string;
+  /** The billing name, street and ZIP. AVS compares street and ZIP with what the card's bank
+   *  holds; nothing was sent for either until 2026-10. All three go through cpBillingFields on
+   *  the way out, whoever built the request. */
   postal?: string;
   name?: string;
-  /** "E" e-commerce (customer paying online) or "R" retail (card present at the counter). */
-  ecomind?: "E" | "R";
-  /** ACH needs the routing/account form and its own MID; the gateway auto-captures it. */
+  address?: string;
+  /**
+   * REQUIRED, with no default. invoicePayment.ts ecomindFor is the one place that decides it:
+   *
+   *   "E"    e-commerce: the CARDHOLDER keyed their own card online (my-quotes). Bank payments carry
+   *          it too, unchanged, until the SEC-code work decides what they send.
+   *   "T"    mail/telephone order: a builder's STAFF keyed the card. Fiserv (CardPointe
+   *          integrations), 2026-10-14: with the customer not present a keyed card is T, because "this
+   *          is not an electronic transaction". Every builder-keyed card went out as E until then.
+   *   null   NO ecomind at all: a card-present SWIPE. The track data is what tells the gateway the
+   *          card was there, and Fiserv confirmed on 2026-10-14 that a swipe may leave it out.
+   *
+   * ⚠️ "R" IS RECURRING in CardPointe's API, not retail, and nothing here ever sends it. This comment
+   * called it retail until 2026-10, and every swipe went out flagged as a recurring card-not-present
+   * sale. The field was optional with a silent "E" default until 2026-10-14, which is how builder
+   * sales came to send E without anyone choosing it; a required field makes the choice visible.
+   */
+  ecomind: "E" | "T" | null;
+  /** ACH needs the routing/account form and a MID set up for ACH (the tenant's one MID, on which
+   *  Fiserv enables ACH); the gateway auto-captures it. */
   rail?: "card" | "ach";
 };
+
+/** The billing fields a page may send with a card charge, cleaned for the gateway. */
+export type CpBilling = { name?: string; address?: string; postal?: string };
+
+/** C0 and C1 controls plus the two Unicode line breaks: a typed street must never carry a
+ *  newline or a NUL into the gateway's request or our logs. */
+const CP_CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+function cpCleanText(v: unknown, max: number): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const s = v.replace(CP_CONTROL, " ").replace(/\s+/g, " ").trim().slice(0, max).trim();
+  return s || undefined;
+}
+
+/** The cap on the name and the street, here and in both pages' maxLength. ⚠️ Unconfirmed against
+ *  the gateway: CardPointe's auth spec may cap both at 30 (AN 30). The UAT sale with a 31+
+ *  character street settles it before promotion; if 30 is enforced, change this and both pages. */
+const CP_BILLING_TEXT_MAX = 60;
+
+/**
+ * Name, street and ZIP from a request body (`name`, `address`, `postal`), cleaned for /auth.
+ *
+ * Trimmed, control characters out, runs of space collapsed. Name and street are capped at
+ * CP_BILLING_TEXT_MAX. The ZIP is KEPT ONLY when it is a US ZIP or ZIP+4 (`12345`, `12345-6789`,
+ * `123456789`): a malformed one is dropped rather than sent, because a garbage ZIP is an AVS
+ * mismatch the card's bank may decline on, where a missing one is only "not checked". A kept
+ * ZIP+4 goes out as NINE DIGITS, dash removed: a US postal code is 5 or 9 digits on the gateway's
+ * side (AN 9), and `12345-6789` is ten characters. Anything absent, blank or not a string is left
+ * out of the result, never sent as an empty field.
+ *
+ * Every field is OPTIONAL here, on purpose: production's pages send none of them, and the server
+ * must keep taking exactly what they send. The pages are what require them.
+ */
+export function cpBillingFields(raw: unknown): CpBilling {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const out: CpBilling = {};
+  const name = cpCleanText(r.name, CP_BILLING_TEXT_MAX);
+  const address = cpCleanText(r.address, CP_BILLING_TEXT_MAX);
+  const zip = typeof r.postal === "string" ? r.postal.trim() : "";
+  if (name) out.name = name;
+  if (address) out.address = address;
+  if (/^\d{5}(-?\d{4})?$/.test(zip)) out.postal = zip.replace("-", "");
+  return out;
+}
+
+/** The /auth body, built in ONE place so the field names recorded on the attempt
+ *  (cpAuthFieldNames) are the names actually sent and cannot drift from them. */
+function cpAuthBody(req: CpAuthRequest): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    merchid: req.merchant.merchid,
+    account: req.account,
+    amount: cpAmount(req.amountCents),
+    currency: "USD",
+    orderid: req.orderid,
+    capture: "Y",
+  };
+  // Exactly what the request says: null (a swipe) sends none, and there is no default to fall to.
+  if (req.ecomind) body.ecomind = req.ecomind;
+  // Normalised, never passed through: the tokenizer says YYYYMM (or YYYYM, Jan-Sep) and
+  // /auth wants MMYY.
+  const exp = cpExpiry(req.expiry);
+  if (exp) body.expiry = exp;
+  const billing = cpBillingFields({ name: req.name, address: req.address, postal: req.postal });
+  if (billing.postal) body.postal = billing.postal;
+  if (billing.name) body.name = billing.name;
+  if (billing.address) body.address = billing.address;
+  if (req.rail === "ach") body.accttype = "ECHK";
+  return body;
+}
+
+/**
+ * The NAMES of the fields /auth will be sent for this request, sorted, and never a value: the
+ * account is a token or track data, and none of it belongs in a log. Stored on the attempt as
+ * `sent_fields` (migration 291), which is how "did that sale carry the address?" is answered
+ * from the database rather than from memory.
+ */
+export function cpAuthFieldNames(req: CpAuthRequest): string[] {
+  return Object.keys(cpAuthBody(req)).sort();
+}
+
+/** What the card's bank said about the street/ZIP (AVS) and the security code (CVV), plus the
+ *  gateway's response code. Read off every /auth answer, approved or declined. */
+export type CpVerification = {
+  respcode: string | null;
+  avsresp: string | null;
+  cvvresp: string | null;
+};
+
+export function cpVerification(j: Record<string, unknown> | null | undefined): CpVerification {
+  const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 16) : null);
+  return { respcode: s(j?.respcode), avsresp: s(j?.avsresp), cvvresp: s(j?.cvvresp) };
+}
+
+/**
+ * The AVS/CVV answer a DECLINE carried, or null when the error was not a decline. A decline is
+ * thrown (see cpAuth), so without this its avsresp and cvvresp were lost with the response, and
+ * a mismatching-CVV decline left nothing to compare against a matching one.
+ */
+export function cpDeclineVerification(e: unknown): CpVerification | null {
+  const v = (e as { cpVerification?: CpVerification } | null)?.cpVerification;
+  return v && typeof v === "object" ? v : null;
+}
 
 /**
  * Authorize AND capture in one call (`capture: "Y"`).
@@ -318,29 +501,14 @@ export type CpAuthRequest = {
  * Throws on decline, unknown, throttled and config. Returns on approved and PARTIAL.
  */
 export async function cpAuth(req: CpAuthRequest): Promise<CpAuthResult> {
-  const body: Record<string, unknown> = {
-    merchid: req.merchid,
-    account: req.account,
-    amount: cpAmount(req.amountCents),
-    currency: "USD",
-    orderid: req.orderid,
-    capture: "Y",
-    ecomind: req.ecomind ?? "E",
-  };
-  // Normalised, never passed through: the tokenizer says YYYYMM (or YYYYM, Jan-Sep) and
-  // /auth wants MMYY.
-  const exp = cpExpiry(req.expiry);
-  if (exp) body.expiry = exp;
-  if (req.postal) body.postal = req.postal;
-  if (req.name) body.name = req.name;
-  if (req.rail === "ach") body.accttype = "ECHK";
-
-  const j = await cpPost("PUT", "/auth", body);
+  const j = await cpPost(req.merchant, "PUT", "/auth", cpAuthBody(req));
   const stat = requireRespstat(j);
 
   if (stat === "C") {
     const text = String(j.resptext ?? "").trim() || "The card was declined.";
-    throw new Error(text);
+    // The AVS/CVV answer rides on the thrown decline (cpDeclineVerification) so the caller can
+    // keep it on the attempt: a decline has no payments row to hold it.
+    throw Object.assign(new Error(text), { cpVerification: cpVerification(j) });
   }
   if (stat === "B") {
     // Documented as "retry" and treated as UNKNOWN. See the header.
@@ -429,21 +597,26 @@ function readLast4(j: Record<string, unknown>): string | null {
 }
 
 /** Release an authorization that has not settled. Cheap, and always tried before a refund. */
-export async function cpVoid(merchid: string, retref: string): Promise<boolean> {
-  const j = await cpPost("PUT", "/void", { merchid, retref });
+export async function cpVoid(merchant: CpMerchant, retref: string): Promise<boolean> {
+  const j = await cpPost(merchant, "PUT", "/void", { merchid: merchant.merchid, retref });
   return requireRespstat(j) === "A";
 }
 
 /** Return money on a SETTLED transaction. A refund is a new event, never a mutation of the
  *  original — the original settled and the books have to show both. */
 export async function cpRefund(
-  merchid: string,
+  merchant: CpMerchant,
   retref: string,
   amountCents: number,
 ): Promise<{ ok: boolean; retref: string | null; raw: Record<string, unknown> }> {
-  const j = await cpPost("PUT", "/refund", { merchid, retref, amount: cpAmount(amountCents) });
+  const j = await cpPost(merchant, "PUT", "/refund", { merchid: merchant.merchid, retref, amount: cpAmount(amountCents) });
   const ok = requireRespstat(j) === "A";
   return { ok, retref: typeof j.retref === "string" ? j.retref : null, raw: j };
+}
+
+/** The inquireByOrderid path, built in one place for the recovery call and the Verify button. */
+function inquirePath(merchant: CpMerchant, orderid: string): string {
+  return `/inquireByOrderid/${encodeURIComponent(orderid)}/${encodeURIComponent(merchant.merchid)}`;
 }
 
 /**
@@ -452,26 +625,100 @@ export async function cpRefund(
  * Returns null when the gateway has no record, which means nothing was charged.
  */
 export async function cpInquireByOrderId(
-  merchid: string,
+  merchant: CpMerchant,
   orderid: string,
 ): Promise<Record<string, unknown> | null> {
-  const j = await cpPost("GET", `/inquireByOrderid/${encodeURIComponent(orderid)}/${encodeURIComponent(merchid)}`);
+  const j = await cpPost(merchant, "GET", inquirePath(merchant, orderid));
   // The gateway answers with an empty-ish object or a "not found" respstat when there is
   // no such order. Absence of a retref is the honest test.
   const retref = typeof j.retref === "string" ? j.retref.trim() : "";
   return retref ? j : null;
 }
 
-/** Settlement status for a date (YYYYMMDD). ONE call returns the whole batch — always
- *  preferred over a per-payment inquire loop, which would 429 itself into uselessness and
- *  starve real customer charges of the shared per-MID quota. */
-export async function cpSettleStat(merchid: string, date: string): Promise<unknown> {
-  return await cpPost("GET", `/settlestat?merchid=${encodeURIComponent(merchid)}&date=${encodeURIComponent(date)}`);
+export type CpVerifyResult =
+  | { reachable: true; expected: boolean; orderid: string; answer: Record<string, unknown> }
+  | { reachable: false; orderid: string; kind: "config" | "throttled" | "unknown"; message: string };
+
+/** The gateway's "no such transaction" answer: respcode 29 ("Txn not found"), with no retref. It is
+ *  the ONE answer a Verify for a never-used order id should get. */
+export const CP_TXN_NOT_FOUND = "29";
+
+/**
+ * The operator's Verify button (admin-catalog verify_payments): ONE inquireByOrderid, the same
+ * request cpInquireByOrderId makes, for an order id nobody ever used. It moves no money and creates
+ * nothing at the gateway. What it proves is that this deployment's login for the merchant's system
+ * is accepted and the gateway answers an inquiry under that MID:
+ *
+ *   reachable, expected      a 2xx carrying the known "not found" answer (respcode 29, no retref):
+ *                            the one answer a never-used order id should get
+ *   reachable, NOT expected  a 2xx carrying anything else. The login worked, but this is not the
+ *                            answer a check expects, so it is not a pass: a 200 can carry an error
+ *                            about the MID itself. `answer` is the whitelisted summary, so the
+ *                            operator reads the gateway's own words.
+ *   config       not configured here, or the gateway refused us (401/403/4xx): wrong credentials or
+ *                a MID those credentials do not cover
+ *   throttled    the per-MID rate limiter; try again shortly
+ *   unknown      no usable answer (network, 5xx, an unparseable body)
+ *
+ * Even "expected" cannot tell a mistyped MID from the right one if the gateway answers "not found"
+ * for any MID under a login that covers several. The operator console says so. Never throws.
+ */
+export async function cpVerifyMerchant(merchant: CpMerchant): Promise<CpVerifyResult> {
+  const orderid = "ssverify_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  try {
+    const j = await cpPost(merchant, "GET", inquirePath(merchant, orderid));
+    // The MID is the operator's own input; the answer does not need to carry it back.
+    const { merchid: _mid, ...answer } = cpSummary(j);
+    // A body that is not one object (an array, a bare null) is "answered, not as expected".
+    const one = j && typeof j === "object" && !Array.isArray(j) ? j : {};
+    const retref = typeof one.retref === "string" ? one.retref.trim() : "";
+    const expected = String(one.respcode ?? "").trim() === CP_TXN_NOT_FOUND && !retref;
+    return { reachable: true, expected, orderid, answer };
+  } catch (e) {
+    const message = String((e as Error)?.message ?? "").replace(/^GATEWAY_[A-Z]+:\s*/, "").slice(0, 200);
+    const kind = isGatewayConfig(e) ? "config" : isGatewayThrottled(e) ? "throttled" : "unknown";
+    return { reachable: false, orderid, kind, message };
+  }
 }
 
-/** Funding detail — the final word on whether an ACH debit actually funded. */
-export async function cpFunding(merchid: string, date: string): Promise<unknown> {
-  return await cpPost("GET", `/funding?merchid=${encodeURIComponent(merchid)}&date=${encodeURIComponent(date)}`);
+/** The day the gateway's reporting calls (settlestat, funding) take: MMDD, the format Fiserv's API
+ *  reference gives for both. Reconcile keys its days YYYYMMDD (or YYYY-MM-DD); this turns one into the
+ *  wire form and leaves anything else as it came, so a caller already sending MMDD is unchanged.
+ *  Until 2026-10-14 both calls were sent YYYYMMDD, an assumption from 2026-09-02 that no live answer
+ *  ever confirmed (settlestat failures were swallowed whole). Still unproven live: if
+ *  reconcile_gateway_failed rows appear with kind "config" for these calls, this is the first suspect. */
+export function cpReportDay(day: string): string {
+  const d = String(day ?? "").replace(/-/g, "");
+  return /^[0-9]{8}$/.test(d) ? d.slice(4) : String(day ?? "");
+}
+
+/** Settlement status for a date (sent MMDD, cpReportDay; unproven live, see cpFunding). ONE call
+ *  returns the whole batch — always preferred over a per-payment inquire loop, which would 429
+ *  itself into uselessness and starve real customer charges of the shared per-MID quota. The answer
+ *  is read by achState.ts settlementStatuses, whatever it is wrapped in: a copy of Fiserv's API
+ *  reference says it is a list, which the code used to read as an object and so read nothing. */
+export async function cpSettleStat(merchant: CpMerchant, date: string): Promise<unknown> {
+  return await cpPost(merchant, "GET", `/settlestat?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(cpReportDay(date))}`);
+}
+
+/** Funding detail — the final word on whether an ACH debit actually funded. Fiserv (CardPointe
+ *  integrations), 2026-10-14: every UAT bank payment comes back R03, and the return shows in the
+ *  FUNDING data, which settlestat does not carry. portal-payments reconcile reads it for bank
+ *  payments still clearing and for settled ones inside their return window, and achState.ts
+ *  achFundingRead reads the answer.
+ *
+ *  ⚠️ THE DATE FORMAT IS UNPROVEN LIVE. It goes out MMDD (cpReportDay), the format a copy of Fiserv's
+ *  API reference gives for both funding and settlestat; until 2026-10-14 both went out YYYYMMDD,
+ *  which nothing had confirmed either. One read-only UAT call settles it. What a wrong date
+ *  looks like depends on the gateway: a 4xx files reconcile_gateway_failed (kind "config") and ends
+ *  that sweep's funding calls; a 200 that is not a funding answer files
+ *  reconcile_funding_unrecognised. But a 200 with EMPTY lists for a date it misread looks exactly
+ *  like a day with nothing funded, and nothing can tell the two apart from here. Reconcile
+ *  remembers every day it has read (payments.funding_checked_through, migration 309), so days read
+ *  under a wrong format stay read: after changing the format, set that column back to null on the
+ *  cardpointe bank payments and every day is read again. */
+export async function cpFunding(merchant: CpMerchant, date: string): Promise<unknown> {
+  return await cpPost(merchant, "GET", `/funding?merchid=${encodeURIComponent(merchant.merchid)}&date=${encodeURIComponent(cpReportDay(date))}`);
 }
 
 /**
@@ -481,14 +728,14 @@ export async function cpFunding(merchid: string, date: string): Promise<unknown>
  * "unknown" rather than throwing.
  */
 export async function cpSurchargeProbe(
-  merchid: string,
+  merchant: CpMerchant,
   token: string,
   postal?: string,
 ): Promise<{ applies: boolean | null; percent: number | null }> {
   try {
-    const qs = new URLSearchParams({ merchid, account: token });
+    const qs = new URLSearchParams({ merchid: merchant.merchid, account: token });
     if (postal) qs.set("postal", postal);
-    const j = await cpPost("GET", `/surcharge?${qs.toString()}`);
+    const j = await cpPost(merchant, "GET", `/surcharge?${qs.toString()}`);
     const raw = String(j.surchargeapplied ?? j.surcharge ?? "").toLowerCase();
     const pctRaw = j.surchargepercent ?? j.percent;
     const pct = pctRaw == null ? null : Number(pctRaw);
@@ -511,6 +758,12 @@ export async function cpSurchargeProbe(
  * ⚠️ This repo is PUBLIC. No CardPointe host may appear in a browser-served file, and
  * preflight enforces that. Composing here also means the isv-uat/production switch is a
  * secret change rather than a code edit, and there is exactly one place to get it wrong.
+ *
+ * PER MERCHANT since workstream 1 phase 3: the tokenizer is the one on the merchant's own system,
+ * because a token minted by the test tokenizer cannot be charged on live, and the reverse. A
+ * system that is not configured answers "" rather than a relative "?enhancedresponse=…" URL,
+ * which an iframe would resolve against the page and load the portal into itself; every caller
+ * refuses before it gets here anyway.
  *
  * The parameter set is chosen for a phone, because most shed shoppers open my-quotes.html
  * from a text message:
@@ -539,8 +792,43 @@ export async function cpSurchargeProbe(
  * on cpTokenizerOrigin() (CORS checked 2026-10-06: Access-Control-Allow-Origin: *). The URL
  * is still served so a page cached from before keeps working; it can go once nothing that
  * old can still be open.
+ *
+ * ⚠️ THE SWIPE RAIL IS ITS OWN PARAMETER SET (2026-10-13), not the card URL + "&swipeonly=true".
+ * The card reader is a USB KEYBOARD that types an encrypted blob: uppercase hex plus % ^ ; = ?,
+ * with Shift held for every letter and symbol. Three card parameters each lost the swipe on
+ * CardPointe's real UAT iframe (itoke.js, probed headless with a synthetic blob):
+ *   cardnumbernumericonly  cancels every keystroke that is not a digit or that has Shift held,
+ *                          so the hex letters and the track symbols never reach the field. What
+ *                          is left still looks like a reader frame (02…03), goes to CardSecure,
+ *                          and is refused: HTTP 500, errorcode 39 "Wrong message length". The
+ *                          iframe posts nothing at all on a non-200, so the page heard nothing.
+ *   usecvv (+invalidcvvevent)
+ *                          itoke checks for an empty CVV before tokenizing even a swipe, so EVERY
+ *                          swipe first posted "CVV is Required", and that message stayed on
+ *                          screen whenever CardSecure then refused the read.
+ *   useexpiry              with expiry/CVV on, the first keystroke after a token clears the
+ *                          field, eating the first character of the next swipe.
+ * formatinput (it inserts spaces into the blob) and the invalidcreditcard/expiry events go with
+ * them. What the swipe rail adds:
+ *   autofocus              the ONLY way the card box gets focus from inside the frame (itoke's
+ *                          onLoad calls input.focus()). Focusing the iframe ELEMENT from the page
+ *                          leaves the frame's activeElement on BODY, where the reader's keys
+ *                          vanish without a message. The portal reloads the frame every time it
+ *                          arms the reader (no "Ready" press since 2026-10-21) so this runs each time.
+ *   css + #ccnumfield{color:#FFFFFF}
+ *                          the card css with the box's text white (2026-10-21), so the reader's
+ *                          raw output never shows on screen.
+ *   invalidinputevent      a half or garbled read says "Invalid Account Number" instead of nothing
+ *   sendcardtypingevent    {cardTyping:true} on the reader's first character, so the page can say
+ *                          so when no token follows (a refused read posts nothing else)
+ *   swipeonly              kept for what it says; it does nothing next to tokenizewheninactive,
+ *                          which stays because the rate test that replaces it has never been
+ *                          measured against this reader. The portal refuses a token whose
+ *                          `entry` is not "swipe" instead (a card typed by hand into this frame).
  */
-export function cpTokenizerUrl(rail: "card" | "ach"): string {
+export function cpTokenizerUrl(merchant: CpMerchant, rail: "card" | "ach" | "swipe"): string {
+  const base = cpConfig(merchant?.env).tokenizerBase;
+  if (!base) return "";
   // ⚠️ THREE THINGS HERE ARE FIXES FOR DEFECTS SEEN ON A REAL PHONE (2026-09-02), not
   // decoration. The first version of this looked fine in the markup and wrong on screen.
   //
@@ -573,16 +861,15 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
   // So labels stay INLINE (the <br> already breaks the line) and width is set per FIELD,
   // never on the `input` element generally. Only Fiserv's allow-listed properties apply;
   // anything else is dropped silently.
-  const css = encodeURIComponent(
-    `body{margin:0;padding:0;font-family:${FONT};color:#0F172A}` +
-      `label{font-family:${FONT};font-size:13px;font-weight:600;color:#475569}` +
-      `input{box-sizing:border-box;font-size:16px;padding:10px 12px;border:1px solid #CBD5E1;` +
-      `border-radius:8px;color:#0F172A;font-family:${FONT};margin-top:5px;margin-bottom:12px}` +
-      `#ccnumfield{width:100%}` +
-      `#ccexpiryfieldmonth{width:78px;margin-right:6px}#ccexpiryfieldyear{width:96px;margin-left:6px}` +
-      `#cccvvfield{width:110px}` +
-      `.error{color:#B91C1C;font-size:13px;font-family:${FONT}}`,
-  );
+  const cssText = `body{margin:0;padding:0;font-family:${FONT};color:#0F172A}` +
+    `label{font-family:${FONT};font-size:13px;font-weight:600;color:#475569}` +
+    `input{box-sizing:border-box;font-size:16px;padding:10px 12px;border:1px solid #CBD5E1;` +
+    `border-radius:8px;color:#0F172A;font-family:${FONT};margin-top:5px;margin-bottom:12px}` +
+    `#ccnumfield{width:100%}` +
+    `#ccexpiryfieldmonth{width:78px;margin-right:6px}#ccexpiryfieldyear{width:96px;margin-left:6px}` +
+    `#cccvvfield{width:110px}` +
+    `.error{color:#B91C1C;font-size:13px;font-family:${FONT}}`;
+  const css = encodeURIComponent(cssText);
   const common = [
     "enhancedresponse=true",
     "unique=true",
@@ -597,6 +884,24 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
       "formatinput=false",
       "cardlabel=" + encodeURIComponent("Routing / account number"),
       "placeholder=" + encodeURIComponent("031201360/0000000000"),
+    ]
+    : rail === "swipe"
+    ? [
+      // See the docblock: no cardnumbernumericonly, formatinput, useexpiry, useexpiryfield,
+      // usecvv or invalidcreditcard/expiry/cvv events. Each one loses or garbles a real swipe.
+      //
+      // WHITE TEXT IN THE READER'S BOX (Carolyn 2026-10-20: the reader's raw output typed itself
+      // across the screen). The box is white, so what the reader types can't be seen; `color` is
+      // on Fiserv's css allow-list (the input rule above uses it), and the caret, which follows
+      // the text colour, goes with it. The placeholder keeps the browser's own grey. The portal
+      // says what is happening beside the frame instead ("Reading card…", then the last 4).
+      ...common.map((p) => p.startsWith("css=") ? `css=${encodeURIComponent(cssText + "#ccnumfield{color:#FFFFFF}")}` : p),
+      "swipeonly=true",
+      "autofocus=true",
+      "invalidinputevent=true",
+      "sendcardtypingevent=true",
+      "cardlabel=" + encodeURIComponent("Card reader"),
+      "placeholder=" + encodeURIComponent("Swipe, insert or tap the card"),
     ]
     : [
       ...common,
@@ -613,7 +918,7 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
       "cvvlabel=" + encodeURIComponent("Security code"),
       "placeholder=" + encodeURIComponent("Card number"),
     ];
-  return `${CP_TOKENIZER_BASE}?${params.join("&")}`;
+  return `${base}?${params.join("&")}`;
 }
 
 /**
@@ -626,20 +931,27 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
  * non-scrolling frame. A customer could not complete a payment, and nothing errored.
  * Generous on purpose: an over-tall frame is whitespace, an under-tall one is a dead form.
  */
-export function cpTokenizerHeight(rail: "card" | "ach"): number {
+export function cpTokenizerHeight(rail: "card" | "ach" | "swipe"): number {
   // MEASURED at a 283px frame against the live tokenizer, not estimated. With the CSS above
   // — labels inline, month/year sharing one row — the card rail's content is 243px with the
   // CVV's bottom edge at 231. It was 357px before, purely because the first CSS forced the
   // expiry fields onto separate lines and doubled every label gap.
   // Generous by ~20px: an over-tall frame is whitespace, an under-tall one is a form the
   // customer cannot finish, and nothing errors when it happens.
-  return rail === "ach" ? 130 : 265;
+  // The swipe rail is ONE box and no label (itoke draws cardlabel only beside an expiry or CVV
+  // box). MEASURED 2026-10-13 on the UAT iframe with the CSS above: the box spans 5-48px and
+  // the form ends at 60px. It was 130 (ach's): 70px of the frame's own blank page under the box,
+  // and a click there left the frame's focus on its body, where a swipe vanished. The portal now
+  // covers this frame with a click target of its own; the height is kept to the box anyway.
+  if (rail === "swipe") return 64;
+  return rail === "card" ? 265 : 130;
 }
 
-/** The origin the browser must check every postMessage against. */
-export function cpTokenizerOrigin(): string {
+/** The origin the browser must check every postMessage against, and where the pages tokenize a bank
+ *  account themselves: the tokenizer of the merchant's own system. "" when it is not configured. */
+export function cpTokenizerOrigin(merchant: CpMerchant): string {
   try {
-    return new URL(CP_TOKENIZER_BASE).origin;
+    return new URL(cpConfig(merchant?.env).tokenizerBase).origin;
   } catch {
     return "";
   }

@@ -47,6 +47,8 @@
 import { rsSendEmail, resendConfigured, ResendApiError } from "./resend.ts";
 import { logEdgeError } from "./logError.ts";
 import { buildThreadMessageId, buildReplyAddress } from "./emailInbound.ts";
+// The type only: emailSend.ts still runs no code of repReplyTo's.
+import type { ReplyCopy } from "./repReplyTo.ts";
 
 /** The platform-owned fallback sender for tenants whose own domain is not yet verified.
  *  Usable only while PLATFORM_EMAIL_DOMAIN_READY === 'true' (read at request time, so
@@ -60,7 +62,11 @@ export type TenantMail = {
   // 'acceptance' + 'change_order' came with migration 124; 'conversation' was live in the
   // constraint but missing from this union until 167 (a silent drift, found by the compiler
   // only because 'login_code' was added next to it); 'login_code' is migration 167.
-  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code";
+  // 'form_autoreply' + 'form_notification' are migration 325 (website lead forms).
+  // 'meeting_*' are migration 327 (Meetings phase 2): the booking confirmation, the reminder,
+  // the cancellation and the "it moved" note. Four rather than one so a builder reading their
+  // email ledger can tell a confirmation from a reminder.
+  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code" | "form_autoreply" | "form_notification" | "meeting_booked" | "meeting_reminder" | "meeting_cancelled" | "meeting_rescheduled";
   /**
    * The HUMAN reply address(es) for this send — the staff member who is writing, or whoever
    * the tenant wants a customer to reach. One address or several.
@@ -80,8 +86,20 @@ export type TenantMail = {
    * no MX — under RFC 5321 an A record with no MX becomes an implicit MX, so a customer who
    * replies gets a multi-day queue and then a bounce, and the builder never learns they
    * tried.
+   *
+   * ⚠️ AND A THIRD TIME, 2026-10-07: THE PERSON'S COPY IS OPT-IN. Every customer-email sender
+   * passes repReplyTo's answer, a ReplyCopy `{ address, copy }`, and `copy` is that person's
+   * own My Profile switch (default OFF: replies land in StructureStudio only). The decision is
+   * made below, where the routing address is known (humanReplyTo):
+   *   • a ReplyCopy with copy:true → its address rides, after the routing address;
+   *   • a ReplyCopy with copy:false → its address rides ONLY when there is no routing address
+   *     (replies not set up, or nothing to route by), so a reply never goes nowhere;
+   *   • a plain string or string[] → always advertised, as before. Kept on purpose so every
+   *     call site and the pinned senders test stay as they were; a future caller passing a
+   *     plain address is saying "always", and should mean it;
+   *   • anything else → nothing.
    */
-  replyTo?: string | string[];
+  replyTo?: string | string[] | ReplyCopy;
   /** Design short code; null/absent for kind 'test'. */
   shortCode?: string | null;
   /** Who this is about — the CRM composer's case, and a test sent to someone who is a contact.
@@ -109,6 +127,15 @@ export type TenantMail = {
   subject: string;
   html: string;
   text?: string;
+  /**
+   * Files to attach; `content` is base64 (migration 327, for the meeting invite).
+   *
+   * ⚠️ NOT recorded on the email_sends row, deliberately. The ledger holds what was SAID
+   * (subject, body text) so a conversation can replay it; a base64 blob is neither readable
+   * there nor small, and the row has no column for it. What a meeting needs to remember about
+   * its invite is the SEQUENCE, which lives on the meeting (meetings.ics_sequence).
+   */
+  attachments?: { filename: string; content: string; contentType?: string }[];
 };
 
 /**
@@ -242,6 +269,27 @@ export function combineReplyTo(
     }
   }
   return out;
+}
+
+/**
+ * The human part of Reply-To for one send, given the routing address sendTenantEmail derived
+ * (null when the account has no active reply domain, or the send has nothing to route by). The
+ * rules are TenantMail.replyTo's. Pure, and exported for the tests.
+ *
+ * WHY "OFF" STILL ADVERTISES THE PERSON WITHOUT A ROUTING ADDRESS. "StructureStudio only" needs
+ * StructureStudio to be able to receive the reply. Without a routing address it can't: the From
+ * is the builder's sending address or the platform's no-reply@, so a Reply-To with nobody on it
+ * sends the customer's answer to an address no one reads, or into a bounce. Keeping the person
+ * there is exactly how every email behaved before the switch existed, and the switch takes
+ * effect the moment the company sets up replies.
+ */
+export function humanReplyTo(replyTo: unknown, routing: string | null): string | string[] | null {
+  if (typeof replyTo === "string") return replyTo;
+  if (Array.isArray(replyTo)) return replyTo.filter((a): a is string => typeof a === "string");
+  if (!replyTo || typeof replyTo !== "object") return null;
+  const { address, copy } = replyTo as { address?: unknown; copy?: unknown };
+  if (typeof address !== "string" || !address.trim()) return null;
+  return copy === true || !routing ? address : null;
 }
 
 /** Ledger-safe error text, capped ~300 chars. A ResendApiError becomes the enum-ish
@@ -410,9 +458,10 @@ export async function sendTenantEmail(
     );
 
     // ── Reply-To ─────────────────────────────────────────────────────────
-    // BOTH addresses, not one: the routable address on the TENANT'S OWN inbound subdomain
-    // (so the reply comes back into the portal, and the customer only ever sees the builder's
-    // domain) AND whatever human address the caller passed.
+    // The routable address on the TENANT'S OWN inbound subdomain (so the reply comes back into
+    // the portal, and the customer only ever sees the builder's domain), and after it the human
+    // address the caller passed, when that person asked for copies (see humanReplyTo and the
+    // 2026-10-07 note below).
     //
     // THE DERIVATION LIVES HERE, NOT AT THE CALL SITES, and that is the older fix this must
     // not undo. The routing address used to be computed by hand inside portal-settings'
@@ -442,19 +491,27 @@ export async function sendTenantEmail(
     // visible token address turns out to be unacceptable, the fix is a prettier local part,
     // not a return to the either/or.
     //
+    // ⚠️ WHAT CHANGED 2026-10-07: THE SECOND ADDRESS IS OPT-IN PER PERSON. The combine above
+    // made every rep's inbox a copy of every reply, wanted or not. Carolyn asked for a switch in
+    // each person's My Profile, default OFF: replies land in StructureStudio only, and a person
+    // who wants them in their own inbox too turns it on. The senders pass repReplyTo's answer
+    // ({ address, copy }), and humanReplyTo decides here, against the routing address computed
+    // once below: copies on → the person rides second, as above; copies off → the person rides
+    // only when there IS no routing address, because then StructureStudio can't receive the reply
+    // and leaving them off would send it to nobody. So the switch bites only where replies are
+    // set up, and with it off the customer sees one address, the token, on their reply.
+    //
     // combineReplyTo (read its comment — the ORDER is the load-bearing part) owns the ordering
     // rule, the de-duplication and the empty-drop. buildReplyAddress still returns null unless
     // the inbound domain is genuinely 'active', so a pending domain contributes nothing and the
     // human address stands alone — exactly as before, which is what keeps a customer's reply
     // out of a bounce queue.
-    const replyTo = combineReplyTo(
-      buildReplyAddress(
-        (s as Record<string, unknown>).inbound_domain,
-        (s as Record<string, unknown>).inbound_status,
-        { shortCode: mail.shortCode, contactId: mail.contactId },
-      ),
-      mail.replyTo,
+    const routing = buildReplyAddress(
+      (s as Record<string, unknown>).inbound_domain,
+      (s as Record<string, unknown>).inbound_status,
+      { shortCode: mail.shortCode, contactId: mail.contactId },
     );
+    const replyTo = combineReplyTo(routing, humanReplyTo(mail.replyTo, routing));
 
     // ── Send, then record the outcome on the claimed row ────────────────────────────
     let messageId: string;
@@ -467,6 +524,7 @@ export async function sendTenantEmail(
         ...(mail.text ? { text: mail.text } : {}),
         ...(replyTo.length ? { replyTo } : {}),
         ...(threadId ? { headers: { "Message-ID": threadId } } : {}),
+        ...(mail.attachments && mail.attachments.length ? { attachments: mail.attachments } : {}),
         // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
         // them to Resend's charset so a dotted tenant slug degrades the TAG rather than
         // failing the whole send.

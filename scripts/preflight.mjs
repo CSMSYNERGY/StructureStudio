@@ -67,15 +67,18 @@
 //      that a later commit added two more on the very same line. This step is SKIPPED with
 //      a warning when Deno isn't installed (it is not an npm devDependency).
 //   7. `deno test` over the edge-function unit tests — the parts of supabase/functions that
-//      cannot be exercised any other way. Three groups with different invocations: the
+//      cannot be exercised any other way. Four groups: the
 //      self-contained `_shared/*.test.ts` (currently the OAuth discovery document's endpoint
 //      validation, which guards where the client secret gets sent), the pre-existing
-//      `_shared/_test_stubs/*_test.ts`, which needs its own import map, and `tests/phone/`
+//      `_shared/_test_stubs/*_test.ts`, which needs its own import map, a function's own
+//      `<function>/*.test.ts` or `*_test.ts` (run like `_shared`), and `tests/phone/`
 //      (My Synergy Phone's portal and edge pieces, run from the repo root). Same skip-with-a-warning
 //      policy as step 6. Then the migration tests in `tests/sql/*.test.cjs` (PGlite, Node), ONLY
 //      when `tests/sql/node_modules` is already installed: the gate never installs anything, so
 //      without it the step prints a SKIPPED line and blocks nothing — unless CI is set or
-//      SS_REQUIRE_SQL_TESTS=1, where a missing install FAILS the gate instead.
+//      SS_REQUIRE_SQL_TESTS=1, where a missing install FAILS the gate instead. Then every
+//      `scripts/*.test.mjs` under `node --test` (the release-note nudge's, since 2026-10-09:
+//      until then nothing ran a scripts test at all).
 //   8. my-quotes.html's sales-tax breakdown, executed against a DOM shim. That page is a
 //      standalone HTML file, so the eslint pass never reads its inline script and the deno
 //      steps do not know it exists — yet it is the only place a CUSTOMER sees the tax they
@@ -87,6 +90,14 @@
 //      run against the same vectors, no line naming a bank number may also touch storage, a
 //      URL, the console, the error log or an error sentence, and the boxes keep autocomplete
 //      off (checkAchBankInputs).
+//  10. How long a card token may be held before the page asks for the card again (Fiserv: the
+//      CVV is kept for 2 minutes): CARD_TOKEN_MAX_MS in my-quotes.html and portal/04-orders.jsx
+//      must be present, equal, and no more than 110 s (checkCardTokenMaxAge).
+//  11. "Estimate", never "quote", in text a person reads (Carolyn 2026-10-06): string
+//      literals, template parts and JSX text in the portal parts, both designer twins, the
+//      page sources, my-quotes.html, the portal's install manifest and every edge-function
+//      module, read with the vendored Babel. Identifiers, log-only text and the
+//      carrier-registered SMS copy are exempt (checkEstimateWording).
 //
 // Steps are numbered in the order they RUN.
 //
@@ -102,6 +113,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 // this gate has twice ended up reporting clean while running zero rules.
 import { TARGETS, targetName, readTarget, PORTAL_PARTS } from "./compile.mjs";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -577,8 +589,9 @@ function run(files) {
 
   // portal.html's module tag must stay ROOT-ABSOLUTE, and this rule is the only thing that can
   // protect the ONE failure mode no in-page check can reach. If the module URL resolves to
-  // something under /portal/ that is not a real asset, the `/portal/*` splat in _redirects returns
-  // portal.html itself with HTTP 200 text/html — Babel is handed "<!DOCTYPE html>", throws a
+  // something under a page's address that is not a real asset, that page's `/<slug>/*` rule in
+  // _redirects (the `/portal/*` splat until 2026-10-13) returns portal.html itself with HTTP
+  // 200 text/html — Babel is handed "<!DOCTYPE html>", throws a
   // SyntaxError inside its own runner, and that throw ABORTS THE WHOLE QUEUE: the mount block
   // never executes, so the page is blank AND completely unlogged, because the error reporter lives
   // in the block that never ran. A check inside the mount block cannot help, by construction.
@@ -594,8 +607,8 @@ function run(files) {
   // rather than left to habit.
   //
   // (1) The compiled app tags. Every *.compiled.js tag must be ROOT-ABSOLUTE (portal.html is
-  // served at /portal/<page>/<sub> too, where a relative src resolves against URL depth and
-  // the /portal/* splat answers with portal.html at HTTP 200 — a classic script handed HTML
+  // served at /<page>/<sub> too, where a relative src resolves against URL depth and
+  // the page's /<slug>/* rule answers with portal.html at HTTP 200 — a classic script handed HTML
   // is a SyntaxError, and only the guard's sentinel would notice), must carry `defer` (defer
   // executes after parsing — after the guard has set or not set __ssBootBlocked — and in
   // DOCUMENT ORDER; a tag without defer executes mid-parse, BEFORE the guard exists), must
@@ -607,7 +620,7 @@ function run(files) {
     for (const t of tags) {
       const attrs = t[1] + " ";
       if (!t[2].startsWith("/")) {
-        errors.push(`${f}: compiled tag src "${t[2]}" is not root-absolute — under /portal/* a `
+        errors.push(`${f}: compiled tag src "${t[2]}" is not root-absolute — under /<page>/* a `
           + "relative src resolves to portal.html at HTTP 200 and the script dies on HTML with "
           + "only the sentinel to notice. Use a leading /");
       }
@@ -616,7 +629,7 @@ function run(files) {
       // for window.ssLoadDesigner(), which injects the real script on demand. `defer` and
       // `async` describe when a script RUNS, and this one never runs, so both rules are
       // vacuous here. The shape is still held to root-absolute above (the loader copies the
-      // src verbatim, so /portal/settings/... would break exactly as it did for a real tag)
+      // src verbatim, so /settings/... would break exactly as it did for a real tag)
       // and is separately required to be BACKED BY A LOADER below — removing the eager
       // tag without one would otherwise pass every check and ship a dead Designer tab.
       const isSrcPointer = /\stype="ss\/designer-src"/.test(attrs);
@@ -1028,6 +1041,58 @@ function checkAchBankInputs(files) {
   return errors;
 }
 
+// ── How long a card token may be held: one number, in two hand-kept copies ─────────────────────
+//
+// Fiserv (CardPointe integrations), 2026-10-14: the CVV stays linked to the CardSecure token for 2
+// minutes. Both card surfaces, the customer's pay panel in my-quotes.html and the builder's
+// Record-a-payment modal in portal/04-orders.jsx, refuse to charge a card token older than
+// CARD_TOKEN_MAX_MS and ask for the card again. The two copies must be the same number (one page
+// timing out at 100 s and the other at 180 s is a CVV lost on one surface only), and neither may
+// creep up to the 2 minutes themselves: above 110 s there is no room left for the upload, an edge
+// cold start and the database writes before /auth. Taken from the SHIPPED text of both files, so a
+// copy cannot drift while the gate reads something else. Exactly one assignment per file, as a
+// plain integer: anything cleverer is a number this check cannot vouch for.
+//
+// Takes the texts as arguments so --self-test can hand it broken variants.
+const CARD_TOKEN_FILES = ["my-quotes.html", "portal/04-orders.jsx"];
+const CARD_TOKEN_MAX_CEILING_MS = 110000;
+function checkCardTokenMaxAge(files) {
+  const errors = [];
+  const seen = {};
+  for (const f of CARD_TOKEN_FILES) {
+    const text = (files[f] ?? "").replace(/\r\n/g, "\n");
+    const hits = [...text.matchAll(/\bCARD_TOKEN_MAX_MS\s*=(?!=)\s*([^;,\n]*)/g)];
+    if (hits.length === 0) {
+      errors.push(`${f}: CARD_TOKEN_MAX_MS is gone — the card token age limit (Fiserv: the CVV is kept `
+        + "for 2 minutes) lives there. If the limit moved, point checkCardTokenMaxAge at it.");
+      continue;
+    }
+    if (hits.length > 1) {
+      errors.push(`${f}: CARD_TOKEN_MAX_MS is assigned ${hits.length} times — keep one, so the limit `
+        + "this check reads is the one the page uses");
+      continue;
+    }
+    const raw = hits[0][1].trim();
+    const at = text.slice(0, hits[0].index).split("\n").length;
+    if (!/^\d+$/.test(raw)) {
+      errors.push(`${f}:${at}  CARD_TOKEN_MAX_MS = ${raw} — write it as a plain number of milliseconds`);
+      continue;
+    }
+    const ms = Number(raw);
+    if (ms > CARD_TOKEN_MAX_CEILING_MS) {
+      errors.push(`${f}:${at}  CARD_TOKEN_MAX_MS = ${ms} is above ${CARD_TOKEN_MAX_CEILING_MS} — the CVV leaves `
+        + "the token 2 minutes after tokenizing, and the charge needs time to reach /auth");
+    }
+    seen[f] = ms;
+  }
+  const [a, b] = CARD_TOKEN_FILES;
+  if (seen[a] !== undefined && seen[b] !== undefined && seen[a] !== seen[b]) {
+    errors.push(`CARD_TOKEN_MAX_MS differs: ${a} says ${seen[a]}, ${b} says ${seen[b]} — the two card `
+      + "surfaces must ask for the card again at the same age");
+  }
+  return errors;
+}
+
 
 // ── The customer-facing standalone pages must PARSE ────────────────────────────────────
 // 2026-09-08: a multiline regex whose newline escapes did not survive an edit landed in
@@ -1387,15 +1452,18 @@ function checkAreaMirror(files, inject = null) {
   const areasSrc = ts.slice(areasAt, areasEnd);
   // `levels:` is either a named constant (RVE) or an inline array. Resolve named ones from
   // their own declaration so a change to the constant is seen, not assumed.
+  // ⚠️ A LEVEL MAY CARRY AN UNDERSCORE (contacts' "own_view", migration 286). The level pattern was
+  // [a-z]+ until then, which silently SKIPPED such a level on this side only, so the joined
+  // vocabularies could never agree; self-test (c2) pins it.
   const namedLevels = {};
   for (const m of ts.matchAll(/^const\s+([A-Z][A-Z0-9_]*)\s*:\s*Level\[\]\s*=\s*\[([^\]]*)\]/gm)) {
-    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
   }
   const tsAreas = new Map();
   for (const m of areasSrc.matchAll(/\{\s*key:\s*"([a-z_]+)"[^}]*?levels:\s*(\[[^\]]*\]|[A-Z][A-Z0-9_]*)/g)) {
     const raw = m[2];
     const levels = raw.startsWith("[")
-      ? [...raw.matchAll(/"([a-z]+)"/g)].map((x) => x[1])
+      ? [...raw.matchAll(/"([a-z_]+)"/g)].map((x) => x[1])
       : namedLevels[raw];
     if (!levels) {
       errors.push(`${TS}: area "${m[1]}" uses levels constant \`${raw}\` which preflight could `
@@ -1748,17 +1816,21 @@ function denoCheck() {
 // could move it is a credential-exfiltration primitive, and the only live way to test the module
 // is to complete a real OAuth round trip. Same skip-with-a-warning policy as denoCheck().
 //
-// TWO GROUPS, because they need different invocations and the difference is not cosmetic:
+// THREE GROUPS under supabase/functions (tests/phone, a fourth, is below), because they need
+// different invocations and the difference is not cosmetic:
 //
 //   _shared/*.test.ts          — self-contained (no jsr:/npm: imports), run with no import map.
 //   _shared/_test_stubs/*_test.ts — the pre-existing resolveTenant suite. It REQUIRES its own
 //                                import map (which rewrites jsr:@supabase/supabase-js@2 to a
 //                                stub); without it 12 of its 14 cases fail on module resolution.
+//   <function>/*.test.ts and <function>/*_test.ts — a function's own tests
+//                                (customer-designs/handler.test.ts), run like _shared:
+//                                self-contained, no import map.
 //
 // The second group existed before this step did and nothing ran it automatically — it guards
 // resolveTenant, which its own header notes sits in front of every tenant's settings, billing and
-// designs. Discovering it by convention rather than listing it means a new file in either shape is
-// covered the day it lands.
+// designs. Discovering them by convention rather than listing them means a new file in any of these
+// shapes is covered the day it lands.
 // My Synergy Phone's Deno suite and the PGlite migration tests, both outside supabase/functions.
 const PHONE_TESTS_DIR = "tests/phone";
 const SQL_TESTS_DIR = "tests/sql";
@@ -1785,6 +1857,22 @@ function testGroups() {
     if (files.length && existsSync(join(root, FUNCTIONS_DIR, map))) {
       groups.push({ label: "_test_stubs", files, importMap: map });
     }
+  }
+
+  // A function's OWN tests, beside its handler: <function>/*.test.ts or *_test.ts, either naming as
+  // elsewhere (customer-designs/handler.test.ts was the first, and sat outside the gate from migration
+  // 231 until 2026-10-15 because only the two _shared shapes above were discovered). Same invocation
+  // as _shared: self-contained, no import map, run from supabase/functions. Directories starting with
+  // "_" are not functions (_shared is above).
+  const fnRoot = join(root, FUNCTIONS_DIR);
+  if (existsSync(fnRoot)) {
+    const files = readdirSync(fnRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("_") && e.name !== "node_modules")
+      .flatMap((e) => readdirSync(join(fnRoot, e.name))
+        .filter((f) => f.endsWith(".test.ts") || f.endsWith("_test.ts"))
+        .map((f) => `${e.name}/${f}`))
+      .sort();
+    if (files.length) groups.push({ label: "functions", files, importMap: null });
   }
 
   // tests/phone — My Synergy Phone's portal-settings, portal-sms and portal pieces (DEVIATIONS item 13
@@ -1849,22 +1937,70 @@ function denoTest() {
 // deps can be installed, the migration tests are not optional. Set SS_REQUIRE_SQL_TESTS=1 on any
 // machine that has run `npm install --prefix tests/sql` and wants the gate to hold it to that.
 // `dir` and `required` are parameters so --self-test can drive both directions on a fixture.
-function sqlTestsRequired(env = process.env) {
-  return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1";
+// ⚠️ AND REQUIRED WHEN THIS PUSH TOUCHES WHAT THEY TEST (2026-10-23). The two triggers above
+// are posture: somebody has to set them. That left the real hole — a machine with no install
+// pushes a change to the very thing these tests cover, the step SKIPS, the gate goes green, and
+// the break lands on beta for whoever DOES have them installed to discover. That is not a
+// hypothetical: the Meetings work added the `meetings` area to _shared/access.ts, migration277
+// and migration286 went red for everyone with the install, and beta was un-pushable until it was
+// chased down. The author saw a clean gate and had no way to know.
+//
+// So: if what you are pushing changes a migration or the permission model, these tests stop being
+// optional for you. Not for everyone, not for unrelated work — a fresh clone pushing a CSS fix
+// still needs no PGlite, which is the posture CLAUDE.md asks for ("a gate that makes the repo
+// unpushable is worse than the bugs it catches").
+const SQL_SUBJECT_RE = /^supabase\/(migrations\/|functions\/_shared\/access\.ts$)/;
+// Pure, so --self-test can drive it without a repository.
+function sqlSubjectPaths(files) {
+  return [...new Set(files.map((f) => String(f).trim().replace(/\\/g, "/")).filter((f) => SQL_SUBJECT_RE.test(f)))];
 }
-function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired()) {
+// LOCAL git only — never the network, and never fatal. Anything unexpected (no upstream, a
+// detached HEAD, git missing, a brand-new branch) answers "nothing touched", which leaves the
+// old skip-and-warn posture exactly as it was. `@{u}...HEAD` is what this push would add;
+// `HEAD` catches an uncommitted edit so `npm run preflight` warns before the commit too.
+function sqlSubjectTouched(cwd = root) {
+  const out = [];
+  for (const args of [["diff", "--name-only", "@{u}...HEAD"], ["diff", "--name-only", "HEAD"]]) {
+    try {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (r.status === 0 && r.stdout) out.push(...r.stdout.split("\n"));
+    } catch (_e) { /* git unavailable: answer nothing */ }
+  }
+  return sqlSubjectPaths(out);
+}
+function sqlTestsRequired(env = process.env, touched = []) {
+  return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1" || touched.length > 0;
+}
+function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired(), touched = []) {
   if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SQL_TESTS_DIR}/ does not exist`, files: [] };
   const files = readdirSync(dir).filter((f) => f.endsWith(".test.cjs")).sort();
   if (!files.length) return { errors: [], skipped: true, why: `no *.test.cjs files in ${SQL_TESTS_DIR}/`, files };
   if (!existsSync(join(dir, "node_modules"))) {
-    const how = `run \`npm install --prefix ${SQL_TESTS_DIR}\` once to include ${files.join(", ")}`;
+    // The COMMAND and the COUNT, never the 53 file names: a refusal nobody can read is a
+    // refusal people reach for --no-verify to get past.
+    const how = `run \`npm install --prefix ${SQL_TESTS_DIR}\` once (${files.length} test file(s))`;
     if (required) {
+      // Name the files that made it required: "REQUIRED here" with no reason reads as the gate
+      // being arbitrary, and the first instinct is --no-verify.
+      const why = touched.length
+        ? `this push changes ${touched.slice(0, 4).join(", ")}${touched.length > 4 ? ` (+${touched.length - 4} more)` : ""}, which is exactly what ${files.length} migration test(s) check`
+        : "REQUIRED here (CI or SS_REQUIRE_SQL_TESTS=1)";
       return {
-        errors: [`migration tests: REQUIRED here (CI or SS_REQUIRE_SQL_TESTS=1) but ${SQL_TESTS_DIR}/node_modules is not installed — ${how}`],
+        errors: [`migration tests: ${why}, but ${SQL_TESTS_DIR}/node_modules is not installed, so they DID NOT RUN — ${how}.
+`
+          + "    These are what catch _shared/access.ts drifting from its SQL mirror. A green gate without them says nothing about it."],
         skipped: false, files,
       };
     }
-    return { errors: [], skipped: true, files, why: `${SQL_TESTS_DIR}/node_modules is not installed (${how})` };
+    // Two reasons, deliberately. `why` INSTRUCTS (the self-test pins that a skip tells you how to
+    // fix it); `shortWhy` is the one clause the banner shows, so the command appears once, on its
+    // own line, ready to copy. The first version of both pasted all 53 test file names in and
+    // buried the sentence that mattered under the list it was trying to warn about.
+    return {
+      errors: [], skipped: true, files,
+      why: `${SQL_TESTS_DIR}/node_modules is not installed — run \`npm install --prefix ${SQL_TESTS_DIR}\` once`,
+      shortWhy: `${SQL_TESTS_DIR}/node_modules is not installed`,
+    };
   }
   const errors = [];
   for (const f of files) {
@@ -1877,6 +2013,26 @@ function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired()
     }
   }
   return { errors, skipped: false, files };
+}
+
+// ── Script tests: scripts/*.test.mjs (node --test) ──────────────────────────────────────
+// Tests for the repo's own Node tooling (release-note-nudge.test.mjs first, 2026-10-09). Before
+// this step the gate ran _shared, _test_stubs, tests/phone and tests/sql and NOTHING under scripts/,
+// so a test written there passed review and then never ran — the silent-pass hazard every other
+// step here guards against. Discovered by suffix, like the others, so the next one is covered the
+// day it lands. Same Node as this gate, no shell, run from scripts/ with the file names as given.
+// `dir` is a parameter so --self-test can drive it on a fixture.
+const SCRIPT_TESTS_DIR = "scripts";
+function scriptTests(dir = join(root, SCRIPT_TESTS_DIR)) {
+  if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SCRIPT_TESTS_DIR}/ does not exist`, files: [] };
+  const files = readdirSync(dir).filter((f) => f.endsWith(".test.mjs")).sort();
+  if (!files.length) return { errors: [], skipped: true, why: `no *.test.mjs files in ${SCRIPT_TESTS_DIR}/`, files };
+  const res = spawnSync(process.execPath, ["--test", ...files], { cwd: dir, encoding: "utf8" });
+  if (res.status !== 0) {
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n");
+    return { errors: [`script tests: node --test failed in ${SCRIPT_TESTS_DIR}/ (exit ${res.status ?? res.signal}; ${files.join(", ")})\n${out}`], skipped: false, files };
+  }
+  return { errors: [], skipped: false, files };
 }
 
 /**
@@ -1909,9 +2065,15 @@ function checkSettingsRouteCoverage(files, inject = null) {
     return errors;
   }
 
-  // The five functions that between them define every settings slug. Anchored on the
-  // declaration, so a rename surfaces here rather than quietly shrinking the slug set.
-  const TAB_FNS = ["ssSettingsTabs", "ssCompanyTabs", "ssColorTabs", "ssBillingTabs", "ssOptionTabs"];
+  // The functions that between them define every settings slug. Anchored on the declaration, so
+  // a rename surfaces here rather than quietly shrinking the slug set.
+  //
+  // ⚠️ A NEW HUB MEANS A NEW NAME HERE. ssCustomerHubTabs (2026-10-22) was the first hub added
+  // after this check was written, and until it was listed its tabs were the one part of Settings
+  // with no route coverage — the exact blindness the messages below are worded against. The
+  // count guard beneath only catches the list going EMPTY, not it going stale.
+  const TAB_FNS = ["ssSettingsTabs", "ssCompanyTabs", "ssColorTabs", "ssBillingTabs", "ssOptionTabs",
+    "ssCustomerHubTabs"];
   const slugs = new Set();
   for (const name of TAB_FNS) {
     const at = core.indexOf(`function ${name}(`);
@@ -1933,15 +2095,252 @@ function checkSettingsRouteCoverage(files, inject = null) {
     return errors;
   }
 
-  const covered = new Set([...spec.matchAll(/"\/portal\/settings\/([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
+  // Root addresses since 2026-10-13 (/settings/<slug>, no /portal): the spec lists the canonical
+  // form, and scripts/redirects.test.mjs proves each one's old /portal address still redirects.
+  const covered = new Set([...spec.matchAll(/"\/settings\/([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
   const missing = [...slugs].filter((s) => !covered.has(s)).sort();
   if (missing.length) {
     errors.push(`${SPEC}: ${missing.length} Settings slug(s) have no route in the smoke suite — `
-      + missing.map((s) => `"/portal/settings/${s}"`).join(", ")
+      + missing.map((s) => `"/settings/${s}"`).join(", ")
       + ". An unknown sub CLAMPS to the first tab rather than erroring, so an untested settings "
       + "page fails silently by landing people on Structures. Add them to ROUTES.");
   }
   return errors;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// "ESTIMATE", NEVER "QUOTE", WHEREVER A PERSON READS IT (Carolyn Q12, 2026-10-06).
+//
+// The product called StructureStudio's own paperwork a "quote" from migration 121 until
+// 2026-10-06, and the word was in ~450 strings when she asked for it gone: the designer, the
+// customer page, every email, the PDFs, the texts, the portal. The sweep fixed the copy; this
+// keeps it fixed, because the next feature written from a quote-era comment would bring the
+// word straight back.
+//
+// THE WORD STAYS IN IDENTIFIERS, ON PURPOSE. Routes and links already sent (/my-quotes,
+// ?account=quotes), function and action names (customer-quotes, accept_quote), DB columns and
+// values (ss_quote_*, subject 'quote', the email_template_copy kind 'quote'), storage keys
+// (-quote.pdf), CSS classes and element ids. Renaming any of those breaks something live, so
+// the rule reads only TEXT: string literals, template parts and JSX text (via the vendored
+// Babel, the compiler compile.mjs uses), plus my-quotes.html's markup. It skips:
+//   • a single identifier-shaped token: no whitespace, not capitalised ("quotes-list",
+//     "customer-quotes", "-quote.pdf", "&account=quotes&q="). A lowercase token IS flagged
+//     where it is rendered as it stands: a JSX child (`{x ? "quotes" : "invoices"}`) or the
+//     interpolation of a sentence-shaped template literal, and any part of a template literal
+//     that has a space anywhere in it (`quote ${n}` is a sentence, "quote " alone is not).
+//   • object keys, TypeScript literal types, import paths, and the attributes a person never
+//     reads (className, id, htmlFor, key, data-*, href, ...);
+//   • log-only text: the arguments of console.*, logEdgeError and the audit log (audit,
+//     auditStrict: key=value lines for support, not prose), and dbFail in
+//     customer-accept / customer-quotes (there it only logs; in portal-settings its `where`
+//     reaches the screen as "Couldn't …", so it IS checked);
+//   • WORDING_ALLOW below: the copy registered with the carriers for texting (the opt-in
+//     sentence, the A2P campaign text and its disclosure page). Changing those needs an update
+//     filed with Twilio for the active campaign, so they keep "quote" until Ahsan decides
+//     (decision 1 of the 2026-10-06 wording sweep). Remove an entry when its copy moves.
+//
+// THE SERVER HALF CAN SHIP LATER (WORDING_SERVER_HELD). The sweep's edge-function copy must not
+// go live before production's my-quotes prints the server's accept sentence (CLAUDE.md, the
+// estimate-wording HOLD), and beta and production share one Supabase project, so a sibling
+// deploy from beta would ship it early. If the branch goes to beta in two halves, the FRONTEND
+// half is pushed with this set to true: the supabase/functions files that discovery finds (they
+// still say "quote" until the server half lands) are read but what they say is set aside, while
+// any file a caller names (`only`, the self-test's plants, `inject`) is checked as usual. The
+// server half sets it back to false, and it is false in any tree holding both halves. A hold
+// left on after the server copy is clean is refused, so it cannot quietly outlive its half.
+//
+// `inject` maps a repo path to replacement text (or adds a file) — for --self-test only.
+const WORDING_SERVER_HELD = true;
+const WORDING_RE = /\bquot(e|es|ed|ing)\b/i;
+const WORDING_IDENT = /^[a-z0-9_\-.:/?&=[\]#{}$]*$/;
+const WORDING_HIDDEN_ATTR = /^(className|class|id|htmlFor|for|key|name|type|role|rel|target|href|src|action|method|view|mainClass|style|ref|data-[\w-]+|aria-(controls|labelledby|describedby))$/;
+const WORDING_ALLOW = {
+  // Carrier-registered SMS copy (decision 1): every string in these files.
+  files: [
+    "supabase/functions/_shared/smsConsentText.ts",
+    "supabase/functions/_shared/smsCopyTemplate.ts",
+    "supabase/functions/_shared/smsComplianceCheck.ts",
+    "supabase/functions/sms-optin-disclosure/index.ts",
+    "portal/11-sms.jsx",
+  ],
+  // ...and the two places outside them that carry the opt-in's own words: the designer twins'
+  // copy of the opt-in sentence (smsConsentText.ts's twin), and the portal's "they gave us
+  // permission" attestation, which names the same message category.
+  text: [
+    "your quote and your building. Message frequency varies.",
+    "permission to text them about their quote and building",
+  ],
+};
+let _wordingBabel = null;
+function wordingBabel() {
+  if (!_wordingBabel) _wordingBabel = createRequire(import.meta.url)(join(root, "vendor", "babel-standalone-7.23.9.min.js"));
+  return _wordingBabel;
+}
+function wordingFiles() {
+  const out = [...PORTAL_PARTS, "StructureStudio.jsx", "structure-studio.component.js",
+    "index.mount.jsx", "admin.app.jsx", "my-quotes.html", "manifest.json"];
+  const walk = (dir) => {
+    let ents = [];
+    try { ents = readdirSync(join(root, dir), { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) { if (e.name !== "node_modules" && e.name !== "_test_stubs") walk(rel); }
+      else if (/\.ts$/.test(e.name) && !/(\.test|_test)\.ts$/.test(e.name)) out.push(rel);
+    }
+  };
+  walk(FUNCTIONS_DIR);
+  walk("workers/phone-api/src");
+  return out;
+}
+// `only` narrows the SCAN to the named files (the self-test plants one file at a time; the
+// discovery is still run and still has to find the real set), and `listFiles` exists so
+// the self-test can prove a blind discovery is refused rather than reported clean. `held`
+// is WORDING_SERVER_HELD unless the self-test says otherwise.
+function checkEstimateWording(inject = null, { only = null, listFiles = wordingFiles, held = WORDING_SERVER_HELD } = {}) {
+  const errors = [];
+  const files = listFiles();
+  if (inject) for (const f of Object.keys(inject)) if (!files.includes(f)) files.push(f);
+  if (files.filter((f) => f.startsWith(FUNCTIONS_DIR + "/")).length < 20 || !files.includes("portal/02-sales.jsx")) {
+    return [`estimate wording: only ${files.length} file(s) found to scan — the discovery has gone `
+      + "blind and the rule is checking nothing; re-anchor wordingFiles() in scripts/preflight.mjs"];
+  }
+  let babel;
+  try { babel = wordingBabel(); } catch (e) {
+    return [`estimate wording: the vendored Babel did not load (${String(e.message).slice(0, 120)}) — the rule is checking nothing`];
+  }
+  const allowed = (f, text) => WORDING_ALLOW.files.includes(f) || WORDING_ALLOW.text.some((t) => text.includes(t));
+  const flag = (f, line, text) => errors.push(`${f}:${line}  says "quote" where a person reads it: `
+    + `"${text.replace(/\s+/g, " ").trim().slice(0, 140)}" — say "estimate" (Carolyn 2026-10-06). `
+    + "Identifiers (routes, ids, DB values, action names) keep the word; see checkEstimateWording.");
+  const scanCode = (f, code, lineOffset, isTs) => {
+    let ast;
+    try {
+      ast = babel.transform(code, {
+        filename: f + (isTs ? ".ts" : ".jsx"), ast: true, code: false, babelrc: false, configFile: false,
+        parserOpts: { sourceType: "unambiguous", allowReturnOutsideFunction: true, plugins: isTs ? ["typescript"] : ["jsx"] },
+      }).ast;
+    } catch (e) {
+      errors.push(`${f}: estimate wording check could not parse this file (${String(e.message).slice(0, 120)}) — `
+        + "it is checking nothing here; fix the parse or the file list");
+      return;
+    }
+    const logOnly = (anc) => {
+      for (let i = anc.length - 1; i >= 0; i--) {
+        const a = anc[i];
+        if (a.type !== "CallExpression" && a.type !== "NewExpression") continue;
+        const c = a.callee;
+        if (c.type === "MemberExpression" && c.object && c.object.name === "console") return true;
+        if (c.type === "Identifier" && /^(logEdgeError|audit|auditStrict)$/.test(c.name)) return true;
+        if (c.type === "Identifier" && c.name === "dbFail" && /^supabase\/functions\/customer-(accept|quotes)\//.test(f)) return true;
+      }
+      return false;
+    };
+    // A lowercase token rendered exactly as it stands: through ?: and &&/|| straight into a JSX
+    // child, or into a template literal that is itself a sentence.
+    const rendered = (node, anc) => {
+      if (node.type !== "StringLiteral") return false;
+      let child = node;
+      for (let i = anc.length - 1; i >= 0; i--) {
+        const a = anc[i];
+        if (a.type === "ConditionalExpression" && a.test !== child) { child = a; continue; }
+        if (a.type === "LogicalExpression") { child = a; continue; }
+        if (a.type === "JSXExpressionContainer") {
+          const p = anc[i - 1];
+          return !!p && (p.type === "JSXElement" || p.type === "JSXFragment");
+        }
+        if (a.type === "TemplateLiteral") return a.quasis.some((q) => /\s/.test(q.value.cooked ?? q.value.raw));
+        return false;
+      }
+      return false;
+    };
+    const walk = (node, anc) => {
+      if (!node || typeof node.type !== "string") return;
+      let text = null;
+      if (node.type === "StringLiteral") text = node.value;
+      else if (node.type === "TemplateElement") text = node.value.cooked ?? node.value.raw;
+      else if (node.type === "JSXText") text = node.value;
+      if (text && WORDING_RE.test(text) && !allowed(f, text)) {
+        const parent = anc[anc.length - 1];
+        const t = text.trim();
+        // A template part is prose when ANY part of its template has a space in it: `quote ${n}`
+        // is a sentence even though "quote " trims to a lone word (the sweep missed two that way).
+        const proseTemplate = node.type === "TemplateElement" && parent && parent.type === "TemplateLiteral"
+          && parent.quasis.some((q) => /\s/.test(q.value.cooked ?? q.value.raw));
+        const skip =
+          (parent && parent.type === "TSLiteralType")
+          || (parent && /^(ObjectProperty|ObjectMethod|ClassProperty|TSPropertySignature)$/.test(parent.type) && parent.key === node)
+          || (parent && /^(Import|Export)/.test(parent.type))
+          || (parent && parent.type === "JSXAttribute" && WORDING_HIDDEN_ATTR.test(
+            parent.name.type === "JSXNamespacedName" ? parent.name.name.name : parent.name.name))
+          || (WORDING_IDENT.test(t) && !proseTemplate && !rendered(node, anc))
+          || logOnly(anc);
+        if (!skip) flag(f, node.loc.start.line + lineOffset, text);
+      }
+      for (const k of Object.keys(node)) {
+        if (k === "loc" || k === "leadingComments" || k === "trailingComments" || k === "innerComments" || k === "extra") continue;
+        const v = node[k];
+        if (Array.isArray(v)) { for (const c of v) if (c && typeof c === "object") walk(c, anc.concat(node)); }
+        else if (v && typeof v === "object" && typeof v.type === "string") walk(v, anc.concat(node));
+      }
+    };
+    walk(ast.program, []);
+  };
+  const injected = (f) => !!inject && Object.prototype.hasOwnProperty.call(inject, f);
+  // Under the hold a discovered server file is still read, but what it says is set aside and
+  // only counted: nothing set aside means the server half has landed and the hold is stale.
+  const heldBack = (f) => held && !only && f.startsWith(FUNCTIONS_DIR + "/") && !injected(f);
+  let heldFiles = 0, heldHits = 0;
+  for (const f of only || files) {
+    const mark = errors.length;
+    scanOne(f);
+    if (heldBack(f)) { heldFiles++; heldHits += errors.length - mark; errors.length = mark; }
+  }
+  if (heldFiles && !heldHits) {
+    errors.push(`estimate wording: WORDING_SERVER_HELD is on, but none of the ${heldFiles} supabase/functions `
+      + "file(s) it holds back says \"quote\" any more — the server half has landed; set it back to false "
+      + "in scripts/preflight.mjs so the edge-function copy is checked again");
+  }
+  return errors;
+
+  function scanOne(f) {
+    const src = injected(f) ? inject[f] : readIfExists(f);
+    if (src == null) { errors.push(`${f}: missing — the estimate wording check expected to scan it`); return; }
+    if (/\.json$/.test(f)) {
+      // The portal's install manifest: the words the browser's "Install app" sheet shows.
+      let j = null;
+      try { j = JSON.parse(src); } catch (e) {
+        errors.push(`${f}: estimate wording check could not parse this file (${String(e.message).slice(0, 120)}) — it is checking nothing here`);
+        return;
+      }
+      for (const k of ["name", "short_name", "description"]) {
+        const v = j && typeof j[k] === "string" ? j[k] : "";
+        if (WORDING_RE.test(v) && !allowed(f, v)) {
+          const at = src.indexOf(`"${k}"`);
+          flag(f, at < 0 ? 1 : src.slice(0, at).split("\n").length, v);
+        }
+      }
+      return;
+    }
+    if (!/\.html$/.test(f)) { scanCode(f, src, 0, /\.ts$/.test(f)); return; }
+    // A page: its inline scripts as code, then the markup a person sees — text between tags and
+    // the attributes that are read (title, aria-label, placeholder, alt, value, content).
+    let markup = src;
+    for (const m of src.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+      if (!/\ssrc=/.test(m[1])) scanCode(f, m[2], src.slice(0, m.index + m[0].indexOf(">") + 1).split("\n").length - 1, false);
+    }
+    const blank = (s) => s.replace(/[^\n]/g, " ");
+    markup = markup.replace(/<script\b[\s\S]*?<\/script>/gi, blank).replace(/<style\b[\s\S]*?<\/style>/gi, blank).replace(/<!--[\s\S]*?-->/g, blank);
+    const lineAt = (i) => markup.slice(0, i).split("\n").length;
+    for (const m of markup.matchAll(/<[^>]*>|[^<]+/g)) {
+      if (m[0][0] !== "<") {
+        if (WORDING_RE.test(m[0]) && !allowed(f, m[0])) flag(f, lineAt(m.index), m[0]);
+        continue;
+      }
+      for (const a of m[0].matchAll(/\s(title|aria-label|placeholder|alt|value|content)\s*=\s*"([^"]*)"/gi)) {
+        if (WORDING_RE.test(a[2]) && !allowed(f, a[2])) flag(f, lineAt(m.index), a[2]);
+      }
+    }
+  }
 }
 
 if (process.argv.includes("--self-test")) {
@@ -2512,12 +2911,19 @@ if (process.argv.includes("--self-test")) {
   // suffix — so it ran zero of those 14 cases while reporting clean.
   // tests/phone joined on 2026-09-29, and it is the one group that runs from the repo root with
   // its own read flag: assert both, or a refactor that dropped either would run it wrongly (or
-  // not at all) and still report clean.
-  for (const want of ["_shared", "_test_stubs", PHONE_TESTS_DIR]) {
+  // not at all) and still report clean. "functions" (a function's own <fn>/*.test.ts) joined on
+  // 2026-10-15; customer-designs/handler.test.ts is named so the group cannot be found empty-handed.
+  for (const want of ["_shared", "_test_stubs", PHONE_TESTS_DIR, "functions"]) {
     if (!groups.some((g) => g.label === want)) {
       console.error(`self-test FAILED: test group "${want}" was not discovered`);
       process.exit(1);
     }
+  }
+  const fnGroup = groups.find((g) => g.label === "functions");
+  if (!fnGroup.files.includes("customer-designs/handler.test.ts") || fnGroup.importMap || fnGroup.cwd) {
+    console.error("self-test FAILED: the functions group does not run customer-designs/handler.test.ts from "
+      + `${FUNCTIONS_DIR} with no import map`);
+    process.exit(1);
   }
   const phoneGroup = groups.find((g) => g.label === PHONE_TESTS_DIR);
   if (phoneGroup.cwd !== root || phoneGroup.readFlag !== "--allow-read" || phoneGroup.importMap
@@ -2569,6 +2975,38 @@ if (process.argv.includes("--self-test")) {
       console.error("self-test FAILED: sqlTestsRequired does not read CI / SS_REQUIRE_SQL_TESTS=1");
       process.exit(1);
     }
+    // ── The third trigger: the push TOUCHES what these tests cover (2026-10-23) ──
+    // Both directions, and the matcher on its own, because this is the trigger that had to exist:
+    // the first two are posture somebody has to opt into, and nobody had.
+    const subjHit = sqlSubjectPaths([
+      "supabase/migrations/326_meetings.sql", "supabase/functions/_shared/access.ts",
+      "supabase\\migrations\\327_x.sql", "  supabase/migrations/328_y.sql  ",
+    ]);
+    const subjMiss = sqlSubjectPaths([
+      "portal/01-core.jsx", "supabase/functions/_shared/nmi.ts", "supabase/functions/portal-billing/index.ts",
+      "tests/sql/migration277.test.cjs", "docs/supabase/migrations/x.sql",
+    ]);
+    if (subjHit.length !== 4 || subjMiss.length) {
+      console.error(`self-test FAILED: the migration-test subject matcher is wrong (hit ${JSON.stringify(subjHit)}, miss ${JSON.stringify(subjMiss)})`);
+      process.exit(1);
+    }
+    if (!sqlTestsRequired({}, ["supabase/migrations/326_meetings.sql"]) || sqlTestsRequired({}, [])) {
+      console.error("self-test FAILED: touching a migration does not make the migration tests required");
+      process.exit(1);
+    }
+    // ...and the refusal NAMES what made it required, rather than reading as an arbitrary gate.
+    const touchedReq = sqlTests(tmpS, true, ["supabase/functions/_shared/access.ts"]);
+    if (touchedReq.skipped || touchedReq.errors.length !== 1
+      || !/_shared\/access\.ts/.test(touchedReq.errors[0]) || !/DID NOT RUN/.test(touchedReq.errors[0])
+      || !/npm install --prefix/.test(touchedReq.errors[0])) {
+      console.error("self-test FAILED: a push touching access.ts with no install did not fail the gate naming the file:\n" + touchedReq.errors.join("\n"));
+      process.exit(1);
+    }
+    // The probe itself must never throw and never reach the network; outside a repo it answers nothing.
+    if (sqlSubjectTouched(tmpdir()).length) {
+      console.error("self-test FAILED: sqlSubjectTouched invented touched files outside a repository");
+      process.exit(1);
+    }
     mkdirSync(join(tmpS, "node_modules"));
     const failed = sqlTests(tmpS, false);
     if (failed.skipped || failed.errors.length !== 1 || !/fails\.test\.cjs failed/.test(failed.errors[0])) {
@@ -2585,7 +3023,35 @@ if (process.argv.includes("--self-test")) {
   } finally {
     rmSync(tmpS, { recursive: true, force: true });
   }
-  console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI or SS_REQUIRE_SQL_TESTS=1), and a failing one fails the gate (${realSql.files.length} file(s) found)`);
+  console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI, SS_REQUIRE_SQL_TESTS=1, or because the push touches a migration or _shared/access.ts), the refusal names what made it required, the subject matcher fires both ways, and a failing test fails the gate (${realSql.files.length} file(s) found)`);
+
+  // ── The script-test step (scripts/*.test.mjs, node --test) ───────────────────
+  // Discovered for real (the nudge's test must be among them), and on a fixture directory a failing
+  // test fails the gate while a passing one does not.
+  const realScripts = readdirSync(join(root, SCRIPT_TESTS_DIR)).filter((f) => f.endsWith(".test.mjs"));
+  if (!realScripts.includes("release-note-nudge.test.mjs")) {
+    console.error(`self-test FAILED: ${SCRIPT_TESTS_DIR}/release-note-nudge.test.mjs was not discovered by the script-test step`);
+    process.exit(1);
+  }
+  const tmpN = mkdtempSync(join(tmpdir(), "ss-preflight-node-"));
+  try {
+    writeFileSync(join(tmpN, "fails.test.mjs"), 'import { test } from "node:test";\ntest("deliberately failing", () => { throw new Error("boom"); });\n');
+    const failedN = scriptTests(tmpN);
+    if (failedN.skipped || failedN.errors.length !== 1 || !/node --test failed/.test(failedN.errors[0])) {
+      console.error("self-test FAILED: a failing scripts/*.test.mjs did not fail the gate");
+      process.exit(1);
+    }
+    rmSync(join(tmpN, "fails.test.mjs"));
+    writeFileSync(join(tmpN, "passes.test.mjs"), 'import { test } from "node:test";\ntest("fine", () => {});\n');
+    const passedN = scriptTests(tmpN);
+    if (passedN.skipped || passedN.errors.length) {
+      console.error("self-test FAILED: a passing scripts/*.test.mjs failed the gate:\n" + passedN.errors.join("\n"));
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpN, { recursive: true, force: true });
+  }
+  console.log(`self-test passed: scripts/*.test.mjs run under node --test, and a failing one fails the gate (${realScripts.length} file(s) found)`);
 
   // ── The my-quotes tax-breakdown step ───────────────────────────────────────
   // Same silent-pass hazard as the two above, and a sharper one: this check EXTRACTS its
@@ -2678,6 +3144,43 @@ if (process.argv.includes("--self-test")) {
   console.log("self-test passed: the Routing/Checking validators agree in both files, and a drifted check "
     + "digit, a number in storage or an error sentence, a box the browser may remember, a missing "
     + "validator and a hardcoded CardSecure host are each refused");
+
+  // ── How long a card token may be held ──
+  // The real files pass; the limit raised in ONE copy, raised past the ceiling in both, gone from
+  // one, assigned twice, and written as an expression each fail.
+  const tokReal = Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, read(f)]));
+  if (checkCardTokenMaxAge(tokReal).length) {
+    console.error("self-test FAILED: the real my-quotes.html / portal/04-orders.jsx do not pass checkCardTokenMaxAge:");
+    for (const e of checkCardTokenMaxAge(tokReal)) console.error("  " + e);
+    process.exit(1);
+  }
+  const tokMutants = [
+    ["the portal's limit drifted from my-quotes'", { "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 90000;"] }, /differs/],
+    ["both limits raised past the 2 minutes", {
+      "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_MAX_MS = 120000;"],
+      "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 120000;"],
+    }, /is above 110000/],
+    ["the limit gone from my-quotes", { "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_LIMIT = 100000;"] }, /my-quotes\.html: CARD_TOKEN_MAX_MS is gone/],
+    ["a second assignment in the portal", { "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 100000; window.CARD_TOKEN_MAX_MS = 100000;"] }, /assigned 2 times/],
+    ["the limit as an expression", { "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_MAX_MS = 2 * 60000;"] }, /plain number/],
+  ];
+  for (const [what, edits, want] of tokMutants) {
+    const mutated = { ...tokReal };
+    for (const [f, [from, to]] of Object.entries(edits)) {
+      const src = tokReal[f].replace(/\r\n/g, "\n");
+      mutated[f] = src.replace(from, to);
+      if (mutated[f] === src) {
+        console.error(`self-test FAILED: could not plant "${what}" in ${f} — the subject of checkCardTokenMaxAge moved`);
+        process.exit(1);
+      }
+    }
+    if (!checkCardTokenMaxAge(mutated).some((e) => want.test(e))) {
+      console.error(`self-test FAILED: checkCardTokenMaxAge passed ${what}`);
+      process.exit(1);
+    }
+  }
+  console.log("self-test passed: CARD_TOKEN_MAX_MS is read from both card surfaces, and a drifted copy, a "
+    + "limit past 110 s, a missing one, a second assignment and an expression are each refused");
 
   // ── The GATES ⇄ action cross-check ─────────────────────────────────────────
   // This rule had NO self-test at all until now, in either direction — while quietly running
@@ -2840,6 +3343,19 @@ if (process.argv.includes("--self-test")) {
     console.error("self-test FAILED: a level-vocabulary mismatch did not fire");
     process.exit(1);
   }
+  // (c2) SEES A LEVEL WITH AN UNDERSCORE, on the TypeScript side. Drop contacts' "own_view" from
+  // access.ts alone: the two sides now disagree, and the rule must say so. With the old [a-z]+
+  // pattern the TS side never saw the level at all, so this mismatch would have been invisible —
+  // and the real files could never have passed (a).
+  const dropOwnView = amTs.replace(/levels:\s*\["none", "own_view", "own", "view", "edit"\]/, 'levels: ["none", "own", "view", "edit"]');
+  if (dropOwnView === amTs) {
+    console.error("self-test FAILED: could not find contacts' own_view in access.ts — the anchor moved and (c2) tests nothing");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { ts: dropOwnView }).some((e) => /area "contacts" allows \[none\|own\|view\|edit\]/.test(e))) {
+    console.error("self-test FAILED: an underscore level missing from access.ts did not fire");
+    process.exit(1);
+  }
   // (d) REFUSES TO RUN BLIND. A renamed AREAS export must be an error, never a clean pass —
   // the whole point is that a rule reporting nothing must not look like a rule reporting OK.
   if (!checkAreaMirror(amFiles, { ts: amTs.replace("export const AREAS", "export const AREAS_RENAMED") })
@@ -2932,7 +3448,8 @@ if (process.argv.includes("--self-test")) {
     + "one that is not, and it refuses to run blind if the table is renamed");
 
   console.log("self-test passed: the permission-model mirror agrees today, fires on an area "
-    + "missing from SQL, on a level-vocabulary mismatch, on a job title missing from either "
+    + "missing from SQL, on a level-vocabulary mismatch (an underscore level like own_view "
+    + "included), on a job title missing from either "
     + "SQL copy, is not fooled by a header comment naming the tables, and refuses to run "
     + "blind on a renamed AREAS or TITLES export");
 
@@ -2950,7 +3467,7 @@ if (process.argv.includes("--self-test")) {
       + "reported errors on the real files");
     process.exit(1);
   }
-  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec.replace('"/portal/settings/cladding",', "") })
+  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec.replace('"/settings/cladding",', "") })
         .some((e) => /cladding/.test(e))) {
     console.error("self-test FAILED: a settings slug missing from the smoke suite did not fire");
     process.exit(1);
@@ -2976,6 +3493,88 @@ if (process.argv.includes("--self-test")) {
     + "one that does not, and it refuses to run blind on a renamed tab function, a changed "
     + "tuple shape, or a missing spec");
 
+  // ── "Estimate", never "quote" ──
+  // Both directions, because a wording rule that cries wolf on an identifier gets deleted by the
+  // first person it stops, and one that never fires is indistinguishable from a clean tree.
+  const ewFail = (why, errs = []) => {
+    console.error("self-test FAILED: estimate wording — " + why);
+    for (const e of errs) console.error("  " + e);
+    process.exit(1);
+  };
+  // (a) CLEAN on the real tree. If this fires, a person really is reading "quote" somewhere.
+  const ewClean = checkEstimateWording();
+  if (ewClean.length) ewFail("the real tree is not clean today:", ewClean);
+  // (b) THE PLANT: the designer's customer button reading "Get Quote" again.
+  const ewCmpFile = "structure-studio.component.js";
+  const ewCmp = readIfExists(ewCmpFile) || "";
+  const ewAnchor = 'hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Estimate"}';
+  if (!ewCmp.includes(ewAnchor)) ewFail("the Get Estimate anchor moved — re-anchor this self-test");
+  const ewPlanted = checkEstimateWording({ [ewCmpFile]: ewCmp.replace(ewAnchor, ewAnchor.replace('"Get Estimate"', '"Get Quote"')) }, { only: [ewCmpFile] });
+  if (!ewPlanted.some((e) => /^structure-studio\.component\.js:\d+ .*"Get Quote"/.test(e))) ewFail("a planted \"Get Quote\" button was not caught", ewPlanted);
+  // (c) IDENTIFIERS AND LOG TEXT STAY QUIET; a sentence beside them fires.
+  const ewTs = "supabase/functions/_shared/__wording_selftest__.ts";
+  const ewQuiet = [
+    'const a = "customer-quotes"; const b = `/my-quotes?client=${a}&account=quotes`; const k = { quote: 1 };',
+    'console.warn("SS quote PDF upload failed:", a);',
+    'logEdgeError({ message: `quote countersign failed: ${a}` });',
+    'type D = "quote" | "invoice";',
+    'if (a === "quotes") audit("x", null, `short_code=${a} quote=${b}`);',
+  ].join("\n");
+  const ewQuietErrs = checkEstimateWording({ [ewTs]: ewQuiet }, { only: [ewTs] });
+  if (ewQuietErrs.length) ewFail("identifiers or log-only text tripped the rule:", ewQuietErrs);
+  if (!checkEstimateWording({ [ewTs]: 'export const r = () => ({ error: "That quote was not found." });' }, { only: [ewTs] })
+        .some((e) => e.startsWith(ewTs + ":1 "))) ewFail("a server error sentence saying \"quote\" was not caught");
+  // (d) A LOWERCASE TOKEN RENDERED AS IT STANDS fires; the same token as a key or class does not.
+  const ewJsx = "portal/__wording_selftest__.jsx";
+  if (!checkEstimateWording({ [ewJsx]: 'const X = ({ v }) => <div>Loading your {v === "invoices" ? "invoices" : "quotes"}…</div>;' }, { only: [ewJsx] })
+        .some((e) => e.startsWith(ewJsx + ":1 "))) ewFail("a lowercase \"quotes\" rendered as a JSX child was not caught");
+  const ewJsxQuiet = checkEstimateWording({ [ewJsx]: 'const X = ({ v }) => <div className="ssd-ft-cta is-quote" id="quotes-list">{v === "quotes" && tab("quotes", "Estimates")}</div>;' }, { only: [ewJsx] });
+  if (ewJsxQuiet.length) ewFail("a class, an id or a compared key tripped the rule:", ewJsxQuiet);
+  // (d2) A WORD IN A SENTENCE-SHAPED TEMPLATE fires even when its own part trims to one word —
+  //      the shape the 2026-10-06 sweep itself missed twice in 02-sales' confirms.
+  if (!checkEstimateWording({ [ewJsx]: 'const f = (qn) => window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this estimate"}.`);' }, { only: [ewJsx] })
+        .some((e) => e.startsWith(ewJsx + ":1 "))) ewFail("\"quote ${qn}\" nested in a sentence was not caught");
+  // (e) my-quotes MARKUP: the heading fires, the ids on the same line do not.
+  const ewMq = readIfExists("my-quotes.html") || "";
+  const ewMqAnchor = '<h1 id="quotes-heading">Your estimates</h1>';
+  if (!ewMq.includes(ewMqAnchor)) ewFail("the my-quotes heading anchor moved — re-anchor this self-test");
+  const ewMqErrs = checkEstimateWording({ "my-quotes.html": ewMq.replace(ewMqAnchor, '<h1 id="quotes-heading">Your quotes</h1>') }, { only: ["my-quotes.html"] });
+  if (ewMqErrs.length !== 1 || !/my-quotes\.html:\d+ .*"Your quotes"/.test(ewMqErrs[0])) ewFail("my-quotes' heading saying \"Your quotes\" was not caught exactly once", ewMqErrs);
+  // (f) THE CARRIER ALLOWANCE IS NARROW: the opt-in sentence passes, other prose in the same
+  //     place does not.
+  if (!checkEstimateWording({ [ewJsx]: 'const t = "Your quote is ready.";' }, { only: [ewJsx] }).length) ewFail("prose outside the carrier allowance passed");
+  if (checkEstimateWording({ [ewJsx]: 'const t = "about " + "your quote and your building. Message frequency varies. Message and data rates may apply.";' }, { only: [ewJsx] }).length) {
+    ewFail("the carrier-registered opt-in sentence tripped the rule");
+  }
+  // (g) REFUSES TO RUN BLIND when discovery finds nothing.
+  if (!checkEstimateWording(null, { listFiles: () => [] }).some((e) => /gone blind/.test(e))) ewFail("an empty discovery reported clean instead of blind");
+  // (h) THE INSTALL MANIFEST: the portal's "Install app" sheet saying "quotes" fires.
+  const ewMan = readIfExists("manifest.json") || "";
+  if (!/"description":/.test(ewMan)) ewFail("manifest.json has no description to plant in — re-anchor this self-test");
+  const ewManErrs = checkEstimateWording({ "manifest.json": ewMan.replace(/("description":\s*")/, "$1Build quotes. ") }, { only: ["manifest.json"] });
+  if (ewManErrs.length !== 1 || !/^manifest\.json:\d+ .*Build quotes/.test(ewManErrs[0])) ewFail("the manifest's description saying \"quotes\" was not caught exactly once", ewManErrs);
+  // (i) THE SERVER-HALF HOLD (WORDING_SERVER_HELD) sets aside only what discovery found under
+  //     supabase/functions: a named or injected server file is still checked, and the hold says
+  //     whether it is holding anything back. Proven against this tree whichever half it holds.
+  const ewServer = 'export const r = () => ({ error: "That quote was not found." });';
+  if (!checkEstimateWording({ [ewTs]: ewServer }, { only: [ewTs], held: true }).some((e) => e.startsWith(ewTs + ":1 "))) ewFail("under the hold, a named server file saying \"quote\" was not caught");
+  if (!checkEstimateWording({ [ewTs]: ewServer }, { held: true }).some((e) => e.startsWith(ewTs + ":1 "))) ewFail("under the hold, an injected server file saying \"quote\" was not caught");
+  const ewOpen = checkEstimateWording(null, { held: false });
+  const ewHeld = checkEstimateWording(null, { held: true });
+  const ewServerHits = ewOpen.filter((e) => e.startsWith(FUNCTIONS_DIR + "/"));
+  if (ewServerHits.length) {
+    // The frontend half: the server copy still says "quote", and the hold sets exactly that aside.
+    if (ewHeld.some((e) => e.startsWith(FUNCTIONS_DIR + "/") || /WORDING_SERVER_HELD/.test(e))) ewFail("the hold did not set the server files aside:", ewHeld);
+    if (ewHeld.length !== ewOpen.length - ewServerHits.length) ewFail("the hold changed what is checked outside supabase/functions:", ewHeld);
+  } else if (ewHeld.filter((e) => /WORDING_SERVER_HELD is on/.test(e)).length !== 1) {
+    // Both halves (or the server half): nothing to hold back, so a hold left on is refused.
+    ewFail("a hold with nothing left to hold back was not refused", ewHeld);
+  }
+  console.log("self-test passed: no \"quote\" where a person reads it today; a planted \"Get Quote\", a "
+    + "server sentence, a rendered lowercase token, a my-quotes heading and the install manifest all fire; "
+    + "identifiers, classes, keys, log text and the carrier opt-in sentence stay quiet; a blind discovery "
+    + "is refused; the server-half hold sets aside only what discovery found, and a stale hold is refused");
+
   process.exit(0);
 }
 
@@ -2998,10 +3597,16 @@ if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
 
-const sql = sqlTests();
+// What this push would add, so a change to a migration or to the permission model cannot skip
+// the tests that cover it. Local git, never the network; "nothing touched" is the safe answer.
+const sqlTouched = sqlSubjectTouched();
+const sql = sqlTests(join(root, SQL_TESTS_DIR), sqlTestsRequired(process.env, sqlTouched), sqlTouched);
 errors.push(...sql.errors);
-if (sql.skipped) {
-  console.error(`preflight: migration tests SKIPPED — ${sql.why}.`);
+
+const scriptRes = scriptTests();
+errors.push(...scriptRes.errors);
+if (scriptRes.skipped) {
+  console.error(`preflight: script tests SKIPPED — ${scriptRes.why}.`);
 }
 
 errors.push(...checkStandalonePagesParse({
@@ -3010,6 +3615,24 @@ errors.push(...checkStandalonePagesParse({
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
+errors.push(...checkCardTokenMaxAge(Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
+errors.push(...checkEstimateWording());
+
+// The skip is now the LOUDEST thing this gate prints, and on a clean run it is the LAST.
+// It used to be one line in the middle of the output, which is how a skipped migration suite read
+// as "green": the author of the Meetings work saw a clean gate while migration277 and migration286
+// were red for everyone who had the install, and beta could not be pushed to until it was chased
+// down. One line, mid-run, among other skips, is not a warning anybody acts on.
+if (sql.skipped) {
+  const bar = "=".repeat(68);
+  console.error(`\n${bar}`);
+  console.error(`  MIGRATION TESTS DID NOT RUN - ${sql.files.length} file(s) in ${SQL_TESTS_DIR}/ were skipped`);
+  console.error(`  Why:  ${sql.shortWhy || sql.why}`);
+  console.error(`  Fix:  npm install --prefix ${SQL_TESTS_DIR}      (once, then they run on every push)`);
+  console.error("  Until then a green gate here says NOTHING about your migrations, or about");
+  console.error("  _shared/access.ts still agreeing with its SQL mirror.");
+  console.error(`${bar}\n`);
+}
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);

@@ -18,10 +18,15 @@
 //      a porch with FOUR steps, and piers on ground that falls 2 ft to the back;
 //      3b: on Auto, the steps' and posts' −/+ step from the count Auto draws, and the posts' Auto chip
 //      keeps saying what Auto draws once a number is typed;
+//      3f (Carolyn 2026-10-06): under Number of steps, one line says the count is the treads you walk on,
+//      its (i) that the porch floor at the top is not counted; the box keeps its exact name and its
+//      −/+ theirs, and Porch posts has no note;
 //      3c (2026-10-03): a projecting porch's steps go down either side too, greyed out (saying why) on a
 //      deck under 2' 6"; one picked on a deeper deck stays picked there but is not drawn, the note saying
 //      so, and is drawn again once the deck is deepened (2026-10-04); a recessed porch offers the three
-//      front ones only and builds its steps;
+//      front ones and (2026-10-07) one down either open side, keeping the side flight it is switched to
+//      with and building it turned onto that side, the two greyed out (saying why) on a porch under 4 ft,
+//      one picked there staying picked, not drawn, the note saying so; and builds its front steps;
 //      3e (2026-10-05): with no front set the porch end is a gable end, front or back, the note saying to set the
 //      front first; with the front a gable end it offers the left and right walls, which build the porch there,
 //      and a recessed porch on the left wall (an eave wall there) offers no timber truss, where the front gable does;
@@ -50,7 +55,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -124,7 +129,7 @@ async function open(path) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   return { ctx, page, errors };
@@ -160,7 +165,7 @@ const shot = async (page, name) => page.screenshot({ path: join(SHOTS, name), fu
 const railCur = (page) => page.evaluate(() => { const b = document.querySelector(".ss-adv .ssd-rail .ssd-step.is-current"); return b ? b.getAttribute("aria-label") : ""; });
 
 try {
-  const { ctx, page, errors } = await open("/portal/advanced");
+  const { ctx, page, errors } = await open("/advanced");
   await page.waitForSelector('[data-ss-adv="sections"]', { timeout: 60000 });
   await page.waitForTimeout(600);
 
@@ -233,11 +238,12 @@ try {
   const OWN = {
     leanto: ["leanToAdd", "leanToWall", "leanToWidthFt", "leanToDropFt", "leanToAttach", "leanToAttachFt", "leanToLength", "leanToLengthFt", "leanToOffsetFt", "leanToEnclosed", "leanToMeetPorch"],
     // Each wing set on its own (roof.wingSides, 2026-09-29): the shared middle height, then a card per eave side.
-    // The wing list (roof.wingList, 2026-10-01): the add row, "+ Add a wing on ...", and each list card's controls.
+    // The wing list (roof.wingList, 2026-10-01): the add row, "+ Add a wing on ...", and each list card's controls;
+    // the outermost side wing's "Along the wall" (lengthFt / offsetFt, 2026-10-07).
     wings: ["wingsOn", "centerEaveFt", ...["left", "right", "front", "back"].flatMap((s) => ["wingOn", "wingWidthFt", "wingAttach", "wingAttachFt", "wingPitch"].map((f) => `${f}-${s}`)),
-      "wlAdd", "wlAddOn", "wlWidthFt", "wlAttach", "wlAttachFt", "wlPitch", "wlEaveFt", "wlMove", "wlRemove"],
+      "wlAdd", "wlAddOn", "wlWidthFt", "wlAttach", "wlAttachFt", "wlPitch", "wlEaveFt", "wlMove", "wlRemove", "wlLength", "wlLengthFt", "wlOffsetFt"],
     dormer: ["dormerOn", "dormerType", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"],
-    porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
+    porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchGable", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
   };
   const MUST = { leanto: ["leanToWall", "leanToWidthFt", "leanToEnclosed"], wings: ["centerEaveFt", "wingOn-left", "wingWidthFt-left", "wingOn-right", "wingWidthFt-right"], dormer: ["dormerWidthFt", "dormerType"], porch: ["porchKind"] };
   const others = (k) => Object.entries(OWN).filter(([o]) => o !== k).flatMap(([, v]) => v);
@@ -377,6 +383,33 @@ try {
   ok("3b: …and the chip still says what Auto draws, not the number typed", postsChip.trim() === `Auto (${autoPosts})` && await autoChip("porchPosts").getAttribute("aria-pressed") === "false", postsChip);
   await autoChip("porchPosts").click();
 
+  // 3f ── what the count counts (Carolyn 2026-10-06: the treads you walk on) ──────────────────────
+  const stepsF = page.locator('[data-ss-adv-f="porchStepCount"]');
+  const stepsNote = stepsF.locator(".ss-adv-note");
+  await stepsF.scrollIntoViewIfNeeded();
+  const noteInfo = await stepsNote.evaluateAll((ns) => ns.map((n) => {
+    const short = [...n.childNodes].filter((c) => c.nodeType === 3).map((c) => c.textContent).join("").replace(/\s+/g, " ").trim();
+    const row = n.parentElement.querySelector(".ss-adv-step"), box = n.closest(".is-full"), rise = box && box.querySelector('[data-ss-step-rise="adv"]');
+    return { short, h: Math.round(n.getBoundingClientRect().height), belowRow: !!row && n.getBoundingClientRect().top >= row.getBoundingClientRect().bottom - 1,
+      aboveRise: !rise || rise.getBoundingClientRect().top >= n.getBoundingClientRect().bottom - 1, rise: !!rise, hasWhy: !!n.querySelector("details.ss-adv-why") };
+  }));
+  ok("3f: under Number of steps, one note: \"The treads you walk on.\"", noteInfo.length === 1 && noteInfo[0].short === "The treads you walk on." && noteInfo[0].hasWhy, JSON.stringify(noteInfo));
+  ok("3f: …one line, under the −/+ row and above the rise readout", noteInfo.length === 1 && noteInfo[0].h <= 20 && noteInfo[0].belowRow && noteInfo[0].rise && noteInfo[0].aboveRise, JSON.stringify(noteInfo));
+  const stepsWhy = stepsNote.locator(".ss-adv-why");
+  const stepsWhyClosed = !(await stepsWhy.locator(".ss-adv-why-t").isVisible());
+  await stepsWhy.locator("summary").click();
+  await page.waitForTimeout(150);
+  const stepsWhyT = (await stepsWhy.locator(".ss-adv-why-t").innerText().catch(() => "")).trim();
+  ok("3f: …its (i) opens on a click: the porch floor at the top is not counted as a step",
+    stepsWhyClosed && stepsWhyT === "The porch floor at the top is not counted as a step.", JSON.stringify(stepsWhyT));
+  await shot(page, "ask-porch-steps-treads-note.png");
+  await stepsWhy.locator("summary").click();
+  await page.waitForTimeout(150);
+  ok("3f: the box keeps its exact name, and −/+ theirs", (await byLabel(page, "Number of steps").count()) === 1
+    && (await page.getByRole("button", { name: "Number of steps: one more", exact: true }).count()) === 1
+    && (await page.getByRole("button", { name: "Number of steps: one fewer", exact: true }).count()) === 1);
+  ok("3f: Porch posts has no note", (await page.locator('[data-ss-adv-f="porchPosts"] .ss-adv-note').count()) === 0);
+
   // 3c ── the steps by porch kind (2026-10-03) ─────────────────────────────────────────────────────
   const segOpts = () => page.locator('[data-ss-adv-f="porchSteps"] button').evaluateAll((bs) => bs.map((b) => `${b.textContent.trim()}${b.disabled ? "(off)" : ""}`).join("|"));
   ok("3c: a projecting porch's steps go along its front or down either side", (await segOpts()) === "None|Left|Center|Right|Left side|Right side", await segOpts());
@@ -408,16 +441,60 @@ try {
   await shot(page, "ask-porch-side-steps.png");
   await radio(page, "Porch", "Recessed").click();
   await page.waitForTimeout(200);
-  ok("3c: a recessed porch offers the three front steps only, the side flight gone", (await segOpts()) === "None|Left|Center|Right"
-    && (await segBtn(page, "Porch steps", "None").getAttribute("aria-pressed")) === "true", await segOpts());
-  ok("3c: …and with no steps, no wood colour to pick", (await page.locator('[data-ss-adv-f="wood"]').count()) === 0);
+  // Since 2026-10-07 a recessed porch's sides are open and take a flight too: the side flight carries over,
+  // built off that open side of the porch, turned onto it. The lean-to section 3 put on the right wall stands
+  // along the porch's right side, so that one is greyed out, saying why.
+  ok("3c: a recessed porch offers the three front steps and its open left side, keeping the side flight; the right side has the lean-to",
+    (await segOpts()) === "None|Left|Center|Right|Left side|Right side(off)" && (await segBtn(page, "Porch steps", "Left side").getAttribute("aria-pressed")) === "true"
+      && (await segBtn(page, "Porch steps", "Right side").getAttribute("title")) === "A lean-to is on that side", await segOpts());
+  await panelModel(page, (M) => !!(M.recessedSteps && M.recessedSteps.where === "leftSide" && M.recessedSteps.turn === -1 && !M.porch));
+  ok("3c: …and builds it off the recessed porch's left side", true);
+  const recNote = (await page.locator('[data-ss-adv-f="porchSteps"]').innerText()).replace(/\s+/g, " ");
+  ok("3c: …the note says where steps can go, and which side has the lean-to",
+    /Off the floor's edge in the opening, or down its left side, as seen from in front\. A lean-to stands on its right side\./.test(recNote), recNote);
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
+  await shot(page, "ask-recessed-side-steps.png");
+  // Under 4 ft deep there is no room between the inside corner and the post: greyed out, saying why; the pick stays and is not drawn.
+  await byLabel(page, "Depth (ft)").fill("3");
+  await page.keyboard.press("Tab");
+  await panelModel(page, (M) => { let n = 0; M.root.traverse((o) => { if (o.userData && o.userData.ssPorchSteps) n++; }); return !!M.recessedFrame && !M.recessedSteps && n === 0; });
+  const recShallow = (await page.locator('[data-ss-adv-f="porchSteps"]').innerText()).replace(/\s+/g, " ");
+  ok("3c: ⚠️ on a 3 ft recessed porch both sides are greyed out, saying why, and the picked one is not drawn",
+    (await segOpts()) === "None|Left|Center|Right|Left side(off)|Right side(off)" && (await segBtn(page, "Porch steps", "Right side").getAttribute("title")) === "Needs a porch 4' 0\" deep"
+      && (await segBtn(page, "Porch steps", "Left side").getAttribute("aria-pressed")) === "true"
+      && /Steps down a side are not drawn until the porch is at least 4' 0" deep\. Make it deeper, or pick steps off its front edge\./.test(recShallow), `${await segOpts()} | ${recShallow}`);
+  await byLabel(page, "Depth (ft)").fill("6");
+  await page.keyboard.press("Tab");
+  await panelModel(page, (M) => !!(M.recessedSteps && M.recessedSteps.where === "leftSide"));
+  ok("3c: …and at 6 ft it is drawn again", true);
+  await segBtn(page, "Porch steps", "None").click();
+  await panelModel(page, (M) => !M.recessedSteps && !!M.recessedFrame);
+  // Its frame and deck are built of the porch wood since 2026-10-07, so the picker shows with no steps too.
+  ok("3c: …and with no steps, the wood colour its frame is built in", (await page.locator('[data-ss-adv-f="wood"]').count()) === 1
+    && /Wood color \(posts, beams, truss, deck\)/.test(await page.locator('[data-ss-adv-f="wood"]').innerText()));
+  // ⚠️ Blank on a recessed porch is NOT natural wood (the 2026-10-07 review): the frame is drawn in the trim colour
+  // with no decking, only the steps natural. The readout says so, the Natural tile writes the natural wood colour
+  // itself (the frame and deck turn wood), and the Trim color tile clears it again.
+  const woodRead = async () => (await page.locator('[data-ss-adv-f="wood"] [data-ss-wood-read]').innerText()).trim();
+  const woodTile = (l) => page.locator(`[data-ss-adv-f="wood"] button[aria-label="${l}"]`);
+  ok("3c: …blank says what it draws: the frame in the trim colour, no decking, natural-wood steps",
+    (await woodRead()) === "Not set: frame in the trim color, no decking, steps in natural wood" && (await woodTile("Trim color").getAttribute("aria-pressed")) === "true", await woodRead());
+  await woodTile("Natural").click();
+  await panelModel(page, (M) => !!(M.recessedFrame && M.recessedFrame.wood));
+  ok("3c: …Natural writes the natural wood colour, so the frame and the deck are wood",
+    (await woodRead()) === "Natural" && (await woodTile("Natural").getAttribute("aria-pressed")) === "true"
+      && (await page.getByRole("textbox", { name: "Wood color hex", exact: true }).inputValue()).toUpperCase() === "#C4965A", await woodRead());
+  await woodTile("Trim color").click();
+  await panelModel(page, (M) => !!(M.recessedFrame && !M.recessedFrame.wood));
+  ok("3c: …and Trim color clears it, the frame back in the trim colour", (await woodRead()).startsWith("Not set:")
+    && (await page.getByRole("textbox", { name: "Wood color hex", exact: true }).inputValue()) === "", await woodRead());
   await segBtn(page, "Porch steps", "Center").click();
   await panelModel(page, (M) => !!(M.recessedSteps && M.recessedSteps.where === "center" && !M.porch));
   ok("3c: Center builds the recessed porch's steps", true);
   ok("3c: …and its step count shows, on Auto", (await page.locator('[data-ss-adv-f="porchStepCount"]').count()) === 1 && /^Auto \(\d+\)$/.test((await autoChip("porchStepCount").innerText()).trim()));
   // The recessed steps are built of the porch wood (2026-10-04), so its picker shows for them, named so.
   const woodF = page.locator('[data-ss-adv-f="wood"]');
-  ok("3c: …and the wood colour they are built in, as \"Wood color (steps)\"", (await woodF.count()) === 1 && /Wood color \(steps\)/.test(await woodF.innerText()));
+  ok("3c: …and the wood colour they are built in, as \"Wood color (posts, beams, truss, deck)\"", (await woodF.count()) === 1 && /Wood color \(posts, beams, truss, deck\)/.test(await woodF.innerText()));
   await shot(page, "ask-recessed-steps.png");
   await radio(page, "Porch", "Projecting").click();
   await panelModel(page, (M) => !!(M.porch && M.porch.steps && M.porch.steps.where === "center"));
@@ -443,9 +520,19 @@ try {
   await radio(page, "Porch", "Recessed").click();
   await page.waitForTimeout(200);
   ok("3e: a recessed porch on the left wall of a gable front offers no timber truss", (await trussSw()) === 0);
+  // The open porch gable (roof.porchGable, 2026-10-07) is a gable END's the same way.
+  const gableSw = () => page.locator('[data-ss-adv-f="porchGable"]').count();
+  ok("3e: …and no open gable", (await gableSw()) === 0);
   await segBtn(page, "Porch end", "Front wall").click();
   await page.waitForTimeout(200);
   ok("3e: …at the front gable end it does", (await trussSw()) === 1);
+  ok("3e: …and the open gable beside it, which builds the open gable", (await gableSw()) === 1);
+  await page.locator('[data-ss-adv-f="porchGable"]').click();
+  await panelModel(page, (M) => !!(M.recessedFrame && M.recessedFrame.open === true));
+  ok("3e: ticked, the 3D opens the gable over the porch", true);
+  await page.locator('[data-ss-adv-f="porchGable"]').click();
+  await panelModel(page, (M) => !!(M.recessedFrame && M.recessedFrame.open === false));
+  ok("3e: …and unticked, it is sided again", true);
   await segBtn(page, "Porch end", "Left wall").click();
   await radio(page, "Porch", "Projecting").click();
   await panelModel(page, (M) => !!(M.porch && M.porch.wall === "west"));
@@ -680,7 +767,7 @@ try {
   // Ahsan: "re design the designer settings tab similar to what we have done with advance tab". It
   // used to keep every field at once in the amber grid (and this check asserted exactly that).
   {
-    const { ctx: c2, page: p2, errors: e2 } = await open("/portal/settings/designer");
+    const { ctx: c2, page: p2, errors: e2 } = await open("/settings/designer");
     await p2.waitForFunction(() => document.body.innerText.includes("3D Style Calibration"), null, { timeout: 60000 });
     const before = await p2.evaluate(() => ({
       tiles: [...document.querySelectorAll('.ss-cal [data-ss-cal="styles"] [data-ss-style]')].map((t) => t.getAttribute("aria-label")),

@@ -3,7 +3,7 @@
 // The account menu offers My Profile to everyone and the needsDetails nudge's "Add details"
 // sends people there; its two actions (save_prefs / save_profile) are "self" on the server. But
 // the route clamp asked for a settings_* area, which a sales rep, dealer, scheduler, crew member
-// or driver holds none of — so /portal/settings/myprofile bounced them to their fallback page and
+// or driver holds none of — so /settings/myprofile bounced them to their fallback page and
 // rewrote the address bar, and both controls did nothing at all.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
@@ -12,11 +12,11 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine), the shape
 // supportConsoles.mjs uses. SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file
 // instead — against the artifact before this fix, A, B and C fail (the address bar ends on
-// /portal/designs and "How the Pipeline tab opens" never renders).
+// /designs and "How the Contacts tab opens" never renders).
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF } from "./lib.mjs";
+import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -84,7 +84,7 @@ async function run(S, path, act) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
@@ -95,40 +95,40 @@ async function run(S, path, act) {
     pageErrors,
     path: await page.evaluate(() => location.pathname),
     body: await page.evaluate(() => (document.querySelector(".ss-body") || document.body).innerText),
-    settingsNav: await page.evaluate(() => !!document.querySelector('.ss-nav a[href="/portal/settings"]')),
+    settingsNav: await page.evaluate(() => !!document.querySelector('.ss-nav a[href="/settings"]')),
   };
   await ctx.close();
   return out;
 }
 
-const PROFILE_MARK = "How the Pipeline tab opens";
+const PROFILE_MARK = "How the Contacts tab opens";
 try {
   // A: a sales rep's cold deep link.
-  const A = await run({ role: "user", access: SALES_REP }, "/portal/settings/myprofile");
-  ok("A: a sales rep's /portal/settings/myprofile stays put", A.path === "/portal/settings/myprofile", A.path);
+  const A = await run({ role: "user", access: SALES_REP }, "/settings/myprofile");
+  ok("A: a sales rep's /settings/myprofile stays put", A.path === "/settings/myprofile", A.path);
   ok("A: …and renders My Profile", A.body.includes(PROFILE_MARK));
   ok("A: no Settings item appears in the workspace rail", !A.settingsNav);
   ok("A: no uncaught page errors", A.pageErrors.length === 0, A.pageErrors.join(" | "));
 
   // B: the account menu's My Profile, from the rep's landing page.
-  const B = await run({ role: "user", access: SALES_REP }, "/portal/designs", async (page) => {
-    await page.evaluate(() => { const a = document.querySelector('.ss-user-menu a[href="/portal/settings/myprofile"]'); if (a) a.click(); });
+  const B = await run({ role: "user", access: SALES_REP }, "/designs", async (page) => {
+    await page.evaluate(() => { const a = document.querySelector('.ss-user-menu a[href="/settings/myprofile"]'); if (a) a.click(); });
   });
-  ok("B: the account menu's My Profile opens it", B.path === "/portal/settings/myprofile" && B.body.includes(PROFILE_MARK), B.path);
+  ok("B: the account menu's My Profile opens it", B.path === "/settings/myprofile" && B.body.includes(PROFILE_MARK), B.path);
 
   // C: the needsDetails nudge's "Add details" (no name on file).
-  const C = await run({ role: "user", access: SALES_REP, fullName: null }, "/portal/designs", async (page) => {
+  const C = await run({ role: "user", access: SALES_REP, fullName: null }, "/designs", async (page) => {
     await page.evaluate(() => { const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "Add details"); if (b) b.click(); });
   });
-  ok("C: \"Add details\" lands on My Profile", C.path === "/portal/settings/myprofile" && C.body.includes(PROFILE_MARK), C.path);
+  ok("C: \"Add details\" lands on My Profile", C.path === "/settings/myprofile" && C.body.includes(PROFILE_MARK), C.path);
 
   // D: the rest of Settings is still refused to the rep.
-  const D = await run({ role: "user", access: SALES_REP }, "/portal/settings/team");
-  ok("D: /portal/settings/team still bounces a sales rep", D.path !== "/portal/settings/team" && !D.path.startsWith("/portal/settings"), D.path);
+  const D = await run({ role: "user", access: SALES_REP }, "/settings/team");
+  ok("D: /settings/team still bounces a sales rep", D.path !== "/settings/team" && !D.path.startsWith("/settings"), D.path);
 
   // E: an owner is unchanged.
-  const E = await run({ role: "owner", access: OWNER }, "/portal/settings/myprofile");
-  ok("E: an owner's My Profile is unchanged", E.path === "/portal/settings/myprofile" && E.body.includes(PROFILE_MARK), E.path);
+  const E = await run({ role: "owner", access: OWNER }, "/settings/myprofile");
+  ok("E: an owner's My Profile is unchanged", E.path === "/settings/myprofile" && E.body.includes(PROFILE_MARK), E.path);
 } finally {
   await browser.close();
 }

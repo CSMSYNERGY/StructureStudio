@@ -25,13 +25,18 @@ import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor, bosIsPct } from "../_s
 import { ssPriceGroupId, ssPriceRowKey } from "../_shared/priceRowKey.ts";
 import { applyPriceOverrides, parsePriceOverrides } from "../_shared/priceOverride.ts";
 // Partition walls (migration 278): the clamped reading of itemSummary.partitions and how a wall is charged.
-import { partitionCharge, partitionDescription, partitionOpeningDescription, partitionsFromPayload } from "../_shared/partitionPricing.ts";
+import {
+  interiorWallRates, interiorWallTableMissing, partitionCharge, partitionDescription, partitionMaxRiseFt, partitionOpeningDescription, partitionsFromPayload, partitionStud,
+} from "../_shared/partitionPricing.ts";
 import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } from "../_shared/foundation.ts";
 import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
 import { hasSubject } from "../_shared/jwtSubject.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { cladLineName } from "../_shared/claddingLineName.ts";
+// The Roof line's words: a metal roof on standing seam is named (2026-10-06, the profile per design).
+import { effectiveRoofProfile, roofLineDesc } from "../_shared/roofProfile.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
+import { companyOf, ghlContactNameFields, personName } from "../_shared/customerNaming.ts";
 import { resolveRate } from "../_shared/salesTax.ts";
 import {
   agreedTax, carriedTax, carryDecision, chooseDefaultRate, homeLotApplies, stampTax, TAX_LOCATION_COLUMNS,
@@ -291,7 +296,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // draft and the ISSUED steps below mark it sent. Read here only to skip that write for a
     // design already past draft; the write itself re-checks draft in its WHERE.
     // updated_at (2026-09-17) is the SS persist's compare-and-swap token (see "PERSIST" in 9-ALT).
-    .select("client_id, status, updated_at, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
+    // selections (2026-10-06): the design's own metal roof profile, for a body from a designer that
+    // predates the pick and so sends no roofProfile key (Line 3: Roof).
+    .select("client_id, status, updated_at, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot, selections")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -424,14 +431,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
   // WHO A CUSTOMER'S REPLY TO THIS EMAIL IS COPIED TO (2026-10-05; the rule is
   // _shared/repReplyTo.ts). callerUserId is the verified session's person, so a rep submitting
-  // from the portal's designer gets the customer's answer in their own inbox as well as on the
-  // record. repReplyTo names them only as a member of THIS tenant who is not a CSM Synergy
-  // operator on a customer's account (an operator in view-as has no membership here); a member
-  // with no usable address gets no copy rather than a colleague's. For anyone else, and for a
-  // shopper's own submit (no session at all), the copy goes to the rep the customer is
-  // assigned to, or to nobody. Membership, not mayPrice: who wrote the quote decides whose inbox,
-  // not what they were allowed to price. Asked only when an email is actually built, and a failed
-  // lookup costs the copy, never the quote.
+  // from the portal's designer gets the customer's answer on the record, and in their own inbox
+  // as well if they switched reply copies on in My Profile (or while replies aren't routed to the
+  // record on this account; sendTenantEmail decides, 2026-10-07). repReplyTo names them only as a
+  // member of THIS tenant who is not a CSM Synergy operator on a customer's account (an operator
+  // in view-as has no membership here); a member with no usable address gets no copy rather than
+  // a colleague's. For anyone else, and for a shopper's own submit (no session at all), the copy
+  // goes to the rep the customer is assigned to, on that rep's own switch, or to nobody.
+  // Membership, not mayPrice: who wrote the quote decides whose inbox, not what they were allowed
+  // to price. Asked only when an email is actually built, and a failed lookup costs the copy,
+  // never the quote.
   //
   // `recipient` is where this email goes: the email in the REQUEST, which on a shopper's submit is
   // whatever they typed. The assigned rep is named only when it is the contact's own address,
@@ -648,8 +657,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const r = await fetch("https://services.leadconnectorhq.com/contacts/upsert", {
       method: "POST",
       headers: ghlHeaders,
+      // The name fields through customerNaming.ts: `{ name }` exactly as always without a company;
+      // with one (quote to a business entity), firstName/lastName from the PERSON and companyName,
+      // so the CRM stops greeting "Hi Bear" for Bear River Band.
       body: JSON.stringify({
-        name: contact?.name || "",
+        ...ghlContactNameFields(contact),
         email: contact?.email || "",
         phone: contact?.phone || "",
         locationId,
@@ -815,6 +827,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   let styleShowImage = true;                 // per-style toggle: attach the photo to the estimate? (default yes)
   let buildingPrice = 0, priced = false;
   let buildingWidthFt = 0, buildingDepthFt = 0;   // drive sqft_building / perimeter_building add-ons
+  // The matched style's d3, for the Roof line's metal profile (the style's value is the starting one
+  // for a design that has not picked). Null when no style matches or the read fails: AG Panel.
+  let styleD3: unknown = null;
 
   // ── Taxability, per catalog item (migration 148) ────────────────────────────────────────
   //
@@ -855,6 +870,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
+      styleD3 = styleRow.d3 ?? null;
       // The style's OWN wall height, which anything priced by wall AREA has to start from.
       // Read here rather than in the wall-height block because it is true whether or not the
       // customer bought an upgrade. See the resolvedWallHeightFt comment below for why this
@@ -1551,7 +1567,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //
   // ⚠️ EXTRACTED COPY EXISTS: _shared/attributeLines.ts carries this function and the
   // paint/roof line builders below verbatim — the order screen's attribute change orders
-  // (migration 127) price with it. Any change to this math MUST land in both files.
+  // (migration 127) price with it. Any change to this math MUST land in both files. (The Roof
+  // line's WORDS are shared outright since 2026-10-06: both build them with roofProfile.ts.)
   const colorAmount = (row: any): number => {
     const rate = Number(row?.rate) || 0;
     if (rate <= 0) return 0;
@@ -1614,14 +1631,30 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
   // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
   // roofType key, possibly empty). Type + Color in the description; amount is the roof color's rate.
+  //
+  // THE METAL PROFILE (2026-10-06, Carolyn: "there is no standard it is per individual design").
+  // A metal roof on standing seam reads "Metal (Standing Seam) — Black"; every other roof keeps the
+  // words it has always had, byte for byte, so no signed order sees its Roof line change. The
+  // profile is the design's own pick, else (a SIGNED design) the profile its agreed Roof line names,
+  // else its style's starting value, else AG Panel. The pick is the body's roofProfile when the
+  // body NAMES the key (the designer always sends it, "" when cleared, so "" is a real clear); a
+  // body that does not name it comes from a designer older than the pick, and then the stored
+  // design's own pick stands, so a resubmit from production's bundle keeps a profile a rep set on
+  // beta. Words only: the amount and the taxability are unchanged.
+  // The agreed line beats the style (review 2026-10-07): a builder who later sets the style to
+  // Standing Seam for future quotes must not reword an order signed as "Metal — Black", or this
+  // resubmit raises "Roof: options updated" for a roof nobody changed. See roofProfile.ts.
   if (Object.prototype.hasOwnProperty.call(selections, "roofType")) {
     const roofType = String(selections.roofType ?? "").trim();
     const roofColor = String(selections.roofColor ?? "").trim();
+    const roofPick = Object.prototype.hasOwnProperty.call(selections, "roofProfile")
+      ? (selections as Record<string, unknown>).roofProfile
+      : (existingDesign.selections as Record<string, unknown> | null)?.roofProfile;
+    const roofAgreed = (existingDesign.accepted_at || existingDesign.accepted_snapshot) ? agreedBaseline(existingDesign).lines : null;
     let roofAmount = 0;
-    let roofDesc = "No roof selected";
+    const roofDesc = roofLineDesc(roofType, roofColor, effectiveRoofProfile(roofPick, styleD3, roofAgreed));
     let roofTaxable = true;
     if (roofType) {
-      roofDesc = roofColor ? `${roofType} — ${roofColor}` : `${roofType} — (color TBD)`;
       if (roofColor && norm(roofColor) !== norm("TBD")) {
         try {
           const flag = norm(roofType) === norm("Metal") ? "metal" : "shingle";
@@ -1785,18 +1818,48 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // that line — which is why these do not go through pushItem, whose line sums every item of a key.
   // partitionsFromPayload clamps every length to the building and every height to the wall this
   // estimate prices (the anon key reaches this function). The wall is charged by the builder's method
-  // on the partitionWall row (partitionCharge: per foot, per square foot of wall, or each); an
-  // unpriced wall still gets its $0 line, because it is on the plan. A door or window is priced from
+  // (partitionCharge: per lineal foot or per square foot of wall); an unpriced wall still gets its $0
+  // line, because it is on the plan. A door or window is priced from
   // fixture_items by its id, like the doors[] and windows[] lines above, except that nothing in the
   // body is ever a price: an id that is not in this tenant's catalog, or not a door or window, prices
   // nothing. Never netted against a size's inclusions (those are the building's own doors), and no new
   // QBO kind: a wall is a layout_item, a door a door, a window a window.
+  //
+  // INTERIOR WALLS V2 (2026-10-17): a wall is a segment at any angle, framed in 2x4 or 2x6 and as tall
+  // as the stud wall, a stated height, or the roof's underside ("to the rafters"). The rate is the one
+  // for its stud size in interior_wall_settings (the builder's Interior walls tab). NO ROW = NOT SET
+  // UP (Carolyn, 2026-10-17): the designer offers no Interior wall button, and a wall that reaches
+  // here anyway (a design saved earlier, a hand-built body) gets its $0 line, never a charge. The 278
+  // partitionWall layout row is read ONLY when the table itself does not exist (a database before 313,
+  // where get_config has no interiorWalls key and the designer keeps 278's behaviour). Any other
+  // failed read refuses the estimate, the electrical settings' posture: a wall must never go out at $0
+  // because a read blipped. A wall to the rafters is charged by its face area held between the wall's
+  // and the roof's (partitionMaxRiseFt over the style's own roof). Nothing from the body is a price.
   {
-    const partitions = partitionsFromPayload((summary as Record<string, unknown>).partitions,
-      { widthFt: buildingWidthFt, lengthFt: buildingDepthFt }, resolvedWallHeightFt);
+    const rawPartitions = (summary as Record<string, unknown>).partitions;
+    let iwRow: Record<string, unknown> | null = null;
+    let iwTableMissing = false;
+    if (Array.isArray(rawPartitions) && rawPartitions.length) {
+      const iwRes = await supabase.from("interior_wall_settings")
+        .select("standard_stud, pricing_method, rate_2x4, rate_2x6, allow_rafters, taxable")
+        .eq("client_id", clientId).maybeSingle();
+      if (iwRes.error) {
+        if (!interiorWallTableMissing(iwRes.error)) {
+          return json({ error: "Could not read your interior wall settings just now. Try resubmitting in a moment." }, 400);
+        }
+        iwTableMissing = true;
+        console.info(`submit-estimate: interior_wall_settings is not there yet (${iwRes.error.message}); the partitionWall layout rate prices the walls`);
+      } else iwRow = (iwRes.data as Record<string, unknown> | null) ?? null;
+    }
+    const lp = layoutRates.get("partitionWall");
+    const iw = interiorWallRates(iwRow, lp ?? null, { tableMissing: iwTableMissing });
+    const partitions = partitionsFromPayload(rawPartitions,
+      { widthFt: buildingWidthFt, lengthFt: buildingDepthFt }, resolvedWallHeightFt,
+      { maxRiseFt: partitionMaxRiseFt(styleD3, buildingWidthFt, buildingDepthFt), allowRafters: iw.allowRafters });
     if (partitions.length) {
-      const lp = layoutRates.get("partitionWall");
-      const rate = lp?.rate || 0;
+      // The tab's flag; the 278 item's only on the pre-313 fallback; nothing to say for a $0 wall.
+      const wallNonTaxable = iw.taxable != null ? iw.taxable === false
+        : iw.source === "layout_item_pricing" ? layoutTaxable.get("partitionWall") === false : false;
       const fxIds = [...new Set(partitions.flatMap((p) => p.openings.map((o) => o.fixtureItemId)).filter((x): x is string => !!x))];
       const fxRows = new Map<string, { name: string; category: string; price: number | null; widthIn: number | null; heightIn: number | null; url: string | null; show: boolean }>();
       if (fxIds.length) {
@@ -1812,12 +1875,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         }
       }
       for (const p of partitions) {
-        const ch = partitionCharge(p, lp?.method);
+        const stud = partitionStud(p, iw);
+        const ch = partitionCharge(p, iw.method);
         targetItems.push(tagLine({
-          name: "Partition Wall", qty: ch.qty, amount: rate,
-          priceId: "", productId: "", attachments: lp ? imgAttachments(lp.imageUrl) : [],
-          currency: "USD", type: "one_time", description: partitionDescription(p),
-        }, { kind: "layout_item", itemKey: "partitionWall", nonTaxable: layoutTaxable.get("partitionWall") === false,
+          name: "Interior Wall", qty: ch.qty, amount: iw.rates[stud] ?? 0,
+          priceId: "", productId: "", attachments: lp && iw.source === "layout_item_pricing" ? imgAttachments(lp.imageUrl) : [],
+          currency: "USD", type: "one_time", description: partitionDescription(p, stud),
+        }, { kind: "layout_item", itemKey: "partitionWall", nonTaxable: wallNonTaxable,
              ...(p.id ? { rowKey: ssPriceRowKey("partition", p.id) } : {}) }));
         for (const o of p.openings) {
           const fx = o.fixtureItemId ? fxRows.get(o.fixtureItemId) : undefined;
@@ -2081,6 +2145,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (w && w.flowerBox) { const l = dressLabel(w.flowerBoxColorId, w.flowerBoxColorLabel); bits.push(l ? `flower box: ${l}` : "flower box"); }
       return bits.length ? bits.join(" · ") : null;
     };
+    // The window's grid of lites (migration 335; Carolyn, 2026-10-23), as the designer drew it:
+    // "6-lite (3 rows of 2)". Display text only, never priced: the designer sends the pair it resolved
+    // (the rep's override, else the row's default), and anything but two whole numbers from 1 to 8 is
+    // no words. A plain window (1 x 1) and an automatic one (none sent) say nothing, so a window whose
+    // look did not change keeps its line exactly (a changed line on a signed order is a change order).
+    // ⚠️ The designer's ssLitesWords says the same words; change both together.
+    const litesWords = (w: any): string | null => {
+      const r = Number(w?.liteRows), c = Number(w?.liteCols);
+      if (!Number.isInteger(r) || !Number.isInteger(c) || r < 1 || c < 1 || r > 8 || c > 8 || r * c < 2) return null;
+      return `${r * c}-lite (${r} row${r === 1 ? "" : "s"} of ${c})`;
+    };
     const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null; rowKey: string | null }>();
     for (const w of windows) {
       // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
@@ -2100,12 +2175,25 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
       const dressText = dressDesc(w);
+      const litesText = litesWords(w);
       // WHERE IT IS. `wall` is one of front/back/left/right and a dormer window has none — its
       // face is not a wall, so the designer sends `wall: null` and `dormer: true` rather than
       // inventing a fifth value (2026-09-07). A client that predates the flag sends neither and
       // reads exactly as it always did.
-      const place = w && w.dormer ? "in the dormer" : (w && w.wall ? `${w.wall} wall` : null);
-      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, place].filter(Boolean).join(" · ");
+      //
+      // A WINDOW IN A DOOR (migration 289) sends `inDoor: true` and the door's name instead. It is the
+      // window's OWN line at the window's catalog price, one entry per leaf (two on a double), never
+      // folded into the door's line: an included door nets its whole grouped price, which would give
+      // the window away with it. The name is display text only (the price is re-read from
+      // fixture_items above), trimmed and capped so a forged body cannot write an essay on the quote.
+      const doorName = w && w.inDoor ? (String(w.doorName || "Door").trim().slice(0, 80) || "Door") : null;
+      // A TRANSOM in the door (fixture_items.door_window_at, 2026-10-21) sends `doorWindowAt: "top"`
+      // beside `inDoor`: glass across the top of each leaf rather than in its upper panel. Same price
+      // rule (the catalog price, one line per leaf); only the words and the group differ. Anything
+      // but the exact "top" is the panel window it always was.
+      const doorTop = !!doorName && w.doorWindowAt === "top";
+      const place = w && w.dormer ? "in the dormer" : doorName ? `${doorTop ? "Transom in door" : "Window in door"}: ${doorName}` : (w && w.wall ? `${w.wall} wall` : null);
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, litesText, colorText, dressText, place].filter(Boolean).join(" · ");
       // The dressing joins the group key for the same reason the colour does: two otherwise
       // identical windows, one with shutters and one without, are two different products to
       // the shop, and collapsing them into one line would describe both by whichever arrived
@@ -2120,8 +2208,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // payload), so it never takes a wall window's price even when it shares that row's key.
       const rowKey = w && w.dormer ? null
         : ssPriceRowKey("win", ssPriceGroupId(w.fixtureItemId, w.name || "Window", w.price != null ? Number(w.price) : 0), w.colorId || "");
-      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : ""}`
-        + (rowKey && allowedOverrides.has(rowKey) ? `|${rowKey}` : "");
+      // A window in a door joins the key with its door's name, for the dormer's reason: folded into an
+      // identical wall window's group it would be described as on that window's wall (and the other
+      // way round), and two doors' windows would both be named after whichever door came first. It
+      // KEEPS the win: row key, unlike the dormer: the designer's Details folds it into that very row
+      // (computeLayoutPricingRows' customWindows), so a rep's price on the row re-prices it too. A
+      // transom adds its position, so it is never described as a panel window in the same door.
+      // The grid joins it last, and only when there is one, so every key without a grid is exactly
+      // what it was: a 6-lite and a 9-lite of one window are two products to the shop.
+      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : doorName ? `door:${doorName}${doorTop ? "|top" : ""}` : ""}`
+        + (rowKey && allowedOverrides.has(rowKey) ? `|${rowKey}` : "") + (litesText ? `|lites:${litesText}` : "");
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null), rowKey };
       if (g.rowKey !== rowKey) g.rowKey = null;
       g.qty++; wg.set(key, g);
@@ -2633,7 +2729,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     buildingLine.description = buildingLine.description ? `${pdfLink}<br>${buildingLine.description}` : pdfLink;
   }
 
-  const firstName = contact?.name ? String(contact.name).split(" ")[0] : "Customer";
+  // The CRM estimate's title: the business when the quote is for one ("Bear River Band - Barn
+  // 10x12"), else the first word of the name as it always was.
+  const customerCompany = companyOf(contact);
+  const firstName = customerCompany || (contact?.name ? String(contact.name).split(" ")[0] : "Customer");
   const estimateName = `${firstName} - ${styleLabel} ${size}`.trim();
   // Collision-resistant invoice sequence: low 8 digits of the epoch-ms clock
   // (unique within any ~28h window) + 2 random digits to cover two submissions
@@ -2674,7 +2773,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       ...(businessLogoUrl ? { logoUrl: businessLogoUrl } : {}),
     },
     contactDetails: {
-      name: contact?.name || "Unknown",
+      // With a company: the person (or the company when there is none) plus companyName. Without
+      // one, exactly the name it always sent.
+      name: (customerCompany ? personName(contact) || customerCompany : contact?.name) || "Unknown",
+      ...(customerCompany ? { companyName: customerCompany } : {}),
       email: contact?.email || "",
       phoneNo: formattedPhone,
       ...(estimateAddress ? { address: estimateAddress } : {}),
@@ -2777,34 +2879,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // conditionals threaded through the money path. Junior Barns and every other tenant on
   // invoice_in_ghl = true reach this line and walk straight past it.
   if (!invoiceInGhl) {
-    // The number is allocated ONCE per design and reused on every resubmit — the same promise
-    // the GHL path keeps by PUTting the same estimate id rather than creating a second one. A
-    // customer who receives a revised quote must not see the number change under them.
-    let ssQuoteNumber: string | null = existingDesign.ss_quote_number || null;
-    if (!ssQuoteNumber) {
-      const { data: allocated, error: allocErr } = await supabase
-        .rpc("allocate_ss_quote_number", { p_client_id: clientId });
-      if (allocErr) {
-        // Authored sentence out, raw Postgres text to the log — portal-settings' `dbFail`
-        // contract. A driver message can carry column names, constraint text and row values,
-        // and this response is read by an anonymous shopper.
-        await logEdgeError({
-          fn: "submit-estimate", req, clientId, code: "ss_quote_number_alloc_failed",
-          message: `allocate_ss_quote_number failed: ${allocErr.message}`,
-          context: { designId: String(designId) },
-        });
-        return json({ error: "We couldn't issue a quote number for this business just now. Please try again in a moment." }, 502);
-      }
-      ssQuoteNumber = allocated ? String(allocated) : null;
-    }
-    // NULL means the tenant has no starting number. portal-settings refuses to save this
-    // combination, so reaching here means the row was edited around the portal — refuse rather
-    // than invent a 1, which would collide with the paperwork they already have out.
-    if (!ssQuoteNumber) {
-      return json({
-        error: "This account issues its own quotes but has no starting quote number set. Add one in Settings → CRM Connection → Quotes & Invoices.",
-      }, 400);
-    }
+    // The quote number is allocated further down, AFTER the sales-tax decision (2026-10-07).
+    // See "The quote number" below for why.
 
     // ── Sales tax (migration 148; the rate chain, 2026-09-17) ───────────────────────────
     //
@@ -2879,8 +2955,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       } catch (e) {
         // REFUSE, do not fall to the company rate. A quote that names a location with its own
         // rate would be emailed at a total the builder did not set, and the next resubmit
-        // would quietly change it. Nothing about the quote has been written yet; a first issue
-        // loses its allocated number, as it does on every refusal after the allocation above.
+        // would quietly change it. Nothing about the quote has been written yet, and no number
+        // has been taken: the allocation waits below this decision.
         // This is also what a deploy ahead of migration 245 looks like.
         await logEdgeError({
           fn: "submit-estimate", req, clientId, code: "tax_location_read_failed",
@@ -2891,15 +2967,54 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }
       taxDefault = chooseDefaultRate({ salesLocationId, location, homeLot, companyRate: ssTaxRate, companyLabel: ssTaxLabel });
       // No link has a rate. portal-settings refuses to turn invoice_in_ghl off without a company
-      // rate, so reaching here means the row was edited around the portal, and quoting an
-      // untaxed bill is the one outcome worth refusing over — the same posture the missing
-      // quote number takes immediately above. The company rate still lives on that card.
+      // rate, so reaching here means the row was created without that save (280's default: a
+      // paperwork row whose owner never opened the card) or edited around the portal, and
+      // quoting an untaxed bill is the one outcome worth refusing over. The company rate still
+      // lives on that card. Refused BEFORE the number is allocated below, so it costs nothing.
       if (!taxDefault) {
         return json({
           error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
           reason: "no_tax_rate",
         }, 400);
       }
+    }
+    // ── The quote number (moved below the tax decision, 2026-10-07) ─────────────────────
+    // The number is allocated ONCE per design and reused on every resubmit — the same promise
+    // the GHL path keeps by PUTting the same estimate id rather than creating a second one. A
+    // customer who receives a revised quote must not see the number change under them.
+    //
+    // WHY HERE AND NOT FIRST. Allocating spends the number, and every refusal after it burned
+    // one. Since migration 283 a blank starting number hands out 1000 (Carolyn 2026-10-06), so
+    // with the allocation first, a paperwork tenant with no tax rate yet took 1000, 1001, 1002 …
+    // on every shopper's refused attempt and opened its books on a gap. Both tax refusals above
+    // now come first. The amendment gate below refuses only SIGNED designs, and those already
+    // carry their number, so nothing after this point allocates for a quote that is turned away
+    // before its first write.
+    let ssQuoteNumber: string | null = existingDesign.ss_quote_number || null;
+    if (!ssQuoteNumber) {
+      const { data: allocated, error: allocErr } = await supabase
+        .rpc("allocate_ss_quote_number", { p_client_id: clientId });
+      if (allocErr) {
+        // Authored sentence out, raw Postgres text to the log — portal-settings' `dbFail`
+        // contract. A driver message can carry column names, constraint text and row values,
+        // and this response is read by an anonymous shopper.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "ss_quote_number_alloc_failed",
+          message: `allocate_ss_quote_number failed: ${allocErr.message}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't issue a quote number for this business just now. Please try again in a moment." }, 502);
+      }
+      ssQuoteNumber = allocated ? String(allocated) : null;
+    }
+    // DEFENSIVE. Since 283 the allocator answers NULL only for a tenant with no settings row,
+    // which step 1 turned away long before this, or while 123's allocator is still the live one
+    // (this function deployed ahead of 283) and the start is blank. Refuse; never invent a number
+    // here, which could collide with paperwork the builder already has out.
+    if (!ssQuoteNumber) {
+      return json({
+        error: "We couldn't issue a quote number for this business. Please try again later, or contact them directly. (For the business: check your numbering under Settings → CRM Connection → Quotes & Invoices.)",
+      }, 400);
     }
     // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07; moved up 2026-09-15) ────
     // Only a design the customer already signed can be an amendment. BEFORE the first write,
@@ -3435,6 +3550,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // The {customer} token's name, and the building's photo (its own "Image on estimate"
           // switch, and only this builder's own upload, as for the line photos above).
           customerName: String(contact?.name ?? "").trim(),
+          customerCompany: companyOf(contact),
           pictureUrl: emailStylePhoto,
           businessName,
           logoUrl: businessLogoUrl || null,
@@ -3451,6 +3567,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           formalPdfUrl: quotePdfUrl,
           quoteTerms: quoteTerms || null,
           docWord: "quote",
+          // The photo design's signature carries the address (her GHL email does).
+          address: businessAddress,
         });
       const replyTo = await quoteReplyTo(intendedTo);
       const outcome = await sendTenantEmail(supabase, clientId, {
@@ -3903,6 +4021,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           const content = estimateEmail({
             templateCopy: settings.email_template_copy,
             customerName: String(contact?.name ?? "").trim(),
+            customerCompany: companyOf(contact),
             pictureUrl: emailStylePhoto,
             businessName,
             logoUrl: businessLogoUrl || null,
@@ -3918,6 +4037,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             pdfUrl: tenantStorageUrl(imageUrl),
             formalPdfUrl,
             quoteTerms: quoteTerms || null,
+            address: businessAddress,
           });
           const replyTo = await quoteReplyTo(intendedTo);
           const outcome = await sendTenantEmail(supabase, clientId, {

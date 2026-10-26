@@ -74,6 +74,11 @@ export const CRM_FEED_TYPES = {
   // Read from phone_calls (migration 254) with the voicemail embedded; see the slot-14 read.
   // Mirrors CRM_CHIPS' "calls" in portal/02-sales.jsx; keep the two identical.
   call: ["call", "call_missed", "voicemail"],
+  // MEETINGS (Carolyn 2026-10-26, "Add Meetings" on the chip row). What is still AHEAD of you
+  // is Planned; this chip is what HAPPENED — booked, cancelled, and how it went. Three types
+  // under one chip, the email/message/call precedent: one meeting's life is one story.
+  // Mirrors CRM_CHIPS' "meetings" in portal/02-sales.jsx; keep the two identical.
+  meeting: ["meeting_booked", "meeting_cancelled", "meeting_done"],
   // DOCUMENTS ARE HISTORY, NOT AN ACTION. Carolyn, 2026-08-26 24:01, having found the same
   // documents listed in two places: "the top part is about things to do. The bottom part is
   // about history … instead of in two places." So the record page's Documents TAB is gone
@@ -180,7 +185,8 @@ export async function buildCrmFeed(
   //   5 change_orders  6 invoice_sends    7 captured_leads 8 crm_notes
   //   9 crm_activities 10 email_inbound   11 crm_files    12 sms_messages
   //  13 crm_field_changes                14 phone_calls (+ its voicemail)
-  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges, calls] = await Promise.all([
+  //  15 meetings
+  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges, calls, meets] = await Promise.all([
     // image_url is the floor-plan PDF the `floor_plan` event below carries. It was missing from
     // this list, so `d.image_url` was always undefined and no floor plan ever reached History.
     codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact, image_url").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
@@ -215,7 +221,7 @@ export async function buildCrmFeed(
           return r?.data ?? [];
         })().catch(() => [])
       : Promise.resolve([]),
-    codes.length ? q(admin.from("design_acceptances").select("id, short_code, subject, quote_number, signer_name, method, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
+    codes.length ? q(admin.from("design_acceptances").select("id, short_code, subject, quote_number, signer_name, method, accepted_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("change_orders").select("id, short_code, co_no, status, total_before_cents, total_after_cents, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("invoice_sends").select("short_code, status, invoice_number, issued_by, updated_at, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     opts.contactId ? q(admin.from("captured_leads").select("id, name, source, created_at").eq("client_id", clientId).eq("contact_id", opts.contactId)) : Promise.resolve([]),
@@ -301,6 +307,14 @@ export async function buildCrmFeed(
           return r?.data ?? [];
         })().catch(() => [])
       : Promise.resolve([]),
+    // MEETINGS — scoped like crm_notes: the PERSON on a contact record (a meeting is with
+    // them, and most are about no one design), the design's own on a design record. Cancelled
+    // ones are read too: "they cancelled" is the part of the story you most need later.
+    q(opts.contactId
+      ? admin.from("meetings").select("id, short_code, starts_at, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).eq("contact_id", opts.contactId)
+      : (codes.length
+        ? admin.from("meetings").select("id, short_code, starts_at, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).in("short_code", codes)
+        : Promise.resolve({ data: [] }))),
   ]);
 
   for (const d of designs as any[]) {
@@ -308,7 +322,7 @@ export async function buildCrmFeed(
     const what = [sel.style, sel.size].filter(Boolean).join(" ") || "a design";
     push({ id: `d:${d.short_code}`, type: "design_created", at: iso(d.created_at), title: `Design started — ${what}`, code: d.short_code, icon: "design" });
     if (d.ss_quote_sent_at) push({ id: `qs:${d.short_code}`, type: "email", at: iso(d.ss_quote_sent_at), title: `Quote ${d.ss_quote_number || ""} sent`.trim(), code: d.short_code, icon: "email" });
-    if (d.accepted_at) push({ id: `ac:${d.short_code}`, type: "accepted", at: iso(d.accepted_at), title: "Quote accepted", code: d.short_code, icon: "accept" });
+    if (d.accepted_at) push({ id: `ac:${d.short_code}`, type: "accepted", at: iso(d.accepted_at), title: "Estimate accepted", code: d.short_code, icon: "accept" });
     // The customer OPENED the estimate. The one genuinely GHL-only signal, and it is here
     // as a stamped column rather than a live API call.
     if (d.ghl_last_visited_at) push({ id: `ov:${d.short_code}`, type: "quote_opened", at: iso(d.ghl_last_visited_at), title: "Customer opened the quote", code: d.short_code, icon: "eye" });
@@ -402,8 +416,17 @@ export async function buildCrmFeed(
       ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${e.subject || "(no subject)"}${words ? st : ""}`, body: words ?? `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email", meta }
       : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email", meta });
   }
+  // Estimates are ACCEPTED, never signed (Carolyn 2026-10-17: "I don't want ANY signatures on
+  // estimates… the customer signs the invoice"). Only invoices and change orders read "signed".
+  // This used to title every row "Quote signed by", click acceptances and invoices included.
+  const how: Record<string, string> = { click: "clicked Accept", drawn: "drawn signature", typed: "typed signature", rep: "recorded by staff" };
   for (const a of accepts as any[]) {
-    push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.created_at), title: `${a.subject === "change_order" ? "Change order" : "Quote"} signed by ${a.signer_name || "customer"}`, body: a.quote_number ? `Quote ${a.quote_number} · ${a.method}` : a.method, code: a.short_code, icon: "accept" });
+    const who = a.signer_name || "customer";
+    const title = a.subject === "change_order" ? `Change order signed by ${who}`
+      : a.subject === "invoice" ? (a.method === "rep" ? `Invoice accepted for ${who} (recorded by staff)` : `Invoice signed by ${who}`)
+      : (a.method === "rep" ? `Estimate accepted for ${who} (recorded by staff)` : `Estimate accepted by ${who}`);
+    const method = how[a.method] || a.method;
+    push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.accepted_at), title, body: a.quote_number ? `${a.subject === "invoice" ? "Invoice" : a.subject === "change_order" ? "Change order" : "Estimate"} ${a.quote_number} · ${method}` : method, code: a.short_code, icon: "accept" });
   }
   for (const c of changeOrders as any[]) {
     const delta = (Number(c.total_after_cents || 0) - Number(c.total_before_cents || 0)) / 100;
@@ -417,6 +440,21 @@ export async function buildCrmFeed(
   // which reads as broken rather than as early.
   for (const l of leads as any[]) {
     push({ id: `cl:${l.id}`, type: "lead_captured", at: iso(l.created_at), title: `Enquired on the design page${l.source ? ` (${l.source})` : ""}`, icon: "lead" });
+  }
+  // MEETINGS. Up to two events each: it was booked, and then what became of it. The booking
+  // is at created_at, NOT at starts_at — History is what has happened, and dating a booking
+  // in the future would file next week's meeting above today's call. What is ahead of you is
+  // the record's Planned section (CLAUDE.md, "Planned"); this is its history.
+  for (const m of meets as any[]) {
+    const name = (m.meeting_types && m.meeting_types.name) || "Meeting";
+    const when = m.starts_at ? new Date(m.starts_at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : null;
+    push({ id: `mt:${m.id}`, type: "meeting_booked", at: iso(m.created_at), title: `${name} booked`, body: when ? `for ${when}` : null, code: m.short_code, icon: "meeting" });
+    if (m.status === "cancelled") {
+      push({ id: `mtx:${m.id}`, type: "meeting_cancelled", at: iso(m.cancelled_at || m.updated_at), title: `${name} cancelled`, body: m.cancel_reason || null, code: m.short_code, icon: "meeting" });
+    } else if (m.status === "completed" || m.status === "no_show") {
+      // updated_at is the only timestamp either of these writes (set_status).
+      push({ id: `mtd:${m.id}`, type: "meeting_done", at: iso(m.updated_at), title: m.status === "completed" ? `${name} took place` : `${name} — no-show`, code: m.short_code, icon: "meeting" });
+    }
   }
   for (const n of notes as any[]) {
     push({ id: `n:${n.id}`, type: "note", at: iso(n.created_at), title: "Note", body: n.body, code: n.short_code, pinned: !!n.pinned, actor: n.created_by, icon: "note" });
@@ -569,7 +607,8 @@ export async function buildCrmFeed(
   // is "a former team member", the same fact the owner line states.
   const callerName = (v: string) =>
     nameByUser.get(v) ?? (knownUsers.has(v) ? "a team member" : "a former team member");
-  for (const e of callFeedEvents(callRows, callerName)) push(e);
+  // The transcript's "Team" lines take the person's own name, never the words above.
+  for (const e of callFeedEvents(callRows, callerName, (v) => nameByUser.get(v) ?? null)) push(e);
 
   out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   return out.slice(0, opts.limit || 200);
@@ -713,6 +752,28 @@ export function recordingMeta(c: any): Record<string, unknown> | null {
 }
 
 /**
+ * Who the "Team" lines of a call's transcript are, as a user id, or null to keep "Team"
+ * (Carolyn 2026-10-23, 24:13: show the person's name; "Customer" can stay). The phone-api Worker
+ * writes the transcript once, as "Customer: ..." / "Team: ..." lines from the recording's two
+ * channels (cron/transcribe.ts transcriptOf), and the team channel is EVERYONE on our side of the
+ * call. So it is one person only when one person was on it: whoever placed it (outbound) or
+ * answered it (inbound), with no transfer and no message.
+ *   a transfer (transferred_from)  → null: whoever handed it on, and whoever took it (a teammate
+ *                                    or a forward number), spoke on that channel too
+ *   a message left on the call     → null: the voicemail greeting played on it
+ *   nobody answered (a ring group nobody picked up, a forward number that did) → null
+ */
+// deno-lint-ignore no-explicit-any
+export function transcriptTeamUser(c: any): string | null {
+  if (!c || c.transferred_from) return null;
+  const vm = Array.isArray(c.phone_voicemails) ? (c.phone_voicemails[0] ?? null) : (c.phone_voicemails ?? null);
+  if (vm || String(c.status ?? "") === "voicemail") return null;
+  const who = c.direction === "out" ? c.placed_by : c.answered_by;
+  if (c.direction === "out" && c.answered_by && c.answered_by !== c.placed_by) return null;
+  return typeof who === "string" && who ? who : null;
+}
+
+/**
  * phone_calls rows (with their phone_voicemails embed) → timeline events.
  *
  * WHICH TYPE, in this order (plan section 7's outcomes, from the customer's side of the line):
@@ -725,9 +786,14 @@ export function recordingMeta(c: any): Record<string, unknown> | null {
  *   inbound, anything else         → `call_missed`.
  *
  * The number is shown as the stored E.164, the same way the texting lines show theirs.
+ *
+ * `speakerName` (optional) is the person's REAL name or null: a recorded call's line then carries
+ * `teamSpeaker`, the name the portal puts on the transcript's "Team" lines (transcriptTeamUser
+ * above). `nameOf`'s "a former team member" is right in a sentence and wrong as a speaker, so
+ * someone with no name set or no longer on the team is null there, and the lines stay "Team".
  */
 // deno-lint-ignore no-explicit-any
-export function callFeedEvents(rows: any[], nameOf: (userId: string) => string): FeedEvent[] {
+export function callFeedEvents(rows: any[], nameOf: (userId: string) => string, speakerName?: (userId: string) => string | null): FeedEvent[] {
   const out: FeedEvent[] = [];
   for (const c of rows || []) {
     if (!c || !c.id) continue;
@@ -737,6 +803,8 @@ export function callFeedEvents(rows: any[], nameOf: (userId: string) => string):
     const status = String(c.status ?? "");
     const live = status === "ringing" || status === "in_progress";
     const dur = Number(c.duration_s) || 0;
+    const rec = recordingMeta(c);
+    const speaker = rec && speakerName ? transcriptTeamUser(c) : null;
     const base = {
       id: `pc:${c.id}`,
       at: iso(c.started_at),
@@ -748,7 +816,8 @@ export function callFeedEvents(rows: any[], nameOf: (userId: string) => string):
         voicemailDeleted: !!vm?.deleted_at,
         // The call's own recording, its summary and whether there is a transcript (migration
         // 263, recordingMeta above). Absent on a call that was not recorded.
-        ...(recordingMeta(c) ?? {}),
+        ...(rec ?? {}),
+        ...(rec && speakerName ? { teamSpeaker: (speaker && speakerName(speaker)) || null } : {}),
       } as Record<string, unknown>,
     };
     if (c.direction === "out") {
@@ -797,16 +866,21 @@ function labelActivity(k: string): string {
 
 // Moved verbatim in spirit from portal/02-sales.jsx's diffVersionSelections. It lives here
 // now so the browser is not re-deriving on every render what the server already assembled.
+// The built-in names (D3_CLADDING); lap's became 7" LP Lap Siding and vinyl joined on 2026-10-06.
 const CLADDING_LABELS: Record<string, string> = {
-  panel: "Panel Siding", lap: "Lap Siding", batten: "Board & Batten", agpanel: "AG Panel",
+  panel: "Panel Siding", lap: '7" LP Lap Siding', vinyl: '4.5" Vinyl Siding', batten: "Board & Batten", agpanel: "AG Panel",
 };
+// The metal roof profile, a design's own pick since 2026-10-06 (roofProfile.ts). Without these a
+// switch read as the raw ids, "roofProfile: agpanel → standingseam".
+const ROOF_PROFILE_LABELS: Record<string, string> = { agpanel: "AG Panel", standingseam: "Standing Seam" };
 function diffSelections(a: Record<string, any>, b: Record<string, any>): string[] {
   const out: string[] = [];
   const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
   for (const k of keys) {
     const av = a?.[k], bv = b?.[k];
     if (String(av ?? "") === String(bv ?? "")) continue;
-    const pretty = (v: any) => (k === "cladding" ? (CLADDING_LABELS[String(v)] || String(v || "—")) : String(v || "—"));
+    const labels = k === "cladding" ? CLADDING_LABELS : k === "roofProfile" ? ROOF_PROFILE_LABELS : null;
+    const pretty = (v: any) => (labels ? (labels[String(v)] || String(v || "—")) : String(v || "—"));
     out.push(`${k}: ${pretty(av)} → ${pretty(bv)}`);
   }
   return out.slice(0, 8);

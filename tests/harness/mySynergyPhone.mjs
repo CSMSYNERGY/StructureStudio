@@ -40,7 +40,11 @@
 //      doesn't say "recorded" is refused before Save, the announcement can't be unticked; anyone
 //      else sees the card read-only; before 263 the card says it is not available; with the
 //      server's switch (the Worker's CALL_RECORDING rail) off, the owner's on reads "On, not
-//      started yet" and never "Calls are recorded".
+//      started yet" and never "Calls are recorded". Since migration 287: the standard sentence is
+//      "This call may be recorded." ("... and transcribed" only with the CALL_TRANSCRIBE rail on,
+//      and with it off the card says transcripts haven't started); a business no owner has saved
+//      is on by default and the card says so, and its first save asks "Record calls?" (a stamped
+//      choice doesn't ask again).
 //   Q. A recorded call in the contact timeline: its summary shows, Play recording fetches
 //      <PHONE_API_BASE>/recordings/<id>/audio only on the press (header, blob: URL), and "Show
 //      transcript" reads /calls/<id>/transcript the same way; neither in view-as or with calling off.
@@ -64,7 +68,7 @@
 //      The stub checks every save with the REAL parseRoute / parseNumberLabel / parseAssignee /
 //      pickNumber. Nothing is bought, connected or texted anywhere.
 //   W. Who reaches Your calls: a sales rep (phone 'own', no settings area: the real title preset)
-//      gets Settings with exactly Phone and My Profile, and the card, at /portal/settings/phone
+//      gets Settings with exactly Phone and My Profile, and the card, at /settings/phone
 //      (the apps' "Change in Structure Studio" link); and an older Worker, which answers GET
 //      /settings/me with 405 (it routes only POST there), hides the card instead of showing a fault.
 //
@@ -155,6 +159,15 @@ const shots = shotsDir("my-synergy-phone");
 const pageErrors = [];
 const H = { "access-control-allow-origin": "*", "access-control-expose-headers": "*" };
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
+// The number search's stub answer, for both screens (2026-10-12: the area code and up to three
+// more digits). A longer search answers with numbers that start with it, as the server keeps only
+// those; "555999" finds none. Nothing is searched anywhere.
+const stubSearchE164s = (body) => {
+  const d = String(body.startsWith ?? body.areaCode ?? "");
+  if (d === "555999") return [];
+  if (d.length > 3) return [1, 2].map((i) => `+1${d}${String(i).padStart(10 - d.length, "0")}`);
+  return ["+15555550101", "+15555550102"];
+};
 
 /**
  * One fresh browser context per scenario. Returns { page, calls, sent() }:
@@ -175,8 +188,11 @@ async function scenario(browser, opts) {
     smsStatus = null,
     // Call recording (P): the client_settings row's recording columns (null = before migration
     // 263), whether this caller may change them (the server's owner rule), and the server's
-    // switch (portal-settings' copy of the Worker's CALL_RECORDING rail).
-    recordingRow = {}, canChangeRecording = true, recordingServerOn = true,
+    // switches (portal-settings' copies of the Worker's CALL_RECORDING and CALL_TRANSCRIBE rails;
+    // transcripts ship off).
+    recordingRow = {}, canChangeRecording = true, recordingServerOn = true, transcribeServerOn = false,
+    // ...and what an own-level caller is told ({on, serverOn, notice}; null = nothing, as before).
+    ownRecording = null,
     // Your calls (R): the signed-in person's own settings the stub Worker answers GET and POST
     // /settings/me with (null = the stub answers those paths as it always has), the team screen's
     // list, and the browser's time zone.
@@ -221,13 +237,20 @@ async function scenario(browser, opts) {
 
   const page = await ctx.newPage();
   page.on("pageerror", (e) => pageErrors.push(`${opts.name}: ${e.message}`));
-  page.on("dialog", (d) => d.accept());
+  // Every confirm is accepted, and its words kept (P20/P21: which saves ask "Record calls?"),
+  // unless a scenario sets dismiss.next (P22: cancelling "Turn off the announcement?").
+  const dialogs = [];
+  const dismiss = { next: false };
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    if (dismiss.next) { dismiss.next = false; d.dismiss(); } else d.accept();
+  });
   const calls = [];
   const state = {
     phoneStatus, route: null,
     callerId: { available: trustAvailable, shakenStir: { registered: false, status: null }, voiceIntegrity: { registered: false, status: null }, checkedAt: null },
     sms: smsStatus,
-    recording: recordingRow ? recordingView(recordingRow, recordingServerOn) : null,
+    recording: recordingRow ? recordingView(recordingRow, recordingServerOn, transcribeServerOn) : null,
     number: opts.noNumber ? null : (numberOverride ?? { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: false, callingOnly: false }),
     my,
     numbers: numbers ? numbers.map((n) => ({ ...n })) : null,
@@ -305,6 +328,9 @@ async function scenario(browser, opts) {
     if (url.includes("/portal-sms")) {
       if (!state.sms) return json(route, { ok: true });
       calls.push({ fn: "portal-sms", ...body });
+      if (body.action === "search_numbers") {
+        return json(route, { ok: true, numbers: stubSearchE164s(body).map((e164) => ({ phoneNumber: e164, friendlyName: null, locality: null, region: "MO" })) });
+      }
       if (body.action === "buy_number") {
         // What the server answers after adopting (My Synergy Phone phase 6): the number joins the
         // Messaging Service, the registration moves to number_pending. A STUB: nothing at Twilio.
@@ -400,7 +426,7 @@ async function scenario(browser, opts) {
         // An 'own' caller gets their own slice (portal-settings' ownPhoneOnly branch).
         if (access.phone !== "view" && access.phone !== "edit") {
           return json(route, { ok: true, available: true, scope: "own", phoneStatus: state.phoneStatus, level: "own", canEdit: false,
-            number: state.number ? { e164: state.number.e164 } : null, recording: null });
+            number: state.number ? { e164: state.number.e164 } : null, recording: ownRecording });
         }
         return json(route, { ok: true, available: true, scope: "team", phoneStatus: state.phoneStatus, level: "edit", canEdit: true,
           number: state.number, canBuyNumber: rolloutOpen, numbersForSale: true, voiceSetup: true,
@@ -409,13 +435,17 @@ async function scenario(browser, opts) {
           recording: state.recording, canChangeRecording: !!state.recording && canChangeRecording,
           route: state.route, team, suggestedMembers: state.route ? null : [USER.id] });
       // P. Call recording: the owner only (the server's rule; the stub refuses the same way), and
-      // the REAL parseRecording decides what is valid.
+      // the REAL parseRecording decides what is valid. A save without `notice` keeps the stored
+      // announcement, as the real update does (the column is simply not in the write).
       case "phone_recording_save": {
         if (!canChangeRecording) return json(route, { error: "Only the business owner can change call recording." }, 403);
         if (!state.recording) return json(route, { error: "Call recording isn't set up on this server yet." }, 503);
         const r = parseRecording(body);
         if (!r.ok) return json(route, { error: r.error }, 400);
-        state.recording = recordingView({ ...r.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: USER.id }, recordingServerOn);
+        state.recording = recordingView({
+          phone_recording_notice: state.recording.notice, ...r.row,
+          phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: USER.id,
+        }, recordingServerOn, transcribeServerOn);
         return json(route, { ok: true, recording: state.recording });
       }
       // Plan phase 6, caller ID. STUBS: nothing reaches Twilio. The server refuses non-operators;
@@ -438,10 +468,7 @@ async function scenario(browser, opts) {
         state.number = { ...state.number, voiceReady: true };
         return json(route, { ok: true, number: { id: state.number.id, e164: state.number.e164, voiceReady: true } });
       case "phone_search_numbers":
-        return json(route, { ok: true, numbers: [
-          { e164: "+15555550101", locality: "Example City", region: "MO" },
-          { e164: "+15555550102", locality: null, region: "MO" },
-        ] });
+        return json(route, { ok: true, numbers: stubSearchE164s(body).map((e164, i) => ({ e164, locality: i ? null : "Example City", region: "MO" })) });
       case "phone_buy_number":
         if (state.number) return json(route, { error: "This account already has a number." }, 409);
         state.number = { id: "num-2", e164: body.phoneNumber, textingStatus: "pending_registration", voiceReady: state.phoneStatus === "on", callingOnly: true };
@@ -500,7 +527,7 @@ async function scenario(browser, opts) {
     await page.waitForTimeout(1200);
   };
   const sent = () => page.evaluate(() => (window.__sssSent || []).map((s) => ({ id: s.id, ...s.msg })));
-  return { ctx, page, calls, go, sent, vm, state };
+  return { ctx, page, calls, go, sent, vm, state, dialogs, dismiss };
 }
 
 // R. The phone-api Worker's POST /settings/me for the person's own hours (routes/me.ts
@@ -533,7 +560,7 @@ const tick = (loc) => loc.check({ timeout: 5000 }).then(() => true, () => false)
 // The action-bar tab by its exact label.
 const tabBtn = (page, label) => page.locator("button").filter({ hasText: new RegExp(`^${label}$`) }).first();
 async function openContact(s) {
-  await s.go(`/portal/contacts/c-${CONTACT_ID}`);
+  await s.go(`/contacts/c-${CONTACT_ID}`);
   await s.page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 });
   await s.page.waitForTimeout(400);
 }
@@ -641,7 +668,7 @@ try {
     }
 
     // J. Call on the contact LIST.
-    await s.go("/portal/contacts");
+    await s.go("/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     const listRendered = ok("J0 the contact list rendered a Call button on the row", (await rowCall.count()) === 1);
@@ -733,7 +760,7 @@ try {
           && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
       await s.page.screenshot({ path: join(shots, "E-view-as-disabled.png") });
     }
-    await s.go("/portal/contacts");
+    await s.go("/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     ok("E8 the list's Call is greyed in view-as with the record's hint", (await rowCall.count()) === 1 && !(await rowCall.isEnabled())
@@ -755,7 +782,7 @@ try {
     ok("Q11 with calling off, a recorded call shows its summary but no Play recording or Show transcript",
       (await s.page.locator("[data-ss-call-summary]").count()) === 1
         && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
-    await s.go("/portal/contacts");
+    await s.go("/contacts/people");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     ok("F5 the list's Call is greyed and says calling is off, like the record", (await rowCall.count()) === 1 && !(await rowCall.isEnabled())
@@ -766,11 +793,11 @@ try {
   // ── G. Settings → Phone ──────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "G" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     const body = await s.page.locator('[data-ss-phone-settings]').innerText().catch(() => "");
     const rendered = ok("G0 the Phone tab rendered the owner's setup", (await s.page.locator('[data-ss-phone-settings="team"]').count()) === 1, body.slice(0, 80));
-    ok("G1 the Settings rail lists Phone", (await s.page.locator('.ss-set-nav a[href*="/portal/settings/phone"]').count()) === 1);
+    ok("G1 the Settings rail lists Phone", (await s.page.locator('.ss-set-nav a[href*="/settings/phone"]').count()) === 1);
     if (rendered) {
       ok("G2 it shows the builder's number from the texting setup", (await s.page.locator("[data-ss-phone-number]").innerText()) === "(555) 555-0199");
       ok("G3 and the switch state", (await s.page.locator('[data-ss-phone-status="on"]').count()) === 1);
@@ -831,18 +858,28 @@ try {
 
   // ── P. Settings → Phone, Call recording (migration 263) ──────────────────────────────────
   {
-    const s = await scenario(browser, { name: "P" });
-    await s.go("/portal/settings/phone");
+    // An owner who turned recording OFF (a stamped choice, which 287 never overrides) turns it
+    // back on with their own wording.
+    const s = await scenario(browser, { name: "P", recordingRow: {
+      phone_record_calls: false, phone_recording_updated_at: "2026-10-05T12:00:00Z", phone_recording_updated_by: USER.id } });
+    await s.go("/settings/phone");
     const card = s.page.locator("[data-ss-phone-recording]").first();
     await card.waitFor({ timeout: 15000 }).catch(() => {});
-    const rendered = ok("P0 the Phone tab has a Call recording card, off by default", (await s.page.locator('[data-ss-phone-recording="off"]').count()) === 1);
+    const rendered = ok("P0 the Phone tab has a Call recording card, off as the owner left it", (await s.page.locator('[data-ss-phone-recording="off"]').count()) === 1
+      && (await s.page.locator("[data-ss-phone-recording-default]").count()) === 0);
     if (rendered) {
       const save = s.page.locator("[data-ss-phone-recording-save]");
       const words = s.page.locator("[data-ss-phone-recording-notice]");
       ok("P1 its Save waits for a change", (await save.count()) === 1 && await save.isDisabled());
       const notice = s.page.locator('[data-ss-phone-recording-check="notice"]');
-      ok("P2 the announcement is ticked and can't be unticked", (await notice.isChecked()) && (await notice.isDisabled()));
-      ok("P3 the wording box shows the standard sentence", (await words.getAttribute("placeholder")) === "This call will be recorded and transcribed.");
+      ok("P2 the announcement is ticked by default, and the owner can untick it", (await notice.isChecked()) && (await notice.isEnabled()));
+      ok("P3 the wording box shows the standard sentence, without \"and transcribed\" while transcripts haven't started",
+        (await words.getAttribute("placeholder")) === "This call may be recorded."
+          && /Leave it empty for the standard sentence: \u201cThis call may be recorded\.\u201d/.test(await card.innerText().catch(() => "")));
+      ok("P3b the transcripts box is still there and ticked, and says transcripts haven't started on this account",
+        (await s.page.locator('[data-ss-phone-recording-check="transcribe"]').isChecked())
+          && /Transcripts haven\u2019t started on this account yet\. Your choice is saved and takes effect once they do\./.test(
+            await s.page.locator("[data-ss-phone-recording-transcripts-waiting]").innerText().catch(() => "")));
       ok("P4 recordings are kept for a year unless the owner picks otherwise", (await s.page.locator("[data-ss-phone-recording-keep]").inputValue()) === "365");
       ok("P5 the legal note is on the card", (await s.page.locator("[data-ss-phone-recording-legal]").count()) === 1);
       await card.scrollIntoViewIfNeeded().catch(() => {});
@@ -858,8 +895,8 @@ try {
       await tap(save);
       await s.page.waitForSelector('[data-ss-phone-recording="on"]', { timeout: 8000 }).catch(() => {});
       const sent = s.calls.filter((c) => c.action === "phone_recording_save").pop();
-      ok("P8 Save sent phone_recording_save with on, the wording, transcripts and the keep length, and never notice:false",
-        !!sent && sent.on === true && sent.noticeText === mine && sent.transcribe === true && sent.retentionDays === 90 && !("notice" in sent),
+      ok("P8 Save sent phone_recording_save with on, the announcement still on, the wording, transcripts and the keep length",
+        !!sent && sent.on === true && sent.notice === true && sent.noticeText === mine && sent.transcribe === true && sent.retentionDays === 90,
         JSON.stringify(sent));
       const after = await card.innerText().catch(() => "");
       ok("P9 the real validator took it, and the card says calls are recorded",
@@ -868,13 +905,21 @@ try {
       ok("P10 and who changed it, and when", /Last changed today by Olive Owner\./.test(after));
       ok("P11 the routing form's Save was never sent", !s.calls.some((c) => c.action === "phone_settings_save"));
       await card.screenshot({ path: join(shots, "P-recording-on.png") }).catch(() => {});
+      const asked = s.dialogs.filter((m) => /^Record calls\?/.test(m)).length;
+      await s.page.locator("[data-ss-phone-recording-keep]").selectOption("730");
+      await tap(save);
+      for (let i = 0; i < 80 && s.calls.filter((c) => c.action === "phone_recording_save").length < 2; i++) await s.page.waitForTimeout(100);
+      const again = s.calls.filter((c) => c.action === "phone_recording_save");
+      ok("P21 once the owner's own choice is stamped on, keeping recordings longer saves without asking \"Record calls?\" again",
+        again.length === 2 && again[1].retentionDays === 730 && s.dialogs.filter((m) => /^Record calls\?/.test(m)).length === asked && asked === 1,
+        JSON.stringify(s.dialogs));
     }
     await s.ctx.close();
   }
   {
     // Not the owner (an admin with phone edit, or an operator in view-as): read-only.
     const s = await scenario(browser, { name: "P-admin", canChangeRecording: false, recordingRow: { phone_record_calls: true, phone_recording_retention_days: 180 } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator('[data-ss-phone-recording="on"]');
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     const inputs = card.locator("input, select");
@@ -888,8 +933,64 @@ try {
     await s.ctx.close();
   }
   {
+    // Migration 287: a business no owner has saved is ON by default. With the server recording,
+    // the card says calls are recorded, and that it is the default rather than who changed it.
+    const s = await scenario(browser, { name: "P-default-on", recordingRow: { phone_record_calls: true } });
+    await s.go("/settings/phone");
+    const card = s.page.locator('[data-ss-phone-recording="on"]');
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const text = await card.innerText().catch(() => "");
+    ok("P16 on by default: the card reads \"Calls are recorded\" and says it is on by default for every business",
+      (await s.page.locator('[data-ss-phone-recording-status="on"]').innerText().catch(() => "")) === "Calls are recorded"
+        && (await s.page.locator('[data-ss-phone-recording-check="on"]').isChecked())
+        && /On by default for every business\. The business owner can turn it off\./.test(text) && !/Last changed/.test(text), text.slice(0, 200));
+    ok("P17 the owner can still turn it off", await s.page.locator('[data-ss-phone-recording-check="on"]').isEnabled());
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-default-on.png") }).catch(() => {});
+    // Its first save stamps the owner as having chosen recording, so it asks first, even when
+    // only the keep length changed (longer, so the shorter-keep confirm doesn't ask instead).
+    await s.page.locator("[data-ss-phone-recording-keep]").selectOption("730");
+    await tap(s.page.locator("[data-ss-phone-recording-save]"));
+    await s.page.waitForFunction(() => /Saved\./.test(document.querySelector("[data-ss-phone-recording]")?.innerText || ""), null, { timeout: 8000 }).catch(() => {});
+    const first = s.calls.filter((c) => c.action === "phone_recording_save").pop();
+    ok("P20 the first save of a business on by default asks \"Record calls?\" before it stamps the owner's choice",
+      s.dialogs.length === 1 && /^Record calls\? From your next call on, every call to and from your business number is announced and then recorded\./.test(s.dialogs[0])
+        && !!first && first.on === true && first.retentionDays === 730,
+      JSON.stringify({ dialogs: s.dialogs, first }));
+    await s.ctx.close();
+  }
+  {
+    // Between 287 and the rail (SETUP.md 7d steps 1-4): on by default, but nothing records yet.
+    const s = await scenario(browser, { name: "P-default-waiting", recordingRow: { phone_record_calls: true }, recordingServerOn: false });
+    await s.go("/settings/phone");
+    const card = s.page.locator('[data-ss-phone-recording="on"]');
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const text = await card.innerText().catch(() => "");
+    ok("P19 on by default with the server's switch off: 'On, not started yet', never 'Calls are recorded'",
+      (await s.page.locator('[data-ss-phone-recording-status="waiting"]').innerText().catch(() => "")) === "On, not started yet"
+        && (await s.page.locator("[data-ss-phone-recording-waiting]").count()) === 1 && !/Calls are recorded/.test(text)
+        && /On by default for every business\./.test(text), text.slice(0, 200));
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-default-waiting.png") }).catch(() => {});
+    await s.ctx.close();
+  }
+  {
+    // The CALL_TRANSCRIBE rail on (not the case today): the standard sentence says "and
+    // transcribed", and the "haven't started" note is gone.
+    const s = await scenario(browser, { name: "P-transcribing", recordingRow: { phone_record_calls: true }, transcribeServerOn: true });
+    await s.go("/settings/phone");
+    const card = s.page.locator("[data-ss-phone-recording]").first();
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    ok("P18 with the transcripts rail on the placeholder becomes \"... and transcribed\" and the note is hidden",
+      (await s.page.locator("[data-ss-phone-recording-notice]").getAttribute("placeholder")) === "This call may be recorded and transcribed."
+        && (await s.page.locator("[data-ss-phone-recording-transcripts-waiting]").count()) === 0);
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-transcribing.png") }).catch(() => {});
+    await s.ctx.close();
+  }
+  {
     const s = await scenario(browser, { name: "P-before-263", recordingRow: null });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     ok("P13 before migration 263 the card says call recording isn't available, and offers nothing",
       (await s.page.locator('[data-ss-phone-recording="unavailable"]').count()) === 1 && (await s.page.locator("[data-ss-phone-recording-save]").count()) === 0);
@@ -899,7 +1000,7 @@ try {
     // The server's switch is off (the Worker's CALL_RECORDING rail): the owner can still choose,
     // but the card never says calls are recorded, and the save says when it starts.
     const s = await scenario(browser, { name: "P-not-started", recordingServerOn: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     const card = s.page.locator("[data-ss-phone-recording]").first();
     await card.waitFor({ timeout: 15000 }).catch(() => {});
     ok("P14 with the server's switch off the card says recording hasn't started on this account",
@@ -915,11 +1016,74 @@ try {
     await card.screenshot({ path: join(shots, "P-recording-not-started.png") }).catch(() => {});
     await s.ctx.close();
   }
+  {
+    // 2026-10-21 (Carolyn's 10-20 ask, Ahsan's decision): the owner can turn the announcement
+    // off. Unticking asks first with the all-party-consent warning; Cancel keeps it on; once off,
+    // the warning replaces the short legal note and the save sends notice:false; calls stay
+    // recorded. Ticking it back on asks nothing. STUBBED: no real business is changed.
+    const s = await scenario(browser, { name: "P-unannounced", recordingRow: {
+      phone_record_calls: true, phone_recording_updated_at: "2026-10-04T12:00:00Z", phone_recording_updated_by: USER.id,
+    } });
+    await s.go("/settings/phone");
+    const card = s.page.locator("[data-ss-phone-recording]").first();
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const notice = s.page.locator('[data-ss-phone-recording-check="notice"]');
+    const save = s.page.locator("[data-ss-phone-recording-save]");
+    s.dismiss.next = true;
+    await tap(notice);
+    await s.page.waitForTimeout(200);
+    ok("P22 unticking the announcement asks first, with the warning, and Cancel keeps it on",
+      s.dialogs.length === 1 && /^Turn off the announcement\? Calls will still be recorded, but callers won't be told\./.test(s.dialogs[0])
+        && /California, Florida, Illinois, Maryland, Massachusetts, Montana, New Hampshire, Pennsylvania and Washington/.test(s.dialogs[0])
+        && /check with your lawyer/.test(s.dialogs[0]) && (await notice.isChecked()) && (await save.isDisabled()), JSON.stringify(s.dialogs));
+    await tap(notice);
+    await s.page.waitForTimeout(200);
+    const warn = s.page.locator('[data-ss-phone-recording-legal="unannounced"]');
+    ok("P23 OK unticks it: the warning replaces the short legal note, the wording box says it isn't heard, and Save is ready",
+      s.dialogs.length === 2 && !(await notice.isChecked()) && (await warn.count()) === 1
+        && /Callers aren’t told calls are recorded\./.test(await warn.innerText().catch(() => ""))
+        && (await s.page.locator('[data-ss-phone-recording-legal]:not([data-ss-phone-recording-legal="unannounced"])').count()) === 0
+        && (await s.page.locator("[data-ss-phone-recording-notice-unused]").count()) === 1 && (await save.isEnabled()));
+    await card.scrollIntoViewIfNeeded().catch(() => {});
+    await card.screenshot({ path: join(shots, "P-recording-unannounced.png") }).catch(() => {});
+    await tap(save);
+    await s.page.waitForFunction(() => /Saved\./.test(document.querySelector("[data-ss-phone-recording]")?.innerText || ""), null, { timeout: 8000 }).catch(() => {});
+    const off = s.calls.filter((c) => c.action === "phone_recording_save").pop();
+    const after = await card.innerText().catch(() => "");
+    ok("P24 Save sends notice:false; calls are still recorded, and the card says it's without an announcement",
+      !!off && off.notice === false && off.on === true && s.state.recording.notice === false && !(await notice.isChecked())
+        && (await s.page.locator('[data-ss-phone-recording-status="on"]').innerText().catch(() => "")) === "Calls are recorded"
+        && /Saved\. Calls are recorded from the next call on, without an announcement\./.test(after)
+        && (await warn.count()) === 1 && s.dialogs.length === 2, JSON.stringify({ off, after: after.slice(0, 240), dialogs: s.dialogs }));
+    await card.screenshot({ path: join(shots, "P-recording-unannounced-saved.png") }).catch(() => {});
+    await tap(notice);
+    await s.page.waitForTimeout(200);
+    await tap(save);
+    await s.page.waitForFunction(() => /announced and recorded/.test(document.querySelector("[data-ss-phone-recording]")?.innerText || ""), null, { timeout: 8000 }).catch(() => {});
+    const back = s.calls.filter((c) => c.action === "phone_recording_save").pop();
+    ok("P25 ticking it back on asks nothing, saves notice:true, and the short legal note returns",
+      s.dialogs.length === 2 && !!back && back.notice === true && s.state.recording.notice === true && (await notice.isChecked())
+        && (await warn.count()) === 0 && (await s.page.locator("[data-ss-phone-recording-legal]").count()) === 1
+        && /Saved\. Calls are announced and recorded from the next call on\./.test(await card.innerText().catch(() => "")), JSON.stringify(back));
+    await s.ctx.close();
+  }
+  for (const [label, notice, want] of [
+    ["P26", false, /Calls on your business number are recorded\. Your owner has turned the announcement off, so callers\s+aren’t told\./],
+    ["P27", true, /Calls on your business number are recorded\. Callers hear an announcement first/],
+  ]) {
+    // Someone with their own calls only is told whether callers hear the announcement.
+    const s = await scenario(browser, { name: `${label}-own`, role: "user", access: PRESETS.sales_rep, ownRecording: { on: true, serverOn: true, notice } });
+    await s.go("/settings/phone");
+    await s.page.waitForSelector('[data-ss-phone-recording="own"]', { timeout: 15000 }).catch(() => {});
+    const line = await s.page.locator('[data-ss-phone-recording="own"]').innerText().catch(() => "");
+    ok(`${label} the own-level line with the announcement ${notice ? "on" : "off"}`, want.test(line), line);
+    await s.ctx.close();
+  }
 
   // ── L. Settings → Phone with NO number: the calling-only purchase (stubbed) ──────────────
   {
     const s = await scenario(browser, { name: "L", noNumber: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-buy]", { timeout: 15000 }).catch(() => {});
     const offered = ok("L3 an owner with no number is offered 'Get a number for calls'", (await s.page.locator("[data-ss-phone-buy]").count()) === 1);
     if (offered) {
@@ -928,7 +1092,24 @@ try {
       const box = (id) => s.page.locator(`[data-ss-phone-member="${id}"] input[type=checkbox]`);
       const inOrder = s.page.locator("label", { hasText: "Ring one after another, in this order" }).locator("input");
       ok("L8a the answer list can be chosen before there is a number", (await tick(box(REP))) && (await tick(inOrder)));
-      await s.page.locator("[data-ss-phone-areacode]").fill("555");
+      // 2026-10-12: the area code AND up to three more digits, typed however (the box keeps digits).
+      const areaBox = s.page.locator("[data-ss-phone-areacode]");
+      await areaBox.fill("555-300");
+      ok("L4a the box takes the area code and three more digits, formatting dropped", (await areaBox.inputValue()) === "555300");
+      await tap(s.page.locator("[data-ss-phone-search]"));
+      await s.page.waitForSelector('[data-ss-phone-result="+15553000001"]', { timeout: 8000 }).catch(() => {});
+      const longer = s.calls.filter((c) => c.action === "phone_search_numbers").pop();
+      ok("L4b a longer search sends the digits AND the area code (an older server still searches its area code), and lists what came back",
+        !!longer && longer.startsWith === "555300" && longer.areaCode === "555"
+          && (await s.page.locator("[data-ss-phone-result]").count()) === 2, JSON.stringify(longer));
+      await s.page.screenshot({ path: join(shots, "L-number-search-prefix.png"), fullPage: true });
+      await areaBox.fill("555999");
+      await tap(s.page.locator("[data-ss-phone-search]"));
+      await s.page.waitForSelector("[data-ss-phone-search-empty]", { timeout: 8000 }).catch(() => {});
+      ok("L4c nothing found names the digits searched, and says to try fewer",
+        (await s.page.locator("[data-ss-phone-search-empty]").innerText().catch(() => "")) === "No numbers start with 555-999 right now — try fewer digits.");
+      await s.page.screenshot({ path: join(shots, "L-number-search-none.png"), fullPage: true });
+      await areaBox.fill("555");
       await tap(s.page.locator("[data-ss-phone-search]"));
       await s.page.waitForSelector('[data-ss-phone-result="+15555550101"]', { timeout: 8000 }).catch(() => {});
       const search = s.calls.filter((c) => c.action === "phone_search_numbers").pop();
@@ -959,7 +1140,7 @@ try {
   // ── M. The rollout, on the Phone tab (SSB-1), and a switch-off whose move failed (SSB-2) ──
   {
     const s = await scenario(browser, { name: "M1", phoneStatus: "off", rolloutOpen: false, noNumber: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     const rendered = ok("M1 the Phone tab rendered for an owner the rollout does not include", (await s.page.locator('[data-ss-phone-settings="team"]').count()) === 1);
     if (rendered) {
@@ -973,7 +1154,7 @@ try {
   }
   {
     const s = await scenario(browser, { name: "M5", phoneStatus: "off", rolloutOpen: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     ok("M5 a number not connected shows no Connect button for an owner the rollout does not include",
       (await s.page.locator("[data-ss-phone-connect-card]").count()) === 1 && (await s.page.locator("[data-ss-phone-connect]").count()) === 0);
@@ -983,7 +1164,7 @@ try {
     // Calling is on, the number is connected, and the move to voicemail fails when it is turned off.
     const s = await scenario(browser, { name: "M6", moveFails: true,
       numberOverride: { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: true, callingOnly: false } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-switch]", { timeout: 15000 }).catch(() => {});
     await tap(s.page.locator("[data-ss-phone-switch]"));
     await s.page.waitForSelector("[data-ss-phone-stuck]", { timeout: 8000 }).catch(() => {});
@@ -1004,7 +1185,7 @@ try {
   // ── N. Caller ID on the Phone tab (plan §14, phase 6; STUBS, nothing reaches Twilio) ────────
   {
     const s = await scenario(browser, { name: "N1", trustOperator: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
     const card = s.page.locator("[data-ss-phone-callerid]");
     const shown = ok("N1 the Caller ID card is on the team screen, under the number", (await card.count()) === 1);
@@ -1040,7 +1221,7 @@ try {
   }
   {
     const s = await scenario(browser, { name: "N9", trustOperator: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
     const text = await s.page.locator("[data-ss-phone-callerid]").innerText().catch(() => "");
     ok("N9 a builder's owner sees where it stands, and no buttons", /Not registered/.test(text)
@@ -1052,7 +1233,7 @@ try {
   }
   {
     const s = await scenario(browser, { name: "N11", trustOperator: true, trustAvailable: false });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
     ok("N11 before migration 255 the card says it isn't available, with no buttons",
       /isn.t available on this account yet/.test(await s.page.locator("[data-ss-phone-callerid]").innerText().catch(() => ""))
@@ -1072,7 +1253,7 @@ try {
       optInDisclosureUrl: "https://demo.example.test/opt-in", compliance: { checkedAt: null, checks: [] },
     };
     const s = await scenario(browser, { name: "O", smsStatus });
-    await s.go("/portal/settings/sms");
+    await s.go("/settings/sms");
     await s.page.waitForSelector("[data-ss-sms-adopt]", { timeout: 15000 }).catch(() => {});
     const offered = ok("O1 at 'pick your number' with a calling-only number, the tab offers to use it", (await s.page.locator("[data-ss-sms-adopt]").count()) === 1
       && /\+15555550199/.test(await s.page.locator("[data-ss-sms-adopt]").innerText()));
@@ -1093,7 +1274,7 @@ try {
     // accepts it in number_pending and active), offered as a finish.
     for (const st of ["number_pending", "active"]) {
       const s2 = await scenario(browser, { name: `O5-${st}`, smsStatus: { ...smsStatus, status: st } });
-      await s2.go("/portal/settings/sms");
+      await s2.go("/settings/sms");
       await s2.page.waitForSelector("[data-ss-sms-adopt]", { timeout: 15000 }).catch(() => {});
       const card = s2.page.locator('[data-ss-sms-adopt="finish"]');
       const offered2 = ok(`O5 at ${st} with a calling-only number still on the account, the tab offers to FINISH connecting it`,
@@ -1111,13 +1292,38 @@ try {
       }
       await s2.ctx.close();
     }
+
+    // 2026-10-12: with nothing to adopt, "Choose your number" searches by the area code and up to
+    // three more digits, the same as Settings -> Phone.
+    {
+      const s3 = await scenario(browser, { name: "O7", smsStatus: { ...smsStatus, numbers: [] } });
+      await s3.go("/settings/sms");
+      await s3.page.waitForSelector("[data-ss-sms-areacode]", { timeout: 15000 }).catch(() => {});
+      const box = s3.page.locator("[data-ss-sms-areacode]");
+      if (ok("O7 with nothing to adopt, 'Choose your number' offers the search", (await box.count()) === 1)) {
+        await box.fill("+1 (555) 300");
+        ok("O7a the box keeps the six digits, without the +1", (await box.inputValue()) === "555300");
+        await tap(s3.page.locator("[data-ss-sms-search]"));
+        await s3.page.waitForFunction(() => /\+15553000001/.test(document.body.innerText), null, { timeout: 8000 }).catch(() => {});
+        const q = s3.calls.filter((c) => c.fn === "portal-sms" && c.action === "search_numbers").pop();
+        ok("O7b search_numbers sends the digits AND the area code, and the numbers are listed",
+          !!q && q.startsWith === "555300" && q.areaCode === "555" && /\+15553000001/.test(await s3.page.locator("body").innerText()), JSON.stringify(q));
+        await s3.page.screenshot({ path: join(shots, "O7-sms-number-search.png"), fullPage: true });
+        await box.fill("555999");
+        await tap(s3.page.locator("[data-ss-sms-search]"));
+        await s3.page.waitForSelector("[data-ss-sms-search-empty]", { timeout: 8000 }).catch(() => {});
+        ok("O7c nothing found names the digits searched, and says to try fewer",
+          (await s3.page.locator("[data-ss-sms-search-empty]").innerText().catch(() => "")) === "No numbers start with 555-999 right now — try fewer digits.");
+      }
+      await s3.ctx.close();
+    }
   }
 
   // ── H. The Calls page ────────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "H" });
-    ok("H1 the rail has a Calls item", (await s.page.locator('.ss-ws-nav a[href$="/portal/calls"]').count()) === 1);
-    await s.go("/portal/calls");
+    ok("H1 the rail has a Calls item", (await s.page.locator('.ss-ws-nav a[href$="/calls"]').count()) === 1);
+    await s.go("/calls");
     await s.page.waitForSelector("[data-ss-calls-report] table", { timeout: 15000 }).catch(() => {});
     const mine = s.calls.filter((c) => c.action === "phone_calls_report").pop();
     ok("H2 My calls is the default", !!mine && mine.scope === "mine" && mine.days === 30, JSON.stringify(mine));
@@ -1175,7 +1381,7 @@ try {
     const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null };
     const team = TEAM.map((t) => (t.userId === REP ? { ...t, ringHours: WEEKDAYS, ringHoursTz: "America/Chicago" } : { ...t, ringHours: null, ringHoursTz: null }));
     const s = await scenario(browser, { name: "R", my, team, timezoneId: "America/Denver" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-my-hours]", { timeout: 15000 }).catch(() => {});
     const card = s.page.locator("[data-ss-phone-my-hours]");
     const radio = (label) => card.locator("label", { hasText: label }).locator("input");
@@ -1244,7 +1450,7 @@ try {
   {
     // A Worker that keeps covers but not hours: the card has no hours section.
     const s = await scenario(browser, { name: "R9", my: { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null } });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-cover]", { timeout: 15000 }).catch(() => {});
     ok("R9 a Worker that doesn't keep hours: the cover shows, 'When my phone rings' doesn't",
       (await s.page.locator("[data-ss-phone-cover]").count()) === 1 && (await s.page.locator("[data-ss-phone-my-hours]").count()) === 0);
@@ -1256,7 +1462,7 @@ try {
   {
     const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } };
     const s = await scenario(browser, { name: "V", my, timezoneId: "America/Denver" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-greeting]", { timeout: 15000 }).catch(() => {});
     const sec = s.page.locator("[data-ss-phone-greeting]");
     const said = () => sec.innerText().catch(() => "");
@@ -1311,7 +1517,7 @@ try {
     const RILEY = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550198", label: "Riley cell", assignedUserId: REP, textingStatus: "pending_registration",
       voiceReady: false, callingOnly: true, main: false, callerId: CID, route: null, suggestedMembers: [REP] };
     const s = await scenario(browser, { name: "X", numbers: [MAIN, RILEY], textingActive: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-number-list]", { timeout: 15000 }).catch(() => {});
     const rows = await s.page.locator("[data-ss-phone-number-row]").allInnerTexts();
     ok("X1 two numbers are listed, each with its name and whose it is",
@@ -1382,7 +1588,7 @@ try {
     // A sales rep whose own number it is: "Your number", the one their calls show.
     const RILEY_OWN = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550198", label: "Riley cell", assignedUserId: USER.id };
     const s = await scenario(browser, { name: "X9", role: "user", access: PRESETS.sales_rep, numbers: [{ id: "00000000-0000-4000-8000-00000000a001", e164: "+15555550199", label: null, assignedUserId: null }, RILEY_OWN] });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="own"]', { timeout: 15000 }).catch(() => {});
     const card = await s.page.locator('[data-ss-phone-numbers]').first().innerText().catch(() => "");
     ok("X9 a sales rep with their own number is shown it as \"Your number\"", /Your number/.test(card) && /\(555\) 555-0198/.test(card) && /Riley cell/.test(card), card);
@@ -1393,30 +1599,30 @@ try {
   // ── W. Who reaches Your calls ─────────────────────────────────────────────────────────────
   {
     // A sales rep: phone 'own' and no settings area at all (the real preset). The apps' "Change in
-    // Structure Studio" button opens /portal/settings/phone; before Phone joined SETTINGS_AREAS
+    // Structure Studio" button opens /settings/phone; before Phone joined SETTINGS_AREAS
     // that clamped them to Designs, with no Settings anywhere.
     const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } };
     const s = await scenario(browser, { name: "W", role: "user", access: PRESETS.sales_rep, my, timezoneId: "America/Denver" });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector("[data-ss-phone-my-hours]", { timeout: 15000 }).catch(() => {});
     const path = await s.page.evaluate(() => location.pathname);
     const rail = await s.page.evaluate(() => [...document.querySelectorAll(".ss-side.ss-side-settings .ss-nav a")]
-      .map((a) => new URL(a.href).pathname).filter((p) => p.startsWith("/portal/settings/")));
-    ok("W1 a sales rep's /portal/settings/phone stays put (not their fallback page)", path === "/portal/settings/phone", path);
-    ok("W2 their Settings rail is exactly Phone and My Profile", JSON.stringify(rail) === JSON.stringify(["/portal/settings/phone", "/portal/settings/myprofile"]), JSON.stringify(rail));
+      .map((a) => new URL(a.href).pathname).filter((p) => p.startsWith("/settings/")));
+    ok("W1 a sales rep's /settings/phone stays put (not their fallback page)", path === "/settings/phone", path);
+    ok("W2 their Settings rail is exactly Phone and My Profile", JSON.stringify(rail) === JSON.stringify(["/settings/phone", "/settings/myprofile"]), JSON.stringify(rail));
     ok("W3 the Phone tab is their own view, with Your calls: who covers, their hours and their greeting",
       (await s.page.locator('[data-ss-phone-settings="own"]').count()) === 1 && (await s.page.locator("[data-ss-phone-cover]").count()) === 1
         && (await s.page.locator("[data-ss-phone-my-hours]").count()) === 1 && (await s.page.locator("[data-ss-phone-greeting]").count()) === 1);
     await s.page.screenshot({ path: join(shots, "W-sales-rep-your-calls.png"), fullPage: true });
-    await s.go("/portal/settings");
-    ok("W4 a bare /portal/settings is Settings for them too, landing on Phone", (await s.page.evaluate(() => location.pathname)).startsWith("/portal/settings")
+    await s.go("/settings");
+    ok("W4 a bare /settings is Settings for them too, landing on Phone", (await s.page.evaluate(() => location.pathname)).startsWith("/settings")
       && (await s.page.locator("[data-ss-phone-yours]").count()) === 1, await s.page.evaluate(() => location.pathname));
     await s.ctx.close();
   }
   {
     // A Worker from before 264: GET /settings/me is 405 "That method isn't allowed here."
     const s = await scenario(browser, { name: "W5", my: { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null }, oldWorker: true });
-    await s.go("/portal/settings/phone");
+    await s.go("/settings/phone");
     await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
     await s.page.waitForTimeout(800);
     const body = await s.page.innerText("body").catch(() => "");

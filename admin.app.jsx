@@ -221,6 +221,75 @@ function downloadFile(name, text) {
 
 function slugify(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40); }
 
+// What delete_client did and what outlived the builder, as sentences for the confirmation
+// (2026-10-21, migration 321): how much was deleted, the customer-data export, records kept for good,
+// anything left behind (nothing should be), and steps outside the database done, to do by hand, or
+// failed. The twin of admDeleteReport in portal/07-admin.jsx; the server sends names and counts only,
+// plus the export's signed link.
+const DONE = {
+  resend_domain: "removed their sending domain at Resend",
+  resend_inbound_domain: "removed their reply domain at Resend",
+  quickbooks: "disconnected QuickBooks at Intuit",
+};
+const BY_HAND = {
+  resend_domain: "remove their sending domain at Resend",
+  resend_inbound_domain: "remove their reply domain at Resend",
+  quickbooks: "disconnect QuickBooks at Intuit",
+  twilio_a2p: "close their texting registration (A2P brand and campaign) on our Twilio account",
+  connections_unknown: "check whether Resend and QuickBooks are still connected (the check failed)",
+};
+function failedStep(f) {
+  const [kind, what] = String(f).split(":");
+  if (kind === "storage") return `the file cleanup in ${what}`;
+  if (kind === "logins") return `deleting ${what} login${what === "1" ? "" : "s"}`;
+  if (kind === "resend_domain" || kind === "resend_inbound_domain") return BY_HAND[kind];
+  if (kind === "quickbooks") return BY_HAND.quickbooks;
+  return f;
+}
+// "1,234 rows from 41 tables, 2 logins and 57 files": the purge reports every table it touched.
+function deletedSummary(d) {
+  if (!d) return "";
+  let rows = 0, tables = 0;
+  for (const [k, v] of Object.entries(d)) {
+    if (k === "auth_logins" || k === "storage_files" || !v) continue;
+    rows += v; tables++;
+  }
+  const bits = [];
+  if (tables) bits.push(`${rows.toLocaleString()} row${rows === 1 ? "" : "s"} from ${tables} table${tables === 1 ? "" : "s"}`);
+  if (d.auth_logins) bits.push(`${d.auth_logins} login${d.auth_logins === 1 ? "" : "s"}`);
+  if (d.storage_files) bits.push(`${d.storage_files} file${d.storage_files === 1 ? "" : "s"}`);
+  return bits.join(", ");
+}
+function deleteReport(r) {
+  if (!r) return "";
+  const rows = (m) => {
+    const e = Object.entries(m || {});
+    const n = e.reduce((s, [, v]) => s + v, 0);
+    return e.length ? `${n} row${n === 1 ? "" : "s"} in ${e.length} table${e.length === 1 ? "" : "s"} (${e.map(([k, v]) => `${k} ${v}`).join(", ")})` : "";
+  };
+  const withFiles = (rowText, buckets) => [rowText, (buckets || []).length ? `files in ${buckets.join(", ")}` : ""].filter(Boolean).join(", plus ");
+  const files = r.files || {};
+  const c = r.cleanup || {};
+  const out = [];
+  if (r.export) {
+    out.push(`Their customer data (CRM, texts, emails, calls, customer logins) was exported first: ${r.export.rows} row${r.export.rows === 1 ? "" : "s"}`
+      + `${r.export.files ? ` and ${r.export.files} file${r.export.files === 1 ? "" : "s"}` : ""}. The download link works for 7 days.`);
+  }
+  const kept = withFiles(rows(r.retained), files.retained);
+  if (kept) out.push(`Kept for good (money, signed and consent records): ${kept}.`);
+  if ((files.notExported || []).length) out.push(`Too large to export, so kept: files in ${files.notExported.join(", ")}.`);
+  const left = withFiles(rows(r.leftBehind), (files.leftBehind || []).filter((b) => !(files.notExported || []).includes(b)));
+  if (left) out.push(`Still there after the delete (tell CSM Synergy): ${left}.`);
+  if ((c.done || []).length) out.push(`Also ${c.done.map((k) => DONE[k] || k).join("; ")}.`);
+  const byHand = (c.byHand || []).map((k) => (k === "twilio_numbers"
+    ? `release their number${(c.numbers || []).length === 1 ? "" : "s"} on our Twilio account (${(c.numbers || []).join(", ")})`
+    : BY_HAND[k] || k));
+  if (byHand.length) out.push(`Still to do by hand: ${byHand.join("; ")}.`);
+  if ((c.failed || []).length) out.push(`Did not finish, do by hand: ${c.failed.map(failedStep).join("; ")}.`);
+  if ((r.notCounted || []).length) out.push(`Could not check ${r.notCounted.join(", ")}.`);
+  return out.join(" ");
+}
+
 // ─── Read-only impersonation view (operator "view portal as <client>") ───
 // Renders the SAME Designs & Leads table the owner portal shows, from the
 function AdminApp() {
@@ -264,9 +333,15 @@ function AdminApp() {
   // merchant id. Read on demand (get_payments), never carried in the clients list — a MID
   // names somebody else's bank account, so it loads only for the builder being looked at.
   const [payOpen, setPayOpen] = useState(false);
-  const [payLoaded, setPayLoaded] = useState(null);   // null=unread · {paymentsEnabled,merchid} · {error}
+  const [payLoaded, setPayLoaded] = useState(null);   // null=unread · get_payments' answer · {error}
   const [payEnabled, setPayEnabled] = useState(false);
   const [payMerchid, setPayMerchid] = useState("");
+  // Which Fiserv system (migration 296): "uat" = test, "prod" = live. Only sent when the database
+  // has the column (get_payments' envColumn), so a console in front of an unmigrated database
+  // still saves exactly what it saved before.
+  const [payEnv, setPayEnv] = useState("uat");
+  // The Verify button's last answer for the builder on screen: null · {busy} · verify_payments' answer · {error}
+  const [payVerify, setPayVerify] = useState(null);
   // Deliberate friction: switching payments ON requires ticking this first. The field is not
   // a preference — it decides whose account a customer's card payment lands in.
   const [payConfirm, setPayConfirm] = useState(false);
@@ -305,7 +380,8 @@ function AdminApp() {
   // Auto-dismiss clears only the message it announced: the timer captures its own m and
   // the functional update checks identity, so a newer message flashed inside the 2.5s
   // window (e.g. an error from the next action) is never wiped by the stale timer.
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 2500); else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
+  // A `sticky` ok (a delete that left data behind, 2026-10-21) stays until dismissed.
+  const flash = (m) => { setMsg(m); if (m && m.ok) { if (!m.sticky) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 2500); } else if (m && m.err) ssLogError(SS_ERR_SOURCE, m.err, null, { ui: "flash" }); };
 
   const login = async () => {
     setBusy(true); setMsg(null);
@@ -352,7 +428,7 @@ function AdminApp() {
     if (!to) return;
     setEmailTestBusy(true); setMsg(null);
     try {
-      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/portal" });
+      const r = await api("test_email", pwd, { email: to, portalUrl: location.origin + "/login" });
       flash({ ok: `Test sent to ${r.sentTo}${r.senderEmail ? ` from ${r.senderEmail}` : ""} — check the inbox. It's a password-reset email; nothing changes unless you click the link.` });
     } catch (e) { flash({ err: e.message }); }
     setEmailTestBusy(false);
@@ -371,6 +447,7 @@ function AdminApp() {
     // per-tenant, so leaving one builder's merchant id on screen under another builder's
     // name is the one mistake this card must never make.
     setPayOpen(false); setPayLoaded(null); setPayEnabled(false); setPayMerchid(""); setPayConfirm(false);
+    setPayEnv("uat"); setPayVerify(null);
     // Seed the billing editor from the list row so it opens showing what is actually set.
     const row = (freshClients || clients).find((c) => c.client_id === cid);
     setBillPct(String(row?.discountPercent ?? 0)); setBillExempt(Boolean(row?.billingExempt));
@@ -456,15 +533,28 @@ function AdminApp() {
   // somebody opens this card, and one builder's merchant id should not sit in the page's
   // memory because an operator clicked through the builder list.
   const loadPayments = async (cid) => {
-    setPayLoaded(null);
+    setPayLoaded(null); setPayVerify(null);
     try {
       const r = await api("get_payments", pwd, { clientId: cid });
       if (selRef.current !== cid) return;   // another builder is on screen now — see selRef
       setPayLoaded(r);
       setPayEnabled(Boolean(r.paymentsEnabled));
       setPayMerchid(String(r.merchid || ""));
+      setPayEnv(r.env === "prod" ? "prod" : "uat");
       setPayConfirm(false);
     } catch (e) { if (selRef.current === cid) setPayLoaded({ error: e.message }); }
+  };
+  // Verify: one harmless question to the gateway, on this builder's MID and system, with this
+  // deployment's credentials (admin-catalog verify_payments). It checks what is SAVED, not what is
+  // typed in the boxes, so the answer is about the account their customers would really pay into.
+  const verifyPayments = async () => {
+    const cid = sel;
+    if (!cid) return;
+    setPayVerify({ busy: true });
+    try {
+      const r = await api("verify_payments", pwd, { clientId: cid });
+      if (selRef.current === cid) setPayVerify(r);
+    } catch (e) { if (selRef.current === cid) setPayVerify({ error: e.message }); }
   };
   const togglePayments = () => {
     const next = !payOpen;
@@ -486,11 +576,19 @@ function AdminApp() {
     if (payEnabled && !payConfirm) {
       flash({ err: "Tick the confirmation first. This decides whose bank account customer card payments land in." }); return;
     }
+    const envKnown = Boolean(payLoaded && payLoaded.envColumn);
+    if (payEnabled && envKnown && payEnv === "uat" && !payLoaded.billingExempt) {
+      flash({ err: "Test mode moves no real money, so only a non-billable account may take payments in it. Pick Live, or mark the account non-billable on the Billing card first." }); return;
+    }
+    if (payEnabled && payLoaded && payLoaded.configured && payLoaded.configured[envKnown ? payEnv : "uat"] === false) {
+      flash({ err: `${(envKnown ? payEnv : "uat") === "prod" ? "Live" : "Test"} card processing isn't set up on this deployment yet, so payments can't be switched on for it.` }); return;
+    }
     setBusy(true); setMsg(null);
     try {
-      const r = await api("set_payments", pwd, { clientId: sel, paymentsEnabled: payEnabled, merchid: mid });
-      setPayLoaded({ paymentsEnabled: r.paymentsEnabled, merchid: r.merchid });
-      setPayMerchid(String(r.merchid || "")); setPayConfirm(false);
+      const r = await api("set_payments", pwd, { clientId: sel, paymentsEnabled: payEnabled, merchid: mid, ...(envKnown ? { env: payEnv } : {}) });
+      setPayLoaded((cur) => ({ ...(cur || {}), paymentsEnabled: r.paymentsEnabled, merchid: r.merchid, env: r.env ?? (cur && cur.env) }));
+      setPayMerchid(String(r.merchid || "")); setPayConfirm(false); setPayVerify(null);
+      if (r.env === "prod" || r.env === "uat") setPayEnv(r.env);
       flash({ ok: r.note || "Saved." });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
@@ -504,7 +602,7 @@ function AdminApp() {
       const email = ownerEmail.trim();
       const r = await api("link_owner", pwd, {
         clientId: sel, email, role: linkRole,
-        portalUrl: location.origin + "/portal",
+        portalUrl: location.origin + "/login",
         ...(reassign ? { reassign: true } : {}),
       });
       // Names the role link_owner actually wrote: "owner" (every area, Billing included), never
@@ -534,17 +632,17 @@ function AdminApp() {
     }
     setBusy(false);
   };
-  // Operator hard-delete: server wipes the tenant + all its data (catalog,
-  // designs, settings, logins, storage). Guarded by typing the builder id.
+  // Operator hard-delete: the server exports the builder's customer data, then purges everything
+  // but the kept records in one transaction (migration 321), and reports it all. Guarded by typing
+  // the builder id.
   const deleteClient = async () => {
     const id = sel;
     if (!id || delConfirm.trim() !== id) return;
     setBusy(true); setMsg(null);
     try {
       const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
-      const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       selRef.current = ""; setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
-      const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
+      const parts = deletedSummary(r && r.deleted);
       // What happened at the payment gateway (counts only; the server never sends an id).
       const g = (r && r.gateway) || {};
       const gw = [
@@ -552,7 +650,18 @@ function AdminApp() {
         g.vaultDeleted ? "saved card removed" : "",
         g.vaultKept ? "saved card kept, because another builder uses it" : "",
       ].filter(Boolean).join(", ");
-      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.${gw ? ` Payment gateway: ${gw}.` : ""}` });
+      const report = deleteReport(r);
+      const exportUrl = r && r.export && r.export.url;
+      // Shown BEFORE the list refresh: a failed refresh must not swallow the export's link, the only
+      // copy of their customers' data.
+      flash({
+        ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.${gw ? ` Payment gateway: ${gw}.` : ""}${report ? ` ${report}` : ""}`,
+        sticky: !!(report || exportUrl),
+        link: exportUrl ? { href: exportUrl, label: "Download the customer-data export" } : null,
+      });
+      try {
+        const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
+      } catch (_) { /* the list catches up on the next load */ }
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -720,7 +829,23 @@ function AdminApp() {
         <div style={{ marginLeft: "auto", fontSize: 12, opacity: 0.8 }}>{clients.length} builders</div></div>
       <div style={S.wrap}>
         {msg && msg.err && <div style={S.err}>{msg.err}</div>}
-        {msg && msg.ok && <div style={S.ok}>{msg.ok}</div>}
+        {msg && msg.ok && (
+          <div style={S.ok}>
+            {msg.ok}
+            {msg.link && (
+              <a href={msg.link.href} target="_blank" rel="noopener noreferrer" data-adm-export-link=""
+                style={{ marginLeft: 10, color: "#15803D", fontWeight: 800, textDecoration: "underline" }}>
+                {msg.link.label}
+              </a>
+            )}
+            {msg.sticky && (
+              <button type="button" onClick={() => setMsg(null)}
+                style={{ marginLeft: 10, background: "none", border: "none", color: "#15803D", fontWeight: 700, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}>
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
 
         <div style={{ ...S.card, display: "flex", alignItems: "center", gap: 12 }}>
           <span style={S.lbl}>Builder</span>
@@ -732,10 +857,11 @@ function AdminApp() {
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
           <button onClick={() => setBillOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8")} title={sel ? `Billing posture for ${sel}` : "Select a builder first"}>{billOpen ? "Cancel" : "Billing"}</button>
           <button onClick={togglePayments} disabled={!sel} style={S.btn(sel ? "#FEF3C7" : "#F1F5F9", sel ? "#92400E" : "#94A3B8")} title={sel ? `Card payments + merchant id for ${sel}` : "Select a builder first"}>{payOpen ? "Cancel" : "Card payments"}</button>
-          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
+          <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
           {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
-              client (portal.html auto-opens ?view= for logged-in operators). */}
-          {sel && <a href={`/portal?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
+              client (portal.html auto-opens ?view= for logged-in operators), on Contacts —
+              where the portal's own account switcher lands too. */}
+          {sel && <a href={`/contacts?view=${encodeURIComponent(sel)}`} target="_blank" rel="noopener" style={{ ...S.btn("#3D3672", "#FFF"), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open portal ↗</a>}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <div style={S.tab(tab === "items")} onClick={() => setTab("items")}>Layout Items</div>
             <div style={S.tab(tab === "styles")} onClick={() => setTab("styles")}>Building Styles</div>
@@ -884,6 +1010,11 @@ function AdminApp() {
                     Nothing here charges anybody. It is the switch the customer pay page, the card
                     modal and the swipe reader all check before they will take a payment.
                   </div>
+                  <div style={{ marginTop: 6 }}>
+                    <b>Live</b> sends their customers' payments to their real Fiserv account. <b>Test (UAT)</b> is
+                    Fiserv's test system: no real money moves, so only a non-billable account may take payments
+                    on it. Payments already taken are always cancelled and refunded on the system they were taken on.
+                  </div>
                 </div>
 
                 {/* What is actually set right now, stated before anything is editable. */}
@@ -897,6 +1028,20 @@ function AdminApp() {
                   {payLoaded.merchid
                     ? <code style={{ fontSize: 12.5 }}>{payLoaded.merchid}</code>
                     : <span style={{ color: "#B45309" }}>none set</span>}
+                  {" · "}
+                  <b>System:</b>{" "}
+                  {payLoaded.env === "prod"
+                    ? <span style={{ color: "#1D4ED8", fontWeight: 700 }}>LIVE</span>
+                    : <span style={{ color: "#7E22CE", fontWeight: 700 }}>TEST (UAT)</span>}
+                  {payLoaded.billingExempt ? <span style={{ color: "#64748B" }}> · non-billable account</span> : null}
+                  {/* The state set_payments and set_billing refuse to create, reached some other way
+                      (a row changed by hand): every card payment is refused until it is fixed. */}
+                  {payLoaded.paymentsEnabled && payLoaded.env !== "prod" && !payLoaded.billingExempt && (
+                    <div style={{ marginTop: 6, color: "#991B1B" }}>
+                      <b>Their customers can't pay right now:</b> test mode (UAT) is only for a non-billable account, so
+                      every card payment is refused. Switch them to Live, or switch payments off.
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
@@ -907,13 +1052,64 @@ function AdminApp() {
                       placeholder="12–16 digits" title="Paste it from their Fiserv/CardConnect boarding paperwork — do not retype it"
                       style={{ ...S.input, width: 200, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }} />
                   </label>
+                  {/* Test or live (migration 296). Hidden until the database has the column: an
+                      unmigrated database keeps every builder on test, and set_payments would refuse
+                      the field. Test is only for a non-billable account; the server refuses it otherwise. */}
+                  {payLoaded.envColumn && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B" }}>
+                      <b>System</b>
+                      <select value={payEnv} onChange={(e) => { setPayEnv(e.target.value === "prod" ? "prod" : "uat"); setPayConfirm(false); }}
+                        style={{ ...S.input, width: "auto" }}>
+                        <option value="prod">Live{payLoaded.configured && payLoaded.configured.prod === false ? " (not set up on this deployment)" : ""}</option>
+                        <option value="uat">Test (UAT){payLoaded.billingExempt ? "" : " (non-billable accounts only)"}</option>
+                      </select>
+                    </label>
+                  )}
                   <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
                     <input type="checkbox" checked={payEnabled} onChange={(e) => { setPayEnabled(e.target.checked); setPayConfirm(false); }} />
                     <b>Take card payments for this builder</b>
                   </label>
                   <button onClick={savePayments} disabled={busy || (payEnabled && !payConfirm)}
                     style={S.btn(busy || (payEnabled && !payConfirm) ? "#9CA3AF" : "#B45309", "#FFF")}>Save payment settings</button>
+                  <button onClick={verifyPayments} disabled={busy || (payVerify && payVerify.busy) || !payLoaded.merchid}
+                    title={payLoaded.merchid ? "Ask the gateway one harmless question on the SAVED merchant id and system. No money moves." : "Save a merchant id first"}
+                    style={S.btn(busy || (payVerify && payVerify.busy) || !payLoaded.merchid ? "#E5E7EB" : "#FFF", "#92400E")}>
+                    {payVerify && payVerify.busy ? "Verifying…" : "Verify"}
+                  </button>
                 </div>
+                {/* Verify's answer. GREEN only for the gateway's known "not found" answer to a
+                    never-used order id (expected: respcode 29). Any other answer is AMBER: our login
+                    worked, but a 200 can carry an error about the MID itself. RED when nothing
+                    usable came back. The gateway's own words always follow, and even green does not
+                    prove this is the right builder's account, so it says so. */}
+                {payVerify && !payVerify.busy && (() => {
+                  const tone = payVerify.reachable && payVerify.expected ? "ok" : payVerify.reachable ? "warn" : "bad";
+                  const C = { ok: ["#F0FDF4", "#BBF7D0", "#166534"], warn: ["#FFFBEB", "#FDE68A", "#92400E"], bad: ["#FEF2F2", "#FECACA", "#991B1B"] }[tone];
+                  const sys = payVerify.env === "prod" ? "live" : "test";
+                  const said = payVerify.gateway && (payVerify.gateway.resptext || payVerify.gateway.respcode)
+                    ? <span> It said: “{String(payVerify.gateway.resptext || "")}”{payVerify.gateway.respcode ? ` (${payVerify.gateway.respcode})` : ""}.</span>
+                    : <span> It gave no message.</span>;
+                  return (
+                    <div data-pay-verify={tone} style={{ fontSize: 12.5, marginTop: 10, borderRadius: 8, padding: "9px 12px", lineHeight: 1.5,
+                      background: C[0], border: `1px solid ${C[1]}`, color: C[2] }}>
+                      {payVerify.error && !("reachable" in payVerify)
+                        ? <span><b>Couldn't verify:</b> {payVerify.error}</span>
+                        : tone === "ok"
+                        ? <span>
+                            <b>Reachable.</b> The {sys} gateway accepted our login and answered for the merchant id ending {payVerify.midLast4 || "?"} with
+                            the reply a check expects (no such order).{said} This does not prove the id is the right builder's, so
+                            check it against their boarding paperwork.
+                          </span>
+                        : tone === "warn"
+                        ? <span>
+                            <b>Answered, but not as expected.</b> The {sys} gateway accepted our login, but its reply for the
+                            merchant id ending {payVerify.midLast4 || "?"} is not the “Txn not found” (29) a check should get.{said} Read
+                            it before relying on this account.
+                          </span>
+                        : <span><b>Not reachable.</b> {payVerify.configError || payVerify.error || "No answer."}</span>}
+                    </div>
+                  );
+                })()}
                 <div style={{ fontSize: 11.5, color: "#78350F", marginTop: 6 }}>
                   Digits only — no spaces, dashes or letters. A mistyped id is not rejected by anyone
                   downstream; it just sends the money somewhere else. Clearing the box removes the id.
@@ -1029,11 +1225,12 @@ function AdminApp() {
             ) : (
               <div>
                 <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
-                  This permanently deletes <b>{sel}</b> and <b>all of its data</b> — designs/leads, building styles &amp; sizes,
-                  pricing &amp; inclusions, layout items, settings (incl. GHL credentials), error logs, owner/team logins, and
-                  uploaded floor-plan &amp; branding files. Any paid plans are cancelled at the payment gateway and their saved
-                  card is removed, so they are never charged again. <b>This cannot be undone.</b> (GoHighLevel contacts/estimates
-                  live in GHL and are not affected.)
+                  This permanently deletes <b>{sel}</b> and <b>all of its data</b>: designs/leads, catalog and pricing,
+                  settings (incl. GHL credentials), owner/team logins, uploaded files, and their customers' contacts, texts,
+                  emails and calls. That customer data is <b>exported first</b>, with a download link in the result. Money,
+                  signed and consent records are kept for good, and the id can never be used again. Any paid plans are
+                  cancelled at the payment gateway and their saved card is removed, so they are never charged again.
+                  <b> This cannot be undone.</b> (GoHighLevel contacts/estimates live in GHL and are not affected.)
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={delConfirm} onChange={(e) => setDelConfirm(e.target.value)} placeholder={`Type "${sel}" to confirm`}

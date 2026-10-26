@@ -12,6 +12,8 @@ vi.mock("../../../supabase/functions/_shared/smsSend.ts", () => ({
 }));
 
 import { mapSmsRefusal } from "../src/routes/sms";
+import { contactsLevelOf, mayReadUnknownNumbers, maySendToContacts, narrowedToOwn } from "../src/scope";
+import { normContactsLevel, normLevel, type CallerContext } from "../src/db";
 import {
   Auth, CLIENT, CONTACT_1, CUSTOMER, FakeNet, USER_A, appRequest, call, callerCtx, filter, makeEnv,
 } from "./helpers";
@@ -109,6 +111,29 @@ describe("/sms/send checks", () => {
     expect(sendTenantSms).not.toHaveBeenCalled();
   });
 
+  // contacts:'own_view' (migration 286): own customers, VIEW ONLY. Texting is a customer-record write,
+  // so it is refused before the row scope is even asked — on their own customer too.
+  it("contacts:'own_view' may NOT text even a customer they own (view only)", async () => {
+    const { net, token, env } = await setup({ ctx: callerCtx({ contacts_level: "own_view", own_contacts_only: true }), visible: [CONTACT_1] });
+    const { res, json } = await call(env, send(token, {}));
+    expect(res.status).toBe(403);
+    expect(json.error).toEqual({
+      code: "not_your_customer",
+      message: "Your account can see customers but not text them. Ask your owner for Contacts edit access.",
+    });
+    expect(sendTenantSms).not.toHaveBeenCalled();
+    expect(replyFromNumber).not.toHaveBeenCalled();
+    expect(net.rpcCalls("crm_visible_contact_ids")).toEqual([]);
+  });
+
+  it("contacts:'own_view' is refused even when the RPC's own_contacts_only is false (the level is the fact)", async () => {
+    const { token, env } = await setup({ ctx: callerCtx({ contacts_level: "own_view", own_contacts_only: false }), visible: [CONTACT_1] });
+    const { res, json } = await call(env, send(token, {}));
+    expect(res.status).toBe(403);
+    expect(json.error.code).toBe("not_your_customer");
+    expect(sendTenantSms).not.toHaveBeenCalled();
+  });
+
   it("a scope check that errors refuses (fails closed)", async () => {
     const { net, token, env } = await setup({ ctx: callerCtx({ contacts_level: "own", own_contacts_only: true }) });
     net.rpc("crm_visible_contact_ids", () => new Response(JSON.stringify({ message: "boom" }), { status: 500 }));
@@ -156,6 +181,14 @@ describe("/sms/send checks", () => {
       const { json } = await call(env, send(token, { contact_id: null }));
       expect(json.error.code).toBe("not_your_customer");
       expect(json.error.message).toContain("Save this number as a contact first");
+    });
+
+    it("refuses contacts:'own_view' too: unknown numbers are for view and edit", async () => {
+      const { token, env } = await setup({ ctx: callerCtx({ contacts_level: "own_view", own_contacts_only: true }), inbound: [{ id: "x" }] });
+      const { json } = await call(env, send(token, { contact_id: null }));
+      expect(json.error.code).toBe("not_your_customer");
+      expect(json.error.message).toContain("Save this number as a contact first");
+      expect(sendTenantSms).not.toHaveBeenCalled();
     });
 
     it("refuses when the number has since been saved as a contact", async () => {
@@ -210,5 +243,41 @@ describe("refusal mapping", () => {
     expect(mapSmsRefusal({ sent: false, reason: "opted_out" }).message).toBe("This customer asked not to be texted (STOP).");
     expect(mapSmsRefusal({ sent: false, reason: "not_active" }).message).toBe("Your texting number isn't registered yet.");
     expect(mapSmsRefusal({ sent: false, reason: "no_consent" }).message).toBe("This customer hasn't agreed to texts yet.");
+  });
+});
+
+// The scope rules themselves, per contacts level. contacts:'own_view' (migration 286) is own customers,
+// VIEW ONLY: narrowed like 'own', no texts or emails, and no unknown numbers.
+describe("scope rules per contacts level", () => {
+  const ctxOf = (over: Record<string, unknown>) => callerCtx(over) as unknown as CallerContext;
+  it.each([
+    // level, RPC own_contacts_only, narrowed, may send, unknown numbers
+    ["edit", false, false, true, true],
+    ["view", false, false, false, true],
+    ["own", true, true, true, false],
+    ["own_view", true, true, false, false],
+    // A database before 286 says own_contacts_only false for own_view; the level alone narrows.
+    ["own_view", false, true, false, false],
+    ["none", false, false, false, false],
+  ] as const)("contacts %s (rpc own_contacts_only %s)", (level, rpcOwn, narrowed, send, unknown) => {
+    const ctx = ctxOf({ contacts_level: level, own_contacts_only: rpcOwn });
+    expect(narrowedToOwn(ctx)).toBe(narrowed);
+    expect(maySendToContacts(ctx)).toBe(send);
+    expect(mayReadUnknownNumbers(ctx)).toBe(unknown);
+  });
+
+  it("contactsLevelOf keeps own_view from a stored map, and drops it only where access.ts does", () => {
+    expect(contactsLevelOf({ role: "user", title: "sales_rep", access: { contacts: "own_view" } })).toBe("own_view");
+    expect(contactsLevelOf({ role: "user", title: "dealer", access: { contacts: "own_view" } })).toBe("own_view");
+    expect(contactsLevelOf({ role: "owner", title: "owner", access: { contacts: "own_view" } })).toBe("edit");
+    expect(contactsLevelOf({ role: "user", title: "dealer", access: null })).toBe("own");
+    expect(contactsLevelOf({ role: "user", title: "sales_rep", access: { contacts: "own-view" } })).toBe("edit");
+  });
+
+  it("normContactsLevel keeps own_view; normLevel (phone) never does", () => {
+    expect(normContactsLevel("own_view")).toBe("own_view");
+    expect(normContactsLevel("own")).toBe("own");
+    expect(normContactsLevel("sideways")).toBe("none");
+    expect(normLevel("own_view")).toBe("none");
   });
 });

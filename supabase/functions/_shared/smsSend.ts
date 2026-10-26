@@ -14,10 +14,16 @@
 
 import { logEdgeError } from "./logError.ts";
 import {
-  sendSms, smsCredentialsConfigured, smsE164US, smsPhoneKey, isDamagedPhoneKey, SmsApiError,
+  sendSms, smsE164US, smsPhoneKey, isDamagedPhoneKey, SmsApiError,
 } from "./twilioSms.ts";
 import { quietHoursVerdict } from "./smsQuietHours.ts";
+// Twilio's 21610, recorded one way whether it comes at send time (below) or later (sms-status).
+import { recordTwilioOptOut, TWILIO_OPTED_OUT } from "./smsOptOut.ts";
 import { checkUsageGate, keepAlive, requestAutoTopup } from "./usageGate.ts";
+// Which Twilio account the tenant's number lives in (Workstream 2): the parent from the
+// environment while TWILIO_SUBACCOUNTS is not "on" (no lookup), else the tenant's own sub-account.
+// A zero-import leaf, so the phone-api Worker, which bundles this file, bundles it too.
+import { resolveTwilioAccount, TwilioAccountError, type TwilioAccount } from "./twilioAccount.ts";
 
 export type SmsOutcome = {
   sent: boolean;
@@ -75,7 +81,26 @@ export async function sendTenantSms(
     // Platform secrets first: an unconfigured deployment skips even the settings read.
     // Platform CREDENTIALS only now: under the ISV model the Messaging Service belongs
     // to the tenant, read below, so it is no longer part of this question.
-    if (!smsCredentialsConfigured()) return { sent: false, reason: "not_active" };
+    //
+    // RESOLVED ONCE, HERE, and handed to sendSms below as a value (Workstream 2). With
+    // TWILIO_SUBACCOUNTS not "on" this is the environment check it always was (the parent's
+    // credentials, or null = not configured) and touches nothing: no lookup, no network. With it
+    // on, a tenant with a sub-account sends from it; a sub that is not active yet is "not
+    // switched on"; a lookup that fails stops THIS tenant's text and nobody else's.
+    let account: TwilioAccount | null;
+    try {
+      account = await resolveTwilioAccount(admin, clientId, (k) => Deno.env.get(k));
+    } catch (e) {
+      if (e instanceof TwilioAccountError && e.kind === "not_ready") return { sent: false, reason: "not_active" };
+      await logEdgeError({
+        fn: "sms-send",
+        clientId,
+        code: "twilio_account_lookup_failed",
+        message: `The tenant's Twilio account could not be resolved, so the text was not sent: ${(e as Error)?.message ?? "unknown"}`,
+      }).catch(() => {});
+      return { sent: false, reason: "failed", error: "The text could not be sent. Try again." };
+    }
+    if (!account) return { sent: false, reason: "not_active" };
 
     const { data: s } = await admin.from("client_settings")
       .select("sms_number, sms_status")
@@ -311,6 +336,7 @@ export async function sendTenantSms(
         messagingServiceSid: String(reg.messaging_service_sid),
         body,
         statusCallback: msg.statusCallback ?? null,
+        creds: account,
       });
       const { error: upErr } = await admin.from("sms_messages").update({
         status: "sent",
@@ -344,18 +370,11 @@ export async function sendTenantSms(
       // (a STOP to a different number on the same service, or one our webhook missed).
       // Record it on the contact so the composer stops offering, and answer in the
       // customer's terms rather than with a provider code.
-      if (code === 21610) {
+      if (code === TWILIO_OPTED_OUT) {
         // Twilio saw an opt-out we did not. Record it where the send path actually looks,
-        // keyed on the phone, so it survives whatever happens to the contact row.
-        await admin.from("sms_opt_outs").upsert({
-          client_id: clientId, phone_digits: key, reason: "sms_stop",
-          note: "Recorded from Twilio error 21610 — the opt-out reached Twilio by a route our webhook did not see.",
-        }, { onConflict: "client_id,phone_digits" });
-        if (msg.contactId) {
-          await admin.from("crm_contacts")
-            .update({ sms_opt_out_at: new Date().toISOString() })
-            .eq("client_id", clientId).eq("id", msg.contactId);
-        }
+        // keyed on the phone, so it survives whatever happens to the contact row. The same
+        // write sms-status makes when the 21610 comes later, in a delivery status (smsOptOut.ts).
+        await recordTwilioOptOut(admin, clientId, key, msg.contactId ?? null);
         return { sent: false, reason: "opted_out", error: "This customer has opted out of texts from this number." };
       }
       if (code === 30034) {

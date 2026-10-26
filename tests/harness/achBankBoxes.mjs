@@ -399,7 +399,7 @@ try {
   // ── P: the portal's Record-a-payment modal ──
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-  await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/portal/orders/o-${ORDER_ID}`);
+  await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/orders/o-${ORDER_ID}`);
   const recordBtn = page.getByRole("button", { name: "Record a payment" });
   ok("P0: the order opens with Record a payment", await recordBtn.waitFor({ timeout: 20000 }).then(() => true, () => false));
   await page.waitForFunction(() => {

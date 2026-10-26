@@ -9,6 +9,10 @@ import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
 import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
+// Sales tax lookups, operator side (2026-10-21, migration 319): the per-tenant report, and the
+// replay of charges that failed. taxMeter.ts and taxUsage.ts carry the rules and their tests.
+import { closeTenantTaxCharges, retryLookupCharges } from "../_shared/taxMeter.ts";
+import { parseTaxUsageRange, readTaxLookupsInRange, summarizeTaxUsage } from "../_shared/taxUsage.ts";
 // "Offered on" (272): a template's per-style fixture lists, carried into a clone. portal-settings
 // imports the same module, so a change to it deploys both functions.
 import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
@@ -16,11 +20,42 @@ import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
 // before it wipes anything (2026-10-05). nmi.ts is the one gateway client; see its importer ledger.
 import { nmiConfigured, nmiPost } from "../_shared/nmi.ts";
 import { cleanupTenantGateway, GatewayCleanupError, needsGateway, openSubscriptions } from "../_shared/tenantGatewayCleanup.ts";
+// delete_client (Track G, 2026-10-21): the tenant data registry says what tenant_purge (migration 321)
+// keeps and what is exported first; _test_stubs/tenantTableCoverage_test holds delete_client to it.
+// The export, the recursive storage sweep, and the Resend and QuickBooks clean-up after the purge.
+import {
+  CHECKED_BUCKETS, COUNTED_AFTER_DELETE, EXPORT_TABLES, EXPORTED_BUCKETS, RETAINED_TABLES, SWEPT_BUCKETS, TENANT_BUCKETS,
+} from "../_shared/tenantTables.ts";
+import { buildTenantExport, ExportTooLarge, sweepOldExports, type ExportResult } from "../_shared/tenantExport.ts";
+import { sweepPrefix } from "../_shared/storageTree.ts";
+import { rsDeleteDomain } from "../_shared/resend.ts";
+import { qboEndpoints } from "../_shared/qboDiscovery.ts";
+// Workstream 2, phase 9: the operator console's card for a builder's own Twilio sub-account (get,
+// create, suspend, close), and delete_client closing that sub-account first.
+import {
+  closePlannedSub, ensureTwilioAccount, forgetTwilioAccount, maskSid, relationMissing, setTwilioAccountStatus,
+  twilioAccountView, twilioClosePlan, type EnsureResult, type StatusChange,
+} from "../_shared/twilioProvision.ts";
+// 2026-10-12 (C55): create_client makes the new builder's sub-account when TWILIO_SUBACCOUNTS is
+// "on", without ever failing or holding up the create (twilioAtCreate.ts says how).
+import { provisionAtCreate } from "./twilioAtCreate.ts";
+// 2026-10-21 (board 72b1008c, migration 323): each builder's own Verify service inside their sub,
+// named after them, so a customer's login text names the builder. Made by Create and by the card's
+// "Sync login text name" (twilio_verify_sync, one builder or every active sub: the backfill).
+import { syncVerifyService, type VerifySyncResult, verifySyncSentence } from "../_shared/twilioVerifyService.ts";
+// Card payments (workstream 1 phase 3): set_payments refuses a system this deployment has no
+// credentials for, and verify_payments asks the gateway one harmless question. cardpointe.ts is the
+// one CardPointe client and paymentSettings.ts reads the tenant's account; see their importer ledgers.
+import { cardpointeConfigured, cpEnvSecretNames, cpVerifyMerchant } from "../_shared/cardpointe.ts";
+import { cpEnvOf, cpMerchant, isMissingColumn, midLast4, readPaymentSettings, testModeNeedsExempt } from "../_shared/paymentSettings.ts";
 import {
   chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
   summarizePhoneUsage, type PhoneBillingSettings, type TwilioDailyRow, type UsageChargeRow,
 } from "../_shared/phoneBillingAdmin.ts";
+// Workstream 2, phase 8 (review 2026-10-09): an open "Bring your number" request's overlap with
+// another builder's numbers or requests, shown to the operator instead of refused to the builder.
+import { requestFlags } from "../_shared/numberRequestFlags.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -97,6 +132,100 @@ async function mgmtAuthConfig(method: "GET" | "PATCH", body?: unknown) {
     throw new Error(`Supabase Management API: ${String(msg).slice(0, 500)}`);
   }
   return data;
+}
+
+// ── Workstream 2, phase 9: what the console says about a builder's Twilio account ──────────
+// Operators, not builders: these name steps, codes and the edge secrets that are missing (names,
+// never values), so the person pressing the button knows what to do next.
+function twilioProvisionSentence(r: Extract<EnsureResult, { ok: false }>): string {
+  switch (r.reason) {
+    case "not_configured":
+      return `Creating sub-accounts needs these edge secrets: ${(r.missing ?? []).join(", ")}.`
+        + (r.parentKeyOnly ? " The parent's API key cannot create or reach sub-accounts: set TWILIO_AUTH_TOKEN (the parent's auth token)." : "");
+    case "busy": return "Another run is setting this account up right now. Try again in a minute.";
+    case "suspended": return "This builder's sub-account is suspended. Press Reactivate to turn it back on.";
+    case "closed": return "This builder's sub-account was closed, and a closed Twilio account cannot be reopened.";
+    case "lookup_failed": return `The database could not be read (${r.code}). Nothing was created.`;
+    // Never for the console (operator: true runs whatever the switch says); here for completeness.
+    case "manual": return "TWILIO_SUBACCOUNTS is \"manual\": only this console makes sub-accounts.";
+    default: return `Twilio stopped at the ${r.step ?? "first"} step (${r.code}). Press Create again: it resumes from there and never makes anything twice.`;
+  }
+}
+/** The card's "Login text name" row (migration 323): the builder's own Verify service, masked, and
+ *  the name their customers' login texts carry. null = 323 not applied, or the read failed. */
+// deno-lint-ignore no-explicit-any
+async function verifyServiceView(sb: any, clientId: string): Promise<{ sid: string | null; name: string | null } | null> {
+  try {
+    const r = await sb.from("twilio_accounts").select("verify_service_sid, verify_service_name").eq("client_id", clientId).maybeSingle();
+    if (r?.error) return null;
+    return { sid: maskSid(r?.data?.verify_service_sid), name: r?.data?.verify_service_name ?? null };
+  } catch { return null; }
+}
+
+/** A sync's answer for the console: masked SID, the name, or the sentence and code (never Twilio's words). */
+function verifySyncView(r: VerifySyncResult):
+  | { ok: true; outcome: string; sid: string | null; name: string }
+  | { ok: false; reason: string; code: string; status: number; sentence: string } {
+  return r.ok
+    ? { ok: true, outcome: r.outcome, sid: maskSid(r.sid), name: r.name }
+    : { ok: false, reason: r.reason, code: r.code, status: r.status, sentence: verifySyncSentence(r) };
+}
+
+/** One admin_audit row for a sync (best-effort, masked SID, codes only). */
+async function auditVerify(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  // deno-lint-ignore no-explicit-any
+  identity: any,
+  clientId: string,
+  v: ReturnType<typeof verifySyncView>,
+): Promise<void> {
+  try {
+    await sb.from("admin_audit").insert({
+      action: "twilio_verify_sync", target_client_id: clientId,
+      actor_email: identity?.via === "operator" ? identity.email : null,
+      actor_user_id: identity?.via === "operator" ? identity.userId : null,
+      note: (v.ok ? `via=${identity?.via} ${v.outcome} sid=${v.sid} name=${v.name}` : `via=${identity?.via} refused ${v.reason} code=${v.code}`).slice(0, 2000),
+    });
+  } catch (_e) { /* best-effort: the outcome is also in the response */ }
+}
+
+function twilioStatusSentence(r: Extract<StatusChange, { ok: false }>, want: string): string {
+  switch (r.reason) {
+    case "no_sub": return "This builder has no sub-account of its own.";
+    case "has_numbers": return `This sub-account still has ${r.numbers ?? "a"} number${r.numbers === 1 ? "" : "s"}. Release ${r.numbers === 1 ? "it" : "them"} first: closing a Twilio account releases every number in it, for good.`;
+    case "not_configured": return r.code === "parent_token_missing"
+      ? "Changing a sub-account needs the parent's auth token (TWILIO_AUTH_TOKEN): its API key cannot."
+      : "TWILIO_ACCOUNT_SID is not set on the server.";
+    case "wrong_state": return r.code === "closed" ? "This sub-account is closed; nothing can change it now." : `It can't be ${want} from "${r.code}".`;
+    case "duplicate": return "Twilio has more than one open account named for this builder. Look in Twilio's console and close the extra one first.";
+    case "twilio_failed": return `Twilio did not accept it (${r.code}). Nothing was recorded here; try again.`;
+    default: return `It was not recorded (${r.code}). Look at the account in Twilio before you try again.`;
+  }
+}
+
+// ── Workstream 2, phase 6: each live number's caller-ID registrations, for the console card ──────
+// Statuses only (Twilio's TrustProduct enum, as last read by portal-settings phone_trust_status),
+// the CNAM name callers see, and the number's last four digits: no SID. CNAM's columns are
+// migration 297's; before it, 255's are read alone and `cnam` is null. Any other failure is null
+// (the card says "unknown"): it never fails the account view.
+async function callerIdSummary(sb: any, clientId: string): Promise<Array<Record<string, unknown>> | null> {
+  const read = (cols: string) => sb.from("sms_numbers").select(cols).eq("client_id", clientId).is("released_at", null)
+    .order("purchased_at", { ascending: true }).limit(20);
+  let res = await read("phone_number, shaken_status, voice_integrity_status, cnam_status, cnam_display_name");
+  let cnam = true;
+  if (res.error && relationMissing(res.error)) {
+    cnam = false;
+    res = await read("phone_number, shaken_status, voice_integrity_status");
+  }
+  if (res.error) return null;
+  return (res.data ?? []).map((n: any) => ({
+    number: `…${String(n.phone_number ?? "").slice(-4)}`,
+    shaken: n.shaken_status ?? null,
+    voiceIntegrity: n.voice_integrity_status ?? null,
+    cnam: cnam ? (n.cnam_status ?? null) : undefined,
+    cnamName: cnam ? (n.cnam_display_name ?? null) : undefined,
+  }));
 }
 
 // Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
@@ -233,6 +362,13 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
 // (migration 259 revokes them from anon/authenticated), so the service-role client here is
 // their only reader outside the phone-api worker.
 const PHONE_BILLING_ACTIONS = new Set(["phone_billing_get", "phone_billing_set", "phone_billing_arm", "phone_usage_report"]);
+// Sales tax lookups (2026-10-21): the report (what each builder's calls cost and were charged) and
+// the replay of failed charges, which posts real debits. Both on the money grant, like phone
+// billing's four, and neither is on READ_ONLY_ACTIONS, so both need can_write too.
+const TAX_BILLING_ACTIONS = new Set(["tax_usage_get", "tax_charge_retry"]);
+
+/** verify_payments: at most one gateway check per builder in this many seconds (see the action). */
+const VERIFY_COOLDOWN_S = 10;
 
 async function readPhoneBilling(sb: any): Promise<{ settings: PhoneBillingSettings; meters: any[] }> {
   const [st, mt] = await Promise.all([
@@ -294,10 +430,15 @@ async function readTwilioDaily(sb: any, firstDay: string, nextFirstDay: string):
   // server cap of 500 with `offset += PAGE` would silently skip rows 500–999 of every page.
   let offset = 0;
   while (offset < 20_000) {
+    // Workstream 2, phase 7: one row per day, ACCOUNT and category, so (day, category) is no longer
+    // unique and offset paging over it could repeat or skip rows past a page (review 2026-10-09).
+    // account_sid completes the order: (day, category, account_sid) is 299's key, the parent's NULL
+    // first.
     const { data, error } = await sb.from("twilio_usage_daily")
       .select("day, category, count, usage, price_micros")
       .gte("day", firstDay).lt("day", nextFirstDay)
       .order("day", { ascending: true }).order("category", { ascending: true })
+      .order("account_sid", { ascending: true, nullsFirst: true })
       .range(offset, offset + PAGE - 1);
     if (error) throw phoneBillingDbError(error);
     const batch = (data ?? []) as TwilioDailyRow[];
@@ -370,6 +511,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   const READ_ONLY_ACTIONS = new Set([
     "list_clients", "get_master", "get_client_catalog", "get_email_sender",
     "get_billing_overview", "get_payments", "avalara_tax_codes_status",
+    // Masked SIDs and what exists; `check` asks Twilio two GETs and changes nothing.
+    "twilio_account_get",
+    // Workstream 2, phase 8: the open "Bring your number" requests (a builder's numbers and who may
+    // approve the move; no PIN, bill or account number exists to show).
+    "number_requests_list",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -392,6 +538,12 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     if (String(action ?? "") === "set_payments" && !identity.canBill) {
       return json({ error: "This operator account cannot change payment routing." }, 403);
     }
+    // verify_payments moves no money, but it calls a builder's merchant account at the gateway with
+    // our credentials, so it sits on the same money grant as set_payments (and, being absent from
+    // READ_ONLY_ACTIONS, needs can_write too: phone_usage_report's precedent for a money-adjacent read).
+    if (String(action ?? "") === "verify_payments" && !identity.canBill) {
+      return json({ error: "This operator account cannot check payment routing." }, 403);
+    }
     // Phone & text billing (usage billing Part 1 step 6): all four on the money grant, the two
     // READS included. phone_billing_get and phone_usage_report serve OUR COST of every call and
     // text — the margin on every builder, the same class of number as wallet_status's
@@ -400,6 +552,19 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // billing" would be wrong for a read.
     if (PHONE_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
       return json({ error: "This operator account cannot see or change phone and text billing." }, 403);
+    }
+    if (TAX_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
+      return json({ error: "This operator account cannot see or change sales tax billing." }, 403);
+    }
+    // Workstream 2, phase 9: making a builder's Twilio sub-account starts a bill at Twilio (its
+    // numbers and registrations are billed to our parent account), and closing one releases its
+    // numbers for good. Both on the money grant; suspending (reversible) needs can_write only.
+    // ONE DELIBERATE EXCEPTION (2026-10-12, C55): create_client (can_write) makes the new builder's
+    // sub too, with TWILIO_SUBACCOUNTS "on" only (twilioAtCreate.ts). An empty sub costs nothing,
+    // and with the switch "on" the builder's own number search or purchase makes the same sub with
+    // no operator at all; buying a number in it needs the money grant wherever that happens.
+    if ((String(action ?? "") === "twilio_account_provision" || String(action ?? "") === "twilio_account_close") && !identity.canBill) {
+      return json({ error: "This operator account cannot create or close a builder's phone account." }, 403);
     }
   }
 
@@ -734,6 +899,22 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const exists = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
         if (exists.error) throw exists.error;
         if (exists.data) throw new Error(`A builder "${clientId}" already exists.`);
+        // A deleted builder's id is never used again (Ahsan, 10-21): their kept records (orders,
+        // payments, signed estimates, consents) still carry it, so a new builder on it would see them
+        // through RLS. deleted_clients is the list (migration 321; a database without it has none),
+        // and an id that still has kept rows is refused the same way, which covers builders deleted
+        // before the list existed.
+        const tomb = await sb.from("deleted_clients").select("deleted_at").eq("client_id", clientId).maybeSingle();
+        if (tomb.error && !relationMissing(tomb.error)) throw tomb.error;
+        let keptRows = !!tomb.data;
+        for (const t of keptRows ? [] : RETAINED_TABLES.filter((name) => name !== "deleted_clients")) {
+          const { count, error } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
+          if (error && !relationMissing(error)) throw error;
+          if (count) { keptRows = true; break; }
+        }
+        if (keptRows) {
+          throw new Error(`"${clientId}" belonged to a deleted builder whose records are kept, so it can't be used again. Choose another id.`);
+        }
         // templateClientId === "__none__" => start blank (no clone): a standard contact
         // form so the designer works, and empty sizes/options the operator fills in via
         // the tabs + pricing CSV. Otherwise clone the named template (or junior-barns).
@@ -975,7 +1156,80 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           console.error("setup checklist assign failed for", clientId, e instanceof Error ? e.message : String(e));
         }
 
-        return json({ ok: true, clientId, blank, cloned: clonedCounts, setupAssigned });
+        // ── Electrical starter items (Carolyn 2026-10-12) ─────────────────────────────
+        // A new tenant used to open Settings → Options → Electrical to three "Your standards"
+        // dropdowns holding nothing but "— none —", because the choices are the tenant's own
+        // electrical_items rows and neither the blank path nor the clone path above creates any.
+        // Seed the three the package lays out (the shape migration 206 gave every pre-existing
+        // tenant) plus four common add-ons, and point the standards at the three, so the only thing left to do
+        // is price them. Both prices NULL on purpose: NULL reads "not offered" until the builder
+        // decides, never a guessed dollar amount. `enabled` keeps its default (off) for the same
+        // reason — nothing is offered to a customer by a seed.
+        //
+        // Best-effort, like the checklist: the tenant exists by now, and a seed failing is a
+        // cosmetic problem, not a reason to leave a half-made tenant behind the duplicate-slug
+        // check. ignoreDuplicates because (client_id, name) is unique and a retry must not 500.
+        let electricalSeeded = 0;
+        try {
+          // The four add-ons joined the same day ("also add these"), copied from structure-studio's
+          // own list: mount, height and sort order as there, prices still NULL.
+          const starters = [
+            { name: "Outlet",        icon: "🔌", mount: "wall",    height_off_floor_in: 24,  sort_order: 1 },
+            { name: "Light Switch",  icon: "🎚️", mount: "wall",    height_off_floor_in: 48,  sort_order: 2 },
+            { name: "Light",         icon: "💡", mount: "ceiling", height_off_floor_in: 96,  sort_order: 3 },
+            { name: "Ceiling Fan",   icon: "🌀", mount: "ceiling", height_off_floor_in: 96,  sort_order: 10 },
+            { name: "Flood Light",   icon: "🔦", mount: "wall",    height_off_floor_in: 108, sort_order: 20 },
+            { name: "220V Outlet",   icon: "🔌", mount: "wall",    height_off_floor_in: 24,  sort_order: 30 },
+            { name: "Extra Breaker", icon: "🧰", mount: "wall",    height_off_floor_in: 60,  sort_order: 40 },
+          ];
+          const ins = await sb.from("electrical_items")
+            .upsert(starters.map((it) => ({ client_id: clientId, ...it, price_with_package: null, price_standalone: null })),
+              { onConflict: "client_id,name", ignoreDuplicates: true });
+          if (ins.error) throw new Error(ins.error.message);
+          const got = await sb.from("electrical_items").select("id, name").eq("client_id", clientId)
+            .in("name", starters.map((it) => it.name));
+          if (got.error) throw new Error(got.error.message);
+          const idOf = (name: string) => (got.data ?? []).find((r: any) => r.name === name)?.id ?? null;
+          const std = { outlet_item_id: idOf("Outlet"), switch_item_id: idOf("Light Switch"), light_item_id: idOf("Light") };
+          // Upsert, not insert: a clone path or a future seed may have made the row first; and the
+          // standards are only filled where still unset, so nothing a builder chose is overwritten.
+          const cur = await sb.from("electrical_settings").select("outlet_item_id, switch_item_id, light_item_id")
+            .eq("client_id", clientId).maybeSingle();
+          if (cur.error) throw new Error(cur.error.message);
+          const row = {
+            client_id: clientId,
+            outlet_item_id: cur.data?.outlet_item_id ?? std.outlet_item_id,
+            switch_item_id: cur.data?.switch_item_id ?? std.switch_item_id,
+            light_item_id:  cur.data?.light_item_id  ?? std.light_item_id,
+            updated_at: new Date().toISOString(),
+          };
+          const up = await sb.from("electrical_settings").upsert(row, { onConflict: "client_id" });
+          if (up.error) throw new Error(up.error.message);
+          electricalSeeded = (got.data ?? []).length;
+        } catch (e) {
+          console.error("electrical starter seed failed for", clientId, e instanceof Error ? e.message : String(e));
+        }
+
+        // ── The builder's own Twilio sub-account (2026-10-12, C55) ─────────
+        // Best-effort for the checklist's reason: the tenant exists and the answer is about to say
+        // so. Only with TWILIO_SUBACCOUNTS "on"; never throws, and the create waits at most
+        // AT_CREATE_WAIT_MS before a longer run carries on under waitUntil ("pending"). A run that
+        // does not finish is filed in app_errors, and the builder's next number search (Phone or
+        // Text Messaging tab), a purchase, a texting submit or the console card's Create finishes it
+        // (ensureTwilioAccount resumes from the step it reached). Not on the money grant: see the
+        // can_bill block above.
+        const twilio = await provisionAtCreate(sb, clientId, {
+          get: (k) => Deno.env.get(k),
+          actor: identity.via === "operator" ? { via: "operator", email: identity.email, userId: identity.userId } : { via: identity.via },
+          log: logEdgeError,
+        });
+
+        return json({
+          ok: true, clientId, blank, cloned: clonedCounts, setupAssigned, electricalSeeded,
+          twilio: twilio.outcome,
+          ...(twilio.reason ? { twilioReason: twilio.reason } : {}),
+          ...(twilio.code ? { twilioCode: twilio.step ? `${twilio.step}:${twilio.code}` : twilio.code } : {}),
+        });
       }
 
       // ── link a user login to a client (with a role) ────────────────────
@@ -1262,6 +1516,78 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         });
       }
 
+      // ── SALES TAX LOOKUPS, OPERATOR SIDE (2026-10-21, migration 319) ─────────────────────
+      // tax_usage_get: the "Sales tax lookups" card under Admin → Billing. Per builder over a date
+      // range (UTC days, both inclusive; default this month): calls by kind and outcome, charged
+      // count and cents, exempt, the meters' state, and each builder's tax_lookup_enabled switch
+      // (read-only here: it is still set by hand). Counted from tax_lookups, the call ledger, not
+      // from the wallet, which cannot see a disarmed, unpriced or exempt call. On can_bill.
+      case "tax_usage_get": {
+        const range = parseTaxUsageRange(p, new Date());
+        const [read, cs, cfg, meters] = await Promise.all([
+          readTaxLookupsInRange(sb, range.from, range.to),
+          sb.from("client_settings").select("client_id, tax_lookup_enabled, invoice_in_ghl, billing_exempt"),
+          sb.from("client_configs").select("client_id, company_name"),
+          sb.from("usage_prices").select("kind, active, price_cents").in("kind", ["tax_lookup", "tax_invoice"]),
+        ]);
+        if (!read.ok) throw new Error(`tax_lookups: ${String((read.error as any)?.message ?? read.error)}`);
+        if (cs.error) throw new Error(`client_settings: ${cs.error.message}`);
+        if (cfg.error) throw new Error(`client_configs: ${cfg.error.message}`);
+        if (meters.error) throw new Error(`usage_prices: ${meters.error.message}`);
+        const names = new Map<string, string>((cfg.data ?? []).map((c: any) => [String(c.client_id), String(c.company_name || c.client_id)]));
+        return json({
+          ok: true,
+          ...summarizeTaxUsage({
+            range, rows: read.rows, switches: cs.data ?? [], names, meters: meters.data ?? [],
+            truncated: read.truncated, pre319: read.pre319,
+          }),
+        });
+      }
+
+      // tax_charge_retry: replay the charges that failed (charge_state 'error') or never finished
+      // ('pending' for over 15 minutes), oldest first, optionally for one builder. Only rows that
+      // got past the arming rail (they carry the price attempted) are candidates; a debit already
+      // posted under the row's tax_ledger key is linked first, never posted twice; a deleted
+      // builder's rows are skipped (orphaned); a replay is charged at the price first attempted or
+      // not at all (price_changed). REFUSED (409) while a meter a row still needs is disarmed or
+      // priced at 0: nothing is charged. It posts real debits, so it asks for confirm: true, and
+      // writes its own audit row. On can_bill. The rules are taxMeter.ts retryLookupCharges.
+      case "tax_charge_retry": {
+        if (p.confirm !== true) throw new Error("This replays failed sales tax charges against builders' wallets. Send confirm: true to go ahead.");
+        const clientId = p.clientId == null || p.clientId === "" ? null : reqStr(p.clientId, "clientId");
+        const out = await retryLookupCharges(sb, {
+          clientId,
+          limit: p.limit == null ? undefined : Number(p.limit),
+          actorUserId: identity.via === "operator" ? identity.userId : null,
+        });
+        try {
+          await sb.from("admin_audit").insert({
+            action: "tax_charge_retry",
+            target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: (out.ok
+              ? `via=${identity.via} candidates=${out.candidates} charged=${out.charged} linked=${out.linked} exempt=${out.exempt}`
+                + ` still_failed=${out.stillFailed} price_changed=${out.priceChanged} orphaned=${out.orphaned}`
+              : out.refused === "meter_disarmed"
+              ? `via=${identity.via} refused=meter_disarmed linked=${out.linked} orphaned=${out.orphaned}`
+              : `via=${identity.via} refused=${out.refused}`).slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort: never fail a completed replay on a logging failure */ }
+        if (!out.ok && out.refused === "meter_disarmed") {
+          const off = out.meters.filter((m) => !m.active || m.priceCents <= 0).map((m) => m.kind === "tax_lookup" ? "Tax verification" : "Invoice tax check");
+          const linkedNote = out.linked
+            ? ` ${out.linked} charge${out.linked === 1 ? " that had already posted was" : "s that had already posted were"} linked to ${out.linked === 1 ? "its" : "their"} wallet row.`
+            : "";
+          return json({
+            error: `The ${off.join(" and ")} meter${off.length === 1 ? " is" : "s are"} off or priced at $0, so nothing was charged. The failed charges stay recorded as failed.${linkedNote}`,
+            reason: "meter_disarmed", meters: out.meters, candidates: out.candidates, linked: out.linked, orphaned: out.orphaned,
+          }, 409);
+        }
+        if (!out.ok) return json({ error: "Couldn't read the failed charges, so nothing was retried. Try again in a minute.", reason: "unreadable" }, 503);
+        return json(out);
+      }
+
       // ── Avalara credential check (2026-09-17) ─────────────────────────────────────
       // Do the platform's Avalara credentials work? GET /api/v2/utilities/ping, run on purpose by
       // an operator. Deliberately NOT in READ_ONLY_ACTIONS: whether Avalara bills a ping is not
@@ -1472,6 +1798,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           .select("billing_exempt").eq("client_id", clientId).maybeSingle();
         const wasExempt = Boolean(priorCs?.billing_exempt);
 
+        // ⛔ MAKING A BUILDER BILLABLE WHILE THEY TAKE CARDS IN TEST MODE (workstream 1 phase 3). Only a
+        // non-billable account may take payments on Fiserv's test system (UAT), which moves no real
+        // money: set_payments refuses switching a billable builder on there, and this is the other
+        // door into the same state. Refused before anything is written, so the discount and dates
+        // sent with it are not saved either. Only the CHANGE is refused: the card sends billingExempt
+        // on every save, and an account that is already billable is not being made so here. The money
+        // gates refuse the charge itself too (paymentSettings.ts testModeNeedsExempt).
+        if (wasExempt && p.billingExempt === false) {
+          const { row: pay, error: payErr } = await readPaymentSettings(sb, clientId, []);
+          if (payErr) throw payErr;
+          if (pay?.payments_online_enabled === true && testModeNeedsExempt({ ...pay, billing_exempt: false })) {
+            throw new Error(
+              "This builder takes card payments in test mode (UAT), which moves no real money, so the account has to stay non-billable. " +
+              "Move them to Live, or switch their card payments off, under Card payments first. Nothing was changed.");
+          }
+        }
+
         const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
         if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
         if (p.discountPercent !== undefined) {
@@ -1535,16 +1878,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Per-tenant on purpose, rather than folded into list_clients: a MID identifies
         // somebody else's bank account, and there is no reason for every operator page-load
         // to carry one for every builder when the console shows one tenant at a time.
+        //
+        // Since workstream 1 phase 3 it also answers WHICH SYSTEM the builder is on (env: 'uat' =
+        // Fiserv's test system, 'prod' = live; migration 296), whether they are non-billable (only
+        // a non-billable account may take payments in test mode), and which systems this
+        // deployment has credentials for. `envColumn: false` means 296 is not applied yet: every
+        // builder is on UAT and the console must not offer the switch.
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
-        const { data, error } = await sb.from("client_settings")
-          .select("payments_online_enabled, cardpointe_merchid")
-          .eq("client_id", clientId).maybeSingle();
+        const { row, error, envColumn } = await readPaymentSettings(sb, clientId, ["billing_exempt"]);
         if (error) throw error;
         return json({
           ok: true,
           clientId,
-          paymentsEnabled: data?.payments_online_enabled === true,
-          merchid: data?.cardpointe_merchid ?? null,
+          paymentsEnabled: row?.payments_online_enabled === true,
+          merchid: row?.cardpointe_merchid ?? null,
+          env: cpEnvOf(row?.cardpointe_env),
+          envColumn,
+          billingExempt: row?.billing_exempt === true,
+          configured: { uat: cardpointeConfigured("uat"), prod: cardpointeConfigured("prod") },
         });
       }
       case "set_payments": {
@@ -1578,8 +1929,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             // SHAPE: digits only, 12–16 of them. A CardPointe MID is a 12-digit number
             // (the gateway fixtures in _shared/cardpointe.test.ts are 12), and Fiserv has
             // issued longer numeric ids on some front-ends — 16 leaves that headroom without
-            // ever accepting free text. NOTHING IS STRIPPED: "4900-0000-0101" and
-            // "4900 0000 0101" are refused, not silently repunctuated, because a value the
+            // ever accepting free text. NOTHING IS STRIPPED: an id typed with dashes or spaces
+            // between its digit groups is refused, not silently repunctuated, because a value the
             // operator never typed is exactly the class of change that must not happen
             // quietly to the field that decides where money goes.
             throw new Error(
@@ -1592,28 +1943,67 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           patch.cardpointe_merchid = merchid;
         }
 
-        const { data: current, error: curErr } = await sb.from("client_settings")
-          .select("payments_online_enabled, cardpointe_merchid")
-          .eq("client_id", clientId).maybeSingle();
-        if (curErr) throw curErr;
-        const effectiveMerchid = merchid !== undefined ? merchid : (current?.cardpointe_merchid ?? null);
+        // The SYSTEM (migration 296): undefined = leave it alone (an older console sends none),
+        // 'uat' = Fiserv's test system, 'prod' = live. Anything else is refused, never mapped.
+        let env: "uat" | "prod" | undefined;
+        if (p.env !== undefined) {
+          if (p.env !== "uat" && p.env !== "prod") {
+            throw new Error(`env must be "uat" (test) or "prod" (live), not ${JSON.stringify(p.env).slice(0, 40)}.`);
+          }
+          env = p.env;
+          patch.cardpointe_env = env;
+        }
 
-        // ⛔ ENABLED WITH NO MID IS THE DANGEROUS STATE, NOT MERELY AN INCOMPLETE ONE.
-        // Both readers resolve `settings.cardpointe_merchid || CP_DEFAULT_MERCHID` — so a
-        // blank id does NOT refuse, it falls through to the deployment-wide CARDPOINTE_MERCHID
-        // and takes this builder's customers' money into OUR merchant account. Refusing at
-        // this door is the only place that pairing is checked.
-        if (p.paymentsEnabled === true && !effectiveMerchid) {
-          throw new Error(
-            "Add this builder's own CardPointe merchant id before switching payments on. " +
-            "Enabled with no MID is not a half-finished setting: portal-payments and customer-pay " +
-            "both fall back to the deployment-wide merchant id, so their customers' card payments " +
-            "would land in the wrong account rather than being refused.");
+        const { row: current, error: curErr, envColumn } = await readPaymentSettings(sb, clientId, ["billing_exempt"]);
+        if (curErr) throw curErr;
+        if (env !== undefined && !envColumn) {
+          throw new Error("The test/live setting needs migration 296 applied first. Nothing was changed.");
+        }
+        const effectiveMerchid = merchid !== undefined ? merchid : (current?.cardpointe_merchid ?? null);
+        const currentEnv = cpEnvOf(current?.cardpointe_env);
+        const effectiveEnv = env ?? currentEnv;
+        if (!effectiveEnv) {
+          // Unreachable through the column's CHECK; refused rather than guessed if it ever is.
+          throw new Error("This builder's stored test/live setting isn't one this console knows. Pick Test or Live and save again.");
+        }
+
+        if (p.paymentsEnabled === true) {
+          // ⛔ ENABLED WITH NO MID. Until workstream 1 phase 3 a blank id fell through to the
+          // deployment-wide CARDPOINTE_MERCHID and took this builder's customers' money into OUR
+          // merchant account. That fallback is gone, so a blank id now refuses every card payment
+          // instead; switching on with none is still refused here, because it is never what anyone
+          // meant.
+          if (!effectiveMerchid) {
+            throw new Error(
+              "Add this builder's own CardPointe merchant id before switching payments on. " +
+              "With none, their customers can't pay by card at all.");
+          }
+          // ⛔ TEST MODE TAKES NO REAL MONEY. A builder's customer who "pays" on Fiserv's test
+          // system has paid nothing, while the order reads paid. So only a non-billable account
+          // (our own, and the certification tenant) may take payments in test mode. set_billing
+          // refuses the other way in (making such a builder billable), and the money gates refuse
+          // the charge itself (paymentSettings.ts testModeNeedsExempt).
+          if (testModeNeedsExempt({ cardpointe_env: effectiveEnv, billing_exempt: current?.billing_exempt })) {
+            throw new Error(
+              "Test mode (UAT) moves no real money, so only a non-billable account may take payments in it. " +
+              "Switch this builder to Live, or mark the account non-billable on the Billing card first. Nothing was changed.");
+          }
+          // ⛔ A SYSTEM THIS DEPLOYMENT CANNOT REACH. Every card payment would be refused.
+          if (!cardpointeConfigured(effectiveEnv)) {
+            throw new Error(
+              `${effectiveEnv === "prod" ? "Live" : "Test"} card processing isn't set up on this deployment yet: ` +
+              `set the ${cpEnvSecretNames(effectiveEnv).join(", ")} secrets first. Nothing was changed.`);
+          }
         }
         patch.payments_online_enabled = p.paymentsEnabled === true;
 
         const { error: upErr } = await sb.from("client_settings").upsert(patch, { onConflict: "client_id" });
-        if (upErr) throw upErr;
+        if (upErr) {
+          if (isMissingColumn(upErr) && "cardpointe_env" in patch) {
+            throw new Error("The test/live setting needs migration 296 applied first. Nothing was changed.");
+          }
+          throw upErr;
+        }
 
         // A DEDICATED audit row, on top of the generic operator one at the top of this
         // function. That row records only that `set_payments` ran; when money has landed
@@ -1628,19 +2018,88 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             actor_user_id: identity.via === "operator" ? identity.userId : null,
             note: `via=${identity.via}`
               + ` enabled ${current?.payments_online_enabled === true} -> ${patch.payments_online_enabled === true}`
-              + ` merchid ${current?.cardpointe_merchid || "(none)"} -> ${effectiveMerchid || "(none)"}`,
+              + ` merchid ${current?.cardpointe_merchid || "(none)"} -> ${effectiveMerchid || "(none)"}`
+              + ` env ${currentEnv ?? "(unknown)"} -> ${effectiveEnv}`,
           });
         } catch (_e) { /* best-effort: never fail a completed write on a logging failure */ }
 
+        const sys = effectiveEnv === "prod" ? "LIVE" : "TEST (UAT)";
         return json({
           ok: true,
           clientId,
           paymentsEnabled: patch.payments_online_enabled === true,
           merchid: effectiveMerchid,
+          env: effectiveEnv,
           note: patch.payments_online_enabled === true
-            ? `Card payments are ON for ${clientId}. Charges route to merchant id ${effectiveMerchid} — their Fiserv account, their chargeback liability.`
+            ? `Card payments are ON for ${clientId}, on ${sys}. Charges route to merchant id ${effectiveMerchid} — their Fiserv account, their chargeback liability.`
             : `Card payments are OFF for ${clientId}. Their pay surface disappears; nothing already taken is affected.`,
         });
+      }
+      case "verify_payments": {
+        // The Verify button: is this builder's account reachable with this deployment's credentials
+        // for its system? ONE inquireByOrderid for an order id nobody ever used (cardpointe.ts
+        // cpVerifyMerchant): no money moves and nothing is created at the gateway. It asks whether
+        // the switch is on only to report it, so an account can be checked BEFORE it is switched on.
+        // `expected` is true only for the gateway's known "not found" answer (respcode 29); any other
+        // answer is reachable but not a pass, and the console shows it in amber with the gateway's words.
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const { row, error } = await readPaymentSettings(sb, clientId, []);
+        if (error) throw error;
+        const merchant = cpMerchant(row);
+        const base = {
+          ok: true,
+          clientId,
+          paymentsEnabled: row?.payments_online_enabled === true,
+          env: merchant?.env ?? cpEnvOf(row?.cardpointe_env),
+          midLast4: midLast4(row?.cardpointe_merchid),
+        };
+        let out: Record<string, unknown>;
+        if (!merchant) {
+          out = { ...base, reachable: false, configError: "No merchant id is set for this builder." };
+        } else if (!cardpointeConfigured(merchant.env)) {
+          out = {
+            ...base, reachable: false,
+            configError: `${merchant.env === "prod" ? "Live" : "Test"} card processing isn't set up on this deployment: ` +
+              `the ${cpEnvSecretNames(merchant.env).join(", ")} secrets are missing.`,
+          };
+        } else {
+          // ONE CHECK PER BUILDER EVERY VERIFY_COOLDOWN_S SECONDS. Each check spends one of the requests a
+          // minute the gateway allows a MID, and real customer charges on that MID share them. Only a
+          // check that went out is counted (the verify_payments audit row, written below after the
+          // call); a refused click writes nothing, so a stuck clicker cannot keep the window shut.
+          // If the audit read fails, the check goes ahead: this guard protects a quota, not money.
+          const since = new Date(Date.now() - VERIFY_COOLDOWN_S * 1000).toISOString();
+          const recent = await sb.from("admin_audit").select("created_at")
+            .eq("action", "verify_payments").eq("target_client_id", clientId).gte("created_at", since).limit(1);
+          if (!recent.error && Array.isArray(recent.data) && recent.data.length) {
+            return json({
+              error: `This builder's account was checked a few seconds ago. Wait ${VERIFY_COOLDOWN_S} seconds and try again.`,
+              retryAfterSeconds: VERIFY_COOLDOWN_S,
+            }, 429);
+          }
+          const v = await cpVerifyMerchant(merchant);
+          out = v.reachable
+            ? { ...base, reachable: true, expected: v.expected, gateway: v.answer }
+            : v.kind === "config"
+            ? { ...base, reachable: false, configError: `The gateway refused our request: ${v.message}` }
+            : v.kind === "throttled"
+            ? { ...base, reachable: false, error: "The gateway is busy for this merchant id. Try again in a minute." }
+            : { ...base, reachable: false, error: `The gateway did not answer: ${v.message}` };
+        }
+        // Who checked which account, and what came back. Last four only: the full id is on the
+        // set_payments row that put it there.
+        try {
+          await sb.from("admin_audit").insert({
+            action: "verify_payments",
+            target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} env=${base.env ?? "(unknown)"} mid=…${base.midLast4 ?? "(none)"}`
+              + ` reachable=${out.reachable === true}${out.configError ? " config_error" : out.error ? " no_answer" : ""}`
+              + `${out.reachable === true && out.expected !== true ? " unexpected_answer" : ""}`,
+          });
+        } catch (_e) { /* best-effort */ }
+        return json(out);
       }
       case "link_owner": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
@@ -1770,7 +2229,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }
         if (!exists) throw new Error(`"${email}" isn't a login yet, so no test can be sent to it. Use an existing owner/operator login address (or create it first under "Link owner").`);
 
-        // Where the reset link lands; the panel passes location.origin + "/portal.html".
+        // Where the reset link lands: AUTH_PORTAL_URL, whatever the panel passes.
         const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: AUTH_PORTAL_URL });
         if (error) throw error;
         return json({ ok: true, sentTo: email, senderEmail: (cfg && cfg.smtp_admin_email) || null });
@@ -1798,19 +2257,293 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // are counted as `leftBehind` so the operator sees them; see the note at that list.
       // Keep this list in step with the wipes below; drift here is what left a
       // deleted tenant's PII in the database twice already.
+      // ── Workstream 2, phase 9: the builder's own Twilio sub-account ───────────────────────────
+      // _shared/twilioProvision.ts does the work; these answer the console's card (AdmTwilioAccount
+      // in portal/07-admin.jsx). Every outcome that touches Twilio gets its own admin_audit row
+      // (masked SID), because what happened there cannot be undone from here.
+      case "twilio_account_get": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const account = await twilioAccountView(sb, clientId, { get: (k) => Deno.env.get(k), check: p.check === true });
+        // Workstream 2, phase 6: where each number's caller ID stands (SHAKEN/STIR, Voice Integrity,
+        // CNAM), registered from the builder's Phone tab in view-as. Phase 8: how many "Bring your
+        // number" requests of theirs are open (null = migration 298 not applied, or the read failed).
+        // Both are extras on the card: a read that fails (or throws) is null, never a failed view.
+        const openNumberRequests = await (async () => {
+          try {
+            const r = await sb.from("phone_number_requests").select("id", { count: "exact", head: true })
+              .eq("client_id", clientId).in("status", ["new", "in_progress"]);
+            return r?.error ? null : Number(r?.count ?? 0);
+          } catch { return null; }
+        })();
+        const callerId = await (async () => { try { return await callerIdSummary(sb, clientId); } catch { return null; } })();
+        return json({ ok: true, account: { ...account, callerId, openNumberRequests, verifyService: await verifyServiceView(sb, clientId) } });
+      }
+
+      // ── Workstream 2, phase 8: "Bring your number" requests (migration 298) ─────────────────────
+      // A builder's request IS the operator's notification: status 'new' until someone takes it. The
+      // console lists every open one (and the last month's finished ones) across builders, newest
+      // first, and moves it on. The move itself is workers/phone-api/PORTING.md; landing the number
+      // is portal-settings phone_adopt_number, which marks the request done by itself.
+      case "number_requests_list": {
+        const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+        const cols = "id, client_id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at";
+        const [open, recent, names] = await Promise.all([
+          sb.from("phone_number_requests").select(cols).in("status", ["new", "in_progress"]).order("created_at", { ascending: false }).limit(100),
+          sb.from("phone_number_requests").select(cols).in("status", ["done", "cancelled"]).gte("updated_at", since).order("updated_at", { ascending: false }).limit(50),
+          sb.from("client_configs").select("client_id, company_name"),
+        ]);
+        if (open.error && relationMissing(open.error)) return json({ ok: true, installed: false, requests: [] });
+        if (open.error) throw open.error;
+        if (recent.error) throw recent.error;
+        const nameOf = new Map(((names.data ?? []) as any[]).map((c) => [String(c.client_id), String(c.company_name ?? "")]));
+        // Review 2026-10-09: a builder's request is never refused over ANOTHER builder's number or
+        // request (that told them whose a number was), so the operator is shown it here instead:
+        // each open request's numbers that are live on another builder's account, or that another
+        // builder's open request also names. A failed read leaves the flags out, never the list.
+        const openRows = ((open.data ?? []) as any[]).map((r) => ({ ...r, numbers: Array.isArray(r.numbers) ? r.numbers.map(String) : [] }));
+        const asked = [...new Set(openRows.flatMap((r) => r.numbers))].slice(0, 500);
+        let live: Array<{ phone_number: string; client_id: string }> | null = [];
+        if (asked.length) {
+          const l = await sb.from("sms_numbers").select("phone_number, client_id").in("phone_number", asked).is("released_at", null).limit(1000);
+          live = l.error ? null : ((l.data ?? []) as any[]).map((x) => ({ phone_number: String(x.phone_number), client_id: String(x.client_id) }));
+        }
+        const view = (r: any, flagged: boolean) => ({
+          id: r.id, clientId: r.client_id, companyName: nameOf.get(String(r.client_id)) || null,
+          numbers: Array.isArray(r.numbers) ? r.numbers : [], currentCarrier: r.current_carrier, isLcPhone: r.is_lc_phone,
+          contactName: r.contact_name, contactEmail: r.contact_email, cutoverWindow: r.cutover_window ?? null,
+          status: r.status, createdAt: r.created_at, handledAt: r.handled_at ?? null,
+          ...(flagged && live ? { flags: requestFlags(r, { live, open: openRows }) } : {}),
+        });
+        return json({ ok: true, installed: true, requests: [...openRows.map((r) => view(r, true)), ...((recent.data ?? []) as any[]).map((r) => view(r, false))] });
+      }
+
+      case "number_request_set": {
+        const id = reqStr(p.id, "id");
+        if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("invalid request id");
+        const status = String(p.status ?? "");
+        if (!["new", "in_progress", "done", "cancelled"].includes(status)) throw new Error("status must be new, in_progress, done or cancelled");
+        const now = new Date().toISOString();
+        const { data, error } = await sb.from("phone_number_requests")
+          .update({ status, updated_at: now, handled_at: status === "new" ? null : now, handled_by: identity.via === "operator" ? identity.userId : null })
+          .eq("id", id).select("id, client_id, status").maybeSingle();
+        if (error && relationMissing(error)) return json({ error: "Migration 298 isn't applied on this database yet." }, 503);
+        if (error) throw error;
+        if (!data) return json({ error: "No such request." }, 404);
+        try {
+          await sb.from("admin_audit").insert({
+            action: "number_request_set", target_client_id: data.client_id,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} status=${status}`,
+          });
+        } catch (_e) { /* best-effort */ }
+        return json({ ok: true, id: data.id, status: data.status });
+      }
+
+      case "twilio_account_provision": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        // ⚠️ AN EXPLICIT CHOICE OF BUILDER. This is the one way to make a sub-account while
+        // TWILIO_SUBACCOUNTS is off (the first test sub), so the console makes the operator type
+        // the builder's id, the way delete_client does.
+        if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
+          throw new Error("Confirmation text does not match the client id.");
+        }
+        const get = (k: string) => Deno.env.get(k);
+        const auditTwilio = async (outcome: string) => {
+          try {
+            await sb.from("admin_audit").insert({
+              action: "twilio_account_provision", target_client_id: clientId,
+              actor_email: identity.via === "operator" ? identity.email : null,
+              actor_user_id: identity.via === "operator" ? identity.userId : null,
+              note: `via=${identity.via} ${outcome}`.slice(0, 2000),
+            });
+          } catch (_e) { /* best-effort: the outcome is also in the response */ }
+        };
+        // The same button reactivates a suspended sub.
+        const cur = await sb.from("twilio_accounts").select("kind, status").eq("client_id", clientId).maybeSingle();
+        if (cur.error && relationMissing(cur.error)) {
+          return json({ error: "Migrations 292 and 295 aren't applied on this database yet, so no sub-account can be made." }, 503);
+        }
+        if (cur.error) throw new Error(`twilio_accounts: ${cur.error.message}`);
+        if (cur.data?.kind === "sub" && cur.data?.status === "suspended") {
+          const r = await setTwilioAccountStatus(sb, clientId, "active", { get });
+          if (!r.ok) return json({ error: twilioStatusSentence(r, "reactivated"), code: r.code }, r.status);
+          await auditTwilio("reactivated");
+          return json({ ok: true, reactivated: true, account: await twilioAccountView(sb, clientId, { get }) });
+        }
+        const r = await ensureTwilioAccount(sb, clientId, { get, operator: true });
+        if (!r.ok) {
+          await auditTwilio(`refused ${r.reason} step=${r.step ?? "-"} code=${r.code}`);
+          return json({ error: twilioProvisionSentence(r), reason: r.reason, step: r.step, code: r.code, ...(r.missing ? { missing: r.missing } : {}) }, r.status);
+        }
+        if (r.kind === "parent") {
+          // Pinned, our own internal account, or something already on the parent: it stays there
+          // (one tenant, one account; migration 292's twilio_accounts_no_split).
+          const why = r.reason === "internal" ? "it is our own internal account"
+            : r.reason === "parent_holdings" ? "it already has a number or a texting registration on the parent account"
+            : r.reason === "pinned" ? "it is pinned to the parent account" : "the switch is off";
+          return json({ error: `${clientId} stays on the parent account: ${why}.`, reason: r.reason }, 409);
+        }
+        await auditTwilio(`${r.ran ? "provisioned" : "already_active"} sid=${maskSid(r.accountSid)}${r.pushSkipped.length ? ` push_skipped=${r.pushSkipped.join(",")}` : ""}`);
+        // The builder's own login text service rides along (made, adopted or renamed; never fatal to
+        // the account, which is ready either way).
+        const verifyService = verifySyncView(await syncVerifyService(sb, clientId, { get }));
+        if (verifyService.ok) await auditVerify(sb, identity, clientId, verifyService);
+        return json({
+          ok: true, pushSkipped: r.pushSkipped, verifyService,
+          account: { ...await twilioAccountView(sb, clientId, { get }), verifyService: await verifyServiceView(sb, clientId) },
+        });
+      }
+
+      // ── The builder's own Verify service (2026-10-21, migration 323) ─────────────────────────
+      // "Sync login text name" on the card (one builder), or `all: true` for every active sub (the
+      // backfill). Idempotent: a builder whose service is already right costs three GETs and no
+      // write at Twilio. Nothing here bills anyone (a Verify service costs nothing until a code is
+      // sent, and that cost was ours before too), so it is on can_write, not the money grant.
+      case "twilio_verify_sync": {
+        const get = (k: string) => Deno.env.get(k);
+        let ids: string[];
+        if (p.all === true) {
+          const subs = await sb.from("twilio_accounts").select("client_id").eq("kind", "sub").eq("status", "active");
+          if (subs.error && relationMissing(subs.error)) return json({ error: "Migrations 292 and 295 aren't applied on this database yet." }, 503);
+          if (subs.error) throw new Error(`twilio_accounts: ${subs.error.message}`);
+          ids = ((subs.data ?? []) as Array<{ client_id: string }>).map((r) => String(r.client_id)).sort().slice(0, 200);
+        } else {
+          ids = [await assertClient(sb, reqStr(p.clientId, "clientId"))];
+        }
+        const results: Array<{ clientId: string } & ReturnType<typeof verifySyncView>> = [];
+        for (const id of ids) {
+          const view = verifySyncView(await syncVerifyService(sb, id, { get }));
+          await auditVerify(sb, identity, id, view);
+          results.push({ clientId: id, ...view });
+        }
+        if (p.all !== true) {
+          const one = results[0];
+          if (!one.ok) return json({ error: one.sentence, reason: one.reason, code: one.code }, one.status ?? 502);
+          return json({
+            ok: true, verifyService: one,
+            account: { ...await twilioAccountView(sb, ids[0], { get }), verifyService: await verifyServiceView(sb, ids[0]) },
+          });
+        }
+        return json({ ok: true, results });
+      }
+
+      case "twilio_account_suspend":
+      case "twilio_account_close": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const closing = action === "twilio_account_close";
+        // ⚠️ CLOSING IS IRREVERSIBLE (and releases every number in it): the builder's id is typed.
+        if (closing && reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
+          throw new Error("Confirmation text does not match the client id.");
+        }
+        const get = (k: string) => Deno.env.get(k);
+        const r = await setTwilioAccountStatus(sb, clientId, closing ? "closed" : "suspended", { get });
+        try {
+          await sb.from("admin_audit").insert({
+            action: String(action), target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} ${r.ok ? (r.already ? "already" : "done") : `refused ${r.reason} code=${r.code}`}`.slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort */ }
+        if (!r.ok) return json({ error: twilioStatusSentence(r, closing ? "closed" : "suspended"), reason: r.reason, code: r.code }, r.status);
+        return json({ ok: true, status: r.status, account: await twilioAccountView(sb, clientId, { get }) });
+      }
+
       case "delete_client": {
         const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
         if (reqStr(p.confirmClientId, "confirmClientId") !== clientId) {
           throw new Error("Confirmation text does not match the client id.");
         }
         const deleted: Record<string, number> = {};
-        // Adds to the count rather than setting it: billing_customers is wiped twice, once by the
-        // gateway step the moment the card is gone, and again in the list below as the backstop.
+        // Adds to the count rather than setting it: billing_customers is deleted twice, once by the
+        // gateway step the moment the card is gone, and again by tenant_purge below as the backstop.
+        // Since 10-21 that hook is the only table delete_client deletes from itself.
         const wipe = async (table: string) => {
           const { error, count } = await sb.from(table).delete({ count: "exact" }).eq("client_id", clientId);
           if (error) throw new Error(`${table}: ${error.message}`);
           deleted[table] = (deleted[table] ?? 0) + (count ?? 0);
         };
+
+        // ── The builder's Twilio sub-account: CHECKED here, closed only after every refusal ──────
+        // (Workstream 2, phase 9; review M1.) Closing a sub-account is irreversible and releases its
+        // numbers, so this first step only READS (twilioClosePlan): the account row, and for a sub
+        // whether it still holds a number (our rows, then Twilio's own list), or, for a sub whose
+        // create answer was lost, whether Twilio made one anyway (found by its name). Any refusal
+        // here is "nothing was deleted", and true. The close itself comes after the billing reads
+        // and the gateway step below, which can still refuse; then the account row goes, BEFORE the
+        // first wipe (review M2), so a refused or missing twilio_account_forget never leaves a
+        // half-deleted tenant. A parent pin, or no row (or no table: 292 not applied), closes nothing.
+        const twGet = (k: string) => Deno.env.get(k);
+        // Its own audit row (a masked SID only), like the gateway's below.
+        const twilioAudit = async (outcome: string, sid: string | null) => {
+          const row = {
+            action: "delete_client", target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} twilio ${outcome}${sid ? ` sid=${maskSid(sid)}` : ""}`.slice(0, 2000),
+          };
+          try { await sb.from("admin_audit").insert(row); } catch (_e) { /* best-effort: the outcome is also in the response */ }
+        };
+        // A provisioning run holding its lock (create_client's, carrying on under waitUntil, or a
+        // builder's number search or purchase) could make the sub at Twilio AFTER the plan below had
+        // looked and found none, leaving a live sub that no row records (2026-10-12, C55). So the
+        // delete waits until the run lets go. A read that fails is left to the plan, which reads the
+        // same row and says why.
+        const twLock = await sb.from("twilio_accounts").select("provision_lock_until").eq("client_id", clientId).maybeSingle();
+        if (!twLock?.error && Date.parse(String(twLock?.data?.provision_lock_until ?? "")) > Date.now()) {
+          await twilioAudit("refused busy code=provisioning", null);
+          return json({
+            error: "This builder's phone account is still being set up. Try again in a few minutes. Nothing was deleted.",
+            twilio: { reason: "busy", code: "provisioning" },
+          }, 409);
+        }
+        const twPlan = await twilioClosePlan(sb, clientId, { get: twGet });
+        if (!twPlan.ok) {
+          await twilioAudit(`refused ${twPlan.reason} code=${twPlan.code}`, null);
+          return json({
+            error: `${twilioStatusSentence(twPlan, "closed")} Nothing was deleted.`,
+            twilio: { reason: twPlan.reason, code: twPlan.code },
+          }, twPlan.reason === "has_numbers" || twPlan.reason === "duplicate" ? 409 : twPlan.status);
+        }
+        let twilioClosed = false;
+
+        // ── The purge, asked for a DRY RUN first (Track G part 2, 2026-10-21) ─────────────────────
+        // Still before anything irreversible: tenant_purge (migration 321) must be there, or the
+        // delete stops here with nothing deleted. RETAINED_TABLES is its keep list: money that moved,
+        // signed records and SMS consent evidence stay forever (Ahsan, 10-21); every other table with
+        // a client_id column is purged, including tables nobody named (deny by default; preflight's
+        // coverage test makes sure a new table gets a fate on purpose).
+        const actor = (identity.via === "operator" ? identity.email || identity.userId : null) || `via=${identity.via}`;
+        const dry = await sb.rpc("tenant_purge", { p_client_id: clientId, p_keep: RETAINED_TABLES, p_actor: actor, p_dry_run: true });
+        if (dry.error) {
+          const missing = ["PGRST202", "42883"].includes(String(dry.error.code ?? ""));
+          return json({
+            error: missing
+              ? "The database doesn't have the builder-delete update yet (migration 321), so nothing was deleted."
+              : `This builder's data could not be checked before the delete (${dry.error.message}). Nothing was deleted.`,
+          }, missing ? 503 : 500);
+        }
+
+        // ── Their customer data, EXPORTED before anything is deleted ──────────────────────────────
+        // Ahsan, 10-21: CRM contacts, texts, emails, calls, voicemails and customer logins are
+        // exported, then deleted. One ZIP in the private tenant-exports bucket, a signed link in the
+        // response. No copy, no delete: a failure here refuses with nothing deleted. A refusal further
+        // down leaves the file for the 30-day clean-up.
+        let exported: ExportResult;
+        try {
+          exported = await buildTenantExport(sb, clientId, { tables: EXPORT_TABLES, buckets: EXPORTED_BUCKETS });
+        } catch (e) {
+          const tooBig = e instanceof ExportTooLarge;
+          return json({
+            error: tooBig
+              ? `${(e as Error).message} Nothing was deleted.`
+              : `The export of this builder's customer data could not be saved (${(e as Error).message}), so nothing was deleted.`,
+          }, tooBig ? 413 : 502);
+        }
+        const exportView = exported.path
+          ? { url: exported.url, expiresAt: exported.expiresAt, rows: exported.rows, files: exported.files, tables: Object.keys(exported.tables).length, bytes: exported.bytes }
+          : null;
 
         // ── The payment gateway FIRST, before a single row is wiped (2026-10-05). ──────────────
         // billing_subscriptions and billing_customers (wiped below) are only MIRRORS. Until this,
@@ -1914,173 +2647,244 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }
         await auditGateway(atGateway ? "done" : "none");
 
-        // tax_code_assignments (migration 246) goes FIRST, ahead of the order below. Its rows have
-        // no foreign key to anything wiped here (target_key is text, shared by style ids and
-        // heading keys), so none cascade; and the HEADING rows — delivery, doors, services — pass
-        // tax_codes_get's visibility filter for any tenant, because the heading keys are the same
-        // everywhere. Left behind, a recreated slug's Tax tab would show the deleted company's
-        // codes as its own saved choices, and a save that kept them would stamp them as theirs.
-        // First, because it is the one table here that can be missing: admin-catalog deployed
-        // before 246 is applied refuses the delete on this line, before anything is gone, instead
-        // of half-deleting the tenant and throwing further down. (Only the gateway step above runs
-        // ahead of it: its refusals wipe nothing, and once the gateway has removed the saved card it
-        // wipes the billing_customers row that pointed at it, which is the one row that must not
-        // outlive the card.)
-        await wipe("tax_code_assignments");
-        // wallet_accounts (migration 164) is the BALANCE, keyed by client_id with no FK to anything,
-        // so a recreated slug inherited it: a deleted test tenant left $100.00 behind (seen 10-05),
-        // which the next tenant on that slug would have spent as its own. The movements stay:
-        // wallet_transactions is a ledger, reported under `retained` below.
-        await wipe("wallet_accounts");
-        // client_feature_grants is the same kind of entitlement as wallet_accounts and
-        // billing_subscriptions: keyed by client_id, no FK, so a recreated slug inherited the dead
-        // tenant's comped features (seen 10-05: an unexpired view_3d grant outliving its tenant).
-        // get_config's view3d is an EXISTS over this table, so the new tenant would have had paid
-        // 3D on day one. A grant is a comp, not a record of money that moved, so it is wiped, not
-        // retained.
-        await wipe("client_feature_grants");
-        // Catalog/design rows first, config last. Order respects FKs
-        // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
-        await wipe("designs");
-        // design_versions and captured_leads were BOTH missing from this list until
-        // 2026-07-30. Neither has a foreign key to designs (verified: zero FKs on either), so
-        // nothing cascaded and both survived a tenant hard-delete — leaving that tenant's
-        // full quote history and their browsing leads, complete with customer names, phone
-        // numbers and addresses, in a database the tenant no longer exists in.
-        await wipe("design_versions");
-        await wipe("captured_leads");
-        await wipe("layout_item_pricing");      // FK style_id → building_styles
-        await wipe("colors");                   // standalone per-tenant palette
-        await wipe("building_size_inclusions");
-        await wipe("building_sizes");
-        await wipe("building_styles");
-        await wipe("client_layout_items");
-        await wipe("client_settings");
-        // 2026-08-01: the same orphan-cascade hole as design_versions/captured_leads above, on the
-        // tables added since. Verified against information_schema rather than by memory — no FK
-        // chain reaches any of these from anything wiped here.
-        //
-        //   billing_subscriptions + billing_customers are the DANGEROUS pair, and not merely
-        //   untidy: entitlement is computed purely from surviving rows keyed on client_id, and
-        //   `hasCard` / the charge vault come from billing_customers.vault_id. Recreating a slug
-        //   (a re-onboard, or just reusing a test slug) therefore handed the new tenant the dead
-        //   one's 'active' subscription — full product, no payment — and made a subscribe call
-        //   charge the FORMER customer's stored card, on an invoice nobody could attribute.
-        //   Neither table is an accounting record; both are mirrors of gateway state, and the
-        //   gateway remains the source of truth. By this line the gateway step at the top has
-        //   already cancelled the subscriptions and removed the card these rows describe (and
-        //   wiped billing_customers once the card was gone; this second wipe is the backstop).
-        await wipe("billing_subscriptions");
-        await wipe("billing_customers");
-        //   feedback_submissions holds submitter_name + submitter_email — the named people who
-        //   filed bugs from that portal. feedback_comments cascades from it (verified ON DELETE
-        //   CASCADE), and the attachments live under {client_id}/ in the bucket loop below.
-        await wipe("feedback_submissions");
-        //   fixture_items is the per-tenant door catalog; its photos are served PUBLICLY from the
-        //   `fixtures` bucket, now included below.
-        await wipe("fixture_items");
-        //   qbo_item_map points at QuickBooks item ids from the DELETED tenant's company. Only the
-        //   style-scoped rows cascade (via qbo_item_map_style_id_fkey); the tenant-default rows
-        //   (style_id IS NULL) survived, so a recreated slug that connects a DIFFERENT QuickBooks
-        //   company would resolve its first invoice against stale ids and bill whatever items
-        //   happen to share them — exactly the harm qbo-oauth-callback's realm-change wipe exists
-        //   to prevent.
-        await wipe("qbo_item_map");
-        try { await wipe("app_errors"); } catch (_) { /* error logs are best-effort */ }
-
-        // DELIBERATELY RETAINED, and reported rather than silently kept: the financial ledgers.
-        // orders (payments cascades from it), invoice_sends and billing_charge_attempts are
-        // records of money that actually moved. Destroying them is a data-retention decision with
-        // accounting consequences, not a bug fix, so it is NOT made here — but leaving them
-        // unmentioned is how this class of miss happened in the first place. The counts go back in
-        // the response so the operator can see exactly what outlived the tenant and escalate if a
-        // deletion request requires them gone too. wallet_transactions (every top-up, debit and
-        // refund) and usage_charges (each metered call, text and 3D generation) joined the list on
-        // 2026-10-05: they are the same kind of record, and were neither wiped nor reported.
-        const retained: Record<string, number> = {};
-        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges"]) {
-          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
-          if (count) retained[t] = count;
+        // ── Now the builder's Twilio sub-account is closed (planned above, read-only), and its row
+        // removed with a closed sub's two Vault secrets (295's twilio_account_forget), BEFORE the
+        // first wipe. A refusal from here on says what the gateway step already did.
+        const gatewayDid = gateway.subscriptionsCancelled || gateway.vaultDeleted
+          ? ` The payment gateway step had already run (${gateway.subscriptionsCancelled} paid plan${gateway.subscriptionsCancelled === 1 ? "" : "s"} cancelled${gateway.vaultDeleted ? ", the saved card removed" : ""}); nothing else was deleted. Delete again to finish.`
+          : " Nothing was deleted.";
+        if (twPlan.closeSid) {
+          const closed = await closePlannedSub(sb, clientId, twPlan, { get: twGet });
+          await twilioAudit(closed.ok ? (twPlan.orphan ? "closed_orphan" : "closed") : `refused ${closed.reason} code=${closed.code}`, twPlan.closeSid);
+          if (!closed.ok) {
+            return json({ error: `${twilioStatusSentence(closed, "closed")}${gatewayDid}`, twilio: { reason: closed.reason, code: closed.code }, gateway }, 502);
+          }
+          twilioClosed = true;
         }
-        // LEFT BEHIND, and NOT a decision: the tenant's CRM, phone, text, email and customer-login
-        // rows, which name THEIR customers (names, phone numbers, message bodies, voicemails). All
-        // keyed by client_id with no FK to anything wiped here, so none cascade, and on 2026-10-05
-        // a deleted tenant's crm_contacts and customer_sessions were still in the database. Whether
-        // they are wiped, kept or exported first is a retention call for Ahsan and Carolyn, not
-        // part of the 10-05 change, so they are counted here exactly like `retained`: the dialog
-        // says "all of its data", and what outlives it has to be visible rather than assumed.
-        const leftBehind: Record<string, number> = {};
-        for (
-          const t of [
-            "crm_contacts", "crm_notes", "crm_files", "crm_activities", "sms_messages", "phone_calls",
-            "phone_voicemails", "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions",
-            "customer_email_otps", "design_acceptances",
-          ]
-        ) {
-          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
-          if (count) leftBehind[t] = count;
+        if (twPlan.row) {
+          const forgot = await forgetTwilioAccount(sb, clientId, twPlan.row);
+          if (!forgot.ok) {
+            return json({
+              error: `This builder's Twilio account row could not be removed (${forgot.code}).`
+                + `${twilioClosed ? " Their Twilio sub-account is already closed." : ""}${gatewayDid}`,
+              twilio: { closed: twilioClosed, code: forgot.code }, gateway,
+            }, 500);
+          }
+          deleted["twilio_accounts"] = forgot.outcome === "none" ? 0 : 1;
         }
 
-        // Capture the logins mapped to this client, unmap them, then delete any
-        // that aren't also attached to another client.
+        // ── What must be read BEFORE the purge takes the rows ──────────────────────────────────────
+        // The logins (deleted from auth afterwards when no other builder uses them), what
+        // client_settings connects to outside the database (removed after the purge commits), and,
+        // for a builder whose Twilio sub-account was NOT closed above (on our parent account, or none),
+        // the numbers and A2P brand they still hold there: nothing releases those automatically
+        // (Ahsan, 10-21), so they go back to the operator as a step by hand.
         const cu = await sb.from("client_users").select("user_id").eq("client_id", clientId);
         if (cu.error) throw cu.error;
         const userIds = [...new Set((cu.data ?? []).map((r: any) => r.user_id).filter(Boolean))];
-        await wipe("client_users");
+        const connections = await sb.from("client_settings")
+          .select("resend_domain_id, resend_inbound_domain_id, qbo_realm_id, qbo_connected_at, qbo_refresh_token")
+          .eq("client_id", clientId).maybeSingle();
+        let parentNumbers: string[] = [];
+        let parentA2p: { brandSid: string | null; campaignSid: string | null } | null = null;
+        if (!twilioClosed) {
+          const [nums, reg] = await Promise.all([
+            sb.from("sms_numbers").select("phone_number").eq("client_id", clientId).is("released_at", null),
+            sb.from("sms_registrations").select("brand_sid, campaign_sid").eq("client_id", clientId).maybeSingle(),
+          ]);
+          parentNumbers = ((nums?.data ?? []) as any[]).map((n) => String(n.phone_number ?? "")).filter(Boolean);
+          if (reg?.data?.brand_sid || reg?.data?.campaign_sid) {
+            parentA2p = { brandSid: reg.data.brand_sid ?? null, campaignSid: reg.data.campaign_sid ?? null };
+          }
+        }
+
+        // tax_lookups is KEPT (a ledger of calls Avalara billed us for), but a charge of this
+        // builder's still waiting on tax_charge_retry (319: pending, or error with a price) is closed
+        // here, before the wallet goes: replayed after the delete, wallet_credit would create a fresh
+        // wallet for the slug and, if the slug is reused, bill the NEW builder for the old one's call.
+        // retryLookupCharges also skips a deleted builder's rows on its own; this is the second wall.
+        // Best-effort: a database without 319 just has nothing to close, and the delete goes on.
+        const taxChargesClosed = await closeTenantTaxCharges(sb, clientId);
+
+        // ── THE PURGE: every table with a client_id column but the kept ones, ONE transaction ─────
+        // Replaces the 23 one-at-a-time PostgREST wipes that ran here until 10-21 with no transaction
+        // (a timeout half-way left a half-deleted tenant). tenant_purge retries a delete a foreign
+        // key refuses on its next pass, raises if it cannot finish (nothing deleted), and writes the
+        // deleted_clients tombstone in the same transaction, which blocks this id for good:
+        // create_client refuses it, because the kept rows still carry it.
+        const purge = await sb.rpc("tenant_purge", { p_client_id: clientId, p_keep: RETAINED_TABLES, p_actor: actor, p_dry_run: false });
+        if (purge.error) {
+          return json({
+            error: `The database refused the delete (${purge.error.message}), so none of this builder's data was deleted.`
+              + (gatewayDid === " Nothing was deleted." ? "" : gatewayDid.replace("; nothing else was deleted.", "."))
+              + (twilioClosed ? " Their Twilio sub-account is already closed." : ""),
+            gateway, ...(exportView ? { export: exportView } : {}),
+          }, 500);
+        }
+        for (const [t, n] of Object.entries((purge.data?.purged ?? {}) as Record<string, number>)) deleted[t] = (deleted[t] ?? 0) + Number(n);
+        const passes = Number(purge.data?.passes ?? 0);
+
+        // The logins that belonged to this builder alone.
         let deletedUsers = 0;
+        // A login that should have gone and did not (a failed read or delete) is reported, not dropped.
+        let loginsKept = 0;
         for (const uid of userIds) {
-          const still = await sb.from("client_users").select("user_id").eq("user_id", uid).maybeSingle();
-          if (!still.error && !still.data) { const d = await sb.auth.admin.deleteUser(uid); if (!d.error) deletedUsers++; }
+          const still = await sb.from("client_users").select("user_id").eq("user_id", uid).limit(1).maybeSingle();
+          if (still.error) { loginsKept++; continue; }
+          if (still.data) continue; // another builder still uses this login
+          const d = await sb.auth.admin.deleteUser(uid);
+          if (d.error) loginsKept++; else deletedUsers++;
         }
         deleted["auth_logins"] = deletedUsers;
 
-        // Storage: remove everything under <clientId>/ in every bucket that can hold their files.
-        //
-        // `fixtures` and `feedback-attachments` were missing. fixtures is PUBLIC, so a deleted
-        // tenant's product/door photos stayed downloadable by anyone holding the old URL;
-        // feedback-attachments holds their users' bug-report screenshots. Both are keyed
-        // {client_id}/…, so the same loop covers them.
-        //
-        // Paginated: list() caps at 1000 per call, and the old single call meant a tenant with
-        // more than 1000 objects silently left the overflow behind — junior-barns alone already has
-        // 93 floor plans, and nothing warned that the sweep was partial.
+        // ── Storage: everything under <clientId>/, at any depth, in every bucket the registry wipes ─
+        // Recursive since 10-21 (_shared/storageTree.ts): the old one-level sweep kept every file in
+        // {client}/{unit}/{file} buckets. Files the export could not take (too many or too big) are
+        // KEPT and reported, never deleted unexported.
         let files = 0;
-        for (const bucket of ["floor-plans", "branding", "fixtures", "feedback-attachments"]) {
+        const storageFailed: string[] = [];
+        const notExported = new Map(exported.filesNotExported.map((f) => [f.bucket, f]));
+        for (const bucket of SWEPT_BUCKETS) {
+          if (notExported.has(bucket)) continue;
           try {
-            // Always re-list from offset 0: each round DELETES what it listed, so the next page
-            // shifts down into the same window. The bound is a round counter, not an offset —
-            // if a remove() ever fails we must not re-list the same 1000 objects forever.
-            for (let round = 0; round < 20; round++) {
-              const { data: list, error: lsErr } = await sb.storage.from(bucket)
-                .list(clientId, { limit: 1000 });
-              if (lsErr) break;
-              const batch = list ?? [];
-              if (batch.length === 0) break;
-              const paths = batch.map((o: any) => `${clientId}/${o.name}`);
-              const rm = await sb.storage.from(bucket).remove(paths);
-              if (rm.error) break;                    // stop rather than spin on the same page
-              files += rm.data?.length ?? paths.length;
-              if (batch.length < 1000) break;         // that was the last page
-            }
-          } catch (_) { /* storage cleanup is best-effort */ }
+            const swept = await sweepPrefix(sb, bucket, clientId);
+            files += swept.removed;
+            if (!swept.complete) storageFailed.push(bucket);
+          } catch (_) { storageFailed.push(bucket); }
         }
         deleted["storage_files"] = files;
 
-        const cc = await sb.from("client_configs").delete({ count: "exact" }).eq("client_id", clientId);
-        if (cc.error) throw new Error(`client_configs: ${cc.error.message}`);
-        deleted["client_configs"] = cc.count ?? 0;
+        // ── Outside the database, after the purge committed: best-effort, every outcome reported ──
+        // The Resend sending and reply domains (only if no other builder's settings name the same
+        // domain id), and the QuickBooks connection, revoked at Intuit the way disconnect_qbo does.
+        // Names only in the response, never an id or a token.
+        const conn = connections.error ? null : connections.data;
+        const done: string[] = [];
+        const byHand: string[] = connections.error ? ["connections_unknown"] : [];
+        const failed: string[] = [];
+        for (const [key, id] of [["resend_domain", conn?.resend_domain_id], ["resend_inbound_domain", conn?.resend_inbound_domain_id]] as const) {
+          if (!id) continue;
+          const domainId = String(id);
+          if (!/^[A-Za-z0-9-]{1,64}$/.test(domainId)) { byHand.push(key); continue; }
+          const shared = await sb.from("client_settings").select("client_id", { count: "exact", head: true })
+            .or(`resend_domain_id.eq.${domainId},resend_inbound_domain_id.eq.${domainId}`);
+          if (shared.error) { failed.push(key); continue; }
+          if (shared.count) continue; // another builder's domain too: not ours to remove
+          try {
+            await rsDeleteDomain(domainId);
+            done.push(key);
+          } catch (e) {
+            failed.push(key);
+            logEdgeError({ fn: "admin-catalog", req, clientId, code: `delete_client_${key}`, message: `provider domain delete failed (id ${domainId}): ${String((e as Error)?.message ?? e)}` }).catch(() => {});
+          }
+        }
+        if (conn?.qbo_realm_id && conn?.qbo_connected_at) {
+          const qboId = Deno.env.get("QBO_CLIENT_ID"), qboSecret = Deno.env.get("QBO_CLIENT_SECRET");
+          if (!qboId || !qboSecret || !conn.qbo_refresh_token) byHand.push("quickbooks");
+          else {
+            try {
+              const { revoke } = await qboEndpoints();
+              const r = await fetch(revoke, {
+                method: "POST",
+                headers: { Authorization: `Basic ${btoa(`${qboId}:${qboSecret}`)}`, "Content-Type": "application/json", Accept: "application/json" },
+                body: JSON.stringify({ token: conn.qbo_refresh_token }),
+              });
+              if (r.ok) done.push("quickbooks"); else failed.push("quickbooks");
+            } catch (_) { failed.push("quickbooks"); }
+          }
+        }
+        if (parentNumbers.length) byHand.push("twilio_numbers");
+        if (parentA2p) byHand.push("twilio_a2p");
+        if (loginsKept) failed.push(`logins:${loginsKept}`);
+        for (const b of storageFailed) failed.push(`storage:${b}`);
 
-        // `retained` is empty for a normal tenant and only appears when financial rows outlived
-        // the delete — see the note above. Surfacing it is the point: the dialog says "and ALL of
-        // its data", so anything that survives has to be visible rather than assumed.
-        // `gateway` is counts only (see the gateway step): what was cancelled and removed at the
-        // payment gateway, so the operator's confirmation can say so. `leftBehind` works like
-        // `retained`: present only when the tenant had rows there.
+        // ── The report: counted again AFTER everything, from the registry ─────────────────────────
+        // retained: the kept records (the tombstone itself left out). leftBehind should be empty:
+        // anything here survived the purge and is said, not assumed gone. A count that fails is named
+        // in notCounted, so a report that could not look is never read as "nothing there".
+        const notCounted: string[] = [];
+        const countTenantRows = async (list: readonly string[]) => {
+          const counts: (number | null)[] = [];
+          for (let i = 0; i < list.length; i += 8) {
+            counts.push(...await Promise.all(list.slice(i, i + 8).map(async (t) => {
+              const { count, error } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
+              if (error) { if (!relationMissing(error)) notCounted.push(t); return null; }
+              return count;
+            })));
+          }
+          const found: Record<string, number> = {};
+          list.forEach((t, i) => { if (counts[i]) found[t] = counts[i]!; });
+          return found;
+        };
+        const retained = await countTenantRows(RETAINED_TABLES.filter((t) => t !== "deleted_clients"));
+        const leftBehind = await countTenantRows(COUNTED_AFTER_DELETE);
+        // Every per-builder bucket, looked at: anything still under <clientId>/ is reported, as
+        // retained (signatures) or left behind. One object is enough to know.
+        const filesRetained: string[] = [];
+        const filesLeft: string[] = [];
+        await Promise.all(CHECKED_BUCKETS.map(async (bucket) => {
+          try {
+            const { data, error } = await sb.storage.from(bucket).list(clientId, { limit: 1 });
+            if (error) { if (!storageFailed.includes(bucket)) failed.push(`storage:${bucket}`); return; }
+            if ((data ?? []).length) (TENANT_BUCKETS[bucket].fate === "retain" ? filesRetained : filesLeft).push(bucket);
+          } catch (_) { if (!storageFailed.includes(bucket)) failed.push(`storage:${bucket}`); }
+        }));
+        const byOrder = (a: string, b: string) => CHECKED_BUCKETS.indexOf(a) - CHECKED_BUCKETS.indexOf(b);
+
+        // Exports older than 30 days go now (no scheduler in this project). Best-effort.
+        const oldExportsRemoved = await sweepOldExports(sb).catch(() => null);
+
+        // One audit row for what the purge did: counts and the export's path, never its signed link.
+        const purgedRows = Object.values((purge.data?.purged ?? {}) as Record<string, number>).reduce((s, n) => s + Number(n), 0);
+        try {
+          await sb.from("admin_audit").insert({
+            action: "delete_client", target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: (`via=${identity.via} purge passes=${passes} rows=${purgedRows}`
+              + ` kept=${Object.values(retained).reduce((s, n) => s + n, 0)} export=${exported.path ?? "none"}`
+              + ` tax_charges_closed=${taxChargesClosed}`
+              + (exported.filesNotExported.length ? ` files_kept=${exported.filesNotExported.map((f) => f.bucket).join(",")}` : "")
+              + (done.length ? ` done=${done.join(",")}` : "") + (byHand.length ? ` by_hand=${byHand.join(",")}` : "")
+              + (failed.length ? ` failed=${failed.join(",")}` : "")).slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort: the same is in the response */ }
+
+        // Each report is present only when it has something in it. `gateway` is counts only (see
+        // the gateway step). `export` carries the signed link: it is the only copy of the
+        // builder's customer data, for 30 days.
         return json({
           ok: true, clientId, deleted,
           gateway: { ...gateway, ...(vaultShared ? { vaultKept: "in use by another builder" } : {}) },
+          // Workstream 2: whether the builder's own Twilio sub-account was closed first.
+          ...(twilioClosed ? { twilio: { closed: true } } : {}),
+          // Sales tax charges that were waiting on a retry and now never will be (count only).
+          ...(taxChargesClosed ? { taxChargesClosed } : {}),
+          ...(exportView ? { export: exportView } : {}),
           ...(Object.keys(retained).length ? { retained } : {}),
           ...(Object.keys(leftBehind).length ? { leftBehind } : {}),
+          ...(filesRetained.length || filesLeft.length || exported.filesNotExported.length
+            ? {
+              files: {
+                ...(filesRetained.length ? { retained: filesRetained.sort(byOrder) } : {}),
+                ...(filesLeft.length ? { leftBehind: filesLeft.sort(byOrder) } : {}),
+                ...(exported.filesNotExported.length ? { notExported: exported.filesNotExported.map((f) => f.bucket) } : {}),
+              },
+            }
+            : {}),
+          ...(done.length || byHand.length || failed.length
+            ? {
+              cleanup: {
+                ...(done.length ? { done } : {}),
+                ...(byHand.length ? { byHand } : {}),
+                ...(failed.length ? { failed } : {}),
+                ...(parentNumbers.length ? { numbers: parentNumbers } : {}),
+                ...(parentA2p ? { a2p: parentA2p } : {}),
+              },
+            }
+            : {}),
+          ...(notCounted.length ? { notCounted } : {}),
+          ...(oldExportsRemoved ? { oldExportsRemoved } : {}),
         });
       }
 

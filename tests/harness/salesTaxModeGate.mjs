@@ -2,7 +2,7 @@
 //
 // Two review findings on the Avalara settings stage (2026-09-17), both about tenants who must see
 // no change at all:
-//   • The Sales tax box on CRM Connection keyed on the form's `ssMode`, which is true for a
+//   • The Sales tax box on GHL Connection keyed on the form's `ssMode`, which is true for a
 //     grandfathered tenant without CRM invoicing whose row still says CRM mode. It called
 //     tax_settings, and pointed them at a Locations tax section that the same answer hides.
 //   • Against a portal-settings older than the page (the frontend deploys on push, functions
@@ -12,12 +12,12 @@
 // leaves the machine) through each tenant shape and asserts what shows and what gets called:
 //
 //   A. saved SS mode: box + location rates render
-//   B. grandfathered (no capability, row says CRM): no call from CRM Connection, no tax text anywhere
+//   B. grandfathered (no capability, row says CRM): no call from GHL Connection, no tax text anywhere
 //   C. SS tenant, older function: no box, no refusal, no Locations banner, lots still render
 //   D. CRM-mode tenant WITH the capability, older function: no tax text anywhere
 //   E. nothing (not even "Checking…") until the answer lands
 //   F. an unsaved switch to CRM invoicing hides the box
-//   G. a real 500: shown on CRM Connection (saved row is SS); silent on a first Locations read
+//   G. a real 500: shown on GHL Connection (saved row is SS); silent on a first Locations read
 //   H. a failed Locations RE-read after an SS answer shows its sentence
 //   I. lookups on: the 24-hour usage line shows a counted number, and is left out when the ledger
 //      could not be counted (usage24h null means unknown, not zero)
@@ -31,7 +31,9 @@
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is
 // how to prove a check still fires: against c5b2ec4's artifact, B, C, D, E and G fail; against
-// 366b93b's, I's unreadable-ledger check fails.
+// 366b93b's, I's unreadable-ledger check fails. (Since 2026-10-09 the GHL Connection anchor is the
+// company rate's read-only summary rather than its old input box, so artifacts from before then
+// stop at the first GHL Connection visit; re-point openCrm to "SALES TAX RATE (%)" to replay them.)
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 
@@ -134,10 +136,11 @@ const boot = async (shape) => {
   await page.getByText("Settings", { exact: true }).last().click();
   await page.waitForTimeout(900);
 };
-// The label is uppercased by CSS, and innerText reports what is rendered.
+// The company rate is not a box on GHL Connection since 2026-10-09 (it is set on Company → Tax); a
+// tenant without the capability sees its read-only summary, whose link is the anchor here.
 const openCrm = async () => {
-  await page.getByText("CRM Connection", { exact: true }).last().click();
-  await waitText(S.allowed ? "Quote and invoice through my CRM" : "SALES TAX RATE (%)");
+  await page.getByText("GHL Connection", { exact: true }).last().click();
+  await waitText(S.allowed ? "Estimates and invoices through my CRM" : "Change it in Company → Tax");
 };
 const openLocations = async () => {
   await page.getByText("Company", { exact: true }).last().click();
@@ -161,9 +164,9 @@ try {
   await openCrm();
   await page.waitForTimeout(1500);
   let t = await text();
-  ok("B: numbering + company-rate fields still show (unchanged)", t.toLowerCase().includes("sales tax rate (%)"));
-  ok("B: CRM Connection makes no tax_settings call", taxCalls() === before, `calls ${taxCalls() - before}`);
-  ok("B: CRM Connection shows no tax text", !TAX_TEXT.test(t), hit(t));
+  ok("B: numbering + the company-rate summary still show (unchanged)", t.includes("Change it in Company → Tax") && t.includes("6.5%, shown on documents as"));
+  ok("B: GHL Connection makes no tax_settings call", taxCalls() === before, `calls ${taxCalls() - before}`);
+  ok("B: GHL Connection shows no tax text", !TAX_TEXT.test(t), hit(t));
   await openLocations();
   await page.waitForTimeout(1500);
   t = await text();
@@ -176,8 +179,8 @@ try {
   await openCrm();
   await page.waitForTimeout(1500);
   t = await text();
-  ok("C: older function: CRM Connection did ask", taxCalls() > before);
-  ok("C: older function: no box, no refusal on CRM Connection", !TAX_TEXT.test(t), hit(t));
+  ok("C: older function: GHL Connection did ask", taxCalls() > before);
+  ok("C: older function: no box, no refusal on GHL Connection", !TAX_TEXT.test(t), hit(t));
   await openLocations();
   await page.waitForTimeout(1500);
   t = await text();
@@ -190,8 +193,8 @@ try {
   await openCrm();
   await page.waitForTimeout(1500);
   t = await text();
-  ok("D: CRM-mode tenant: no tax_settings call from CRM Connection", taxCalls() === before);
-  ok("D: CRM-mode tenant: no tax text on CRM Connection", !TAX_TEXT.test(t), hit(t));
+  ok("D: CRM-mode tenant: no tax_settings call from GHL Connection", taxCalls() === before);
+  ok("D: CRM-mode tenant: no tax text on GHL Connection", !TAX_TEXT.test(t), hit(t));
   await openLocations();
   await page.waitForTimeout(1500);
   t = await text();
@@ -208,14 +211,14 @@ try {
   await boot({ invoiceInGhl: false, allowed: true, taxMode: "ok" });
   await openCrm();
   ok("F: capable saved-SS tenant sees the box", await waitText("Verified lookups:"));
-  await page.getByText("Quote and invoice through my CRM", { exact: true }).click();
+  await page.getByText("Estimates and invoices through my CRM", { exact: true }).click();
   await page.waitForTimeout(500);
   ok("F: an unsaved switch to CRM invoicing hides the box", !/Verified lookups/.test(await text()));
 
   // G
   await boot({ invoiceInGhl: false, allowed: false, taxMode: "fail" });
   await openCrm();
-  ok("G: CRM Connection shows a real failure to a saved-SS tenant", await waitText("couldn't read your sales tax settings", 8000));
+  ok("G: GHL Connection shows a real failure to a saved-SS tenant", await waitText("couldn't read your sales tax settings", 8000));
   await openLocations();
   await page.waitForTimeout(1500);
   ok("G: a first Locations read that fails is silent", !/Sales tax rates couldn't load/.test(await text()));

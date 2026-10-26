@@ -455,7 +455,7 @@ async function portalRun(browser) {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     await settle(page, 600);
-    await page.evaluate(() => { history.pushState({}, "", "/portal/settings/vents"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await page.evaluate(() => { history.pushState({}, "", "/settings/vents"); window.dispatchEvent(new PopStateEvent("popstate")); });
     await page.waitForFunction(() => document.body.innerText.includes("Louvered window vent"), null, { timeout: 20000 }).catch(() => {});
     await settle(page, 600);
     const rowOf = (name) => page.locator("[draggable]").filter({ has: page.getByText(name, { exact: true }) }).first();

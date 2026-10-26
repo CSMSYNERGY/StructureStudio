@@ -1,11 +1,11 @@
 // `sub`/`onSub` are supplied by Dashboard so the sub-page lives in the URL
-// (/portal/settings/colors). The internal fallback keeps the shell usable if it is ever
+// (/settings/colors). The internal fallback keeps the shell usable if it is ever
 // ─── QuickBooks (Settings → QuickBooks) ─────────────────────────────────────
 // Connection card + the estimate-line → QuickBooks-item mapping grid. All data flows
 // through portal-settings (qbo_status / list_item_map / save_item_map / list_qbo_items /
 // qbo_test / disconnect_qbo) and qbo-oauth-connect; tokens never reach the browser.
 //
-// The OAuth round trip lands back on /portal/settings/quickbooks?connected=… — this view
+// The OAuth round trip lands back on /settings/quickbooks?connected=… — this view
 // reads that flag once, shows a banner, and strips it from the URL so a refresh doesn't
 // re-announce a stale result.
 const QBO_KINDS = [
@@ -603,7 +603,11 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
 // field the server knows comes back whenever it said something; one it doesn't know (an older
 // server build) is dropped with an ok, and this is the only place that shows. The photo switch
 // is stored only when it is OFF, so only an unticked box can go missing.
-const SS_WORDING_FIELDS = [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"]];
+const SS_WORDING_FIELDS = [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"],
+  // The photo design (Carolyn 2026-10-14). Its switch and pictures are strings too, so the same
+  // test reports a server that predates them.
+  ["layout", "photo design"], ["hero", "top photo"], ["heading", "heading"], ["message", "message"], ["tagline", "slogan"],
+  ["signName", "signature name"], ["signTitle", "signature title"], ["footer", "bottom banner"], ["accent", "accent colour"], ["buttonColor", "button colour"]];
 function ssWordingDropped(sent, kept) {
   const out = [];
   for (const kind of ["estimate", "quote", "invoice"]) {
@@ -640,6 +644,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // preview never sits under the wrong tab.
   const [pv, setPv] = useState(null);
   const [pvBusy, setPvBusy] = useState(false);
+  // The photo design's picture upload in flight: "hero" | "footer" | null.
+  const [imgBusy, setImgBusy] = useState(null);
   // Seed the wording boxes ONCE from the server. A ref rather than a "is it empty?" test,
   // and an effect rather than a render-time set: the empty check would have been true
   // forever for a tenant with no saved copy, so setting state on it during render was an
@@ -754,7 +760,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
 
   const inboundDisconnect = () => {
     if (!window.confirm(
-      "Turn off replies in the portal?\n\nCustomer replies go back to the inbox of whoever sent the email. Your quotes and invoices are not affected.",
+      "Turn off replies in the portal?\n\nCustomer replies go back to the inbox of whoever sent the email. Your estimates and invoices are not affected.",
     )) return;
     act({ action: "email_inbound_disconnect" }, () => setMsg({ ok: "Replies switched off." }));
   };
@@ -793,6 +799,9 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // Preview draws the wording in the boxes for the open tab, saved or not, so a builder can try
   // words before committing them. The server renders the real email (their own header, footer
   // and photo, a sample customer); it sends nothing.
+  // The open tab's photo design has a top photo of its own, so the Preview's "no building photo"
+  // notes don't apply to it.
+  const ownHero = tplKind !== "invoice" && (tpl[tplKind] || {}).layout === "photo" && !!(tpl[tplKind] || {}).hero;
   const previewWording = async () => {
     const kind = tplKind;
     setPvBusy(true); setPv(null);
@@ -805,6 +814,33 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     // A server from before Preview existed answers "Unrecognised action".
     if (e2 && /unrecognised action/i.test(e2)) e2 = "Preview isn't available on this server yet. Tell CSM Synergy.";
     setPv(e2 ? { kind, err: e2 } : { kind, subject: r.subject || "", html: r.html, photo: r.photo || null });
+  };
+
+  // The photo design's two pictures. Upload-only (email_upload_image): the URL comes back into
+  // the open tab's boxes and is stored by "Save wording" like every other field, so an upload the
+  // builder abandons changes nothing a customer sees. The tab is fixed at click time: switching
+  // tabs while it uploads must not drop the picture into the other kind.
+  const uploadEmailImage = (which) => (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const kind = tplKind;
+    if (f.size > 3_000_000) { setTplMsg({ err: "That picture is over 3 MB. Save it smaller (about 1200 pixels wide is plenty for an email) and try again." }); return; }
+    const r = new FileReader();
+    r.onload = async () => {
+      setImgBusy(which); setTplMsg(null);
+      const { data, error: err } = await sb.functions.invoke("portal-settings", {
+        body: { action: "email_upload_image", which, imageBase64: r.result, imageContentType: f.type || "image/jpeg" },
+      });
+      setImgBusy(null);
+      let e2 = (data && data.error) || (err && err.message);
+      if (!e2 && !(data && data.url)) e2 = "The upload didn't finish. Try again.";
+      if (e2 && /unrecognised action/i.test(e2)) e2 = "Picture upload isn't available on this server yet. Tell CSM Synergy.";
+      if (e2) { setTplMsg({ err: e2 }); return; }
+      setTpl((p) => ({ ...p, [kind]: { ...(p[kind] || {}), [which]: data.url } }));
+    };
+    r.onerror = () => setTplMsg({ err: "That picture couldn't be read. Try saving it again as a JPG or PNG." });
+    r.readAsDataURL(f);
   };
 
   const fmtWhen = (iso) => {
@@ -977,7 +1013,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     const body = [
       `Hi,`,
       ``,
-      `Please add the following DNS records for ${dom}. They let our quoting software send`,
+      `Please add the following DNS records for ${dom}. They let our estimating software send`,
       `email from our own address instead of a shared one, and they prove to Gmail and`,
       `Outlook that the mail really is from us.`,
       ``,
@@ -1301,7 +1337,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             {inboundSt === "off" && (
               <div>
                 <p style={{ fontSize: 13, color: "#475569", marginTop: 0, marginBottom: 10, lineHeight: 1.6 }}>
-                  Right now when a customer replies to a quote, it goes to the personal inbox of
+                  Right now when a customer replies to an estimate, it goes to the personal inbox of
                   whoever sent it. Switch this on and replies land here instead, on the customer's
                   record, so anyone on your team can pick the conversation up.
                 </p>
@@ -1406,7 +1442,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", flexShrink: 0 }}>Turn off</button>
                 </div>
                 <p style={{ fontSize: 12.5, color: "#475569", marginTop: 10, marginBottom: 0, lineHeight: 1.6 }}>
-                  When a customer replies to a quote it appears on their record, and on the design
+                  When a customer replies to an estimate it appears on their record, and on the design
                   they were asking about. Each email gets its own reply address so we know what it
                   belongs to — they look like <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5 }}>{inbound.replyExample}</span>.
                   Customers never type it; their email program fills it in when they press Reply.
@@ -1546,17 +1582,17 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             <div data-ss-email-wording style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
               <div style={S.lbl}>Your wording</div>
               <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
-                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name) and they fill in automatically.
+                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name), {"{first}"} (their first name), {"{company}"} (their business, when the estimate has one) and they fill in automatically.
                 {/* Plan 3.1 (Carolyn 2026-09-14, the quote email she highlighted): the quote
                     email no longer prints the total, so the customer meets the price on the
                     quote itself. {total} still fills in — saved wording must never print a
                     literal "{total}" — it is just the one token that works against that. */}
                 {tplKind === "quote" && (
-                  <span data-token-hint="total"> <b>{"{total}"}</b> is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.</span>
+                  <span data-token-hint="total"> <b>{"{total}"}</b> is not recommended for estimates — the estimate email leaves the price out, so the customer sees it when they open the estimate.</span>
                 )}
               </div>
               <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-                {[["estimate", "Estimate"], ["quote", "Quote"], ["invoice", "Invoice"]].map(([k, label]) => (
+                {[["estimate", "CRM estimate"], ["quote", "Estimate"], ["invoice", "Invoice"]].map(([k, label]) => (
                   <button key={k} type="button" onClick={() => setTplKind(k)}
                     style={{ background: tplKind === k ? ACCENT : "#FFF", color: tplKind === k ? "#FFF" : "#334155", border: "1px solid " + (tplKind === k ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                 ))}
@@ -1565,37 +1601,160 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 const cur = tpl[tplKind] || {};
                 const setField = (f, v) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), [f]: v } }));
                 const fieldLbl = { fontSize: 11.5, fontWeight: 700, color: "#475569", margin: "6px 0 3px" };
-                const docWord = tplKind === "invoice" ? "invoice" : tplKind;
+                // The word the PLACEHOLDERS say. The kind keys stay as stored ("quote" is
+                // StructureStudio's own paperwork), but every document is an estimate to the
+                // person reading (Carolyn Q12, 2026-10-06).
+                const docWord = tplKind === "invoice" ? "invoice" : "estimate";
+                // THE PHOTO DESIGN (Carolyn 2026-10-14: "I really want that template inside
+                // Structure Studio"): her CRM email's big photo, heading, message, wide button,
+                // slogan and signature. Estimates only; the invoice keeps one design. Switching
+                // back to Classic keeps what was typed here, it just isn't drawn.
+                const photo = tplKind !== "invoice" && cur.layout === "photo";
+                const hintLbl = { fontWeight: 500, color: "#94A3B8" };
+                const imgBox = (which, label, hint) => (
+                  <div data-ss-email-image={which} style={{ marginTop: 6 }}>
+                    <div style={fieldLbl}>{label}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      {cur[which]
+                        ? <img src={cur[which]} alt="" style={{ height: 48, maxWidth: 160, objectFit: "cover", borderRadius: 6, border: "1px solid #E2E8F0" }} />
+                        : <span style={{ fontSize: 12, color: "#94A3B8" }}>None yet</span>}
+                      <label style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: imgBusy ? "default" : "pointer", opacity: imgBusy ? 0.6 : 1 }}>
+                        {imgBusy === which ? "Uploading…" : cur[which] ? "Replace" : "Upload"}
+                        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={uploadEmailImage(which)} disabled={!!imgBusy} style={{ display: "none" }} />
+                      </label>
+                      {cur[which] && (
+                        <button type="button" onClick={() => setField(which, "")}
+                          style={{ background: "none", border: "none", color: "#B91C1C", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Remove</button>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 3 }}>{hint}</div>
+                  </div>
+                );
+                const colorBox = (which, label, dflt) => (
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155" }}>
+                    <input data-ss-wording={which} type="color" aria-label={label} value={cur[which] || dflt}
+                      onChange={(e) => setField(which, e.target.value)}
+                      style={{ width: 34, height: 26, padding: 0, border: "1px solid #E2E8F0", borderRadius: 6, cursor: "pointer" }} />
+                    {label}
+                    {cur[which] && (
+                      <button type="button" onClick={() => setField(which, "")}
+                        style={{ background: "none", border: "none", color: "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Reset</button>
+                    )}
+                  </label>
+                );
+                const closingBox = () => (
+                  <>
+                    <div style={fieldLbl}>{photo
+                      ? <>Sign-off <span style={hintLbl}>(above your name, e.g. “Thanks,”)</span></>
+                      : <>Closing message <span style={hintLbl}>(under the button)</span></>}</div>
+                    <textarea data-ss-wording="closing" aria-label={photo ? "Sign-off" : "Closing message"} maxLength={1000}
+                      value={cur.closing || ""}
+                      onChange={(e) => setField("closing", e.target.value)}
+                      rows={photo ? 2 : 3}
+                      placeholder={photo ? "Thanks," : "e.g. Questions about your " + docWord + "? Just reply to this email or give us a call."}
+                      style={{ ...S.input, resize: "vertical" }} />
+                  </>
+                );
                 return (
                   <>
+                    {tplKind !== "invoice" && (
+                      <div data-ss-email-design style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", margin: "0 0 6px" }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: "#475569", marginRight: 2 }}>Design</span>
+                        {[["", "Classic"], ["photo", "Photo header"]].map(([v, label]) => {
+                          const on = (cur.layout || "") === v;
+                          return (
+                            <button key={label} type="button" data-ss-wording-layout={v || "classic"} onClick={() => setField("layout", v)}
+                              style={{ background: on ? "#0F172A" : "#FFF", color: on ? "#FFF" : "#334155", border: "1px solid " + (on ? "#0F172A" : "#E2E8F0"), borderRadius: 999, padding: "3px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                          );
+                        })}
+                        <span style={{ fontSize: 12, color: "#64748B", flexBasis: "100%" }}>
+                          {photo
+                            ? "A big photo across the top, your heading and message, one wide button, a slogan and your signature."
+                            : "Your logo and name on a card, your opening line, the details, then the button."}
+                        </span>
+                      </div>
+                    )}
                     <div style={fieldLbl}>Subject</div>
                     <input data-ss-wording="subject" aria-label="Subject" maxLength={300}
                       value={cur.subject || ""}
                       onChange={(e) => setField("subject", e.target.value)}
-                      placeholder={"e.g. Your " + tplKind + " {number} from {business}"}
+                      placeholder={photo ? "e.g. Your shed " + docWord + " is here!" : "e.g. Your " + docWord + " {number} from {business}"}
                       style={S.input} />
-                    <div style={fieldLbl}>Opening line</div>
-                    <textarea data-ss-wording="intro" aria-label="Opening line" maxLength={300}
-                      value={cur.intro || ""}
-                      onChange={(e) => setField("intro", e.target.value)}
-                      rows={3}
-                      placeholder={tplKind === "quote"
-                        ? "e.g. Thanks for designing with {business}! Your quote {number} is ready."
-                        : "e.g. Thanks for designing with {business}! Your {total} quote is ready."}
-                      style={{ ...S.input, resize: "vertical" }} />
-                    <div style={fieldLbl}>Closing message <span style={{ fontWeight: 500, color: "#94A3B8" }}>(under the button)</span></div>
-                    <textarea data-ss-wording="closing" aria-label="Closing message" maxLength={1000}
-                      value={cur.closing || ""}
-                      onChange={(e) => setField("closing", e.target.value)}
-                      rows={3}
-                      placeholder={"e.g. Questions about your " + docWord + "? Just reply to this email or give us a call."}
-                      style={{ ...S.input, resize: "vertical" }} />
+                    {photo && (
+                      <>
+                        {imgBox("hero", "Top photo", "Across the top of the email; about 1200 pixels wide looks sharp. With none, the building photo goes there (when it shows), else your logo.")}
+                        <div style={fieldLbl}>Heading</div>
+                        <input data-ss-wording="heading" aria-label="Heading" maxLength={150}
+                          value={cur.heading || ""}
+                          onChange={(e) => setField("heading", e.target.value)}
+                          placeholder={"We're getting closer, {first}"}
+                          style={S.input} />
+                        <div style={fieldLbl}>Message <span style={hintLbl}>(above the button; a blank line starts a new paragraph; **bold**, *italic*)</span></div>
+                        <textarea data-ss-wording="message" aria-label="Message" maxLength={1500}
+                          value={cur.message || ""}
+                          onChange={(e) => setField("message", e.target.value)}
+                          rows={7}
+                          placeholder={"Hi {first},\n\nHere is the " + docWord + " for your new building! Please click the button below to review and approve it."}
+                          style={{ ...S.input, resize: "vertical" }} />
+                      </>
+                    )}
+                    {!photo && (
+                      <>
+                        <div style={fieldLbl}>Opening line</div>
+                        <textarea data-ss-wording="intro" aria-label="Opening line" maxLength={300}
+                          value={cur.intro || ""}
+                          onChange={(e) => setField("intro", e.target.value)}
+                          rows={3}
+                          placeholder={tplKind === "quote"
+                            ? "e.g. Thanks for designing with {business}! Your estimate {number} is ready."
+                            : "e.g. Thanks for designing with {business}! Your {total} estimate is ready."}
+                          style={{ ...S.input, resize: "vertical" }} />
+                        {closingBox()}
+                      </>
+                    )}
                     <div style={fieldLbl}>Button text</div>
                     <input data-ss-wording="button" aria-label="Button text" maxLength={40}
                       value={cur.button || ""}
                       onChange={(e) => setField("button", e.target.value)}
-                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : tplKind === "quote" ? "e.g. View Shed Quote" : "e.g. View Your Estimate"}
+                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : photo ? "e.g. VIEW SHED ESTIMATE" : tplKind === "quote" ? "e.g. View Shed Estimate" : "e.g. View Your Estimate"}
                       style={{ ...S.input, maxWidth: 340 }} />
+                    {photo && (
+                      <>
+                        <div style={fieldLbl}>Slogan <span style={hintLbl}>(under the button; *words* in a script font)</span></div>
+                        <input data-ss-wording="tagline" aria-label="Slogan" maxLength={150}
+                          value={cur.tagline || ""}
+                          onChange={(e) => setField("tagline", e.target.value)}
+                          placeholder={"e.g. EVERYONE NEEDS *a little space* IN THEIR LIFE"}
+                          style={S.input} />
+                        {closingBox()}
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                            <div style={fieldLbl}>Signature name</div>
+                            <input data-ss-wording="signName" aria-label="Signature name" maxLength={80}
+                              value={cur.signName || ""}
+                              onChange={(e) => setField("signName", e.target.value)}
+                              placeholder="e.g. Pat Miller"
+                              style={S.input} />
+                          </div>
+                          <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                            <div style={fieldLbl}>Signature title</div>
+                            <input data-ss-wording="signTitle" aria-label="Signature title" maxLength={80}
+                              value={cur.signTitle || ""}
+                              onChange={(e) => setField("signTitle", e.target.value)}
+                              placeholder="e.g. Owner/Manager"
+                              style={S.input} />
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 3 }}>
+                          Under the name come your company name, logo, address, website and phone from your business settings.
+                        </div>
+                        {imgBox("footer", "Bottom banner", "Optional. A strip across the bottom; with none, a thin line in your accent colour.")}
+                        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 10 }}>
+                          {colorBox("accent", "Accent colour", "#f47b2a")}
+                          {colorBox("buttonColor", "Button colour", "#2cab05")}
+                        </div>
+                      </>
+                    )}
                     {tplKind !== "invoice" && (
                       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
                         <input data-ss-wording="picture" type="checkbox" checked={cur.picture !== false}
@@ -1604,7 +1763,9 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                         <span>
                           <b>Show the building photo</b>
                           <span style={{ display: "block", color: "#64748B", fontSize: 12, marginTop: 1 }}>
-                            The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Structures.
+                            {photo
+                              ? "The photo of the style they picked goes across the top when you haven't uploaded a top photo. It shows only for styles with “Image on estimate” ticked under Sheds."
+                              : "The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Sheds."}
                           </span>
                         </span>
                       </label>
@@ -1613,10 +1774,12 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 );
               })()}
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-                <button type="button" disabled={tplBusy} onClick={saveWording}
-                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: tplBusy ? 0.6 : 1 }}>{tplBusy ? "Saving…" : "Save wording"}</button>
-                <button type="button" disabled={pvBusy} onClick={previewWording}
-                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: pvBusy ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
+                {/* Not while a picture uploads: its address only reaches the boxes when the upload
+                    answers, so a save in between would say "Saved." without the photo. */}
+                <button type="button" disabled={tplBusy || !!imgBusy} onClick={saveWording}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: (tplBusy || imgBusy) ? 0.6 : 1 }}>{tplBusy ? "Saving…" : imgBusy ? "Uploading picture…" : "Save wording"}</button>
+                <button type="button" disabled={pvBusy || !!imgBusy} onClick={previewWording}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: (pvBusy || imgBusy) ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
                 {tplMsg && tplMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{tplMsg.ok}</span>}
                 {tplMsg && tplMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{tplMsg.err}</span>}
               </div>
@@ -1632,21 +1795,21 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                       <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 6, wordBreak: "break-word" }}>
                         <span style={{ color: "#64748B", fontWeight: 700 }}>Subject:</span> <b data-ss-preview-subject>{pv.subject}</b>
                       </div>
-                      {pv.photo === "none" && (
+                      {pv.photo === "none" && !ownHero && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
-                          No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Structures.
+                          No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Sheds.
                         </div>
                       )}
                       {/* "not_own": the photos ARE there and ticked, but were copied from another
                           account's catalog, so they live in that account's folder and no email (or
                           estimate) may show them. The "none" sentence would send them to a screen
                           where every tick is already on. */}
-                      {pv.photo === "not_own" && (
+                      {pv.photo === "not_own" && !ownHero && (
                         <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
-                          No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Structures.
+                          No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Sheds.
                         </div>
                       )}
-                      <iframe title={"Preview of your " + tplKind + " email"} sandbox="" srcDoc={pv.html}
+                      <iframe title={"Preview of your " + (tplKind === "invoice" ? "invoice" : "estimate") + " email"} sandbox="" srcDoc={pv.html}
                         style={{ display: "block", width: "100%", height: 560, border: "1px solid #E2E8F0", borderRadius: 8, background: "#F1F5F9" }} />
                       <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
                         A made-up customer and number, with your own business details. Nothing is sent. Save to use these words.
@@ -1885,7 +2048,9 @@ function CommissionStructure({ clientId }) {
 // day someone adds an area, and a permission screen that disagrees with the server is worse
 // than no screen at all, because people believe what it shows them.
 
-const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
+// own_view (contacts, migration 286) reads like own and view. Rank says nothing about writes; canGrant
+// asks that separately, the way mayGrant does on the server.
+const LEVEL_RANK = { none: 0, own_view: 1, own: 1, view: 1, edit: 2 };
 
 // Commissions speaks a different language from the rest: its three settings are about WHOSE
 // payouts you see, not how much you can change. "Everyone's" is the honest word for the top
@@ -1896,10 +2061,12 @@ const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
 // this line landed.
 function ssLevelLabel(areaKey, lv) {
   if (areaKey === "commissions") return ({ none: "No access", own: "Own only", edit: "Everyone's" })[lv] || lv;
-  // Contacts reads all four: 'own' narrows which CUSTOMERS a person sees, and unlike
-  // commissions it sits alongside a real 'view' rather than replacing it — dropping 'view'
-  // would have silently demoted everyone already stored on it.
-  if (areaKey === "contacts") return ({ none: "No access", own: "Own only", view: "View", edit: "Edit" })[lv] || lv;
+  // Contacts reads all five, as two questions in one row: WHOSE customers (Own = the ones they are
+  // assigned to or follow, All = everyone's) and WHAT they may do (View or Edit). 'own_view' arrived
+  // 2026-10-06 (Carolyn: "a per-user setting the builder controls: edit or view only"); 'own'
+  // writes since 09-07 and is "Own · Edit" — the Dealer preset, unchanged. 'view' stays beside them
+  // rather than being replaced — dropping it would have silently demoted everyone stored on it.
+  if (areaKey === "contacts") return ({ none: "No access", own_view: "Own · View", own: "Own · Edit", view: "All · View", edit: "All · Edit" })[lv] || lv;
   // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
   // edited. Two levels, so this row renders two buttons rather than three.
   if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
@@ -2011,10 +2178,12 @@ function ssAccessSummary(m, meta) {
   }
   const names = (level) => areas.filter((a) => lvl(a.key) === level).map((a) => a.label);
   const parts = [];
-  const e = names("edit"), v = names("view"), o = names("own");
+  const e = names("edit"), v = names("view"), o = names("own"), ov = names("own_view");
   if (e.length) parts.push(e.join(", ") + " Edit");
   if (v.length) parts.push(v.join(", ") + " View");
   if (o.length) parts.push(o.join(", ") + " own only");
+  // Own · View (contacts, migration 286): their own customers, and look only.
+  if (ov.length) parts.push(ov.join(", ") + " own, view only");
   const n = Object.keys(m.access || {}).length;
   const base = parts.length ? parts.join(" · ") : "No access yet";
   return n ? base + " (+" + n + " changed)" : base;
@@ -2039,12 +2208,22 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
   const pickTitle = (t) => { setTitle(t); setMap({ ...(presets[t] || {}) }); };
 
   // What may THIS granter hand out? Never above their own level. The server enforces the
-  // same rule (mayGrantMap); this only keeps the UI from offering a click that will 403.
+  // same rules (mayGrant in _shared/access.ts, through mayGrantMap); this only keeps the UI from
+  // offering a click that will 403. Rules 3 and 4 are mirrored too, because rank alone ties
+  // own_view, own and view:
+  //   3. someone limited to their own customers (own or own_view) passes on only an own level;
+  //   4. nobody passes on a WRITE they do not hold (edit, or own where the area says own writes),
+  //      so an Own · View or All · View holder can hand out Own · View but never Own · Edit.
   const canGrant = (area, level) => {
     if (ssSwitchLock(area, isOwner, title)) return false;
     if (level === "none") return true;                      // taking away is always allowed
     if (isOwner) return true;
-    return LEVEL_RANK[level] <= LEVEL_RANK[(myAccess || {})[area.key] || "none"];
+    const held = (myAccess || {})[area.key] || "none";
+    const ownScope = (lv) => lv === "own" || lv === "own_view";
+    if (ownScope(held) && !ownScope(level)) return false;
+    const writes = (lv) => lv === "edit" || (lv === "own" && !!area.ownWrites);
+    if (writes(level) && !writes(held)) return false;
+    return LEVEL_RANK[level] <= LEVEL_RANK[held];
   };
 
   const preset = presets[title] || {};
@@ -2059,8 +2238,14 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
     const lockLabel = ssSwitchLock(a, isOwner, title);
     const locked = !!lockLabel;
     const changed = !a.byTitleOnly && (preset[a.key] || "none") !== cur;
+    // WRAPS, and only when it has to. Contacts has five buttons since migration 286 (Own · View
+    // joined the row), about 400px, which overflowed the card on a 768px screen. The hint's flex
+    // basis is 0 (`flex: 1`), so the wrap decision counts only the label, the badges and the
+    // buttons: wherever the row fit before it lays out exactly as before (the hint still takes
+    // what is left), and where it does not, the buttons drop to a line of their own instead of
+    // running off the card.
     return (
-      <div key={a.key} style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 0", borderBottom: "1px solid #F1F5F9", opacity: locked ? 0.55 : 1 }}>
+      <div key={a.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: 14, rowGap: 8, padding: "10px 0", borderBottom: "1px solid #F1F5F9", opacity: locked ? 0.55 : 1 }}>
         <div style={{ width: 190, flexShrink: 0, fontSize: 13.5, fontWeight: 700, color: locked ? "#94A3B8" : "#1E293B" }}>{a.label}</div>
         <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "#94A3B8" }}>{a.hint}</div>
         {changed && <div style={{ fontSize: 11, fontWeight: 700, color: ACCENT, whiteSpace: "nowrap" }}>changed from title</div>}
@@ -2077,7 +2262,9 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
                     ? (title !== "admin"
                       ? a.label + " can only be held by an Admin — change their job title first."
                       : "Only an owner can grant " + a.label + ".")
-                    : "You don't have " + a.label + " yourself, so you can't give it to anyone.")}
+                    : ((myAccess || {})[a.key] || "none") !== "none"
+                      ? "You can't give more " + a.label + " access than you have yourself."
+                      : "You don't have " + a.label + " yourself, so you can't give it to anyone.")}
                 onClick={() => setMap((prev) => ({ ...prev, [a.key]: lv }))}
                 style={{
                   border: "none", borderLeft: a.levels[0] === lv ? "none" : "1px solid #E2E8F0",
@@ -3123,6 +3310,248 @@ function CommissionsReport({ clientId }) {
   );
 }
 
+// ── CALL RECORDING & AI TRANSCRIPTS — your own answer (2026-10-14) ─────────────────────────
+// Ahsan: "so people (Carolyn especially) can say yes or no on the web today, without waiting for
+// the app updates." The phone app (build 9) and the Chrome extension (0.1.4) ask each person
+// whether recordings of calls they're on may go to Cloudflare Workers AI for a transcript and the
+// transcript to Anthropic's Claude for a summary. This card asks the SAME question with the same
+// substance, and saves the SAME answer: one per account (phone_user_settings.ai_transcripts,
+// migration 307), which the phone-api Worker reads before it sends any call, and only when
+// everyone from the team on the call allowed it.
+//
+//   * The words follow phone-core's (structure-studio-phone packages/phone-core/src/aiTranscripts.ts:
+//     noticeSections, settingsStatusLines, choiceText, AI_WORDS), with "the phone app and the
+//     Chrome extension" where the apps name themselves. This card claims nothing about what
+//     Structure Studio's own screens show: it doesn't hide summaries, so it never says it does.
+//   * The full notice shows BEFORE the first answer (App Store guideline 5.1.2(i): say where the
+//     data goes first). After a yes the button is "Stop sending my calls"; after a no, "Review and
+//     allow" opens the notice again before Allow.
+//   * "Saved." only when the server's answer (what the database now holds) is the one asked for;
+//     anything else is an error and the card keeps showing the answer that really is saved.
+//   * View-as: the person signed in is CSM Synergy staff, so there are no buttons (the server
+//     refuses the save anyway), and no answer is read.
+// portal-settings ai_transcripts_get / ai_transcripts_save; the rules are _shared/aiConsent.ts.
+// tests/phone/aiTranscripts_test.ts lifts the helpers below out of this file and pins the version
+// and the words; tests/harness/myProfileAiConsent.mjs drives the card on the compiled portal.
+const SS_AI_NOTICE_VERSION = 1; // _shared/aiConsent.ts AI_NOTICE_VERSION = phone-core's; raise them together
+const SS_AI_PRIVACY_URL = "https://csmsynergy.com/my-synergy-phone/privacy";
+const SS_AI_WORDS = {
+  title: "Call recording & AI transcripts",
+  noticeTitle: "Transcripts and summaries",
+  allow: "Allow",
+  allowLabel: "Allow: send your calls for transcripts and summaries",
+  decline: "Don't allow",
+  declineLabel: "Don't allow: your calls aren't sent, and transcripts stay hidden",
+  stop: "Stop sending my calls",
+  stopLabel: "Stop sending your calls for transcripts and summaries, and hide them",
+  show: "Review and allow",
+  review: "Review the notice",
+  hide: "Hide the notice",
+  privacy: "Privacy policy",
+  saveFailed: "Your answer couldn't be saved. Check your connection and try again.",
+  notKept: "The server didn't keep your answer, so nothing has changed. Try again, or tell CSM Synergy.",
+  same: "The same answer counts in the My Synergy Phone app and the Chrome extension: change it in any of them and it changes everywhere.",
+  ownerLine: "You're the business owner, so you can also turn call transcripts off for everyone, under Settings › Phone.",
+  viewAs: "You're viewing another account. Each person answers this for themselves in My Profile, signed in as themselves, so there are no buttons here.",
+  noPhone: "You don't make or take calls with My Synergy Phone on this account right now, so none of your calls are sent either way. Your answer is kept for if you do.",
+};
+
+/**
+ * What happens to this business's calls now, in plain lines (phone-core settingsStatusLines, for the web).
+ * `callAnnounced` false (2026-10-21) is the owner's announcement switch turned off; a server that
+ * doesn't send it reads as announced, as every business was before.
+ */
+function ssAiStatusLines(d) {
+  const lines = [];
+  const announced = !(d && d.callAnnounced === false);
+  lines.push(d && d.callRecording
+    ? (announced
+      ? "Calls on your business line are recorded by Twilio, our calling provider, unless the business owner turns recording off. Callers hear an announcement first."
+      : "Calls on your business line are recorded by Twilio, our calling provider, unless the business owner turns recording off. The business owner has turned the announcement off, so callers aren't told.")
+    : (announced
+      ? "Calls on your business line aren't recorded right now. If the business owner turns recording on, Twilio, our calling provider, records them, and callers hear an announcement first."
+      : "Calls on your business line aren't recorded right now. If the business owner turns recording on, Twilio, our calling provider, records them without telling callers, because the owner has turned the announcement off."));
+  lines.push(d && d.businessTranscribes
+    ? "Recorded calls are transcribed by Cloudflare Workers AI and summarized by Anthropic's Claude, but only when everyone from your team on the call allowed it."
+    : "Recorded calls aren't transcribed or summarized right now. When your business has call transcripts on, Cloudflare Workers AI transcribes them and Anthropic's Claude summarizes them, only when everyone from your team on the call allowed it.");
+  lines.push("Voicemails are turned into text by Twilio.");
+  return lines;
+}
+
+/** The line on this person's own answer (phone-core choiceText, naming both apps). */
+function ssAiChoiceText(answer) {
+  if (answer === "allowed") return "You allowed it. Calls you're on are sent for transcripts and summaries, and the phone app and the Chrome extension show them.";
+  if (answer === "declined") return "You said no. Calls you're on aren't sent, and transcripts and summaries are hidden in the phone app and the Chrome extension.";
+  return "You haven't chosen yet. Until you allow it, calls you're on aren't sent, and transcripts and summaries stay hidden.";
+}
+
+/** The notice (phone-core noticeSections, naming both apps): a heading and its sentences, each part. */
+function ssAiNoticeSections(businessTranscribes) {
+  const calls =
+    "a minute or two after a recorded call you were on ends, our phone service sends the recording, with what you and the " +
+    "customer said, to Cloudflare Workers AI, which writes a transcript. Then it sends the transcript to Anthropic, whose " +
+    "Claude AI writes a short summary with any action items.";
+  return [
+    {
+      heading: "What's sent, and to whom",
+      lines: [
+        "Recordings: Twilio, our calling provider, makes and keeps every call recording and voicemail.",
+        businessTranscribes === false
+          ? "Transcripts and summaries, only if you allow them: when your business has call transcripts on, " + calls
+          : "Transcripts and summaries, only if you allow them: " + calls,
+        "Under their terms, Cloudflare and Anthropic don't train AI models on what we send them.",
+        "Voicemails: Twilio also turns each voicemail into text.",
+      ],
+    },
+    { heading: "Why", lines: ["So your team can read what was said without playing the recording, and find a voicemail by searching."] },
+    { heading: "Who sees them", lines: ["People at your business who can see a call can read its transcript and summary."] },
+    {
+      heading: "How long they're kept",
+      lines: [
+        "A call's transcript is deleted with its recording, after the time your business keeps recordings: one year unless your " +
+          "owner chose another. A voicemail's transcript is deleted with the voicemail after 12 months. A call's short summary stays " +
+          "with the call history.",
+      ],
+    },
+    {
+      heading: "Your choice",
+      lines: [
+        "Allow: recordings of calls you're on are sent for transcripts and summaries, and the phone app and the Chrome extension show them.",
+        "Don't allow: calls you're on aren't sent to Cloudflare or Anthropic, and the phone app and the Chrome extension hide transcripts " +
+          "and summaries, voicemail text included. A call is only sent if everyone from your team who was on it allowed it.",
+        "Your answer is saved with your account, so it's the same here, in the My Synergy Phone app and in the Chrome extension. You can " +
+          "change it here at any time; it counts for calls from then on. Calls, recordings and voicemails work the same either way.",
+      ],
+    },
+  ];
+}
+window.__ssAiConsent = { SS_AI_NOTICE_VERSION, ssAiStatusLines, ssAiChoiceText, ssAiNoticeSections };
+
+function AiTranscriptsCard({ viewing = false, onOpenPhone = null }) {
+  // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN (React #310).
+  const [data, setData] = useState(null);      // ai_transcripts_get's answer
+  const [loadErr, setLoadErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);        // { ok } | { err } after a save
+  const [open, setOpen] = useState(false);     // the notice opened by "Review…" (it is always open before a first answer)
+  const load = useCallback(async () => {
+    setLoadErr(null);
+    try {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action: "ai_transcripts_get" } });
+      if (error) throw new Error(await fnError(error));
+      if (d && d.error && d.available !== false) throw new Error(d.error);
+      setData(d || {});
+    } catch (e) { setLoadErr(e.message || "Couldn't load your answer."); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // Save, then believe only the server: the answer it sends back is what the database now holds.
+  const save = async (answer) => {
+    if (busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "ai_transcripts_save", answer, version: SS_AI_NOTICE_VERSION },
+      });
+      if (error) {
+        // A sentence the server wrote is shown as it is; a dropped connection (or an error page
+        // with no sentence in it) gets ours, never supabase-js's "non-2xx status code".
+        const m = await fnError(error);
+        throw new Error(!m || /non-2xx|failed to (send|fetch)|networkerror|load failed/i.test(m) ? SS_AI_WORDS.saveFailed : m);
+      }
+      if (d && d.error) throw new Error(d.error);
+      if (!d || d.answer !== answer) throw new Error(SS_AI_WORDS.notKept);
+      setData((x) => ({ ...(x || {}), answer: d.answer, version: d.version, at: d.at || null }));
+      setOpen(false);
+      setMsg({ ok: "Saved." });
+    } catch (e) {
+      setMsg({ err: e.message || SS_AI_WORDS.saveFailed });
+    }
+    setBusy(false);
+  };
+
+  const card = (body) => (
+    <div style={S.card} data-ss-ai-card={data ? (data.available === false ? "unavailable" : (data.answer || "none")) : (loadErr ? "error" : "loading")}>
+      <div style={S.h2}>{SS_AI_WORDS.title}</div>
+      {body}
+    </div>
+  );
+  if (!data && loadErr) {
+    return card(<>
+      <div style={S.err}>{loadErr}</div>
+      <button type="button" onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Try again</button>
+    </>);
+  }
+  if (!data) return card(<p style={{ fontSize: 13, color: "#94A3B8", margin: 0 }}>Loading your answer…</p>);
+  if (data.available === false) {
+    return card(<p style={{ fontSize: 13, color: "#64748B", margin: 0, lineHeight: 1.5 }}>{data.error || "Choosing AI transcripts isn't set up on this server yet."}</p>);
+  }
+
+  const answer = data.answer === "allowed" || data.answer === "declined" ? data.answer : null;
+  const viewAs = viewing || data.viewAs === true;
+  // Open before the first answer (the notice comes before the question), and whenever "Review…" opened it.
+  const showNotice = viewAs ? open : (answer === null || open);
+  const when = answer && data.at ? new Date(data.at) : null;
+  const whenText = when && !isNaN(when) ? when.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : null;
+  const line = { fontSize: 13, color: "#475569", margin: "0 0 8px", lineHeight: 1.55 };
+  const choiceBtn = (value, label, aria, primary) => (
+    <button type="button" key={value} data-ss-ai-choice={value} aria-label={aria} onClick={() => save(value)}
+      style={{ ...S.btn(primary ? ACCENT : "#F1F5F9", primary ? "#FFF" : "#334155"), ...(primary ? {} : { border: "1px solid #E2E8F0" }), opacity: busy ? 0.6 : 1 }}>
+      {label}
+    </button>
+  );
+  const linkBtn = { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" };
+
+  return card(<>
+    <div data-ss-ai-status>
+      {ssAiStatusLines(data).map((t, i) => <p key={i} style={line}>{t}</p>)}
+    </div>
+    {data.canChangeRecording && (
+      <p data-ss-ai-owner style={{ ...line, color: "#334155" }}>
+        {onOpenPhone
+          ? <>You&rsquo;re the business owner, so you can also turn call transcripts off for everyone, under{" "}
+              <button type="button" onClick={onOpenPhone} style={linkBtn}>Settings › Phone</button>.</>
+          : SS_AI_WORDS.ownerLine}
+      </p>
+    )}
+    {viewAs
+      ? <div data-ss-ai-viewas style={{ fontSize: 12.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px", margin: "4px 0 10px", lineHeight: 1.55 }}>{SS_AI_WORDS.viewAs}</div>
+      : <div data-ss-ai-answer style={{ fontSize: 13, color: "#1E293B", fontWeight: 600, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px", margin: "4px 0 10px", lineHeight: 1.55 }}>
+          {ssAiChoiceText(answer)}{whenText ? ` (since ${whenText})` : ""}
+        </div>}
+    {!viewAs && data.phoneAccess === false && <p data-ss-ai-nophone style={line}>{SS_AI_WORDS.noPhone}</p>}
+    {showNotice && (
+      <div data-ss-ai-notice style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", margin: "4px 0 12px", background: "#FFF" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>{SS_AI_WORDS.noticeTitle}</div>
+        {ssAiNoticeSections(data.businessTranscribes === true).map((s) => (
+          <div key={s.heading} style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#334155", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 3 }}>{s.heading}</div>
+            {s.lines.map((t, i) => <p key={i} style={{ fontSize: 12.5, color: "#475569", margin: "0 0 5px", lineHeight: 1.55 }}>{t}</p>)}
+          </div>
+        ))}
+      </div>
+    )}
+    {!viewAs && (
+      <div data-ss-ai-buttons style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {showNotice
+          ? [choiceBtn("allowed", SS_AI_WORDS.allow, SS_AI_WORDS.allowLabel, true), choiceBtn("declined", SS_AI_WORDS.decline, SS_AI_WORDS.declineLabel, false)]
+          : answer === "allowed"
+          ? choiceBtn("declined", SS_AI_WORDS.stop, SS_AI_WORDS.stopLabel, false)
+          : <button type="button" data-ss-ai-review onClick={() => { setOpen(true); setMsg(null); }} style={S.btn(ACCENT, "#FFF")}>{SS_AI_WORDS.show}</button>}
+        {busy && <span style={{ fontSize: 12, color: "#64748B" }}>Saving…</span>}
+      </div>
+    )}
+    {msg && <div data-ss-ai-msg={msg.err ? "err" : "ok"} style={{ marginTop: 10, fontSize: 12.5, color: msg.err ? "#DC2626" : "#15803D", fontWeight: 600 }}>{msg.err || msg.ok}</div>}
+    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 12, fontSize: 12.5 }}>
+      {(answer !== null || viewAs) && (
+        <button type="button" data-ss-ai-toggle onClick={() => setOpen((o) => !o)} style={linkBtn}>{open ? SS_AI_WORDS.hide : SS_AI_WORDS.review}</button>
+      )}
+      <a href={SS_AI_PRIVACY_URL} target="_blank" rel="noopener noreferrer" data-ss-ai-privacy style={{ color: ACCENT, fontWeight: 700 }}>{SS_AI_WORDS.privacy}</a>
+    </div>
+    <p data-ss-ai-same style={{ fontSize: 12, color: "#64748B", margin: "10px 0 0", lineHeight: 1.5 }}>{SS_AI_WORDS.same}</p>
+  </>);
+}
+
 // ── MY VIEW — the settings that configure the PERSON, not the business ───────────
 // Carolyn, 2026-08-28 @42:00: "I'm trying to think which I want to have the default. I want
 // them to be able to decide if they want the default. I don't want it to always be list.
@@ -3143,19 +3572,238 @@ function CommissionsReport({ clientId }) {
 //
 // THE REPLY-TO CARD BELOW has worked since 2026-09-06, when save_prefs learned to keep
 // `replyToEmail`. Since 2026-10-05 it covers every email a customer gets from us, not only the
-// ones typed in a record: a quote, an invoice or a change order carries the address of whoever
+// ones typed in a record: an estimate, an invoice or a change order carries the address of whoever
 // sent it, and a confirmation the customer set off themselves carries their assigned rep's
 // (supabase/functions/_shared/repReplyTo.ts has the rule, and why an operator is never named).
-// If save_prefs ever stops keeping the key, the card still says so on screen rather than "Saved."
+// Since 2026-10-07 the copy is OPT-IN: `replyCopy` (only `true` is kept by save_prefs) chooses
+// between "StructureStudio only", the default, and "StructureStudio and my inbox". If save_prefs
+// ever stops keeping either key, the card still says so on screen rather than "Saved."
 //
 // The address goes into a mail header, so this box and the server check it with the SAME rule:
 // REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
 // _shared/repReplyToSenders.test.ts fails if the two differ. Change both together.
 const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
-function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null }) {
-  const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
+// ─── My connections (My Profile) ───────────────────────────────────────────────────────────
+// ONE segment with tabs, in MY PROFILE, not Settings → Meetings (Carolyn 2026-10-23: "I want
+// calendars and zoom and hangouts and teams all in one segment with tabs along the top. and I
+// want this moved to my profile"). It belongs here because every one of these is PER PERSON:
+// a meeting is created in the host's own account, and a calendar that blocks a slot is their
+// own calendar. Nobody connects an account on a colleague's behalf — a manager may only
+// disconnect one, from the Team screen, after someone leaves.
+//
+// This is the exception the "settings live under Settings" rule already makes for My Profile:
+// the page is explicitly "your settings, not the business's". The business half of Meetings —
+// the booking link, the hours, the meeting types, the booking pages — stays where it was.
+//
+// It loads `overview` itself rather than taking props, because Settings → Meetings is now a
+// different page and may not be mounted at all.
+function MyConnectionsCard({ clientId, viewing = false }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [tab, setTab] = useState("calendars");
+
+  const call = useCallback(async (action, body) => {
+    const { data: d, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !d || d.error) throw new Error((d && d.error) || (error ? await fnError(error) : "That didn't work."));
+    return d;
+  }, []);
+
+  const load = useCallback(async () => {
+    try { setData(await call("overview", {})); } catch (e) { setErr(e.message); }
+  }, [call]);
+  useEffect(() => { setData(null); setErr(null); load(); }, [clientId, load]);
+
+  // Back from Zoom (meetings-oauth-callback lands on ?video=connected or ?video=0&reason=…).
+  // Read once, then take the parameters off the address so a reload does not repeat it. Opening
+  // on the Zoom tab is the point: the person pressed a button there and is coming back to it.
+  const [landing, setLanding] = useState(null);
+  useEffect(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      if (!p.has("video")) return;
+      const reasons = {
+        denied: "You cancelled at Zoom, so nothing was connected.",
+        state: "That connection attempt expired or didn't match. Press Connect Zoom again.",
+        exchange: "Zoom didn't accept the connection. Try again.",
+        save: "The connection couldn't be saved. Try again, and tell us if it keeps happening.",
+        not_set_up: "Zoom isn't switched on for Structure Studio yet.",
+      };
+      setLanding(p.get("video") === "connected"
+        ? { ok: "Zoom connected. Video meeting types set to “a new Zoom meeting for every booking” now make one for you." }
+        : { err: reasons[p.get("reason")] || "The Zoom connection didn't complete. Try again." });
+      setTab("zoom");
+      p.delete("video"); p.delete("reason"); p.delete("provider");
+      const qs = p.toString();
+      window.history.replaceState(window.history.state, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+    } catch (_e) { /* an address we cannot read is one we leave alone */ }
+  }, []);
+
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+  const row = (title, state, right, dot) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 11, border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", flexWrap: "wrap" }}>
+      <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: 999, flex: "0 0 auto", background: dot }} />
+      <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+        <div style={{ fontWeight: 700, fontSize: 13 }}>{title}</div>
+        <div style={{ fontSize: 11.5, color: "#64748B" }}>{state}</div>
+      </div>
+      {right}
+    </div>
+  );
+  // What a connector that needs setup on our side says. NOT a dead Connect button: a button that
+  // opens nothing is the greyed-WhatsApp-tab mistake, "a promise nobody intended to keep, sitting
+  // on a screen Carolyn shows at a trade show".
+  const comingSoon = (name, what) => (<>
+    {row(name, "Not available yet", null, "#CBD5E1")}
+    <div style={{ ...sub, marginTop: 8 }}>
+      {what} It needs setup on our side before anyone can connect, so there's nothing to press
+      here yet. Your meeting types can still send a link you paste in yourself, and Zoom is
+      ready today.
+    </div>
+  </>);
+
+  const TABS = [
+    ["calendars", "Calendars", "Google Calendar or Outlook — so your own calendar blocks a slot too"],
+    ["zoom", "Zoom", "Make a fresh Zoom meeting for every booking, in your own account"],
+    ["meet", "Google Meet", "A Google Meet link for every booking"],
+    ["teams", "Teams", "A Microsoft Teams link for every booking"],
+  ];
+
+  if (err && !data) return (<div style={S.card}><CardHead title="My connections" /><div style={S.err}>{err}</div></div>);
+
+  return (
+    <div style={S.card}>
+      <CardHead title="My connections" />
+      <p style={{ ...sub, margin: "0 0 12px" }}>
+        Your own accounts, not the business's — everyone on the team connects their own. Your
+        booking link, hours and the meeting types you take are in My meetings, below.
+      </p>
+      <SubTabs tabs={TABS} sub={tab} onSub={setTab} />
+      {!data ? <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading your connections…</div> : (() => {
+        const conns = data.connections || [];
+        const host = data.myHost || null;
+        const zoomConn = conns.find((c) => c.provider === "zoom") || null;
+        const ready = !!(data.videoReady && data.videoReady.zoom);
+        const connected = zoomConn && zoomConn.status === "connected";
+        const connectZoom = () => run(async () => {
+          const d = await call("video_connect", { provider: "zoom", hostId: host.id, returnTo: window.location.hostname });
+          if (d && d.url) window.location.assign(d.url);
+        });
+        const disconnectZoom = () => run(async () => {
+          if (!window.confirm("Disconnect your Zoom account?\n\nMeetings already booked keep their links. New bookings use the type's room link until you connect again.")) return;
+          await call("video_disconnect", { provider: "zoom", hostId: host.id });
+          await load();
+          setMsg({ ok: "Zoom disconnected." });
+        });
+
+        if (tab === "zoom") return (<>
+          {landing && landing.ok && (
+            <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "8px 12px", color: "#065F46", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{landing.ok}</div>
+          )}
+          {landing && landing.err && <div style={{ ...S.err, marginBottom: 10 }}>{landing.err}</div>}
+          {row("Zoom",
+            connected
+              ? `Connected${zoomConn.accountEmail ? ` as ${zoomConn.accountEmail}` : zoomConn.accountName ? ` as ${zoomConn.accountName}` : ""}`
+              : zoomConn
+                ? (zoomConn.lastError === "removed_at_zoom" ? "Removed from your Zoom account — connect again to keep making links" : "Stopped working — connect again to keep making links")
+                : !ready ? "Not available yet — Structure Studio is still setting up Zoom" : "Not connected",
+            (<>
+              {ready && !viewing && host && host.id && (
+                <button style={connected ? { ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" } : S.btn(ACCENT, "#FFF")}
+                  disabled={busy} onClick={connected ? disconnectZoom : connectZoom}>
+                  {connected ? "Disconnect" : zoomConn ? "Reconnect Zoom" : "Connect Zoom"}
+                </button>
+              )}
+              {zoomConn && !connected && !viewing && (
+                <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" }} disabled={busy} onClick={disconnectZoom}>Remove</button>
+              )}
+            </>),
+            connected ? "#10B981" : zoomConn ? "#F59E0B" : "#CBD5E1")}
+          <div style={{ ...sub, marginTop: 8 }}>
+            {!(host && host.id)
+              ? "Set up your booking link first, in My meetings below — Zoom connects to your booking calendar."
+              : viewing
+                ? "Each person connects their own Zoom account while signed in as themselves."
+                : "Connect once, and any video meeting type set to “a new Zoom meeting for every booking” makes a fresh meeting in your Zoom for each booking — and moves or deletes it when the booking changes. Your customers never need a Zoom account."}
+          </div>
+          {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
+        </>);
+
+        if (tab === "meet") return comingSoon("Google Meet", "Meeting links made in your own Google account.");
+        if (tab === "teams") return comingSoon("Teams", "Meeting links made in your own Microsoft 365 account.");
+
+        // ── Calendars ───────────────────────────────────────────────────────────────────
+        // `connections` is already read here, so the day the connectors land this tab shows
+        // real status without being rewritten.
+        const cals = conns.filter((c) => c.provider !== "zoom");
+        return (<>
+          {cals.length > 0
+            ? cals.map((c) => (
+              <div key={c.provider} style={{ marginBottom: 8 }}>
+                {row(c.provider === "google" ? "Google Calendar" : "Outlook / Microsoft 365",
+                  `${c.status === "connected" ? "Connected" : c.status === "needs_reauth" ? "Needs reconnecting" : "Disconnected"}${c.lastSyncedAt ? ` · last checked ${new Date(c.lastSyncedAt).toLocaleString()}` : ""}`,
+                  null,
+                  c.status === "connected" ? "#10B981" : c.status === "needs_reauth" ? "#F59E0B" : "#CBD5E1")}
+              </div>
+            ))
+            : (
+              <div style={sub}>
+                <p style={{ margin: "0 0 8px" }}>
+                  <strong style={{ color: "#0F172A" }}>Not connected to anything yet, and that's fine.</strong> Your
+                  hours and the meetings already booked in Structure Studio decide what customers
+                  are offered, so your link works today.
+                </p>
+                <p style={{ margin: 0 }}>
+                  Linking Google Calendar or Outlook — so anything already on your own calendar blocks a
+                  slot too, and new meetings appear there — is still being built. It needs setup on our
+                  side before anyone can connect, so there's nothing to press here yet.
+                </p>
+              </div>
+            )}
+        </>);
+      })()}
+    </div>
+  );
+}
+
+function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false, clientId = null, hubReach = null, aiCard = false, viewing = false, onOpenPhone = null }) {
+  // WHICH TAB CONTACTS OPENS ON (Carolyn 2026-10-12, C25): "we need them to set the default of
+  // what they want the default to be." Contacts, the Design list, or any one pipeline. `picked` is
+  // what this person chose (ssSavedHubView: contactsView, or the old Pipeline tab's choice), or
+  // null when they never have. Someone who never chose gets the hub's default: the first pipeline
+  // with the built-in CRM, the Design list without it. What applies is worked out by the hub's own
+  // rule (ssHubResolve), so this card and the tab can never disagree.
+  //
+  // Only the views this person may open are offered (hubReach, the hub's ssHubCan answers): a Crew
+  // Leader with designs and no contacts is offered the Design list alone.
+  //
+  // crmPending: on your own portal the CRM answer (portal-billing) lands a moment after this
+  // card can, and until it does crmUnlocked's false means "not known yet". The card then lights
+  // only the person's own pick, shows no padlock and refuses nothing; a press saves the pick as
+  // usual (save_prefs keeps it whatever the plan, and without the CRM the line below says the
+  // Design list applies once the answer is in).
+  const reach = hubReach || { people: true, designs: true };
+  const [picked, setVal] = useState(ssSavedHubView({ prefs }));
+  const pipesOn = !!crmUnlocked && !!reach.people;
+  const { pipelines } = useSsPipelineList(clientId, pipesOn && !!clientId);
+  const applied = ssHubResolve({ sub: null, saved: picked, reach, crm: !!crmUnlocked, crmKnown: !crmPending, pipelines: pipesOn ? pipelines : null });
+  const appliedId = applied.view === "pipe" ? "p-" + applied.pipeId
+    : (applied.view === "people" || applied.view === "designs" || applied.view === "locked") ? applied.canon : null;
+  const val = crmPending ? picked : appliedId;
+  // Names as the tab row shows them.
+  const pipeName = (v) => { const id = ssHubPipeId(v); const p = id && (pipelines || []).find((x) => x.id === id); return p ? p.name : null; };
+  const nameOf = (v) => (v === SS_HUB_PEOPLE ? "Contacts" : v === SS_HUB_DESIGNS ? "the Design list"
+    : v === SS_HUB_PIPELINE ? "your pipeline board" : (pipeName(v) || "a pipeline"));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  // A refusal said while the plan read one way must not outlive it: the CRM answer arriving (or
+  // the plan changing) clears whatever message the card was showing.
+  useEffect(() => { setMsg(null); }, [crmUnlocked, crmPending]);
   // ── The reply-to card's own state ───────────────────────────────────────────────
   // Seeded from prefs but NOT re-synced to it, deliberately: a save that the server refuses
   // to persist (see commit) must leave what the person typed on screen next to the message
@@ -3165,6 +3813,13 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   const [addrBusy, setAddrBusy] = useState(false);
   const [addrMsg, setAddrMsg] = useState(null);
   const savedAddr = (prefs && prefs.replyToEmail) || "";
+  // Reply copies, OFF unless the saved prefs say exactly true (the server's rule). copyKept is what
+  // the server last kept from ANY card's save (commit sets it), so a failed save puts the choice
+  // back to something true.
+  const [copyOn, setCopyOn] = useState(!!(prefs && prefs.replyCopy === true));
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyMsg, setCopyMsg] = useState(null);
+  const copyKept = useRef(!!(prefs && prefs.replyCopy === true));
   // ── The email signature card's own state ────────────────────────────────────────
   // Seeded from prefs and not re-synced, for the same reason as the reply-to address above.
   const [sig, setSig] = useState(((prefs && prefs.emailSignature) || ""));
@@ -3204,15 +3859,39 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
     const body = { action: "save_prefs", prefs: prefsWant.current };
     const { data, error } = await sb.functions.invoke("portal-settings", { body });
     if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    // What the server now holds for reply copies, from EVERY card's save: each one carries
+    // prefsWant.replyCopy, so a signature save can change it too. A failed reply-copy save goes
+    // back to this, never to an older answer that another card's save has since overwritten.
+    copyKept.current = !!(data && data.prefs && data.prefs.replyCopy === true);
     // Hand the saved map back so the shell stops serving the stale one -- otherwise the
     // setting only takes effect on the next full reload, which reads as not having saved.
     if (onSaved) onSaved(data && data.prefs);
     return (data && data.prefs) || null;
   };
 
+  // contactsView is the choice. designsView rides along for the build of the portal that still has
+  // a separate Pipeline tab (production until the next promotion, same prefs): the Design list is
+  // its "list" and a pipeline its "pipeline", and Contacts clears it there (null drops the key).
+  //
+  // The whitelist check again (see saveAddr): "Saved." only when the prefs the server answers with
+  // open the Contacts tab on the pick, read the way the shell reads them (ssSavedHubView). A build
+  // that drops contactsView still answers ok; then the pick goes back to what the server holds, so
+  // the line above says where Contacts really opens, and the message says the choice didn't stick.
+  const hubKey = (v) => (ssHubPipeId(v) ? "p-" + ssHubPipeId(v) : (v || null));
   const save = async (next) => {
     setVal(next); setBusy(true); setMsg(null);
-    try { await commit({ designsView: next }); setMsg({ ok: "Saved." }); }
+    const mirror = next === SS_HUB_DESIGNS ? "list" : (ssHubPipeId(next) ? "pipeline" : null);
+    try {
+      const back = await commit({ contactsView: next, designsView: mirror });
+      const kept = ssSavedHubView({ prefs: back });
+      if (hubKey(kept) !== hubKey(next)) {
+        prefsWant.current = { ...prefsWant.current, contactsView: (back && back.contactsView) || null, designsView: (back && back.designsView) || null };
+        setVal(kept);
+        setMsg({ err: "Saved, but this server build didn't keep that choice, so the Contacts tab still opens as the line above says. Tell CSM Synergy." });
+      } else {
+        setMsg({ ok: "Saved." });
+      }
+    }
     catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
@@ -3244,6 +3923,37 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
       }
     } catch (e) { setAddrMsg({ err: e.message }); }
     setAddrBusy(false);
+  };
+
+  // Reply copies on or off. OFF is sent as false, which save_prefs drops: no key is OFF. The
+  // whitelist check again: a server build that doesn't know the key answers ok and keeps nothing,
+  // so asking for ON and getting no `replyCopy: true` back is said plainly, and the choice goes
+  // back to what the server holds (the card-order rule: never show a state no email will follow).
+  // ⚠️ THE MESSAGE SAYS NOTHING CHANGED, NOT WHERE REPLIES GO. The only build that drops the key
+  // is one from before 2026-10-07, and that build's emailSend.ts puts the person's address on
+  // every email: replies are still reaching their inbox. "StructureStudio only for now" would be
+  // the opposite of the truth in the one case this message exists for.
+  // A press while a save is out is ignored, with "Saving…" on screen; the buttons are never
+  // `disabled`, which would also throw a keyboard user's focus off them.
+  const saveCopy = async (next) => {
+    if (copyBusy || next === copyOn) return;
+    setCopyOn(next); setCopyBusy(true); setCopyMsg(null);
+    try {
+      const back = await commit({ replyCopy: next });
+      const kept = !!(back && back.replyCopy === true);
+      if (next && !kept) {
+        prefsWant.current = { ...prefsWant.current, replyCopy: false };
+        setCopyOn(false);
+        setCopyMsg({ err: "Saved, but this server build didn't keep it, so nothing has changed yet. Tell CSM Synergy." });
+      } else {
+        setCopyMsg({ ok: "Saved." });
+      }
+    } catch (e) {
+      prefsWant.current = { ...prefsWant.current, replyCopy: copyKept.current };
+      setCopyOn(copyKept.current);
+      setCopyMsg({ err: e.message });
+    }
+    setCopyBusy(false);
   };
 
   // The server trims it and keeps at most 1,000 characters (_shared/emailSignature.ts); the box
@@ -3330,22 +4040,69 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           top of my profile"). Who you are, then how the portal behaves for you — and it is the
           card the name-and-phone nudge sends people to, so it should be the one they land on. */}
       <YourDetailsCard profile={profile} email={email} onSaved={onProfileSaved} />
+      {/* Your own accounts — Zoom today, calendars and the other video providers as they land.
+          Second on the page on purpose: it is the one card here that a person comes BACK to
+          (the Zoom callback lands on this page), and it sits beside Your details because both
+          are "who you are", ahead of the how-the-portal-behaves cards. */}
+      <MyConnectionsCard clientId={clientId} viewing={viewing} />
+      {/* MY MEETINGS (Carolyn 2026-10-26): "I want all the company set meetings to show in MY
+          PROFILE so that users can choose the calendars they want to use." Each person's own
+          booking link, hours, days off and the company meeting types they take — the same
+          component Customer Hub → Meetings renders in "business" mode. */}
+      <div style={{ ...S.h2, margin: "18px 0 8px" }}>My meetings</div>
+      <MeetingsSettings clientId={clientId} mode="mine" viewingLabel={viewing ? "this account" : null} />
       <div style={S.card}>
-        <div style={S.h2}>How the Pipeline tab opens</div>
+        <div style={S.h2}>How the Contacts tab opens</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          Your own default, not the business's — everyone on your team picks their own. Opening a
-          direct link to a list or a board still shows whichever the link names.
+          Pick the tab you land on when you open Contacts. Your own default, not the business's —
+          everyone on your team picks their own. A link to one tab still opens that tab.
         </p>
-        <div style={{ display: "flex", gap: 8 }}>
-          {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => (
-            <button key={k} disabled={busy} onClick={() => save(k)}
-              style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 }}>
-              {label}
-            </button>
-          ))}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[
+            ...(reach.people ? [[SS_HUB_PEOPLE, "Contacts", true]] : []),
+            ...(reach.designs ? [[SS_HUB_DESIGNS, "Design list", false]] : []),
+            ...(pipesOn ? (pipelines || []).map((p) => ["p-" + p.id, p.name, true]) : []),
+          ].map(([k, label, needsCrm]) => {
+            // Never a silent disabled button: without the CRM, Contacts keeps its padlock and the
+            // tab row's own title, and a click says why.
+            const locked = needsCrm && !crmUnlocked && !crmPending;
+            return (
+              <button key={k} disabled={busy} aria-pressed={val === k} data-ss-view-pick={k}
+                title={locked ? "Part of the built-in CRM" : undefined}
+                onClick={() => (locked
+                  ? setMsg({ err: "Contacts is part of the built-in CRM, so the Contacts tab opens on the Design list." })
+                  : save(k))}
+                style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : (locked ? "#94A3B8" : "#334155")), opacity: busy ? 0.6 : 1 }}>
+                {locked ? `🔒 ${label}` : label}
+              </button>
+            );
+          })}
+        </div>
+        <div data-ss-view-default style={{ marginTop: 10, fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+          {crmPending
+            ? (picked ? `You picked ${nameOf(picked)}. Checking your plan…` : "Checking your plan…")
+            : applied.view === "loading"
+            ? "Loading your pipelines…"
+            : !picked
+            ? (applied.view === "pipe"
+              ? `You haven't picked one, so the Contacts tab opens on ${nameOf(appliedId)}, your first pipeline.`
+              : applied.view === "designs"
+                ? `You haven't picked one, so the Contacts tab opens on the Design list${pipesOn ? "." : ", the default without the built-in CRM."}`
+                : `You haven't picked one, so the Contacts tab opens on ${nameOf(appliedId)}.`)
+            : (appliedId === picked || (picked === SS_HUB_PIPELINE && applied.view === "pipe"))
+            ? `The Contacts tab opens on ${nameOf(appliedId)} (your choice).`
+            : `You picked ${nameOf(picked)}, but ${(picked === SS_HUB_PEOPLE || ssHubPipeId(picked) || picked === SS_HUB_PIPELINE) && !crmUnlocked
+                ? "that is part of the built-in CRM"
+                : "that isn't one of your tabs any more"}, so the Contacts tab opens on ${appliedId ? nameOf(appliedId) : "the first tab you have"}.`}
         </div>
         {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
       </div>
+
+      {/* ── CALL RECORDING & AI TRANSCRIPTS (2026-10-14) — your own answer, the one the phone
+          app and the extension ask for (AiTranscriptsCard above). Wherever the Phone tab is
+          offered (ssPhoneOffered: calling on for this business, a beta host, or view-as), so a
+          builder without My Synergy Phone isn't asked about calls they don't have. */}
+      {aiCard && <AiTranscriptsCard viewing={viewing} onOpenPhone={onOpenPhone} />}
 
       {/* ── RECORD CARD ORDER — Carolyn 2026-08-28 @39:00 ──────────────────────────────
           Next to the Pipeline default because Ahsan put the two together on that call ("all of
@@ -3425,40 +4182,79 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           a "self"-gated action. The dialog is name/phone/password — who you are; this tab is
           how the portal behaves for you. Do not merge them without asking.
 
-          ⚠️ WHAT THE COPY MUST NOT PROMISE. This does not REDIRECT replies, it ADDS a second
-          address: the customer's reply reaches this address AND the customer's record in
-          StructureStudio. Wording it as "send replies here" would describe GoHighLevel's
-          behaviour, which is what she was comparing us to, and the first person to notice a
-          reply still landing in the app would reasonably call it a bug.
+          ⚠️ WHAT THE COPY MUST NOT PROMISE. The inbox copy does not REDIRECT replies, it ADDS a
+          second address: with copies on, the customer's reply reaches this address AND the
+          customer's record in StructureStudio. Wording it as "send replies here" would describe
+          GoHighLevel's behaviour, which is what she was comparing us to, and the first person to
+          notice a reply still landing in the app would reasonably call it a bug.
+
+          COPIES ARE OPT-IN (2026-10-07). Carolyn asked for a per-person choice, default OFF:
+          "StructureStudio only" (the reply shows on the record and nowhere else) or
+          "StructureStudio and my inbox". Two buttons in the Pipeline-default style, saved through
+          the same commit as every card here; save_prefs keeps `replyCopy` only when it is true.
+          With copies off nothing tells the rep a reply came in: it shows on the record and in the
+          conversation feed, and the copy says no more than that.
+
+          ⚠️ THE RECORD KEEPS THE WORDS, NOT THE FILES (review 2026-10-07). email-inbound stores a
+          reply's subject and text but no attachments (email_inbound has no column for them and
+          nothing writes them to crm_files); it notes on the reply how many files there were, and
+          the files themselves only reach a person through the inbox copy. So the OFF line says so
+          and points at the other choice. Take that sentence out only when attachments land on the
+          record. The composer's line in 02-sales.jsx says the same.
 
           WHICH EMAILS (2026-10-05). Every email a customer gets from us: the ones typed in a
-          record, and the quotes, invoices and change orders a person sends. The confirmations a
-          customer sets off themselves (accepting a quote, signing an invoice) go to the rep the
-          customer is assigned to, so the card says that too. The rule is the server's
-          (_shared/repReplyTo.ts); keep this wording in step with it.
+          record, and the estimates, invoices and change orders a person sends. The confirmations
+          a customer sets off themselves (accepting an estimate, signing an invoice) go to the rep
+          the customer is assigned to, on THAT rep's own choice, so the card says that too. The
+          rule is the server's (_shared/repReplyTo.ts, emailSend.ts); keep this wording in step.
 
           WHAT IT CAN'T PROMISE ON EVERY ACCOUNT. The card shows on every tenant, but the copy
-          only rides on email StructureStudio itself sends: on a CRM tenant the quotes and
-          invoices go out from GoHighLevel, which this setting never touches. And a reply lands
-          on the record only once the company has set up replies (Settings → Email Settings);
-          until then it reaches the inbox alone. Most customers have no assigned rep yet, so the
-          confirmation line says "if they have one". Worded to be true everywhere rather than
+          only rides on email StructureStudio itself sends: on a CRM tenant the estimates and
+          invoices go out from GoHighLevel, which this setting never touches. And StructureStudio
+          can only receive a reply once the company has set up replies (Settings → Email
+          Settings); until then the server keeps putting the person's address on the email
+          whatever they picked, so a reply still reaches somebody, and the card says so. Most
+          customers have no assigned rep yet, so the confirmation line says "if they have one"
+          as well as "if they've switched this on". Worded to be true everywhere rather than
           switched per tenant, because a rep has no right to read the email settings it would
-          need. */}
+          need.
+
+          The address box stays: it is the inbox used when copies are on, and the one replies
+          come to until the company sets up replies. */}
       <div style={S.card}>
         <div style={S.h2}>Where replies to your emails go</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           When a customer hits Reply on an email you sent them from StructureStudio, whether it's a
-          message, a quote, an invoice or a change order, their reply comes to your own inbox too,
-          and lands on the customer's record here once your company has set up replies under
-          Settings → Email Settings. Leave this blank to use the email address you sign in with, or
-          fill it in to get those replies somewhere else.
+          message, an estimate, an invoice or a change order, their reply shows on that customer's
+          record here. Pick whether you want a copy in your own inbox as well.
         </p>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          This is for email StructureStudio sends. A quote or invoice your CRM sends for you follows
-          the CRM's own settings. A customer's reply to the confirmation they get after accepting a
-          quote or signing an invoice goes to the person that customer is assigned to, if they have
-          one.
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[[false, "StructureStudio only"], [true, "StructureStudio and my inbox"]].map(([on, label]) => (
+            <button key={label} data-ss-reply-copy={on ? "on" : "off"} onClick={() => saveCopy(on)}
+              aria-pressed={copyOn === on} aria-disabled={copyBusy}
+              style={{ ...S.btn(copyOn === on ? ACCENT : "#F1F5F9", copyOn === on ? "#FFF" : "#334155"), opacity: copyBusy ? 0.6 : 1, cursor: copyBusy ? "default" : "pointer" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "#334155", lineHeight: 1.5 }}>
+          {copyOn
+            ? "Replies show on the customer's record, and a copy comes to your own inbox too."
+            : "Replies show on the customer's record in StructureStudio only. Files a customer attaches aren't kept there yet, so pick \"StructureStudio and my inbox\" if you need them."}
+        </div>
+        {(copyBusy || copyMsg) && (
+          <div style={{ marginTop: 6, fontSize: 12, color: copyBusy ? "#64748B" : (copyMsg.err ? "#DC2626" : "#15803D") }}>
+            {copyBusy ? "Saving…" : (copyMsg.err || copyMsg.ok)}
+          </div>
+        )}
+        <p style={{ fontSize: 13, color: "#64748B", margin: "12px 0 14px", lineHeight: 1.5 }}>
+          Until your company sets up replies under Settings → Email Settings, StructureStudio can't
+          receive them, so replies come to your inbox whichever you pick.
+        </p>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Your inbox for replies</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 8, lineHeight: 1.5 }}>
+          Leave this blank to use the email address you sign in with, or fill it in to get replies
+          somewhere else.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
           <input
@@ -3478,6 +4274,12 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           </button>
         </div>
         {addrMsg && <div style={{ marginTop: 10, fontSize: 12, color: addrMsg.err ? "#DC2626" : "#15803D" }}>{addrMsg.err || addrMsg.ok}</div>}
+        <p style={{ fontSize: 13, color: "#64748B", margin: "14px 0 0", lineHeight: 1.5 }}>
+          This is for email StructureStudio sends. An estimate or invoice your CRM sends for you
+          follows the CRM's own settings. When a customer replies to the confirmation they get after
+          accepting an estimate or signing an invoice, the copy goes to the person that customer is
+          assigned to, if they have one and they've switched this on.
+        </p>
       </div>
 
       {/* ── YOUR EMAIL SIGNATURE — Carolyn 2026-10-01 ─────────────────────────────────
@@ -3494,7 +4296,7 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
         <div style={S.h2}>Your email signature</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Added to the end of every email you write to a customer, and to test emails. Plain
-          text, up to 1,000 characters. Quotes and invoices keep their own footer.
+          text, up to 1,000 characters. Estimates and invoices keep their own footer.
         </p>
         <textarea
           value={sig}
@@ -3626,6 +4428,29 @@ function taxCodesUnavailable(err) {
   return /Unrecogni[sz]ed action|^Unknown action\b/i.test(String(err.message || ""));
 }
 
+// ─── Your sales tax rate (Settings → Company → Tax, 2026-10-09) ───
+// The company rate (client_settings.ss_tax_rate / ss_tax_label / ss_tax_delivery, migration 158)
+// lived only on GHL Connection → Estimates & Invoices; it is set here now, through
+// save_company_tax, and that card shows a read-only summary with a link back. Nothing about how
+// tax is worked out changes: every taxable item gets the one rate the chain picks (a rate verified
+// for the delivery address, else the sales location's own, else this one), and an item marked not
+// taxable in the catalog is never taxed.
+//
+// THE BLOCK RENDERS ONLY WHEN tax_codes_get ANSWERS companyRatePct (null included: no rate yet).
+// A portal-settings older than this page leaves the key out, and the tab then looks exactly as it
+// did, with no box offering a save the function cannot take (the salesTaxModeGate lesson).
+//
+// Never word it as tax "figured from each estimate's delivery address": a verified rate exists only
+// where someone pressed Verify. The CRM card's help text once said lookups ran on every estimate,
+// and a builder reading it believed every estimate was being checked.
+const ssHasCompanyTax = (d) => !!d && !d.err && Object.prototype.hasOwnProperty.call(d, "companyRatePct");
+// The stored values as the form holds them: strings for the boxes, a boolean for the tick.
+const ssCompanyTaxForm = (d) => ({
+  rate: d.companyRatePct == null ? "" : String(d.companyRatePct),
+  label: d.companyLabel || "",
+  delivery: d.ssTaxDelivery === true,
+});
+
 // One row's code picker: the chosen code with a Change button, or a type-ahead over
 // tax_codes_search — debounced 300ms while typing, at once for an empty box, which lists the
 // common codes first with their hints. The search reads the stored catalog; nothing here reaches
@@ -3732,13 +4557,20 @@ function TaxCodePicker({ code, info, onPick, disabled = false }) {
   );
 }
 
-function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
+function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection = null }) {
   const [data, setData] = useState(null);       // tax_codes_get answer | { err, unavailable } | null while loading
   const [rows, setRows] = useState([]);         // the editor's working copy: [{ rid, title, code, targets: [id] }]
   const [codeInfo, setCodeInfo] = useState({}); // code → { code, description, typeId, isActive, hint }
   const [openRid, setOpenRid] = useState(null); // the row whose checklist is open
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);         // { ok } | { err }
+  // "Your sales tax rate": the boxes (see ssCompanyTaxForm), its save, and the "Use tax codes"
+  // switch, which saves the moment it is flipped and flips back if the save is refused.
+  const [rateForm, setRateForm] = useState({ rate: "", label: "", delivery: false });
+  const [rateBusy, setRateBusy] = useState(false);
+  const [rateMsg, setRateMsg] = useState(null); // { ok } | { err }
+  const [codesBusy, setCodesBusy] = useState(false);
+  const [codesMsg, setCodesMsg] = useState(null); // { ok } | { err }
   const ridSeq = useRef(0);
   // Latest load wins, the LocationsCard rule: a slow first answer must not land over a retry's.
   const loadSeq = useRef(0);
@@ -3765,9 +4597,53 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
     const saved = taxSavedRows(d);
     setRows(withRids(saved.length ? saved : taxSuggestedRows(d)));
     setOpenRid(null);
+    if (ssHasCompanyTax(d)) setRateForm(ssCompanyTaxForm(d));
     setData(d);
   }, [canReadTax]);
   useEffect(() => { load(); }, [load]);
+
+  // Only what CHANGED is sent. ss_tax_delivery has a second editor (Options → Delivery's Taxable),
+  // so a tab opened before someone changed it there must not write the old value back with a rate.
+  const companyTax = ssHasCompanyTax(data);
+  const storedRate = companyTax ? ssCompanyTaxForm(data) : null;
+  const rateChanges = {};
+  if (storedRate) {
+    if (rateForm.rate.trim() !== storedRate.rate) rateChanges.ssTaxRate = rateForm.rate;
+    if (rateForm.label.trim() !== storedRate.label) rateChanges.ssTaxLabel = rateForm.label;
+    if (rateForm.delivery !== storedRate.delivery) rateChanges.ssTaxDelivery = rateForm.delivery;
+  }
+  const rateDirty = Object.keys(rateChanges).length > 0;
+  const saveRate = async () => {
+    if (!rateDirty || rateBusy) return;
+    setRateBusy(true); setRateMsg(null);
+    const { data: res, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_company_tax", ...rateChanges } });
+    setRateBusy(false);
+    // The invoke wrapper has already swapped a refusal's generic "non-2xx" for the server's sentence.
+    if (error || !res || res.error || !ssHasCompanyTax(res)) {
+      setRateMsg({ err: (res && res.error) || (error && error.message) || "Couldn't save your sales tax rate." });
+      return;
+    }
+    // The answer is what is stored; ssMode with it, because a first save creates the row.
+    const stored = { ssMode: res.ssMode === true, companyRatePct: res.companyRatePct, companyLabel: res.companyLabel, ssTaxDelivery: res.ssTaxDelivery === true };
+    setData((cur) => (cur && !cur.err ? { ...cur, ...stored } : cur));
+    setRateForm(ssCompanyTaxForm(stored));
+    setRateMsg({ ok: stored.companyRatePct == null ? "Saved — your estimates have no company rate now." : `Saved — your sales tax rate is ${stored.companyRatePct}%.` });
+  };
+  const setCodesOn = async (next) => {
+    if (!data || data.err || typeof data.taxCodesEnabled !== "boolean" || codesBusy || next === data.taxCodesEnabled) return;
+    const prev = data.taxCodesEnabled;
+    setCodesBusy(true); setCodesMsg(null);
+    setData((cur) => (cur && !cur.err ? { ...cur, taxCodesEnabled: next } : cur));
+    const { data: res, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_company_tax", taxCodesEnabled: next } });
+    setCodesBusy(false);
+    if (error || !res || res.error || typeof res.taxCodesEnabled !== "boolean") {
+      setData((cur) => (cur && !cur.err ? { ...cur, taxCodesEnabled: prev } : cur));
+      setCodesMsg({ err: (res && res.error) || (error && error.message) || "Couldn't change the tax codes setting." });
+      return;
+    }
+    setData((cur) => (cur && !cur.err ? { ...cur, taxCodesEnabled: res.taxCodesEnabled } : cur));
+    setCodesMsg({ ok: res.taxCodesEnabled ? "Tax codes are on." : "Tax codes are off. The codes you saved are kept." });
+  };
 
   const d = data && !data.err ? data : null;
   const targets = useMemo(() => taxTargetsOf(d), [d]);
@@ -3889,15 +4765,105 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
       : <span style={{ fontSize: 12.5, color: "#94A3B8" }}>Nothing yet</span>;
   };
 
-  return (
+  // The "Use tax codes" switch shows only when the answer carries it as a boolean: a function older
+  // than migration 290's read leaves it out, and a database without 290 answers null. Either way
+  // the editor shows as it always has. Off folds the editor to one line; every saved code is kept.
+  const switchShown = !!d && typeof d.taxCodesEnabled === "boolean";
+  const codesOff = switchShown && d.taxCodesEnabled === false;
+  const rateInput = { ...S.input, maxWidth: 220 };
+  // Same-document navigation where the shell handed us a way to do it, a plain link otherwise:
+  // ssPagePath keeps ?view=, so an operator's view-as survives either way.
+  const connectionLink = (text) => (
+    <a href={ssPagePath("settings", "connection")} onClick={onOpenConnection ? ssNavClick(onOpenConnection) : undefined}
+      style={{ color: ACCENT, fontWeight: 700 }}>{text}</a>
+  );
+
+  return (<>
+    {companyTax && (
+      <div style={S.card} data-company-tax="">
+        <div style={S.h2}>Your sales tax rate</div>
+        {/* What the rate does depends on who issues this builder's estimates. In paperwork mode it is
+            the rate on every taxable item unless a closer one applies. In CRM mode with a CRM
+            connected the CRM works the tax out (submit-estimate sends the CRM's estimate). In CRM
+            mode with NO CRM every estimate is refused today (submit-estimate's first check), and
+            the way out is the paperwork switch on GHL Connection, which needs this rate saved
+            first: that card's save judges the STORED rate since it stopped posting one. Those two
+            steps are told only to someone who can take them; a reader gets the situation and who
+            can change it. */}
+        <div data-company-tax-copy="" style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
+          {d.ssMode === true
+            ? <>Charged on every taxable item. Items marked not taxable in your catalog are never taxed. A sales location's own rate, or a rate verified for the delivery address, is used instead. Enter 0 if you don't collect sales tax.</>
+            : d.crmConfigured === true
+              ? <>Your CRM works out the tax on your estimates, so this rate isn't used.</>
+              : <>Your estimates can't go out until you switch to StructureStudio paperwork.{canEditTax && <> Save your rate here first (0 counts), then {connectionLink("make the switch on GHL Connection")}.</>}</>}
+          {!canEditTax && " Only someone who can edit GHL Connection settings can change this."}
+        </div>
+        {canEditTax ? (<>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, maxWidth: 520 }}>
+            <div><span style={S.lbl}>Sales tax rate (%)</span>
+              <input style={rateInput} value={rateForm.rate} disabled={rateBusy} placeholder="e.g. 7.25" inputMode="decimal" aria-label="Sales tax rate (%)"
+                onChange={(e) => { const v = e.target.value; setRateMsg(null); setRateForm((f) => ({ ...f, rate: v })); }} /></div>
+            <div><span style={S.lbl}>Tax label on documents</span>
+              <input style={rateInput} value={rateForm.label} disabled={rateBusy} placeholder="Sales tax" maxLength={40} aria-label="Tax label on documents"
+                onChange={(e) => { const v = e.target.value; setRateMsg(null); setRateForm((f) => ({ ...f, label: v })); }} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on estimates and invoices.</div></div>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, fontWeight: 600, color: "#1E293B", marginTop: 10 }}>
+            <input type="checkbox" checked={rateForm.delivery} disabled={rateBusy}
+              onChange={(e) => { const v = e.target.checked; setRateMsg(null); setRateForm((f) => ({ ...f, delivery: v })); }} />
+            Charge tax on delivery
+          </label>
+        </>) : (
+          <div data-company-tax-readonly="" style={{ fontSize: 13, color: "#1E293B", lineHeight: 1.6 }}>
+            <div><b>Rate:</b> {d.companyRatePct == null ? "not set" : `${d.companyRatePct}%`}</div>
+            <div><b>Label on documents:</b> {d.companyLabel || "Sales tax"}</div>
+            <div><b>Tax on delivery:</b> {d.ssTaxDelivery === true ? "yes" : "no"}</div>
+          </div>
+        )}
+        {/* Paperwork mode with no rate on file: an estimate whose sales location has no rate of its
+            own is refused (submit-estimate's no_tax_rate). From the STORED value, not the box. */}
+        {d.ssMode === true && d.companyRatePct == null && (
+          <div data-company-tax-warning="" style={{ marginTop: 12, maxWidth: 780, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            No sales tax rate is set. An estimate whose sales location has no rate of its own can't go out until you save one (0 counts).
+          </div>
+        )}
+        {canEditTax && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+            <button type="button" onClick={saveRate} disabled={rateBusy || !rateDirty} style={S.btn(rateDirty ? ACCENT : "#CBD5E1", "#FFF")}>
+              {rateBusy ? "Saving…" : "Save tax rate"}
+            </button>
+            {!rateBusy && <span style={{ fontSize: 12, color: "#64748B" }}>{rateDirty ? "Unsaved changes" : "No changes to save"}</span>}
+          </div>
+        )}
+        {rateMsg && rateMsg.ok && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{rateMsg.ok}</div>}
+        {rateMsg && rateMsg.err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{rateMsg.err}</div>}
+      </div>
+    )}
+
     <div style={S.card}>
       <div style={S.h2}>Tax codes</div>
+      {switchShown && (
+        <label data-tax-codes-switch="" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 10, cursor: canEditTax ? "pointer" : "default" }}>
+          <input type="checkbox" checked={d.taxCodesEnabled === true} disabled={!canEditTax || codesBusy}
+            onChange={(e) => setCodesOn(e.target.checked)} />
+          Use tax codes
+          {codesBusy && <span style={{ fontSize: 12, fontWeight: 500, color: "#64748B" }}>Saving…</span>}
+        </label>
+      )}
+      {codesMsg && codesMsg.ok && <div style={{ ...S.okMsg, marginTop: 0, marginBottom: 10 }}>{codesMsg.ok}</div>}
+      {codesMsg && codesMsg.err && <div style={{ ...S.err, marginTop: 0, marginBottom: 10 }}>{codesMsg.err}</div>}
+      {codesOff && (
+        <div data-tax-codes-off="" style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, maxWidth: 780 }}>
+          Tax codes are off.{d.ssMode === true ? " Every taxable item is charged the rate above." : ""} Any codes you saved are kept.
+        </div>
+      )}
+      {!codesOff && (<>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
         Every building, option and service you sell falls under a tax code from Avalara's list. Pick a code, then tick
         everything that code covers — each building style and option heading takes one code. You (or your accountant)
         choose the codes, so they match how you file. The notes beside common codes are suggestions, not tax advice.
         {/* Said up front rather than left to missing buttons, as on the location rates. */}
-        {d && !canEditTax && " Only someone who can edit CRM Connection settings can change these codes."}
+        {d && !canEditTax && " Only someone who can edit GHL Connection settings can change these codes."}
       </div>
       {/* Every state gets the note, because in none of them does a code change a quote yet. It is
           the amber warning when this account is not on per-line-ready tax at all (CRM mode, or
@@ -3907,11 +4873,11 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
           ? { background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }
           : { background: "#F8FAFC", border: "1px solid #E2E8F0", color: "#475569", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 500, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }}>
           These codes are saved now and will be used when per-line tax with Avalara is switched on for your account.
-          Until then they don't change the tax on any quote.
+          Until then they don't change the tax on any estimate.
         </div>
       )}
 
-      {!canReadTax && <p style={{ fontSize: 13, color: "#64748B" }}>Only someone who can view CRM Connection settings can see your tax codes.</p>}
+      {!canReadTax && <p style={{ fontSize: 13, color: "#64748B" }}>Only someone who can view GHL Connection settings can see your tax codes.</p>}
       {canReadTax && !data && <p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p>}
       {data && data.err && data.unavailable && (
         <p style={{ fontSize: 13, color: "#64748B" }}>Tax codes aren't available on your account yet — check back soon.</p>
@@ -3969,7 +4935,7 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
                           <span>All buildings</span>
                         </label>
                       ) : (
-                        <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No building styles yet — add them under Structures.</div>
+                        <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No building styles yet — add them under Sheds.</div>
                       ))}
                       {inGroup.map((t) => {
                         const mine = r.targets.indexOf(t.id) !== -1;
@@ -4047,6 +5013,114 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
             : "Only Avalara's common codes are listed until CSM Synergy loads the full list."}
         </div>
       )}
+      </>)}
+    </div>
+  </>);
+}
+
+// ─── Structure Studio Payments (Settings → Company → Payments, workstream 1 phase 4) ───
+// A builder's READ-ONLY view of the card account the Structure Studio team sets up for them in
+// Admin (admin-catalog set_payments). Ahsan's decision of 2026-10-08: the team enters the merchant
+// details and the builder's side is locked. So this card saves nothing and offers no field to type
+// into; it says what is set and how to ask for a change. The brand is Carolyn's, "Structure Studio
+// Payments", never the platform company's name.
+//
+// What it shows comes from portal-settings payments_status: on or off, test or live (only once a
+// merchant id is set or payments are on), and the last four digits of the merchant id (never the
+// whole id). A portal-settings older than this page
+// answers 403 "Unrecognised action": the card then says only who manages the account, with no
+// status at all, rather than a refusal or a guess (the taxCodesUnavailable rule, reused).
+//
+// How to ask for a change: the Feedback button's "Request a Feature", which lands on the team's
+// board and shows under Support → My Requests. An operator in view-as has no Feedback button, and
+// needs none: the change is theirs to make in Admin.
+const PAYMENTS_BRAND = "Structure Studio Payments";
+// The answer carries the fields this card shows. Anything else (an older function's shape, a
+// refusal) shows no status.
+const ssHasPaymentsStatus = (d) => !!d && !d.err && typeof d.enabled === "boolean" && (d.env === "live" || d.env === "test");
+
+function PaymentsCard() {
+  const [data, setData] = useState(null);   // payments_status answer | { err, unavailable } | null while loading
+  const loadSeq = useRef(0);
+  useEffect(() => {
+    const seq = ++loadSeq.current;
+    (async () => {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action: "payments_status" } });
+      if (seq !== loadSeq.current) return;
+      if (error || !d || d.error) {
+        setData({ err: (d && d.error) || (error && error.message) || "Couldn't load your payment details.", unavailable: taxCodesUnavailable(error) });
+        return;
+      }
+      setData(d);
+    })();
+    return () => { loadSeq.current++; };
+  }, []);
+
+  const d = ssHasPaymentsStatus(data) ? data : null;
+  const row = (label, value, attr) => (
+    <div {...{ [attr]: "" }} style={{ display: "flex", gap: 12, alignItems: "baseline", padding: "9px 0", borderTop: "1px solid #F1F5F9" }}>
+      <span style={{ ...S.lbl, marginBottom: 0, minWidth: 130 }}>{label}</span>
+      <span style={{ fontSize: 13.5, color: "#1E293B", fontWeight: 600 }}>{value}</span>
+    </div>
+  );
+  const pill = (text, bg, fg) => (
+    <span style={{ background: bg, color: fg, borderRadius: 12, fontSize: 11.5, fontWeight: 800, padding: "3px 10px", letterSpacing: 0.3 }}>{text}</span>
+  );
+
+  return (
+    <div data-payments-card="" style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>{(d && d.brand) || PAYMENTS_BRAND}</div>
+        <span data-payments-locked="" title="Set up and managed by the Structure Studio team"
+          style={{ background: "#F1F5F9", color: "#475569", borderRadius: 12, fontSize: 11.5, fontWeight: 700, padding: "3px 10px" }}>
+          🔒 Managed for you
+        </span>
+      </div>
+      <p style={{ fontSize: 13, color: "#475569", lineHeight: 1.55, margin: "0 0 12px" }}>
+        Your payment account is set up and managed by the Structure Studio team. It's locked here, so nothing on this
+        page can change it, and there's nothing for you to fill in.
+      </p>
+
+      {data === null && <div style={{ fontSize: 13, color: "#64748B" }}>Loading your payment details…</div>}
+
+      {data && data.err && (data.unavailable
+        ? <div data-payments-soon="" style={{ fontSize: 13, color: "#64748B" }}>The details of your account will show here soon.</div>
+        : <div style={{ ...S.err, marginBottom: 0 }}>{data.err}</div>)}
+
+      {data && !data.err && !d && (
+        <div data-payments-soon="" style={{ fontSize: 13, color: "#64748B" }}>The details of your account will show here soon.</div>
+      )}
+
+      {d && (
+        <div data-payments-status="">
+          {row("Card payments",
+            d.enabled ? pill("ON", "#DCFCE7", "#15803D") : pill("OFF", "#FEF3C7", "#92400E"),
+            "data-payments-onoff")}
+          {/* Test or live only once there is an account to be on one: with payments off and no merchant
+              id, every builder reads "test" by default, and a TEST row would describe an account that
+              doesn't exist. */}
+          {(d.enabled || d.midLast4) && row("Mode",
+            d.env === "live"
+              ? <span>{pill("LIVE", "#DBEAFE", "#1D4ED8")} <span style={{ fontWeight: 500, color: "#475569", marginLeft: 6 }}>Real payments go to your bank account.</span></span>
+              : <span>{pill("TEST", "#F3E8FF", "#7E22CE")} <span style={{ fontWeight: 500, color: "#475569", marginLeft: 6 }}>No real money moves. This is how an account is checked before it goes live.</span></span>,
+            "data-payments-mode")}
+          {row("Merchant ID",
+            d.midLast4 ? <span>ending in <code style={{ fontSize: 13 }}>{d.midLast4}</code></span> : <span style={{ color: "#92400E" }}>Not set up yet</span>,
+            "data-payments-mid")}
+          {!d.enabled && (
+            <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginTop: 8 }}>
+              While payments are off, your customers can't pay online and your team can't take a card in Orders.
+              Payments you've already taken aren't affected.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div data-payments-request="" style={{ marginTop: 14, padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 12.5, color: "#334155", lineHeight: 1.55 }}>
+        <b>Need a change?</b> To switch payments on or off, move from test to live, or use a different merchant
+        account, send us a request with the <b>Feedback</b> button (choose <b>Request a Feature</b>), or ask your
+        Structure Studio contact. You can follow it under <b>Support → My Requests</b>.
+      </div>
     </div>
   );
 }
@@ -4131,6 +5205,7 @@ function OptionsShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
       {sub === "ramps" && <RampsView {...p} />}
       {sub === "cladding" && <CladdingView {...p} />}
       {sub === "interior" && <LayoutPricing {...p} />}
+      {sub === "interior-walls" && <InteriorWalls {...p} />}
       {sub === "electrical" && <Electrical {...p} />}
       {sub === "insulation" && <Insulation {...p} />}
       {sub === "delivery" && <DeliveryView {...p} />}
@@ -4197,24 +5272,1304 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
       {sub === "crews" && <DriversTerritoriesCard section="crews" />}
       {sub === "drivers" && <DriversTerritoriesCard section="drivers" />}
       {/* The whole tab is settings_crm (SETTINGS_TAB_AREA.tax), so reading is already implied by
-          the tab being here; editing is passed separately, the same pair LocationsCard gets. */}
-      {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} />}
+          the tab being here; editing is passed separately, the same pair LocationsCard gets. The
+          company rate block's "switch to StructureStudio paperwork" link opens GHL Connection
+          (also settings_crm) without leaving the page. */}
+      {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} onOpenConnection={() => onSub("connection")} />}
+      {/* Read-only (workstream 1 phase 4): the card account is managed by the Structure Studio team,
+          so the tab only shows it. The tab rides settings_branding (SETTINGS_TAB_AREA.payments),
+          the same gate as payments_status, so whoever sees it may read it. */}
+      {sub === "payments" && <PaymentsCard />}
     </div>
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false }) {
-  const [subState, setSubState] = useState("structures");
+// ── Customer Hub ─────────────────────────────────────────────────────────────────────────
+// The customer-facing config that is OURS (Carolyn 2026-10-22). Two tabs: the built-in
+// pipelines and card statuses, and how a customer gets their login code. GHL Connection is a
+// separate rail item and stays one — this hub is deliberately not about anyone else's CRM.
+//
+// Pipelines keeps the entitlement gate it had as a rail item: statuses and stages belong to the
+// built-in CRM and every crm_* action refuses without it, so an unentitled tenant gets the
+// teaser rather than a screen whose every button 403s. The Customer login tab is NOT gated —
+// the customer login is ours whether or not a tenant has the CRM add-on or a GHL connection,
+// which is exactly why that card was worth lifting off the connection page.
+function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false, clientId = null, canEdit = true, isAdmin = false, access = null }) {
+  // The same clamp SettingsShell and CompanyShell run: an unknown slug must land on a tab that
+  // really renders, or the sub-tab bar appears over an empty body.
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      {sub === "pipelines" && (crmUnlocked || crmPending
+        ? <PipelineSettings viewing={!!viewingLabel} />
+        : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+      {/* One card, its own section of SettingsView — the form state covers every field whichever
+          section renders and this card posts only its own, so nothing else is touched. */}
+      {sub === "customer-login" && <SettingsView section="customer-login" />}
+      {/* Forms + Email Templates (migration 325): part of the built-in CRM, so the same gate and
+          teaser as Pipelines. The server refuses every crm_form_* / crm_email_tpl_* action for an
+          unentitled tenant regardless. */}
+      {(sub === "forms" || sub === "email-templates") && !(crmUnlocked || crmPending) && (
+        <div style={S.card}><div style={S.h2}>{sub === "forms" ? "Website forms" : "Email templates"}</div><p style={{ fontSize: 13, color: "#64748B" }}>Website lead forms and their emails are part of the built-in CRM. Add it under Settings → Billing.</p></div>
+      )}
+      {sub === "forms" && (crmUnlocked || crmPending) && <FormsHub clientId={clientId} canEdit={canEdit} />}
+      {sub === "email-templates" && (crmUnlocked || crmPending) && <EmailTemplatesHub canEdit={canEdit} />}
+      {/* MEETINGS (migration 326; moved in here 2026-10-22). No entitlement teaser of its own:
+          MeetingsSettings asks portal-meetings, which refuses with the CRM sentence and the
+          component shows it. Doing it twice would mean two places deciding what "unpaid"
+          looks like on one page. */}
+      {sub === "meetings" && <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* EMAIL SETTINGS, TEXT MESSAGING, PHONE — moved in from the rail on 2026-10-23 with their
+          slugs, props and canEdit rules exactly as they were in SettingsShell. */}
+      {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* Self-serve carrier registration. canEdit mirrors the server's own split: reading the
+          status is contacts-level, but every action that submits or spends is
+          settings_billing:'edit'. The component still renders read-only for everyone else
+          rather than vanishing — a rep should be able to see that texting is coming. */}
+      {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
+        canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
+      {/* My Synergy Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
+          phone_settings_save / phone_status_set / phone_signout_user are gated on — read the
+          unclamped way CompanyShell's tax flags are: an owner/admin, or a null map (a platform
+          operator in view-as, whose rights come from app_operators). 'own' never writes here:
+          phone is not an ownWrites area, so ssCanWrite answers false for it. The server
+          refuses regardless. */}
+      {sub === "phone" && <PhoneSettingsView clientId={clientId} viewingLabel={viewingLabel}
+        canEdit={isAdmin || !access || ssCanWrite(access, "phone")}
+        onOpenTexting={() => onSub("sms")} />}
+      {/* Fields (migration 330). Behind the CRM like Pipelines and Forms: the register describes a
+          contact and a deal, which is the CRM's own data, and every crm_field_* action refuses an
+          unentitled tenant by the crm_ prefix regardless — so the teaser rather than a screen
+          whose every button 403s. */}
+      {sub === "fields" && (crmUnlocked || crmPending
+        ? <CrmFieldsHub clientId={clientId} canEdit={canEdit} />
+        : <div style={S.card}><div style={S.h2}>Fields</div><p style={{ fontSize: 13, color: "#64748B" }}>Contact and deal fields are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+    </div>
+  );
+}
+
+// ══ Customer Hub → Fields (migration 330, Carolyn 2026-10-22) ════════════════════════════
+// "We need to show all the current fields for contacts and designs/deals in the customer hub tab
+// under its own tab called fields. We need to allow to add as many custom fields as desired."
+//
+// A REGISTER FIRST, an editor second. One half of each list is every field that already exists —
+// the real columns, grouped the way the contact editor and the deal panel lay them out, with what
+// sets each one. Nothing in the product has ever shown a builder that list, and it is the half she
+// asked for first ("show all the current fields"). Their own fields sit above it, because that is
+// the half with buttons on it.
+//
+// ⚠️ THE CATALOGUE IS THE SERVER'S (_shared/crmFields.ts) and arrives with every overridden label
+// already folded in. Do NOT mirror the list of built-ins here: the columns are in code, one copy
+// of that list is the whole point, and a second copy in the browser would drift the moment a
+// column moved. This renders what crm_fields_list sends and knows nothing about which columns exist.
+//
+// WHAT MAY BE CHANGED, and it is two different lists:
+//   one of OURS     the label, and whether it shows on the card. Never the type, never deleted —
+//                   the rest of the product reads that column. A few keep their name as well
+//                   (relabel: false — Status, Stage, Created…), because other screens refer to
+//                   them by that word, and Name cannot be hidden.
+//   one of THEIRS   everything, and Delete ARCHIVES: the values stay in the jsonb and Restore
+//                   brings the lot back. One click never destroys a column of customer data.
+//
+// Reordering is up/down buttons, not drag. The built-ins are not reorderable at all (their order
+// is the card's own), so the only movable list here is usually two or three rows long — a
+// pointer-events drag for that is more ways to go wrong than it is worth, and the buttons work
+// from a keyboard, which the pipeline board's drag does not.
+const SSFLD_ENTITIES = [["contact", "Contacts"], ["deal", "Designs & deals"]];
+// The one place a built-in's `type` becomes words. The catalogue carries types the custom-field
+// list does not have (address, owner, stage, status, money, labels, link): they describe a column
+// that is not free text, and saying "Text" for "Assigned to" would be a small lie on a screen
+// whose whole job is telling a builder what they have.
+const SSFLD_TYPE_WORD = {
+  text: "Text", textarea: "Long text", number: "Number", date: "Date", select: "Drop-down",
+  checkbox: "Yes / no", phone: "Phone", url: "Hyperlink",
+  address: "Address", owner: "Team member", stage: "Stage", status: "Status",
+  money: "Money", labels: "Labels", link: "Link",
+};
+const ssfldType = (t) => SSFLD_TYPE_WORD[String(t)] || "Text";
+// The two currencies Carolyn asked for, and nothing else (migration 332). The CODE is shown as
+// well as the symbol because USD and CAD both print "$", and a bare "$1,200" beside a US price on
+// a Canadian builder's screen is how somebody ends up quoting the wrong number.
+const SSFLD_CURRENCIES = [["", "No currency"], ["USD", "US dollars (US$)"], ["CAD", "Canadian dollars (CA$)"]];
+const SSFLD_CUR_PREFIX = { USD: "US$", CAD: "CA$" };
+// What a number field's settings read as on its row: "US$ 100,000", "100000", "100,000".
+function ssfldNumberSample(f) {
+  const n = f.thousands === false ? "100000" : "100,000";
+  const p = SSFLD_CUR_PREFIX[String(f.currency || "")] || "";
+  return p ? p + " " + n : n;
+}
+
+// A chip saying who fills a field in. Three answers, and the difference matters to a builder
+// deciding where to put something: they type it, the designer/estimate sets it, or the system does.
+//
+// ⚠️ "From the design" is keyed on the derived source NAMING `designs`, not on there being one at
+// all. Every field read out of another table carries a `derived`, and the first version of this
+// said "From the design" for all of them — so Status, whose source is `crm_statuses`, claimed to
+// come from the designer on the very row whose own note says the system sets it and nobody sets it
+// by hand. Caught on beta. A field with no `derived` is a plain column on the entity's own table.
+function SsfldWho({ field }) {
+  // `who` wins when the catalogue sets one: the Google Maps links are neither typed, nor from the
+  // designer, nor set by the system — they are built from other fields on the same card, and
+  // saying any of the other three would be a small lie on the screen that exists to say this.
+  if (field.who) {
+    return (
+      <span style={{ display: "inline-block", background: "#FEF9C3", color: "#854D0E", borderRadius: 999,
+        padding: "2px 8px", fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap" }}>{field.who}</span>
+    );
+  }
+  const fromDesign = !!field.derived && /^designs\./.test(String(field.derived));
+  const [text, bg, fg] = !field.editable && fromDesign
+    ? ["From the design", "#EFF6FF", "#1D4ED8"]
+    : !field.editable
+      ? ["Set by the system", "#F1F5F9", "#475569"]
+      : ["You fill it in", "#F0FDF4", "#15803D"];
+  return (
+    <span style={{ display: "inline-block", background: bg, color: fg, borderRadius: 999,
+      padding: "2px 8px", fontSize: 10.5, fontWeight: 800, whiteSpace: "nowrap" }}>{text}</span>
+  );
+}
+
+function SsfldHidden() {
+  return (
+    <span title="Hidden from the contact card and the deal panel"
+      style={{ display: "inline-block", background: "#FEF3C7", color: "#92400E", borderRadius: 999,
+        padding: "2px 8px", fontSize: 10.5, fontWeight: 800, marginLeft: 6, whiteSpace: "nowrap" }}>Hidden</span>
+  );
+}
+
+// The Add / Edit sheet for one of THEIR fields. The key is minted from the name on the server and
+// is never editable — renaming a key orphans every value already stored under it (330's header) —
+// so the name is what changes, and the key is shown, greyed, as the thing it is.
+function SsfldEditor({ entity, field, types, onClose, onSaved }) {
+  const isNew = !field;
+  const [label, setLabel] = useState(field ? field.label : "");
+  const [type, setType] = useState(field ? field.type : "text");
+  const [choices, setChoices] = useState(field && field.choices ? field.choices.join("\n") : "");
+  const [help, setHelp] = useState(field && field.help ? field.help : "");
+  const [required, setRequired] = useState(!!(field && field.required));
+  // How a NUMBER is shown (migration 332). Kept in state whatever the type is, so switching to
+  // Drop-down and back does not lose what was picked a moment ago; the server is what clears them
+  // on a field that is no longer a number, and it is the only thing that has to.
+  const [currency, setCurrency] = useState(field && field.currency ? field.currency : "");
+  const [thousands, setThousands] = useState(!field || field.thousands !== false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const entLabel = entity === "contact" ? "contact" : "design/deal";
+
+  const save = async () => {
+    setBusy(true); setErr("");
+    const body = {
+      label, type, help, required,
+      choices: type === "select" ? choices.split("\n").map((s) => s.trim()).filter(Boolean) : [],
+      // Sent only for a number: on any other type the server clears them, and sending a currency
+      // with a text field would be asking it to refuse something nobody chose.
+      ...(type === "number" ? { currency, thousands } : {}),
+    };
+    try {
+      if (isNew) await ssfCall("crm_field_create", { entity, ...body });
+      else await ssfCall("crm_field_save", { id: field.id, ...body });
+      onSaved();
+      onClose();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <SsfModal title={isNew ? "Add a field to every " + entLabel : "Edit " + field.label} onClose={onClose}
+      footer={(
+        <>
+          <button type="button" style={SSF_BTN(false)} onClick={onClose} disabled={busy}>Cancel</button>{" "}
+          <button type="button" style={{ ...SSF_BTN(true), opacity: busy || !label.trim() ? 0.6 : 1 }}
+            disabled={busy || !label.trim()} onClick={save}>{busy ? "Saving…" : (isNew ? "Add field" : "Save")}</button>
+        </>
+      )}>
+      {err && <div style={S.err}>{err}</div>}
+      <span style={S.lbl}>Field name</span>
+      <input style={{ ...S.input, marginBottom: 10 }} value={label} maxLength={80} autoFocus
+        placeholder={entity === "contact" ? "Gate code" : "Permit number"}
+        onChange={(e) => setLabel(e.target.value)} />
+      <span style={S.lbl}>What kind of field</span>
+      <select style={{ ...S.input, marginBottom: 4 }} value={type} onChange={(e) => setType(e.target.value)}>
+        {(types || []).map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+      </select>
+      <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 10 }}>
+        {((types || []).find((t) => t.id === type) || {}).hint || ""}
+      </div>
+      {type === "select" && (
+        <>
+          <span style={S.lbl}>The choices, one per line</span>
+          <textarea style={{ ...S.input, marginBottom: 10, minHeight: 96, fontFamily: "inherit" }}
+            value={choices} placeholder={"Yes\nNo\nNot yet asked"}
+            onChange={(e) => setChoices(e.target.value)} />
+        </>
+      )}
+      {/* HOW THE NUMBER IS SHOWN (migration 332). Both settings are about the DISPLAY: the number
+          itself is stored plain, so switching the currency or the comma later never changes what
+          anybody already typed, and a sample sits under them so the choice is not abstract. */}
+      {type === "number" && (
+        <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8,
+          padding: "10px 11px", marginBottom: 10 }}>
+          <span style={S.lbl}>Money</span>
+          <select style={{ ...S.input, marginBottom: 8 }} value={currency}
+            onChange={(e) => setCurrency(e.target.value)}>
+            {SSFLD_CURRENCIES.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155" }}>
+            <input type="checkbox" checked={thousands} onChange={(e) => setThousands(e.target.checked)} />
+            Group the thousands with commas
+          </label>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 7 }}>
+            Shows as <strong style={{ color: "#1E293B" }}>{ssfldNumberSample({ currency, thousands })}</strong>.
+            Only how it looks — the number itself is stored plain, so you can change this later
+            without touching a single value.
+          </div>
+        </div>
+      )}
+      <span style={S.lbl}>A hint under the field (optional)</span>
+      <input style={{ ...S.input, marginBottom: 10 }} value={help} maxLength={200}
+        placeholder="Shown in small print beside the box"
+        onChange={(e) => setHelp(e.target.value)} />
+      <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155" }}>
+        <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
+        Ask for it every time — the card marks it while it is empty
+      </label>
+      {!isNew && (
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 12, lineHeight: 1.5 }}>
+          Stored as <code>{field.key}</code>, which never changes — so renaming this field keeps
+          every value already filled in. Changing the kind of field leaves what is already stored
+          alone; it reads as whatever was typed until somebody edits it.
+        </div>
+      )}
+    </SsfModal>
+  );
+}
+
+// Rename / hide one of OURS. A sheet rather than an inline input because Reset needs explaining:
+// pressing it is not "clear the name", it is "go back to ours", and the two read the same in a
+// bare text box.
+function SsfldBuiltinEditor({ entity, field, onClose, onSaved }) {
+  const [label, setLabel] = useState(field.label);
+  const [hidden, setHidden] = useState(!!field.hidden);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const touched = field.renamed || field.hidden;
+
+  const send = async (body) => {
+    setBusy(true); setErr("");
+    try { await ssfCall("crm_builtin_field_save", { entity, builtinKey: field.id, ...body }); onSaved(); onClose(); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  return (
+    <SsfModal title={field.defaultLabel} onClose={onClose}
+      footer={(
+        <>
+          {touched && (
+            <button type="button" style={{ ...SSF_BTN(false), marginRight: "auto" }} disabled={busy}
+              title="Put the name and the visibility back to ours"
+              onClick={() => send({ reset: true })}>Reset to default</button>
+          )}
+          <button type="button" style={SSF_BTN(false)} onClick={onClose} disabled={busy}>Cancel</button>{" "}
+          <button type="button" style={{ ...SSF_BTN(true), opacity: busy ? 0.6 : 1 }} disabled={busy}
+            onClick={() => send({ label, hidden })}>{busy ? "Saving…" : "Save"}</button>
+        </>
+      )}>
+      {err && <div style={S.err}>{err}</div>}
+      <div style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.5, marginBottom: 12 }}>
+        This is one of ours, backed by a real field on every {entity === "contact" ? "contact" : "design/deal"}.
+        You can call it something else and you can take it off the card — it keeps working either
+        way, and it cannot be deleted.
+      </div>
+      {field.relabel === false ? (
+        <div style={{ fontSize: 12.5, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0",
+          borderRadius: 8, padding: "9px 11px", marginBottom: 12 }}>
+          This one keeps its name — other screens refer to it by that word.
+        </div>
+      ) : (
+        <>
+          <span style={S.lbl}>What to call it</span>
+          <input style={{ ...S.input, marginBottom: 4 }} value={label} maxLength={80} autoFocus
+            onChange={(e) => setLabel(e.target.value)} />
+          <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 12 }}>
+            Ours is “{field.defaultLabel}”. Typing that back is the same as Reset.
+          </div>
+        </>
+      )}
+      {field.hideable === false ? (
+        <div style={{ fontSize: 12, color: "#94A3B8" }}>This one always shows.</div>
+      ) : (
+        <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "#334155" }}>
+          <input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} />
+          Hide it from the contact card and the deal panel
+        </label>
+      )}
+    </SsfModal>
+  );
+}
+
+function CrmFieldsHub({ clientId, canEdit }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [entity, setEntity] = useState("contact");
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);            // one of theirs
+  const [editingBuiltin, setEditingBuiltin] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    setErr("");
+    ssfCall("crm_fields_list").then(setData, (e) => setErr(e.message));
+  }, []);
+  useEffect(() => { setData(null); load(); }, [clientId, load]);
+
+  const act = async (fn) => { setBusy(true); setErr(""); try { await fn(); load(); } catch (e) { setErr(e.message); } setBusy(false); };
+
+  const half = data ? data[entity] : null;
+  const custom = half ? half.custom : [];
+  const archived = half ? half.archived : [];
+  const entLabel = entity === "contact" ? "contact" : "design/deal";
+
+  // Up / down. The server takes the WHOLE live list in its new order and refuses a partial one, so
+  // the swap happens here and the full array goes over.
+  const move = (id, delta) => {
+    const i = custom.findIndex((f) => f.id === id);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= custom.length) return;
+    const ids = custom.map((f) => f.id);
+    ids[i] = custom[j].id; ids[j] = custom[i].id;
+    act(() => ssfCall("crm_fields_reorder", { entity, ids }));
+  };
+
+  // The built-ins, in the catalogue's order, with a heading each time the group changes — the same
+  // "the run IS the heading" shape the Options tabs and the setup checklist use, so there is no
+  // second ordering model to keep in step.
+  const builtinRows = [];
+  let lastGroup = null;
+  (half ? half.builtins : []).forEach((f) => {
+    if (f.group !== lastGroup) {
+      lastGroup = f.group;
+      builtinRows.push(
+        <tr key={"g:" + f.group}>
+          <td colSpan={4} style={{ padding: "12px 8px 4px", fontSize: 10.5, fontWeight: 800,
+            letterSpacing: ".06em", textTransform: "uppercase", color: "#94A3B8" }}>{f.group}</td>
+        </tr>,
+      );
+    }
+    builtinRows.push(
+      <tr key={f.group + ":" + f.id}>
+        <td style={S.td}>
+          <div style={{ fontWeight: 700, color: "#1E293B" }}>
+            {f.label}{f.hidden && <SsfldHidden />}
+            {f.renamed && <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 600 }}> (ours: {f.defaultLabel})</span>}
+          </div>
+          {f.note && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2, lineHeight: 1.4 }}>{f.note}</div>}
+        </td>
+        <td style={{ ...S.td, whiteSpace: "nowrap" }}>{ssfldType(f.type)}</td>
+        <td style={S.td}><SsfldWho field={f} /></td>
+        <td style={{ ...S.td, textAlign: "right", whiteSpace: "nowrap" }}>
+          {canEdit && (f.relabel !== false || f.hideable !== false) ? (
+            <button type="button" style={SSF_BTN(false)} disabled={busy}
+              onClick={() => setEditingBuiltin(f)}>Rename / hide</button>
+          ) : <span style={{ fontSize: 11.5, color: "#CBD5E1" }}>—</span>}
+        </td>
+      </tr>,
+    );
+  });
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Fields"
+        desc="Everything a contact and a design/deal can hold — the fields that come with Structure Studio, and as many of your own as you want beside them. Your own show on the contact card and in the deal panel, where your team fills them in."
+        right={canEdit && <button type="button" style={SSF_BTN(true)} onClick={() => setAdding(true)}>+ Add field</button>} />
+      {/* The two halves. A segment rather than two stacked lists: each half is twenty-odd rows, and
+          she asked for ONE tab — not a page you scroll past one whole list to reach the other. */}
+      <div style={{ display: "inline-flex", border: "1px solid #CBD5E1", borderRadius: 999, overflow: "hidden", marginBottom: 12 }}>
+        {SSFLD_ENTITIES.map(([id, name]) => {
+          const on = entity === id;
+          const n = data && data[id] ? data[id].custom.length : 0;
+          return (
+            <button key={id} type="button" onClick={() => setEntity(id)} aria-pressed={on}
+              style={{ background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", border: "none",
+                padding: "7px 15px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}>
+              {name}{n > 0 ? " · " + n + " of yours" : ""}
+            </button>
+          );
+        })}
+      </div>
+      {err && <div style={S.err}>{err}</div>}
+      {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+      {half && (
+        <>
+          {/* THEIRS FIRST on the screen even though the register is the headline, because it is the
+              part with buttons on it: a builder who came here to add a field should not scroll
+              past twenty of ours to find out whether they already did. */}
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", margin: "4px 0 6px" }}>
+            Your own fields on every {entLabel}
+          </div>
+          {custom.length === 0 ? (
+            <div style={{ border: "1px dashed #CBD5E1", borderRadius: 8, padding: "16px 14px",
+              fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginBottom: 18 }}>
+              None yet. {canEdit
+                ? "Add one and it appears on every " + entLabel + " straight away, above the fields below."
+                : "Somebody with settings access can add one."}
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto", marginBottom: 18 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={S.th}>Field</th><th style={S.th}>Kind</th><th style={S.th}>Stored as</th>
+                  <th style={{ ...S.th, textAlign: "right" }}></th>
+                </tr></thead>
+                <tbody>
+                  {custom.map((f, i) => (
+                    <tr key={f.id}>
+                      <td style={S.td}>
+                        <div style={{ fontWeight: 700, color: "#1E293B" }}>
+                          {f.label}
+                          {f.required && <span title="Asked for every time" style={{ color: "#DC2626", marginLeft: 4 }}>*</span>}
+                          {f.hidden && <SsfldHidden />}
+                        </div>
+                        {f.help && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{f.help}</div>}
+                        {f.type === "select" && f.choices.length > 0 && (
+                          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{f.choices.join(" · ")}</div>
+                        )}
+                        {/* A number's money and comma settings, as the thing they produce — the
+                            two switches are only meaningful as the number they print. */}
+                        {f.type === "number" && (
+                          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>Shows as {ssfldNumberSample(f)}</div>
+                        )}
+                      </td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{ssfldType(f.type)}</td>
+                      <td style={S.td}><code style={{ fontSize: 11.5, color: "#64748B" }}>{f.key}</code></td>
+                      <td style={{ ...S.td, textAlign: "right", whiteSpace: "nowrap" }}>
+                        {canEdit && (
+                          <>
+                            <button type="button" style={SSF_BTN(false)} disabled={busy || i === 0}
+                              title="Move up" onClick={() => move(f.id, -1)}>↑</button>{" "}
+                            <button type="button" style={SSF_BTN(false)} disabled={busy || i === custom.length - 1}
+                              title="Move down" onClick={() => move(f.id, 1)}>↓</button>{" "}
+                            <button type="button" style={SSF_BTN(false)} disabled={busy}
+                              onClick={() => setEditing(f)}>Edit</button>{" "}
+                            <button type="button" style={{ ...SSF_BTN(false), color: "#B91C1C" }} disabled={busy}
+                              onClick={() => {
+                                if (window.confirm("Delete “" + f.label + "”? It comes off every " + entLabel + ". What your team has already filled in is kept, and you can restore it.")) {
+                                  act(() => ssfCall("crm_field_delete", { id: f.id }));
+                                }
+                              }}>Delete</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* THE REGISTER — what she asked for first: every field that already exists. */}
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", margin: "4px 0 2px" }}>
+            What comes with Structure Studio
+          </div>
+          <div style={{ fontSize: 12, color: "#64748B", marginBottom: 2, lineHeight: 1.5 }}>
+            Every field a {entLabel} already has. None can be deleted — the rest of the product
+            reads them — but you can call one something else, or take it off the card.
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                <th style={S.th}>Field</th><th style={S.th}>Kind</th><th style={S.th}>Who fills it in</th>
+                <th style={{ ...S.th, textAlign: "right" }}></th>
+              </tr></thead>
+              <tbody>{builtinRows}</tbody>
+            </table>
+          </div>
+
+          {archived.length > 0 && (
+            <details style={{ marginTop: 16 }}>
+              <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#64748B" }}>
+                Deleted fields ({archived.length}) — what was filled in is still there
+              </summary>
+              <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}>
+                <tbody>
+                  {archived.map((f) => (
+                    <tr key={f.id}>
+                      <td style={S.td}><span style={{ fontWeight: 700, color: "#475569" }}>{f.label}</span></td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{ssfldType(f.type)}</td>
+                      <td style={S.td}><code style={{ fontSize: 11.5, color: "#94A3B8" }}>{f.key}</code></td>
+                      <td style={{ ...S.td, textAlign: "right" }}>
+                        {canEdit && (
+                          <button type="button" style={SSF_BTN(false)} disabled={busy}
+                            onClick={() => act(() => ssfCall("crm_field_delete", { id: f.id, restore: true }))}>Restore</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+        </>
+      )}
+      {adding && (
+        <SsfldEditor entity={entity} field={null} types={data ? data.types : []}
+          onClose={() => setAdding(false)} onSaved={load} />
+      )}
+      {editing && (
+        <SsfldEditor entity={entity} field={editing} types={data ? data.types : []}
+          onClose={() => setEditing(null)} onSaved={load} />
+      )}
+      {editingBuiltin && (
+        <SsfldBuiltinEditor entity={entity} field={editingBuiltin}
+          onClose={() => setEditingBuiltin(null)} onSaved={load} />
+      )}
+    </div>
+  );
+}
+
+// ── Settings → Meetings (migration 326, Carolyn 2026-10-22) ──────────────────────────────
+// A person's booking link and hours, the meeting types the business offers, and the
+// Google/Outlook connections. Spec + her decisions in MEETINGS_SCOPE.md.
+//
+// Carolyn's standing rule: every feature's settings get their own page under the Settings
+// tab, never a panel on the working tab. So the diary itself lives on the CRM record's
+// Meeting scheduler tab, and everything that CONFIGURES it lives here.
+//
+// ⚠️ TWO AUDIENCES ON ONE PAGE, and the split is the `meetings` area's own:
+//   * an 'own' holder (sales rep, dealer) sees and edits THEIR link, hours and types-offered
+//   * 'view'/'edit' additionally see the business half — the meeting types and the page's
+//     own settings — and only 'edit' may save it (`canManageBusiness` from the server)
+// The business cards render READ-ONLY for an own-only holder rather than being hidden: a rep
+// needs to see what "Lot walkthrough — 30 min" means to pick it, and a card that vanishes
+// reads as "not built" where a disabled one reads as "not yours". Same reasoning as the
+// greyed CRM tabs in 02-sales.jsx.
+const MEETING_DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
+
+// The zones a US shed builder actually works in, plus whatever this browser is set to, so the
+// list is short and the right answer is usually already in it. A zone we do not list is still
+// storable — the server accepts any zone Intl knows — but nobody has asked for one yet.
+function ssMeetingZones(current) {
+  const base = ["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix",
+    "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"];
+  let here = null;
+  try { here = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_e) { here = null; }
+  const out = [];
+  for (const z of [current, here, ...base]) if (z && out.indexOf(z) === -1) out.push(z);
+  return out;
+}
+
+const MEETING_PLACES = [
+  ["in_person", "In person"],
+  ["phone", "Phone call"],
+  ["video", "Video call"],
+  ["custom", "Something else"],
+];
+
+// VIDEO PROVIDERS (migrations 328/329, Carolyn 2026-10-22: "We need to be able to connect
+// zoom, hangouts & teams to generate video meeting links for video meetings").
+//
+// Two ways to get the link, per type (migration 333, `conference_mode`):
+//   room     — the builder's STANDING ROOM LINK, pasted once; every booking carries it
+//              (328/329). Works with any provider and needs nothing connected.
+//   generate — a NEW meeting per booking, made in the HOST's own connected account by
+//              _shared/meetingVideo.ts. Zoom only for now (Carolyn 2026-10-23: "Zoom first");
+//              Meet and Teams links come from the Google / Microsoft calendar connections,
+//              which are not built. The room link, if any, is the fallback when one cannot be
+//              made, and the booking never fails for want of a link.
+const MEETING_VIDEO = [
+  ["none", "I'll send a link myself"],
+  ["zoom", "Zoom"],
+  ["google_meet", "Google Meet"],
+  ["teams", "Microsoft Teams"],
+  ["other", "Something else"],
+];
+
+// MODE (Carolyn 2026-10-26: "I want all the company set meetings to show in MY PROFILE so that
+// users can choose the calendars they want to use"). One component, two homes, so the two halves
+// can never disagree about what a host row is:
+//   "mine"     — My Profile → My meetings: MY booking link and hours, my days off, and which of
+//                the company's meeting types I take. Every person, whatever their title.
+//   "business" — Settings → Customer Hub → Meetings: the company's meeting types and booking
+//                pages. Read-only below Edit; the server refuses those writes anyway.
+function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) {
+  const mine = mode === "mine";
+  const [data, setData] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [host, setHost] = useState(null);       // the draft of MY host row
+  const [page, setPage] = useState(null);       // the draft of the tenant's settings
+  const [editType, setEditType] = useState(null);
+  const [newDate, setNewDate] = useState("");
+
+  const call = useCallback(async (action, body) => {
+    const { data: d, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !d || d.error) throw new Error((d && d.error) || (error ? await fnError(error) : "That didn't work."));
+    return d;
+  }, []);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await call("overview", {});
+      setData(d);
+      setHost(d.myHost
+        ? { ...d.myHost, weeklyHours: d.myHost.weeklyHours || {} }
+        // No host row yet — this person has never had a booking link. Seed a sensible week
+        // rather than an empty one: a brand-new link with no hours shows a customer a
+        // calendar with nothing on it, which reads as broken.
+        : {
+            id: null, slug: "", publicName: "", publicTitle: "", photoUrl: null,
+            timeZone: (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Chicago"; } catch (_e) { return "America/Chicago"; } })(),
+            weeklyHours: { mon: [["08:00", "17:00"]], tue: [["08:00", "17:00"]], wed: [["08:00", "17:00"]], thu: [["08:00", "17:00"]], fri: [["08:00", "17:00"]] },
+            accepting: true, typeIds: [],
+          });
+      setPage(d.settings || { enabled: false, heading: "", intro: "", sendConfirmation: true, reminderHours: [24], createContact: true });
+    } catch (e) {
+      setMsg({ err: e.message });
+    }
+  }, [call]);
+
+  useEffect(() => { setData(null); setMsg(null); load(); }, [clientId, load]);
+
+  if (msg && msg.err && !data) return <div style={S.err}>{msg.err}</div>;
+  if (!data || !host) return <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading your meeting settings…</div>;
+
+  const canBiz = !!data.canManageBusiness;
+  const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const bookUrl = host.slug
+    ? `${shopPublicOrigin()}/book?client=${encodeURIComponent(clientId)}&with=${encodeURIComponent(host.slug)}`
+    : null;
+
+  const setHostField = (k, v) => setHost((h) => ({ ...h, [k]: v }));
+  const flash = (ok) => { setMsg({ ok }); setTimeout(() => setMsg((m) => (m && m.ok === ok ? null : m)), 2600); };
+
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+
+  // ── My hours ────────────────────────────────────────────────────────────────────────────
+  const blocksFor = (key) => host.weeklyHours[key] || [];
+  const setBlocks = (key, blocks) => setHost((h) => {
+    const next = { ...h.weeklyHours };
+    if (blocks && blocks.length) next[key] = blocks; else delete next[key];
+    return { ...h, weeklyHours: next };
+  });
+  const toggleDay = (key, on) => setBlocks(key, on ? [["08:00", "17:00"]] : []);
+  const editBlock = (key, i, which, value) => {
+    const blocks = blocksFor(key).map((b, n) => (n === i ? (which === 0 ? [value, b[1]] : [b[0], value]) : b));
+    setBlocks(key, blocks);
+  };
+
+  const saveHost = () => run(async () => {
+    const d = await call("save_host", {
+      hostId: host.id || undefined,
+      slug: host.slug || undefined,
+      publicName: host.publicName,
+      publicTitle: host.publicTitle,
+      timeZone: host.timeZone,
+      weeklyHours: host.weeklyHours,
+      accepting: host.accepting,
+    });
+    setHost((h) => ({ ...h, ...d.host, typeIds: h.typeIds }));
+    flash(host.id ? "Saved." : "Your booking link is ready.");
+    if (!host.id) load();
+  });
+
+  const saveMyTypes = (ids) => run(async () => {
+    if (!host.id) { setMsg({ err: "Save your booking link first, then choose what you offer." }); return; }
+    await call("set_host_types", { hostId: host.id, typeIds: ids });
+    setHost((h) => ({ ...h, typeIds: ids }));
+    flash("Saved.");
+  });
+
+  const savePage = () => run(async () => {
+    const d = await call("save_settings", page);
+    setPage(d.settings);
+    flash(d.settings.enabled ? "Saved. Your booking pages are live." : "Saved. Your booking pages are switched off.");
+  });
+
+  const saveType = (t) => run(async () => {
+    await call("save_type", t);
+    setEditType(null);
+    await load();
+    flash("Saved.");
+  });
+
+  const removeType = (t) => run(async () => {
+    if (!window.confirm(`Delete “${t.name}”? Anyone offering it stops offering it.`)) return;
+    await call("delete_type", { id: t.id });
+    await load();
+    flash("Deleted.");
+  });
+
+  const addOverride = () => run(async () => {
+    if (!host.id) { setMsg({ err: "Save your booking link first." }); return; }
+    if (!newDate) { setMsg({ err: "Pick the date you're away." }); return; }
+    await call("save_override", { hostId: host.id, onDate: newDate, blocked: true });
+    setNewDate("");
+    await load();
+    flash("Blocked out.");
+  });
+
+  const dropOverride = (o) => run(async () => {
+    await call("delete_override", { id: o.id });
+    await load();
+    flash("Back on.");
+  });
+
+  const copyLink = async () => {
+    if (!bookUrl) return;
+    try { await navigator.clipboard.writeText(bookUrl); setCopied(true); setTimeout(() => setCopied(false), 1600); }
+    catch (_e) { window.prompt("Copy this:", bookUrl); }
+  };
+
+  return (
+    <div>
+      {mine && viewingLabel && (
+        <div style={{ ...sub, marginBottom: 10 }}>
+          You're looking at <strong>{viewingLabel}</strong>. A booking link belongs to a person on their
+          team, so there isn't one of yours to set up here.
+        </div>
+      )}
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && (
+        <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "9px 13px", color: "#065F46", fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+          {msg.ok}
+        </div>
+      )}
+
+      {mine && (<>
+      {/* ── MY BOOKING LINK ───────────────────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <CardHead title="My booking link" />
+        {!data.myHost && (
+          <div style={{ ...sub, marginBottom: 12 }}>
+            You don't have a booking link yet. Add the name customers should see, check your hours
+            below, and save — the link is yours from then on.
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+          <div style={{ flex: "1 1 220px" }}>
+            <span style={lbl}>Name customers see</span>
+            <input value={host.publicName || ""} maxLength={80} onChange={(e) => setHostField("publicName", e.target.value)}
+              placeholder="Jamie Fulton" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ flex: "1 1 180px" }}>
+            <span style={lbl}>Title (optional)</span>
+            <input value={host.publicTitle || ""} maxLength={80} onChange={(e) => setHostField("publicTitle", e.target.value)}
+              placeholder="Sales Rep" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ flex: "1 1 180px" }}>
+            <span style={lbl}>Time zone</span>
+            <select value={host.timeZone} onChange={(e) => setHostField("timeZone", e.target.value)}
+              style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+              {ssMeetingZones(host.timeZone).map((z) => <option key={z} value={z}>{z.replace(/_/g, " ")}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <span style={lbl}>The link</span>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 260px", minWidth: 0 }}>
+              <span style={{ ...sub, whiteSpace: "nowrap" }}>/book?with=</span>
+              <input value={host.slug || ""} maxLength={40} onChange={(e) => setHostField("slug", e.target.value)}
+                placeholder="jamie" style={{ ...S.input, flex: 1, minWidth: 0 }} />
+            </div>
+            {bookUrl && (
+              <>
+                <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={copyLink}>{copied ? "Copied" : "Copy link"}</button>
+                <a href={bookUrl} target="_blank" rel="noopener noreferrer" style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", textDecoration: "none" }}>Open</a>
+              </>
+            )}
+          </div>
+          {bookUrl && <div style={{ ...sub, marginTop: 5, wordBreak: "break-all" }}>{bookUrl}</div>}
+          {/* The page is dark for EVERY person on the account until this switch is on. Said
+              here, next to the link, because that is where somebody discovers their link
+              shows "not available" and has no idea why. */}
+          {canBiz && page && !page.enabled && (
+            <div style={{ ...sub, marginTop: 6, color: "#92400E" }}>
+              Booking pages are switched off for this account, so this link isn't live yet — switch
+              them on under Settings → Customer Hub → Meetings.
+            </div>
+          )}
+          {!canBiz && page && !page.enabled && (
+            <div style={{ ...sub, marginTop: 6, color: "#92400E" }}>
+              Booking pages aren't switched on for this account yet, so this link isn't live. Ask an
+              owner or admin to turn them on.
+            </div>
+          )}
+        </div>
+        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", cursor: "pointer" }}>
+          <input type="checkbox" checked={!!host.accepting} onChange={(e) => setHostField("accepting", e.target.checked)} style={{ marginTop: 2 }} />
+          <span><strong>Accepting bookings</strong><span style={{ color: "#64748B" }}> — turn this off while you're away and the page says so instead of showing an empty calendar</span></span>
+        </label>
+      </div>
+
+      {/* ── MY HOURS ──────────────────────────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <CardHead title="My hours" />
+        <div style={{ ...sub, marginBottom: 10 }}>
+          The hours customers can book, in <strong>{host.timeZone.replace(/_/g, " ")}</strong>. Times are
+          24-hour. These are the same kind of hours your phone uses, so they read the same way.
+        </div>
+        {MEETING_DAYS.map(([key, label]) => {
+          const blocks = blocksFor(key);
+          const on = blocks.length > 0;
+          return (
+            <div key={key} style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 7, flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, width: 92, cursor: "pointer", flex: "0 0 auto" }}>
+                <input type="checkbox" checked={on} onChange={(e) => toggleDay(key, e.target.checked)} />
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: "#334155" }}>{label}</span>
+              </label>
+              {!on && <span style={{ fontSize: 12.5, color: "#94A3B8", paddingTop: 3 }}>Not available</span>}
+              {on && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  {blocks.map((b, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <input value={b[0]} maxLength={5} aria-label={`${label} start`} onChange={(e) => editBlock(key, i, 0, e.target.value)}
+                        placeholder="08:00" style={{ ...S.input, width: 82 }} />
+                      <span style={{ fontSize: 12.5, color: "#64748B" }}>to</span>
+                      <input value={b[1]} maxLength={5} aria-label={`${label} end`} onChange={(e) => editBlock(key, i, 1, e.target.value)}
+                        placeholder="17:00" style={{ ...S.input, width: 82 }} />
+                      {blocks.length > 1 && (
+                        <button type="button" aria-label={`Remove this block on ${label}`} onClick={() => setBlocks(key, blocks.filter((_x, n) => n !== i))}
+                          style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FECACA", padding: "4px 9px" }}>Remove</button>
+                      )}
+                      {i === blocks.length - 1 && blocks.length < 6 && (
+                        <button type="button" aria-label={`Add another block on ${label}`} onClick={() => setBlocks(key, blocks.concat([["13:00", "17:00"]]))}
+                          style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "4px 9px" }}>Add</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
+          <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={saveHost}>
+            {busy ? "Saving…" : (data.myHost ? "Save my link and hours" : "Create my booking link")}
+          </button>
+          <span style={sub}>A lunch break is two blocks on the same day — 08:00 to 12:00, then 13:00 to 17:00.</span>
+        </div>
+      </div>
+
+      {/* ── DAYS OFF ──────────────────────────────────────────────────────────────────── */}
+      {data.myHost && (
+        <div style={S.card}>
+          <CardHead title="Days off" />
+          <div style={{ ...sub, marginBottom: 10 }}>
+            A holiday or a day away. A blocked day beats your hours above, so nobody can book you on it.
+          </div>
+          {(data.overrides || []).length === 0 && (
+            <div style={{ ...sub, marginBottom: 10 }}>Nothing blocked out between now and the end of your booking window.</div>
+          )}
+          {(data.overrides || []).map((o) => (
+            <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#0F172A", width: 110 }}>{o.onDate}</span>
+              <span style={{ fontSize: 12.5, color: "#64748B", flex: 1 }}>
+                {o.blocked ? "Blocked out" : `Working ${(o.hours || []).map((b) => b[0] + "–" + b[1]).join(", ")}`}
+              </span>
+              <button style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FECACA", padding: "4px 10px" }}
+                disabled={busy} onClick={() => dropOverride(o)}>Remove</button>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
+            <input type="date" value={newDate} aria-label="Date to block out" onChange={(e) => setNewDate(e.target.value)} style={{ ...S.input, width: "auto" }} />
+            <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !newDate} onClick={addOverride}>Block out this day</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── WHAT I OFFER ──────────────────────────────────────────────────────────────── */}
+      {data.myHost && (
+        <div style={S.card}>
+          <CardHead title="Meeting types I take" />
+          <div style={{ ...sub, marginBottom: 10 }}>
+            Tick the company's meeting types you want on your calendar — customers and your team can
+            book you for those. Tick none and your link has nothing to offer, so it won't take bookings.
+            {canBiz && <> The types themselves are set up in <a href={ssPagePath("settings", "meetings")} style={{ color: ACCENT, fontWeight: 700 }}>Customer Hub → Meetings</a>.</>}
+          </div>
+          {(data.types || []).filter((t) => t.active).length === 0 && (
+            <div style={sub}>The business hasn't set up any meeting types yet.</div>
+          )}
+          {(data.types || []).filter((t) => t.active).map((t) => {
+            const on = (host.typeIds || []).indexOf(t.id) !== -1;
+            return (
+              <label key={t.id} style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 7, cursor: "pointer" }}>
+                <input type="checkbox" checked={on} disabled={busy}
+                  onChange={(e) => saveMyTypes(e.target.checked
+                    ? (host.typeIds || []).concat([t.id])
+                    : (host.typeIds || []).filter((x) => x !== t.id))}
+                  style={{ marginTop: 2 }} />
+                <span>
+                  <strong>{t.name}</strong>
+                  <span style={{ color: "#64748B" }}>
+                    {" — "}{t.durationMinutes} min
+                    {t.locationDetail ? ` · ${t.locationDetail}` : ""}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      </>)}
+
+      {!mine && (<>
+      {/* Where each person's own setup went (2026-10-26). A pointer rather than silence: this
+          is the page people have been told to use for their hours since 2026-10-22. */}
+      <div style={S.card}>
+        <CardHead title="Your own booking link and hours" />
+        <div style={sub}>
+          Each person sets their own booking link, hours, days off and the meeting types they take in{" "}
+          <a href={ssPagePath("settings", "myprofile")} style={{ color: ACCENT, fontWeight: 700 }}>My Profile → My meetings</a>.
+          {" "}This page is the company's: the meeting types everyone can choose from, and the booking pages.
+        </div>
+      </div>
+
+      {/* ── MEETING TYPES (the business) ──────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <CardHead title="Meeting types" />
+        <div style={{ ...sub, marginBottom: 12 }}>
+          {canBiz
+            ? "What this business offers. Each person then picks which of these they take."
+            : "What this business offers. Only an owner or admin changes these."}
+        </div>
+        {(data.types || []).map((t) => (
+          <div key={t.id} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "11px 13px", marginBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 11, flexWrap: "wrap" }}>
+              <span style={{ width: 4, alignSelf: "stretch", minHeight: 30, borderRadius: 3, background: t.color || ACCENT, flex: "0 0 auto" }} />
+              <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 13.5, color: "#0F172A" }}>
+                  {t.name}{!t.active && <span style={{ color: "#94A3B8", fontWeight: 600 }}> · switched off</span>}
+                </div>
+                <div style={{ fontSize: 12, color: "#64748B" }}>
+                  {t.durationMinutes} min
+                  {` · ${(MEETING_PLACES.find((x) => x[0] === t.locationKind) || ["", "In person"])[1]}`}
+                  {t.locationDetail ? ` · ${t.locationDetail}` : ""}
+                  {t.conferenceMode === "generate"
+                    ? " · new Zoom link per booking"
+                    : t.conferenceUrl ? ` · ${(MEETING_VIDEO.find((x) => x[0] === t.conferenceProvider) || ["", "Video"])[1]} link` : ""}
+                  {` · ${t.minNoticeHours}h notice`}
+                  {(t.bufferBeforeMinutes || t.bufferAfterMinutes) ? ` · ${t.bufferBeforeMinutes}/${t.bufferAfterMinutes} min buffer` : ""}
+                </div>
+              </div>
+              {canBiz && (
+                <>
+                  <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "5px 11px" }}
+                    onClick={() => setEditType(editType && editType.id === t.id ? null : { ...t })}>
+                    {editType && editType.id === t.id ? "Close" : "Edit"}
+                  </button>
+                  <button style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FECACA", padding: "5px 11px" }}
+                    disabled={busy} onClick={() => removeType(t)}>Delete</button>
+                </>
+              )}
+            </div>
+            {editType && editType.id === t.id && (
+              <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} video={{ ready: data.videoReady, team: data.team }} />
+            )}
+          </div>
+        ))}
+        {canBiz && (
+          editType && !editType.id
+            ? (
+              <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "11px 13px" }}>
+                <MeetingTypeEditor draft={editType} onChange={setEditType} onSave={saveType} busy={busy} video={{ ready: data.videoReady, team: data.team }} />
+              </div>
+            )
+            : (
+              <button style={S.btn(ACCENT, "#FFF")} disabled={busy}
+                onClick={() => setEditType({
+                  name: "", durationMinutes: 30, locationKind: "in_person", locationDetail: "",
+                  description: "", bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
+                  minNoticeHours: 2, maxDaysAhead: 60, slotIntervalMinutes: 15, active: true,
+                  conferenceProvider: "none", conferenceUrl: "", conferenceNote: "", conferenceMode: "room",
+                })}>Add a meeting type</button>
+            )
+        )}
+      </div>
+
+      {/* ── WHERE THE PER-PERSON CONNECTIONS WENT (Carolyn 2026-10-23) ──────────────────
+          "My Zoom account" and "Connected calendars" were two cards here. They are one tabbed
+          segment in My Profile now (MyConnectionsCard): they are per PERSON, and this page is
+          the business's — the booking link, the hours, the types and the booking pages. A
+          pointer rather than silence, because the meeting-type editor tells people to connect
+          their own Zoom and this is the page they are looking at when it does. */}
+      <div style={S.card}>
+        <CardHead title="Zoom, calendars and video" />
+        <div style={sub}>
+          Your own accounts live in{" "}
+          <a href={ssPagePath("settings", "myprofile")} style={{ color: ACCENT, fontWeight: 700 }}>My Profile → My connections</a>
+          {" "}— Zoom, Google Meet, Teams and calendar links. Everyone on the team connects their
+          own, so a meeting is made in the host's account and their own calendar blocks a slot.
+        </div>
+      </div>
+
+      {/* ── THE BOOKING PAGES (the business) ──────────────────────────────────────────── */}
+      {page && (
+        <div style={S.card}>
+          <CardHead title="Booking pages" />
+          {!canBiz && <div style={{ ...sub, marginBottom: 10 }}>Only an owner or admin changes these.</div>}
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 10, cursor: canBiz ? "pointer" : "default" }}>
+            <input type="checkbox" checked={!!page.enabled} disabled={!canBiz}
+              onChange={(e) => setPage((x) => ({ ...x, enabled: e.target.checked }))} style={{ marginTop: 2 }} />
+            <span><strong>Booking pages are live</strong><span style={{ color: "#64748B" }}> — until this is on, every booking link on this account says it isn't available</span></span>
+          </label>
+          <div style={{ marginBottom: 12 }}>
+            <span style={lbl}>Heading</span>
+            <input value={page.heading || ""} disabled={!canBiz} maxLength={120}
+              onChange={(e) => setPage((x) => ({ ...x, heading: e.target.value }))}
+              placeholder="Come and see us" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <span style={lbl}>Intro</span>
+            <textarea value={page.intro || ""} disabled={!canBiz} maxLength={1000} rows={2}
+              onChange={(e) => setPage((x) => ({ ...x, intro: e.target.value }))}
+              placeholder="Pick a time that suits you and we'll walk the lot together."
+              style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+          </div>
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 8, cursor: canBiz ? "pointer" : "default" }}>
+            <input type="checkbox" checked={!!page.createContact} disabled={!canBiz}
+              onChange={(e) => setPage((x) => ({ ...x, createContact: e.target.checked }))} style={{ marginTop: 2 }} />
+            <span><strong>Add whoever books to Contacts</strong><span style={{ color: "#64748B" }}> — a meeting with somebody who isn't in your CRM is a lead nobody follows up</span></span>
+          </label>
+          {/* CONFIRMATIONS + REMINDERS (migration 327). These switches are rendered now
+              because they are read now — until phase 2 they were deliberately absent, since a
+              checkbox that saves a value nothing acts on is worse than no checkbox: somebody
+              ticks it and believes reminders are going out. */}
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 8, cursor: canBiz ? "pointer" : "default" }}>
+            <input type="checkbox" checked={!!page.sendConfirmation} disabled={!canBiz}
+              onChange={(e) => setPage((x) => ({ ...x, sendConfirmation: e.target.checked }))} style={{ marginTop: 2 }} />
+            <span><strong>Email a confirmation when someone books</strong><span style={{ color: "#64748B" }}> — with a calendar invite attached, and a link they can use to move or cancel it themselves</span></span>
+          </label>
+          <div style={{ marginBottom: 12 }}>
+            <span style={lbl}>Reminders before the meeting</span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[[2, "2 hours"], [24, "1 day"], [48, "2 days"], [168, "1 week"]].map(([h, label]) => {
+                const on = (page.reminderHours || []).indexOf(h) !== -1;
+                return (
+                  <button key={h} type="button" disabled={!canBiz}
+                    onClick={() => setPage((x) => ({
+                      ...x,
+                      reminderHours: on
+                        ? (x.reminderHours || []).filter((v) => v !== h)
+                        : (x.reminderHours || []).concat([h]).sort((a, b) => a - b),
+                    }))}
+                    style={{
+                      background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155",
+                      border: `1px solid ${on ? ACCENT : "#CBD5E1"}`, borderRadius: 999,
+                      padding: "5px 13px", fontSize: 12.5, fontWeight: 700,
+                      cursor: canBiz ? "pointer" : "default", fontFamily: "inherit",
+                    }}>{label}</button>
+                );
+              })}
+            </div>
+            <div style={{ ...sub, marginTop: 6 }}>
+              {(page.reminderHours || []).length
+                ? "Email only. Pick none and nobody gets a reminder."
+                : "Nobody gets a reminder at the moment."}
+            </div>
+          </div>
+          {/* ⚠️ Text reminders are NOT a switch here, and that is deliberate rather than
+              unfinished: a text to somebody who never opted in runs into the registration,
+              consent and STOP rules in Settings → Text Messaging, and it is a compliance
+              question before it is a feature. Said plainly so nobody goes looking for the
+              toggle. */}
+          <div style={{ ...sub, marginBottom: 12 }}>
+            Reminders go by email. Text reminders aren't offered yet — texting a customer needs
+            their consent on record, which is a separate thing to set up.
+          </div>
+          {canBiz && (
+            <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={savePage}>
+              {busy ? "Saving…" : "Save booking page settings"}
+            </button>
+          )}
+        </div>
+      )}
+      </>)}
+    </div>
+  );
+}
+
+// The editor for one meeting type. Split out because it renders in two places — inline on an
+// existing type, and on its own for a new one — and duplicating eleven fields is how two
+// copies of a form drift apart.
+function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
+  const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
+  const set = (k, v) => onChange({ ...draft, [k]: v });
+  const num = (k, v) => set(k, v === "" ? "" : Math.max(0, Math.trunc(Number(v)) || 0));
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #E2E8F0" }}>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ flex: "1 1 200px" }}>
+          <span style={lbl}>Name</span>
+          <input value={draft.name} maxLength={80} onChange={(e) => set("name", e.target.value)}
+            placeholder="Lot walkthrough" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 120px" }}>
+          <span style={lbl}>Minutes</span>
+          <input type="number" min="5" max="480" value={draft.durationMinutes}
+            onChange={(e) => num("durationMinutes", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 150px" }}>
+          <span style={lbl}>Where</span>
+          <select value={draft.locationKind} onChange={(e) => set("locationKind", e.target.value)}
+            style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+            {MEETING_PLACES.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <span style={lbl}>Where exactly (shown to the customer)</span>
+        <input value={draft.locationDetail || ""} maxLength={300} onChange={(e) => set("locationDetail", e.target.value)}
+          placeholder="At our lot — 4120 State Road 9" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+      </div>
+      {/* VIDEO, only for a video call — a dial-in for a phone type belongs in "where exactly"
+          above, and offering a meeting link on a lot walkthrough is noise. */}
+      {draft.locationKind === "video" && (() => {
+        const provider = draft.conferenceProvider || "none";
+        // 'generate' only means anything for Zoom today (migration 333, Carolyn 2026-10-23:
+        // Zoom first). Meet and Teams arrive with the Google / Microsoft calendar connections.
+        const generate = provider === "zoom" && draft.conferenceMode === "generate";
+        const zoomReady = !!(video && video.ready && video.ready.zoom);
+        // Who offers this type but would fall back to the room link because they haven't
+        // connected Zoom. Only someone managing the team gets the list (the server sends an
+        // empty team to an own-only caller).
+        const offering = ((video && video.team) || []).filter((h) => draft.id && (h.typeIds || []).indexOf(draft.id) !== -1);
+        const unconnected = offering.filter((h) => h.zoom !== "connected");
+        return (
+          <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 13px", marginBottom: 10, background: "#F8FAFC" }}>
+            <div style={{ flex: "0 0 200px", maxWidth: 260, marginBottom: 10 }}>
+              <span style={lbl}>Video provider</span>
+              <select value={provider}
+                onChange={(e) => onChange({ ...draft, conferenceProvider: e.target.value, conferenceMode: e.target.value === "zoom" ? (draft.conferenceMode || "room") : "room" })}
+                style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+                {MEETING_VIDEO.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+              </select>
+            </div>
+
+            {provider === "zoom" && (
+              <div style={{ marginBottom: 10 }} role="radiogroup" aria-label="How the Zoom link is made">
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 6, cursor: "pointer" }}>
+                  <input type="radio" name="ss-conf-mode" checked={generate} onChange={() => set("conferenceMode", "generate")} style={{ marginTop: 2 }} />
+                  <span><strong>A new Zoom meeting for every booking</strong><span style={{ color: "#64748B" }}> — made in the host's own Zoom account the moment someone books, and moved or deleted with the booking</span></span>
+                </label>
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", cursor: "pointer" }}>
+                  <input type="radio" name="ss-conf-mode" checked={!generate} onChange={() => set("conferenceMode", "room")} style={{ marginTop: 2 }} />
+                  <span><strong>My standing room link</strong><span style={{ color: "#64748B" }}> — the same Zoom room for every booking</span></span>
+                </label>
+              </div>
+            )}
+
+            {provider !== "none" && (
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 240px" }}>
+                  <span style={lbl}>{generate ? "Room link to use if a new meeting can't be made (optional)" : "Your meeting room link"}</span>
+                  <input value={draft.conferenceUrl || ""} maxLength={500}
+                    onChange={(e) => set("conferenceUrl", e.target.value)}
+                    placeholder="https://zoom.us/j/1234567890"
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+                </div>
+                <div style={{ flex: "1 1 200px" }}>
+                  <span style={lbl}>Anything else they need to get in (optional)</span>
+                  <input value={draft.conferenceNote || ""} maxLength={300}
+                    onChange={(e) => set("conferenceNote", e.target.value)}
+                    placeholder="Passcode 4120"
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+                </div>
+              </div>
+            )}
+
+            <div style={{ fontSize: 12, color: "#64748B", marginTop: 10, lineHeight: 1.55 }}>
+              {provider === "none"
+                ? "Pick a provider and every booking of this type carries its link — in the confirmation, the reminder, and the calendar invite."
+                : generate
+                  ? "Each person who offers this type connects their own Zoom in My Profile → My connections. If someone hasn't, or Zoom can't be reached, the booking still goes through: it uses the room link above, or tells the customer a link will follow and gives you a Make the link button on the meeting."
+                  : "This is your standing room link, so every booking of this type uses the same one. It goes in the confirmation, the reminder, and the calendar invite — where their calendar turns it into a Join button."}
+            </div>
+            {generate && !zoomReady && (
+              <div style={{ fontSize: 12, color: "#92400E", marginTop: 6, lineHeight: 1.55 }}>
+                Zoom isn't switched on for Structure Studio yet, so until it is, bookings of this type use the room link above.
+              </div>
+            )}
+            {generate && zoomReady && unconnected.length > 0 && (
+              <div style={{ fontSize: 12, color: "#92400E", marginTop: 6, lineHeight: 1.55 }}>
+                Not connected to Zoom yet: {unconnected.map((h) => h.publicName).join(", ")}. Their bookings use the room link until they connect.
+              </div>
+            )}
+            {(provider === "google_meet" || provider === "teams") && (
+              <div style={{ fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.55 }}>
+                A new {provider === "teams" ? "Teams" : "Meet"} link for every booking comes with the {provider === "teams" ? "Microsoft" : "Google"} calendar connection, which isn't built yet. Your room link works today.
+              </div>
+            )}
+          </div>
+        );
+      })()}
+      <div style={{ marginBottom: 10 }}>
+        <span style={lbl}>What it's for (shown to the customer)</span>
+        <textarea value={draft.description || ""} maxLength={2000} rows={2} onChange={(e) => set("description", e.target.value)}
+          placeholder="Walk the lot and see what's ready now. Bring your measurements if you have them."
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ flex: "0 0 130px" }}>
+          <span style={lbl}>Buffer before</span>
+          <input type="number" min="0" max="240" value={draft.bufferBeforeMinutes}
+            onChange={(e) => num("bufferBeforeMinutes", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 130px" }}>
+          <span style={lbl}>Buffer after</span>
+          <input type="number" min="0" max="240" value={draft.bufferAfterMinutes}
+            onChange={(e) => num("bufferAfterMinutes", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 140px" }}>
+          <span style={lbl}>Least notice (hours)</span>
+          <input type="number" min="0" max="720" value={draft.minNoticeHours}
+            onChange={(e) => num("minNoticeHours", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 140px" }}>
+          <span style={lbl}>Book up to (days)</span>
+          <input type="number" min="1" max="365" value={draft.maxDaysAhead}
+            onChange={(e) => num("maxDaysAhead", e.target.value)} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "0 0 140px" }}>
+          <span style={lbl}>Times on the hour every</span>
+          <select value={draft.slotIntervalMinutes} onChange={(e) => num("slotIntervalMinutes", e.target.value)}
+            style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+            {[10, 15, 20, 30, 60].map((n) => <option key={n} value={n}>{n} min</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10, lineHeight: 1.5 }}>
+        A buffer is time nobody can book either side of this meeting — travel to the lot, or writing
+        the estimate up afterwards.
+      </div>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 10, cursor: "pointer" }}>
+        <input type="checkbox" checked={draft.active !== false} onChange={(e) => set("active", e.target.checked)} />
+        <span><strong>Offered</strong><span style={{ color: "#64748B" }}> — switch it off to stop it being bookable without losing its history</span></span>
+      </label>
+      <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !String(draft.name || "").trim()} onClick={() => onSave(draft)}>
+        {busy ? "Saving…" : "Save meeting type"}
+      </button>
+    </div>
+  );
+}
+
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false, hubReach = null }) {
+  const [subState, setSubState] = useState("sheds");
   const setSub = onSub || setSubState;
   // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
   // ssPhoneOffered answer, or the rail would offer a Phone tab the body clamps to Structures.
   const TABS = ssSettingsTabs({ isOwner, isAdmin, access, phoneOffered });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
-  // /portal/settings/branding, a link people hold, would fall back to Structures.
-  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked });
+  // /settings/branding, a link people hold, would fall back to Structures.
+  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked, phoneOffered });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
-  // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
+  // a renamed sub-tab like /settings/color) survived as-is, and since every content branch
   // below is an equality match on a KNOWN slug, nothing rendered: the banner and sub-tab bar
   // appeared, the caption claimed "Structures — Building styles, sizes and base prices", the body
   // was empty and no tab was underlined. `active` already fell back, so only the label was right.
@@ -4242,7 +6597,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           build another block down here … underneath here that has the real time pricing in
           it"). The component gates itself on rtpUnlocked — not-entitled renders a compact
           teaser with a Billing deep link, so the block is also the feature's shop window. */}
-      {sub === "structures" && (<>
+      {sub === "sheds" && (<>
         <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}
@@ -4257,8 +6612,14 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
       {/* `advanced` is the Advanced mode switch (06-3d.jsx AdvancedModeCard), null where it must not show. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} view3d={view3d} canBill={canBill} advanced={advanced} />}
+      {sub === "online-inventory" && (
+        <div style={S.card}>
+          <CardHead title="Online Inventory" />
+          <ShopSettingsPanel clientId={clientId} canEdit={isAdmin || !access || access.inventory === "edit"} />
+        </div>
+      )}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
-          Every one of them is still a real /portal/settings/<slug>, so the bookmarks and the
+          Every one of them is still a real /settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}
       {hubs.company.some((t) => t[0] === sub) && (
         <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
@@ -4271,34 +6632,1637 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           canReadTax={isAdmin || !access || ssCanRead(access, "settings_crm")}
           canEditTax={isAdmin || !access || ssCanWrite(access, "settings_crm")} />
       )}
-      {sub === "connection" && <SettingsView section="connection" />}
+      {/* The company rate lives on Company → Tax now; the Estimates & Invoices card links there. */}
+      {sub === "connection" && <SettingsView section="connection" onOpenTax={() => setSub("tax")} />}
+      {/* CUSTOMER HUB is a hub with its own top navigation, the Company shape: two tabs behind
+          one rail item, each still a real /settings/<slug>. `pipelines` is unchanged as an
+          address, which is the point — see ssCustomerHubTabs. */}
+      {/* `sub === "pipelines"` on its own as well: it is the hub's RAIL id, and since the hub's tabs
+          are filtered per area (2026-10-23) someone who holds only Phone or Meetings has no
+          Pipelines tab — the shell's own clamp then opens their first tab instead of nothing. */}
+      {(hubs.pipelines.some((t) => t[0] === sub) || (sub === "pipelines" && hubs.pipelines.length > 0)) && (
+        <CustomerHubShell sub={sub} onSub={setSub} tabs={hubs.pipelines}
+          viewingLabel={viewingLabel} crmUnlocked={crmUnlocked} crmPending={crmPending}
+          clientId={clientId} canEdit={isAdmin || !access || ssCanWrite(access, "settings_crm")}
+          isAdmin={isAdmin} access={access} />
+      )}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
-          open, and /portal/settings/quickbooks is a link people actually have. */}
+          open, and /settings/quickbooks is a link people actually have. */}
       {sub === "quickbooks" && (qboUnlocked
         ? <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />
         : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}
-      {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
-      {/* Self-serve carrier registration. canEdit mirrors the server's own split: reading the
-          status is contacts-level, but every action that submits or spends is
-          settings_billing:'edit'. The component still renders read-only for everyone else
-          rather than vanishing — a rep should be able to see that texting is coming. */}
-      {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
-        canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
-      {/* My Synergy Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
-          phone_settings_save / phone_status_set / phone_signout_user are gated on — read the
-          unclamped way CompanyShell's tax flags are: an owner/admin, or a null map (a platform
-          operator in view-as, whose rights come from app_operators). 'own' never writes here:
-          phone is not an ownWrites area, so ssCanWrite answers false for it. The server
-          refuses regardless. */}
-      {sub === "phone" && <PhoneSettingsView clientId={clientId} viewingLabel={viewingLabel}
-        canEdit={isAdmin || !access || ssCanWrite(access, "phone")}
-        onOpenTexting={() => setSub("sms")} />}
+      {/* Email Settings, Text Messaging and Phone render inside CustomerHubShell since 2026-10-23
+          (same slugs, same props, same canEdit rules) — see ssCustomerHubTabs. */}
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
+      {/* aiCard / viewing / onOpenPhone: the Call recording & AI transcripts card (2026-10-14). It
+          shows where the Phone tab is offered, has no buttons in view-as, and its owner line links
+          to Settings › Phone only when that tab is in this person's list. */}
       {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved}
-        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} />}
+        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending}
+        aiCard={phoneOffered} viewing={!!viewingLabel}
+        onOpenPhone={hubs.pipelines.some((t) => t[0] === "phone") ? () => setSub("phone") : null}
+        clientId={clientId} hubReach={hubReach} />}
     </div>
   );
 }
 
+// ══ Customer Hub → Forms + Email Templates (migration 325, Carolyn 2026-10-22) ══════════════
+// "I want to start planning out a designer to build out forms for websites so we can capture
+// leads, and build out email templates ... This should go into the customer hub settings tab."
+// A GoHighLevel-style builder: palette on the left, the live form in the middle, Styles / Themes /
+// Advanced on the right; Edit · Settings · Submissions · Notifications · Analytics across the top.
+//
+// ONE RENDERER: the canvas and Preview call window.SSForm.build from /forms-render.js — the same
+// file the public /form page uses — so the designer cannot show something the website does not.
+// The email editor's preview is the SERVER's render (crm_email_tpl_preview), the same function
+// every real send calls. Every action is portal-settings crm_form_* / crm_email_tpl_* (./leadForms.ts
+// there), gated settings_crm and the CRM subscription.
+//
+// LIVES HERE, not in its own part file, on purpose (2026-10-22): a new part means renumbering
+// 12-shell.jsx, which ~20 tests and other branches name by path. This file already holds the
+// Customer Hub and Email Settings.
+
+const ssfCall = (action, body) => ssPipeCall(action, body);
+
+let ssfRendererP = null;
+function ssfRenderer() {
+  if (window.SSForm) return Promise.resolve(window.SSForm);
+  if (!ssfRendererP) {
+    ssfRendererP = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "/forms-render.js?v=3";
+      s.onload = () => (window.SSForm ? resolve(window.SSForm) : reject(new Error("The form preview didn't load.")));
+      s.onerror = () => { ssfRendererP = null; reject(new Error("The form preview couldn't load. Refresh the page.")); };
+      document.head.appendChild(s);
+    });
+  }
+  return ssfRendererP;
+}
+
+// The palette, in the screenshot's groups. Types and default labels mirror _shared/leadForms.ts
+// FIELD_TYPES (the server rebuilds every definition from that list, so a type missing there is
+// simply dropped on save).
+const SSF_PALETTE = [
+  ["Personal info", [["full_name", "Full name", "👤"], ["first_name", "First name", "🪪"], ["last_name", "Last name", "🪪"], ["phone", "Phone", "📞"], ["email", "Email", "✉️"], ["date_of_birth", "Date of birth", "🎂"], ["organization", "Company name", "🏢"]]],
+  ["Address", [["address", "Address", "📍"], ["city", "City", "🏙️"], ["state", "State", "🗺️"], ["postal_code", "Postal code", "📮"], ["country", "Country", "🌎"], ["website", "Website", "🔗"]]],
+  ["StructureStudio", [["building_style", "Building style", "🏠"], ["building_size", "Building size", "📐"], ["delivery_zip", "Delivery zip", "🚚"], ["timeframe", "Timeframe to buy", "⏱️"]]],
+  ["General", [["text", "Short answer", "✏️"], ["textarea", "Paragraph", "📝"], ["select", "Dropdown", "🔽"], ["radio", "Single choice", "🔘"], ["checkboxes", "Multiple choice", "☑️"], ["number", "Number", "#️⃣"], ["date", "Date", "📅"], ["hidden", "Hidden value", "🙈"]]],
+  ["Consent", [["sms_consent", "Text message consent", "💬"], ["terms", "Terms & privacy", "📄"]]],
+  ["Layout", [["heading", "Heading", "🔠"], ["paragraph", "Text", "¶"], ["divider", "Divider", "➖"], ["image", "Image", "🖼️"]]],
+];
+const SSF_LABEL = Object.fromEntries(SSF_PALETTE.flatMap(([, items]) => items.map(([t, l]) => [t, l])));
+// `custom` is not in the list above: a builder's own fields are not a fixed palette, they are
+// whatever crm_field_defs holds for this tenant (ssfCustomGroup builds that group from the server's
+// `customFields`). It still needs a name for the inspector's header.
+SSF_LABEL.custom = "Your field";
+// The crm field types (migration 330/332), and the icon each gets in the palette. `number` covers
+// money too — 332 made currency and the comma a way of SHOWING a number, not a type of its own.
+const SSF_CF_ICON = { text: "✏️", textarea: "📝", number: "#️⃣", date: "📅", select: "🔽", checkbox: "☑️", phone: "📞", url: "🔗" };
+const SSF_CF_TYPE_LABEL = { text: "Text", textarea: "Long text", number: "Number", date: "Date", select: "Drop-down", checkbox: "Yes / no", phone: "Phone", url: "Hyperlink" };
+
+/** The palette group for this builder's own contact fields, or null when they have none. Built at
+ *  render time from crm_forms_list's `customFields`, so a field added in Settings → Customer Hub →
+ *  Fields is offered here the next time the Forms hub loads. */
+function ssfCustomGroup(meta) {
+  const list = (meta?.customFields || []).filter((d) => d && d.key && SSF_CF_ICON[d.field_type]);
+  if (!list.length) return null;
+  return ["Your fields", list.map((d) => [`custom:${d.key}`, d.label || d.key, SSF_CF_ICON[d.field_type]])];
+}
+const SSF_INPUT = (t) => !["heading", "paragraph", "divider", "image"].includes(t);
+const SSF_CHOICES = (t) => ["select", "radio", "checkboxes", "timeframe"].includes(t);
+const SSF_TIMEFRAME = ["As soon as possible", "Within 1 month", "1–3 months", "3–6 months", "Just looking"];
+const SSF_THEMES = {
+  clean: { label: "Clean", inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F3F4F6", formBg: "#FFFFFF", label: "#111827", text: "#111827", inputBg: "#FFFFFF", border: "#D1D5DB", accent: "#2563EB", buttonBg: "#2563EB", buttonText: "#FFFFFF" } },
+  brand: { label: "Your brand", inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F8FAFC", formBg: "#FFFFFF", label: "#0F172A", text: "#0F172A", inputBg: "#FFFFFF", border: "#CBD5E1", accent: "#1E3A5F", buttonBg: "#1E3A5F", buttonText: "#FFFFFF" } },
+  dark: { label: "Dark", inputStyle: "box", radius: 6, shadow: false, colors: { pageBg: "#0B1220", formBg: "#111827", label: "#F9FAFB", text: "#F9FAFB", inputBg: "#1F2937", border: "#374151", accent: "#60A5FA", buttonBg: "#3B82F6", buttonText: "#FFFFFF" } },
+  rounded: { label: "Rounded", inputStyle: "rounded", radius: 22, shadow: true, colors: { pageBg: "#FFF7ED", formBg: "#FFFFFF", label: "#1C1917", text: "#1C1917", inputBg: "#FFFBF5", border: "#E7E5E4", accent: "#EA580C", buttonBg: "#EA580C", buttonText: "#FFFFFF" } },
+};
+const SSF_FONTS = [["system", "System"], ["inter", "Inter"], ["georgia", "Georgia"], ["verdana", "Verdana"], ["trebuchet", "Trebuchet"], ["mono", "Monospace"]];
+
+function ssfNewField(type, fields, meta) {
+  // The palette sends "custom:<key>" for one of the builder's own fields. The TYPE is always
+  // `custom`; the key and the definition's own type ride alongside, and neither is editable
+  // afterwards — they belong to the Fields register, not to this form.
+  let cf = null;
+  if (type.startsWith("custom:")) {
+    const key = type.slice(7);
+    cf = (meta?.customFields || []).find((d) => d && d.key === key) || null;
+    if (!cf) return null;
+    type = "custom";
+  }
+  const base = (cf ? cf.key : type).replace(/[^a-z0-9_]/g, "_");
+  let id = base, i = 1;
+  while (fields.some((f) => f.id === id)) id = `${base}_${++i}`;
+  const f = { id, type, label: SSF_LABEL[type] || "Field", placeholder: "", help: "", required: false, width: "full", options: [] };
+  if (cf) {
+    f.key = cf.key;
+    f.fieldType = cf.field_type;
+    f.label = cf.label || cf.key;
+    f.help = cf.help || "";
+    if (cf.field_type === "select") f.options = [...(cf.choices || [])];
+    if (cf.field_type === "textarea" || cf.field_type === "checkbox") f.width = "full";
+    return f;
+  }
+  if (type === "select" || type === "radio" || type === "checkboxes") f.options = ["Option 1", "Option 2"];
+  if (type === "timeframe") f.options = [...SSF_TIMEFRAME];
+  if (type === "heading") { f.text = "Heading"; f.level = 1; }
+  if (type === "paragraph") f.text = "";
+  if (type === "hidden") { f.source = "utm_source"; f.value = ""; }
+  if (type === "terms") f.required = true;
+  if (type === "email") f.placeholder = "you@example.com";
+  if (type === "phone") f.placeholder = "(555) 555-5555";
+  return f;
+}
+
+async function ssfUpload(file) {
+  if (!file) return null;
+  if (file.size > 5 * 1024 * 1024) throw new Error("That image is over 5 MB. Choose a smaller one.");
+  const ext = (String(file.name || "").split(".").pop() || "").toLowerCase();
+  const r = await ssfCall("crm_form_upload_url", { ext });
+  const { error } = await sb.storage.from("form-assets").uploadToSignedUrl(r.path, r.token, file, { contentType: file.type || undefined });
+  if (error) throw new Error("The upload didn't finish. Try again.");
+  return r.publicUrl;
+}
+
+// The URL keeps the open editor (?form=<id> / ?tpl=<id>) so a reload lands back in it.
+function ssfUrlParam(key, value) {
+  try {
+    const u = new URL(window.location.href);
+    if (value) u.searchParams.set(key, value); else u.searchParams.delete(key);
+    window.history.replaceState(window.history.state, "", u.toString());
+  } catch (_e) { /* ignore */ }
+}
+const ssfReadParam = (key) => { try { const v = new URL(window.location.href).searchParams.get(key); return /^[0-9a-f-]{36}$/i.test(v || "") ? v : null; } catch (_e) { return null; } };
+
+const SSF_BTN = (primary) => ({ ...S.btn(primary ? ACCENT : "#FFF", primary ? "#FFF" : "#1E293B"), border: primary ? "none" : "1px solid #CBD5E1", padding: "8px 14px" });
+const SSF_CHIP = (bg, fg) => ({ fontSize: 11, fontWeight: 800, background: bg, color: fg, borderRadius: 999, padding: "2px 9px", whiteSpace: "nowrap" });
+const ssfWhen = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—");
+const ssfStatus = (s) => (s === "published" ? SSF_CHIP("#DCFCE7", "#166534") : s === "archived" ? SSF_CHIP("#F1F5F9", "#64748B") : SSF_CHIP("#FEF3C7", "#92400E"));
+const ssfStatusLabel = (s) => (s === "published" ? "Live" : s === "archived" ? "Archived" : "Draft");
+
+function SsfModal({ title, onClose, width = 560, children, footer }) {
+  useEffect(() => {
+    const k = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+  return (
+    <div role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#FFF", borderRadius: 12, width: "100%", maxWidth: width, maxHeight: "90vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,.25)" }}>
+        <div style={{ display: "flex", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid #E2E8F0" }}>
+          <div style={{ fontWeight: 800, fontSize: 15, color: "#1E293B" }}>{title}</div>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ marginLeft: "auto", background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#64748B" }}>×</button>
+        </div>
+        <div style={{ padding: 18, overflow: "auto" }}>{children}</div>
+        {footer && <div style={{ padding: "12px 18px", borderTop: "1px solid #E2E8F0", display: "flex", gap: 8, justifyContent: "flex-end" }}>{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function SsfCopy({ text }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button type="button" style={SSF_BTN(false)} onClick={() => {
+      navigator.clipboard?.writeText(text).then(() => { setDone(true); setTimeout(() => setDone(false), 1500); }, () => {});
+    }}>{done ? "Copied ✓" : "Copy"}</button>
+  );
+}
+
+function SsfGetCode({ clientId, form, onClose }) {
+  const origin = window.location.origin;
+  const link = `${origin}/form?client=${encodeURIComponent(clientId)}&id=${form.id}`;
+  const embed = `<div data-ss-form="${clientId}/${form.id}"></div>\n<script src="${origin}/form-embed.js" async></script>`;
+  const iframe = `<iframe src="${link}&embed=1" style="width:100%;min-height:640px;border:0" title="${String(form.name || "Form").replace(/"/g, "&quot;")}"></iframe>`;
+  const box = { fontFamily: "ui-monospace,Menlo,Consolas,monospace", fontSize: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, whiteSpace: "pre-wrap", wordBreak: "break-all", flex: 1 };
+  return (
+    <SsfModal title={`Put “${form.name}” on your website`} onClose={onClose} width={640}>
+      {form.status !== "published" && <div style={S.err}>This form isn't live yet. Press Publish first, or the code below shows “This form isn't available”.</div>}
+      {[["Embed on your website (recommended)", "Paste this where the form should appear. It grows to fit and sends form views and submissions to your Google Tag Manager.", embed],
+        ["Direct link", "Share it anywhere: a text, an email, a social post or a QR code.", link],
+        ["Plain iframe", "For website builders that only accept an iframe. It won't resize itself.", iframe]].map(([t, d, code]) => (
+        <div key={t} style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{t}</div>
+          <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 6px" }}>{d}</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}><div style={box}>{code}</div><SsfCopy text={code} /></div>
+        </div>
+      ))}
+    </SsfModal>
+  );
+}
+
+// ── The list ───────────────────────────────────────────────────────────────────────────────
+function FormsHub({ clientId, canEdit }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [editId, setEditId] = useState(() => ssfReadParam("form"));
+  const [picker, setPicker] = useState(false);
+  const [code, setCode] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    setErr("");
+    ssfCall("crm_forms_list").then((d) => { setData(d); ssfSetBrand(d?.brand?.colors); }, (e) => setErr(e.message));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const open = (id) => { ssfUrlParam("form", id); setEditId(id); };
+  const close = () => { ssfUrlParam("form", null); setEditId(null); load(); };
+  const act = async (fn) => { setBusy(true); setErr(""); try { await fn(); load(); } catch (e) { setErr(e.message); } setBusy(false); };
+
+  if (editId) return <FormEditor id={editId} clientId={clientId} canEdit={canEdit} meta={data} onClose={close} />;
+  const forms = (data?.forms || []).filter((f) => f.status !== "archived");
+  const archived = (data?.forms || []).filter((f) => f.status === "archived");
+  const row = (f) => (
+    <tr key={f.id}>
+      <td style={S.td}><button type="button" onClick={() => open(f.id)} style={{ background: "none", border: "none", padding: 0, fontWeight: 800, color: ACCENT, cursor: "pointer", fontSize: 13, textAlign: "left" }}>{f.name}</button></td>
+      <td style={S.td}><span style={ssfStatus(f.status)}>{ssfStatusLabel(f.status)}</span></td>
+      <td style={{ ...S.td, textAlign: "right" }}>{f.submissions30d}</td>
+      <td style={S.td}>{ssfWhen(f.lastSubmission)}</td>
+      <td style={S.td}>{ssfWhen(f.updated_at)}</td>
+      <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right" }}>
+        <button type="button" style={SSF_BTN(false)} onClick={() => open(f.id)}>{canEdit ? "Edit" : "Open"}</button>{" "}
+        <button type="button" style={SSF_BTN(false)} onClick={() => setCode(f)}>Get code</button>{" "}
+        {canEdit && <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => act(async () => { const r = await ssfCall("crm_form_duplicate", { id: f.id }); open(r.form.id); })}>Duplicate</button>}{" "}
+        {canEdit && (f.status === "archived"
+          ? <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => act(() => ssfCall("crm_form_archive", { id: f.id, archived: false }))}>Restore</button>
+          : <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => { if (window.confirm(`Archive “${f.name}”? It comes off your website; its submissions stay.`)) act(() => ssfCall("crm_form_archive", { id: f.id })); }}>Archive</button>)}{" "}
+        {canEdit && f.status === "archived" && <button type="button" disabled={busy} style={{ ...SSF_BTN(false), color: "#B91C1C" }} onClick={() => { if (window.confirm(`Delete “${f.name}” for good?`)) act(() => ssfCall("crm_form_delete", { id: f.id })); }}>Delete</button>}
+      </td>
+    </tr>
+  );
+  return (
+    <div style={S.card}>
+      <CardHead title="Website forms" count={data ? forms.length : null}
+        desc="Build a form, publish it, and paste one line of code into your website. Every submission becomes a contact in your CRM."
+        right={canEdit && <button type="button" style={SSF_BTN(true)} onClick={() => setPicker(true)}>+ New form</button>} />
+      {err && <div style={S.err}>{err}</div>}
+      {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+      {data && !forms.length && (
+        <div style={{ textAlign: "center", padding: "28px 12px", color: "#64748B", fontSize: 13 }}>
+          No forms yet.{canEdit && <> <button type="button" onClick={() => setPicker(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 800, cursor: "pointer" }}>Create your first form</button></>}
+        </div>
+      )}
+      {data && forms.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={S.th}>Form</th><th style={S.th}>Status</th><th style={{ ...S.th, textAlign: "right" }}>Leads (30 days)</th><th style={S.th}>Last lead</th><th style={S.th}>Edited</th><th style={S.th}></th></tr></thead>
+            <tbody>{forms.map(row)}</tbody>
+          </table>
+        </div>
+      )}
+      {archived.length > 0 && (
+        <details style={{ marginTop: 14 }}>
+          <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#64748B" }}>Archived ({archived.length})</summary>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 8 }}><tbody>{archived.map(row)}</tbody></table>
+        </details>
+      )}
+      {picker && (
+        <SsfModal title="Start a new form" onClose={() => setPicker(false)}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 10 }}>
+            {(data?.starters || []).map((s) => (
+              <button key={s.key} type="button" disabled={busy}
+                onClick={() => act(async () => { const r = await ssfCall("crm_form_create", { starter: s.key }); setPicker(false); open(r.form.id); })}
+                style={{ border: "1px solid #E2E8F0", borderRadius: 10, background: "#FFF", padding: "18px 12px", cursor: "pointer", fontWeight: 800, color: "#1E293B", fontSize: 13 }}>
+                <div style={{ fontSize: 26, marginBottom: 6 }}>{{ blank: "📄", contact: "💬", quote: "🧾", inquiry: "🏠" }[s.key] || "📄"}</div>
+                {s.key === "blank" ? "Blank form" : s.name}
+              </button>
+            ))}
+          </div>
+        </SsfModal>
+      )}
+      {code && <SsfGetCode clientId={clientId} form={code} onClose={() => setCode(null)} />}
+    </div>
+  );
+}
+
+// ── The editor ─────────────────────────────────────────────────────────────────────────────
+function FormEditor({ id, clientId, canEdit, meta, onClose }) {
+  const [form, setForm] = useState(null);
+  const [def, setDef] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [name, setName] = useState("");
+  const [err, setErr] = useState("");
+  const [tab, setTab] = useState("edit");
+  const [device, setDevice] = useState("desktop");
+  const [sel, setSel] = useState(null);
+  const [hist, setHist] = useState({ past: [], future: [] });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [recs, setRecs] = useState([]);
+  const [showRecs, setShowRecs] = useState(false);
+  const [showCode, setShowCode] = useState(false);
+  const [preview, setPreview] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const latest = useRef({});
+  latest.current = { def, settings, name, dirty };
+
+  useEffect(() => {
+    ssfCall("crm_form_get", { id }).then((r) => {
+      setForm(r.form); setDef(r.form.definition); setSettings(r.form.settings); setName(r.form.name); setRecs(r.form.recommendations || []);
+    }, (e) => setErr(e.message));
+  }, [id]);
+
+  const save = useCallback(async () => {
+    const cur = latest.current;
+    if (!canEdit || !cur.def) return null;
+    setSaving(true);
+    try {
+      const r = await ssfCall("crm_form_save", { id, name: cur.name, definition: cur.def, settings: cur.settings });
+      setForm(r.form); setRecs(r.form.recommendations || []); setDirty(false); setSavedAt(new Date()); setErr("");
+      return r.form;
+    } catch (e) { setErr(e.message); return null; } finally { setSaving(false); }
+  }, [id, canEdit]);
+  useEffect(() => {
+    if (!dirty || !canEdit) return undefined;
+    const t = setTimeout(() => { save(); }, 1200);
+    return () => clearTimeout(t);
+  }, [dirty, def, settings, name, canEdit, save]);
+
+  const change = (next) => {
+    setHist({ past: [...hist.past.slice(-49), def], future: [] });
+    setDef(next); setDirty(true);
+  };
+  const undo = () => {
+    if (!hist.past.length) return;
+    const prev = hist.past[hist.past.length - 1];
+    setHist({ past: hist.past.slice(0, -1), future: [def, ...hist.future] });
+    setDef(prev); setDirty(true);
+  };
+  const redo = () => {
+    if (!hist.future.length) return;
+    const nxt = hist.future[0];
+    setHist({ past: [...hist.past, def], future: hist.future.slice(1) });
+    setDef(nxt); setDirty(true);
+  };
+  const setFields = (fields) => change({ ...def, fields });
+  const setStyle = (patch) => change({ ...def, style: { ...def.style, ...patch } });
+  const setSet = (patch) => { setSettings((s) => ({ ...s, ...patch })); setDirty(true); };
+
+  const addField = (type, at) => {
+    if (def.fields.length >= 60) { setErr("A form can hold up to 60 fields."); return; }
+    const f = ssfNewField(type, def.fields, meta);
+    // null = a "custom:<key>" whose definition is no longer in the register (deleted in another
+    // tab). Nothing is added and nothing is said: reopening the hub reloads the palette.
+    if (!f) return;
+    const fields = [...def.fields];
+    fields.splice(at == null ? fields.length : at, 0, f);
+    setFields(fields); setSel(f.id);
+  };
+  const moveField = (fid, to) => {
+    const from = def.fields.findIndex((f) => f.id === fid);
+    if (from < 0) return;
+    const fields = [...def.fields];
+    const [f] = fields.splice(from, 1);
+    fields.splice(to > from ? to - 1 : to, 0, f);
+    setFields(fields);
+  };
+  const patchField = (fid, patch) => setFields(def.fields.map((f) => (f.id === fid ? { ...f, ...patch } : f)));
+  const removeField = (fid) => { setFields(def.fields.filter((f) => f.id !== fid)); setSel(null); };
+  const dupField = (fid) => {
+    const i = def.fields.findIndex((f) => f.id === fid);
+    if (i < 0) return;
+    const copy = { ...def.fields[i], id: ssfNewField(def.fields[i].type, def.fields).id };
+    const fields = [...def.fields]; fields.splice(i + 1, 0, copy); setFields(fields); setSel(copy.id);
+  };
+
+  const publish = async () => {
+    setPublishing(true); setErr("");
+    try {
+      if (latest.current.dirty) await save();
+      const r = await ssfCall("crm_form_publish", { id });
+      setForm(r.form); setRecs(r.form.recommendations || []); setSavedAt(new Date());
+    } catch (e) { setErr(e.message); }
+    setPublishing(false);
+  };
+  const unpublish = async () => {
+    if (!window.confirm("Take this form off your website? Anyone who opens it will see “This form isn't available”.")) return;
+    try { const r = await ssfCall("crm_form_unpublish", { id }); setForm(r.form); setRecs(r.form.recommendations || []); } catch (e) { setErr(e.message); }
+  };
+  const back = async () => { if (latest.current.dirty) await save(); onClose(); };
+
+  useEffect(() => {
+    const k = (e) => {
+      if (tab !== "edit") return;
+      const tag = (e.target && e.target.tagName) || "";
+      if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable)) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+      if ((e.key === "Delete" || e.key === "Backspace") && sel && canEdit) { e.preventDefault(); removeField(sel); }
+    };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  });
+
+  const shell = { position: "fixed", inset: 0, zIndex: 3000, background: "#F1F5F9", display: "flex", flexDirection: "column", fontFamily: "inherit" };
+  if (!def) return <div style={shell}><div style={{ margin: "auto", color: "#64748B" }}>{err ? <div style={S.err}>{err} <button type="button" style={SSF_BTN(false)} onClick={onClose}>Back</button></div> : "Loading form…"}</div></div>;
+  const selected = def.fields.find((f) => f.id === sel) || null;
+  const live = form?.status === "published";
+  const changedSinceLive = recs.some((r) => r.id === "unpublished");
+  const topBtn = (active) => ({ background: active ? "#EEF2FF" : "transparent", border: "1px solid " + (active ? "#C7D2FE" : "transparent"), borderRadius: 6, padding: "6px 9px", cursor: "pointer", fontSize: 14 });
+
+  return (
+    <div style={shell}>
+      {/* Top bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 14px", background: "#FFF", borderBottom: "1px solid #E2E8F0", flexWrap: "wrap" }}>
+        <button type="button" onClick={back} style={{ ...SSF_BTN(false), border: "none" }}>← Back</button>
+        <input value={name} disabled={!canEdit} onChange={(e) => { setName(e.target.value); setDirty(true); }} aria-label="Form name"
+          style={{ ...S.input, width: 240, fontSize: 15, fontWeight: 800, border: "1px solid transparent", background: "#F8FAFC" }} />
+        <span style={ssfStatus(form?.status)}>{ssfStatusLabel(form?.status)}{live && changedSinceLive ? " · unpublished changes" : ""}</span>
+        <span style={{ fontSize: 12, color: "#94A3B8" }}>{!canEdit ? "View only" : saving ? "Saving…" : dirty ? "Unsaved" : savedAt ? "Saved" : ""}</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 2, background: "#F1F5F9", borderRadius: 8, padding: 2 }}>
+            <button type="button" title="Desktop" aria-label="Desktop view" onClick={() => setDevice("desktop")} style={topBtn(device === "desktop")}>🖥️</button>
+            <button type="button" title="Phone" aria-label="Phone view" onClick={() => setDevice("mobile")} style={topBtn(device === "mobile")}>📱</button>
+          </div>
+          {canEdit && <><button type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!hist.past.length} onClick={undo} style={topBtn(false)}>↶</button>
+            <button type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled={!hist.future.length} onClick={redo} style={topBtn(false)}>↷</button></>}
+          <div style={{ position: "relative" }}>
+            <button type="button" onClick={() => setShowRecs((v) => !v)} style={{ ...SSF_BTN(false), color: "#1D4ED8", background: "#EFF6FF", border: "1px solid #BFDBFE" }}>
+              💡 Recommendations {recs.length > 0 && <span style={SSF_CHIP("#1D4ED8", "#FFF")}>{recs.length}</span>}
+            </button>
+            {showRecs && (
+              <div style={{ position: "absolute", right: 0, top: "110%", width: 340, background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,.12)", padding: 12, zIndex: 10 }}>
+                {!recs.length && <div style={{ fontSize: 13, color: "#166534" }}>✓ Looks good. Nothing to fix.</div>}
+                {recs.map((r) => <div key={r.id} style={{ fontSize: 13, color: r.blocking ? "#B91C1C" : "#1E293B", padding: "6px 0", borderBottom: "1px solid #F1F5F9" }}>{r.blocking ? "⛔ " : "• "}{r.text}</div>)}
+              </div>
+            )}
+          </div>
+          <button type="button" style={SSF_BTN(false)} onClick={() => setPreview(true)}>👁 Preview</button>
+          <button type="button" style={SSF_BTN(false)} onClick={() => setShowCode(true)}>{"</>"} Get code</button>
+          {canEdit && live && <button type="button" style={SSF_BTN(false)} onClick={unpublish}>Unpublish</button>}
+          {canEdit && <button type="button" style={SSF_BTN(true)} disabled={publishing} onClick={publish}>{publishing ? "Publishing…" : live ? (changedSinceLive || dirty ? "Update live form" : "Published ✓") : "Publish"}</button>}
+        </div>
+      </div>
+      {/* Tabs */}
+      <div style={{ display: "flex", justifyContent: "center", gap: 4, background: "#FFF", borderBottom: "1px solid #E2E8F0" }}>
+        {[["edit", "Edit"], ["settings", "Settings"], ["submissions", "Submissions"], ["notifications", "Notifications"], ["analytics", "Analytics"]].map(([k, l]) => (
+          <button key={k} type="button" onClick={() => setTab(k)} style={{ background: "none", border: "none", borderBottom: tab === k ? `2px solid ${ACCENT}` : "2px solid transparent", color: tab === k ? ACCENT : "#475569", fontWeight: 700, fontSize: 13, padding: "10px 14px", cursor: "pointer" }}>{l}</button>
+        ))}
+      </div>
+      {err && <div style={{ ...S.err, margin: "10px 14px 0" }}>{err}</div>}
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        {tab === "edit" && (<>
+          <SsfPalette disabled={!canEdit} meta={meta} onAdd={(t) => addField(t)} />
+          <div style={{ flex: 1, minWidth: 0, overflow: "auto", padding: "24px 16px" }} onClick={(e) => { if (e.target === e.currentTarget) setSel(null); }}>
+            <SsfCanvas def={def} sel={sel} device={device} meta={meta} canEdit={canEdit}
+              onSelect={setSel} onAdd={addField} onMove={moveField}
+              onRemove={removeField} onDuplicate={dupField}
+              onWidth={(fid) => patchField(fid, { width: (def.fields.find((f) => f.id === fid) || {}).width === "half" ? "full" : "half" })}
+              onShift={(fid, d) => { const i = def.fields.findIndex((f) => f.id === fid); const j = i + d; if (j < 0 || j >= def.fields.length) return; const fields = [...def.fields]; [fields[i], fields[j]] = [fields[j], fields[i]]; setFields(fields); }} />
+          </div>
+          <div style={{ width: 330, flexShrink: 0, background: "#FFF", borderLeft: "1px solid #E2E8F0", overflow: "auto" }}>
+            {selected
+              ? <SsfFieldPanel key={selected.id} field={selected} meta={meta} disabled={!canEdit} onChange={(p) => patchField(selected.id, p)} onClose={() => setSel(null)} onRemove={() => removeField(selected.id)} />
+              : <SsfStylePanel def={def} meta={meta} disabled={!canEdit} onStyle={setStyle} onDef={change} />}
+          </div>
+        </>)}
+        {tab === "settings" && <SsfSettingsTab def={def} settings={settings} meta={meta} disabled={!canEdit} onDef={change} onSettings={setSet} />}
+        {tab === "submissions" && <SsfSubmissionsTab formId={id} def={def} formName={name} />}
+        {tab === "notifications" && <SsfNotificationsTab formId={id} settings={settings} meta={meta} disabled={!canEdit} onSettings={setSet} save={save} dirty={dirty} />}
+        {tab === "analytics" && <SsfAnalyticsTab formId={id} />}
+      </div>
+      {showCode && <SsfGetCode clientId={clientId} form={{ ...form, name }} onClose={() => setShowCode(false)} />}
+      {preview && <SsfPreview def={def} settings={settings} meta={meta} onClose={() => setPreview(false)} />}
+    </div>
+  );
+}
+
+function SsfPalette({ onAdd, disabled, meta }) {
+  const [q, setQ] = useState("");
+  const match = (l) => !q.trim() || l.toLowerCase().includes(q.trim().toLowerCase());
+  // Their own fields go LAST, after ours: the built-ins are what most forms are made of, and a
+  // builder with forty custom fields should not have to scroll past them to reach Email.
+  const custom = ssfCustomGroup(meta);
+  const groups = custom ? [...SSF_PALETTE, custom] : SSF_PALETTE;
+  return (
+    <div style={{ width: 260, flexShrink: 0, background: "#FFF", borderRight: "1px solid #E2E8F0", overflow: "auto", padding: 12 }}>
+      <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B", marginBottom: 8 }}>Form elements</div>
+      <input placeholder="Search elements" value={q} onChange={(e) => setQ(e.target.value)} style={{ ...S.input, marginBottom: 10 }} />
+      {disabled && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>You can look, but only someone who can edit Customer Hub settings can change this form.</div>}
+      {groups.map(([group, items]) => {
+        const shown = items.filter(([, l]) => match(l));
+        if (!shown.length) return null;
+        return (
+          <div key={group} style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "4px 0 6px" }}>{group}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6 }}>
+              {shown.map(([type, label, icon]) => (
+                <button key={type} type="button" disabled={disabled} draggable={!disabled}
+                  onDragStart={(e) => { e.dataTransfer.setData("text/ssf-new", type); e.dataTransfer.effectAllowed = "copy"; }}
+                  onClick={() => onAdd(type)} title={`Add ${label} (or drag it onto the form)`}
+                  style={{ border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF", padding: "10px 4px 8px", cursor: disabled ? "default" : "grab", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minHeight: 66 }}>
+                  <span style={{ fontSize: 18 }}>{icon}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 600, color: "#334155", lineHeight: 1.15, textAlign: "center" }}>{label}</span>
+                </button>
+              ))}
+            </div>
+            {group === "Your fields" && (
+              <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.4 }}>
+                Your own contact fields. An answer here is saved onto the contact's field, not just the note.
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {!custom && !q.trim() && (
+        <div style={{ fontSize: 11.5, color: "#64748B", borderTop: "1px solid #E2E8F0", paddingTop: 10, lineHeight: 1.45 }}>
+          <div style={{ fontWeight: 700, color: "#475569", marginBottom: 3 }}>Your own fields</div>
+          Add a field in Settings → Customer Hub → Fields and it appears here, ready to put on a form.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The canvas: the REAL renderer's output, with selection, drag-to-reorder and drop-to-add laid over it.
+function SsfCanvas({ def, sel, device, meta, canEdit, onSelect, onAdd, onMove, onRemove, onDuplicate, onWidth, onShift }) {
+  const host = useRef(null);
+  const wrap = useRef(null);
+  const [err, setErr] = useState("");
+  const [drop, setDrop] = useState(null);   // { index, y }
+  const [bar, setBar] = useState(null);     // selected field's toolbar position
+  useEffect(() => {
+    let dead = false;
+    ssfRenderer().then((SSF) => {
+      if (dead || !host.current) return;
+      const node = SSF.build(def, { designer: true, catalog: meta?.catalog, consentSentence: meta?.consentSentence });
+      host.current.textContent = "";
+      host.current.appendChild(node);
+      host.current.querySelectorAll("[data-field-id]").forEach((b) => {
+        b.style.cursor = canEdit ? "grab" : "pointer";
+        b.style.borderRadius = "6px";
+        b.style.outlineOffset = "4px";
+        b.draggable = !!canEdit;
+        if (b.getAttribute("data-field-id") === sel) b.style.outline = `2px solid ${ACCENT}`;
+      });
+      const s = sel && host.current.querySelector(`[data-field-id="${CSS.escape(sel)}"]`);
+      if (s && wrap.current) {
+        const a = s.getBoundingClientRect(), w = wrap.current.getBoundingClientRect();
+        setBar({ top: a.top - w.top - 30, left: a.right - w.left });
+      } else setBar(null);
+    }, (e) => setErr(e.message));
+    return () => { dead = true; };
+  }, [def, sel, device, meta, canEdit]);
+
+  const boxes = () => Array.from(host.current ? host.current.querySelectorAll("[data-field-id]") : []);
+  const indexAt = (clientY) => {
+    const bs = boxes();
+    const w = wrap.current.getBoundingClientRect();
+    for (let i = 0; i < bs.length; i++) {
+      const r = bs[i].getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) return { index: i, y: r.top - w.top - 6 };
+    }
+    const last = bs[bs.length - 1];
+    return { index: bs.length, y: last ? last.getBoundingClientRect().bottom - w.top + 6 : 20 };
+  };
+  const onDragStart = (e) => {
+    const b = e.target.closest && e.target.closest("[data-field-id]");
+    if (!b || !canEdit) return;
+    e.dataTransfer.setData("text/ssf-move", b.getAttribute("data-field-id"));
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDragOver = (e) => {
+    if (!canEdit) return;
+    const types = Array.from(e.dataTransfer.types || []);
+    if (!types.includes("text/ssf-new") && !types.includes("text/ssf-move")) return;
+    e.preventDefault();
+    setDrop(indexAt(e.clientY));
+  };
+  const onDrop = (e) => {
+    if (!canEdit) return;
+    e.preventDefault();
+    const at = indexAt(e.clientY).index;
+    const t = e.dataTransfer.getData("text/ssf-new");
+    const m = e.dataTransfer.getData("text/ssf-move");
+    setDrop(null);
+    if (t) onAdd(t, at); else if (m) onMove(m, at);
+  };
+  const width = device === "mobile" ? 375 : Math.min(1200, Math.max(320, (def.style?.width || 640) + 48));
+  const tool = { background: "#FFF", border: "none", cursor: "pointer", padding: "4px 7px", fontSize: 13, color: "#1E293B" };
+  return (
+    <div ref={wrap} style={{ position: "relative", width, maxWidth: "100%", margin: "0 auto", background: def.style?.colors?.pageBg || "#F3F4F6", borderRadius: device === "mobile" ? 24 : 10, padding: device === "mobile" ? "28px 10px" : 24, boxShadow: device === "mobile" ? "0 0 0 10px #1E293B" : "none", transition: "width .2s" }}
+      onClick={(e) => { const b = e.target.closest && e.target.closest("[data-field-id]"); if (b) onSelect(b.getAttribute("data-field-id")); else onSelect(null); }}
+      onDragStart={onDragStart} onDragOver={onDragOver} onDragLeave={(e) => { if (!wrap.current.contains(e.relatedTarget)) setDrop(null); }} onDrop={onDrop}>
+      {err && <div style={S.err}>{err}</div>}
+      <div ref={host} />
+      {!def.fields.length && <div style={{ textAlign: "center", color: "#94A3B8", fontSize: 13, padding: 20 }}>Drag elements here from the left, or click one to add it.</div>}
+      {drop && <div style={{ position: "absolute", left: 16, right: 16, top: drop.y, height: 3, background: "#2563EB", borderRadius: 2, pointerEvents: "none" }} />}
+      {bar && canEdit && sel && (
+        <div style={{ position: "absolute", top: Math.max(0, bar.top), left: bar.left, transform: "translateX(-100%)", display: "flex", border: "1px solid #CBD5E1", borderRadius: 6, overflow: "hidden", boxShadow: "0 2px 6px rgba(0,0,0,.12)", zIndex: 5 }}
+          onClick={(e) => e.stopPropagation()}>
+          <button type="button" title="Move up" aria-label="Move up" style={tool} onClick={() => onShift(sel, -1)}>▲</button>
+          <button type="button" title="Move down" aria-label="Move down" style={tool} onClick={() => onShift(sel, 1)}>▼</button>
+          <button type="button" title="Half / full width" aria-label="Toggle width" style={tool} onClick={() => onWidth(sel)}>⇔</button>
+          <button type="button" title="Duplicate" aria-label="Duplicate" style={tool} onClick={() => onDuplicate(sel)}>⧉</button>
+          <button type="button" title="Delete" aria-label="Delete" style={{ ...tool, color: "#B91C1C" }} onClick={() => onRemove(sel)}>✕</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SsfRow({ label, children, hint }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label style={S.lbl}>{label}</label>
+      {children}
+      {hint && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.4 }}>{hint}</div>}
+    </div>
+  );
+}
+function SsfSeg({ value, options, onChange, disabled }) {
+  return (
+    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      {options.map(([v, l]) => (
+        <button key={String(v)} type="button" disabled={disabled} onClick={() => onChange(v)}
+          style={{ flex: 1, minWidth: 0, padding: "7px 6px", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 700, border: "1px solid " + (value === v ? ACCENT : "#CBD5E1"), background: value === v ? "#EEF2FF" : "#FFF", color: value === v ? ACCENT : "#334155" }}>{l}</button>
+      ))}
+    </div>
+  );
+}
+// ══ COLOR CONTROLS ═══════════════════════════════════════════════════════════════════════════
+// Carolyn 2026-10-25, three asks about one control: "I want the HEX codes to show the first when
+// selecting a color option", "in the company settings I want to be able to add additional brand
+// colors and then those colors to show in the forms as easy selections and also to show in the
+// email as easy selection", and "in the form colors when I try to paste a color code from
+// somewhere else it doesn't let me paste".
+//
+// The last one was not a bug in anything we wrote — the control WAS a bare <input type="color">
+// and a read-only <code>, and an OS color well has no text to paste into. So the hex is now a
+// real text box, FIRST, and the well sits beside it as the picker. Paste anything a brand kit
+// hands you: #D97706, d97706, #FFF, rgb(217 119 6), or with a stray space or comma.
+
+// The hex a paste can look like lives in 01-core as ssHexColor — the Branding card's palette
+// editor needs the same rule, and two copies of "what counts as a color" is how one of them
+// drifts.
+const ssfHex = (raw) => ssHexColor(raw);
+
+// THE BRAND PALETTE, module-level on purpose. The swatches belong under every color control in
+// both editors, and the two editors are separate hubs with separate list calls (FormsHub reads
+// `brand.colors`, EmailTemplatesHub reads `brandColors`) — threading a prop from each hub down
+// through the style panel, the block panel and the field panel would mean touching eight
+// components to paint one row of swatches, and would still leave the next color control to
+// remember it. Each hub announces the palette as it loads; SsfColor subscribes.
+let SSF_BRAND = [];
+const ssfBrandSubs = new Set();
+function ssfSetBrand(list) {
+  SSF_BRAND = Array.isArray(list) ? list.filter((c) => c && ssfHex(c.hex)).map((c) => ({ name: String(c.name || ""), hex: ssfHex(c.hex) })) : [];
+  ssfBrandSubs.forEach((fn) => fn(SSF_BRAND));
+}
+function useSsfBrand() {
+  const [v, setV] = useState(SSF_BRAND);
+  useEffect(() => { ssfBrandSubs.add(setV); setV(SSF_BRAND); return () => { ssfBrandSubs.delete(setV); }; }, []);
+  return v;
+}
+
+function SsfColor({ label, value, onChange, disabled }) {
+  const brand = useSsfBrand();
+  // `draft` holds what is being TYPED, including the half-finished "#D9" nobody can use yet, so
+  // the box doesn't fight the person's cursor. null means "show the saved value". A draft that
+  // never becomes a color is dropped on blur rather than saved as garbage.
+  const [draft, setDraft] = useState(null);
+  const saved = ssfHex(value) || "";
+  const shown = draft == null ? (saved || String(value || "")) : draft;
+  const take = (raw) => { const h = ssfHex(raw); setDraft(raw); if (h) onChange(h); };
+  const sw = (hex, name, on) => (
+    <button key={hex + name} type="button" disabled={disabled} title={name ? `${name} · ${hex}` : hex}
+      aria-label={name ? `${name} ${hex}` : hex} onClick={() => { setDraft(null); onChange(hex); }}
+      style={{ width: 20, height: 20, borderRadius: 4, background: hex, cursor: disabled ? "default" : "pointer", padding: 0,
+        border: on ? "2px solid #0F172A" : "1px solid rgba(15,23,42,.25)", boxShadow: on ? "0 0 0 2px #FFF inset" : "none" }} />
+  );
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 4 }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <input type="text" disabled={disabled} value={shown} placeholder="#RRGGBB" spellCheck={false} aria-label={`${label} hex code`}
+          onChange={(e) => take(e.target.value)}
+          onPaste={(e) => { const t = e.clipboardData?.getData("text"); if (t && ssfHex(t)) { e.preventDefault(); setDraft(null); onChange(ssfHex(t)); } }}
+          onBlur={() => setDraft(null)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); setDraft(null); } }}
+          style={{ ...S.input, flex: 1, minWidth: 0, fontFamily: "ui-monospace,Menlo,Consolas,monospace", fontSize: 12, textTransform: "uppercase" }} />
+        <input type="color" disabled={disabled} value={saved || "#000000"} aria-label={`${label} color picker`}
+          onChange={(e) => { setDraft(null); onChange(e.target.value.toUpperCase()); }}
+          style={{ width: 32, height: 30, border: "1px solid #CBD5E1", borderRadius: 4, padding: 0, background: "none", flexShrink: 0, cursor: disabled ? "default" : "pointer" }} />
+      </div>
+      {brand.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 5 }}>
+          {brand.map((c) => sw(c.hex, c.name, c.hex === saved))}
+        </div>
+      )}
+    </div>
+  );
+}
+function SsfNum({ value, onChange, min, max, suffix = "px", disabled }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <input type="number" disabled={disabled} min={min} max={max} value={value ?? ""} onChange={(e) => onChange(e.target.value === "" ? min : Math.max(min, Math.min(max, Number(e.target.value))))} style={{ ...S.input }} />
+      <span style={{ fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>{suffix}</span>
+    </div>
+  );
+}
+function SsfSection({ title, open: start = false, children }) {
+  const [open, setOpen] = useState(start);
+  return (
+    <div style={{ borderBottom: "1px solid #F1F5F9" }}>
+      <button type="button" onClick={() => setOpen((v) => !v)} style={{ width: "100%", textAlign: "left", background: "#F8FAFC", border: "none", padding: "11px 14px", fontWeight: 700, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>{open ? "▾" : "▸"} {title}</button>
+      {open && <div style={{ padding: "12px 14px" }}>{children}</div>}
+    </div>
+  );
+}
+
+function SsfStylePanel({ def, meta, onStyle, onDef, disabled }) {
+  const [t, setT] = useState("styles");
+  const st = def.style || {};
+  const c = st.colors || {};
+  const b = st.button || {};
+  const color = (k) => (v) => onStyle({ colors: { ...c, [k]: v } });
+  const btn = (patch) => onStyle({ button: { ...b, ...patch } });
+  const applyTheme = (key) => {
+    const p = SSF_THEMES[key];
+    const colors = { ...p.colors };
+    if (key === "brand" && meta?.brand?.accent) { colors.accent = meta.brand.accent; colors.buttonBg = meta.brand.accent; }
+    onDef({ ...def, theme: key, style: { ...st, inputStyle: p.inputStyle, radius: p.radius, shadow: p.shadow, colors, button: { ...b, radius: p.radius } },
+      header: key === "brand" && meta?.brand?.logoUrl && !def.header?.imageUrl ? { ...(def.header || {}), title: def.header?.title || meta.brand.companyName || "" } : def.header });
+  };
+  return (
+    <div>
+      <div style={{ display: "flex", borderBottom: "1px solid #E2E8F0" }}>
+        {[["styles", "Styles"], ["themes", "Themes"], ["advanced", "Advanced"]].map(([k, l]) => (
+          <button key={k} type="button" onClick={() => setT(k)} style={{ flex: 1, background: "none", border: "none", borderBottom: t === k ? `2px solid ${ACCENT}` : "2px solid transparent", color: t === k ? ACCENT : "#475569", fontWeight: 700, fontSize: 13, padding: "12px 6px", cursor: "pointer" }}>{l}</button>
+        ))}
+      </div>
+      {t === "styles" && (<>
+        <SsfSection title="Layout" open>
+          <SsfRow label="Columns" hint={(st.layout || "single") === "two" ? "Fields sit side by side, two to a row. Text boxes, headings and checkboxes stay full width." : "Each field uses its own width (Full or Half, set on the field)."}><SsfSeg disabled={disabled} value={st.layout || "single"} onChange={(v) => onStyle({ layout: v })} options={[["single", "Single column"], ["two", "Two columns"]]} /></SsfRow>
+          <SsfRow label="Input style"><SsfSeg disabled={disabled} value={st.inputStyle || "box"} onChange={(v) => onStyle({ inputStyle: v })} options={[["box", "Box"], ["underline", "Underline"], ["rounded", "Rounded"]]} /></SsfRow>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <SsfRow label="Width"><SsfNum disabled={disabled} value={st.width} min={280} max={1200} onChange={(v) => onStyle({ width: v })} /></SsfRow>
+            <SsfRow label="Field spacing"><SsfNum disabled={disabled} value={st.fieldSpacing} min={0} max={48} onChange={(v) => onStyle({ fieldSpacing: v })} /></SsfRow>
+            <SsfRow label="Padding"><SsfNum disabled={disabled} value={st.padding} min={0} max={64} onChange={(v) => onStyle({ padding: v })} /></SsfRow>
+            <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={st.radius} min={0} max={30} onChange={(v) => onStyle({ radius: v })} /></SsfRow>
+          </div>
+          <SsfRow label="Label position"><SsfSeg disabled={disabled} value={st.labelAlign || "top"} onChange={(v) => onStyle({ labelAlign: v })} options={[["top", "Top"], ["left", "Left"], ["right", "Right"]]} /></SsfRow>
+          {st.labelAlign && st.labelAlign !== "top" && <SsfRow label="Label width"><SsfNum disabled={disabled} value={st.labelWidth} min={80} max={400} onChange={(v) => onStyle({ labelWidth: v })} /></SsfRow>}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 6 }}><input type="checkbox" disabled={disabled} checked={st.showLabels !== false} onChange={(e) => onStyle({ showLabels: e.target.checked })} /> Show field labels</label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={!!st.shadow} onChange={(e) => onStyle({ shadow: e.target.checked })} /> Drop shadow</label>
+        </SsfSection>
+        <SsfSection title="Colors & background">
+          <SsfColor disabled={disabled} label="Page background" value={c.pageBg} onChange={color("pageBg")} />
+          <SsfColor disabled={disabled} label="Form background" value={c.formBg} onChange={color("formBg")} />
+          <SsfColor disabled={disabled} label="Labels" value={c.label} onChange={color("label")} />
+          <SsfColor disabled={disabled} label="Text" value={c.text} onChange={color("text")} />
+          <SsfColor disabled={disabled} label="Field background" value={c.inputBg} onChange={color("inputBg")} />
+          <SsfColor disabled={disabled} label="Field border" value={c.border} onChange={color("border")} />
+          <SsfColor disabled={disabled} label="Accent (focus, ticks, links)" value={c.accent} onChange={color("accent")} />
+          <SsfColor disabled={disabled} label="Button" value={c.buttonBg} onChange={color("buttonBg")} />
+          <SsfColor disabled={disabled} label="Button text" value={c.buttonText} onChange={color("buttonText")} />
+        </SsfSection>
+        <SsfSection title="Typography">
+          <SsfRow label="Font"><select disabled={disabled} value={st.font || "system"} onChange={(e) => onStyle({ font: e.target.value })} style={S.input}>{SSF_FONTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></SsfRow>
+          <SsfRow label="Text size"><SsfNum disabled={disabled} value={st.fontSize} min={12} max={22} onChange={(v) => onStyle({ fontSize: v })} /></SsfRow>
+        </SsfSection>
+        <SsfSection title="Submit button">
+          <SsfRow label="Button text"><input disabled={disabled} value={b.text || ""} maxLength={60} onChange={(e) => btn({ text: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Size"><SsfSeg disabled={disabled} value={b.size || "md"} onChange={(v) => btn({ size: v })} options={[["sm", "Small"], ["md", "Medium"], ["lg", "Large"]]} /></SsfRow>
+          <SsfRow label="Alignment"><SsfSeg disabled={disabled} value={b.align || "center"} onChange={(v) => btn({ align: v })} options={[["left", "Left"], ["center", "Center"], ["right", "Right"]]} /></SsfRow>
+          <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={b.radius} min={0} max={30} onChange={(v) => btn({ radius: v })} /></SsfRow>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={b.fullWidth !== false} onChange={(e) => btn({ fullWidth: e.target.checked })} /> Full width</label>
+        </SsfSection>
+      </>)}
+      {t === "themes" && (
+        <div style={{ padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          {Object.entries(SSF_THEMES).map(([k, th]) => (
+            <button key={k} type="button" disabled={disabled} onClick={() => applyTheme(k)}
+              style={{ border: "2px solid " + (def.theme === k ? ACCENT : "#E2E8F0"), borderRadius: 10, padding: 8, background: th.colors.pageBg, cursor: "pointer", textAlign: "left" }}>
+              <div style={{ background: th.colors.formBg, borderRadius: 6, padding: 8 }}>
+                <div style={{ height: 6, width: "60%", background: th.colors.label, opacity: 0.7, borderRadius: 3, marginBottom: 6 }} />
+                <div style={{ height: 14, border: `1px solid ${th.colors.border}`, background: th.colors.inputBg, borderRadius: th.inputStyle === "rounded" ? 10 : 3, marginBottom: 6 }} />
+                <div style={{ height: 14, background: k === "brand" && meta?.brand?.accent ? meta.brand.accent : th.colors.buttonBg, borderRadius: th.inputStyle === "rounded" ? 10 : 3 }} />
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 800, marginTop: 6, color: k === "dark" ? "#F9FAFB" : "#1E293B" }}>{th.label}</div>
+            </button>
+          ))}
+          <div style={{ gridColumn: "span 2", fontSize: 11.5, color: "#64748B" }}>A theme sets the colors, field style and corners. You can fine-tune any of it under Styles.</div>
+        </div>
+      )}
+      {t === "advanced" && (
+        <div style={{ padding: 14 }}>
+          <SsfRow label="Form header title"><input disabled={disabled} value={def.header?.title || ""} maxLength={200} onChange={(e) => onDef({ ...def, header: { ...(def.header || {}), title: e.target.value } })} style={S.input} /></SsfRow>
+          <SsfRow label="Form header subtitle"><textarea disabled={disabled} value={def.header?.subtitle || ""} maxLength={500} rows={2} onChange={(e) => onDef({ ...def, header: { ...(def.header || {}), subtitle: e.target.value } })} style={S.input} /></SsfRow>
+          <SsfRow label="Header image" hint="A logo or banner above the form. JPG, PNG or WebP, up to 5 MB.">
+            <SsfImagePick disabled={disabled} url={def.header?.imageUrl} onUrl={(u) => onDef({ ...def, header: { ...(def.header || {}), imageUrl: u } })} />
+          </SsfRow>
+          <SsfRow label="CSS class" hint="For web designers: added to the form's outer box so your site's own CSS can target it. Letters, numbers, dashes and spaces."><input disabled={disabled} value={st.cssClass || ""} maxLength={80} onChange={(e) => onStyle({ cssClass: e.target.value })} style={S.input} /></SsfRow>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SsfImagePick({ url, onUrl, disabled }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  return (
+    <div>
+      {url && <img src={url} alt="" style={{ display: "block", maxWidth: "100%", maxHeight: 110, borderRadius: 6, marginBottom: 6, border: "1px solid #E2E8F0" }} />}
+      <div style={{ display: "flex", gap: 6 }}>
+        <label style={{ ...SSF_BTN(false), display: "inline-block", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.6 : 1 }}>
+          {busy ? "Uploading…" : url ? "Replace" : "Upload image"}
+          <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={disabled || busy} style={{ display: "none" }}
+            onChange={async (e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return; setBusy(true); setErr(""); try { onUrl(await ssfUpload(f)); } catch (x) { setErr(x.message); } setBusy(false); }} />
+        </label>
+        {url && !disabled && <button type="button" style={SSF_BTN(false)} onClick={() => onUrl("")}>Remove</button>}
+      </div>
+      {err && <div style={{ ...S.err, marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }) {
+  const t = f.type;
+  // A custom field's definition, when we still have it. `gone` is a field whose definition was
+  // deleted or archived after this form was built: it is shown and can be removed, but it stores
+  // nothing on submit, so saying so is the only honest thing to do.
+  const cfDef = t === "custom" ? (meta?.customFields || []).find((d) => d && d.key === f.key) || null : null;
+  const cfType = cfDef ? cfDef.field_type : f.fieldType;
+  const gone = t === "custom" && !cfDef;
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", borderBottom: "1px solid #E2E8F0" }}>
+        <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{t === "custom" ? (cfDef?.label || f.label || "Your field") : (SSF_LABEL[t] || t)}</div>
+        <button type="button" onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontSize: 12 }}>Form styles →</button>
+      </div>
+      <div style={{ padding: 14 }}>
+        {t === "heading" && (<>
+          <SsfRow label="Heading text"><input disabled={disabled} value={f.text || ""} maxLength={200} onChange={(e) => onChange({ text: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Size"><SsfSeg disabled={disabled} value={f.level === 2 ? 2 : 1} onChange={(v) => onChange({ level: v })} options={[[1, "Large"], [2, "Small"]]} /></SsfRow>
+        </>)}
+        {t === "paragraph" && <SsfRow label="Text"><textarea disabled={disabled} rows={5} maxLength={2000} value={f.text || ""} onChange={(e) => onChange({ text: e.target.value })} style={S.input} /></SsfRow>}
+        {t === "image" && <SsfRow label="Image"><SsfImagePick disabled={disabled} url={f.imageUrl} onUrl={(u) => onChange({ imageUrl: u })} /></SsfRow>}
+        {t === "divider" && <div style={{ fontSize: 12.5, color: "#64748B" }}>A thin line between sections. Nothing to set.</div>}
+        {SSF_INPUT(t) && t !== "sms_consent" && (
+          <SsfRow label={t === "terms" ? "Text before the links" : "Label"}><input disabled={disabled} value={f.label || ""} maxLength={200} onChange={(e) => onChange({ label: e.target.value })} style={S.input} /></SsfRow>
+        )}
+        {t === "custom" && (
+          <div style={{ fontSize: 12, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.45 }}>
+            {gone ? (
+              <>
+                <div style={{ fontWeight: 800, color: "#B91C1C", marginBottom: 3 }}>This field no longer exists</div>
+                It was deleted from Settings → Customer Hub → Fields, so an answer to it is kept with the
+                submission but is not saved onto the contact. Delete it from the form, or restore the field.
+              </>
+            ) : (
+              <>
+                <div style={{ fontWeight: 800, marginBottom: 3 }}>One of your own fields</div>
+                The answer is saved onto the contact's <b>{cfDef.label || f.key}</b> field
+                {SSF_CF_TYPE_LABEL[cfType] ? <> ({SSF_CF_TYPE_LABEL[cfType].toLowerCase()})</> : null}, as well as in the
+                submission. {cfType === "select"
+                  ? "The field's type and its choices come from Settings → Customer Hub → Fields, so they can only be changed there"
+                  : "The field's type comes from Settings → Customer Hub → Fields, so it can only be changed there"}
+                — and a change there reaches every form using this field.
+                {cfType === "select" && (cfDef.choices || []).length > 0 && (
+                  <div style={{ marginTop: 6, color: "#64748B" }}>Choices: {(cfDef.choices || []).join(", ")}</div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+        {SSF_INPUT(t) && !SSF_CHOICES(t) && !["hidden", "sms_consent", "terms", "radio", "checkboxes"].includes(t)
+          && !(t === "custom" && (cfType === "checkbox" || cfType === "select")) && (
+          <SsfRow label={t === "building_style" || t === "building_size" ? "Prompt" : "Placeholder"}><input disabled={disabled} value={f.placeholder || ""} maxLength={200} onChange={(e) => onChange({ placeholder: e.target.value })} style={S.input} /></SsfRow>
+        )}
+        {(t === "select" || t === "timeframe" || (t === "custom" && cfType === "select")) && <SsfRow label="Prompt"><input disabled={disabled} value={f.placeholder || ""} maxLength={200} placeholder="Choose…" onChange={(e) => onChange({ placeholder: e.target.value })} style={S.input} /></SsfRow>}
+        {SSF_CHOICES(t) && (
+          <SsfRow label="Choices" hint="One per line.">
+            <textarea disabled={disabled} rows={Math.min(10, Math.max(3, (f.options || []).length + 1))} value={(f.options || []).join("\n")}
+              onChange={(e) => onChange({ options: e.target.value.split("\n").map((x) => x.slice(0, 120)).slice(0, 50) })} style={S.input} />
+          </SsfRow>
+        )}
+        {(t === "building_style" || t === "building_size") && (
+          <div style={{ fontSize: 12, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+            The choices come from your catalog ({t === "building_style" ? "Sheds → styles" : "Sheds → sizes"}) every time the form loads, so they never go out of date.
+            {((t === "building_style" ? meta?.catalog?.styles : meta?.catalog?.sizes) || []).length === 0 && " Your catalog has none yet."}
+          </div>
+        )}
+        {t === "hidden" && (<>
+          <SsfRow label="Value comes from" hint="Ad tracking parameters are read from the address of the page the form is on.">
+            <select disabled={disabled} value={f.source || "utm_source"} onChange={(e) => onChange({ source: e.target.value })} style={S.input}>
+              {["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"].map((s) => <option key={s} value={s}>{s}</option>)}
+              <option value="static">A fixed value</option>
+            </select>
+          </SsfRow>
+          {f.source === "static" && <SsfRow label="Fixed value"><input disabled={disabled} value={f.value || ""} maxLength={300} onChange={(e) => onChange({ value: e.target.value })} style={S.input} /></SsfRow>}
+        </>)}
+        {t === "sms_consent" && (
+          <div style={{ fontSize: 12.5, color: "#334155", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 800, marginBottom: 4 }}>The wording is set for you</div>
+            “{meta?.consentSentence}”
+            <div style={{ marginTop: 6, color: "#64748B" }}>Carriers require these exact words and your business name, so they can't be edited. The box is never required — texting has to be optional. Before you text these leads, check that your texting registration lists this page as a place people opt in.</div>
+            {meta && meta.smsBoxOn === false && <div style={{ ...S.err, marginTop: 8, marginBottom: 0 }}>Your texting consent box is switched off in Settings, so this box won't show on your website.</div>}
+          </div>
+        )}
+        {t === "terms" && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>Links to the Privacy Policy and Terms you set on the form's Settings tab. Always required.</div>}
+        {SSF_INPUT(t) && t !== "hidden" && <SsfRow label="Help text"><input disabled={disabled} value={f.help || ""} maxLength={500} onChange={(e) => onChange({ help: e.target.value })} style={S.input} /></SsfRow>}
+        {SSF_INPUT(t) && !["hidden", "sms_consent", "terms"].includes(t) && (
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 12 }}><input type="checkbox" disabled={disabled} checked={!!f.required} onChange={(e) => onChange({ required: e.target.checked })} /> Required</label>
+        )}
+        {t !== "hidden" && <SsfRow label="Width"><SsfSeg disabled={disabled} value={f.width === "half" ? "half" : "full"} onChange={(v) => onChange({ width: v })} options={[["full", "Full"], ["half", "Half"]]} /></SsfRow>}
+        {t !== "custom" && ["email", "phone", "full_name", "first_name", "last_name", "address", "city", "state", "postal_code", "delivery_zip", "organization"].includes(t) && (
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 12 }}>Saved onto the contact's {t === "full_name" ? "name" : (SSF_LABEL[t] || "").toLowerCase()} in your CRM.</div>
+        )}
+        {!disabled && <button type="button" onClick={onRemove} style={{ ...SSF_BTN(false), color: "#B91C1C", width: "100%" }}>Delete this field</button>}
+      </div>
+    </div>
+  );
+}
+
+function SsfPreview({ def, settings, meta, onClose }) {
+  const host = useRef(null);
+  const [device, setDevice] = useState("desktop");
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let dead = false;
+    ssfRenderer().then((SSF) => {
+      if (dead || !host.current) return;
+      host.current.textContent = "";
+      host.current.appendChild(SSF.build(def, {
+        catalog: meta?.catalog, consentSentence: meta?.consentSentence,
+        onSubmit: () => Promise.resolve({ ok: true, afterSubmit: settings?.afterSubmit?.mode === "redirect" ? { mode: "message", message: `On your website this would now go to ${settings.afterSubmit.redirectUrl}` } : settings?.afterSubmit }),
+      }));
+    }, (e) => setErr(e.message));
+    return () => { dead = true; };
+  }, [def, settings, meta, device]);
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 3500, background: def.style?.colors?.pageBg || "#F3F4F6", overflow: "auto" }}>
+      <div style={{ position: "sticky", top: 0, display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", background: "#1E293B", color: "#FFF", zIndex: 2 }}>
+        <b style={{ fontSize: 13 }}>Preview</b><span style={{ fontSize: 12, opacity: 0.8 }}>Nothing you type here is sent.</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button type="button" style={SSF_BTN(device === "desktop")} onClick={() => setDevice("desktop")}>Desktop</button>
+          <button type="button" style={SSF_BTN(device === "mobile")} onClick={() => setDevice("mobile")}>Phone</button>
+          <button type="button" style={SSF_BTN(false)} onClick={onClose}>Close preview</button>
+        </div>
+      </div>
+      {err && <div style={{ ...S.err, margin: 16 }}>{err}</div>}
+      <div style={{ width: device === "mobile" ? 375 : "100%", maxWidth: "100%", margin: "24px auto", padding: "0 16px" }}><div ref={host} /></div>
+    </div>
+  );
+}
+
+function SsfSettingsTab({ def, settings, meta, onDef, onSettings, disabled }) {
+  const a = settings.afterSubmit || {};
+  const pipes = meta?.pipelines || [];
+  const stages = (pipes.find((p) => p.id === settings.pipelineId) || {}).stages || [];
+  const wrap = { flex: 1, overflow: "auto", padding: 20 };
+  return (
+    <div style={wrap}>
+      <div style={{ maxWidth: 720, margin: "0 auto" }}>
+        <div style={S.card}>
+          <CardHead title="After someone submits" />
+          <SsfRow label="Then"><SsfSeg disabled={disabled} value={a.mode || "message"} onChange={(v) => onSettings({ afterSubmit: { ...a, mode: v } })} options={[["message", "Show a thank-you message"], ["redirect", "Go to a page on my website"]]} /></SsfRow>
+          {a.mode === "redirect"
+            ? <SsfRow label="Page address" hint="Must start with https://. A thank-you page is the easiest way to count conversions in Google Ads or Facebook."><input disabled={disabled} value={a.redirectUrl || ""} placeholder="https://www.yoursite.com/thank-you" onChange={(e) => onSettings({ afterSubmit: { ...a, redirectUrl: e.target.value } })} style={S.input} /></SsfRow>
+            : <SsfRow label="Thank-you message"><textarea disabled={disabled} rows={3} maxLength={1000} value={a.message || ""} onChange={(e) => onSettings({ afterSubmit: { ...a, message: e.target.value } })} style={S.input} /></SsfRow>}
+        </div>
+        <div style={S.card}>
+          <CardHead title="Where the lead goes" desc="Every submission with an email or phone number becomes a contact in your CRM, with a note listing their answers." />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <SsfRow label="Add a card to pipeline">
+              <select disabled={disabled} value={settings.pipelineId || ""} onChange={(e) => onSettings({ pipelineId: e.target.value || null, stageId: null })} style={S.input}>
+                <option value="">Don't add a card</option>
+                {pipes.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </SsfRow>
+            <SsfRow label="In stage">
+              <select disabled={disabled || !settings.pipelineId} value={settings.stageId || ""} onChange={(e) => onSettings({ stageId: e.target.value || null })} style={S.input}>
+                <option value="">Choose a stage</option>
+                {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </SsfRow>
+            <SsfRow label="Assign new contacts to" hint="Only when the contact has no one assigned yet.">
+              <select disabled={disabled} value={settings.assignUserId || ""} onChange={(e) => onSettings({ assignUserId: e.target.value || null })} style={S.input}>
+                <option value="">Nobody</option>
+                {(meta?.team || []).map((t) => <option key={t.userId} value={t.userId}>{t.name}</option>)}
+              </select>
+            </SsfRow>
+            <SsfRow label="Stop taking submissions on" hint="Optional. The form says it's closed after this date.">
+              <input type="date" disabled={disabled} value={settings.closesAt || ""} onChange={(e) => onSettings({ closesAt: e.target.value || null })} style={S.input} />
+            </SsfRow>
+          </div>
+          {settings.pipelineId && !settings.stageId && <div style={S.err}>Choose a stage, or no card will be made.</div>}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={settings.captureUtm !== false} onChange={(e) => onSettings({ captureUtm: e.target.checked })} /> Record ad tracking (utm_source, gclid…) from the page address</label>
+        </div>
+        <div style={S.card}>
+          <CardHead title="Legal links" desc="Shown under the form, and used by the Terms & privacy checkbox." />
+          <SsfRow label="Privacy Policy address"><input disabled={disabled} value={def.footerLinks?.privacy || ""} placeholder="https://www.yoursite.com/privacy" onChange={(e) => onDef({ ...def, footerLinks: { ...(def.footerLinks || {}), privacy: e.target.value } })} style={S.input} /></SsfRow>
+          <SsfRow label="Terms of Service address"><input disabled={disabled} value={def.footerLinks?.terms || ""} placeholder="https://www.yoursite.com/terms" onChange={(e) => onDef({ ...def, footerLinks: { ...(def.footerLinks || {}), terms: e.target.value } })} style={S.input} /></SsfRow>
+          <div style={{ fontSize: 11.5, color: "#64748B" }}>Addresses must start with https://. Anything else is dropped when the form saves.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SsfNotificationsTab({ formId, settings, meta, onSettings, disabled, save, dirty }) {
+  const n = settings.notify || {};
+  const ar = settings.autoreply || {};
+  // One result line per button, shown beside it: a banner at the top of the tab is out of view
+  // by the time someone has scrolled down to the auto-reply.
+  const [out, setOut] = useState({});
+  const all = meta?.templates || [];
+  // Each list offers the templates made for that job (and General ones), plus whatever is already
+  // picked, so a choice made before a template's purpose changed never silently disappears.
+  const fit = (purpose, picked) => all.filter((t) => t.purpose === purpose || t.purpose === "general" || t.id === picked);
+  const test = async (which) => {
+    setOut((o) => ({ ...o, [which]: { busy: true } }));
+    try {
+      if (dirty) await save();
+      const r = await ssfCall("crm_form_test_email", { id: formId, which });
+      setOut((o) => ({ ...o, [which]: { ok: `Test sent to ${r.sentTo}.` } }));
+    } catch (e) { setOut((o) => ({ ...o, [which]: { err: e.message } })); }
+  };
+  const result = (which) => {
+    const r = out[which];
+    if (!r) return null;
+    return <span style={{ marginLeft: 10, fontSize: 12.5, fontWeight: 600, color: r.err ? "#B91C1C" : r.busy ? "#64748B" : "#15803D" }}>{r.busy ? "Sending…" : r.err || r.ok}</span>;
+  };
+  const toggleUser = (uid) => onSettings({ notify: { ...n, userIds: (n.userIds || []).includes(uid) ? n.userIds.filter((x) => x !== uid) : [...(n.userIds || []), uid] } });
+  return (
+    <div style={{ flex: 1, overflow: "auto", padding: 20 }}>
+      <div style={{ maxWidth: 720, margin: "0 auto" }}>
+        <div style={S.card}>
+          <CardHead title="Tell my team about new leads" right={<label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}><input type="checkbox" disabled={disabled} checked={n.enabled !== false} onChange={(e) => onSettings({ notify: { ...n, enabled: e.target.checked } })} /> On</label>} />
+          {n.enabled !== false && (<>
+            <SsfRow label="Who gets the email" hint="Nobody ticked = your owners and admins.">
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {(meta?.team || []).map((t) => (
+                  <label key={t.userId} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, border: "1px solid #E2E8F0", borderRadius: 8, padding: "5px 9px" }}>
+                    <input type="checkbox" disabled={disabled} checked={(n.userIds || []).includes(t.userId)} onChange={() => toggleUser(t.userId)} /> {t.name}
+                  </label>
+                ))}
+              </div>
+            </SsfRow>
+            <SsfRow label="Also send to" hint="Other addresses, one per line (up to 10).">
+              <textarea disabled={disabled} rows={2} value={(n.emails || []).join("\n")} onChange={(e) => onSettings({ notify: { ...n, emails: e.target.value.split(/[\n,]/).map((x) => x.trim()).filter(Boolean).slice(0, 10) } })} style={S.input} />
+            </SsfRow>
+            <SsfRow label="Email design">
+              <select disabled={disabled} value={n.templateId || ""} onChange={(e) => onSettings({ notify: { ...n, templateId: e.target.value || null } })} style={S.input}>
+                <option value="">Built-in “New website lead”</option>
+                {fit("form_notification", n.templateId).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </SsfRow>
+            <button type="button" style={SSF_BTN(false)} onClick={() => test("notification")}>Send me a test</button>{result("notification")}
+          </>)}
+        </div>
+        <div style={S.card}>
+          <CardHead title="Auto-reply to the person who filled it in" desc="Sent from your own email (Settings → Email Settings) when they gave an email address."
+            right={<label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}><input type="checkbox" disabled={disabled} checked={!!ar.enabled} onChange={(e) => onSettings({ autoreply: { ...ar, enabled: e.target.checked } })} /> On</label>} />
+          {ar.enabled && (<>
+            <SsfRow label="Email design">
+              <select disabled={disabled} value={ar.templateId || ""} onChange={(e) => onSettings({ autoreply: { ...ar, templateId: e.target.value || null } })} style={S.input}>
+                <option value="">Built-in “Thanks for reaching out”</option>
+                {fit("form_autoreply", ar.templateId).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </SsfRow>
+            <button type="button" style={SSF_BTN(false)} onClick={() => test("autoreply")}>Send me a test</button>{result("autoreply")}
+          </>)}
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 10 }}>Design your own emails under Customer Hub → Email Templates.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ssfCsv(rows, def) {
+  const cols = def.fields.filter((f) => SSF_INPUT(f.type));
+  const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const head = ["Submitted", ...cols.map((c) => c.label), "Page", "Contact id"].map(q).join(",");
+  const lines = rows.map((r) => {
+    const by = Object.fromEntries((r.answers || []).map((a) => [a.id, a.value]));
+    return [new Date(r.created_at).toISOString(), ...cols.map((c) => by[c.id] ?? ""), r.page_url || "", r.contact_id || ""].map(q).join(",");
+  });
+  return [head, ...lines].join("\r\n");
+}
+
+function SsfSubmissionsTab({ formId, def, formName }) {
+  const [rows, setRows] = useState(null);
+  const [spam, setSpam] = useState(false);
+  const [err, setErr] = useState("");
+  const [open, setOpen] = useState(null);
+  useEffect(() => {
+    setRows(null); setErr("");
+    ssfCall("crm_form_submissions", { id: formId, spam }).then((r) => setRows(r.submissions), (e) => setErr(e.message));
+  }, [formId, spam]);
+  const pick = (r, types) => (r.answers || []).find((a) => types.includes(a.type))?.value || "";
+  const download = () => {
+    const blob = new Blob([ssfCsv(rows || [], def)], { type: "text/csv" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `${String(formName || "form").replace(/[^\w -]+/g, "").trim() || "form"} submissions.csv`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
+  return (
+    <div style={{ flex: 1, overflow: "auto", padding: 20 }}>
+      <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+        <div style={S.card}>
+          <CardHead title={spam ? "Caught as spam" : "Submissions"} count={rows ? rows.length + (rows.length === 200 ? "+" : "") : null}
+            desc={spam ? "Filled in by robots (a hidden field was typed in, or the form was sent in under two seconds). These never became contacts." : "Newest first. Click one to see every answer."}
+            right={<>
+              <button type="button" style={SSF_BTN(false)} onClick={() => setSpam((v) => !v)}>{spam ? "Show real submissions" : "Show spam"}</button>
+              <button type="button" style={SSF_BTN(false)} disabled={!rows || !rows.length} onClick={download}>Export CSV</button>
+            </>} />
+          {err && <div style={S.err}>{err}</div>}
+          {!rows && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+          {rows && !rows.length && <div style={{ color: "#64748B", fontSize: 13, padding: 16, textAlign: "center" }}>{spam ? "No spam caught." : "No submissions yet."}</div>}
+          {rows && rows.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr><th style={S.th}>When</th><th style={S.th}>Name</th><th style={S.th}>Email</th><th style={S.th}>Phone</th><th style={S.th}>Contact</th></tr></thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.id} onClick={() => setOpen(r)} style={{ cursor: "pointer" }}>
+                      <td style={S.td}>{ssfWhen(r.created_at)}</td>
+                      <td style={S.td}>{pick(r, ["full_name"]) || [pick(r, ["first_name"]), pick(r, ["last_name"])].filter(Boolean).join(" ") || "—"}</td>
+                      <td style={S.td}>{pick(r, ["email"]) || "—"}</td>
+                      <td style={S.td}>{pick(r, ["phone"]) || "—"}</td>
+                      <td style={S.td}>{r.contact_id ? <a href={`/contacts/p-${r.contact_id}`} onClick={(e) => e.stopPropagation()} style={{ color: ACCENT, fontWeight: 700 }}>Open</a> : <span style={{ color: "#94A3B8" }}>—</span>}{r.notify_error && <span title={r.notify_error} style={{ marginLeft: 6 }}>⚠️</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+      {open && (
+        <SsfModal title={`Submitted ${ssfWhen(open.created_at)}`} onClose={() => setOpen(null)}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}><tbody>
+            {(open.answers || []).map((a) => <tr key={a.id}><td style={{ ...S.td, color: "#64748B", width: "38%" }}>{a.label}</td><td style={{ ...S.td, whiteSpace: "pre-wrap" }}>{a.value}</td></tr>)}
+            {open.page_url && <tr><td style={{ ...S.td, color: "#64748B" }}>Page</td><td style={{ ...S.td, wordBreak: "break-all" }}>{open.page_url}</td></tr>}
+            {Object.entries(open.utm || {}).map(([k, v]) => <tr key={k}><td style={{ ...S.td, color: "#64748B" }}>{k}</td><td style={S.td}>{v}</td></tr>)}
+            {open.notify_error && <tr><td style={{ ...S.td, color: "#B91C1C" }}>Email</td><td style={{ ...S.td, color: "#B91C1C" }}>{open.notify_error}</td></tr>}
+          </tbody></table>
+          {open.contact_id && <a href={`/contacts/p-${open.contact_id}`} style={{ ...SSF_BTN(true), display: "inline-block", marginTop: 12, textDecoration: "none" }}>Open contact</a>}
+        </SsfModal>
+      )}
+    </div>
+  );
+}
+
+function SsfAnalyticsTab({ formId }) {
+  const [days, setDays] = useState(30);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  useEffect(() => { setData(null); ssfCall("crm_form_stats", { id: formId, days }).then(setData, (e) => setErr(e.message)); }, [formId, days]);
+  const rows = data?.rows || [];
+  const tot = rows.reduce((a, r) => ({ views: a.views + r.views, starts: a.starts + r.starts, submits: a.submits + r.submits }), { views: 0, starts: 0, submits: 0 });
+  const pct = (a, b) => (b ? `${Math.round((a / b) * 1000) / 10}%` : "—");
+  const tile = (label, value, sub) => (
+    <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 800, color: "#1E293B", marginTop: 4 }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: "#64748B" }}>{sub}</div>}
+    </div>
+  );
+  // Every day in the range, zeros included, so a quiet week reads as quiet rather than missing.
+  const series = [];
+  if (data) {
+    const by = Object.fromEntries(rows.map((r) => [r.day, r]));
+    for (let i = 0; i < data.days; i++) {
+      const d = new Date(Date.parse(data.from + "T00:00:00Z") + i * 86400000).toISOString().slice(0, 10);
+      series.push(by[d] || { day: d, views: 0, starts: 0, submits: 0 });
+    }
+  }
+  const max = Math.max(1, ...series.map((r) => r.views));
+  return (
+    <div style={{ flex: 1, overflow: "auto", padding: 20 }}>
+      <div style={{ maxWidth: 1000, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontWeight: 800, fontSize: 15, color: "#1E293B" }}>How this form is doing</div>
+          <div style={{ marginLeft: "auto", width: 220 }}><SsfSeg value={days} onChange={setDays} options={[[30, "30 days"], [90, "90 days"]]} /></div>
+        </div>
+        {err && <div style={S.err}>{err}</div>}
+        {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+        {data && (<>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12, marginBottom: 16 }}>
+            {tile("Views", tot.views.toLocaleString(), "times the form was shown")}
+            {tile("Started", tot.starts.toLocaleString(), `${pct(tot.starts, tot.views)} of views`)}
+            {tile("Submitted", tot.submits.toLocaleString(), "includes spam caught")}
+            {tile("Conversion", pct(tot.submits, tot.views), "submitted ÷ viewed")}
+          </div>
+          <div style={S.card}>
+            <CardHead title="Views and submissions per day" desc="Grey bars are views; the dark part is submissions." />
+            <div role="img" aria-label={`Daily views and submissions over the last ${data.days} days`} style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 140, borderBottom: "1px solid #E2E8F0" }}>
+              {series.map((r) => (
+                <div key={r.day} title={`${r.day}: ${r.views} views, ${r.submits} submitted`} style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+                  <div style={{ height: `${(r.views / max) * 100}%`, background: "#CBD5E1", borderRadius: "2px 2px 0 0", display: "flex", flexDirection: "column", justifyContent: "flex-end", minHeight: r.views ? 2 : 0 }}>
+                    <div style={{ height: r.views ? `${Math.min(100, (r.submits / r.views) * 100)}%` : 0, background: ACCENT, minHeight: r.submits ? 2 : 0 }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#94A3B8", marginTop: 4 }}><span>{series[0]?.day}</span><span>{series[series.length - 1]?.day}</span></div>
+          </div>
+          <div style={S.card}>
+            <CardHead title="Where leads came from" desc="The website page each real submission was sent from." />
+            {!data.pages.length && <div style={{ fontSize: 13, color: "#64748B" }}>No submissions in this period.</div>}
+            {data.pages.map((p) => (
+              <div key={p.page} style={{ display: "flex", gap: 10, padding: "6px 0", borderBottom: "1px solid #F1F5F9", fontSize: 13 }}>
+                <span style={{ flex: 1, wordBreak: "break-all" }}>{p.page}</span><b>{p.n}</b>
+              </div>
+            ))}
+          </div>
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+// ── Email Templates ────────────────────────────────────────────────────────────────────────
+const SSE_BLOCKS = [
+  ["header", "Logo / header", "🏷️"], ["heading", "Heading", "🔠"], ["text", "Text", "📝"], ["image", "Image", "🖼️"],
+  ["button", "Button", "🔘"], ["divider", "Divider", "➖"], ["spacer", "Spacer", "↕️"], ["columns", "Two columns", "▥"],
+  ["social", "Social links", "🔗"], ["answers", "Form answers", "📋"], ["footer", "Footer", "📇"],
+];
+const SSE_LABEL = Object.fromEntries(SSE_BLOCKS.map(([t, l]) => [t, l]));
+const SSE_PURPOSE = [["form_autoreply", "Form auto-reply"], ["form_notification", "New-lead alert"], ["general", "General"]];
+const SSE_FONTS = [["arial", "Arial"], ["georgia", "Georgia"], ["verdana", "Verdana"], ["trebuchet", "Trebuchet"], ["tahoma", "Tahoma"]];
+const SSE_TAGS = [["contact.first_name", "First name"], ["contact.name", "Full name"], ["contact.email", "Email"], ["contact.phone", "Phone"], ["company.name", "Your business name"], ["company.phone", "Your business phone"], ["company.website", "Your website"], ["form.name", "Form name"]];
+
+function sseNewBlock(type, blocks) {
+  let i = blocks.length + 1, id = `${type}${i}`;
+  while (blocks.some((b) => b.id === id)) id = `${type}${++i}`;
+  const b = { id, type };
+  if (type === "header") Object.assign(b, { text: "{{company.name}}", align: "center", width: 160 });
+  if (type === "heading") Object.assign(b, { text: "A heading", size: 24, align: "left" });
+  if (type === "text") Object.assign(b, { html: "<p>Write something here.</p>", size: 15, align: "left" });
+  if (type === "image") Object.assign(b, { url: "", alt: "", width: 100, align: "center" });
+  if (type === "button") Object.assign(b, { text: "Visit our website", href: "{{company.website}}", align: "center" });
+  if (type === "divider") Object.assign(b, { height: 1, color: "#E5E7EB" });
+  if (type === "spacer") Object.assign(b, { height: 24 });
+  if (type === "columns") Object.assign(b, { html: "<p>Left column</p>", html2: "<p>Right column</p>" });
+  if (type === "social") Object.assign(b, { links: [{ label: "Facebook", url: "" }, { label: "Instagram", url: "" }], align: "center" });
+  if (type === "answers") Object.assign(b, { text: "What they sent" });
+  if (type === "footer") Object.assign(b, { text: "", align: "center" });
+  return b;
+}
+
+function EmailTemplatesHub({ canEdit }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [editId, setEditId] = useState(() => ssfReadParam("tpl"));
+  const [picker, setPicker] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => { setErr(""); ssfCall("crm_email_tpl_list").then((d) => { setData(d); ssfSetBrand(d?.brandColors); }, (e) => setErr(e.message)); }, []);
+  useEffect(() => { load(); }, [load]);
+  const open = (id) => { ssfUrlParam("tpl", id); setEditId(id); };
+  const close = () => { ssfUrlParam("tpl", null); setEditId(null); load(); };
+  const act = async (fn) => { setBusy(true); setErr(""); try { await fn(); load(); } catch (e) { setErr(e.message); } setBusy(false); };
+  if (editId) return <EmailTemplateEditor id={editId} canEdit={canEdit} onClose={close} />;
+  const purpose = (p) => (SSE_PURPOSE.find(([k]) => k === p) || [p, p])[1];
+  return (
+    <div style={S.card}>
+      <CardHead title="Email templates" count={data ? data.templates.length : null}
+        desc="Designed emails for your forms: the auto-reply your leads get, and the alert your team gets. Pick them on a form's Notifications tab."
+        right={canEdit && <button type="button" style={SSF_BTN(true)} onClick={() => setPicker(true)}>+ New template</button>} />
+      {err && <div style={S.err}>{err}</div>}
+      {!data && !err && <div style={{ color: "#64748B", fontSize: 13 }}>Loading…</div>}
+      {data && !data.templates.length && <div style={{ textAlign: "center", padding: "28px 12px", color: "#64748B", fontSize: 13 }}>No templates yet. Your forms use the built-in emails until you make one.</div>}
+      {data && data.templates.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr><th style={S.th}>Template</th><th style={S.th}>Used for</th><th style={S.th}>Subject</th><th style={S.th}>Edited</th><th style={S.th}></th></tr></thead>
+            <tbody>
+              {data.templates.map((t) => (
+                <tr key={t.id}>
+                  <td style={S.td}><button type="button" onClick={() => open(t.id)} style={{ background: "none", border: "none", padding: 0, fontWeight: 800, color: ACCENT, cursor: "pointer", fontSize: 13, textAlign: "left" }}>{t.name}</button></td>
+                  <td style={S.td}>{purpose(t.purpose)}</td>
+                  <td style={{ ...S.td, color: "#475569" }}>{t.subject || "—"}</td>
+                  <td style={S.td}>{ssfWhen(t.updated_at)}</td>
+                  <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right" }}>
+                    <button type="button" style={SSF_BTN(false)} onClick={() => open(t.id)}>{canEdit ? "Edit" : "Open"}</button>{" "}
+                    {canEdit && <button type="button" disabled={busy} style={SSF_BTN(false)} onClick={() => act(async () => { const r = await ssfCall("crm_email_tpl_duplicate", { id: t.id }); open(r.template.id); })}>Duplicate</button>}{" "}
+                    {canEdit && <button type="button" disabled={busy} style={{ ...SSF_BTN(false), color: "#B91C1C" }} onClick={() => { if (window.confirm(`Delete “${t.name}”? Forms using it go back to the built-in email.`)) act(() => ssfCall("crm_email_tpl_delete", { id: t.id })); }}>Delete</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {picker && (
+        <SsfModal title="Start a new email" onClose={() => setPicker(false)}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(160px,1fr))", gap: 10 }}>
+            {(data?.starters || []).map((s) => (
+              <button key={s.key} type="button" disabled={busy}
+                onClick={() => act(async () => { const r = await ssfCall("crm_email_tpl_create", { starter: s.key }); setPicker(false); open(r.template.id); })}
+                style={{ border: "1px solid #E2E8F0", borderRadius: 10, background: "#FFF", padding: "18px 12px", cursor: "pointer", fontWeight: 800, color: "#1E293B", fontSize: 13 }}>
+                <div style={{ fontSize: 26, marginBottom: 6 }}>{{ autoreply: "💌", notification: "🔔", blank: "📄" }[s.key] || "📄"}</div>
+                {s.key === "blank" ? "Blank email" : s.name}
+              </button>
+            ))}
+          </div>
+        </SsfModal>
+      )}
+    </div>
+  );
+}
+
+function EmailTemplateEditor({ id, canEdit, onClose }) {
+  const [tpl, setTpl] = useState(null);
+  const [err, setErr] = useState("");
+  const [sel, setSel] = useState(null);
+  const [hist, setHist] = useState({ past: [], future: [] });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [html, setHtml] = useState("");
+  const [subjectOut, setSubjectOut] = useState("");
+  const [device, setDevice] = useState("desktop");
+  const [msg, setMsg] = useState("");
+  const latest = useRef({});
+  latest.current = { tpl, dirty };
+
+  useEffect(() => { ssfCall("crm_email_tpl_get", { id }).then((r) => setTpl(r.template), (e) => setErr(e.message)); }, [id]);
+  // The preview is the server's render: exactly what a send produces.
+  useEffect(() => {
+    if (!tpl) return undefined;
+    const t = setTimeout(() => {
+      ssfCall("crm_email_tpl_preview", { design: tpl.design, subject: tpl.subject, preheader: tpl.preheader })
+        .then((r) => { setHtml(r.html); setSubjectOut(r.subject); }, (e) => setErr(e.message));
+    }, 450);
+    return () => clearTimeout(t);
+  }, [tpl]);
+  const save = useCallback(async () => {
+    const cur = latest.current.tpl;
+    if (!canEdit || !cur) return;
+    setSaving(true);
+    try {
+      await ssfCall("crm_email_tpl_save", { id, name: cur.name, purpose: cur.purpose, subject: cur.subject, preheader: cur.preheader, design: cur.design });
+      setDirty(false); setSavedAt(new Date()); setErr("");
+    } catch (e) { setErr(e.message); }
+    setSaving(false);
+  }, [id, canEdit]);
+  useEffect(() => {
+    if (!dirty || !canEdit) return undefined;
+    const t = setTimeout(save, 1200);
+    return () => clearTimeout(t);
+  }, [dirty, tpl, canEdit, save]);
+
+  const set = (patch, record = true) => {
+    if (record) setHist({ past: [...hist.past.slice(-49), tpl], future: [] });
+    setTpl({ ...tpl, ...patch }); setDirty(true);
+  };
+  const setDesign = (design) => set({ design });
+  const blocks = tpl?.design?.blocks || [];
+  const setBlocks = (b) => setDesign({ ...tpl.design, blocks: b });
+  const patchBlock = (bid, p) => setBlocks(blocks.map((b) => (b.id === bid ? { ...b, ...p } : b)));
+  const addBlock = (type, at) => {
+    if (blocks.length >= 60) { setErr("An email can hold up to 60 blocks."); return; }
+    const b = sseNewBlock(type, blocks);
+    const next = [...blocks];
+    next.splice(at == null ? (sel ? blocks.findIndex((x) => x.id === sel) + 1 : next.length) : at, 0, b);
+    setBlocks(next); setSel(b.id);
+  };
+  const shift = (bid, d) => { const i = blocks.findIndex((b) => b.id === bid), j = i + d; if (i < 0 || j < 0 || j >= blocks.length) return; const n = [...blocks]; [n[i], n[j]] = [n[j], n[i]]; setBlocks(n); };
+  const remove = (bid) => { setBlocks(blocks.filter((b) => b.id !== bid)); setSel(null); };
+  const undo = () => { if (!hist.past.length) return; const prev = hist.past[hist.past.length - 1]; setHist({ past: hist.past.slice(0, -1), future: [tpl, ...hist.future] }); setTpl(prev); setDirty(true); };
+  const redo = () => { if (!hist.future.length) return; const nxt = hist.future[0]; setHist({ past: [...hist.past, tpl], future: hist.future.slice(1) }); setTpl(nxt); setDirty(true); };
+  const test = async () => {
+    setMsg(""); setErr("");
+    try { const r = await ssfCall("crm_email_tpl_test", { design: tpl.design, subject: tpl.subject, preheader: tpl.preheader }); setMsg(`Test sent to ${r.sentTo}.`); setTimeout(() => setMsg(""), 5000); } catch (e) { setErr(e.message); }
+  };
+  const back = async () => { if (latest.current.dirty) await save(); onClose(); };
+
+  const shell = { position: "fixed", inset: 0, zIndex: 3000, background: "#F1F5F9", display: "flex", flexDirection: "column" };
+  if (!tpl) return <div style={shell}><div style={{ margin: "auto", color: "#64748B" }}>{err ? <div style={S.err}>{err} <button type="button" style={SSF_BTN(false)} onClick={onClose}>Back</button></div> : "Loading template…"}</div></div>;
+  const selected = blocks.find((b) => b.id === sel) || null;
+  const topBtn = (active) => ({ background: active ? "#EEF2FF" : "transparent", border: "1px solid " + (active ? "#C7D2FE" : "transparent"), borderRadius: 6, padding: "6px 9px", cursor: "pointer", fontSize: 14 });
+  return (
+    <div style={shell}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 14px", background: "#FFF", borderBottom: "1px solid #E2E8F0", flexWrap: "wrap" }}>
+        <button type="button" onClick={back} style={{ ...SSF_BTN(false), border: "none" }}>← Back</button>
+        <input value={tpl.name} disabled={!canEdit} onChange={(e) => set({ name: e.target.value }, false)} aria-label="Template name"
+          style={{ ...S.input, width: 240, fontSize: 15, fontWeight: 800, border: "1px solid transparent", background: "#F8FAFC" }} />
+        <select value={tpl.purpose} disabled={!canEdit} onChange={(e) => set({ purpose: e.target.value }, false)} style={{ ...S.input, width: 170 }} aria-label="Used for">
+          {SSE_PURPOSE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+        <span style={{ fontSize: 12, color: "#94A3B8" }}>{!canEdit ? "View only" : saving ? "Saving…" : dirty ? "Unsaved" : savedAt ? "Saved" : ""}</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 2, background: "#F1F5F9", borderRadius: 8, padding: 2 }}>
+            <button type="button" aria-label="Desktop view" onClick={() => setDevice("desktop")} style={topBtn(device === "desktop")}>🖥️</button>
+            <button type="button" aria-label="Phone view" onClick={() => setDevice("mobile")} style={topBtn(device === "mobile")}>📱</button>
+          </div>
+          {canEdit && <><button type="button" aria-label="Undo" disabled={!hist.past.length} onClick={undo} style={topBtn(false)}>↶</button>
+            <button type="button" aria-label="Redo" disabled={!hist.future.length} onClick={redo} style={topBtn(false)}>↷</button></>}
+          {canEdit && <button type="button" style={SSF_BTN(false)} onClick={test}>✉ Send me a test</button>}
+          {canEdit && <button type="button" style={SSF_BTN(true)} disabled={saving || !dirty} onClick={save}>{dirty ? "Save" : "Saved ✓"}</button>}
+        </div>
+      </div>
+      {(err || msg) && <div style={{ ...(err ? S.err : S.okMsg), margin: "10px 14px 0" }}>{err || msg}</div>}
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        <div style={{ width: 250, flexShrink: 0, background: "#FFF", borderRight: "1px solid #E2E8F0", overflow: "auto", padding: 12 }}>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B", marginBottom: 8 }}>Add a block</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, marginBottom: 16 }}>
+            {SSE_BLOCKS.map(([type, label, icon]) => (
+              <button key={type} type="button" disabled={!canEdit} onClick={() => addBlock(type)} title={`Add ${label}`}
+                style={{ border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF", padding: "9px 4px 7px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, minHeight: 60 }}>
+                <span style={{ fontSize: 17 }}>{icon}</span><span style={{ fontSize: 10.5, fontWeight: 600, color: "#334155", textAlign: "center", lineHeight: 1.15 }}>{label}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B", marginBottom: 6 }}>Layers</div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 8 }}>Top to bottom, as they appear in the email.</div>
+          {blocks.map((b, i) => (
+            <div key={b.id} onClick={() => setSel(b.id)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 6, marginBottom: 3, cursor: "pointer", background: sel === b.id ? "#EEF2FF" : "#F8FAFC", border: "1px solid " + (sel === b.id ? "#C7D2FE" : "transparent") }}>
+              <span style={{ fontSize: 13 }}>{(SSE_BLOCKS.find((x) => x[0] === b.type) || [])[2]}</span>
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{SSE_LABEL[b.type]}{b.type === "heading" && b.text ? `: ${b.text}` : ""}</span>
+              {canEdit && <span onClick={(e) => e.stopPropagation()} style={{ display: "flex" }}>
+                <button type="button" aria-label="Move up" disabled={i === 0} onClick={() => shift(b.id, -1)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11 }}>▲</button>
+                <button type="button" aria-label="Move down" disabled={i === blocks.length - 1} onClick={() => shift(b.id, 1)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11 }}>▼</button>
+                <button type="button" aria-label="Delete block" onClick={() => remove(b.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: "#B91C1C" }}>✕</button>
+              </span>}
+            </div>
+          ))}
+        </div>
+        <div style={{ flex: 1, minWidth: 0, overflow: "auto", padding: 20 }}>
+          <div style={{ maxWidth: 720, margin: "0 auto 12px", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "90px 1fr", gap: 8, alignItems: "center" }}>
+              <label style={{ ...S.lbl, margin: 0 }}>Subject</label>
+              <SseTagInput disabled={!canEdit} value={tpl.subject} maxLength={200} onChange={(v) => set({ subject: v }, false)} />
+              <label style={{ ...S.lbl, margin: 0 }}>Preview text</label>
+              <SseTagInput disabled={!canEdit} value={tpl.preheader} maxLength={200} placeholder="The grey line inboxes show after the subject" onChange={(v) => set({ preheader: v }, false)} />
+            </div>
+            {subjectOut && <div style={{ fontSize: 12, color: "#64748B", marginTop: 8 }}>With sample details: <b style={{ color: "#1E293B" }}>{subjectOut}</b></div>}
+          </div>
+          <div style={{ width: device === "mobile" ? 375 : 720, maxWidth: "100%", margin: "0 auto", borderRadius: device === "mobile" ? 24 : 10, overflow: "hidden", boxShadow: device === "mobile" ? "0 0 0 10px #1E293B" : "0 1px 3px rgba(0,0,0,.08)", background: "#FFF" }}>
+            <iframe title="Email preview" srcDoc={html} sandbox="" style={{ width: "100%", height: 760, border: 0, display: "block" }} />
+          </div>
+          <div style={{ textAlign: "center", fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>Sample details (“Pat Lee”) fill the merge fields here. Real emails use the lead's own.</div>
+        </div>
+        <div style={{ width: 330, flexShrink: 0, background: "#FFF", borderLeft: "1px solid #E2E8F0", overflow: "auto" }}>
+          {selected
+            ? <SseBlockPanel key={selected.id} block={selected} disabled={!canEdit} onChange={(p) => patchBlock(selected.id, p)} onClose={() => setSel(null)} onRemove={() => remove(selected.id)} />
+            : <SseStylePanel style={tpl.design.style || {}} disabled={!canEdit} onChange={(p) => setDesign({ ...tpl.design, style: { ...tpl.design.style, ...p } })} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SseTagMenu({ onPick, disabled }) {
+  return (
+    <select disabled={disabled} value="" onChange={(e) => { if (e.target.value) onPick(`{{${e.target.value}}}`); }} title="Insert a merge field"
+      style={{ ...S.input, width: 120, flexShrink: 0, fontWeight: 700, color: ACCENT }}>
+      <option value="">+ Field</option>
+      {SSE_TAGS.map(([t, l]) => <option key={t} value={t}>{l}</option>)}
+    </select>
+  );
+}
+function SseTagInput({ value, onChange, disabled, maxLength, placeholder }) {
+  const ref = useRef(null);
+  const insert = (tag) => {
+    const el = ref.current;
+    const v = value || "";
+    const at = el && el.selectionStart != null ? el.selectionStart : v.length;
+    onChange((v.slice(0, at) + tag + v.slice(el && el.selectionEnd != null ? el.selectionEnd : at)).slice(0, maxLength || 500));
+  };
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <input ref={ref} disabled={disabled} value={value || ""} maxLength={maxLength} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} style={S.input} />
+      <SseTagMenu disabled={disabled} onPick={insert} />
+    </div>
+  );
+}
+
+// A small rich-text box: bold, italic, underline, links, lists and merge fields. Its HTML is cut
+// down to that allow-list by the server (emailBlocks.ts cleanRichText) on every preview and save.
+function SseRichText({ html, onChange, disabled }) {
+  const ref = useRef(null);
+  // Set once per block (the panel is keyed on the block id); after that the box owns its HTML, or
+  // every keystroke would reset the caret.
+  const first = useRef(html);
+  useEffect(() => { if (ref.current) ref.current.innerHTML = first.current || ""; }, []);
+  const emit = () => { if (ref.current) onChange(ref.current.innerHTML); };
+  const cmd = (c, v) => (e) => { e.preventDefault(); if (disabled) return; ref.current.focus(); document.execCommand(c, false, v); emit(); };
+  const link = (e) => {
+    e.preventDefault();
+    if (disabled) return;
+    const url = window.prompt("Link address (https://…, mailto: or tel:)", "https://");
+    if (!url) return;
+    if (!/^(https:\/\/|mailto:|tel:)/i.test(url.trim()) && !/^\{\{\s*[a-z_.]+\s*\}\}$/.test(url.trim())) { window.alert("Links must start with https://, mailto: or tel:."); return; }
+    ref.current.focus(); document.execCommand("createLink", false, url.trim()); emit();
+  };
+  const tb = { background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 5, padding: "3px 8px", cursor: "pointer", fontSize: 12.5 };
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap" }}>
+        <button type="button" style={{ ...tb, fontWeight: 800 }} onMouseDown={cmd("bold")} aria-label="Bold">B</button>
+        <button type="button" style={{ ...tb, fontStyle: "italic" }} onMouseDown={cmd("italic")} aria-label="Italic">I</button>
+        <button type="button" style={{ ...tb, textDecoration: "underline" }} onMouseDown={cmd("underline")} aria-label="Underline">U</button>
+        <button type="button" style={tb} onMouseDown={link} aria-label="Link">🔗</button>
+        <button type="button" style={tb} onMouseDown={cmd("insertUnorderedList")} aria-label="Bulleted list">• List</button>
+        <SseTagMenu disabled={disabled} onPick={(tag) => { ref.current.focus(); document.execCommand("insertText", false, tag); emit(); }} />
+      </div>
+      <div ref={ref} contentEditable={!disabled} suppressContentEditableWarning onInput={emit} onBlur={emit}
+        style={{ ...S.input, minHeight: 110, fontWeight: 400, lineHeight: 1.5, overflow: "auto", maxHeight: 320 }} />
+    </div>
+  );
+}
+
+function SseBlockPanel({ block: b, onChange, onClose, onRemove, disabled }) {
+  const t = b.type;
+  const alignRow = <SsfRow label="Alignment"><SsfSeg disabled={disabled} value={b.align || "left"} onChange={(v) => onChange({ align: v })} options={[["left", "Left"], ["center", "Center"], ["right", "Right"]]} /></SsfRow>;
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", borderBottom: "1px solid #E2E8F0" }}>
+        <div style={{ fontWeight: 800, fontSize: 13, color: "#1E293B" }}>{SSE_LABEL[t]}</div>
+        <button type="button" onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontSize: 12 }}>Email styles →</button>
+      </div>
+      <div style={{ padding: 14 }}>
+        {t === "header" && (<>
+          <SsfRow label="Logo" hint="Leave empty to use the logo from your Company settings, or your business name if there's none."><SsfImagePick disabled={disabled} url={b.url} onUrl={(u) => onChange({ url: u })} /></SsfRow>
+          <SsfRow label="Text if there's no logo"><SseTagInput disabled={disabled} value={b.text} maxLength={120} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <SsfRow label="Logo width"><SsfNum disabled={disabled} value={b.width} min={40} max={400} onChange={(v) => onChange({ width: v })} /></SsfRow>
+          <SsfColor disabled={disabled} label="Background" value={b.bg} onChange={(v) => onChange({ bg: v })} />
+          {alignRow}
+        </>)}
+        {t === "heading" && (<>
+          <SsfRow label="Text"><SseTagInput disabled={disabled} value={b.text} maxLength={300} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <SsfRow label="Size"><SsfNum disabled={disabled} value={b.size} min={16} max={40} onChange={(v) => onChange({ size: v })} /></SsfRow>
+          <SsfColor disabled={disabled} label="Color" value={b.color} onChange={(v) => onChange({ color: v })} />
+          {alignRow}
+        </>)}
+        {t === "text" && (<>
+          <SsfRow label="Text"><SseRichText disabled={disabled} html={b.html} onChange={(h) => onChange({ html: h })} /></SsfRow>
+          <SsfRow label="Text size"><SsfNum disabled={disabled} value={b.size} min={12} max={22} onChange={(v) => onChange({ size: v })} /></SsfRow>
+          {alignRow}
+        </>)}
+        {t === "image" && (<>
+          <SsfRow label="Image"><SsfImagePick disabled={disabled} url={b.url} onUrl={(u) => onChange({ url: u })} /></SsfRow>
+          <SsfRow label="Describe the image" hint="Shown when an inbox blocks images."><input disabled={disabled} value={b.alt || ""} maxLength={200} onChange={(e) => onChange({ alt: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Link when clicked (optional)"><input disabled={disabled} value={b.href || ""} placeholder="https://" onChange={(e) => onChange({ href: e.target.value })} style={S.input} /></SsfRow>
+          <SsfRow label="Width"><SsfNum disabled={disabled} value={b.width} min={10} max={100} suffix="%" onChange={(v) => onChange({ width: v })} /></SsfRow>
+          {alignRow}
+        </>)}
+        {t === "button" && (<>
+          <SsfRow label="Button text"><SseTagInput disabled={disabled} value={b.text} maxLength={80} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <SsfRow label="Link" hint="https://…, mailto:, tel: or {{company.website}}"><input disabled={disabled} value={b.href || ""} onChange={(e) => onChange({ href: e.target.value })} style={S.input} /></SsfRow>
+          <SsfColor disabled={disabled} label="Button color" value={b.bg} onChange={(v) => onChange({ bg: v })} />
+          <SsfColor disabled={disabled} label="Text color" value={b.color} onChange={(v) => onChange({ color: v })} />
+          {alignRow}
+        </>)}
+        {t === "divider" && (<>
+          <SsfColor disabled={disabled} label="Color" value={b.color} onChange={(v) => onChange({ color: v })} />
+          <SsfRow label="Thickness"><SsfNum disabled={disabled} value={b.height} min={1} max={6} onChange={(v) => onChange({ height: v })} /></SsfRow>
+        </>)}
+        {t === "spacer" && <SsfRow label="Height"><SsfNum disabled={disabled} value={b.height} min={4} max={80} onChange={(v) => onChange({ height: v })} /></SsfRow>}
+        {t === "columns" && (<>
+          <SsfRow label="Left column"><SseRichText disabled={disabled} html={b.html} onChange={(h) => onChange({ html: h })} /></SsfRow>
+          <SsfRow label="Right column"><SseRichText disabled={disabled} html={b.html2} onChange={(h) => onChange({ html2: h })} /></SsfRow>
+        </>)}
+        {t === "social" && (<>
+          {(b.links || []).map((l, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr auto", gap: 6, marginBottom: 6 }}>
+              <input disabled={disabled} value={l.label} maxLength={40} placeholder="Facebook" onChange={(e) => onChange({ links: b.links.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)) })} style={S.input} />
+              <input disabled={disabled} value={l.url} placeholder="https://" onChange={(e) => onChange({ links: b.links.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)) })} style={S.input} />
+              <button type="button" disabled={disabled} aria-label="Remove link" onClick={() => onChange({ links: b.links.filter((_, j) => j !== i) })} style={{ ...SSF_BTN(false), padding: "4px 8px" }}>✕</button>
+            </div>
+          ))}
+          {(b.links || []).length < 8 && <button type="button" disabled={disabled} style={SSF_BTN(false)} onClick={() => onChange({ links: [...(b.links || []), { label: "", url: "" }] })}>+ Add link</button>}
+          <div style={{ fontSize: 11.5, color: "#64748B", margin: "8px 0" }}>Links without an https:// address are left out of the email.</div>
+          {alignRow}
+        </>)}
+        {t === "answers" && (<>
+          <SsfRow label="Title above the answers"><input disabled={disabled} value={b.text || ""} maxLength={120} onChange={(e) => onChange({ text: e.target.value })} style={S.input} /></SsfRow>
+          <div style={{ fontSize: 12, color: "#64748B" }}>Lists every answer from the form that was filled in. Empty when this template is sent outside a form.</div>
+        </>)}
+        {t === "footer" && (<>
+          <SsfRow label="Extra line (optional)"><SseTagInput disabled={disabled} value={b.text} maxLength={500} onChange={(v) => onChange({ text: v })} /></SsfRow>
+          <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>Your business name, address and phone are added from Company settings.</div>
+          {alignRow}
+        </>)}
+        {!disabled && <button type="button" onClick={onRemove} style={{ ...SSF_BTN(false), color: "#B91C1C", width: "100%", marginTop: 8 }}>Delete this block</button>}
+      </div>
+    </div>
+  );
+}
+
+function SseStylePanel({ style: st, onChange, disabled }) {
+  return (
+    <div>
+      <div style={{ padding: "12px 14px", borderBottom: "1px solid #E2E8F0", fontWeight: 800, fontSize: 13, color: "#1E293B" }}>Email styles</div>
+      <div style={{ padding: 14 }}>
+        <SsfColor disabled={disabled} label="Background" value={st.bg} onChange={(v) => onChange({ bg: v })} />
+        <SsfColor disabled={disabled} label="Email body" value={st.contentBg} onChange={(v) => onChange({ contentBg: v })} />
+        <SsfColor disabled={disabled} label="Text" value={st.text} onChange={(v) => onChange({ text: v })} />
+        <SsfColor disabled={disabled} label="Links and buttons" value={st.accent} onChange={(v) => onChange({ accent: v })} />
+        <div style={{ height: 8 }} />
+        <SsfRow label="Font"><select disabled={disabled} value={st.font || "arial"} onChange={(e) => onChange({ font: e.target.value })} style={S.input}>{SSE_FONTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></SsfRow>
+        <SsfRow label="Email width" hint="600 is the standard; most inboxes show up to 640."><SsfNum disabled={disabled} value={st.width} min={400} max={800} onChange={(v) => onChange({ width: v })} /></SsfRow>
+        <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={st.radius} min={0} max={24} onChange={(v) => onChange({ radius: v })} /></SsfRow>
+        <div style={{ fontSize: 11.5, color: "#64748B" }}>Click a layer on the left to edit that block.</div>
+      </div>
+    </div>
+  );
+}

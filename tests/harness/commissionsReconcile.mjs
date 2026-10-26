@@ -31,7 +31,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, BASE, REF } from "./lib.mjs";
+import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -151,21 +151,21 @@ async function run(label, S) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
-  await page.goto(`${BASE}/portal/commissions`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}/commissions`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(S.settleMs ?? 4500);
   let firstEnd = Date.now();
   if (S.revisit) {
     // Leave and come back within the tab cache's ten minutes: the second open starts from the
     // cached ledger (no paint leg) and must still reconcile before anything is armed.
-    await page.click('a[href="/portal/designs"]');
+    await page.click('a[href="/contacts"]');
     await page.waitForTimeout(800);
     phase = "revisit";
     firstEnd = Date.now();
-    await page.click('a[href="/portal/commissions"]');
+    await page.click('a[href="/commissions"]');
     await page.waitForTimeout(S.revisit.settleMs ?? 4500);
   }
   const samples = await page.evaluate(() => window.__samples);
@@ -173,7 +173,7 @@ async function run(label, S) {
   return { label, calls, logged, pageErrors, samples, firstEnd };
 }
 
-const onTab = (s) => s.path === "/portal/commissions";
+const onTab = (s) => s.path === "/commissions";
 const never = (r, pred, since = 0) => r.samples.filter((s) => s.at >= since && onTab(s)).filter(pred);
 const last = (r) => [...r.samples].reverse().find(onTab) || {};
 const callsOf = (r, phase = "first") => r.calls.filter((c) => c.phase === phase);

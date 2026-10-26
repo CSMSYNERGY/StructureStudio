@@ -248,7 +248,7 @@ async function main() {
   await page.route("**/__stub/img-*.png", (route) => route.fulfill({ status: 200, contentType: "image/png", body: PNG }));
 
   // CLICKED, not deep-linked: python -m http.server serves files, not the Workers routes, so
-  // /portal/settings/designer 404s here even though it is a real URL live.
+  // /settings/designer 404s here even though it is a real URL live.
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), { timeout: 40000 });
   await page.getByText("Settings", { exact: true }).last().click();

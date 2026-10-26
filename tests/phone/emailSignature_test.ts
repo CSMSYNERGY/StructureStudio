@@ -46,7 +46,11 @@ Deno.test("save_prefs keeps emailSignature, through cleanSignature, and nothing 
 
 Deno.test("get_profile returns the cleaned signature for the app ('' when none)", () => {
   const get = slice(SETTINGS, `if (action === "get_profile") {`, `if (action === "save_profile") {`, "get_profile");
-  assert(get.includes(`.select("full_name, phone, role, prefs").eq("user_id", userId)`), "prefs is read off the caller's own row");
+  // selfUserId since 2026-10-23, and the change of identifier is the point: "the caller's own row"
+  // became ambiguous the day an operator could act as a named person. My Profile is about the person
+  // whose screen it is, so acting as a rep shows the REP'S signature — not the operator's filed under
+  // their name. (crm_send_email below still signs with `userId`: that is who is actually sending.)
+  assert(get.includes(`.select("full_name, phone, role, prefs").eq("user_id", selfUserId)`), "prefs is read off the row of the person this screen is about");
   assert(get.includes("emailSignature: cleanSignature((data?.prefs as Record<string, unknown> | null)?.emailSignature) ?? \"\","),
     "the same cleaning the send runs, so the app shows what goes out");
 });

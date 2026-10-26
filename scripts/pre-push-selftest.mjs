@@ -35,9 +35,14 @@
 //   D  DISCRIMINATION: the pre-2026-08-04 hook must FAIL this suite. Without D the suite
 //      could pass while asserting nothing, which is precisely how the original bug
 //      survived. D is the whole point.
+//   E  the RELEASE-NOTE NUDGE (2026-10-09): an ordinary fast-forward push to beta names a
+//      user-facing commit with no Release-note trailer, says nothing when it has one or when
+//      the push is not to beta, never blocks (not even when the nudge itself crashes), and —
+//      the discrimination — a hook that collects beta ranges AFTER the fast-forward
+//      `continue` stays silent on that same push.
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -259,6 +264,74 @@ try {
   before === after
     ? ok("current hook refuses it and preserves those commits")
     : bad("current hook allowed a stale --force to rewrite origin/beta", "");
+
+  console.log("E. the release-note nudge");
+  const NUDGE = join(ROOT, "scripts", "release-note-nudge.mjs");
+  const NUDGE_SAYS = "release-note nudge: 1 commit(s) going to beta";
+  // The lab clone gets the real nudge script, untracked, next to the no-op preflight.
+  const withNudge = (ctx, script = NUDGE) => { copyFileSync(script, join(ctx.W, "scripts", "release-note-nudge.mjs")); return ctx; };
+  const portalCommit = (ctx, ...messages) => {
+    mkdirSync(join(ctx.W, "portal"), { recursive: true });
+    writeFileSync(join(ctx.W, "portal", `p${seq}.jsx`), `portal ${seq} ${Date.now()}\n`);
+    git(["add", "portal"], ctx.W);
+    git(["commit", "-q", ...messages.flatMap((m) => ["-m", m])], ctx.W);
+    return ctx;
+  };
+  const push = (ctx, ...args) => git(["push", ...args], ctx.W);
+
+  // E1 — the ordinary case: up to date, fast-forward, HEAD:beta from a topic branch.
+  c = portalCommit(withNudge(setup(HOOK)), "Portal change with no trailer");
+  git(["checkout", "-q", "-b", "topic/e1"], c.W);
+  out = push(c, "origin", "HEAD:beta");
+  out.rc === 0 && out.out.includes(NUDGE_SAYS)
+    ? ok("a fast-forward push to beta names the user-facing commit with no trailer, and lands")
+    : bad("a fast-forward push to beta did not land with the nudge", out.out);
+
+  // E2 — with a trailer (in the final block), nothing is said.
+  c = portalCommit(withNudge(setup(HOOK)), "Portal change with a note", "Release-note: fix: The portal change builders can now use");
+  out = push(c, "origin", "beta");
+  out.rc === 0 && !out.out.includes("release-note nudge")
+    ? ok("a commit carrying a Release-note trailer is not named")
+    : bad("a commit with a trailer was nudged, or the push failed", out.out);
+
+  // E3 — not beta: nothing is said.
+  c = portalCommit(withNudge(setup(HOOK)), "Portal change on a side branch");
+  out = push(c, "origin", "HEAD:refs/heads/side-branch");
+  out.rc === 0 && !out.out.includes("release-note nudge")
+    ? ok("a push to another branch is not nudged")
+    : bad("a push to a non-beta branch was nudged, or failed", out.out);
+
+  // E4 — the nudge can never block: a nudge that crashes still lets the push through.
+  const CRASH = join(LAB, "crashing-nudge.mjs");
+  writeFileSync(CRASH, 'console.error("nudge crashed on purpose"); process.exit(3);\n');
+  c = portalCommit(withNudge(setup(HOOK), CRASH), "Portal change, crashing nudge");
+  out = push(c, "origin", "beta");
+  out.rc === 0
+    ? ok("a nudge that exits non-zero does not block the push")
+    : bad("a crashing nudge blocked the push", out.out);
+
+  // E5 — DISCRIMINATION: the same hook with the collection moved AFTER the fast-forward
+  // `continue` (where it is easy to put it) is silent on E1's push. If this ever passes, part E
+  // is asserting nothing.
+  const hookText = readFileSync(HOOK, "utf8").replace(/\r\n/g, "\n");
+  const blockAt = hookText.indexOf("  # >>> nudge-collect");
+  const blockEnd = hookText.indexOf("  # <<< nudge-collect\n");
+  const ffLine = '    git merge-base --is-ancestor "$remote_oid" "$local_oid" 2>/dev/null && continue\n';
+  if (blockAt < 0 || blockEnd < 0 || !hookText.includes(ffLine)) {
+    bad("the hook's nudge-collect markers or fast-forward line moved — re-anchor part E5", "");
+  } else {
+    const block = hookText.slice(blockAt, blockEnd + "  # <<< nudge-collect\n".length);
+    const moved = hookText.replace(block, "").replace(ffLine, ffLine + block.replace(/^ {2}/gm, "    "));
+    const MOVED = join(LAB, "moved-collect-pre-push");
+    writeFileSync(MOVED, moved);
+    chmodSync(MOVED, 0o755);
+    c = portalCommit(withNudge(setup(MOVED)), "Portal change with no trailer");
+    git(["checkout", "-q", "-b", "topic/e5"], c.W);
+    out = push(c, "origin", "HEAD:beta");
+    out.rc === 0 && !out.out.includes("release-note nudge")
+      ? ok("a hook collecting AFTER the fast-forward continue misses the ordinary push (the order is load-bearing)")
+      : bad("the moved-collection mutant still nudged — part E no longer discriminates", out.out);
+  }
 } finally {
   rmSync(LAB, { recursive: true, force: true });
 }

@@ -203,6 +203,215 @@ export function eventRows(rows: EventFixture[]): Reply {
   };
 }
 
+// ── A table that answers the way PostgREST would (list search, 2026-10-13) ──────────
+// Honours what the Worker sends: eq, lt, gte, is.null, not.is.null, in, cs, like and ilike;
+// `or` (and `and(...)` / `or(...)` nested inside it); filters on an embedded table
+// (`crm_contacts.name=ilike.*jo*`), which with `!inner` in the select drop the parent row; and
+// order, offset and limit. Rows carry their embeds as plain keys (crm_contacts, phone_voicemails).
+// Rows the Worker must never see (another tenant's, a deleted voicemail) sit in the fixtures, so
+// a filter it forgets shows up as a wrong answer, not as a passing test.
+
+/** Split on the commas that are not inside parentheses or quotes. */
+export function splitTop(s: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (quoted && ch === "\\") { cur += ch + s[++i]; continue; }
+    if (ch === '"') quoted = !quoted;
+    else if (!quoted && ch === "(") depth++;
+    else if (!quoted && ch === ")") depth--;
+    else if (!quoted && ch === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+const unquoteValue = (v: string) => (v.startsWith('"') ? v.slice(1, -1).replace(/\\(.)/g, "$1") : v);
+
+/** One PostgREST operator against one value. */
+export function pgHolds(val: unknown, expr: string): boolean {
+  if (expr === "is.null") return val == null;
+  if (expr === "not.is.null") return val != null;
+  const i = expr.indexOf(".");
+  const op = expr.slice(0, i);
+  const arg = expr.slice(i + 1);
+  if (op === "eq") return val != null && String(val) === arg;
+  if (op === "lt") return val != null && String(val) < arg;
+  if (op === "gte") return val != null && String(val) >= arg;
+  if (op === "in") return val != null && splitTop(arg.slice(1, -1)).map(unquoteValue).includes(String(val));
+  if (op === "cs") return Array.isArray(val) && arg.slice(1, -1).split(",").every((x) => (val as unknown[]).map(String).includes(x));
+  if (op === "like" || op === "ilike") {
+    // PostgREST's * is SQL's %; _ is any one character.
+    const re = [...arg].map((ch) => (ch === "*" || ch === "%" ? ".*" : ch === "_" ? "." : ch.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))).join("");
+    return val != null && new RegExp(`^${re}$`, op === "ilike" ? "is" : "s").test(String(val));
+  }
+  throw new Error(`pgTable(): the fake has no "${op}" filter`);
+}
+
+/** `a.op.v`, `and(...)` or `or(...)` against a row. */
+function pgExpr(row: Record<string, unknown>, part: string): boolean {
+  if (part.startsWith("and(")) return splitTop(part.slice(4, -1)).every((p) => pgExpr(row, p));
+  if (part.startsWith("or(")) return splitTop(part.slice(3, -1)).some((p) => pgExpr(row, p));
+  const dot = part.indexOf(".");
+  return pgHolds(row[part.slice(0, dot)], part.slice(dot + 1));
+}
+
+export function pgTable(rows: Record<string, unknown>[]) {
+  return (s: Seen) => {
+    const p = s.url.searchParams;
+    const select = p.get("select") ?? "*";
+    const embedded = (name: string) => select.includes(`${name}!inner(`) ? "inner" : select.includes(`${name}(`) ? "left" : null;
+    let out: Record<string, unknown>[] = [];
+    for (const r of rows) {
+      const row: Record<string, unknown> = { ...r };
+      let keep = true;
+      for (const [k, v] of p.entries()) {
+        if (k === "select" || k === "order" || k === "limit" || k === "offset") continue;
+        if (k === "or") { if (!splitTop(v.slice(1, -1)).some((part) => pgExpr(row, part))) keep = false; continue; }
+        const dot = k.indexOf(".");
+        if (dot > 0) {
+          // A filter on an embedded table: narrows the embed; with !inner an empty embed drops the row.
+          const name = k.slice(0, dot);
+          const col = k.slice(dot + 1);
+          const how = embedded(name);
+          if (!how) throw new Error(`pgTable(): ${k} filters ${name}, which the select does not embed`);
+          if (how !== "inner") throw new Error(`pgTable(): ${k} filters a left-joined ${name}; the Worker only filters inner joins`);
+          const e = row[name];
+          const list = (Array.isArray(e) ? e : e ? [e] : []) as Record<string, unknown>[];
+          const kept = list.filter((x) => pgHolds(x[col], v));
+          row[name] = Array.isArray(e) ? kept : kept[0] ?? null;
+          if (!kept.length) keep = false;
+          continue;
+        }
+        if (!pgHolds(row[k], v)) keep = false;
+      }
+      // An !inner embed with nothing to join drops the row even without a filter on it.
+      for (const name of ["crm_contacts", "phone_voicemails", "phone_call_recordings"]) {
+        if (embedded(name) === "inner") {
+          const e = row[name];
+          if (e == null || (Array.isArray(e) && !e.length)) keep = false;
+        }
+      }
+      if (keep) out.push(row);
+    }
+    const order = p.get("order");
+    if (order) {
+      const keys = order.split(",").map((o) => {
+        const [col, dir, nulls] = o.split(".");
+        return { col, sign: dir === "desc" ? -1 : 1, nullsFirst: nulls === "nullsfirst" };
+      });
+      out = [...out].sort((a, b) => {
+        for (const { col, sign, nullsFirst } of keys) {
+          const x = a[col], y = b[col];
+          if (x == null || y == null) {
+            if (x == null && y == null) continue;
+            return (x == null) === nullsFirst ? -1 : 1;
+          }
+          if (String(x) !== String(y)) return String(x) < String(y) ? -sign : sign;
+        }
+        return 0;
+      });
+    }
+    const offset = p.get("offset");
+    if (offset) out = out.slice(Number(offset));
+    const limit = p.get("limit");
+    if (limit) out = out.slice(0, Number(limit));
+    if (select === "*") return out;
+    // Only the columns asked for (an embed whole), so a column the Worker forgets to select is
+    // missing here as it would be live.
+    const cols = splitTop(select).map((c) => c.trim()).map((c) => (c.includes("(") ? c.slice(0, c.indexOf("(")).replace(/!inner$/, "") : c));
+    return out.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null])));
+  };
+}
+
+// ── Migration 305's search function, as the Worker's rpc meets it (2026-10-13) ──────
+// public.phone_list_search in JS, over the same fixture rows pgTable serves: what
+// tests/sql/migration305.test.cjs proves the SQL does (PGlite), kind by kind. The term is matched
+// as itself (LIKE's `%`, `_` and `\` escaped), case aside; under 2 characters finds nothing; only
+// p_client_id's rows; a call's contact and voicemail are its embeds (crm_contacts,
+// phone_voicemails), and a deleted voicemail is no voicemail.
+
+type FixtureRow = Record<string, unknown>;
+const oneOf = (v: unknown): FixtureRow | null => (Array.isArray(v) ? (v[0] as FixtureRow) ?? null : (v as FixtureRow) ?? null);
+const timeOf = (v: unknown) => Date.parse(String(v));
+/** Newest first by `col`, ties by id (the function's order). */
+const newestBy = (col: string) => (a: FixtureRow, b: FixtureRow) =>
+  timeOf(b[col]) - timeOf(a[col]) || (String(a.id) < String(b.id) ? 1 : String(a.id) > String(b.id) ? -1 : 0);
+const pick = (r: FixtureRow, cols: string[]) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]));
+
+export function phoneListSearch(w: { sms?: FixtureRow[]; contacts?: FixtureRow[]; calls?: FixtureRow[] }): Reply {
+  return (s: Seen) => {
+    const a = (s.json ?? {}) as Record<string, any>;
+    const client = String(a.p_client_id ?? "").trim();
+    if (!client) return jsonRes({ code: "22004", message: "phone_list_search: a tenant is required" }, 400);
+    const raw = String(a.p_term ?? "").trim();
+    const term = raw.length >= 2 ? raw.slice(0, 60).toLowerCase() : null;
+    const digits = typeof a.p_digits === "string" && /^[0-9]{3,60}$/.test(a.p_digits) ? a.p_digits : null;
+    const limit = Math.min(Math.max(Number(a.p_limit ?? 50) || 50, 1), 1000);
+    const before = a.p_before ? timeOf(a.p_before) : null;
+    const after = a.p_after ? timeOf(a.p_after) : null;
+    const holds = (v: unknown) => term !== null && v != null && String(v).toLowerCase().includes(term);
+    const has = (v: unknown, d: string | null) => d !== null && v != null && String(v).includes(d);
+    const mineOf = (r: FixtureRow) => r.client_id === client;
+    const kind = String(a.p_kind ?? "");
+
+    if (kind === "texts") {
+      return (w.sms ?? []).filter(mineOf)
+        .filter((m) => holds(m.body) || (m.direction === "in" ? has(m.from_number, digits) : has(m.to_number, digits)))
+        .sort(newestBy("created_at")).slice(0, limit)
+        .map((m) => pick(m, ["id", "contact_id", "direction", "body", "created_at", "from_number", "to_number"]));
+    }
+    if (kind === "contacts" || kind === "directory" || kind === "directory_email") {
+      const cc = kind === "contacts" && digits?.startsWith("1") ? digits.slice(1) : null;
+      return (w.contacts ?? []).filter(mineOf).filter((k) => k.merged_into == null)
+        .filter((k) => (kind === "directory_email"
+          ? holds(k.email_lower)
+          : holds(k.name) || has(k.phone_digits, digits) || (cc !== null && String(k.phone_digits ?? "").startsWith(cc))))
+        .sort(newestBy("updated_at")).slice(0, limit)
+        .map((k) => (kind === "contacts" ? { id: k.id } : pick(k, ["id", "name", "phone", "phone_digits", "email"])));
+    }
+    if (kind === "conversations") {
+      const ids = new Set((a.p_ids ?? []) as string[]);
+      const nums = new Set(((a.p_numbers ?? []) as string[]).filter(Boolean));
+      if (!ids.size && !nums.size) return [];
+      return (w.sms ?? []).filter(mineOf)
+        .filter((m) => ids.has(String(m.contact_id)) || (m.contact_id == null && (nums.has(String(m.from_number)) || nums.has(String(m.to_number)))))
+        .filter((m) => (before === null || timeOf(m.created_at) < before) && (after === null || timeOf(m.created_at) >= after))
+        .sort(newestBy("created_at")).slice(0, limit)
+        .map((m) => pick(m, ["id", "contact_id", "direction", "body", "status", "created_at", "from_number", "to_number", "sent_by"]));
+    }
+    if (kind === "calls") {
+      const customers = a.p_customers !== false;
+      const user = (a.p_user_id ?? null) as string | null;
+      return (w.calls ?? []).filter(mineOf).filter((r) => {
+        const contact = r.contact_id ? oneOf(r.crm_contacts) : null;
+        const vm = oneOf(r.phone_voicemails);
+        const voicemail = vm && !vm.deleted_at ? vm : null;
+        const matches = (customers && holds(contact?.name))
+          || (r.direction === "in" ? has(r.from_e164, digits) : has(r.to_e164, digits))
+          || holds(voicemail?.transcript);
+        if (!matches) return false;
+        if (a.p_voicemail === true && !voicemail) return false;
+        if (before !== null && !(timeOf(r.started_at) < before)) return false;
+        if (user === null) return true;
+        return r.placed_by === user || r.answered_by === user || r.transferred_from === user
+          || ((r.rang_user_ids ?? []) as string[]).includes(user)
+          || (customers && contact?.owner_user_id === user && ["missed", "voicemail", "ringing"].includes(String(r.status)));
+      }).sort(newestBy("started_at")).slice(0, limit).map((r) => ({ id: r.id, started_at: r.started_at }));
+    }
+    return jsonRes({ code: "22023", message: `phone_list_search: unknown kind ${kind}` }, 400);
+  };
+}
+
+/** Every Supabase request a test made, as a URL: what Supabase's API request logs would keep. */
+export function supabaseUrls(net: FakeNet): string[] {
+  return net.seen.filter((s) => s.url.origin === SUPABASE_URL).map((s) => decodeURIComponent(s.url.href));
+}
+
 /** A PostgREST filter value from a request, e.g. eq("id") → the id asked for. */
 export function filter(s: Seen, col: string): string | null {
   const v = s.url.searchParams.get(col);
@@ -356,4 +565,21 @@ export function numbersIn(xml: string): string[] {
 export function attr(xml: string, tag: string, name: string): string | null {
   const m = new RegExp(`<${tag}\\b[^>]*\\s${name}="([^"]*)"`).exec(xml);
   return m ? m[1].replace(/&amp;/g, "&") : null;
+}
+
+// ── Transcript consent (migration 307, src/aiConsent.ts) ────────────────────────────
+
+/** One person's yes to transcripts, as phone_user_settings holds it. */
+export const allowed = (userId: string, version = 1) => ({ user_id: userId, ai_transcripts: "allowed", ai_transcripts_version: version, ai_transcripts_at: "2026-10-13T12:00:00Z" });
+
+/**
+ * The three reads behind "everyone on the call allowed it" (src/aiConsent.ts consentedCalls):
+ * each call's team (phone_calls), its transfers (phone_call_events) and their answers
+ * (phone_user_settings), each honouring the Worker's filters.
+ */
+export function serveConsent(net: FakeNet, o: { calls: Record<string, unknown>[]; events?: EventFixture[]; consent: Record<string, unknown>[] }): FakeNet {
+  net.rest("GET", "phone_calls", pgTable(o.calls));
+  net.rest("GET", "phone_call_events", eventRows(o.events ?? []));
+  net.rest("GET", "phone_user_settings", pgTable(o.consent));
+  return net;
 }

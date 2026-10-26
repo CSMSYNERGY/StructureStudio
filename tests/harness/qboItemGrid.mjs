@@ -34,7 +34,7 @@
 // says "— not mapped —" everywhere): the chore itself already works on the live page.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { launch, reporter, shotsDir, BASE, REF } from "./lib.mjs";
+import { launch, reporter, shotsDir, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const CLIENT = "harness-qbo-grid";
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -165,10 +165,10 @@ async function open(mappings) {
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  // What _redirects does in production: every /portal/<page> is portal.html.
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
-  await page.goto(`${BASE}/portal/settings/quickbooks`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${BASE}/settings/quickbooks`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   // The grid is drawn once list_item_map is in; its dropdowns are filled once list_qbo_items is.
   await page.waitForFunction(() => [...document.querySelectorAll("select option")].some((o) => o.textContent === "Options"), null, { timeout: 20000 }).catch(() => {});

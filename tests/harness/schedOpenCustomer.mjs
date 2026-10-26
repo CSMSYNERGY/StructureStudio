@@ -7,13 +7,13 @@
 //
 //   A. Build Schedule, an owner with the CRM: a card click still opens the job popup; the
 //      customer's name in its header is a link ("Alex Tester ›"); it lands on
-//      /portal/contacts/c-<id> with that deal already picked (no "Pick a deal" hint); after a hop
+//      /contacts/c-<id> with that deal already picked (no "Pick a deal" hint); after a hop
 //      away (the deal's Open in designer) the browser's Back reopens it on that deal, and the
 //      record's own Back still goes to the schedule (B1)
-//   B. the record's Back lands on /portal/build-schedule on the SAME week and view it left; the
+//   B. the record's Back lands on /build-schedule on the SAME week and view it left; the
 //      browser's Back does too; from the Table view, Back comes back to the Table view
 //   C. a job whose design is gone shows its name as plain text; a spec build has no link
-//   D. a job whose design has no customer opens the design's record (/portal/designs/d-<code>)
+//   D. a job whose design has no customer opens the design's record (/contacts/d-<code>)
 //   E. unsaved edits in the popup: following the link asks first; "Cancel" stays put
 //   F. the same customer opened from Contacts still shows the hint and Backs to Contacts (the
 //      schedule's hand-off is spent, and A's "no hint" is not vacuous)
@@ -237,7 +237,7 @@ const lastRecord = (s) => s.calls.filter((c) => c.action === "crm_record").pop()
 async function hopToDesigner(page) {
   await tap(page.locator(`button[title="Show this deal's details"]`).first());
   await tap(page.locator("button", { hasText: /^Open in designer$/ }).first());
-  await page.waitForFunction(() => window.location.pathname === "/portal/designer", null, { timeout: 10000 }).catch(() => {});
+  await page.waitForFunction(() => window.location.pathname === "/designer", null, { timeout: 10000 }).catch(() => {});
 }
 
 const { browser } = await launch({ width: 1440, height: 1000 });
@@ -245,7 +245,7 @@ try {
   // ── A–F. Build Schedule, an owner with the CRM ─────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "owner" });
-    await s.go("/portal/build-schedule");
+    await s.go("/build-schedule");
     await boardReady(s.page, "Build Schedule");
     await tap(s.page.locator("button", { hasText: /^›$/ }).first());
     await boardReady(s.page, "Gable Shed");
@@ -263,7 +263,7 @@ try {
     await s.page.screenshot({ path: join(shots, "A-build-popup-1440.png") });
     await tap(link);
     await recordReady(s.page);
-    ok("A4 it lands on the customer's record", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}`, await path(s.page));
+    ok("A4 it lands on the customer's record", (await path(s.page)) === `/contacts/c-${C_ALEX}`, await path(s.page));
     const rec = lastRecord(s);
     ok("A5 (that customer's contact record)", rec.kind === "contact" && rec.id === C_ALEX, JSON.stringify(rec));
     await s.page.waitForTimeout(500);
@@ -274,17 +274,17 @@ try {
     // and the record's Back used to be spent the moment the address moved, so this came back on
     // "Pick a deal" with a Back to Contacts while the browser's Back still went to the schedule.
     await hopToDesigner(s.page);
-    ok("A7 the deal's Open in designer leaves the record", (await path(s.page)) === "/portal/designer", await path(s.page));
+    ok("A7 the deal's Open in designer leaves the record", (await path(s.page)) === "/designer", await path(s.page));
     await s.page.goBack();
     await recordReady(s.page);
     await s.page.waitForTimeout(500);
-    ok("A8 the browser's Back reopens the record on the same deal", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}` && (await dealPicked(s.page)) === true,
+    ok("A8 the browser's Back reopens the record on the same deal", (await path(s.page)) === `/contacts/c-${C_ALEX}` && (await dealPicked(s.page)) === true,
       `${await path(s.page)} ${await dealPicked(s.page)}`);
 
     // ── B. Back ──
     await recordBack(s.page);
     await boardReady(s.page, "Gable Shed");
-    ok("B1 the record's Back (after that hop) lands on the Build Schedule", (await path(s.page)) === "/portal/build-schedule", await path(s.page));
+    ok("B1 the record's Back (after that hop) lands on the Build Schedule", (await path(s.page)) === "/build-schedule", await path(s.page));
     ok("B2 on the same week it left", (await weekLabel(s.page)) === week, `${await weekLabel(s.page)} vs ${week}`);
     ok("B3 and the same view (Calendar)", (await activeView(s.page, ["Calendar", "Table", "Board"])) === "Calendar", await activeView(s.page, ["Calendar", "Table", "Board"]));
     await openCard(s.page, "Gable Shed");
@@ -292,7 +292,7 @@ try {
     await recordReady(s.page);
     await s.page.goBack();
     await boardReady(s.page, "Gable Shed");
-    ok("B4 the browser's Back does the same: Build Schedule, same week", (await path(s.page)) === "/portal/build-schedule" && (await weekLabel(s.page)) === week,
+    ok("B4 the browser's Back does the same: Build Schedule, same week", (await path(s.page)) === "/build-schedule" && (await weekLabel(s.page)) === week,
       `${await path(s.page)} ${await weekLabel(s.page)}`);
     await tap(s.page.locator("button", { hasText: /^Table$/ }).first());
     await boardReady(s.page, "Utility Shed");
@@ -301,7 +301,7 @@ try {
     await recordReady(s.page);
     await recordBack(s.page);
     await boardReady(s.page, "Gable Shed");
-    ok("B5 from the Table view, Back comes back to the Table view", (await activeView(s.page, ["Calendar", "Table", "Board"])) === "Table" && (await path(s.page)) === "/portal/build-schedule",
+    ok("B5 from the Table view, Back comes back to the Table view", (await activeView(s.page, ["Calendar", "Table", "Board"])) === "Table" && (await path(s.page)) === "/build-schedule",
       `${await activeView(s.page, ["Calendar", "Table", "Board"])} ${await path(s.page)}`);
 
     // ── C. No link where there is no customer to open ──
@@ -317,10 +317,10 @@ try {
     await openTableRow(s.page, "Utility Shed");
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-CASE0003"]'));
     await recordReady(s.page);
-    ok("D1 a design with no customer opens the design's record", (await path(s.page)) === "/portal/designs/d-SS-CASE0003", await path(s.page));
+    ok("D1 a design with no customer opens the design's record", (await path(s.page)) === "/contacts/d-SS-CASE0003", await path(s.page));
     ok("D2 (asked as a design record)", lastRecord(s).kind === "design" && lastRecord(s).id === "SS-CASE0003", JSON.stringify(lastRecord(s)));
     await recordBack(s.page);
-    ok("D3 and its Back returns to the Build Schedule", (await path(s.page)) === "/portal/build-schedule", await path(s.page));
+    ok("D3 and its Back returns to the Build Schedule", (await path(s.page)) === "/build-schedule", await path(s.page));
     await boardReady(s.page, "Gable Shed");
 
     // ── E. Unsaved edits ask first ──
@@ -331,31 +331,31 @@ try {
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await s.page.waitForTimeout(400);
     ok("E1 following the link with an unsaved edit asks first", s.dialogs.length === before + 1 && /not saved/.test(s.dialogs[s.dialogs.length - 1] || ""), s.dialogs.slice(-1)[0]);
-    ok("E2 Cancel stays on the job, edit intact", (await path(s.page)) === "/portal/build-schedule"
+    ok("E2 Cancel stays on the job, edit intact", (await path(s.page)) === "/build-schedule"
       && (await popup(s.page).locator('input[placeholder^="Standing note"]').inputValue()) === "Bring the long ladder", await path(s.page));
     s.setAnswer(true);
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("E3 OK leaves for the record", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}`, await path(s.page));
+    ok("E3 OK leaves for the record", (await path(s.page)) === `/contacts/c-${C_ALEX}`, await path(s.page));
     await recordBack(s.page);
     await boardReady(s.page, "Gable Shed");
     await openTableRow(s.page, "Gable Shed");
     const quiet = s.dialogs.length;
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("E4 with nothing changed it doesn't ask", s.dialogs.length === quiet && (await path(s.page)) === `/portal/contacts/c-${C_ALEX}`);
+    ok("E4 with nothing changed it doesn't ask", s.dialogs.length === quiet && (await path(s.page)) === `/contacts/c-${C_ALEX}`);
 
     // ── F. The same customer opened another way ──
-    await s.go("/portal/contacts");
-    await s.go(`/portal/contacts/c-${C_ALEX}`);
+    await s.go("/contacts/people");
+    await s.go(`/contacts/c-${C_ALEX}`);
     await recordReady(s.page);
     await s.page.waitForTimeout(500);
     ok("F1 opened from Contacts, the record asks for a deal (so A6 means something)", (await dealPicked(s.page)) === false, String(await dealPicked(s.page)));
     await recordBack(s.page);
-    ok("F2 and its Back goes to Contacts, not the schedule", (await path(s.page)) === "/portal/contacts", await path(s.page));
+    ok("F2 and its Back goes to Contacts, not the schedule", (await path(s.page)) === "/contacts/people", await path(s.page));
 
     // ── G. Delivery Schedule ──
-    await s.go("/portal/delivery-schedule");
+    await s.go("/delivery-schedule");
     await boardReady(s.page, "Lot building to Main St");
     const links = await s.page.evaluate(() => [...document.querySelectorAll("[data-ss-sched-customer]")].map((b) => [b.getAttribute("data-ss-sched-customer"), b.innerText.trim()]));
     ok("G1 Loads view: the order stop and the sale stop link, the haul and the repair don't",
@@ -365,17 +365,17 @@ try {
     await tap(s.page.locator('[data-ss-sched-customer="SS-ALEX0001"]').first());
     await recordReady(s.page);
     await s.page.waitForTimeout(400);
-    ok("G2 a stop's link opens the customer's record on that deal", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}`
+    ok("G2 a stop's link opens the customer's record on that deal", (await path(s.page)) === `/contacts/c-${C_ALEX}`
       && (await dealPicked(s.page)) === true, `${await path(s.page)} ${await dealPicked(s.page)}`);
     await recordBack(s.page);
     await boardReady(s.page, "Lot building to Main St");
-    ok("G3 Back returns to the Delivery Schedule's Loads view", (await path(s.page)) === "/portal/delivery-schedule"
+    ok("G3 Back returns to the Delivery Schedule's Loads view", (await path(s.page)) === "/delivery-schedule"
       && (await activeView(s.page, ["Loads", "Table", "Calendar"])) === "Loads", `${await path(s.page)} ${await activeView(s.page, ["Loads", "Table", "Calendar"])}`);
     await tap(s.page.locator("button", { hasText: /^Table$/ }).first());
     await s.page.waitForTimeout(300);
     await tap(s.page.locator('[data-ss-sched-customer="SS-DREW0004"]').first());
     await recordReady(s.page);
-    ok("G4 Table view: the sale stop opens the buyer's record", (await path(s.page)) === `/portal/contacts/c-${C_DREW}` && lastRecord(s).id === C_DREW, await path(s.page));
+    ok("G4 Table view: the sale stop opens the buyer's record", (await path(s.page)) === `/contacts/c-${C_DREW}` && lastRecord(s).id === C_DREW, await path(s.page));
     await recordBack(s.page);
     await boardReady(s.page, "Lot building to Main St");
     ok("G5 and Back comes back to the Table view", (await activeView(s.page, ["Loads", "Table", "Calendar"])) === "Table", await activeView(s.page, ["Loads", "Table", "Calendar"]));
@@ -391,7 +391,7 @@ try {
   // (Carolyn 2026-09-02) used to be lost to a hop away and the browser's Back too (review 2026-10-05).
   {
     const s = await scenario(browser, { name: "pipeline", pipeline: true });
-    await s.go("/portal/designs/list");
+    await s.go("/designs/list");
     const row = s.page.locator('button[title="Open Alex Tester"]').first();
     await row.waitFor({ timeout: 15000 }).catch(() => {});
     if (!ok("P0 the Pipeline lists the customer's deal", (await row.count()) > 0)) {
@@ -400,39 +400,39 @@ try {
     await tap(row);
     await recordReady(s.page);
     await s.page.waitForTimeout(500);
-    ok("P1 a Pipeline row opens the customer's record on that deal", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}` && (await dealPicked(s.page)) === true,
+    ok("P1 a Pipeline row opens the customer's record on that deal", (await path(s.page)) === `/contacts/c-${C_ALEX}` && (await dealPicked(s.page)) === true,
       `${await path(s.page)} ${await dealPicked(s.page)}`);
     await hopToDesigner(s.page);
-    ok("P2 Open in designer leaves the record", (await path(s.page)) === "/portal/designer", await path(s.page));
+    ok("P2 Open in designer leaves the record", (await path(s.page)) === "/designer", await path(s.page));
     await s.page.goBack();
     await recordReady(s.page);
     await s.page.waitForTimeout(500);
-    ok("P3 the browser's Back reopens it on the same deal", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}` && (await dealPicked(s.page)) === true,
+    ok("P3 the browser's Back reopens it on the same deal", (await path(s.page)) === `/contacts/c-${C_ALEX}` && (await dealPicked(s.page)) === true,
       `${await path(s.page)} ${await dealPicked(s.page)}`);
     await recordBack(s.page);
-    ok("P4 and its own Back still goes to Contacts, as before", (await path(s.page)) === "/portal/contacts", await path(s.page));
+    ok("P4 and its own Back returns to the Design list it came from (C22)", (await path(s.page)) === "/contacts/designs", await path(s.page));
     await s.ctx.close();
   }
 
   // ── H. Who gets what ─────────────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "crew-leader", role: "user", access: CREW_LEADER });
-    await s.go("/portal/build-schedule");
+    await s.go("/build-schedule");
     await boardReady(s.page, "Build Schedule");
     await tap(s.page.locator("button", { hasText: /^Table$/ }).first());
     await boardReady(s.page, "Gable Shed");
     await openTableRow(s.page, "Gable Shed");
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("H1 a crew leader (designs, no contacts) lands on the design's record", (await path(s.page)) === "/portal/designs/d-SS-ALEX0001"
+    ok("H1 a crew leader (designs, no contacts) lands on the design's record", (await path(s.page)) === "/contacts/d-SS-ALEX0001"
       && lastRecord(s).kind === "design", `${await path(s.page)} ${JSON.stringify(lastRecord(s))}`);
     await recordBack(s.page);
-    ok("H2 and Back returns to the Build Schedule", (await path(s.page)) === "/portal/build-schedule", await path(s.page));
+    ok("H2 and Back returns to the Build Schedule", (await path(s.page)) === "/build-schedule", await path(s.page));
     await s.ctx.close();
   }
   {
     const s = await scenario(browser, { name: "office-staff", role: "user", access: OFFICE_STAFF });
-    await s.go("/portal/build-schedule");
+    await s.go("/build-schedule");
     await boardReady(s.page, "Build Schedule");
     await tap(s.page.locator("button", { hasText: /^Table$/ }).first());
     await boardReady(s.page, "Gable Shed");
@@ -441,12 +441,12 @@ try {
     ok("H3 someone who can only VIEW the board gets no editor, and still gets the link", !viewOnly.save && viewOnly.link, JSON.stringify(viewOnly));
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("H4 (to the customer's record)", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}`, await path(s.page));
+    ok("H4 (to the customer's record)", (await path(s.page)) === `/contacts/c-${C_ALEX}`, await path(s.page));
     await s.ctx.close();
   }
   {
     const s = await scenario(browser, { name: "crew-member", role: "user", access: CREW_MEMBER });
-    await s.go("/portal/build-schedule");
+    await s.go("/build-schedule");
     await boardReady(s.page, "Build Schedule");
     await tap(s.page.locator("button", { hasText: /^Table$/ }).first());
     await boardReady(s.page, "Gable Shed");
@@ -457,21 +457,21 @@ try {
   }
   {
     const s = await scenario(browser, { name: "no-crm", crm: false });
-    await s.go("/portal/build-schedule");
+    await s.go("/build-schedule");
     await boardReady(s.page, "Build Schedule");
     await tap(s.page.locator("button", { hasText: /^Table$/ }).first());
     await boardReady(s.page, "Gable Shed");
     await openTableRow(s.page, "Gable Shed");
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("H6 without the CRM, the design's record (not the CRM sales card)", (await path(s.page)) === "/portal/designs/d-SS-ALEX0001", await path(s.page));
+    ok("H6 without the CRM, the design's record (not the CRM sales card)", (await path(s.page)) === "/contacts/d-SS-ALEX0001", await path(s.page));
     await s.ctx.close();
   }
 
   // ── I. A phone's width ───────────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "narrow", viewport: { width: 390, height: 844 } });
-    await s.go("/portal/build-schedule");
+    await s.go("/build-schedule");
     await boardReady(s.page, "Build Schedule");
     await tap(s.page.locator("button", { hasText: /^Table$/ }).first());
     await boardReady(s.page, "Gable Shed");
@@ -493,9 +493,9 @@ try {
     await s.page.screenshot({ path: join(shots, "I-build-popup-390.png") });
     await tap(popup(s.page).locator('[data-ss-sched-customer="SS-ALEX0001"]'));
     await recordReady(s.page);
-    ok("I2 the link still works", (await path(s.page)) === `/portal/contacts/c-${C_ALEX}`, await path(s.page));
+    ok("I2 the link still works", (await path(s.page)) === `/contacts/c-${C_ALEX}`, await path(s.page));
     await s.page.screenshot({ path: join(shots, "I-record-390.png"), fullPage: true });
-    await s.go("/portal/delivery-schedule");
+    await s.go("/delivery-schedule");
     await boardReady(s.page, "Lot building to Main St");
     const dfit = await s.page.evaluate(() => {
       const l = document.querySelector('[data-ss-sched-customer="SS-ALEX0001"]');
