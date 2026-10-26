@@ -150,7 +150,7 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
 
 // ─── THE BARS (section 9) ─────────────────────────────────────────────────────────────────────────
 // kind "rate": the share of scored rows that pass must reach `min`. The plan gives no share for the
-// numeric bars ("within +/-5%"), so they are read literally: every scored value (min 1).
+// numeric bars ("within +/-10%"), so they are read literally: every scored value (min 1).
 // kind "max": a total (or a single worst value) must not pass `max`. kind "f1": parts.
 export const DOOR_SCORE_BARS = [
   { key: "leaves", label: "Leaves", kind: "rate", min: 1 },
@@ -160,10 +160,12 @@ export const DOOR_SCORE_BARS = [
   { key: "hingeCount", label: "Hinge count", kind: "rate", min: 0.95 },
   { key: "hingeType", label: "Hinge type", kind: "rate", min: 0.85 },
   { key: "hingeNoWarn", label: "Hinge type or count wrong with no warning", kind: "max", max: 0 },
-  { key: "hingeAt", label: "Hinge positions (+/-5% of leaf height)", kind: "rate", min: 1, tol: 0.05 },
-  { key: "hingeLen", label: "Hinge length (+/-2 in)", kind: "rate", min: 1, tol: 2 },
-  { key: "rails", label: "Rails (+/-4% of leaf height)", kind: "rate", min: 1, tol: 0.04 },
-  { key: "frame", label: "Frame width (+/-1 in)", kind: "rate", min: 1, tol: 1 },
+  // The four measured-number bars are twice their first values (Ahsan 2026-10-26: "some measurement
+  // mistakes are acceptable"; plan section 9). Every structure bar is as first written.
+  { key: "hingeAt", label: "Hinge positions (+/-10% of leaf height)", kind: "rate", min: 1, tol: 0.1 },
+  { key: "hingeLen", label: "Hinge length (+/-4 in)", kind: "rate", min: 1, tol: 4 },
+  { key: "rails", label: "Rails (+/-8% of leaf height)", kind: "rate", min: 1, tol: 0.08 },
+  { key: "frame", label: "Frame width (+/-2 in)", kind: "rate", min: 1, tol: 2 },
   { key: "braceDir", label: "Brace direction", kind: "rate", min: 0.95 },
   { key: "panelFills", label: "Panel fills (and the leaf brace)", kind: "rate", min: 0.9 },
   { key: "parts", label: "Parts F1", kind: "f1", min: 0.8 },

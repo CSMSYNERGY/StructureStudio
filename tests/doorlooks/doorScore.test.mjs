@@ -139,35 +139,44 @@ test("hinge type or count wrong with no warning: counted unless a hinge warning 
   assert.equal(bar(scoreCorpus([c], [draft("z", fewer, 1, { warnings: ["hinge_count_split"] })]), "hingeNoWarn").value, 0);
 });
 
-test("hinge positions: within 5% of the leaf height; a different count is not scored twice", () => {
+// The four measured-number bars are twice their first values (Ahsan 2026-10-26), so each test also shows
+// a miss past the old bar now passing.
+test("hinge positions: within 10% of the leaf height; a different count is not scored twice", () => {
   const c = tcase("z", ZDOOR);
-  assert.equal(bar(score(c, edit(ZDOOR, "hinges.at", [0.169, 0.5, 0.88]), 20), "hingeAt").ok, true);
-  assert.equal(bar(score(c, edit(ZDOOR, "hinges.at", [0.171, 0.5, 0.88]), 1), "hingeAt").ok, false);
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.at", [0.171, 0.5, 0.88]), 20), "hingeAt").ok, true); // past the old 5%
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.at", [0.219, 0.5, 0.88]), 20), "hingeAt").ok, true);
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.at", [0.221, 0.5, 0.88]), 1), "hingeAt").ok, false);
   const r = score(c, edit(edit(ZDOOR, "hinges.count", 2), "hinges.at", [0.2, 0.8]), 20);
   assert.equal(bar(r, "hingeAt").ok, null); // no data: the count bar carries it
   assert.equal(bar(r, "hingeCount").ok, false);
 });
 
-test("hinge length: within 2 in", () => {
+test("hinge length: within 4 in", () => {
   const c = tcase("z", ZDOOR);
-  assert.equal(bar(score(c, edit(ZDOOR, "hinges.lenIn", 17.9), 20), "hingeLen").ok, true);
-  assert.equal(bar(score(c, edit(ZDOOR, "hinges.lenIn", 18.1), 1), "hingeLen").ok, false);
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.lenIn", 18.1), 20), "hingeLen").ok, true); // past the old 2 in
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.lenIn", 19.9), 20), "hingeLen").ok, true);
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.lenIn", 20.1), 1), "hingeLen").ok, false);
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.lenIn", 11.9), 1), "hingeLen").ok, false);
 });
 
-test("rails: within 4% of the leaf height; a different rail count fails", () => {
+test("rails: within 8% of the leaf height; a different rail count fails", () => {
   const c = tcase("z", ZDOOR);
-  assert.equal(bar(score(c, edit(ZDOOR, "frame.rails", [0.539]), 20), "rails").ok, true);
-  assert.equal(bar(score(c, edit(ZDOOR, "frame.rails", [0.541]), 1), "rails").ok, false);
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.rails", [0.541]), 20), "rails").ok, true); // past the old 4%
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.rails", [0.579]), 20), "rails").ok, true);
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.rails", [0.581]), 1), "rails").ok, false);
   assert.equal(bar(score(c, edit(ZDOOR, "frame.rails", [0.3, 0.5]), 1), "rails").ok, false);
 });
 
-test("frame width: within 1 in, the stiles and the rail height both", () => {
+test("frame width: within 2 in, the stiles and the rail height both", () => {
   const c = tcase("z", ZDOOR);
-  assert.equal(bar(score(c, edit(ZDOOR, "frame.fIn", 6.4), 20), "frame").ok, true);
-  assert.equal(bar(score(c, edit(ZDOOR, "frame.fIn", 6.6), 1), "frame").ok, false);
-  assert.equal(bar(score(c, edit(ZDOOR, "frame.railHIn", 5.1), 1), "frame").ok, false);
-  // An absent fIn is today's rule: 3.6 in on this door, 1.9 in off the truth's 5.5.
-  assert.equal(bar(score(c, edit(ZDOOR, "frame.fIn", undefined), 1), "frame").ok, false);
+  // fIn keeps one decimal in the cleaner, so the steps are 0.1 in.
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.fIn", 6.6), 20), "frame").ok, true); // past the old 1 in
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.fIn", 3.6), 20), "frame").ok, true);
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.fIn", 3.4), 1), "frame").ok, false);
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.railHIn", 6.1), 1), "frame").ok, false);
+  // An absent fIn is today's rule: 3.6 in on this door, 1.9 in off the truth's 5.5, inside the bar.
+  assert.equal(bar(score(c, edit(ZDOOR, "frame.fIn", undefined), 20), "frame").ok, true);
+  assert.equal(bar(score(c, edit(edit(ZDOOR, "frame.fIn", undefined), "frame.railHIn", undefined), 1), "frame").ok, true);
 });
 
 test("brace direction: the leaf's Z and a panel's Z, 95% exact", () => {
