@@ -39,7 +39,8 @@
 //      path) keeps the live colour and draws the window; the footer's Window row takes it out again
 //   Q. the estimate: Get Estimate sends one windows[] line per leaf with inDoor, at the window's price
 //   E. the board-and-batten door and the eight built-look doors with no window are UNCHANGED: their
-//      mesh digests equal the ones recorded after the no-gap closures (PLANK_DIGEST, LOOK_DIGESTS)
+//      mesh digests equal the ones recorded after the no-gap closures and the shorter hinges (PLANK_DIGEST,
+//      LOOK_DIGESTS)
 //   F. no page errors; screenshots of every door straight on, for holding up against the real doors
 //   T. the TRANSOM (fixture_items.door_window_at 'top', 2026-10-21; Yoder Barns), on a catalog of its
 //      own so every block above keeps its own: the picker offers Yoder's 29 x 10 transom on their 72 in
@@ -62,6 +63,8 @@
 //      double, with and without the windows it may take, and through partition doors, square on and at an
 //      angle, must hit the door; the gap closures are where they belong, and a double still reads as two
 //      leaves from both faces (runNoGap says how).
+//   HG. the four built looks' T-strap hinges (2026-10-26): each strap min(leaf x 0.15, 0.5 ft) past its plate,
+//      on every leaf block N draws (runNoGap says how).
 //
 // SS_DOOR_BASELINE=1 prints only the digests (the board-and-batten door's and the eight built looks') and
 // exits, which is how PLANK_DIGEST and LOOK_DIGESTS were recorded. SS_N_ONLY=1 runs block N alone.
@@ -92,9 +95,12 @@ const PLANK_DIGEST = "85b889b64a586a52";
 // d4e089568669d394: P0 added three liners to each single, and the liners, a meet strip and an astragal to
 // each double, and moved nothing else (block N5). The doubles' were re-recorded the same day when the
 // astragal took its 20% shade (N6; first recorded as american2 17d189e753ff48de, basic2 0f1f286f4667f0e6,
-// classic2 f0cfa2da33b010a9, dutch2 d43e7d4e1c199e90): its colour was their only change.
-const LOOK_DIGESTS = { american: "38c4e8a34026d61f", basic: "b61d57faac181307", classic: "0e88e8c24aa32f7e", dutch: "81d4d5aa3f6b391d",
-  american2: "22b3c82b97bdca37", basic2: "36ddca7817c7fe9a", classic2: "f196fbbe3e32d426", dutch2: "3dcd83cf7ace4cbd" };
+// classic2 f0cfa2da33b010a9, dutch2 d43e7d4e1c199e90): its colour was their only change. All eight again
+// when their T-strap hinges were shortened (HG; before it, american 38c4e8a34026d61f, basic b61d57faac181307,
+// classic 0e88e8c24aa32f7e, dutch 81d4d5aa3f6b391d, american2 22b3c82b97bdca37, basic2 36ddca7817c7fe9a,
+// classic2 f196fbbe3e32d426, dutch2 3dcd83cf7ace4cbd): the straps were their only change.
+const LOOK_DIGESTS = { american: "d6d9321fd57c563c", basic: "4cc553daa3d4f077", classic: "5070910faeb90711", dutch: "37a608bdcc145a29",
+  american2: "5a42837471f0e180", basic2: "ab6378a9c5b4cde9", classic2: "41fbf9d68929e6d0", dutch2: "71d7d571225d56ee" };
 
 const { ok, failed } = reporter();
 const shots = shotsDir("door-looks");
@@ -1039,7 +1045,14 @@ async function runLitesPickers(browser, rect) {
 //       a door's glass.
 //   N5. they are only ADDED: every door less its closures (userData.ssDoorGap) digests exactly as the same
 //       door did on origin/beta 3652c085 before P0 (N_PRE_P0, recorded by this block against that build),
-//       so no leaf, window in a door, transom, lite, photo layer or partition seat moved.
+//       so no leaf, window in a door, transom, lite, photo layer or partition seat moved. Less, too, the
+//       two STRAP pieces of each built look's T-strap hinge (ssDoorPart "hinge", not the 0.11 ft plate),
+//       shortened on purpose the same day (HG), on both sides of the sum: the plates, the hinge rows'
+//       heights and every plank-family hinge are still held to origin/beta here.
+//   HG. the four built looks' T-strap hinges (trimDoorLeaf; Ahsan 2026-10-26, measured on the real doors,
+//       "Door looks corpus/hinge-measurement-2026-10-26.md"): on every leaf, three rows, each strap
+//       min(leaf width x 0.15, 0.5 ft) long past its plate, in its two pieces (55% and 45%). It was
+//       min(x 0.30, 0.85 ft), about 11.5 in in all on a 3 ft leaf; now about 6.7 in.
 //   N6. a double reads as TWO leaves: in the picture from the front (side a of a partition) the astragal
 //       down the meeting line is a seam, a shade off the stiles either side of it, and from inside (side
 //       b) the meet strip between the leaves' backs is. The astragal first shipped in the stiles' own
@@ -1423,6 +1436,9 @@ function nSpans(d, fr) {
   if (d.dbl && d.kind !== "rollup") s.push(["meet", c - 0.03, c + 0.03, yb, yt, "the centre"]);
   return s;
 }
+// A strap piece of a built look's T-strap hinge (trimDoorLeaf tags plate and strap "hinge"; the plate is
+// the 0.11 ft one, a box's width being its length along the wall). Plank-family hinges carry no part.
+const nStrap = (m) => m.part === "hinge" && !!m.box && m.box[0] !== 0.11;
 const nCovers = (g, [kind, a0, a1, y0, y1]) => g.kind === kind && g.a[0] <= a0 + 1e-4 && g.a[1] >= a1 - 1e-4 && g.y[0] <= y0 + 1e-4 && g.y[1] >= y1 - 1e-4 && g.n[0] < 0 && g.n[1] > 0;
 // N6's reading of a picture: the camera put where nShot puts it, only the door's own group drawn (on a
 // layer of its own, with the lights, so no wall or partition between the camera and the door can stand in
@@ -1510,9 +1526,21 @@ async function runNoGap(browser) {
       if (d.kind !== "photo" && !(d.dw && d.dw.doorWindowId)) digests[d.key] = digestOf(r.meshes);
       // N5: the closures are ADDED, nothing of the door moves: less its ssDoorGap meshes, every door (its
       // windows, transom, lites, photo and partition seat included) is byte-identical to origin/beta's.
-      shells[d.key] = digestOf(r.meshes.filter((m) => !m.gap));
+      // Less the built looks' hinge straps too (HG holds them), never their plates.
+      shells[d.key] = digestOf(r.meshes.filter((m) => !m.gap && !nStrap(m)));
       if (N_PRE_P0[d.key]) ok(`N5 ${what}: less its gap closures, byte-identical to origin/beta (nothing of the door moved)`, shells[d.key] === N_PRE_P0[d.key], `${shells[d.key]} vs ${N_PRE_P0[d.key]}`);
       else ok(`N5 ${what}: has a pre-P0 digest recorded`, false, `none for ${d.key} (its shell now is ${shells[d.key]})`);
+      // HG: a built look's T-strap hinges. Three rows to a leaf (every leaf here is over 5 ft), each a 0.11
+      // ft plate and a strap of min(leaf x 0.15, 0.5 ft) in two pieces, 55% then 45%. The leaf: the opening
+      // less 0.05 ft at each jamb, and a double's halves less 0.03 ft each side of the centre.
+      if (d.kind === "trim") {
+        const n = d.dbl ? 2 : 1, span = r.frame.a1 - r.frame.a0, lw = d.dbl ? (span - 0.16) / 2 : span - 0.1, sLen = Math.min(lw * 0.15, 0.5);
+        const straps = r.meshes.filter(nStrap), plates = r.meshes.filter((m) => m.part === "hinge" && !nStrap(m));
+        const long = straps.filter((m) => near(m.box[0], sLen * 0.55, 1e-3)), short = straps.filter((m) => near(m.box[0], sLen * 0.45, 1e-3));
+        ok(`HG ${what}: T-strap hinges, each strap min(leaf x 0.15, 0.5 ft) = ${(sLen * 12).toFixed(2)} in past its 0.11 ft plate`,
+          plates.length === 3 * n && straps.length === 6 * n && long.length === 3 * n && short.length === 3 * n,
+          `${plates.length} plates; strap pieces ${straps.map((m) => m.box[0]).join(",")} (want ${3 * n} of ${(sLen * 0.55).toFixed(4)} and ${3 * n} of ${(sLen * 0.45).toFixed(4)})`);
+      }
     }
     const fov = await page.evaluate(() => window.__ss3dEngine.camera.fov || 45);
     const far = (fr) => nDist(fr, fov);
@@ -1568,6 +1596,10 @@ async function runNoGap(browser) {
         // The hinge jamb from inside, turned about 10 degrees off square: the angle at which a 0.05 ft gap
         // beside a 0.16 ft leaf still shows light.
         if (p) await sh("07-single-jamb-angle-inside.png", p, { out: -2.6, side: -(p.a1 - p.a0) / 2 + 0.75, ta: -(p.a1 - p.a0) / 2 + 0.3 });
+        // A built look's T-strap hinges (HG), the American single square on from outside: shot on the
+        // build before the 2026-10-26 hinge change and after it (SS_SHOT_TAG "old" / "new").
+        const am = frames.american;
+        if (am) await sh("10-american-single-hinges.png", am, { out: far(am) * 0.8 });
       }
     }
     // N7: live paint. A colourless built double's astragal follows a trim swatch and its liners and strip a
@@ -1599,50 +1631,50 @@ async function runNoGap(browser) {
 // The post-P0 digests of N's doors with no window and no photo (outside walls and partitions), recorded
 // with the closures (2026-10-26): the baseline later phases keep byte-identical for a door with no look.
 // The hinged doubles' were re-recorded the same day when the astragal took its 20% shade (N6): its colour
-// was their only change.
+// was their only change. Then the 16 built looks' when their T-strap hinges were shortened (HG): the
+// straps were their only change (N5 holds the rest to origin/beta).
 const N_DIGESTS = {
-  "plank": "f98ba2711cadb67e", "rollup": "a89c5a5394d26865", "american": "ffb68f6a1e14d935",
-  "basic": "03c78fa69ea35134", "classic": "b12448d8906f300d", "dutch": "b5999213fbddbfa4",
+  "plank": "f98ba2711cadb67e", "rollup": "a89c5a5394d26865", "american": "e460e9deac9ff99e",
+  "basic": "6ad8eb773d332cb6", "classic": "17e82dac7ae0074e", "dutch": "dbe62c419440364b",
   "zbrace": "49b970a58ce9c0c7", "xbrace": "261c6deeec25d032", "auto": "27ca1b12b9db9d75",
-  "slideup": "1192b3b837892ad8", "part-american": "1d2474ad2093f40e", "part-basic": "3e9bbd3662eaa3b6",
-  "part-classic": "e3da1ba5e98e3a4d", "part-dutch": "37075e473969d691", "part-plank": "4f071bf52bae11fe",
+  "slideup": "1192b3b837892ad8", "part-american": "c616b69e13d23a98", "part-basic": "77c89257ff9860f0",
+  "part-classic": "e52d26c24f79c82b", "part-dutch": "d16f1ac6f7c735ae", "part-plank": "4f071bf52bae11fe",
   "part-zbrace": "fc987bd18821e633", "part-xbrace": "338c91b68ff49c64", "part-rollup": "0e1d9ec75e870161",
-  "part-auto": "87363bf805af09e8", "plank2": "7e6aed10cfe60202", "american2": "03fe439d0957d95a",
-  "rollup2": "b16fdbde95e34051", "basic2": "b886d14477a50804", "classic2": "8bc8d62ce5b1a260",
-  "dutch2": "c3b8e8cbcb179254", "zbrace2": "6456efc2fe640aff", "xbrace2": "c40cf87c955fde9c",
-  "auto2": "b87079f71a5c5012", "part-american2": "b1d165c29324ba0f", "part-basic2": "b6b3237151764aa4",
-  "part-classic2": "eed9914a669d4fe6", "part-dutch2": "209abbf658754d9c", "part-plank2": "62cea800ba6dd114",
+  "part-auto": "87363bf805af09e8", "plank2": "7e6aed10cfe60202", "american2": "4acec25dd9081769",
+  "rollup2": "b16fdbde95e34051", "basic2": "09e6d30d338a67b9", "classic2": "44d8f3fd8bb9411d",
+  "dutch2": "5bebfc0dae2f3316", "zbrace2": "6456efc2fe640aff", "xbrace2": "c40cf87c955fde9c",
+  "auto2": "b87079f71a5c5012", "part-american2": "4c5203bbf679b346", "part-basic2": "1f025872879d88db",
+  "part-classic2": "7258c55367ab251b", "part-dutch2": "1bc6137da9f2f739", "part-plank2": "62cea800ba6dd114",
   "part-zbrace2": "c10f0e1111969fc5", "part-xbrace2": "2d1d788043150053", "part-rollup2": "31e0244b726e8ad4",
   "part-auto2": "9a5eb2cb76d9bf11"
 };
 // N5's baseline: every N door's digest on origin/beta 3652c085, the build before P0 (no closures there, so
-// all of its meshes), recorded with SS_N_ONLY=1 against that build ("N shell digests").
+// all of its meshes but the built looks' hinge straps, nStrap), recorded with SS_N_ONLY=1 against that build
+// ("N shell digests"). Re-recorded 2026-10-26 when the straps left the shell (HG): the 32 built-look doors'
+// entries moved, and the 268dcc9c build's shells matched them all before its straps were shortened.
 const N_PRE_P0 = {
-  "plank": "cb172a95931e1ed4", "rollup": "756287066cf8e57f", "american": "bc64fa80515ce111",
-  "basic": "8a0bde28cc068139", "classic": "adcc2e71bd54e526", "dutch": "9bd971891e999397",
+  "plank": "cb172a95931e1ed4", "rollup": "756287066cf8e57f", "american": "243ff88355787914",
+  "basic": "437f3904e69f4a3a", "classic": "d44d021f43a1a9e6", "dutch": "48b5c19883c59c51",
   "zbrace": "24796a15631b4377", "xbrace": "b09dd9b2147ed0b0", "auto": "c8abca8a0a9bf4bb",
-  "american-lite": "223293504da5343f", "basic-lite": "b5c15b390a102f64", "classic-lite": "cffb136984ec2d2a",
-  "dutch-lite": "d2e304db2aef204c", "american-transom": "c55b8a013137a836",
-  "basic-transom": "21e2356a2a578361", "classic-transom": "4918146230df7f01",
-  "dutch-transom": "e110d3977ec8bde2", "plank-transom": "adc50d3af2393b08",
-  "zbrace-transom": "a82005c3f51906d1", "xbrace-transom": "afa77e8fb70eb88b",
-  "auto-transom": "1e8005a0599c6312", "slideup": "cef2a0b00927c26f", "photo": "8cf815455b0ec6a7",
-  "cutout": "128e2d558cb4d498", "part-american": "180e8d3be44b4e33", "part-basic": "6e6d37bb8dae06e1",
-  "part-classic": "0c5332fa093b6ae5", "part-dutch": "dfb73161967e2325", "part-plank": "27d87d7c16843c09",
-  "part-zbrace": "8dcf253bf959c511", "part-xbrace": "24808d204532992f", "part-rollup": "579003bd9b844696",
-  "part-auto": "103c4fbaed8b7808", "plank2": "52bebada2e40d1d4", "american2": "ac742f22caa2b055",
-  "rollup2": "d357247a3adfe1b7", "basic2": "ea1b6218e6292570", "classic2": "53c3a9931bd3180d",
-  "dutch2": "88b527f423b4a601", "zbrace2": "878d5af0f04c4bf3", "xbrace2": "79df5562c1fd6ca7",
-  "auto2": "a587028dc96bcb60", "american2-lite": "9e99097c8e662158", "basic2-lite": "f0f58245916972ca",
-  "classic2-lite": "eaf8024a35d0bd77", "dutch2-lite": "6031d98c9c9a881f",
-  "american2-transom": "b3783110050a8716", "basic2-transom": "7e6059634fcb76e6",
-  "classic2-transom": "8d0a4b1efe3d3439", "dutch2-transom": "38289ed52a7c1412",
-  "plank2-transom": "3e38ca02b777dbf5", "zbrace2-transom": "e972d00490423fd4",
-  "xbrace2-transom": "0e1d4153cffc456b", "auto2-transom": "55dd8e0e8996c2ce", "photo2": "13fbef33002dcda3",
-  "cutout2": "a81d4d1df3990c6d", "part-american2": "1fed87a63369a883", "part-basic2": "be5d3fa3a0fd03ce",
-  "part-classic2": "50172495e33f3a2a", "part-dutch2": "a2ed367f4b3bb4dd", "part-plank2": "ca12ff018c710072",
-  "part-zbrace2": "545f7e1d0da5812b", "part-xbrace2": "a474801bb64c5bab", "part-rollup2": "5f8b17ba22df453e",
-  "part-auto2": "18a1febe1afd12c7"
+  "american-lite": "1fe8a7cd6cb5c011", "basic-lite": "722525d7d4589973", "classic-lite": "1ba003eac077d405",
+  "dutch-lite": "8cdee2a67091bf85", "american-transom": "e5be0531e9b397ee", "basic-transom": "9d5bca927cb0307c",
+  "classic-transom": "aa37dd997d5fdcbb", "dutch-transom": "5c75db6283fe6b79", "plank-transom": "adc50d3af2393b08",
+  "zbrace-transom": "a82005c3f51906d1", "xbrace-transom": "afa77e8fb70eb88b", "auto-transom": "1e8005a0599c6312",
+  "slideup": "cef2a0b00927c26f", "photo": "8cf815455b0ec6a7", "cutout": "128e2d558cb4d498",
+  "part-american": "a41142c16cc166f2", "part-basic": "d075ebcadb93d22b", "part-classic": "1bb20ed7e4c3f76d",
+  "part-dutch": "1e43f730746b113c", "part-plank": "27d87d7c16843c09", "part-zbrace": "8dcf253bf959c511",
+  "part-xbrace": "24808d204532992f", "part-rollup": "579003bd9b844696", "part-auto": "103c4fbaed8b7808",
+  "plank2": "52bebada2e40d1d4", "american2": "7740ce91b7c8fca6", "rollup2": "d357247a3adfe1b7",
+  "basic2": "f1b8ad8eaf9ed5dd", "classic2": "be2e5ec86b676b36", "dutch2": "9eb6476c0f8b9942",
+  "zbrace2": "878d5af0f04c4bf3", "xbrace2": "79df5562c1fd6ca7", "auto2": "a587028dc96bcb60",
+  "american2-lite": "c964297e765b1323", "basic2-lite": "daa965bc0ba56f3e", "classic2-lite": "62065201bd4a3401",
+  "dutch2-lite": "ea3055d6b4becfee", "american2-transom": "03f8e52281dc177f", "basic2-transom": "30fa6c196bc6fd1a",
+  "classic2-transom": "a20ea77f4f33ad28", "dutch2-transom": "1dc5bbc39bb62aa0", "plank2-transom": "3e38ca02b777dbf5",
+  "zbrace2-transom": "e972d00490423fd4", "xbrace2-transom": "0e1d4153cffc456b", "auto2-transom": "55dd8e0e8996c2ce",
+  "photo2": "13fbef33002dcda3", "cutout2": "a81d4d1df3990c6d", "part-american2": "b67fc3311661806c",
+  "part-basic2": "45be3bee51032d04", "part-classic2": "bfc46f87d2bc04c0", "part-dutch2": "da2fa235976d5960",
+  "part-plank2": "ca12ff018c710072", "part-zbrace2": "545f7e1d0da5812b", "part-xbrace2": "a474801bb64c5bab",
+  "part-rollup2": "5f8b17ba22df453e", "part-auto2": "18a1febe1afd12c7"
 };
 
 async function main() {

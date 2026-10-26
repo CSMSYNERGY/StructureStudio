@@ -12505,8 +12505,13 @@ function buildShed3DModel(THREE, p) {
     // Black T-strap hinges ON THE RAILS, where these doors carry them: the top and bottom rails, and
     // the mid rail between them on a full-height door (two on a short one, as plankDoorLeaf hangs
     // them). The jamb leaf is the rail's own height, so the bottom one never reaches the threshold.
+    // The STRAP is short, as on the real doors: min(leaf x 0.15, 0.5 ft) past the 0.11 ft plate, about
+    // 6.7 in in all on a 3 ft leaf. Measured on the American's reference video (Ahsan 2026-10-26: 16% and
+    // 14% of the leaf, edge to tip). It first shipped as min(leaf x 0.30, 0.85 ft), the plank door's long
+    // barn strap cut down, about 11.5 in in all: twice the real one. The plate and the rows stay put, and
+    // plankDoorLeaf keeps its long straps (tests/harness/doorLooks.mjs HG).
     const he = hinge === "a0" ? a0 : a1, dir = hinge === "a0" ? 1 : -1;
-    const sLen = Math.min(w * 0.3, 0.85);
+    const sLen = Math.min(w * 0.15, 0.5);
     const iron = (from, to, cy, half, part) => {
       const p0 = Math.min(he + dir * from, he + dir * to), p1 = Math.max(he + dir * from, he + dir * to);
       put(wallBox(ironMat, wf, p0, p1, cy - half, cy + half, 0.165, 0.03), part);
