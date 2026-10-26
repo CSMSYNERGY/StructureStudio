@@ -237,6 +237,11 @@ import { AI_TRANSCRIPTS_NOT_READY, AI_TRANSCRIPTS_VIEW_AS, readAiTranscripts, sa
 // Settings → Customer Hub → Forms + Email Templates (migration 325): every action in ./leadForms.ts.
 import { handleLeadFormAction } from "./leadForms.ts";
 import { handleCrmFieldAction, readBuiltinOverrides, readCustomFields } from "./crmFields.ts";
+// Door looks from a photo (migrations 337/338): the look actions, and the rule that puts a look on a
+// door row (save_fixture, import_fixtures), in ./doorLooks.ts.
+import {
+  doorLookForFixture, doorLookImportRow, doorLookImportState, handleDoorLookAction, isUuid as isDoorLookId, lookSchemaMissing, readDoorLooksFlag,
+} from "./doorLooks.ts";
 import { coerceFieldValue } from "../_shared/crmFields.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
@@ -368,6 +373,14 @@ const GATES: GateTable = {
   delete_fixture:                 { area: "settings_options", level: "edit" },
   reorder_fixtures:               { area: "settings_options", level: "edit" },
   import_fixtures:                { area: "settings_options", level: "edit" },
+  // Door looks from a photo (337/338), beside the door rows they go on. Each branch ALSO refuses
+  // unless client_settings.door_looks_beta is on for the tenant (./doorLooks.ts). None of these calls
+  // the model: generating a look (generate_door_look, P4) adds its own lines with the kill switch.
+  list_door_looks:                { area: "settings_options", level: "view" },
+  save_door_look:                 { area: "settings_options", level: "edit" },
+  archive_door_look:              { area: "settings_options", level: "edit" },
+  door_ref_upload_url:            { area: "settings_options", level: "edit" },
+  door_look_thumb_upload_url:     { area: "settings_options", level: "edit" },
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
   set_layout_item_taxable:        { area: "settings_options", level: "edit" },
@@ -2717,23 +2730,50 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // withholds the balance from exactly those callers. Nothing read it here anyway: the money line
     // needs only the price, the meter and the exemption. If a balance is ever wanted beside the
     // button, gate it the way portal-billing's `mine` does.
-    const walletRead = (async (): Promise<{ priceCents: number | null; meterActive: boolean; exempt: boolean } | null> => {
+    //
+    // TWO METERS SINCE 337. `wallet` is the building meter (video_3d_generation), as before;
+    // `doorWallet` is the door-look meter (door_look_generation), read the same way for the Door
+    // looks section's Generate button. Each is null on its own failure or missing row (the rule
+    // above), and a failed exemption read makes both null.
+    type MoneyLine = { priceCents: number | null; meterActive: boolean; exempt: boolean } | null;
+    const walletRead = (async (): Promise<{ wallet: MoneyLine; doorWallet: MoneyLine }> => {
       try {
-        const [acct, price] = await Promise.all([
+        const [acct, price, doorPrice] = await Promise.all([
           admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle(),
           admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
+          admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "door_look_generation").maybeSingle(),
         ]);
-        if (acct.error || price.error || !price.data) return null;
-        return {
-          // Redacted when visible is false, the same posture portal-billing takes on
-          // billing_plans.price_cents — the projection and the revoke are both load-bearing.
-          priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
-          meterActive: Boolean(price.data?.active),
-          // No wallet row is a tenant never charged for anything, and not exempt: wallet_hold
-          // creates the row at the default (false) on the first hold.
-          exempt: acct.data?.metered_exempt === true,
+        if (acct.error) return { wallet: null, doorWallet: null };
+        const line = (pr: { data: any; error: unknown }): MoneyLine => {
+          if (pr.error || !pr.data) return null;
+          return {
+            // Redacted when visible is false, the same posture portal-billing takes on
+            // billing_plans.price_cents — the projection and the revoke are both load-bearing.
+            priceCents: pr.data.visible !== false ? Number(pr.data.price_cents) : null,
+            meterActive: Boolean(pr.data.active),
+            // No wallet row is a tenant never charged for anything, and not exempt: wallet_hold
+            // creates the row at the default (false) on the first hold.
+            exempt: acct.data?.metered_exempt === true,
+          };
         };
-      } catch (_) { return null; }
+        return { wallet: line(price), doorWallet: line(doorPrice) };
+      } catch (_) { return { wallet: null, doorWallet: null }; }
+    })();
+    // The Door looks section shows only for a builder with client_settings.door_looks_beta on (337).
+    // Read on its own, never in the error loop, and false on any failure: a database without 337
+    // (42703) must not fail the whole catalog, and a flag we could not read hides the section.
+    const doorLooksFlagRead = readDoorLooksFlag(admin, clientId).then((f) => f.on).catch(() => false);
+    // The door rows' own 3D look (fixture_items.door_look_id, 337). On a database before 337 PostgREST
+    // answers 42703 for the whole select, so it is read again without the column (the cladding rule
+    // above): every catalog keeps loading, and no row has a look.
+    // lite_rows / lite_cols (335): a window's grid of lites in 3D, null = automatic. Same rule: 335 is
+    // applied first. (324's panes is no longer read: 335 replaced it.)
+    const FIXTURE_COLUMNS = "id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, door_window_at, lite_rows, lite_cols, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable";
+    const fixturesRead = (async () => {
+      const read = (cols: string) => admin.from("fixture_items").select(cols).eq("client_id", clientId).order("sort_order");
+      const res = await read(`${FIXTURE_COLUMNS}, door_look_id`);
+      if (res.error && lookSchemaMissing(res.error)) return await read(FIXTURE_COLUMNS);
+      return res;
     })();
     // Cladding offered per style (207), with each lap row's course size (style_cladding.exposure_in,
     // migration 275) in the same read. On a database before 275 PostgREST answers 42703 for the whole
@@ -2749,7 +2789,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       return { ...res, courses: !res.error };
     })();
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, iwSettingsRes, iwCoveringsRes, wallet] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, iwSettingsRes, iwCoveringsRes, wallets, doorLooksBeta] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       // updated_at (2026-09-14): the style's version, which the 3D editor sends back with its
@@ -2774,9 +2814,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // in_partition (313): "Allowed in interior walls". Same rule: 313 is applied first.
       // door_window_at (the transom in a door, 2026-10-21): where an in-door window sits. Same rule:
       // its migration is applied first.
-      // lite_rows / lite_cols (335): a window's grid of lites in 3D, null = automatic. Same rule: 335 is
-      // applied first. (324's panes is no longer read: 335 replaced it.)
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, door_window_at, lite_rows, lite_cols, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // lite_rows / lite_cols (335) and door_look_id (337): read above (fixturesRead), the look with
+      // its fallback.
+      fixturesRead,
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -2798,9 +2838,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // partition price) and the builder's covering list. 313 is applied BEFORE this deploy.
       admin.from("interior_wall_settings").select("standard_stud, pricing_method, rate_2x4, rate_2x6, standard_height, allow_rafters, allow_rough_openings, taxable, internal_only").eq("client_id", clientId).maybeSingle(),
       admin.from("interior_wall_coverings").select("id, name, pricing_method, rate, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order").order("name"),
-      // NOT one of the sixteen: never in the error loop below, and it cannot reject (see above).
+      // NOT one of the sixteen: never in the error loop below, and neither can reject (see above).
       walletRead,
+      doorLooksFlagRead,
     ]);
+    const { wallet, doorWallet } = wallets;
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
@@ -2855,7 +2897,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       interiorWallCoverings: iwCoveringsRes.data ?? [],
       // Can the Cladding card offer a lap course size (275)? False only on a database before it.
       claddingCourses: claddingRes.courses === true,
-      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
+      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet,
+      // Door looks from a photo (337): whether this builder sees the Door looks section, and the door
+      // meter's money line (null = say nothing about money, as for `wallet`).
+      doorLooksBeta, doorWallet });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -7079,7 +7124,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // `category !== "window"` invariants below, so a vent validates down to name, width,
   // height and price — which is exactly what a vent is.
   const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp", "vent"]);
-  const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
+  const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string; doorLook?: { id: string | null } } => {
     // JSON.stringify drops undefined-valued keys client-side, so "absent key" is the wire
     // form of "leave this field alone"; the explicit !== undefined guards a hand-built call.
     const has = (k: string) => Object.prototype.hasOwnProperty.call(row ?? {}, k) && row?.[k] !== undefined;
@@ -7271,6 +7316,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // dutch) -- the CHECK, D3_DOOR_STYLES in the portal and both designer twins carry the same eight.
       rec.door_style = ["plank", "zbrace", "xbrace", "rollup", "american", "basic", "classic", "dutch"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
     }
+    // The builder's own 3D look (337): doors only, presence-guarded, and only PARSED here, because the
+    // rule needs the database (this validator has none): the caller hands `doorLook` to
+    // doorLookForFixture / doorLookImportRow (./doorLooks.ts), which check the tenant flag and the look,
+    // force door_style to its base, and clear a look only on an explicit null or a different doorStyle.
+    // An ABSENT key never clears one: today's production portal sends doorStyle on every door save and
+    // no doorLookId at all. A non-door never carries one (337's fixture_items_door_look_door_chk), so
+    // nothing is written for it, and no write here ever names the column on a database without 337.
+    if (isDoor && has("doorLookId")) {
+      const raw = row.doorLookId;
+      if (raw === null || String(raw).trim() === "") return { rec, doorLook: { id: null } };
+      const lookId = String(raw).trim().toLowerCase();
+      if (!isDoorLookId(lookId)) return { err: `${name}: that 3D look isn't in your catalog. Reload the page and pick another.` };
+      return { rec, doorLook: { id: lookId } };
+    }
     return { rec };
   };
   // Inserts still need concrete values for whatever the presence contract left out — the
@@ -7298,6 +7357,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
     if (!("door_style" in rec)) rec.door_style = "auto";
+    // door_look_id (337) is NOT defaulted here: its column default is NULL already, and naming it on
+    // every insert would fail every catalog insert on a database without 337.
     return rec;
   };
 
@@ -7356,6 +7417,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       v.rec!.style_ids = kept;
     }
     const id = String(payload?.id ?? "").trim();
+    // The door's own 3D look (337): set, cleared or left alone by the rule in ./doorLooks.ts. Refused
+    // here, before anything is written.
+    {
+      const dl = await doorLookForFixture(admin, clientId, { category, rec: v.rec!, sent: v.doorLook, rowId: id || null });
+      if ("refuse" in dl) return json({ error: `${v.rec!.name}: ${dl.refuse.error}`, code: dl.refuse.code }, dl.refuse.status);
+      if ("dbError" in dl) return dbFail(req, clientId, dl.where, dl.dbError);
+    }
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
         .eq("id", id).eq("client_id", clientId).eq("category", category);
@@ -7454,6 +7522,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (t.error) return dbFail(req, clientId, "read your building styles", t.error);
       styleIds = t.ids!;
     }
+    // Door looks (337): what save_fixture's rule needs, read once for the whole sheet. null when no
+    // row carries doorStyle or doorLookId (a window sheet, or one without the column).
+    const lookRead = await doorLookImportState(admin, clientId, category, payload.rows);
+    if ("dbError" in lookRead) return dbFail(req, clientId, lookRead.where, lookRead.dbError);
+    const lookState = lookRead.state;
     let saved = 0, added = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.rows) {
@@ -7484,6 +7557,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
       }
       const rid = String(row?.id ?? "").trim();
+      // The same look rule as save_fixture; a refusal leaves the row's look as it was, with a note.
+      if (lookState) {
+        const dl = doorLookImportRow(lookState, v.rec!, v.doorLook, rid && existingIds.has(rid) ? rid : null);
+        if (dl.note) skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${dl.note} Its 3D look was left as it was.`);
+      }
       if (rid && existingIds.has(rid)) {
         const res = await admin.from("fixture_items").update(v.rec!)
           .eq("id", rid).eq("client_id", clientId).eq("category", category);
@@ -7498,6 +7576,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       i++;
     }
     return json({ ok: true, saved, added, skipped });
+  }
+
+  // Door looks from a photo (337/338): the builder's own looks, saved, listed and archived, and the
+  // photo and tile uploads. Every action is NAMED here, not looked up in a set, so preflight's GATES ⇄
+  // branch cross-check (which reads this file) sees them. ./doorLooks.ts refuses them all unless the
+  // tenant's door_looks_beta flag is on.
+  if (action === "list_door_looks" ||
+      action === "save_door_look" ||
+      action === "archive_door_look" ||
+      action === "door_ref_upload_url" ||
+      action === "door_look_thumb_upload_url") {
+    return await handleDoorLookAction({
+      admin, req, clientId, userId: userId ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail,
+    });
   }
 
   // Archive / un-archive a BUILT-IN layout option (singleDoor/doubleDoor/window/ramp/…). Archived =
