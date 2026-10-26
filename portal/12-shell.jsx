@@ -2864,10 +2864,12 @@ function Dashboard({ session }) {
   // null hides the card: not answered yet, not someone who may run the account, or a server that
   // predates `advancedMode` (a switch whose answer could never come back would look broken). Our own
   // account shows it on and locked: internal_account keeps the page whatever the column says.
+  // Builders get no card until SS_ADVANCED_FOR_BUILDERS (01-core) launches the switch (2026-10-27).
   // Turning it off throws away an unsaved building on the Advanced page, so that asks first, in the
   // words exitAccount uses.
   const advancedSwitch = (advancedMayRun && advancedEnt
-    && (advancedEnt.reason === "internal" || typeof advancedEnt.advancedMode === "boolean")) ? {
+    && (advancedEnt.reason === "internal"
+      || (SS_ADVANCED_FOR_BUILDERS && typeof advancedEnt.advancedMode === "boolean"))) ? {
       on: ssAdvancedOn(advancedEnt),
       locked: advancedEnt.reason === "internal",
       confirmOff: () => !advancedDirtyRef.current

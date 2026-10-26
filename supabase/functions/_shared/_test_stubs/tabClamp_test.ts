@@ -40,6 +40,13 @@ type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Acces
 // before every role check, and a beta-host default would quietly skip it. (Deno 2 has no
 // `window` global, so the parameter is also what keeps the slice runnable at all.)
 const factory = new Function("window", `${BLOCK}; return { ssClampTab, ssFallbackTab, ssAdvancedOn, ssHubCan };`);
+// The builder switch is not launched (SS_ADVANCED_FOR_BUILDERS = false, 2026-10-27). The launched
+// rule is still pinned: the same block with the one line flipped.
+const LAUNCH_LINE = "const SS_ADVANCED_FOR_BUILDERS = false;";
+assert(BLOCK.includes(LAUNCH_LINE), "the builder-switch launch line moved or changed; re-point this test");
+const ssAdvancedOnLaunched = (new Function("window", `${BLOCK.replace(LAUNCH_LINE, "const SS_ADVANCED_FOR_BUILDERS = true;")}; return { ssAdvancedOn };`)(
+  { location: { hostname: "app.structurestudiosuite.com" } },
+) as { ssAdvancedOn: (e: unknown) => boolean }).ssAdvancedOn;
 const { ssClampTab, ssFallbackTab, ssAdvancedOn, ssHubCan } = factory(
   { location: { hostname: "app.structurestudiosuite.com" } },
 ) as { ssClampTab: Clamp; ssFallbackTab: (a: Access | null) => string; ssAdvancedOn: (e: unknown) => boolean; ssHubCan: (v: string, c: boolean, a: Access | null) => boolean };
@@ -156,24 +163,31 @@ Deno.test("ssAdvancedOn reads the internal-account signal and the builder's own 
   }
   assertEquals(ssAdvancedOn({ reason: "internal" }), true);
   assertEquals(ssAdvancedOn({ reason: "internal", exempt: true, state: "exempt" }), true);
-  // The builder's switch (2026-10-05, client_settings.advanced_mode via portal-billing).
-  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: true }), true, "a builder who turned it on");
-  assertEquals(ssAdvancedOn({ reason: "exempt", exempt: true, advancedMode: true }), true);
-  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: false }), false, "turned off (or never on)");
-  // Our own account stays on whatever its column says.
+  // NOT LAUNCHED (2026-10-27): a builder's switch reads as off, ours stays on.
+  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: true }), false, "not launched: a builder's switch is ignored");
+  assertEquals(ssAdvancedOn({ reason: "exempt", exempt: true, advancedMode: true }), false, "not launched: exempt too");
   assertEquals(ssAdvancedOn({ reason: "internal", advancedMode: false }), true, "internal stays on with the column off");
+  // LAUNCHED: the builder's switch (2026-10-05, client_settings.advanced_mode via portal-billing).
+  const on = ssAdvancedOnLaunched;
+  assertEquals(on({ reason: "active", advancedMode: true }), true, "a builder who turned it on");
+  assertEquals(on({ reason: "exempt", exempt: true, advancedMode: true }), true);
+  assertEquals(on({ reason: "active", advancedMode: false }), false, "turned off (or never on)");
+  // Our own account stays on whatever its column says.
+  assertEquals(on({ reason: "internal", advancedMode: false }), true, "internal stays on with the column off");
   // Strictly true: nothing that merely looks like yes.
   for (const v of ["true", 1, "on", [true], { on: true }]) {
-    assertEquals(ssAdvancedOn({ reason: "active", advancedMode: v }), false, `advancedMode ${JSON.stringify(v)}`);
+    assertEquals(on({ reason: "active", advancedMode: v }), false, `advancedMode ${JSON.stringify(v)}`);
   }
 });
 
 Deno.test("a builder with Advanced mode on: /portal/advanced resolves for them like any page they may see", () => {
   // The shell passes ssAdvancedOn(...) && advancedMayRun as the 7th argument; with it true the route
   // is theirs, with it false it lands on the Designer — owners and operators included.
-  const on = ssAdvancedOn({ reason: "active", advancedMode: true });
+  // Launched rule (see ssAdvancedOnLaunched); not launched, the same builder lands on the Designer.
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, ssAdvancedOn({ reason: "active", advancedMode: true })), "designer");
+  const on = ssAdvancedOnLaunched({ reason: "active", advancedMode: true });
   assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, on), "advanced");
-  const off = ssAdvancedOn({ reason: "active", advancedMode: false });
+  const off = ssAdvancedOnLaunched({ reason: "active", advancedMode: false });
   assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, off), "designer");
   assertEquals(ssClampTab("advanced", true, true, OWNER_MAP, false, true, off), "designer");
 });

@@ -287,6 +287,13 @@ const aim = (page, pos, target) => page.evaluate(({ pos, target }) => {
   P.camera.position.set(...pos); P.controls.target.set(...target); P.controls.update(); P.render();
 }, { pos, target });
 
+// THE BUILDER SWITCH IS NOT LAUNCHED (2026-10-27, SS_ADVANCED_FOR_BUILDERS in portal/01-core.jsx).
+// The shipped portal gives builders no switch and no Advanced item, whatever advanced_mode says. The
+// launched behaviour is still checked here, but only with SS_ADVANCED_LAUNCHED=1 against a portal
+// compiled with that line flipped to true: the minifier folds the constant, so the shipped bundle
+// cannot be flipped from a harness.
+const LAUNCHED = process.env.SS_ADVANCED_LAUNCHED === "1";
+
 try {
   // ── A: our own account, clicked ──────────────────────────────────────────────────────────
   {
@@ -487,7 +494,20 @@ try {
   // ── M / M2: a builder's own Advanced mode switch (2026-10-05, migration 270) ──────────────
   // Not internal and not exempt: an ordinary builder with 3D whose entitlement carries
   // advancedMode (client_settings.advanced_mode, turned on in Settings → Designer).
-  {
+  if (!LAUNCHED) {
+    // NOT LAUNCHED (2026-10-27): the same builder, switch on, gets nothing.
+    const e = ent("active", { advancedMode: true });
+    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e, billingDelayMs: 1200 }, "/advanced");
+    await settle(page, 3500);
+    const s = await seen(page);
+    ok("M0: not launched: a builder with Advanced mode ON never gets the item", !s.nav);
+    ok("M0: …nor the page", !s.page);
+    ok("M0: …and a cold /advanced ends on /designer", (await here(page)) === "/designer", s.paths.join(" → "));
+    ok("M0: nothing was written", writes(calls).length === 0);
+    ok("M0: no page errors", errors.length === 0, errors.join(" | "));
+    await ctx.close();
+  }
+  if (LAUNCHED) {
     const e = ent("active", { advancedMode: true });
     const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e }, "/designs");
     await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/advanced"]'), null, { timeout: 20000 }).catch(() => {});
