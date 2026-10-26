@@ -4113,6 +4113,15 @@ const SS_DOOR_TOP_LOOKS = { american: true, basic: true, classic: true, dutch: t
 // of the opening, where a plank leaf starts 0.05 ft up), the window's own casing ring, and the gap
 // between that casing and the door's frame, all in feet.
 const SS_TRIM_DOOR_SILL_FT = 0.2, SS_DOOR_WIN_CASE_FT = 0.08, SS_DOOR_WIN_PAD_FT = 0.04;
+// A colour darkened by `k` (0.65 is 35% darker), worked on the "#rrggbb" the builder picked: what fills
+// the gaps round a door's leaves wears it (doorGapLiners), so a line that shows there reads as a shadow
+// rather than as a second colour. Anything that is not "#rrggbb" comes back as it went in.
+function ssShadeHex(hex, k) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || "").trim());
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return "#" + [16, 8, 0].map((s) => Math.round(((n >> s) & 255) * k).toString(16).padStart(2, "0")).join("");
+}
 // A transom's sides are narrow, 1.5 in with its casing, not the 3.5 in stiles: Yoder's 29 in transom
 // has to fit the 35 in leaf of their 72 in double (and a 36 in door's). It is at most 30% of the leaf
 // tall, and the band it makes (glass, casing and the rail under it) ends above 60% of the leaf, clear
@@ -12493,8 +12502,13 @@ function buildShed3DModel(THREE, p) {
     // Black T-strap hinges ON THE RAILS, where these doors carry them: the top and bottom rails, and
     // the mid rail between them on a full-height door (two on a short one, as plankDoorLeaf hangs
     // them). The jamb leaf is the rail's own height, so the bottom one never reaches the threshold.
+    // The STRAP is short, as on the real doors: min(leaf x 0.15, 0.5 ft) past the 0.11 ft plate, about
+    // 6.7 in in all on a 3 ft leaf. Measured on the American's reference video (Ahsan 2026-10-26: 16% and
+    // 14% of the leaf, edge to tip). It first shipped as min(leaf x 0.30, 0.85 ft), the plank door's long
+    // barn strap cut down, about 11.5 in in all: twice the real one. The plate and the rows stay put, and
+    // plankDoorLeaf keeps its long straps (tests/harness/doorLooks.mjs HG).
     const he = hinge === "a0" ? a0 : a1, dir = hinge === "a0" ? 1 : -1;
-    const sLen = Math.min(w * 0.3, 0.85);
+    const sLen = Math.min(w * 0.15, 0.5);
     const iron = (from, to, cy, half, part) => {
       const p0 = Math.min(he + dir * from, he + dir * to), p1 = Math.max(he + dir * from, he + dir * to);
       put(wallBox(ironMat, wf, p0, p1, cy - half, cy + half, 0.165, 0.03), part);
@@ -12640,6 +12654,71 @@ function buildShed3DModel(THREE, p) {
     // reason — a handle you could not get a hand behind is not a handle.
     const cx = (a0 + a1) / 2, hw = Math.min(0.3, w * 0.22);
     og.add(wallBox(mat("#6B7280", { metalness: 0.6, roughness: 0.3 }), wf, cx - hw, cx + hw, y0 + 0.55, y0 + 0.68, 0.178, 0.05));
+  };
+
+  // ── NO SEE-THROUGH GAP (door looks P0, 2026-10-26) ──
+  // Every leaf is cut 0.05 ft off each jamb and under the head, and a double's two leaves stop 0.03 ft
+  // short of the centre, so the leaves read as leaves. Nothing stood behind those gaps: square on, the
+  // customer saw daylight down both jambs, across the head and down the middle of every double, and
+  // under every plank, slab and roll-up door, which stands 0.05 ft up with no sill (the four built looks
+  // stand on their threshold). These fill the gaps THEMSELVES, inside the slab's own depth (every leaf
+  // is a 0.16 ft slab centred on the wall line, -0.08..+0.08), so a partition's door, seen from both
+  // rooms, is closed from both. The main door branch, the roll-up and buildPartition3D call them; each
+  // mesh is tagged userData.ssDoorGap ("liner", "meet", "astragal", "sill"), never ssDoorPart, so a
+  // look's own part counts do not move (tests/harness/doorLooks.mjs, block N fires rays through them).
+  //   - The liners and the meet strip are 0.15 deep, a hair inside the slab's 0.16, and run 0.01 into
+  //     the leaf they meet: no seam between them can open, and no face of theirs lies on a leaf's face,
+  //     where it would z-fight (a leaf's back face IS the door seen from inside). They run 0.02 into the
+  //     casing (opaque, deeper than the wall) for the same reason, and never past it, so in "look inside"
+  //     nothing of them stands in the ghosted wall.
+  //   - They wear the door colour darkened 35% (ssShadeHex): any line of them that shows reads as a
+  //     shadow. A built look with no colour of its own wears the live body paint (setLiveColors), and so
+  //     do its liners, shaded the same. The astragal wears the stiles' colour 20% darker (doorAstragal
+  //     says why), and on a built look with no trim of its own follows the live trim the same way.
+  // ⚠️ NO BACKER BEHIND THE LEAVES, on purpose: a full slab behind them would turn every door's inside
+  // face into a darker slab that shows through the ghosted walls in "look inside", would do nothing for
+  // a partition door (seen from both sides), and would stand inside the room box behind a door's glass.
+  const SS_DOOR_GAP_SHADE = 0.65, SS_DOOR_ASTRAGAL_SHADE = 0.8;
+  // A shaded copy of a door's material. A copy of a LIVE paint keeps following it: of the body paint a
+  // colourless built look wears (ssBodyPaint), or of the building's trim, trimMat itself (ssTrimPaint);
+  // setLiveColors repaints both and shades them again by their ssShade.
+  const doorShadeMat = (src, k) => {
+    const gm = mat(ssShadeHex("#" + src.color.getHexString(), k));
+    const live = src.userData && src.userData.ssBodyPaint ? "ssBodyPaint" : src === trimMat ? "ssTrimPaint" : null;
+    if (live) { gm.userData[live] = true; gm.userData.ssShade = k; }
+    return gm;
+  };
+  const doorGapMat = (leafMat) => doorShadeMat(leafMat, SS_DOOR_GAP_SHADE);
+  const gapPut = (og, m, kind) => { m.userData.ssDoorGap = kind; og.add(m); return m; };
+  // The two jamb liners and the head liner. a0..a1 the opening (its jambs), l0..l1 the leaves' outer
+  // edges, yb..yt the leaves' own height, y1 the opening's head.
+  const doorGapLiners = (og, wf, gm, a0, a1, l0, l1, yb, yt, y1) => {
+    if (l0 > a0 + 1e-6) gapPut(og, wallBox(gm, wf, a0 - 0.02, l0 + 0.01, yb, yt, 0, 0.15), "liner");
+    if (a1 > l1 + 1e-6) gapPut(og, wallBox(gm, wf, l1 - 0.01, a1 + 0.02, yb, yt, 0, 0.15), "liner");
+    if (y1 > yt + 1e-6) gapPut(og, wallBox(gm, wf, a0 - 0.02, a1 + 0.02, yt - 0.01, y1 + 0.02, 0, 0.15), "liner");
+  };
+  // A double's centre gap, m0..m1: the a0 leaf's meeting edge to the a1 leaf's.
+  const doorMeetStrip = (og, wf, gm, m0, m1, yb, yt) => {
+    if (m1 > m0 + 1e-6) gapPut(og, wallBox(gm, wf, m0 - 0.01, m1 + 0.01, yb, yt, 0, 0.15), "meet");
+  };
+  // A double's ASTRAGAL: the 1.5 in strip a real pair carries on its latch leaf, centred on the meeting
+  // line `m` so it laps 0.39 in onto each leaf, the leaves' full height. It stands proud of the leaf's
+  // face (`face`: 0.16 on a framed leaf, 0.08 on a bare slab) and stops behind the casing face (0.18 at
+  // the least), as the hinges do, so nothing but a latch lever stands past the casing.
+  // It wears `am` (the stiles' material, or the slab's) 20% darker. In `am` itself it vanished: every
+  // front face here shares one normal and an opening takes no shadow, so a strip in the stiles' own colour
+  // drew no edge, and a one-colour double read as ONE door (a plain slab double as one wide slab) where
+  // the old gap had drawn the seam. Darker, it is the seam, as a real astragal's shadow lines are;
+  // tests/harness/doorLooks.mjs N6 holds every double to it, from both faces.
+  const doorAstragal = (og, wf, am, m, yb, yt, face) => {
+    const hw = 1.5 / 24, o1 = Math.min(face + 0.04, 0.175);
+    gapPut(og, wallBox(doorShadeMat(am, SS_DOOR_ASTRAGAL_SHADE), wf, m - hw, m + hw, yb, yt, (face + o1) / 2, o1 - face), "astragal");
+  };
+  // The SILL across the bottom gap of a plank, slab or roll-up door, in the built looks' threshold
+  // aluminium; the leaves keep their height. 0.155 deep, between the liners' 0.15 and the slab's 0.16,
+  // so where it meets a liner or runs 0.01 up into a leaf, one face is always clearly in front.
+  const doorSill = (og, wf, a0, a1, y0, y1) => {
+    if (y1 > y0 + 1e-6) gapPut(og, wallBox(mat("#B8BCC2", { metalness: 0.2, roughness: 0.45 }), wf, a0 - 0.02, a1 + 0.02, y0, y1 + 0.01, 0, 0.155), "sill");
   };
 
   // WORLD-FEET UVs for a roof slab -- and the fix for a defect that shipped with the very
@@ -13284,6 +13363,14 @@ function buildShed3DModel(THREE, p) {
           legs.forEach(([la0, la1, hg, lt]) => trimDoorLeaf(og, wf, infillMat, frameMat, ironMat, la0, la1, ty0, y1d, hg, lt, dStyle,
             winOn ? trimDoorWindowOf(o.it, la1 - la0, y1d - ty0) : null));
           trimDoorSurround(og, wf, o, frameMat, ssTrimDoorBoardFt(legs[0][1] - legs[0][0], y1d - ty0), true, ops);
+          // No see-through gap: the jambs and the head round the leaves (they stand on the threshold), and
+          // a double's centre, with its astragal on the latch leaf.
+          const gm = doorGapMat(infillMat);
+          doorGapLiners(og, wf, gm, o.a0, o.a1, legs[0][0], legs[legs.length - 1][1], ty0, y1d, o.y1);
+          if (legs.length === 2) {
+            doorMeetStrip(og, wf, gm, legs[0][1], legs[1][0], ty0, y1d);
+            doorAstragal(og, wf, frameMat, o.a, ty0, y1d, 0.16);
+          }
         } else if (plank) {
           const doorMat = mat(o.it.colorHex || D3_COLORS.door);
           // A two-tone catalog door frames itself in the SAME trim colour its casing already
@@ -13323,6 +13410,15 @@ function buildShed3DModel(THREE, p) {
             plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d,
               o.it.operation === "right" ? "a1" : "a0", true, dStyle,
               winOn ? trimDoorWindowOf(o.it, o.a1 - o.a0 - 0.1, y1d - y0d) : null);
+          }
+          // No see-through gap: the jambs, the head and a sill under the leaves (or the curtain), and a
+          // hinged double's centre with its astragal. A roll-up is one curtain, so it has no centre.
+          const gm = doorGapMat(doorMat);
+          doorGapLiners(og, wf, gm, o.a0, o.a1, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d, o.y1);
+          doorSill(og, wf, o.a0, o.a1, o.y0, y0d);
+          if (dStyle !== "rollup" && (o.it.type === "doubleDoor" || o.it.operation === "double")) {
+            doorMeetStrip(og, wf, gm, o.a - 0.03, o.a + 0.03, y0d, y1d);
+            doorAstragal(og, wf, frameMat, o.a, y0d, y1d, 0.16);
           }
         } else {
           // The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
@@ -13377,6 +13473,16 @@ function buildShed3DModel(THREE, p) {
         // One photo layer even for a double or a roll-up: the photo already shows both
         // leaves / the panel seams, so splitting it would draw them twice.
         if (photoEntry) photoLayer(photoEntry, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d, 0.16, o.it.colorHex || null);
+          // No see-through gap: the jambs, the head and a sill, and a double's centre. A photo's cut-out
+          // shows the slab, and these round it; a photo double gets no astragal, which would lie over the
+          // photo (the photo already shows where its leaves meet).
+          const gm = doorGapMat(doorMat);
+          doorGapLiners(og, wf, gm, o.a0, o.a1, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d, o.y1);
+          doorSill(og, wf, o.a0, o.a1, o.y0, y0d);
+          if (o.it.type === "doubleDoor" || o.it.operation === "double") {
+            doorMeetStrip(og, wf, gm, o.a - 0.03, o.a + 0.03, y0d, y1d);
+            if (!photoEntry) doorAstragal(og, wf, doorMat, o.a, y0d, y1d, 0.08);
+          }
         }
       }
       ogs.push(og);
@@ -17008,15 +17114,33 @@ function buildShed3DModel(THREE, p) {
           : [[a0 + 0.05, a1 - 0.05, o.operation === "right" ? "a1" : "a0", true]];
         legs.forEach(([la0, la1, hg, lt]) => trimDoorLeaf(dg, wf, doorMat, pTrim, ironMat, la0, la1, ty0, y1d, hg, lt, look, null));
         trimDoorSurround(dg, wf, { a0, a1, y0, y1: top }, pTrim, 0, false);
+        // No see-through gap, from either room: the main door's closures, inside the slab's depth, so
+        // seat() centres them with the leaves.
+        const gm = doorGapMat(doorMat);
+        doorGapLiners(dg, wf, gm, a0, a1, legs[0][0], legs[legs.length - 1][1], ty0, y1d, top);
+        if (legs.length === 2) {
+          doorMeetStrip(dg, wf, gm, legs[0][1], legs[1][0], ty0, y1d);
+          doorAstragal(dg, wf, pTrim, m, ty0, y1d, 0.16);
+        }
         seat(dg);
         return;
       }
-      if (look === "rollup" || o.operation === "slideup") rollUpCurtain(dg, wf, doorMat, doorMat, a0 + 0.05, a1 - 0.05, 0.05, y1d);
+      const rolls = look === "rollup" || o.operation === "slideup";
+      if (rolls) rollUpCurtain(dg, wf, doorMat, doorMat, a0 + 0.05, a1 - 0.05, 0.05, y1d);
       else if (o.operation === "double") {
         const m = (a0 + a1) / 2;
         plankDoorLeaf(dg, wf, doorMat, doorMat, ironMat, a0 + 0.05, m - 0.03, 0.05, y1d, "a0", false, field);
         plankDoorLeaf(dg, wf, doorMat, doorMat, ironMat, m + 0.03, a1 - 0.05, 0.05, y1d, "a1", true, field);
       } else plankDoorLeaf(dg, wf, doorMat, doorMat, ironMat, a0 + 0.05, a1 - 0.05, 0.05, y1d, o.operation === "right" ? "a1" : "a0", true, field);
+      // No see-through gap, from either room (as the main door: liners, a sill, a double's centre).
+      const gm = doorGapMat(doorMat);
+      doorGapLiners(dg, wf, gm, a0, a1, a0 + 0.05, a1 - 0.05, 0.05, y1d, top);
+      doorSill(dg, wf, a0, a1, y0, 0.05);
+      if (!rolls && o.operation === "double") {
+        const m = (a0 + a1) / 2;
+        doorMeetStrip(dg, wf, gm, m - 0.03, m + 0.03, 0.05, y1d);
+        doorAstragal(dg, wf, doorMat, m, 0.05, y1d, 0.16);
+      }
       seat(dg);
     });
     g.traverse((o) => { if (o.isMesh && o.material === trimMat) o.material = pTrim; });
@@ -18795,10 +18919,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // detail that makes board & batten legible.
         if (e.model.battenMat) e.model.battenMat.color.set(liveTrimCss);
         // The four built doors' panels with no colour of their own ARE the siding (migration 289):
-        // they take the body swatch with the walls. Their frames are trimMat itself, set above.
+        // they take the body swatch with the walls. Their frames are trimMat itself, set above. The liners
+        // in the gaps round them (doorGapLiners) take it too, darkened by their ssShade, and a double's
+        // astragal (doorAstragal) takes the trim swatch (ssTrimPaint), darkened by its own.
         if (e.model.openingsGroup) {
           e.model.openingsGroup.traverse((o) => {
-            if (o.isMesh && o.material && o.material.userData && o.material.userData.ssBodyPaint) o.material.color.set(liveBodyCss);
+            const ud = o.isMesh && o.material && o.material.userData;
+            if (!ud || !(ud.ssBodyPaint || ud.ssTrimPaint)) return;
+            o.material.color.set(ud.ssBodyPaint ? liveBodyCss : liveTrimCss);
+            if (ud.ssShade) o.material.color.set(ssShadeHex("#" + o.material.color.getHexString(), ud.ssShade));
           });
         }
         // Corner boards and fascia (colors.corner / colors.fascia) follow whichever colour their key

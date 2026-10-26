@@ -4447,6 +4447,20 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
     no_show: ["#B91C1C", "No-show"],
     cancelled: ["#94A3B8", "Cancelled"],
   };
+  // A booked meeting whose time has GONE is not "Upcoming" (Carolyn 2026-10-25). Nothing
+  // sweeps these rows — `booked` is where a meeting stays until a person marks it done or a
+  // no-show — so a chip read straight off the status told a host that last week's meeting was
+  // still ahead of them, on the very screen they use to spot what needs marking.
+  //
+  // Derived from the CLOCK at render, never stored: a status the server would have to age
+  // would need a sweep nobody runs, and this list already re-renders whenever it is opened.
+  // It keys on endsAt, not startsAt, so a meeting in progress still reads as upcoming; a row
+  // without one (there should be none) falls back to the plain status rather than guessing.
+  const statusOf = (m) => (
+    m.status === "booked" && m.endsAt && new Date(m.endsAt).getTime() < Date.now()
+      ? ["#475569", "Past"]
+      : STATUS[m.status] || ["#94A3B8", m.status]
+  );
 
   return (
     <div>
@@ -4459,7 +4473,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
       {hosts.length === 0 && (
         <div style={{ ...sub, marginBottom: 12 }}>
           Nobody on this account has a booking calendar yet. Set one up under{" "}
-          <strong>Settings → Meetings</strong> and this tab can book against it.
+          <strong>My Profile → My meetings</strong> and this tab can book against it.
         </div>
       )}
 
@@ -4494,7 +4508,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
           )}
           {host && host.accepting && !offered.length && (
             <div style={{ ...sub, marginBottom: 10 }}>
-              {host.publicName} hasn't picked any meeting types yet — that's under Settings → Meetings.
+              {host.publicName} hasn't picked any meeting types yet — that's in their My Profile → My meetings.
             </div>
           )}
 
@@ -4507,7 +4521,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
               {!avail && <div style={{ ...sub, marginBottom: 10 }}>Checking the calendar…</div>}
               {avail && !flat.length && (
                 <div style={{ ...sub, marginBottom: 10 }}>
-                  Nothing open in the next three weeks. Their hours and days off are under Settings → Meetings.
+                  Nothing open in the next three weeks. Their hours and days off are in their My Profile → My meetings.
                 </div>
               )}
               {!!flat.length && (
@@ -4576,7 +4590,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
         {!mine && <div style={sub}>Loading…</div>}
         {mine && !mine.length && <div style={sub}>None yet.</div>}
         {(mine || []).map((m) => {
-          const [colour, label] = STATUS[m.status] || ["#94A3B8", m.status];
+          const [colour, label] = statusOf(m);
           return (
             <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 9 }}>
               <span style={{ width: 8, height: 8, borderRadius: 999, background: colour, marginTop: 6, flex: "0 0 auto" }} />

@@ -3680,8 +3680,8 @@ function MyConnectionsCard({ clientId, viewing = false }) {
     <div style={S.card}>
       <CardHead title="My connections" />
       <p style={{ ...sub, margin: "0 0 12px" }}>
-        Your own accounts, not the business's — everyone on the team connects their own. The
-        booking link, your hours and the meeting types live in Settings → Customer Hub → Meetings.
+        Your own accounts, not the business's — everyone on the team connects their own. Your
+        booking link, hours and the meeting types you take are in My meetings, below.
       </p>
       <SubTabs tabs={TABS} sub={tab} onSub={setTab} />
       {!data ? <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading your connections…</div> : (() => {
@@ -3726,7 +3726,7 @@ function MyConnectionsCard({ clientId, viewing = false }) {
             connected ? "#10B981" : zoomConn ? "#F59E0B" : "#CBD5E1")}
           <div style={{ ...sub, marginTop: 8 }}>
             {!(host && host.id)
-              ? (<>Set up your booking link first — Zoom connects to your booking calendar. <a href={ssPagePath("settings", "meetings")} style={{ color: ACCENT, fontWeight: 700 }}>Settings → Meetings</a>.</>)
+              ? "Set up your booking link first, in My meetings below — Zoom connects to your booking calendar."
               : viewing
                 ? "Each person connects their own Zoom account while signed in as themselves."
                 : "Connect once, and any video meeting type set to “a new Zoom meeting for every booking” makes a fresh meeting in your Zoom for each booking — and moves or deletes it when the booking changes. Your customers never need a Zoom account."}
@@ -4045,6 +4045,12 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           (the Zoom callback lands on this page), and it sits beside Your details because both
           are "who you are", ahead of the how-the-portal-behaves cards. */}
       <MyConnectionsCard clientId={clientId} viewing={viewing} />
+      {/* MY MEETINGS (Carolyn 2026-10-26): "I want all the company set meetings to show in MY
+          PROFILE so that users can choose the calendars they want to use." Each person's own
+          booking link, hours, days off and the company meeting types they take — the same
+          component Customer Hub → Meetings renders in "business" mode. */}
+      <div style={{ ...S.h2, margin: "18px 0 8px" }}>My meetings</div>
+      <MeetingsSettings clientId={clientId} mode="mine" viewingLabel={viewing ? "this account" : null} />
       <div style={S.card}>
         <div style={S.h2}>How the Contacts tab opens</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -5877,7 +5883,15 @@ const MEETING_VIDEO = [
   ["other", "Something else"],
 ];
 
-function MeetingsSettings({ clientId, viewingLabel = null }) {
+// MODE (Carolyn 2026-10-26: "I want all the company set meetings to show in MY PROFILE so that
+// users can choose the calendars they want to use"). One component, two homes, so the two halves
+// can never disagree about what a host row is:
+//   "mine"     — My Profile → My meetings: MY booking link and hours, my days off, and which of
+//                the company's meeting types I take. Every person, whatever their title.
+//   "business" — Settings → Customer Hub → Meetings: the company's meeting types and booking
+//                pages. Read-only below Edit; the server refuses those writes anyway.
+function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) {
+  const mine = mode === "mine";
   const [data, setData] = useState(null);
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -6012,7 +6026,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
 
   return (
     <div>
-      {viewingLabel && (
+      {mine && viewingLabel && (
         <div style={{ ...sub, marginBottom: 10 }}>
           You're looking at <strong>{viewingLabel}</strong>. A booking link belongs to a person on their
           team, so there isn't one of yours to set up here.
@@ -6025,6 +6039,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
         </div>
       )}
 
+      {mine && (<>
       {/* ── MY BOOKING LINK ───────────────────────────────────────────────────────────── */}
       <div style={S.card}>
         <CardHead title="My booking link" />
@@ -6074,8 +6089,8 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
               shows "not available" and has no idea why. */}
           {canBiz && page && !page.enabled && (
             <div style={{ ...sub, marginTop: 6, color: "#92400E" }}>
-              Booking pages are switched off for this account, so this link isn't live yet — there's a
-              switch for it further down.
+              Booking pages are switched off for this account, so this link isn't live yet — switch
+              them on under Settings → Customer Hub → Meetings.
             </div>
           )}
           {!canBiz && page && !page.enabled && (
@@ -6170,10 +6185,11 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
       {/* ── WHAT I OFFER ──────────────────────────────────────────────────────────────── */}
       {data.myHost && (
         <div style={S.card}>
-          <CardHead title="What I offer" />
+          <CardHead title="Meeting types I take" />
           <div style={{ ...sub, marginBottom: 10 }}>
-            Which of the business's meeting types customers can book with you. Tick none and your link
-            has nothing to offer, so it won't take bookings.
+            Tick the company's meeting types you want on your calendar — customers and your team can
+            book you for those. Tick none and your link has nothing to offer, so it won't take bookings.
+            {canBiz && <> The types themselves are set up in <a href={ssPagePath("settings", "meetings")} style={{ color: ACCENT, fontWeight: 700 }}>Customer Hub → Meetings</a>.</>}
           </div>
           {(data.types || []).filter((t) => t.active).length === 0 && (
             <div style={sub}>The business hasn't set up any meeting types yet.</div>
@@ -6199,6 +6215,20 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
           })}
         </div>
       )}
+
+      </>)}
+
+      {!mine && (<>
+      {/* Where each person's own setup went (2026-10-26). A pointer rather than silence: this
+          is the page people have been told to use for their hours since 2026-10-22. */}
+      <div style={S.card}>
+        <CardHead title="Your own booking link and hours" />
+        <div style={sub}>
+          Each person sets their own booking link, hours, days off and the meeting types they take in{" "}
+          <a href={ssPagePath("settings", "myprofile")} style={{ color: ACCENT, fontWeight: 700 }}>My Profile → My meetings</a>.
+          {" "}This page is the company's: the meeting types everyone can choose from, and the booking pages.
+        </div>
+      </div>
 
       {/* ── MEETING TYPES (the business) ──────────────────────────────────────────────── */}
       <div style={S.card}>
@@ -6359,6 +6389,7 @@ function MeetingsSettings({ clientId, viewingLabel = null }) {
           )}
         </div>
       )}
+      </>)}
     </div>
   );
 }
@@ -7487,9 +7518,10 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }
                 <div style={{ fontWeight: 800, marginBottom: 3 }}>One of your own fields</div>
                 The answer is saved onto the contact's <b>{cfDef.label || f.key}</b> field
                 {SSF_CF_TYPE_LABEL[cfType] ? <> ({SSF_CF_TYPE_LABEL[cfType].toLowerCase()})</> : null}, as well as in the
-                submission. The field's type{cfType === "select" ? " and its choices" : ""} come from
-                Settings → Customer Hub → Fields, so they can only be changed there — and a change there reaches
-                every form using this field.
+                submission. {cfType === "select"
+                  ? "The field's type and its choices come from Settings → Customer Hub → Fields, so they can only be changed there"
+                  : "The field's type comes from Settings → Customer Hub → Fields, so it can only be changed there"}
+                — and a change there reaches every form using this field.
                 {cfType === "select" && (cfDef.choices || []).length > 0 && (
                   <div style={{ marginTop: 6, color: "#64748B" }}>Choices: {(cfDef.choices || []).join(", ")}</div>
                 )}

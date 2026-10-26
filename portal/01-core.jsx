@@ -2053,7 +2053,7 @@ function ssCustomerHubTabs({ isAdmin = false, access = null, phoneOffered = fals
     //     only Team with no way to reach it"), one hub along.
     //   * for such a rep this hub shows exactly ONE tab, labelled "Customer Hub". That reads a
     //     little oddly for them and is the accepted cost of the grouping owners asked for.
-    ["meetings", "Meetings", "Your booking link and hours, the meeting types you offer, and your calendar connections"],
+    ["meetings", "Meetings", "The meeting types your team chooses from, and the booking pages. Your own link and hours are in My Profile"],
     // FIELDS (migration 330, Carolyn 2026-10-22): "We need to show all the current fields for
     // contacts and designs/deals in the customer hub tab under its own tab called fields. We need
     // to allow to add as many custom fields as desired." A register first and an editor second —
