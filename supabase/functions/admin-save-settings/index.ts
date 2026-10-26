@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, WALK_FRAME_MAX, carryForwardFoundation, carryForwardRoofSeat } from "../_shared/styleD3.ts";
+import { carryForwardFraming } from "../_shared/styleD3.ts";
 
 // Operator (super-admin) bootstrap tool, used by the designer's ?admin=1 panel.
 // Gated by the shared ADMIN_PASSWORD edge-function secret. Owners use the
@@ -137,6 +138,8 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     // an older bundle drops both on an AI redraft and must not put a raised roof back on the plate; the
     // current editor sends seatAware and gets what it sent. See carryForwardRoofSeat.
     carryForwardRoofSeat(clean.d3, d3, lockRow?.d3, seatAware === true);
+    // The Framing view's spacing, by the same rule (carryForwardFraming): an older designer's silence keeps it.
+    carryForwardFraming(clean.d3, d3, lockRow?.d3);
 
     // Matched on the style KEY, which is what the editor knows as `value`;
     // (client_id, key) is unique, so this touches exactly one row.

@@ -463,6 +463,7 @@ export type D3Spec = {
   gradeFallToward?: string;
   gradeCornersFt?: { fl: number; fr: number; bl: number; br: number };
   claddingChoices?: string[];
+  framing?: { studOcIn: number };
 };
 
 // The four corners of a gradeCornersFt value, each held to GRADE_FALL_FT (anything that is not a
@@ -846,6 +847,16 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     if (picked.length) d3.claddingChoices = picked;
   }
 
+  // THE FRAMING VIEW's stud spacing (2026-10-27; Carolyn's roadmap "Show interior 2x4 studs at 16" or 24" OC, set
+  // per building"): 16 or 24 in on centre, per style (Ahsan, 10-27). The 3D's Framing button shows only on a style
+  // that has it. Anything else is dropped, a number in a string included: the value draws lumber in every customer's
+  // browser. An explicit null is the panel's "Not set" and stores nothing (carryForwardFraming lets it land).
+  const frRaw = src.framing;
+  if (frRaw && typeof frRaw === "object") {
+    const oc = (frRaw as Record<string, unknown>).studOcIn;
+    if (oc === 16 || oc === 24) d3.framing = { studOcIn: oc };
+  }
+
   // A spec is a handful of numbers. Anything approaching this size is either a mistake
   // or someone using a customer-visible jsonb column as free storage.
   if (JSON.stringify(d3).length > D3_SPEC_MAX_BYTES) return { ok: false, error: "That 3D spec is implausibly large." };
@@ -964,6 +975,21 @@ export function carryForwardRoofSeat(clean: D3Spec, sent: unknown, stored: unkno
     const d = clamped("rafterDepthIn", was.rafterDepthIn);
     if (d !== null) clean.roof.rafterDepthIn = d;
   }
+}
+
+// ── THE FRAMING VIEW'S SPACING SURVIVES AN OLDER DESIGNER'S SAVE (d3.framing, 2026-10-27) ──
+// The roofProfile rule (save_style_d3's own carry-forward), as a function both save paths share. Beta and production
+// write the same column, and production's designer, until the next promotion, resolves a style through a
+// d3ResolveStyleSpec that drops `framing` (it names every top-level key it keeps), so its Save would erase a spacing a
+// builder set on beta, with an HTTP 200. ABSENCE IS NOT A CLEAR: a body whose d3 has no `framing` key keeps the
+// stored value, re-held to the sanitiser's rule. The panel that sets it always sends the key, null for "Not set",
+// and gets exactly what it sent. Run before the save guard, so an older designer's re-save compares as the
+// duplicate it is. Mutates `clean`.
+export function carryForwardFraming(clean: D3Spec, sent: unknown, stored: unknown): void {
+  if (!sent || typeof sent !== "object" || "framing" in (sent as Record<string, unknown>)) return;
+  const was = (stored && typeof stored === "object") ? (stored as Record<string, unknown>).framing : null;
+  const oc = was && typeof was === "object" ? (was as Record<string, unknown>).studOcIn : null;
+  if (oc === 16 || oc === 24) clean.framing = { studOcIn: oc };
 }
 
 // Reference photos for a spec: http(s) only, capped in both count and length. These are

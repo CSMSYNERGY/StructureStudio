@@ -8141,3 +8141,51 @@ Deno.test("consensusDrafts: porchGable is voted among the recessed reads, like t
   const pj = consensusDrafts([read(), read(), read()]);
   assert(pj.report.discreteAgreement.porchGable == null, JSON.stringify(pj.report.discreteAgreement));
 });
+
+// THE FRAMING VIEW'S SPACING (d3.framing.studOcIn, 2026-10-27): 16 or 24 in on centre per style, and nothing else.
+// An older designer's save keeps it (carryForwardFraming); the panel that sets it sends null for "Not set".
+import { carryForwardFraming } from "./styleD3.ts";
+
+Deno.test("framing: 16 and 24 round-trip, absent stays absent, junk and a null are dropped", () => {
+  const base = { roof: { type: "gable", pitch: 0.4 }, siding: "panel", colors: {} };
+  for (const oc of [16, 24]) {
+    const r = sanitizeD3Spec({ ...base, framing: { studOcIn: oc } });
+    assert(r.ok && r.d3.framing && r.d3.framing.studOcIn === oc, `${oc} kept`);
+    assertEquals(Object.keys(r.ok ? r.d3.framing! : {}), ["studOcIn"], "only the spacing is stored");
+  }
+  for (const junk of [{ studOcIn: 12 }, { studOcIn: "16" }, { studOcIn: 16.5 }, { studOcIn: null }, { oc: 16 }, 16, "24", null, [16]]) {
+    const r = sanitizeD3Spec({ ...base, framing: junk });
+    assert(r.ok, `${JSON.stringify(junk)} must not fail the spec`);
+    assert(r.ok && !("framing" in r.d3), `${JSON.stringify(junk)} must not persist`);
+  }
+  const extra = sanitizeD3Spec({ ...base, framing: { studOcIn: 24, trussOcIn: 16, x: "<script>" } });
+  assertEquals(extra.ok ? extra.d3.framing : null, { studOcIn: 24 }, "nothing rides along");
+  const absent = sanitizeD3Spec(base);
+  assert(absent.ok && !("framing" in absent.d3), "no spacing is ever defaulted: no Framing button until a builder picks one");
+});
+
+Deno.test("framing: an older designer's save keeps the stored spacing; the panel's null clears it", () => {
+  const STORED = { roof: { type: "gable", pitch: 0.4 }, siding: "panel", colors: {}, framing: { studOcIn: 24 } };
+  const save = (sent: Record<string, unknown>, stored: unknown = STORED) => {
+    const clean = sanitizeD3Spec(sent);
+    assert(clean.ok, JSON.stringify(sent));
+    if (!clean.ok) throw new Error("unreachable");
+    carryForwardFraming(clean.d3, sent, stored);
+    return clean.d3;
+  };
+  // Production's designer resolves the style without the key and saves what it has.
+  const older = { roof: { type: "gable", pitch: 0.4 }, siding: "panel", colors: {} };
+  assertEquals(save(older).framing, { studOcIn: 24 }, "absent: the stored spacing is carried");
+  assert(canonicalJson(save(older)) === canonicalJson(sanitizeD3Spec(STORED).ok ? (sanitizeD3Spec(STORED) as { d3: unknown }).d3 : null), "so its re-save is the duplicate it is");
+  // The current panel always sends the key.
+  assert(!("framing" in save({ ...older, framing: null })), "null: Not set lands");
+  assertEquals(save({ ...older, framing: { studOcIn: 16 } }).framing, { studOcIn: 16 }, "a pick lands");
+  assert(!("framing" in save({ ...older, framing: { studOcIn: 30 } })), "a junk pick is dropped, not replaced by the stored one");
+  // A stored oddity is re-held to the rule, never copied.
+  for (const stored of [{ framing: { studOcIn: 12 } }, { framing: { studOcIn: "24" } }, { framing: 24 }, { framing: null }, null, "x"]) {
+    assert(!("framing" in save(older, stored)), `stored ${JSON.stringify(stored)}`);
+  }
+  // Nothing sent at all is left to the caller (the save paths refuse an empty d3 first).
+  const clean = sanitizeD3Spec(older);
+  if (clean.ok) { carryForwardFraming(clean.d3, null, STORED); assert(!("framing" in clean.d3), "no body, nothing carried"); }
+});

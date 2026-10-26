@@ -110,6 +110,7 @@ import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared
 import { carryForwardFoundation } from "../_shared/styleD3.ts";
 // Where the roof sits on the wall (roof.seat, 2026-10-06): the same carry-forward, over an older designer's redraft.
 import { carryForwardRoofSeat } from "../_shared/styleD3.ts";
+import { carryForwardFraming } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { rtpImportNumber, rtpImportOverhead } from "../_shared/rtpImportValues.ts";
 // The Conversations page's calls go through the record timeline's own visibility rule.
@@ -4219,6 +4220,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // keeps the stored pair its roof left out (carryForwardRoofSeat). The current panel sends seatAware, and
     // its "On the plate" and blank rafter box clear them. Before the guard too, for the same reason.
     carryForwardRoofSeat(clean.d3, payload.d3, found.style!.d3, payload.seatAware === true);
+    // THE FRAMING VIEW's spacing (d3.framing, 2026-10-27): absent in an older designer's d3 is not a clear; the
+    // panel that sets it sends null for "Not set" (carryForwardFraming). Before the guard too.
+    carryForwardFraming(clean.d3, payload.d3, found.style!.d3);
     // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
     // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
     // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already
