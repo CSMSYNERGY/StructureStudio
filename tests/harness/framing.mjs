@@ -15,6 +15,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deflateSync } from "node:zlib";
 import { launch, stubSupabase, collectErrors, bypassGate, reporter, shotsDir, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -103,12 +104,12 @@ const itemsFor = (W, L, set) => {
   ];
   return set ? all.filter((it) => set.includes(it.id)) : all;
 };
-const designRow = (c, set) => {
+const designRow = (c, set, items) => {
   const [W, L] = sizeOf(c.size);
   return {
     short_code: CODE, client_id: CLIENT, status: "draft", version: 1,
     selections: { style: c.id, size: c.size, roofType: "", roofColor: "", cladding: "" },
-    items: itemsFor(W, L, set), paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
+    items: items || itemsFor(W, L, set), paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
     contact: { name: "Pat Example", email: "pat@example.test", phone: "5550100100", street: "", city: "", state: "", zip: "" },
     bldg_w: W, bldg_h: L,
   };
@@ -137,12 +138,13 @@ async function openEditor(page) {
 }
 
 // `base` (optional) serves another build of the same files: the baseline part opens origin/beta's there.
-async function render(browser, c, { set = null, viewport = { width: 1280, height: 900 }, base = BASE } = {}) {
+async function render(browser, c, { set = null, viewport = { width: 1280, height: 900 }, base = BASE, items = null, fixtures = FIXTURES, routes = null } = {}) {
   const ctx = await browser.newContext({ viewport });
   const page = await ctx.newPage();
   const errors = collectErrors(page);
   await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
-  await stubSupabase(page, { config: CONFIG, fixtures: FIXTURES, rpc: { load_design: [designRow(c, set)] } });
+  await stubSupabase(page, { config: CONFIG, fixtures, rpc: { load_design: [designRow(c, set, items)] } });
+  if (routes) await routes(page);
   await bypassGate(page, CLIENT);
   await page.goto(`${base}/?client=${CLIENT}&id=${CODE}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
@@ -729,6 +731,108 @@ async function partBaseline(browser) {
   }
 }
 
+
+// ── DOORS AND WINDOWS STAY IN THE FRAMING VIEW ─────────────────────────────────────────────────────────
+// Framing takes the siding off and keeps every door and window: only the casings go (they would stand in
+// front of the studs), and the shallow room drawn behind a pane, since the real inside now shows through.
+// Every door look (the eight door_style looks and the plain slab), single and double, a door shown by its
+// photo, a catalog window and a built-in one, on one 30x60 building at 16": for each opening, every mesh that
+// showed with Framing off still shows with it on, but for those two kinds, and each still draws its leaf or sash.
+const DOOR_LOOKS = ["american", "basic", "classic", "dutch", "plank", "zbrace", "xbrace", "rollup", "auto"];
+const DOOR_BASE = { colorMode: "paint", hasTrimColor: true, imageUrl: null, opLeft: true, opRight: true, opDouble: true, opSlideUp: true, opDefault: "right",
+  swingIn: false, swingOut: true, swingDefault: null, sillIn: null, sillMode: "fixed", sortOrder: 0, price: 500 };
+const PHOTO_URL = `https://${REF}.supabase.co/storage/v1/object/public/fixtures/harness-framing-photo.png`;
+const doorRow = (id, name, look, wIn, extra = {}) => ({ ...DOOR_BASE, id, category: "door", name, planLabel: name.slice(0, 4).toUpperCase(), widthIn: wIn, heightIn: 80,
+  ...(look === "auto" ? {} : { doorStyle: look }), ...extra });
+const DOOR_FIX = [
+  ...DOOR_LOOKS.flatMap((k) => [doorRow(`fd-${k}`, `${k} single`, k, 36), doorRow(`fd-${k}2`, `${k} double`, k, 72)]),
+  doorRow("fd-photo", "photo single", "auto", 36, { imageUrl: PHOTO_URL }),
+  { id: "fw-dh", category: "window", name: "Double hung", planLabel: "DH", price: 120, widthIn: 36, heightIn: 48, sortOrder: 0, colorMode: "fixed", hasTrimColor: false, imageUrl: null, sillIn: null, sillMode: "fixed" },
+];
+// A plain 48 x 96 door photo, drawn here (no file, no network).
+function pngDoor() {
+  const w = 48, h = 96, raw = Buffer.alloc((w * 4 + 1) * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const panel = x > 8 && x < 40 && ((y > 10 && y < 43) || (y > 53 && y < 86));
+    raw.set(panel ? [150, 112, 74, 255] : [118, 86, 56, 255], y * (w * 4 + 1) + 1 + x * 4);
+  }
+  const crcT = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? (0xedb88320 ^ (c >>> 1)) >>> 0 : c >>> 1; return c >>> 0; });
+  const crc = (b) => { let c = 0xffffffff; for (const v of b) c = (crcT[(c ^ v) & 255] ^ (c >>> 8)) >>> 0; return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (t, d) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t, "ascii"), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([l, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+}
+async function partDoors(browser) {
+  const c = { id: "doorsFrame", label: "Doors framed", size: "30x60", d3: { roof: GABLE, ...FR(16) } };
+  if (!CONFIG.buildingStyles.some((s) => s.value === c.id)) {
+    CONFIG.buildingStyles.push({ value: c.id, label: c.label, img: null, sizes: [c.size], sizeInclusions: {}, sizeInclusionQty: {}, d3: D3(c) });
+    CONFIG.sizePricing[c.id] = { [c.size]: { widthFt: 30, lengthFt: 60, basePrice: 9000 } };
+  }
+  const W = 30, L = 60, g = PG(W, L), lens = { south: W, east: L, north: W, west: L }, walls = ["south", "east", "north", "west"];
+  const pos = (wall, at) => wall === "north" ? { x: g.mgX + at * g.scale, y: g.mgY, rotation: 0 }
+    : wall === "south" ? { x: g.mgX + at * g.scale, y: g.mgY + L * g.scale, rotation: 0 }
+    : wall === "west" ? { x: g.mgX, y: g.mgY + at * g.scale, rotation: 90 } : { x: g.mgX + W * g.scale, y: g.mgY + at * g.scale, rotation: 90 };
+  const list = [
+    ...DOOR_LOOKS.flatMap((k) => [{ fx: `fd-${k}`, op: "right" }, { fx: `fd-${k}2`, op: "double" }]),
+    { fx: "fd-photo", op: "right" }, { win: "fw-dh" }, { builtin: "window" }, { builtin: "singleDoor" },
+  ];
+  let wi = 0, at = 2;
+  const items = list.map((d, i) => {
+    const fx = d.fx ? DOOR_FIX.find((f) => f.id === d.fx) : d.win ? DOOR_FIX.find((f) => f.id === d.win) : null;
+    const w = fx ? fx.widthIn / 12 : 3;
+    while (at + w > lens[walls[wi]] - 2) { wi++; at = 2; }
+    const wall = walls[wi], p = pos(wall, at + w / 2);
+    at += w + 1.5;
+    if (d.builtin) return { id: 800 + i, type: d.builtin, ...p, wall, widthFt: 3, heightFt: 0.5 };
+    if (d.win) return { id: 800 + i, type: "window", ...p, wall, widthFt: w, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name, price: fx.price, widthIn: fx.widthIn, heightIn: fx.heightIn, sillMode: "fixed", colorId: null, colorLabel: null, colorHex: null };
+    return { id: 800 + i, type: "fixtureDoor", ...p, wall, widthFt: w, heightFt: 0.5, fixtureItemId: fx.id, doorName: fx.name, planLabel: fx.planLabel, price: fx.price,
+      widthIn: fx.widthIn, heightIn: fx.heightIn, swing: "out", operation: d.op, colorId: null, colorLabel: null, colorHex: null, trimColorId: null, trimColorLabel: null, trimColorHex: null, sillMode: "fixed" };
+  });
+  const photo = pngDoor();
+  const r = await render(browser, c, { items, fixtures: { ...FIXTURES, items: DOOR_FIX }, routes: (page) => page.route(PHOTO_URL, (route) => route.fulfill({ status: 200, contentType: "image/png", headers: { "access-control-allow-origin": "*" }, body: photo })) });
+  r.tag = "doors";
+  const { page } = r;
+  await settle(page, 1500);
+  // Per opening: the meshes showing, by kind (a casing, the room behind a pane, or the door or window itself).
+  const showing = () => page.evaluate(() => {
+    const M = window.__ss3dEngine.model, out = {};
+    M.openingsGroup.children.forEach((og) => {
+      if (!og.userData || og.userData.itemId == null) return;
+      const rec = { kept: [], casing: 0, room: 0 };
+      og.traverse((o) => {
+        if (!o.isMesh) return;
+        let v = true; for (let p = o; p && p !== M.root; p = p.parent) if (!p.visible) v = false;
+        if (!v) return;
+        if (o.userData && (o.userData.ssCasing || o.userData.ssDoorPart === "header")) rec.casing++;
+        else if (o.userData && o.userData.ssGlassRoom) rec.room++;
+        else rec.kept.push(o.uuid);
+      });
+      out[og.userData.itemId] = rec;
+    });
+    return out;
+  });
+  const off = await showing();
+  await shot(page, "23b-doors-front-finished.png", [0, 5, L / 2 + 30], [0, 4, L / 2]);
+  await setFraming(page, true);
+  const on = await showing();
+  const name = (id) => { const it = items.find((x) => x.id === Number(id)); return it.doorName || it.windowName || it.type; };
+  const ids = Object.keys(off);
+  ok("doors: every placed door and window has its opening drawn", ids.length === items.length, `${ids.length} of ${items.length}`);
+  const lost = ids.filter((id) => off[id].kept.some((u) => !on[id].kept.includes(u)));
+  ok("doors: with Framing on every door and window keeps every part it showed (leaves, stiles, rails, hinges, glass, sash, photo), all 9 looks single and double, a photo door, two windows",
+    lost.length === 0, lost.map(name).join(", "));
+  ok("doors: and each still draws something (no opening left empty)", ids.every((id) => on[id].kept.length > 0), ids.filter((id) => !on[id].kept.length).map(name).join(", "));
+  ok("doors: only the casings go (they would stand in front of the studs)", ids.every((id) => on[id].casing === 0) && ids.some((id) => off[id].casing > 0));
+  ok("doors: and the rooms behind the glass (the real inside shows through now)", ids.every((id) => on[id].room === 0));
+  const photoId = items.find((x) => x.fixtureItemId === "fd-photo").id;
+  ok("doors: the photo door keeps its photo", on[photoId].kept.length > 0 && on[photoId].kept.length === off[photoId].kept.length);
+  await shot(page, "23-doors-front.png", [0, 5, L / 2 + 30], [0, 4, L / 2]);
+  await shot(page, "24-doors-right.png", [W / 2 + 34, 5, 0], [W / 2, 4, 0]);
+  await shot(page, "25-doors-back.png", [0, 5, -L / 2 - 30], [0, 4, -L / 2]);
+  await shot(page, "26-doors-left.png", [-W / 2 - 34, 5, 0], [-W / 2, 4, 0]);
+  await done(r);
+}
+
 const only = process.env.SS_FRAMING_ONLY ? new Set(process.env.SS_FRAMING_ONLY.split(",")) : null;
 const want = (k) => !only || only.has(k);
 const { browser } = await launch();
@@ -752,6 +856,7 @@ try {
   if (want("phone")) await casePhone(browser);
   if (want("settings")) await partSettings(browser);
   if (want("baseline")) await partBaseline(browser);
+  if (want("doors")) await partDoors(browser);
   ok("no page errors", errs.length === 0, errs.join(" | ").slice(0, 400));
 } finally {
   await browser.close();
