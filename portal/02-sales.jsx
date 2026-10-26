@@ -4264,13 +4264,16 @@ function CrmQuickSendPicker({ channel, quick, onOpen, onInsert, fill }) {
 //
 // Why a rep books from here rather than sending a link: they are on the phone with the
 // customer. Sending a link and hoping is the thing a CRM is supposed to replace.
-function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
+// The BOOKING form. The customer's meetings used to be listed here too; they belong to
+// Planned now (ContactPlannedMeetings), because this panel only renders under its own tab
+// and a meeting is a planned thing whichever tab you are looking at (Carolyn 2026-10-26).
+// `onBooked` is how this says a new one exists: the list is somebody else's state now.
+function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked = null }) {
   const [over, setOver] = useState(null);
   const [hostId, setHostId] = useState(null);
   const [typeId, setTypeId] = useState(null);
   const [avail, setAvail] = useState(null);
   const [slot, setSlot] = useState(null);
-  const [mine, setMine] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [notes, setNotes] = useState("");
@@ -4302,16 +4305,6 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
     })();
     return () => { live = false; };
   }, [call, clientId]);
-
-  // ── This customer's meetings ────────────────────────────────────────────────────────────
-  const loadMine = useCallback(async () => {
-    if (!contact || !contact.id) { setMine([]); return; }
-    try {
-      const d = await call("contact_meetings", { contactId: contact.id });
-      setMine(d.meetings || []);
-    } catch (e) { setMsg({ err: e.message }); setMine([]); }
-  }, [call, contact]);
-  useEffect(() => { loadMine(); }, [loadMine]);
 
   // ── Open times ──────────────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -4410,57 +4403,9 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
     setSlot(null);
     setNotes("");
     setMsg({ ok: "Booked." });
-    await loadMine();
+    // It lands in Planned, which owns the list now.
+    if (onBooked) onBooked();
   });
-
-  const cancel = (m) => run(async () => {
-    if (!window.confirm(`Cancel the ${m.typeName || "meeting"} on ${fmtWhen(m.startsAt, m.timeZone)}?`)) return;
-    await call("cancel", { id: m.id });
-    setMsg({ ok: "Cancelled." });
-    await loadMine();
-  });
-
-  const mark = (m, status) => run(async () => {
-    await call("set_status", { id: m.id, status });
-    await loadMine();
-  });
-
-  // "They never got the email." Goes to the address already on the booking and nowhere else —
-  // portal-meetings refuses an address from the request body, because that would be a way to
-  // have the platform mail a stranger under the builder's domain.
-  const resend = (m) => run(async () => {
-    const d = await call("resend", { id: m.id });
-    setMsg({ ok: d.sentTo ? `Sent again to ${d.sentTo}.` : "Sent again." });
-  });
-
-  // VIDEO (migration 333): a fresh Zoom link that could not be made when they booked. Tries
-  // again; when it works the customer is sent the confirmation again with the link in it.
-  const makeLink = (m) => run(async () => {
-    const d = await call("make_link", { id: m.id });
-    setMsg({ ok: d.emailSent ? "Zoom link made and sent to the customer." : "Zoom link made." });
-    await loadMine();
-  });
-
-  const STATUS = {
-    booked: ["#B45309", "Upcoming"],
-    completed: ["#047857", "Completed"],
-    no_show: ["#B91C1C", "No-show"],
-    cancelled: ["#94A3B8", "Cancelled"],
-  };
-  // A booked meeting whose time has GONE is not "Upcoming" (Carolyn 2026-10-25). Nothing
-  // sweeps these rows — `booked` is where a meeting stays until a person marks it done or a
-  // no-show — so a chip read straight off the status told a host that last week's meeting was
-  // still ahead of them, on the very screen they use to spot what needs marking.
-  //
-  // Derived from the CLOCK at render, never stored: a status the server would have to age
-  // would need a sweep nobody runs, and this list already re-renders whenever it is opened.
-  // It keys on endsAt, not startsAt, so a meeting in progress still reads as upcoming; a row
-  // without one (there should be none) falls back to the plain status rather than guessing.
-  const statusOf = (m) => (
-    m.status === "booked" && m.endsAt && new Date(m.endsAt).getTime() < Date.now()
-      ? ["#475569", "Past"]
-      : STATUS[m.status] || ["#94A3B8", m.status]
-  );
 
   return (
     <div>
@@ -4582,13 +4527,120 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
         </div>
       )}
 
-      {/* ── HISTORY ────────────────────────────────────────────────────────────────────── */}
-      <div style={{ borderTop: "1px solid #E2E8F0", paddingTop: 11 }}>
-        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 8 }}>
-          Meetings with this customer
-        </div>
-        {!mine && <div style={sub}>Loading…</div>}
-        {mine && !mine.length && <div style={sub}>None yet.</div>}
+    </div>
+  );
+}
+
+
+// ─── What is PLANNED with this customer: the meetings ────────────────────────────────────
+// Carolyn 2026-10-26, pointing at a "Meetings with this customer" block sitting above Focus:
+// "Meetings should simply be under FOCUS ... anything that is scheduled, planned such as
+// activity, meeting, Build and Delivery it should be listed under Focus. And we probably
+// should change focus and call it planned." So the record has ONE place for everything that
+// is still ahead of you, and it is called Planned. See CLAUDE.md, "Planned".
+//
+// It lives in its own component, not in the record body, because every action on a meeting is
+// a portal-meetings call with its own gating — and not in MeetingSchedulerPanel any more,
+// because that panel is the BOOKING form and only renders under its own tab, while Planned
+// has to show the meetings whichever tab is open.
+//
+// `rev` is how the booking form says "I just booked one": the panel no longer holds this list,
+// so it bumps a counter the record body owns and this re-reads. `onCount` lets the body know
+// whether to print its own "nothing planned yet" line — only this component knows how many
+// meetings there are, and two components each printing an empty state is how a section ends up
+// saying it is empty underneath a list of things.
+function ContactPlannedMeetings({ contact, viewing = false, rev = 0, onCount = null }) {
+  const [mine, setMine] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const call = useCallback(async (action, body) => {
+    const { data, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
+    if (error || !data || data.error) throw new Error((data && data.error) || (error ? await fnError(error) : "That didn't work."));
+    return data;
+  }, []);
+
+  const contactId = contact && contact.id;
+  const loadMine = useCallback(async () => {
+    if (!contactId) { setMine([]); return; }
+    try {
+      const d = await call("contact_meetings", { contactId });
+      setMine(d.meetings || []);
+    } catch (e) { setMsg({ err: e.message }); setMine([]); }
+  }, [call, contactId]);
+  useEffect(() => { loadMine(); }, [loadMine, rev]);
+  // The count is reported from an effect, never from render: telling a parent to set state
+  // while this one is rendering is the "cannot update a component while rendering another"
+  // warning, and in a list that reloads on every action it would fire constantly.
+  useEffect(() => { if (onCount) onCount(mine ? mine.length : 0); }, [mine, onCount]);
+
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const run = async (fn) => {
+    setBusy(true); setMsg(null);
+    try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
+  };
+
+  const cancel = (m) => run(async () => {
+    if (!window.confirm(`Cancel the ${m.typeName || "meeting"} on ${fmtWhen(m.startsAt, m.timeZone)}?`)) return;
+    await call("cancel", { id: m.id });
+    setMsg({ ok: "Cancelled." });
+    await loadMine();
+  });
+
+  const mark = (m, status) => run(async () => {
+    await call("set_status", { id: m.id, status });
+    await loadMine();
+  });
+
+  // "They never got the email." Goes to the address already on the booking and nowhere else —
+  // portal-meetings refuses an address from the request body, because that would be a way to
+  // have the platform mail a stranger under the builder's domain.
+  const resend = (m) => run(async () => {
+    const d = await call("resend", { id: m.id });
+    setMsg({ ok: d.sentTo ? `Sent again to ${d.sentTo}.` : "Sent again." });
+  });
+
+  // VIDEO (migration 333): a fresh Zoom link that could not be made when they booked. Tries
+  // again; when it works the customer is sent the confirmation again with the link in it.
+  const makeLink = (m) => run(async () => {
+    const d = await call("make_link", { id: m.id });
+    setMsg({ ok: d.emailSent ? "Zoom link made and sent to the customer." : "Zoom link made." });
+    await loadMine();
+  });
+
+  const STATUS = {
+    booked: ["#B45309", "Upcoming"],
+    completed: ["#047857", "Completed"],
+    no_show: ["#B91C1C", "No-show"],
+    cancelled: ["#94A3B8", "Cancelled"],
+  };
+  // A booked meeting whose time has GONE is not "Upcoming" (Carolyn 2026-10-25). Nothing
+  // sweeps these rows — `booked` is where a meeting stays until a person marks it done or a
+  // no-show — so a chip read straight off the status told a host that last week's meeting was
+  // still ahead of them, on the very screen they use to spot what needs marking.
+  //
+  // Derived from the CLOCK at render, never stored: a status the server would have to age
+  // would need a sweep nobody runs, and this list already re-renders whenever it is opened.
+  // It keys on endsAt, not startsAt, so a meeting in progress still reads as upcoming; a row
+  // without one (there should be none) falls back to the plain status rather than guessing.
+  const statusOf = (m) => (
+    m.status === "booked" && m.endsAt && new Date(m.endsAt).getTime() < Date.now()
+      ? ["#475569", "Past"]
+      : STATUS[m.status] || ["#94A3B8", m.status]
+  );
+
+  if (!mine || !mine.length) {
+    // Nothing of its own to say: the Planned section prints one empty line for every kind of
+    // planned thing at once, and an error still has to be seen.
+    return msg && msg.err ? <div style={{ ...S.err, marginBottom: 8 }}>{msg.err}</div> : null;
+  }
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      {msg && msg.err && <div style={{ ...S.err, marginBottom: 8 }}>{msg.err}</div>}
+      {msg && msg.ok && (
+        <div style={{ fontSize: 12, color: "#15803D", fontWeight: 700, marginBottom: 8 }}>{msg.ok}</div>
+      )}
         {(mine || []).map((m) => {
           const [colour, label] = statusOf(m);
           return (
@@ -4640,7 +4692,6 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing }) {
             </div>
           );
         })}
-      </div>
     </div>
   );
 }
@@ -4735,6 +4786,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // so a note error can't surface under Focus too. Every new attempt clears it first, so a
   // stale failure never outlives the action that follows it.
   const [opErr, setOpErr] = useState(null); // { where: "note" | "activity" | "focus" | "contact", msg }
+  // PLANNED: the meetings are ContactPlannedMeetings' own state, so this end holds the two
+  // things the section needs from it — a counter the booking form bumps to say "re-read", and
+  // how many it found, which decides whether the empty line prints.
+  const [plannedRev, setPlannedRev] = useState(0);
+  const [plannedMeetings, setPlannedMeetings] = useState(0);
   const [pdf, setPdf] = useState(null);     // { url, title } — the pop-up viewer
   // The person editor's state. ⚠️ IT MUST BE DECLARED HERE, ABOVE the `if (err)` and
   // `if (!data)` early returns below. A useState placed after them is skipped on the first
@@ -6432,7 +6488,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {tab === "scheduler" && tabOn("scheduler") && (
               <div style={{ marginBottom: 12 }}>
                 <MeetingSchedulerPanel clientId={clientId} contact={data.contact}
-                  shortCode={activeCode} viewing={!!viewingLabel} />
+                  shortCode={activeCode} viewing={!!viewingLabel}
+                  onBooked={() => setPlannedRev((n) => n + 1)} />
               </div>
             )}
             {tab === "activity" && tabOn("activity") && canEdit && (
@@ -6532,12 +6589,25 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               </div>
             )}
 
-            <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 6 }}>Focus</div>
+            {/* PLANNED — everything still ahead of you on this customer, in one place.
+                Carolyn 2026-10-26: "anything that is scheduled, planned such as activity,
+                meeting, Build and Delivery it should be listed under Focus. And we probably
+                should change focus and call it planned." It was "Focus", with meetings in a
+                block of their own above it. Builds and deliveries are NOT here yet — they
+                hang off a design rather than a contact. See CLAUDE.md, "Planned". */}
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 6 }}>Planned</div>
             {opErr && opErr.where === "focus" && <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginBottom: 6 }}>{opErr.msg}</div>}
+            {/* Meetings first, then the ticked-off activities: two lists in one section, each
+                in its own time order. One merged ordering would mean this component owning
+                the meetings too, and every action on one is a portal-meetings call. */}
+            <ContactPlannedMeetings contact={data.contact} viewing={!!viewingLabel}
+              rev={plannedRev} onCount={setPlannedMeetings} />
             {(data.focus || []).length === 0 ? (
-              <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>
-                No focus items yet. Scheduled activities and pinned notes appear here.
-              </div>
+              plannedMeetings === 0 ? (
+                <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>
+                  Nothing planned yet. Meetings, scheduled activities and pinned notes appear here.
+                </div>
+              ) : null
             ) : (
               <div style={{ marginBottom: 12 }}>
                 {(data.focus || []).map((f) => (

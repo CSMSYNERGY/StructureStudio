@@ -190,6 +190,36 @@ The ordered account-setup steps a new builder works through, and the operator su
 - **v2 (migration 160):** steps carry `section` (display grouping — a header renders whenever it changes walking the position order; there is no second ordering model) and `image_url` (a screenshot). `image_url` may hold ONLY a URL in the public `setup-screens` bucket — `setup_upload_image` mints the path, and both save actions refuse anything else, because the column lands in an `<img src>` in every tenant's browser. The bucket is public with no storage policies on purpose (the `branding`/`fixtures` shape): operator-authored screenshots of the product's own screens, identical for every tenant. Any new column must be added to BOTH copy sites (`admin-catalog` create_client and `setup_assign_template`) and to the two explicit select lists (`SetupChecklist`'s browser read and `portal-setup` `list`).
 - ⚠️ **KEEP THE CHECKLIST CURRENT (Carolyn 2026-08-28).** Shipping any change to a Settings surface or a tenant-facing setup flow INCLUDES reviewing Projects → Client Setup in the same session: update the affected step's wording and re-capture its screenshot (view-as a demo tenant, never a screen showing real customer data). The template is DATA — update it through the editor or `setup_template_save`, never a migration; migration 160's seed is the historical record of the v2 content, not the live truth. Existing tenants keep their copies by design; refresh an individual client's list by hand only where it matters.
 
+## "Planned" — where scheduled things go on a customer record (Carolyn 2026-10-26)
+
+**Anything SCHEDULED or PLANNED for a customer belongs in the record's Planned section** — a
+scheduled activity, a meeting, a build, a delivery. Not a block of its own somewhere up the
+page. Carolyn's words, pointing at a "Meetings with this customer" block sitting above Focus:
+*"Meetings should simply be under FOCUS ... anything that is scheduled, planned such as
+activity, meeting, Build and Delivery it should be listed under Focus. And we probably should
+change focus and call it planned."*
+
+- **The section is called `Planned`** (it was `Focus` until 2026-10-26). Its empty line reads
+  "Nothing planned yet." The server field is still `focus` and `opErr.where === "focus"` — the
+  rename is what a person reads, not an identifier, for the reason the estimate wording note
+  below gives.
+- **The rule is about PLACE, not about ownership.** Each kind keeps its own component and its
+  own edge function: `ContactPlannedMeetings` reads `portal-meetings`, the activity rows come
+  from `crm_record`'s `focus`. They render one after another under the one heading. A merged
+  time ordering would mean one component owning every kind's data and every kind's actions,
+  which is a bigger change than the heading is worth — say so rather than half-doing it.
+- **A new kind of planned thing is a THREE-part change:** render it under Planned, keep its
+  actions with it, and tell the section how many you found so the "nothing planned yet" line
+  does not print above a list (`onCount`). Anything that books, moves or cancels one from
+  elsewhere on the page bumps `plannedRev` so the list re-reads.
+- ⏳ **Builds and deliveries are NOT there yet.** They hang off a DESIGN, not a contact
+  (`build_jobs.design_short_code`, `delivery_stops`), so the record would have to ask
+  `portal-schedule` for the contact's design codes. `schedule_links` is the natural action and
+  is already gated for either board — but it selects no DATES today (`id,
+  design_short_code, inventory_unit_id, stage_id`), and a planned row with no date is not
+  worth printing. Doing this means extending that action, and deciding what a viewer without
+  `build_schedule:view` sees. It is the stated direction; it has not been built.
+
 ## Scheduling suite (Build Schedule · Delivery Schedule · Repairs)
 
 Shipped 2026-08-04 (all five phases; spec + decisions in `SCHEDULING_SCOPE.md` — read it
