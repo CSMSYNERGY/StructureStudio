@@ -9,8 +9,10 @@
 //
 // The contract portal-settings/doorLooks.ts relies on, and all this implements: sanitizeDoorLook
 // returns the cleaned spec (an object carrying v: 1, a base from the seven, src.leaves 1 or 2 and
-// src.hinge) or null when the input cannot be cleaned (not an object, an unknown base, 3+ leaves).
-// It never throws. The real one also fills every default and clamps every number (plan §3).
+// src.hinge left or right) or null when the input cannot be cleaned (not an object, an unknown base,
+// no src.leaves or src.hinge, 3+ leaves). It never throws. Like the real one (P1, 2026-10-26), it
+// fills NO default: src.leaves and src.hinge are required, and an absent key means today's rule.
+// The real one also whitelists and clamps every key (plan §3).
 
 const BASES = ["plank", "zbrace", "xbrace", "american", "basic", "classic", "dutch"];
 
@@ -18,10 +20,9 @@ export function sanitizeDoorLook(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
   if (typeof r.base !== "string" || !BASES.includes(r.base)) return null;
-  const src = (r.src && typeof r.src === "object" ? r.src : {}) as Record<string, unknown>;
-  const leaves = src.leaves === undefined ? 1 : src.leaves;
-  if (leaves !== 1 && leaves !== 2) return null;
-  const out: Record<string, unknown> = { v: 1, base: r.base, src: { leaves, hinge: src.hinge === "right" ? "right" : "left" } };
+  const src = (r.src && typeof r.src === "object" ? r.src : null) as Record<string, unknown> | null;
+  if (!src || (src.leaves !== 1 && src.leaves !== 2) || (src.hinge !== "left" && src.hinge !== "right")) return null;
+  const out: Record<string, unknown> = { v: 1, base: r.base, src: { leaves: src.leaves, hinge: src.hinge } };
   // The rest as sent, minus the keys a spec never holds (the real cleaner whitelists and clamps it all).
   for (const [k, v] of Object.entries(r)) if (!(k in out) && k !== "measure" && k !== "observed") out[k] = v;
   return out;

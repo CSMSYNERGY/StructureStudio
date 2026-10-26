@@ -126,7 +126,10 @@ Deno.test("save_door_look refuses, in words: names, bases, specs, sizes", async 
     [{ name: "None" }, 400, "door_look_base"],
     [{ name: "Junk", spec: "zbrace" }, 400, "door_look_invalid"],
     [{ name: "Junk", spec: { v: 1, base: "garage" } }, 400, "door_look_invalid"],
-    [{ name: "Three", spec: { v: 1, base: "plank", src: { leaves: 3 } } }, 400, "door_look_invalid"],
+    [{ name: "Three", spec: { v: 1, base: "plank", src: { leaves: 3, hinge: "left" } } }, 400, "door_look_invalid"],
+    // src.leaves and src.hinge are required (plan §3): the cleaner fills no default.
+    [{ name: "No src", spec: { v: 1, base: "plank" } }, 400, "door_look_invalid"],
+    [{ name: "No hinge", spec: { v: 1, base: "plank", src: { leaves: 1 } } }, 400, "door_look_invalid"],
     [{ name: "Bad id", id: "nope", spec: SPEC, version: 1 }, 400, "door_look_id"],
   ];
   for (const [body, status, code] of cases) {
@@ -173,10 +176,10 @@ Deno.test("the late-save guard: stale saves 409 with the current look; a duplica
 });
 
 Deno.test("save_door_look: archived and other builders' looks are refused", async () => {
-  const a = await call(seed(), { action: "save_door_look", id: ARCHIVED, version: 2, name: "Retired", spec: { v: 1, base: "basic" } });
+  const a = await call(seed(), { action: "save_door_look", id: ARCHIVED, version: 2, name: "Retired", spec: { ...SPEC, base: "basic" } });
   assertEquals([a.status, a.body.code], [409, "door_look_archived"]);
   const db = seed();
-  const f = await call(db, { action: "save_door_look", id: FOREIGN, version: 1, name: "Mine now", spec: { v: 1, base: "classic" } });
+  const f = await call(db, { action: "save_door_look", id: FOREIGN, version: 1, name: "Mine now", spec: { ...SPEC, base: "classic" } });
   assertEquals([f.status, f.body.code], [404, "door_look_not_found"]);
   assertEquals(db.writesTo("door_looks").length, 0);
 });
