@@ -1,0 +1,42 @@
+# TEMPORARY: proves the promotion workflow's gate on a real runner. Lives only on the
+# throwaway branch ci/promotion-gate-test and is deleted with it. Never merge this.
+name: TEMP promotion gate test
+
+on:
+  push:
+    branches: [ci/promotion-gate-test]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge-step harness on Linux (the real step, 12 synthetic repos)
+        run: |
+          python3 -c "import yaml" 2>/dev/null || pip install pyyaml
+          PYTHON=python3 bash tests/promotion/merge.sh .github/workflows/merge-beta-to-main.yml
+
+      - name: Report-step harness on Linux (real jq, git/curl stubbed)
+        run: PYTHON=python3 bash tests/promotion/report.sh .github/workflows/merge-beta-to-main.yml
+
+      - name: Same setup as the promotion (Node)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Same setup as the promotion (Deno)
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed
+        with:
+          deno-version: "2.9.2"
+
+      - name: The promotion's preflight commands, lifted from merge-beta-to-main.yml
+        run: |
+          python3 -c "import yaml" 2>/dev/null || pip install pyyaml
+          python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/merge-beta-to-main.yml')); open('/tmp/pf.sh','w').write([x for x in d['jobs']['gate']['steps'] if x.get('id')=='preflight'][0]['run'])"
+          bash /tmp/pf.sh
