@@ -848,6 +848,8 @@ const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-un
 //     and free. Ahsan on the 09-28 call: they "turn on the advanced mode to access this tab, so
 //     everybody is not going to see"; Carolyn: "Yep, yep, no, that's good." Whether builders are
 //     offered the switch on production waits on her (it ships with the portal's promotion).
+//     NOT LAUNCHED YET (2026-10-27): see SS_ADVANCED_FOR_BUILDERS just below. Until it is true this
+//     second case is off, so only our own account has Advanced.
 // Strictly `=== true`: a server that predates the field sends nothing, and that is off.
 //
 // Pass the EFFECTIVE tenant's entitlement (the viewed one in view-as). null = not answered yet,
@@ -856,8 +858,18 @@ const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-un
 // This is the TENANT half. WHO on that tenant gets the page is the shell's `advancedMayRun`
 // (12-shell.jsx): whoever may run the account, the same bar setup3d — the page's only way to
 // save — already sets. It is not part of the per-tenant setting, so it stays out of here.
+//
+// THE BUILDER SWITCH IS NOT LAUNCHED (Ahsan 2026-10-27). Carolyn on the 10-26 call: "did you not put
+// advanced only in Structure Studio?", the 09-28 rule ("only available in Structure Studio for us
+// yet"). The switch shipped early (10-05), so any owner with 3D could open a page that post-frame
+// work will be built behind. While this is false, only our own account has Advanced: a builder's
+// advanced_mode reads as off, and the shell offers them no switch (12-shell.jsx advancedSwitch).
+// Launching is this one line; the server half (save_advanced_mode, portal-billing's advancedMode)
+// never stopped working, so a builder who switched it on before is back on the day it flips.
+const SS_ADVANCED_FOR_BUILDERS = false;
 function ssAdvancedOn(entitlement) {
-  return !!(entitlement && (entitlement.reason === "internal" || entitlement.advancedMode === true));
+  return !!(entitlement && (entitlement.reason === "internal"
+    || (SS_ADVANCED_FOR_BUILDERS && entitlement.advancedMode === true)));
 }
 
 // AN OLD /portal ADDRESS HEALS THE MOMENT THE APP LOADS (2026-10-13). On beta and production the
