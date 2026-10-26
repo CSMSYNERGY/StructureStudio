@@ -73,7 +73,7 @@ test("drawnDoorLook resolves an absent key through today's rule, at the row's re
   assert.equal(trim.hinges.count, 3);
   assert.equal(trim.hinges.at[1], 0.42); // on the mid rail
   assert.ok(Math.abs(trim.hinges.at[0] - 0.0240) < 1e-3); // the bottom rail's centre
-  close(trim.hinges.lenIn, 11.52); // 0.11 + 0.85 ft
+  close(trim.hinges.lenIn, (0.11 + 2.92 * 0.15) * 12); // the plate + 15% of a 2.92 ft leaf (shortened 2026-10-26)
   assert.deepEqual(trim.colors, { infill: "door", frame: "trim", members: "trim" });
   assert.deepEqual(trim.meet, { type: "astragal", wIn: 1.5 });
 

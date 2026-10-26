@@ -48,7 +48,7 @@ export const DOOR_RENDER_RULES = [
   { name: "TRIM_F", needle: "return Math.min(0.29, w * 0.16, h * 0.09);" },
   { name: "TRIM_MID", needle: "mid = h * 0.42;" },
   { name: "TRIM_SILL", needle: "SS_TRIM_DOOR_SILL_FT = 0.2," },
-  { name: "TRIM_STRAP", needle: "const sLen = Math.min(w * 0.3, 0.85);" },
+  { name: "TRIM_STRAP", needle: "const sLen = Math.min(w * 0.15, 0.5);" },
   { name: "TRIM_HINGES", needle: "(h >= 5 ? [y0 + F / 2, midY, hTop] : [y0 + F / 2, hTop])" },
   { name: "PLANK_F", needle: "const F = Math.min(0.3, w * 0.16, h * 0.09);" },
   { name: "PLANK_MID", needle: "const midY = y0 + h * 0.55, midH = Math.min(0.26, h * 0.06);" },
@@ -124,7 +124,7 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
   let lenIn = null;
   if (count !== 0 && type !== "hidden") {
     if (num(h.lenIn) !== null) lenIn = leaf ? Math.min(h.lenIn, leaf.w * FT * STRAP_CAP_W) : h.lenIn;
-    else if (leaf) lenIn = (0.11 + (trim ? Math.min(leaf.w * 0.3, 0.85) : Math.min(leaf.w * 0.5, 1.15))) * FT;
+    else if (leaf) lenIn = (0.11 + (trim ? Math.min(leaf.w * 0.15, 0.5) : Math.min(leaf.w * 0.5, 1.15))) * FT;
   }
   const handle = isRec(spec.handle) ? spec.handle : {};
   const meet = isRec(spec.meet) ? spec.meet : {};
