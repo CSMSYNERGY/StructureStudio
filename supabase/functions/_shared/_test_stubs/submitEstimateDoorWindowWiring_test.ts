@@ -57,8 +57,12 @@ const PAY_START = "ssDoorWindowLines(items, C.fixtures).map((w) => {", PAY_END =
 const LABEL_START = "function getDisplayLabel(", LABEL_END = "// How to name a wall in a sentence";
 // The grid of lites (335): the window's rows x columns, which the payload block resolves per window.
 const LITES_START = "// ── WINDOW LITES (335) ──\n", LITES_END = "// ── END WINDOW LITES ──\n";
+// A door's own look (door looks P2): the window rules measure a look's leaf (ssDoorCustomLookOf and the
+// leaf it draws), so they are lifted with the helpers.
+const LOOKS_START = "// ── DOOR LOOKS: A BUILDER'S OWN 3D DOOR", LOOKS_END = "// ── END DOOR LOOKS ──\n";
 const regions = (src: string, file: string) => ({
   lites: lift(src, file, LITES_START, LITES_END),
+  looks: lift(src, file, LOOKS_START, LOOKS_END),
   help: lift(src, file, HELP_START, HELP_END),
   pay: lift(src, file, PAY_START, PAY_END),
   label: lift(src, file, LABEL_START, LABEL_END),
@@ -68,8 +72,9 @@ Deno.test("the lifted door-window helpers and payload block are byte-identical i
   assertEquals(R_JSX.help, R_CMP.help);
   assertEquals(R_JSX.pay, R_CMP.pay);
   assertEquals(R_JSX.lites, R_CMP.lites);
+  assertEquals(R_JSX.looks, R_CMP.looks);
 });
-const W = new Function(`${R_CMP.lites}\n${R_CMP.help}\n${R_CMP.label}\n; return {
+const W = new Function(`${R_CMP.lites}\n${R_CMP.looks}\n${R_CMP.help}\n${R_CMP.label}\n; return {
   ssDoorWindowCount, ssDoorWindowFit, ssDoorLeafFt, ssDoorWindowLines, doorWindowStamps, ssItemPlacesKey, ssRemoveFromRow,
   ssDoorWindowLookOk, ssDoorPhotoOf, ssLites, ssLitesWords, ssItemLites,
   payload: (items, C, frontWall) => ${R_CMP.pay}\n          }),
