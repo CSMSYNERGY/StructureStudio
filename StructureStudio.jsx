@@ -12668,16 +12668,22 @@ function buildShed3DModel(THREE, p) {
   //     nothing of them stands in the ghosted wall.
   //   - They wear the door colour darkened 35% (ssShadeHex): any line of them that shows reads as a
   //     shadow. A built look with no colour of its own wears the live body paint (setLiveColors), and so
-  //     do its liners, shaded the same.
+  //     do its liners, shaded the same. The astragal wears the stiles' colour 20% darker (doorAstragal
+  //     says why), and on a built look with no trim of its own follows the live trim the same way.
   // ⚠️ NO BACKER BEHIND THE LEAVES, on purpose: a full slab behind them would turn every door's inside
   // face into a darker slab that shows through the ghosted walls in "look inside", would do nothing for
   // a partition door (seen from both sides), and would stand inside the room box behind a door's glass.
-  const SS_DOOR_GAP_SHADE = 0.65;
-  const doorGapMat = (leafMat) => {
-    const gm = mat(ssShadeHex("#" + leafMat.color.getHexString(), SS_DOOR_GAP_SHADE));
-    if (leafMat.userData && leafMat.userData.ssBodyPaint) { gm.userData.ssBodyPaint = true; gm.userData.ssShade = SS_DOOR_GAP_SHADE; }
+  const SS_DOOR_GAP_SHADE = 0.65, SS_DOOR_ASTRAGAL_SHADE = 0.8;
+  // A shaded copy of a door's material. A copy of a LIVE paint keeps following it: of the body paint a
+  // colourless built look wears (ssBodyPaint), or of the building's trim, trimMat itself (ssTrimPaint);
+  // setLiveColors repaints both and shades them again by their ssShade.
+  const doorShadeMat = (src, k) => {
+    const gm = mat(ssShadeHex("#" + src.color.getHexString(), k));
+    const live = src.userData && src.userData.ssBodyPaint ? "ssBodyPaint" : src === trimMat ? "ssTrimPaint" : null;
+    if (live) { gm.userData[live] = true; gm.userData.ssShade = k; }
     return gm;
   };
+  const doorGapMat = (leafMat) => doorShadeMat(leafMat, SS_DOOR_GAP_SHADE);
   const gapPut = (og, m, kind) => { m.userData.ssDoorGap = kind; og.add(m); return m; };
   // The two jamb liners and the head liner. a0..a1 the opening (its jambs), l0..l1 the leaves' outer
   // edges, yb..yt the leaves' own height, y1 the opening's head.
@@ -12694,9 +12700,14 @@ function buildShed3DModel(THREE, p) {
   // line `m` so it laps 0.39 in onto each leaf, the leaves' full height. It stands proud of the leaf's
   // face (`face`: 0.16 on a framed leaf, 0.08 on a bare slab) and stops behind the casing face (0.18 at
   // the least), as the hinges do, so nothing but a latch lever stands past the casing.
+  // It wears `am` (the stiles' material, or the slab's) 20% darker. In `am` itself it vanished: every
+  // front face here shares one normal and an opening takes no shadow, so a strip in the stiles' own colour
+  // drew no edge, and a one-colour double read as ONE door (a plain slab double as one wide slab) where
+  // the old gap had drawn the seam. Darker, it is the seam, as a real astragal's shadow lines are;
+  // tests/harness/doorLooks.mjs N6 holds every double to it, from both faces.
   const doorAstragal = (og, wf, am, m, yb, yt, face) => {
     const hw = 1.5 / 24, o1 = Math.min(face + 0.04, 0.175);
-    gapPut(og, wallBox(am, wf, m - hw, m + hw, yb, yt, (face + o1) / 2, o1 - face), "astragal");
+    gapPut(og, wallBox(doorShadeMat(am, SS_DOOR_ASTRAGAL_SHADE), wf, m - hw, m + hw, yb, yt, (face + o1) / 2, o1 - face), "astragal");
   };
   // The SILL across the bottom gap of a plank, slab or roll-up door, in the built looks' threshold
   // aluminium; the leaves keep their height. 0.155 deep, between the liners' 0.15 and the slab's 0.16,
@@ -18904,13 +18915,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         if (e.model.battenMat) e.model.battenMat.color.set(liveTrimCss);
         // The four built doors' panels with no colour of their own ARE the siding (migration 289):
         // they take the body swatch with the walls. Their frames are trimMat itself, set above. The liners
-        // in the gaps round them (doorGapLiners) take it too, darkened by their ssShade.
+        // in the gaps round them (doorGapLiners) take it too, darkened by their ssShade, and a double's
+        // astragal (doorAstragal) takes the trim swatch (ssTrimPaint), darkened by its own.
         if (e.model.openingsGroup) {
           e.model.openingsGroup.traverse((o) => {
-            if (!(o.isMesh && o.material && o.material.userData && o.material.userData.ssBodyPaint)) return;
-            o.material.color.set(liveBodyCss);
-            const sh = o.material.userData.ssShade;
-            if (sh) o.material.color.set(ssShadeHex("#" + o.material.color.getHexString(), sh));
+            const ud = o.isMesh && o.material && o.material.userData;
+            if (!ud || !(ud.ssBodyPaint || ud.ssTrimPaint)) return;
+            o.material.color.set(ud.ssBodyPaint ? liveBodyCss : liveTrimCss);
+            if (ud.ssShade) o.material.color.set(ssShadeHex("#" + o.material.color.getHexString(), ud.ssShade));
           });
         }
         // Corner boards and fascia (colors.corner / colors.fascia) follow whichever colour their key

@@ -58,9 +58,10 @@
 //      Get Estimate sends each window's grid.
 //   LTP. The window picker's Grid row (Default, No grid, rows and lites across) and the door picker's grid
 //      for its window, stamped on what they place.
-//   N. NO SEE-THROUGH GAP (door looks P0, 2026-10-26): rays fired through every look's opening, single and
-//      double, with and without the windows it may take, and through partition doors from both rooms,
-//      must all hit the door; the gap closures are where they belong (runNoGap says how).
+//   N. NO SEE-THROUGH GAP (door looks P0, 2026-10-26): every line through every look's opening, single and
+//      double, with and without the windows it may take, and through partition doors, square on and at an
+//      angle, must hit the door; the gap closures are where they belong, and a double still reads as two
+//      leaves from both faces (runNoGap says how).
 //
 // SS_DOOR_BASELINE=1 prints only the digests (the board-and-batten door's and the eight built looks') and
 // exits, which is how PLANK_DIGEST and LOOK_DIGESTS were recorded. SS_N_ONLY=1 runs block N alone.
@@ -89,9 +90,11 @@ const PLANK_DIGEST = "85b889b64a586a52";
 // 3652c085) they were american 6f4a374622283d6c, basic ca65bed23fa428a6, classic 91d742578fa121cc, dutch
 // ac4004ecd9abc4dd, american2 70bf65524b1e1d00, basic2 01179bbaea2b1e7a, classic2 06884f6927ce38f5, dutch2
 // d4e089568669d394: P0 added three liners to each single, and the liners, a meet strip and an astragal to
-// each double, and moved nothing else (block N5).
+// each double, and moved nothing else (block N5). The doubles' were re-recorded the same day when the
+// astragal took its 20% shade (N6; first recorded as american2 17d189e753ff48de, basic2 0f1f286f4667f0e6,
+// classic2 f0cfa2da33b010a9, dutch2 d43e7d4e1c199e90): its colour was their only change.
 const LOOK_DIGESTS = { american: "38c4e8a34026d61f", basic: "b61d57faac181307", classic: "0e88e8c24aa32f7e", dutch: "81d4d5aa3f6b391d",
-  american2: "17d189e753ff48de", basic2: "0f1f286f4667f0e6", classic2: "f0cfa2da33b010a9", dutch2: "d43e7d4e1c199e90" };
+  american2: "22b3c82b97bdca37", basic2: "36ddca7817c7fe9a", classic2: "f196fbbe3e32d426", dutch2: "3dcd83cf7ace4cbd" };
 
 const { ok, failed } = reporter();
 const shots = shotsDir("door-looks");
@@ -1014,34 +1017,45 @@ async function runLitesPickers(browser, rect) {
 // daylight round every door. The renderer now fills the gaps themselves (doorGapLiners, doorMeetStrip,
 // doorAstragal, doorSill; tagged userData.ssDoorGap). Proved here by firing rays, on two saved designs
 // of their own (singles, doubles) on a 30 x 80 building:
-//   N1. through each opening, a 40 x 60 grid of rays, from both faces, square on and turned ±35° and ±60°
-//       about the vertical (the way a customer orbits), each a segment 3 ft either side of the wall line:
-//       every one must cross a mesh of the door (leaf, hardware, casing, liner, strip, sill or glass).
-//       The pass mark is ZERO misses. The photo layer does not count, because its cut-out areas are
-//       clear; the room box behind a door's glass never does (it does not raycast). A uniform grid would
-//       step over a 0.05 ft gap, so the column and the row nearest each seam the renderer cuts (both
-//       jambs, the meeting line, the head and the floor) are moved onto it.
+//   N1. every level line through each opening, square on and turned ±35° and ±60° about the vertical (the
+//       way a customer orbits), must cross a mesh of the door (leaf, hardware, casing, liner, strip, sill
+//       or glass). Tested EXACTLY, not on a grid: N_PAGE cuts the opening at the edges of every part's
+//       shadow at that angle and fires one ray through the middle of each cell between the cuts, which
+//       answers for every line through the cell (N_PAGE says why). A line is the same line from either
+//       face, and every part counted is a closed box, so one pass is both faces, and both rooms of a
+//       partition. The pass mark is ZERO open cells. The photo layer does not count, because its cut-out
+//       areas are clear; nor does the room box behind a door's glass (it does not raycast), nor a part that
+//       is not a box square to the wall (it could only add cover).
 //   N2. the closures each door gets: three liners (both jambs, the head); a sill under a plank, slab or
 //       roll-up door (a built look stands on its threshold); on a hinged double a meet strip and an
-//       astragal (a photo double has no astragal: it would lie on the photo).
+//       astragal (a photo double has no astragal: it would lie on the photo). And each spans the WHOLE of
+//       its gap, through the wall line (nSpans), so N1 failing names the gap left open.
 //   N3. the liners, the strip and the sill lie inside the slab's own depth (±0.08 about its centre); the
-//       astragal stands between the leaf's face and 0.175, behind the casing face; and they wear the
-//       door colour darkened 35% (the sill the threshold's #B8BCC2).
+//       astragal stands between the leaf's face and 0.175, behind the casing face; the liners and strip
+//       wear the door colour darkened 35% (the sill the threshold's #B8BCC2), the astragal its stiles'
+//       colour darkened 20%.
 //   N4. nothing of them reaches past the opening and its casing: nothing new stands in a wall, so nothing
 //       new shows through the ghosted walls of "look inside"; and none of it is inside the room box behind
 //       a door's glass.
 //   N5. they are only ADDED: every door less its closures (userData.ssDoorGap) digests exactly as the same
 //       door did on origin/beta 3652c085 before P0 (N_PRE_P0, recorded by this block against that build),
 //       so no leaf, window in a door, transom, lite, photo layer or partition seat moved.
+//   N6. a double reads as TWO leaves: in the picture from the front (side a of a partition) the astragal
+//       down the meeting line is a seam, a shade off the stiles either side of it, and from inside (side
+//       b) the meet strip between the leaves' backs is. The astragal first shipped in the stiles' own
+//       colour, and the centre of every one-colour double drew as one even surface: a plain slab double
+//       read as one wide slab.
+//   N7. live paint: a colourless built double's astragal follows a trim swatch and its liners and strip a
+//       body swatch, each shaded as drawn; a double of its own colours keeps its closures' colours.
 // The doors: all 9 looks (the 8 door_style looks and the plain slab), single and double, each with no
 // window, then with only the windows the rules allow: a panel window in the 4 built looks, a transom in
 // the built looks, the 3 board-and-batten looks and the plain slab (none in a roll-up); a slide-up slab;
 // a photo door and a PNG cut-out (no window: a door shown by its photo takes none). And in partition
 // walls, all 9 looks single and double (a partition's 'auto' door is the plank one), fired at from both
 // rooms. Their mesh digests are printed, and recorded below for the later phases.
-// SS_N_ONLY=1 runs this block alone (and against an older build, for the "before": its N2-N4 fail there,
-// by design, and N1 counts the misses). SS_N_SHOTS=<dir> also saves the before/after pictures, named
-// with SS_SHOT_TAG ("before" / "after").
+// SS_N_ONLY=1 runs this block alone (and against an older build, for the "before": its N2-N4 and N6 fail
+// there, by design, and N1 counts the open cells and the daylight square on). SS_N_SHOTS=<dir> also saves
+// the before/after pictures, named with SS_SHOT_TAG ("before" / "after").
 const N_ONLY = !!process.env.SS_N_ONLY;
 const N_SHOTS = process.env.SS_N_SHOTS || "";
 const NW = 30, NL = 80, NSIZE = `${NW}x${NL}`;
@@ -1173,7 +1187,7 @@ async function gapMeshes(page, itemId) {
 // The page side of N: find the door's group (an outside wall's by itemId, a partition's by where it
 // stands), its opening off the casing, then fire the rays. Also every mesh as doorMeshes describes it,
 // for the digest, and the closures' measurements for N2-N4.
-const N_PAGE = ({ sel, cols, rows, yaws, reach }) => {
+const N_PAGE = ({ sel, yaws, reach }) => {
   const E = window.__ss3dEngine;
   E.scene.updateMatrixWorld(true);
   const V = E.camera.position.constructor;
@@ -1202,6 +1216,7 @@ const N_PAGE = ({ sel, cols, rows, yaws, reach }) => {
       const c = wbox(o).c; return Math.hypot(c[0] - sel.part[0], c[2] - sel.part[1]) < sel.hw + 0.4;
     });
   }
+  (window.__nGrps = window.__nGrps || {})[sel.key] = grp;   // N6 pictures it alone
   // The opening, off its casing: the two jambs (tall) and the head.
   const tb = trims.map((o) => ({ o, b: wbox(o) }));
   const jambs = tb.filter((t) => t.b.mx[1] - t.b.mn[1] > 2), head = tb.find((t) => t.b.mx[1] - t.b.mn[1] < 1);
@@ -1226,16 +1241,30 @@ const N_PAGE = ({ sel, cols, rows, yaws, reach }) => {
   const a0 = -dist / 2 + fw / 2, a1 = dist / 2 - fw / 2;
   const y0 = Math.min(jambs[0].b.mn[1], jambs[1].b.mn[1]), y1 = head.b.mn[1];
   const along = (p) => (p[0] - P0.x) * U.x + (p[2] - P0.z) * U.z, across = (p) => (p[0] - P0.x) * N.x + (p[2] - P0.z) * N.z;
-  // The blockers: every visible mesh of the door and its casing, less the photo layer (its cut-out areas
-  // are clear) and the room behind a door's glass.
+  // The blockers: every visible CLOSED BOX of the door and its casing that stands square to the wall, less
+  // the photo layer (its cut-out areas are clear) and the room behind a door's glass. A box turned in the
+  // wall's plane (a brace) or a mesh of another shape (nonBox) is left out: it could only add cover, so
+  // leaving it out can fail a door, never pass one, and it keeps N1's cells exact.
   const visible = (o) => { for (let n = o; n; n = n.parent) if (n.visible === false) return false; return true; };
   const isPhoto = (o) => { const m = Array.isArray(o.material) ? o.material[0] : o.material; return !!(m && m.isMeshBasicMaterial && m.map && m.alphaTest > 0); };
   const pool = [...new Set([...meshesOf(grp), ...trims])];
   const nonBox = [...new Set(pool.filter((o) => o.geometry.type !== "BoxGeometry").map((o) => o.geometry.type))];
-  const blockers = pool.filter((o) => visible(o) && !(o.userData && o.userData.ssGlassRoom) && !isPhoto(o)).map((o) => {
+  const unit = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return v.map((c) => c / l); };
+  const wallAxes = [[U.x, 0, U.z], [0, 1, 0], [N.x, 0, N.z]];
+  const square = (o) => {
+    const e = o.matrixWorld.elements;
+    return [[e[0], e[1], e[2]], [e[4], e[5], e[6]], [e[8], e[9], e[10]]].map(unit)
+      .every((ax) => wallAxes.some((w) => Math.abs(Math.abs(ax[0] * w[0] + ax[1] * w[1] + ax[2] * w[2]) - 1) < 1e-6));
+  };
+  const blockers = pool.filter((o) => visible(o) && !(o.userData && o.userData.ssGlassRoom) && !isPhoto(o) && o.geometry.type === "BoxGeometry" && square(o)).map((o) => {
     if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
-    const b = o.geometry.boundingBox, inv = o.matrixWorld.clone().invert().elements;
-    return { e: inv, mn: [b.min.x, b.min.y, b.min.z], mx: [b.max.x, b.max.y, b.max.z], vol: (b.max.x - b.min.x) * (b.max.y - b.min.y) * (b.max.z - b.min.z) };
+    const b = o.geometry.boundingBox, inv = o.matrixWorld.clone().invert().elements, as = [], ys = [], ns = [];
+    for (let k = 0; k < 8; k++) {
+      const v = new V(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(o.matrixWorld), p = [v.x, v.y, v.z];
+      as.push(along(p)); ys.push(v.y); ns.push(across(p));
+    }
+    return { e: inv, mn: [b.min.x, b.min.y, b.min.z], mx: [b.max.x, b.max.y, b.max.z], vol: (b.max.x - b.min.x) * (b.max.y - b.min.y) * (b.max.z - b.min.z),
+      a: [Math.min(...as), Math.max(...as)], y: [Math.min(...ys), Math.max(...ys)], n: [Math.min(...ns), Math.max(...ns)] };
   }).sort((p, q) => q.vol - p.vol);
   const tf = (e, x, y, z) => [e[0] * x + e[4] * y + e[8] * z + e[12], e[1] * x + e[5] * y + e[9] * z + e[13], e[2] * x + e[6] * y + e[10] * z + e[14]];
   const segHits = (p, q) => {
@@ -1254,23 +1283,40 @@ const N_PAGE = ({ sel, cols, rows, yaws, reach }) => {
     }
     return false;
   };
-  // The grid, with the column and row nearest each seam moved onto it.
-  const snap = (vals, seams) => { const v = vals.slice(), used = new Set(); seams.forEach((s) => { let bi = -1; v.forEach((x, i) => { if (!used.has(i) && (bi < 0 || Math.abs(x - s) < Math.abs(v[bi] - s))) bi = i; }); used.add(bi); v[bi] = s; }); return v; };
-  const As = snap(Array.from({ length: cols }, (_, i) => a0 + ((i + 0.5) * (a1 - a0)) / cols), [a0 + 0.025, (a0 + a1) / 2, a1 - 0.025]);
-  const Ys = snap(Array.from({ length: rows }, (_, j) => y0 + ((j + 0.5) * (y1 - y0)) / rows), [y0 + 0.025, y1 - 0.025]);
+  // N1, EXACTLY, at each yaw (0 is square on; the others are turned about the vertical, the way a customer
+  // orbits). A level line at yaw th that crosses the wall line `a` along runs through a blocker exactly
+  // when `a` lies in [a_lo + min(n tan th), a_hi + max(n tan th)] (n over the box's depth, across the wall)
+  // and its height in the box's: the box's SHADOW on the wall line at that yaw, itself a rectangle. Cut the
+  // opening at every shadow's edges and each cell between the cuts lies wholly inside some shadow or wholly
+  // outside all of them, so ONE ray through each cell's middle answers for every line through that cell:
+  // no grid to step over a gap however thin, and no part of a gap a closure leaves open goes untested.
+  // Each ray is also held to the shadow it should be in (`incons` must stay 0), which checks this sum.
+  // Every other line through the wall runs into the wall, so these are all the lines there are; a line is
+  // the same line whichever face it is fired from, and a closed box hides what is behind it from either
+  // side, so one pass per yaw is both faces (and both rooms of a partition) at once. (This replaced a
+  // 40 x 60 grid fired from both faces: each of its lines was fired twice, and it sampled each gap at one
+  // column or row, so a closure that left part of a gap open still passed.)
   const region = (a, y) => (a - a0 < 0.06 || a1 - a < 0.06 ? "jamb" : y1 - y < 0.06 ? "head" : y - y0 < 0.06 ? "floor" : Math.abs(a - (a0 + a1) / 2) < 0.04 ? "centre" : "field");
-  let total = 0, misses = 0;
+  const cuts = (vals, lo, hi) => [...new Set([lo, hi, ...vals.filter((x) => x > lo && x < hi)].map((x) => Math.round(x * 1e6) / 1e6))].sort((p, q) => p - q);
+  let total = 0, misses = 0, open0 = 0, incons = 0;
   const byRegion = {}, byView = {}, sample = [];
-  for (const a of As) for (const y of Ys) {
-    const P = [P0.x + U.x * a, y, P0.z + U.z * a];
-    for (const s of [1, -1]) for (const deg of yaws) {
-      const th = (deg * Math.PI) / 180, dx = -s * N.x * Math.cos(th) + U.x * Math.sin(th), dz = -s * N.z * Math.cos(th) + U.z * Math.sin(th);
+  for (const deg of yaws) {
+    const th = (deg * Math.PI) / 180, tn = Math.tan(th), dx = -N.x * Math.cos(th) + U.x * Math.sin(th), dz = -N.z * Math.cos(th) + U.z * Math.sin(th);
+    const shadows = blockers.map((k) => ({ a: [k.a[0] + Math.min(k.n[0] * tn, k.n[1] * tn), k.a[1] + Math.max(k.n[0] * tn, k.n[1] * tn)], y: k.y }));
+    const As = cuts(shadows.flatMap((s) => s.a), a0, a1), Ys = cuts(shadows.flatMap((s) => s.y), y0, y1);
+    for (let i = 0; i + 1 < As.length; i++) for (let j = 0; j + 1 < Ys.length; j++) {
+      const da = As[i + 1] - As[i], dy = Ys[j + 1] - Ys[j];
+      if (da < 1e-6 || dy < 1e-6) continue;
+      const a = (As[i] + As[i + 1]) / 2, y = (Ys[j] + Ys[j + 1]) / 2, P = [P0.x + U.x * a, y, P0.z + U.z * a];
       total++;
-      if (segHits([P[0] - dx * reach, y, P[2] - dz * reach], [P[0] + dx * reach, y, P[2] + dz * reach])) continue;
+      const hit = segHits([P[0] - dx * reach, y, P[2] - dz * reach], [P[0] + dx * reach, y, P[2] + dz * reach]);
+      if (hit !== shadows.some((s) => a >= s.a[0] && a <= s.a[1] && y >= s.y[0] && y <= s.y[1])) incons++;
+      if (hit) continue;
       misses++;
-      const r = region(a, y), v = `${s > 0 ? "out" : "in"}${deg}`;
+      if (deg === 0) open0 += da * dy;
+      const r = region(a, y), v = `${deg}deg`;
       byRegion[r] = (byRegion[r] || 0) + 1; byView[v] = (byView[v] || 0) + 1;
-      if (sample.length < 4) sample.push(`${r}@a${a.toFixed(3)},y${(y - y0).toFixed(3)},${v}`);
+      if (sample.length < 4) sample.push(`${r}@a${(As[i] - a0).toFixed(3)}..${(As[i + 1] - a0).toFixed(3)},y${(Ys[j] - y0).toFixed(3)}..${(Ys[j + 1] - y0).toFixed(3)},${v}`);
     }
   }
   // The closures, measured: across the wall from the leaf slab's own centre, and along / up against the
@@ -1286,6 +1332,10 @@ const N_PAGE = ({ sel, cols, rows, yaws, reach }) => {
   });
   // The leaf's own colour: the slab's.
   const slabColor = leafSlab ? "#" + leafSlab.material.color.getHexString() : null;
+  // The stiles' colour, which the astragal wears darkened: a built look's frame (ssDoorPart "frame"); every
+  // other door here frames itself in its own colour (no trim colour of its own), the slab's.
+  const framePart = meshesOf(grp).find((o) => o.userData && o.userData.ssDoorPart === "frame");
+  const frameColor = framePart ? "#" + framePart.material.color.getHexString() : slabColor;
   // Every mesh as doorMeshes() describes it (its digest).
   const r4 = (v) => Math.round(v * 10000) / 10000;
   const wallMap = E.model.wallMat && E.model.wallMat.map ? E.model.wallMat.map.uuid : null;
@@ -1299,7 +1349,7 @@ const N_PAGE = ({ sel, cols, rows, yaws, reach }) => {
       part: (o.userData && o.userData.ssDoorPart) || null, wallMap: !!(m && m.map && m.map.uuid === wallMap),
       gap: !!(o.userData && o.userData.ssDoorGap) };
   });
-  return { total, misses, byRegion, byView, sample, nonBox, gaps, slabColor, rooms: rooms.length, meshes,
+  return { total, misses, open0, incons, byRegion, byView, sample, nonBox, gaps, slabColor, frameColor, rooms: rooms.length, meshes,
     frame: { P0: [P0.x, P0.y, P0.z], U: [U.x, U.z], N: [N.x, N.z], a0, a1, y0, y1, fw } };
 };
 // What N2 expects of a door: three liners always; a sill unless it is a built look; a meet strip on a
@@ -1361,6 +1411,51 @@ const nCam = (fr, { out, side = 0, up = 0, ta = 0, tu = null }) => {
 };
 // Far enough that the opening's height, padded, fills the camera's own vertical field of view.
 const nDist = (fr, fov) => ((fr.y1 - fr.y0) * 1.3) / 2 / Math.tan((fov * Math.PI) / 360);
+// A door, as a check names it.
+const nWhat = (d) => `${d.part ? "partition " : ""}${d.look}${d.dbl ? " double" : " single"}${d.dw && d.dw.doorWindowId ? (d.dw.doorWindowAt === "top" ? " with a transom" : " with a panel window") : ""}${d.key === "slideup" ? " (slide-up)" : ""}${d.kind === "photo" ? ` (${d.key.startsWith("cut") ? "PNG cut-out" : "photo"})` : ""}`;
+// N2's spans: the whole of each gap a closure fills, through the wall line. The leaves stand 0.05 ft in
+// from each jamb and under the head, 0.05 ft off the floor (a built look's on its 0.2 ft threshold, where
+// it needs no sill), and a double's 0.03 ft each side of the centre.
+function nSpans(d, fr) {
+  const c = (fr.a0 + fr.a1) / 2, yb = fr.y0 + (d.kind === "trim" ? 0.2 : 0.05), yt = fr.y1 - 0.05;
+  const s = [["liner", fr.a0, fr.a0 + 0.05, yb, yt, "one jamb"], ["liner", fr.a1 - 0.05, fr.a1, yb, yt, "the other jamb"], ["liner", fr.a0, fr.a1, yt, fr.y1, "the head"]];
+  if (d.kind !== "trim") s.push(["sill", fr.a0, fr.a1, fr.y0, fr.y0 + 0.05, "the floor"]);
+  if (d.dbl && d.kind !== "rollup") s.push(["meet", c - 0.03, c + 0.03, yb, yt, "the centre"]);
+  return s;
+}
+const nCovers = (g, [kind, a0, a1, y0, y1]) => g.kind === kind && g.a[0] <= a0 + 1e-4 && g.a[1] >= a1 - 1e-4 && g.y[0] <= y0 + 1e-4 && g.y[1] >= y1 - 1e-4 && g.n[0] < 0 && g.n[1] > 0;
+// N6's reading of a picture: the camera put where nShot puts it, only the door's own group drawn (on a
+// layer of its own, with the lights, so no wall or partition between the camera and the door can stand in
+// for it), and the luminance at each point given, a 3 x 3 average of the canvas there.
+const N_SEAM = ({ key, target, cam, pts }) => {
+  const E = window.__ss3dEngine, grp = (window.__nGrps || {})[key];
+  if (!grp) return null;
+  const LAYER = 7, mask = E.camera.layers.mask, lit = [];
+  E.scene.traverse((o) => { if (o.isLight) { o.layers.enable(LAYER); lit.push(o); } });
+  grp.traverse((o) => o.layers.enable(LAYER));
+  E.controls.minDistance = 0.2;
+  E.camera.position.set(...cam); E.controls.target.set(...target); E.camera.lookAt(...target);
+  E.camera.updateProjectionMatrix(); if (E.controls.update) E.controls.update();
+  E.camera.layers.set(LAYER);
+  E.scene.updateMatrixWorld(true);
+  E.render();
+  const gl = E.renderer.getContext(), W = gl.drawingBufferWidth, H = gl.drawingBufferHeight, V = E.camera.position.constructor, px = new Uint8Array(36);
+  const out = pts.map((p) => {
+    const v = new V(...p).project(E.camera), x = Math.round(((v.x + 1) / 2) * W), y = Math.round(((v.y + 1) / 2) * H);
+    gl.readPixels(x - 1, y - 1, 3, 3, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let L = 0;
+    for (let k = 0; k < 9; k++) L += 0.2126 * px[4 * k] + 0.7152 * px[4 * k + 1] + 0.0722 * px[4 * k + 2];
+    return L / 9;
+  });
+  E.camera.layers.mask = mask;
+  grp.traverse((o) => o.layers.disable(LAYER));
+  lit.forEach((o) => o.layers.disable(LAYER));
+  E.render();
+  return out;
+};
+// N6's pass mark: the seam at least this much darker or lighter (luminance, 0-255) than the leaves either
+// side of it. The astragal in the stiles' own colour read 0 here (every pixel the same).
+const N_SEAM_MIN = 8;
 async function runNoGap(browser) {
   const tag = SHOT_TAG || "now";
   // The building's plan rectangle for this size, as the 3D reads the items.
@@ -1374,7 +1469,7 @@ async function runNoGap(browser) {
   await settle(rpage, 500);
   const rect = await buildingRect(rpage);
   await rctx.close();
-  const allMisses = {};
+  const allMisses = {}, allOpen = {};
   const digests = {}, shells = {};
   for (const dbl of [false, true]) {
     const doors = nDoors(dbl), pdoors = nPartitionDoors(dbl);
@@ -1383,25 +1478,30 @@ async function runNoGap(browser) {
     const frames = {};
     for (const d of [...doors, ...pdoors]) {
       const hw = nFx(d.fx).widthIn / 24;
-      const r = await page.evaluate(N_PAGE, { sel: d.part ? { part: d.partAt, hw } : { itemId: d.itemId }, cols: 40, rows: 60, yaws: [0, 35, -35, 60, -60], reach: 3 });
-      const what = `${d.part ? "partition " : ""}${d.look}${d.dbl ? " double" : " single"}${d.dw && d.dw.doorWindowId ? (d.dw.doorWindowAt === "top" ? " with a transom" : " with a panel window") : ""}${d.key === "slideup" ? " (slide-up)" : ""}${d.kind === "photo" ? ` (${d.key.startsWith("cut") ? "PNG cut-out" : "photo"})` : ""}`;
+      const r = await page.evaluate(N_PAGE, { sel: d.part ? { key: d.key, part: d.partAt, hw } : { key: d.key, itemId: d.itemId }, yaws: [0, 35, -35, 60, -60], reach: 3 });
+      const what = nWhat(d);
       if (r.error) { ok(`N ${d.key}: found in 3D`, false, r.error); continue; }
       frames[d.key] = r.frame;
       allMisses[d.key] = r.misses;
-      ok(`N1 ${what}: no ray through the opening misses the door (${r.total} rays)`, r.misses === 0,
-        r.misses ? `${r.misses} misses ${JSON.stringify(r.byRegion)} ${JSON.stringify(r.byView)} e.g. ${r.sample.join(" ")}` : "");
-      if (r.nonBox.length) console.log(`  note: ${d.key} has non-box meshes ${r.nonBox.join(",")}`);
+      allOpen[d.key] = r.open0;
+      ok(`N1 ${what}: every line through the opening, square on and at ±35° and ±60°, meets the door (${r.total} cells)`, r.misses === 0 && r.incons === 0,
+        (r.misses ? `${r.misses} open cells, ${(r.open0 * 144).toFixed(2)} sq in of them square on, ${JSON.stringify(r.byRegion)} ${JSON.stringify(r.byView)} e.g. ${r.sample.join(" ")}` : "")
+          + (r.incons ? ` ${r.incons} rays disagree with their shadows` : ""));
+      if (r.nonBox.length) console.log(`  note: ${d.key} has non-box meshes ${r.nonBox.join(",")} (not counted as cover)`);
       const got = r.gaps.reduce((o, g) => { o[g.kind] = (o[g.kind] || 0) + 1; return o; }, {});
       ok(`N2 ${what}: its gap closures`, sameCounts(got, nExpected(d)), `${JSON.stringify(got)} vs ${JSON.stringify(nExpected(d))}`);
+      const unfilled = nSpans(d, r.frame).filter((s) => !r.gaps.some((g) => nCovers(g, s)));
+      ok(`N2 ${what}: each closure spans the whole of its gap, through the wall line`, r.gaps.length > 0 && unfilled.length === 0, unfilled.map((s) => s[5]).join(", "));
       const fillers = r.gaps.filter((g) => g.kind !== "astragal"), astr = r.gaps.filter((g) => g.kind === "astragal");
       const face = d.kind === "slab" ? 0.08 : 0.16;
       ok(`N3 ${what}: liners, strip and sill inside the slab's depth; the astragal between the leaf face and 0.175`,
         r.gaps.length > 0 && fillers.every((g) => g.n[0] >= -0.08 - 1e-4 && g.n[1] <= 0.08 + 1e-4)
           && astr.every((g) => near(g.n[0], face, 1e-3) && g.n[1] <= 0.175 + 1e-4 && near(g.a[1] - g.a[0], 0.125, 1e-3) && near((g.a[0] + g.a[1]) / 2, (r.frame.a0 + r.frame.a1) / 2, 1e-3)),
         r.gaps.map((g) => `${g.kind} ${g.n[0].toFixed(3)}..${g.n[1].toFixed(3)}`).join(", "));
-      const wantLiner = r.slabColor ? shadeHex(r.slabColor, 0.65) : "?";
-      ok(`N3 ${what}: the liners and strip wear the door colour darkened 35% (${wantLiner}), the sill #b8bcc2`,
-        r.gaps.length > 0 && r.gaps.filter((g) => g.kind === "liner" || g.kind === "meet").every((g) => g.color === wantLiner) && r.gaps.filter((g) => g.kind === "sill").every((g) => g.color === "#b8bcc2"),
+      const wantLiner = r.slabColor ? shadeHex(r.slabColor, 0.65) : "?", wantAstr = r.frameColor ? shadeHex(r.frameColor, 0.8) : "?";
+      ok(`N3 ${what}: the liners and strip wear the door colour darkened 35% (${wantLiner}), the sill #b8bcc2${astr.length ? `, the astragal its stiles' colour darkened 20% (${wantAstr})` : ""}`,
+        r.gaps.length > 0 && r.gaps.filter((g) => g.kind === "liner" || g.kind === "meet").every((g) => g.color === wantLiner) && r.gaps.filter((g) => g.kind === "sill").every((g) => g.color === "#b8bcc2")
+          && astr.every((g) => g.color === wantAstr),
         [...new Set(r.gaps.map((g) => `${g.kind}:${g.color}`))].join(","));
       const fr = r.frame;
       ok(`N4 ${what}: nothing of them reaches past the opening and its casing (nothing in a ghosted wall)${r.rooms ? ", and none is in the room behind the glass" : ""}`,
@@ -1414,12 +1514,31 @@ async function runNoGap(browser) {
       if (N_PRE_P0[d.key]) ok(`N5 ${what}: less its gap closures, byte-identical to origin/beta (nothing of the door moved)`, shells[d.key] === N_PRE_P0[d.key], `${shells[d.key]} vs ${N_PRE_P0[d.key]}`);
       else ok(`N5 ${what}: has a pre-P0 digest recorded`, false, `none for ${d.key} (its shell now is ${shells[d.key]})`);
     }
-    ok(`N no page errors (${dbl ? "doubles" : "singles"})`, errors.length === 0, errors.slice(0, 3).join(" | "));
+    const fov = await page.evaluate(() => window.__ss3dEngine.camera.fov || 45);
+    const far = (fr) => nDist(fr, fov);
+    // N6: a double reads as TWO leaves. From the front (side a of a partition) the astragal down the meeting
+    // line is a seam, a shade off the stiles either side of it; from inside (side b) the meet strip between
+    // the leaves' backs is. Read off the picture from the camera the pictures below use, at a fifth and at
+    // three tenths of the leaves' height (clear of latches and mid rails): the meeting line's middle
+    // against 0.1 ft either side of it, on the stiles (or the slab).
+    for (const d of [...doors, ...pdoors]) {
+      const fr = frames[d.key], e = nExpected(d);
+      if (!fr || !e.meet) continue;
+      const c = (fr.a0 + fr.a1) / 2, yb = fr.y0 + (d.kind === "trim" ? 0.2 : 0.05), yt = fr.y1 - 0.05, hs = [0.2, 0.3].map((h) => yb + h * (yt - yb));
+      for (const [face, out, n, want] of [["front", far(fr), 0.17, e.astragal], ["inside", -far(fr), -0.08, e.meet]]) {
+        if (!want) continue;
+        const cam = nCam(fr, { out });
+        const at = (a, y) => [fr.P0[0] + fr.U[0] * a + fr.N[0] * n, y, fr.P0[2] + fr.U[1] * a + fr.N[1] * n];
+        const L = await page.evaluate(N_SEAM, { key: d.key, target: cam.target, cam: cam.cam, pts: hs.flatMap((y) => [at(c - 0.1, y), at(c, y), at(c + 0.1, y)]) });
+        const deltas = L ? hs.map((_, i) => Math.abs(L[3 * i + 1] - (L[3 * i] + L[3 * i + 2]) / 2)) : [];
+        ok(`N6 ${nWhat(d)}: from the ${face}, the meeting line shows as a seam (${face === "front" ? "the astragal" : "the meet strip"} against the leaves)`,
+          deltas.length === 2 && deltas.every((x) => x >= N_SEAM_MIN),
+          L ? `luminance ${L.map((x) => x.toFixed(0)).join("/")}, contrast ${deltas.map((x) => x.toFixed(1)).join(", ")} (want ${N_SEAM_MIN}+)` : "door group not found");
+      }
+    }
     // Pictures. Every door square on from both faces, into the run's shots (as F pictures PLAN's doors);
     // then, with SS_N_SHOTS, the before/after set, each from a camera fixed by the opening alone, so an
     // older build pictured by this same harness stands in exactly the same place.
-    const fov = await page.evaluate(() => window.__ss3dEngine.camera.fov || 45);
-    const far = (fr) => nDist(fr, fov);
     for (const [key, fr] of Object.entries(frames)) {
       for (const [face, out] of [["out", far(fr)], ["in", -far(fr)]]) {
         const c = nCam(fr, { out });
@@ -1430,7 +1549,7 @@ async function runNoGap(browser) {
       mkdirSync(N_SHOTS, { recursive: true });
       const sh = async (file, fr, o) => { const c = nCam(fr, o); await nShot(page, join(N_SHOTS, `${file.slice(0, 3)}${tag}-${file.slice(3)}`), c.target, c.cam); };
       if (dbl) {
-        const p = frames.plank2, a = frames.american2, ru = frames.rollup2, pp = frames["part-plank2"];
+        const p = frames.plank2, a = frames.american2, ru = frames.rollup2, pp = frames["part-plank2"], s2 = frames.auto2;
         if (p) { await sh("01-double-plank-front.png", p, { out: far(p) }); await sh("02-double-plank-inside.png", p, { out: -far(p) }); }
         if (a) await sh("03-double-american-front.png", a, { out: far(a) });
         // From inside, low, looking down at the curtain's foot: light under it would show.
@@ -1441,6 +1560,9 @@ async function runNoGap(browser) {
           await sh("08-double-plank-look-inside.png", p, { out: -9, up: 6 });
           await page.evaluate(() => { const E = window.__ss3dEngine; E.interior = false; E.applyShellMode(E); });
         }
+        // The plain slab double from the front: with the astragal in the slab's own colour it drew as one
+        // wide slab (N6).
+        if (s2) await sh("09-double-slab-front.png", s2, { out: far(s2) });
       } else {
         const p = frames.plank;
         // The hinge jamb from inside, turned about 10 degrees off square: the angle at which a 0.05 ft gap
@@ -1448,10 +1570,25 @@ async function runNoGap(browser) {
         if (p) await sh("07-single-jamb-angle-inside.png", p, { out: -2.6, side: -(p.a1 - p.a0) / 2 + 0.75, ta: -(p.a1 - p.a0) / 2 + 0.3 });
       }
     }
+    // N7: live paint. A colourless built double's astragal follows a trim swatch and its liners and strip a
+    // body swatch, each shaded as drawn (setLiveColors, no rebuild); a door of its own colour keeps its own.
+    if (dbl) {
+      const a2 = doors.find((d) => d.key === "american2"), p2 = doors.find((d) => d.key === "plank2");
+      const before = await gapMeshes(page, p2.itemId);
+      await page.evaluate(() => window.__ss3dEngine.setLiveColors("Barn Red", "White"));
+      const g = await gapMeshes(page, a2.itemId), gp = await gapMeshes(page, p2.itemId);
+      const astr = g.filter((m) => m.kind === "astragal"), fill = g.filter((m) => m.kind === "liner" || m.kind === "meet");
+      ok("N7 a trim swatch moves a colourless built double's astragal with the trim, darkened 20%", astr.length === 1 && astr[0].color === shadeHex("#f2f1ea", 0.8),
+        `${astr.map((m) => m.color).join(",")} vs ${shadeHex("#f2f1ea", 0.8)}`);
+      ok("N7 ...and a body swatch its liners and strip, darkened 35%", fill.length === 4 && fill.every((m) => m.color === shadeHex("#8b2e2e", 0.65)),
+        `${[...new Set(fill.map((m) => m.color))].join(",")} vs ${shadeHex("#8b2e2e", 0.65)}`);
+      ok("N7 ...while a double of its own colour keeps its closures' colours", JSON.stringify(gp) === JSON.stringify(before), `${JSON.stringify(before)} -> ${JSON.stringify(gp)}`);
+    }
+    ok(`N no page errors (${dbl ? "doubles" : "singles"})`, errors.length === 0, errors.slice(0, 3).join(" | "));
     await ctx.close();
   }
-  const total = Object.values(allMisses).reduce((s, v) => s + v, 0);
-  console.log(`N misses in all: ${total} over ${Object.keys(allMisses).length} doors`);
+  const total = Object.values(allMisses).reduce((s, v) => s + v, 0), area = Object.values(allOpen).reduce((s, v) => s + v, 0);
+  console.log(`N open cells in all: ${total} over ${Object.keys(allMisses).length} doors (five yaws); square on, ${(area * 144).toFixed(1)} sq in of daylight`);
   console.log(`N digests: ${JSON.stringify(digests)}`);
   console.log(`N shell digests: ${JSON.stringify(shells)}`);
   for (const [k, want] of Object.entries(N_DIGESTS)) {
@@ -1461,6 +1598,8 @@ async function runNoGap(browser) {
 }
 // The post-P0 digests of N's doors with no window and no photo (outside walls and partitions), recorded
 // with the closures (2026-10-26): the baseline later phases keep byte-identical for a door with no look.
+// The hinged doubles' were re-recorded the same day when the astragal took its 20% shade (N6): its colour
+// was their only change.
 const N_DIGESTS = {
   "plank": "f98ba2711cadb67e", "rollup": "a89c5a5394d26865", "american": "ffb68f6a1e14d935",
   "basic": "03c78fa69ea35134", "classic": "b12448d8906f300d", "dutch": "b5999213fbddbfa4",
@@ -1468,13 +1607,13 @@ const N_DIGESTS = {
   "slideup": "1192b3b837892ad8", "part-american": "1d2474ad2093f40e", "part-basic": "3e9bbd3662eaa3b6",
   "part-classic": "e3da1ba5e98e3a4d", "part-dutch": "37075e473969d691", "part-plank": "4f071bf52bae11fe",
   "part-zbrace": "fc987bd18821e633", "part-xbrace": "338c91b68ff49c64", "part-rollup": "0e1d9ec75e870161",
-  "part-auto": "87363bf805af09e8", "plank2": "53935a5caf001f99", "american2": "639b929eb6886a71",
-  "rollup2": "b16fdbde95e34051", "basic2": "5180901f52384a4d", "classic2": "2024c03ccd6f8c4b",
-  "dutch2": "9e3ddfcd9c50618c", "zbrace2": "cdddf7ff401e5696", "xbrace2": "877f16867fd1f260",
-  "auto2": "607de190b977d18e", "part-american2": "b08f86d1d77e6352", "part-basic2": "58f6ccbb5611c636",
-  "part-classic2": "70cd227d6292805f", "part-dutch2": "e335c9f7f72fb6f6", "part-plank2": "c30f5ebc851f2545",
-  "part-zbrace2": "9bd7afae4c915e5c", "part-xbrace2": "8d37839d2d5f54b5", "part-rollup2": "31e0244b726e8ad4",
-  "part-auto2": "b49d73b7a839b331"
+  "part-auto": "87363bf805af09e8", "plank2": "7e6aed10cfe60202", "american2": "03fe439d0957d95a",
+  "rollup2": "b16fdbde95e34051", "basic2": "b886d14477a50804", "classic2": "8bc8d62ce5b1a260",
+  "dutch2": "c3b8e8cbcb179254", "zbrace2": "6456efc2fe640aff", "xbrace2": "c40cf87c955fde9c",
+  "auto2": "b87079f71a5c5012", "part-american2": "b1d165c29324ba0f", "part-basic2": "b6b3237151764aa4",
+  "part-classic2": "eed9914a669d4fe6", "part-dutch2": "209abbf658754d9c", "part-plank2": "62cea800ba6dd114",
+  "part-zbrace2": "c10f0e1111969fc5", "part-xbrace2": "2d1d788043150053", "part-rollup2": "31e0244b726e8ad4",
+  "part-auto2": "9a5eb2cb76d9bf11"
 };
 // N5's baseline: every N door's digest on origin/beta 3652c085, the build before P0 (no closures there, so
 // all of its meshes), recorded with SS_N_ONLY=1 against that build ("N shell digests").
