@@ -11,6 +11,14 @@ async function blankPdf(): Promise<Uint8Array> {
   d.addPage([612, 792]);
   return await d.save();
 }
+// What the page DRAWS, for comparing two documents. pdf-lib writes CreationDate and ModDate, to
+// the second, into an object stream that pdfText inflates too, so two certificates made either
+// side of a second boundary differ in their dates alone. That failed this test on the promotion
+// gate's runner on 2026-10-26. Re-saved without object streams, the info dictionary stays out of
+// every stream: estimatePdf_test's drawn() does the same.
+async function drawn(bytes: Uint8Array): Promise<string> {
+  return await pdfText(await (await PDFDocument.load(bytes, { updateMetadata: false })).save({ useObjectStreams: false }));
+}
 const CERT = {
   businessName: "Acme Sheds",
   quoteNumber: "AS-1041",
@@ -31,10 +39,11 @@ Deno.test("On behalf of prints under Signed by when there is a business", async 
 });
 
 Deno.test("no business: no row, and the page is the one it always was", async () => {
-  const base = await pdfText(await appendAcceptancePage(await blankPdf(), CERT));
+  const base = await drawn(await appendAcceptancePage(await blankPdf(), CERT));
   assert(!base.includes("On behalf of"));
+  assert(base.includes("Signed by") && base.includes("Thomas Example"), "the page itself is read");
   for (const onBehalfOf of [null, undefined, "", "   "]) {
-    assertEquals(await pdfText(await appendAcceptancePage(await blankPdf(), { ...CERT, onBehalfOf })), base, String(onBehalfOf));
+    assertEquals(await drawn(await appendAcceptancePage(await blankPdf(), { ...CERT, onBehalfOf })), base, String(onBehalfOf));
   }
 });
 
