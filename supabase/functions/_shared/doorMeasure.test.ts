@@ -229,6 +229,34 @@ Deno.test("the points win over the read's own words: rail count, brace, panel br
   assertEquals([noRails.rails, noRails.panels?.map((p) => p.fill)], [null, ["x", "none", "lite"]]);
 });
 
+Deno.test("a part its panel's fill already draws is that fill: a pickets panel's pickets read as boards, a vent centred in a plain panel", () => {
+  // The American reference door's reads gave its 3 pickets a leaf as "pickets" AND as 6 upright boards.
+  const door = singleDoor({ brace: "none", base: "american" }), d = inches(36, 80);
+  const upright = (x: number) => ({ t: "board", a: d.p(x, 6), b: d.p(x, 42), across: d.line(x - 1.75, 24, x + 1.75, 24), role: "members" });
+  const pickets = { ...withMeasure(door.read, { parts: [upright(12), upright(18), upright(24)] }), panels: [{ fill: "pickets", count: 3 }, "none"] };
+  const p = draftOf(doorLookFromMeasure(pickets, door.ctx));
+  assertEquals([p.panels?.map((x) => x.fill), p.parts], [["pickets", "none"], []]);
+  // Not a picket: a diagonal board in the pickets panel, or an upright board in a plain panel.
+  const diagonal = { t: "board", a: d.p(8, 8), b: d.p(28, 40), across: d.line(16, 24, 19.5, 24), role: "members" };
+  assertEquals(draftOf(doorLookFromMeasure(withMeasure(pickets as Rec, { parts: [diagonal] }), door.ctx)).parts.length, 1);
+  assertEquals(draftOf(doorLookFromMeasure({ ...pickets, panels: ["none", "none"] }, door.ctx)).parts.length, 3);
+
+  // The Dutch reference door's reads gave each leaf's small vent, centred in the lower panel, as a part.
+  const dutch = { ...withMeasure(singleDoor({ brace: "none", base: "dutch" }).read, { parts: [{ t: "vent", box: [d.p(13, 16), d.p(23, 28)] }] }), panels: ["none", "none"] };
+  const v = draftOf(doorLookFromMeasure(dutch, door.ctx));
+  assertEquals([v.panels?.map((x) => x.fill), v.parts], [["vent", "none"], []]);
+  // Off the middle (high in a corner of the panel) it stays a part; so does every vent Stage B gives.
+  const corner = withMeasure(dutch as Rec, { parts: [{ t: "vent", box: [d.p(24, 33), d.p(32, 41)] }] });
+  assertEquals(draftOf(doorLookFromMeasure(corner, door.ctx)).parts.map((x) => x.t), ["vent"]);
+  const stageB = draftOf(doorLookFromMeasure(dutch, { ...door.ctx, frame: { leaves: 1, side: "left", meetX: null } }));
+  assertEquals([stageB.panels?.[0].fill, stageB.parts.map((x) => x.t)], ["none", ["vent"]]);
+  // A double: each leaf's vent, one panel fill.
+  const pair = doubleDoor({ brace: "none", base: "dutch" }), q = inches(72, 80);
+  const vents = { ...withMeasure(pair.read, { parts: [{ t: "vent", box: [q.p(13, 16), q.p(23, 28)] }, { t: "vent", box: [q.p(49, 16), q.p(59, 28)] }] }), panels: ["none", "none"] };
+  const vd = draftOf(doorLookFromMeasure(vents, pair.ctx));
+  assertEquals([vd.panels?.map((x) => x.fill), vd.parts], [["vent", "none"], []]);
+});
+
 // ─── Corner gussets ──────────────────────────────────────────────────────────────────────────────
 // Every board part as [u0, v0, u1, v1, wIn, role] to 2 decimals, its ends and the list each in one
 // order (a board is the same board either way round).
