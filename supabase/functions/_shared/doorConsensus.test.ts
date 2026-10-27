@@ -293,3 +293,34 @@ Deno.test("Stage B's parts: kept only when a Stage A read also has them, else a 
   assertEquals(refused.warnings.map((w) => w.text), ["We may have seen a vent we couldn't confirm, so we left it out. Add it on the edit screen if it's there."]);
   assertEquals(keepStageBParts(c, spec.spec, { refuse: "open" }, lite.ctx), { spec: spec.spec, added: 0, warnings: [] });
 });
+
+Deno.test("Stage B marking what Stage A folded into a fill (dutch's vents, American's pickets): no part, no warning", () => {
+  const codes = (k: { warnings: { code: string }[] }) => k.warnings.map((w) => w.code);
+  // Dutch double, each leaf's vent centred in the lower panel: Stage A folds both into panels[0] "vent".
+  const pair = doubleDoor({ brace: "none", base: "dutch" }), q = inches(72, 80);
+  const vents = [{ t: "vent", box: [q.p(13, 16), q.p(23, 28)] }, { t: "vent", box: [q.p(49, 16), q.p(59, 28)] }];
+  const read = { ...withMeasure(pair.read, { parts: vents }), panels: ["none", "none"] };
+  const c = cons(stageADoorLook([read, read, read], pair.ctx));
+  const s = settleCloseUps(c, ASKED);
+  if (!s.ok) throw new Error("did not clean");
+  assertEquals([(s.spec.panels as Rec[]).map((p) => p.fill), s.spec.parts], [["vent", "none"], undefined]);
+  const k = keepStageBParts(c, s.spec, withMeasure(pair.read, { parts: vents }), pair.ctx);
+  assertEquals([k.added, codes(k)], [0, []], "the vents the fill draws");
+  // A vent high in a corner of that panel is not the fill's: still a warning.
+  const corner = keepStageBParts(c, s.spec, withMeasure(pair.read, { parts: [{ t: "vent", box: [q.p(26, 30), q.p(33, 33)] }] }), pair.ctx);
+  assertEquals(codes(corner), ["stageb_part"], "a vent in the corner");
+
+  // American single: Stage A folds the upright boards into the pickets fill.
+  const door = singleDoor({ brace: "none", base: "american" }), d = inches(36, 80);
+  const upright = (x: number) => ({ t: "board", a: d.p(x, 6), b: d.p(x, 30), across: d.line(x - 1.75, 18, x + 1.75, 18), role: "members" });
+  const boards = [upright(12), upright(18), upright(24)];
+  const pk = { ...withMeasure(door.read, { parts: boards }), panels: [{ fill: "pickets", count: 3 }, "none"] };
+  const cp = cons(stageADoorLook([pk, pk, pk], door.ctx));
+  const sp = settleCloseUps(cp, ASKED);
+  if (!sp.ok) throw new Error("did not clean");
+  assertEquals([(sp.spec.panels as Rec[]).map((p) => p.fill), sp.spec.parts], [["pickets", "none"], undefined]);
+  assertEquals(codes(keepStageBParts(cp, sp.spec, withMeasure(door.read, { parts: boards }), door.ctx)), [], "the pickets the fill draws");
+  // A diagonal board in the pickets panel is no picket: still a warning.
+  const diag = { t: "board", a: d.p(8, 8), b: d.p(28, 30), across: d.line(16, 20, 19.5, 20), role: "members" };
+  assertEquals(codes(keepStageBParts(cp, sp.spec, withMeasure(door.read, { parts: [diag] }), door.ctx)), ["stageb_part"]);
+});

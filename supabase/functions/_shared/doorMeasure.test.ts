@@ -257,6 +257,32 @@ Deno.test("a part its panel's fill already draws is that fill: a pickets panel's
   assertEquals([vd.panels?.map((x) => x.fill), vd.parts], [["vent", "none"], []]);
 });
 
+Deno.test("a vent the fill would not draw the same (another size or shape, or two) keeps its own box, and the panel is plain", () => {
+  // The stub's stiles are 5.5 in, so the lower panel's opening is 25 in wide and the fill's vent 7.5 in square.
+  const door = singleDoor({ brace: "none", base: "dutch" }), d = inches(36, 80);
+  const read = (said: string | null, boxes: number[][]) => ({
+    ...withMeasure(door.read, { parts: boxes.map(([x0, y0, x1, y1]) => ({ t: "vent", box: [d.p(x0, y0), d.p(x1, y1)] })) }),
+    panels: said === null ? undefined : [said, "none"],
+  });
+  const shape = (said: string | null, boxes: number[][]) => {
+    const v = draftOf(doorLookFromMeasure(read(said, boxes), door.ctx));
+    return [v.panels?.map((x) => x.fill), v.parts.length];
+  };
+  for (const said of ["none", "vent"]) {
+    // The dutch's own vent, about the fill's size and centred: the fill, no part.
+    assertEquals(shape(said, [[13, 16, 23, 28]]), [["vent", "none"], 0], `dutch vent, said ${said}`);
+    // A 16 x 8 in louvre, centred: its own box, and a panel said "vent" for it draws no second one.
+    assertEquals(shape(said, [[10, 18, 26, 26]]), [["none", "none"], 1], `16 x 8 louvre, said ${said}`);
+    // A tall narrow one (6 x 16 in), centred.
+    assertEquals(shape(said, [[15, 14, 21, 30]]), [["none", "none"], 1], `6 x 16 vent, said ${said}`);
+    // Two 6 x 6 in vents side by side, each centred enough to fold alone.
+    assertEquals(shape(said, [[11, 19, 17, 25], [19, 19, 25, 25]]), [["none", "none"], 2], `two vents, said ${said}`);
+  }
+  // Panels unsaid: a dutch's default lower panel is a vent fill, so a louvre kept as a part makes it plain.
+  assertEquals(shape(null, [[10, 18, 26, 26]]), [["none", null], 1]);
+  assertEquals(shape(null, [[13, 16, 23, 28]]), [["vent", null], 0]);
+});
+
 // ─── Corner gussets ──────────────────────────────────────────────────────────────────────────────
 // Every board part as [u0, v0, u1, v1, wIn, role] to 2 decimals, its ends and the list each in one
 // order (a board is the same board either way round).
@@ -560,4 +586,8 @@ Deno.test("colour roles: the photo picks which colour each part follows, never t
   assertEquals(colorRolesOf({ infill: wood, frame: white, members: [160, 115, 75] }), { infill: "door", frame: "trim", members: "door" });
   assertEquals(colorRolesOf({}), {});
   assertEquals([snapFinish([20, 20, 20]), snapFinish([140, 150, 160]), snapFinish([85, 65, 45])], ["black", "galv", "bronze"]);
+  // Black iron in daylight is a neutral grey of 55-85 (the American and Dutch reference doors' handles and
+  // straps), and a silver butt hinge a cool grey: neither is bronze, which is a brown.
+  assertEquals([[64, 64, 64], [65, 72, 74], [81, 82, 82], [60, 67, 70], [106, 109, 114]].map((c) => snapFinish(c as [number, number, number])), ["black", "black", "black", "black", "galv"]);
+  assertEquals([[75, 60, 50], [95, 75, 55], [110, 85, 60]].map((c) => snapFinish(c as [number, number, number])), ["bronze", "bronze", "bronze"]);
 });
