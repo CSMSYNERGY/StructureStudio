@@ -339,24 +339,24 @@ Deno.test("a close-up that settles the type but not the finish warns about the f
 });
 
 // ─── Hinges ──────────────────────────────────────────────────────────────────────────────────────
-Deno.test("hinges on the frame and mid rails are written as \"rails\"; anywhere else, as numbers", () => {
+Deno.test("hinges keep their measured heights, the ones on the head and sill rails too", () => {
   // A trim double with its T-straps centred on the sill rail, the mid rail and the head rail (5.5 in boards):
-  // as numbers the table would hold the end ones at 0.05 and 0.95, off their rails.
+  // the end ones sit about 3.4% in from the leaf's ends, which the table once held at 0.05 / 0.95, off their rails.
   const door = doubleDoor({ brace: "none", base: "dutch" }), d = inches(72, 80);
   const strap = (y: number) => [{ pivot: d.p(0.5, y), tip: d.p(7, y) }, { pivot: d.p(71.5, y), tip: d.p(65, y) }];
   const onRails = withMeasure(door.read, { hinges: [2.75, 44, 77.25].flatMap(strap) });
   const s = settled(cons(stageADoorLook(three(onRails), door.ctx)));
-  assertEquals([(s.spec.hinges as Rec).count, (s.spec.hinges as Rec).at], [3, "rails"]);
-  // The stub's own hinges, at 13%, 55% and 87%: the ends are off the frame rails, so numbers.
+  assertEquals([(s.spec.hinges as Rec).count, (s.spec.hinges as Rec).at], [3, [0.034, 0.55, 0.966]]);
+  // The stub's own hinges, at 13%, 55% and 87%.
   assertEquals((settled(cons(stageADoorLook(three(door.read), door.ctx))).spec.hinges as Rec).at, [0.13, 0.55, 0.87]);
-  // Two hinges on the head and sill rails only; and one off its rail stays numbers.
-  const two = withMeasure(door.read, { hinges: [2.75, 77.25].flatMap(strap) });
-  assertEquals((settled(cons(stageADoorLook(three(two), door.ctx))).spec.hinges as Rec).at, "rails");
-  const high = withMeasure(door.read, { hinges: [2.75, 52, 77.25].flatMap(strap) });
-  assertEquals((settled(cons(stageADoorLook(three(high), door.ctx))).spec.hinges as Rec).at, [0.05, 0.65, 0.95]);
+  // Numbers, never a reference to the rails: a self-check that moves a rail cannot carry a hinge with it,
+  // and two rails equally far from half way leave the hinge where it was read.
+  const mids = [5.5, 41.5].flatMap((x) => [d.rail(x, x + 25, 26.25, 29.75), d.rail(x, x + 25, 50.25, 53.75), d.rail(x, x + 25, 0, 5.5)]);
+  const mirror = withMeasure(door.read, { rails: mids, hinges: [2.75, 28, 77.25].flatMap(strap) });
+  assertEquals((settled(cons(stageADoorLook(three(mirror), door.ctx))).spec.hinges as Rec).at, [0.034, 0.35, 0.966]);
 });
 
-Deno.test("a strap's length runs from its pivot as read, in the edge strip too, and the longer half of the straps decides", () => {
+Deno.test("a strap's length runs from its pivot as read, in the edge strip too, and straps cut off at the photo's edge do not decide it", () => {
   // T-straps whose pivots sit 1 in into each edge strip (on the jamb), 7 in to the tip; the top pair is cut
   // off at 3 in by the photo's edge. Clamped to the leaf, the pivots lost an inch: 6 in.
   const door = withStrips(doubleDoor({ brace: "none", base: "dutch" }), 2), d = inches(76, 80);
@@ -383,4 +383,35 @@ Deno.test("Stage B's added count is what the cleaned spec keeps", () => {
   assertEquals(s.spec.parts, undefined);
   const k = keepStageBParts(c, s.spec, read, door.ctx);
   assertEquals([k.added, k.spec], [0, s.spec]);
+});
+
+Deno.test("a strap's length: the upper median of the straps, held to the photo and to its own leaf", () => {
+  const door = withStrips(singleDoor({ brace: "none", base: "basic" }), 2), d = inches(40, 80);
+  // 6.6 in T-straps from pivots 1 in into the hinge-side strip.
+  const ok = (y: number) => ({ pivot: d.p(1, y), tip: d.p(7.6, y) });
+  const len = (reads: Rec[]) => (settled(cons(stageADoorLook(reads, door.ctx))).spec.hinges as Rec).lenIn;
+  const read = (hinges: Rec[]) => withMeasure(door.read, { hinges });
+  // One wild strap a read (a tip read on the strike stile, or past the leaf) does not decide it.
+  const wild = read([ok(10.4), { pivot: d.p(1, 44), tip: d.p(30, 44) }, ok(69.6)]);
+  assertEquals(len([wild, wild, read([ok(10.4), ok(44), ok(69.6)])]), 6.6);
+  assertEquals(len([read([ok(10.4), { pivot: d.p(1, 44), tip: d.p(39.5, 2) }, ok(69.6)]), wild, wild]), 6.6);
+  // A pivot read 3 in off the photo counts only to the photo's edge (the 2 in strip): 7.6 in, not 10.6.
+  const off = read([10.4, 44, 69.6].map((y) => ({ pivot: d.p(-3, y), tip: d.p(7.6, y) })));
+  assertEquals(len([off, off, off]), 7.6);
+  // A tip given at its pivot is a hinge with no strap: it is no length beside the ones that have one.
+  const bare = read([{ pivot: d.p(1, 10.4), tip: d.p(1, 10.4) }, ok(44), { pivot: d.p(1, 69.6), tip: d.p(1, 69.6) }]);
+  assertEquals(len([bare, bare, bare]), 6.6);
+});
+
+Deno.test("no finish warning when the close-up sees no hardware to colour (hinges hidden, handle none)", () => {
+  const s = settled(singleC(), { hinges: thrice({ type: "hidden" }), handle: thrice({ type: "none", finish: null }) });
+  assertEquals(s.codes.filter((c) => c.endsWith("_finish_unsure")), []);
+});
+
+Deno.test("a trim look's field: boards become grooves only when the reads settle on boards", () => {
+  const door = singleDoor({ brace: "none", base: "basic" }), [a, b, c] = three(door.read);
+  const dir = (fs: string[]) => (settled(cons(stageADoorLook([{ ...a, field: fs[0] }, { ...b, field: fs[1] }, { ...c, field: fs[2] }], door.ctx))).spec.field as Rec).dir;
+  assertEquals(dir(["v", "v", "grooved"]), "grooved");
+  // A three-way split keeps its tie-break (the first read): a smooth 6-panel door stays smooth.
+  assertEquals(dir(["smooth", "v", "grooved"]), "smooth");
 });
