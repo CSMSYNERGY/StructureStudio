@@ -184,6 +184,7 @@ async function run(browser) {
       (await grid.locator("select").count()) === 0 && /No grid/.test(await grid.innerText()) && /across/.test(await grid.innerText()) && /Standard/.test(await grid.innerText())
       && (await grid.getByRole("button", { name: "More rows" }).count()) === 1 && (await grid.getByRole("button", { name: "More across" }).count()) === 1,
       (await grid.innerText().catch(() => "")).replace(/\s+/g, " "));
+    ok("F ...its steppers show a dash, not 1 x 1 (which is No grid)", (await grid.locator('[data-ss-lites-step="rows"]').innerText()).includes("–") && (await grid.locator('[data-ss-lites-step="cols"]').innerText()).includes("–"), (await grid.locator("[data-ss-lites-step]").allInnerTexts()).join(" | "));
     ok("F ...says what Standard is, and that customers can't change the grid", (await bodyText()).includes("Standard is the look windows had before")
       && (await bodyText()).includes("they can't change it in the designer"));
     await grid.getByRole("button", { name: "More rows" }).click();
