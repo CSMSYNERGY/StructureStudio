@@ -3771,7 +3771,7 @@ function MyConnectionsCard({ clientId, viewing = false }) {
   );
 }
 
-function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false, clientId = null, hubReach = null, aiCard = false, viewing = false, onOpenPhone = null }) {
+function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null, crmUnlocked = true, crmPending = false, clientId = null, hubReach = null, aiCard = false, viewing = false, onOpenPhone = null, meetingsOn = false }) {
   // WHICH TAB CONTACTS OPENS ON (Carolyn 2026-10-12, C25): "we need them to set the default of
   // what they want the default to be." Contacts, the Design list, or any one pipeline. `picked` is
   // what this person chose (ssSavedHubView: contactsView, or the old Pipeline tab's choice), or
@@ -4044,13 +4044,19 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           Second on the page on purpose: it is the one card here that a person comes BACK to
           (the Zoom callback lands on this page), and it sits beside Your details because both
           are "who you are", ahead of the how-the-portal-behaves cards. */}
-      <MyConnectionsCard clientId={clientId} viewing={viewing} />
+      {/* MY CONNECTIONS and MY MEETINGS only where meetings are this person's to use (meetingsOn:
+          the built-in CRM, and the meetings area). Both ask portal-meetings, which refuses a
+          builder without the CRM and a person without the area, and each card shows a refusal as
+          a red box. Unguarded, every user at a builder without the CRM met two of them on the page
+          the name-and-phone nudge sends them to (release review, 2026-10-27). Hidden while the
+          CRM answer is still loading, so nobody sees them flash in and out. */}
+      {meetingsOn && <MyConnectionsCard clientId={clientId} viewing={viewing} />}
       {/* MY MEETINGS (Carolyn 2026-10-26): "I want all the company set meetings to show in MY
           PROFILE so that users can choose the calendars they want to use." Each person's own
           booking link, hours, days off and the company meeting types they take — the same
           component Customer Hub → Meetings renders in "business" mode. */}
-      <div style={{ ...S.h2, margin: "18px 0 8px" }}>My meetings</div>
-      <MeetingsSettings clientId={clientId} mode="mine" viewingLabel={viewing ? "this account" : null} />
+      {meetingsOn && <div style={{ ...S.h2, margin: "18px 0 8px" }}>My meetings</div>}
+      {meetingsOn && <MeetingsSettings clientId={clientId} mode="mine" viewingLabel={viewing ? "this account" : null} />}
       <div style={S.card}>
         <div style={S.h2}>How the Contacts tab opens</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -5315,11 +5321,14 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
       )}
       {sub === "forms" && (crmUnlocked || crmPending) && <FormsHub clientId={clientId} canEdit={canEdit} />}
       {sub === "email-templates" && (crmUnlocked || crmPending) && <EmailTemplatesHub canEdit={canEdit} />}
-      {/* MEETINGS (migration 326; moved in here 2026-10-22). No entitlement teaser of its own:
-          MeetingsSettings asks portal-meetings, which refuses with the CRM sentence and the
-          component shows it. Doing it twice would mean two places deciding what "unpaid"
-          looks like on one page. */}
-      {sub === "meetings" && <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* MEETINGS (migration 326; moved in here 2026-10-22). The same gate and teaser as Pipelines,
+          Forms and Fields. It used to lean on portal-meetings' CRM refusal, but the component
+          shows a refusal as a red error box, and a rep at a builder without the CRM, whose only
+          Customer Hub tab this is, met nothing else there (release review, 2026-10-27). The
+          server still refuses every action for an unentitled tenant. */}
+      {sub === "meetings" && (crmUnlocked || crmPending
+        ? <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />
+        : <div style={S.card}><div style={S.h2}>Meetings</div><p style={{ fontSize: 13, color: "#64748B" }}>Meeting types and booking pages are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
       {/* EMAIL SETTINGS, TEXT MESSAGING, PHONE — moved in from the rail on 2026-10-23 with their
           slugs, props and canEdit rules exactly as they were in SettingsShell. */}
       {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
@@ -6663,7 +6672,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending}
         aiCard={phoneOffered} viewing={!!viewingLabel}
         onOpenPhone={hubs.pipelines.some((t) => t[0] === "phone") ? () => setSub("phone") : null}
-        clientId={clientId} hubReach={hubReach} />}
+        clientId={clientId} hubReach={hubReach}
+        meetingsOn={!!crmUnlocked && (isAdmin || !access || ssCanRead(access, "meetings"))} />}
     </div>
   );
 }
