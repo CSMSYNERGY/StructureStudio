@@ -69,10 +69,13 @@ export function insideRepo(p, root = REPO_ROOT) {
 }
 // Inside ANY git work tree: this repo's other checkouts and worktrees too, which a path test against this
 // checkout alone would miss. A builder's photo never goes into one.
+// GIT_DIR, GIT_INDEX_FILE and friends (set when a git hook runs this) win over -C, so they are dropped:
+// the question is about the folder, not the repository the hook is pushing.
+const GIT_FREE_ENV = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
 export function insideGitWorkTree(p) {
   let cur = realPathOf(p);
   while (!existsSync(cur) && dirname(cur) !== cur) cur = dirname(cur);
-  const r = spawnSync("git", ["-C", cur, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", cur, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", env: GIT_FREE_ENV() });
   return r.status === 0 && String(r.stdout).trim() === "true";
 }
 export const outsideRepos = (p) => !insideRepo(p) && !insideGitWorkTree(p);

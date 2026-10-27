@@ -100,7 +100,11 @@ test("outputs: refused inside ANY git checkout (another worktree of this repo to
   try {
     const repo = join(w.dir, "some-checkout");
     mkdirSync(repo);
-    assert.equal(spawnSync("git", ["init", "-q", repo]).status, 0);
+    // The pre-push hook runs this file with GIT_DIR, GIT_INDEX_FILE and friends pointing at the real
+    // repository, and git obeys them over the path: `git init` would rewrite the SHARED .git/config
+    // (core.bare = true, every session's git broken; it happened on 2026-10-27). So they are removed.
+    const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k)));
+    assert.equal(spawnSync("git", ["init", "-q", repo], { env: cleanEnv }).status, 0);
     assert.equal(insideGitWorkTree(join(repo, "prep")), true);
     assert.equal(insideGitWorkTree(join(w.dir, "prep")), false);
     const photo = join(w.dir, "Builder Name door.jpg");
