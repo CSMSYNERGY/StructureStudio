@@ -80,7 +80,7 @@ export async function sendMeetingEmail(
       .select(
         "id, client_id, starts_at, ends_at, booked_time_zone, status, customer_name, customer_email, " +
           "customer_notes, cancel_token, rescheduled_from, ics_sequence, " +
-          "conference_provider, conference_url, conference_note, conference_status, " +
+          "conference_provider, conference_url, conference_note, conference_status, calendar_invited, " +
           "meeting_types!inner(name, location_kind, location_detail), " +
           "meeting_hosts!inner(public_name)",
       )
@@ -136,6 +136,9 @@ export async function sendMeetingEmail(
       conferenceNote: m.conference_note ?? null,
       // 333: asked for a fresh link, none could be made, no room link either.
       conferencePending: !m.conference_url && (m.conference_status === "failed" || m.conference_status === "pending"),
+      // 341: the host's Google / Outlook event has the customer as a guest — the provider sent
+      // the invite, so ours would be a second one.
+      inviteFromHost: !!m.calendar_invited,
     };
 
     const body = which === "booked"
@@ -150,7 +153,11 @@ export async function sendMeetingEmail(
     // A REMINDER carries none: the event is already in their calendar, and re-sending the
     // same UID at the same sequence does nothing useful while a bumped one would look like a
     // change that did not happen.
-    const attachments = which === "reminder" ? undefined : [{
+    // ⚠️ AND NONE WHEN THE HOST'S CALENDAR SENT IT (341, Carolyn 2026-10-26: "We want to send it
+    // only once"). The customer is a guest on the host's own Google / Outlook event, which put it
+    // in their calendar and carries Accept / Decline; a second invite from us would be a second,
+    // unlinked copy of the same meeting in their calendar.
+    const attachments = which === "reminder" || m.calendar_invited ? undefined : [{
       // "invite.ics" rather than the meeting's name: a filename with a customer's words in
       // it is a filename with their punctuation in it.
       filename: "invite.ics",

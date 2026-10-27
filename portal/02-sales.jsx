@@ -4666,22 +4666,36 @@ function ContactPlannedMeetings({ contact, viewing = false, rev = 0, onCount = n
                 {m.status === "booked" && m.conferenceUrl && (
                   <div style={{ fontSize: 12, marginTop: 2 }}>
                     <a href={m.conferenceUrl} target="_blank" rel="noopener noreferrer" style={{ color: ACCENT, fontWeight: 700 }}>
-                      {m.conferenceStatus === "generated" ? "Join the Zoom meeting" : "Join link"}
+                      {m.conferenceStatus === "generated"
+                        ? `Join the ${m.conferenceProvider === "google_meet" ? "Google Meet" : m.conferenceProvider === "teams" ? "Teams meeting" : "Zoom meeting"}`
+                        : "Join link"}
                     </a>
                   </div>
                 )}
-                {m.status === "booked" && (m.conferenceStatus === "failed" || m.conferenceStatus === "fallback") && (
+                {/* 341: on the host's own Google / Outlook calendar, with the customer invited. */}
+                {m.status === "booked" && m.calendarStatus === "created" && (
+                  <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>
+                    On {m.hostName ? `${m.hostName}'s` : "the host's"} {m.calendarProvider === "microsoft" ? "Outlook" : "Google"} calendar{m.calendarInvited ? " · customer invited" : ""}
+                  </div>
+                )}
+                {m.status === "booked" && (m.conferenceStatus === "failed" || m.conferenceStatus === "fallback") && (() => {
+                  const vname = m.conferenceProvider === "google_meet" ? "Google Meet" : m.conferenceProvider === "teams" ? "Teams" : "Zoom";
+                  const acct = m.conferenceProvider === "google_meet" ? "Google" : m.conferenceProvider === "teams" ? "Outlook" : "Zoom";
+                  return (
                   <div style={{ fontSize: 12, color: "#92400E", marginTop: 2 }}>
                     {m.conferenceStatus === "failed"
-                      ? "No Zoom link yet — the customer was told one will follow."
-                      : "A new Zoom meeting couldn't be made, so this uses your room link."}
-                    {m.conferenceError === "not_connected" ? " The host hasn't connected Zoom." : m.conferenceError === "needs_reconnect" ? " The host's Zoom connection needs reconnecting." : ""}
+                      ? `No ${vname} link yet — the customer was told one will follow.`
+                      : `A new ${vname} link couldn't be made, so this uses your room link.`}
+                    {m.conferenceError === "not_connected" ? ` The host hasn't connected ${acct}.`
+                      : m.conferenceError === "needs_reconnect" ? ` The host's ${acct} connection needs reconnecting.`
+                      : m.conferenceError === "no_link" ? " Teams links need a work or school Microsoft 365 account." : ""}
                     {!viewing && (
                       <button type="button" disabled={busy} onClick={() => makeLink(m)}
                         style={{ background: "none", border: "none", padding: 0, marginLeft: 6, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Make the link</button>
                     )}
                   </div>
-                )}
+                  );
+                })()}
                 {m.status === "booked" && !viewing && (
                   <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                     <button type="button" disabled={busy} onClick={() => mark(m, "completed")}

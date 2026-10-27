@@ -115,6 +115,53 @@ const SMS_ERROR_HELP = {
   "30934": { title: "The privacy policy URL was missing from the submission", what: "The registration reached the carriers without a privacy policy address at all.", fix: "Fill in the privacy policy address and send it again." },
 };
 
+/** ── Registering WITHOUT an EIN (sole proprietor, 2026-10-27) ──────────────────────────────
+ *  Four codes a no-EIN builder can meet. 30903, 30914 and 30915 are CAMPAIGN verdicts (Twilio
+ *  help article "Campaign Registration Rejected"), so they arrive on the campaign_failed card
+ *  through `errors`, like every code above. 30701 is the BRAND's "invalid input" refusal and
+ *  lands on the status card's short list in brand_failed. Until this date none of the four had
+ *  an entry, so a sole proprietor refused for trading under a company name would have read
+ *  Twilio's own sentence and nothing else. The "get in touch" lines are deliberate: moving
+ *  between with- and without-EIN after the brand is in, and some 30701 fixes, need a new
+ *  registration or an operator, and no button here can do either.
+ *
+ *  ⚠️ A MAP OF ITS OWN, READ ONLY FOR brandTier "sole_proprietor" (smsErrorHelp below). 30701 is
+ *  Twilio's GENERIC "Brand Registration Failure: Invalid input parameters", not a sole-prop code,
+ *  so an EIN builder's brand can fail with it too, and the words here (a YES-text registration,
+ *  "your mobile") are written for a person registering as themselves. In SMS_ERROR_HELP they
+ *  replaced Twilio's field-specific description on an EIN builder's screen, which broke the rule
+ *  this route ships under: every byte an EIN builder sees is what it was. Kept apart, an EIN
+ *  builder's lookup is SMS_ERROR_HELP alone, exactly as before 2026-10-27. */
+const SOLE_PROP_ERROR_HELP = {
+  "30903": {
+    title: "The carriers did not accept this as a registration without an EIN",
+    what: "Registering without a tax ID is only for a person trading under their own name in the US or Canada. The carriers turn it down when the business has an EIN, or when the name, email, address or mobile on it does not check out. A Twilio, VoIP or Google Voice number used as the mobile is a common cause.",
+    fix: "If your business has an EIN, this is the wrong registration: get in touch and we will move you to the one with an EIN. If it really has none, check that your name, email, address and mobile are your own and spelled right, then send it again.",
+  },
+  "30914": {
+    title: "Your texts have to go out under your own name",
+    what: "Without an EIN you are registered as yourself, so the carriers expect the description and the example messages to name you, the same way your registration does. A business name, trading name or nickname that does not match gets this refusal.",
+    fix: "Where the description and the examples say who is texting, use your own first and last name exactly as you registered them, then send it again.",
+  },
+  "30915": {
+    title: "The carriers think your business is a company, not a person",
+    what: "Registering without an EIN is only for someone trading as themselves. A name with LLC, Inc., Corp. or similar in it, or a website or public record that shows a registered company, gets this refusal.",
+    fix: "If your business is an LLC, a corporation or a partnership, it has an EIN and needs the other registration: get in touch and we will move you over. If you really trade as yourself, take any company name out, and make sure the first name, last name and email all belong to you.",
+  },
+  "30701": {
+    title: "Some of your details were not in a shape the carriers accept",
+    what: "One of the details we sent was refused before anyone looked at it. Usually that is an address the postal check could not match, an email that does not look real, a phone number in the wrong format, or an answer that was too long.",
+    fix: "Check your street, city, state, ZIP, email and mobile for typos, and write the address the way the post office does. If it comes back again, get in touch, because some of these can only be corrected on our side.",
+  },
+};
+
+/** The help for one carrier code on THIS registration: a sole proprietor's own entries first,
+ *  then the shared ones; every other tier, SMS_ERROR_HELP and nothing else. */
+function smsErrorHelp(code, soleProp) {
+  const c = String(code || "");
+  return (soleProp && SOLE_PROP_ERROR_HELP[c]) || SMS_ERROR_HELP[c];
+}
+
 /** ⚠️ TWILIO NAMES THE FIELD, AND THE FIELD NAME IS THE MOST USEFUL THING IN THE PAYLOAD.
  *  `fields: ["MESSAGE_FLOW"]` is what turns "your campaign was rejected" into "the box on
  *  your screen labelled How do people agree to be texted". Rendered as the label the builder
@@ -129,15 +176,16 @@ const SMS_ERROR_FIELD_LABEL = {
   BRAND_NAME: "Legal business name",
 };
 
-/** The rejection reasons, each with what it means and what to change. */
-function SmsErrorList({ errors }) {
+/** The rejection reasons, each with what it means and what to change. `soleProp`: the
+ *  registration is a sole proprietor's, so SOLE_PROP_ERROR_HELP is asked first (smsErrorHelp). */
+function SmsErrorList({ errors, soleProp }) {
   const list = (errors || []).filter(Boolean);
   if (!list.length) return null;
   return (
     <div style={{ margin: "0 0 12px", display: "grid", gap: 10 }}>
       {list.map((e, i) => {
         const code = String((e && e.error_code) || "");
-        const help = SMS_ERROR_HELP[code];
+        const help = smsErrorHelp(code, soleProp);
         const fields = (e && Array.isArray(e.fields) ? e.fields : [])
           .map((f) => SMS_ERROR_FIELD_LABEL[f] || f);
         return (
@@ -594,6 +642,219 @@ const SMS_TEXTAREA = {
   ...SMS_INPUT, minHeight: 92, lineHeight: 1.5, resize: "vertical", display: "block",
 };
 
+/* ── Texting WITHOUT an EIN: the sole-proprietor route (2026-10-27) ─────────────────────────────
+   Until this date a builder who answered "No" to the EIN question met a refusal box and nothing
+   else, because the carriers' no-tax-ID process (a Starter profile, a sole-proprietor bundle, a
+   SOLE_PROPRIETOR brand and a YES text to the owner's own mobile) was not built.
+
+   ⚠️ IT SHIPS DARK, AND THE SWITCH IS THE SERVER'S. portal-sms sends `soleProprietorAvailable`
+   from client_settings.sms_sole_prop (migration 342), which an operator flips per builder by SQL;
+   nothing on this screen can set it. While it is false (every builder, by default, and every
+   server from before 342, which sends no such key) a "No" still shows today's refusal box, word
+   for word, and nothing below it changes. A builder WITH an EIN never reaches any of this: every
+   one of their screens is the markup that was here before, untouched, not a re-creation of it.
+
+   What the carriers allow such a registration (Twilio's sole-proprietor guide): ONE number, about
+   3,000 texts a day across the US and 1,000 a day to T-Mobile, and a "reply YES" text from
+   +1 (915) 278-2000 that has to be answered within 24 hours, with the whole check done inside 30
+   days or the brand can be expired. The server sends those numbers as `soleProprietorLimits`; the
+   copy below reads them from there and falls back to the same values for a server that sends a
+   flag but no limits. */
+const SMS_SOLE_PROP_LIMITS = { numbers: 1, dailyTMobile: 1000, dailyTotalApprox: 3000, otpSender: "+19152782000", otpHours: 24, verifyWithinDays: 30 };
+function smsSoleLimits(data) {
+  const l = (data && data.soleProprietorLimits) || {};
+  const pick = (k) => (l[k] != null && l[k] !== "" ? l[k] : SMS_SOLE_PROP_LIMITS[k]);
+  return {
+    numbers: Number(pick("numbers")), dailyTMobile: Number(pick("dailyTMobile")),
+    dailyTotalApprox: Number(pick("dailyTotalApprox")), otpSender: String(pick("otpSender")),
+    otpHours: Number(pick("otpHours")), verifyWithinDays: Number(pick("verifyWithinDays")),
+  };
+}
+/** 3000 → "3,000"; the way a sentence writes a count. */
+function smsCount(n) {
+  return Number.isFinite(n) ? n.toLocaleString("en-US") : String(n);
+}
+
+/** The registration is with the carriers, they APPROVED it, and Twilio's YES text to the owner's
+ *  mobile is still unanswered. portal-sms keeps a sole proprietor in brand_pending until
+ *  identityStatus reads VERIFIED (brandReadyForCampaign), so this is the one brand_pending where
+ *  the next move is the BUILDER's, and the "nothing for you to do" line must not show. Null-safe:
+ *  it is asked above the view's early return, before `data` exists. VETTED_VERIFIED counts as a
+ *  YES too, as it does on the server (twilioTrustHub.ts brandReadyForCampaign, soleProp.ts otpWaiting). */
+function smsOtpWaiting(data) {
+  const identity = String(data && data.identityStatus || "").toUpperCase();
+  return !!data && data.status === "brand_pending" && data.brandTier === "sole_proprietor"
+    && String(data.brandStatus || "").toUpperCase() === "APPROVED"
+    && identity !== "VERIFIED" && identity !== "VETTED_VERIFIED";
+}
+
+/** What a sole proprietor's Save and Submit send as `intake`.
+ *
+ *  ⚠️ BUILT FROM SCRATCH, NOT `{ ...form }`. The form state is shared with the EIN branch, so a
+ *  builder who typed an EIN under "Yes" and then switched to "No" would otherwise post that EIN
+ *  with a registration that must not have one. The legal business name of a sole proprietor IS
+ *  the person: "First Last", trimmed and single-spaced, the same rule as soleProprietorBrandName
+ *  on the server (Twilio refuses a campaign whose brand is not the person's own name, 30914). */
+function smsSolePropIntake(form) {
+  const tidy = (v) => String(v == null ? "" : v).trim().replace(/\s+/g, " ");
+  const first = tidy(form.repFirstName), last = tidy(form.repLastName);
+  return {
+    legalBusinessName: [first, last].filter(Boolean).join(" "),
+    businessIndustry: form.businessIndustry || "CONSTRUCTION",
+    websiteUrl: tidy(form.websiteUrl),
+    street: form.street, city: form.city, region: form.region, postalCode: form.postalCode,
+    isoCountry: form.isoCountry === "CA" ? "CA" : "US",
+    repFirstName: first, repLastName: last, repEmail: tidy(form.repEmail),
+    repPhone: smsE164(form.repPhone),
+  };
+}
+
+/** The box a "No" shows once the route is switched on for this builder: who it is for, what it
+ *  allows, and the YES text, BEFORE they fill anything in. Same place and shape as the refusal it
+ *  replaces, so the answer still lands the moment they press No. */
+function SmsSolePropIntro({ limits }) {
+  const lim = limits;
+  const numbers = lim.numbers === 1 ? "One phone number" : `${smsCount(lim.numbers)} phone numbers`;
+  return (
+    <div data-ss-sms-sole-intro="" style={{
+      border: "1px solid #BFDBFE", background: "#EFF6FF", borderRadius: 8,
+      padding: "11px 13px", margin: "0 0 14px",
+    }}>
+      <div style={{ fontSize: 13, color: "#1E3A8A", fontWeight: 700, marginBottom: 5 }}>
+        Texting without an EIN
+      </div>
+      <div style={{ fontSize: 12.5, color: "#1E3A8A", lineHeight: 1.55 }}>
+        This is for a person running a business under their own name: no EIN, not an LLC or a
+        corporation, and based in the US or Canada. You register as yourself, so the carriers
+        see your own name on it.
+      </div>
+      <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12.5, color: "#1E3A8A", lineHeight: 1.6 }}>
+        <li>{numbers}, and about {smsCount(lim.dailyTotalApprox)} texts a day, with no more than{" "}
+          {smsCount(lim.dailyTMobile)} a day to T-Mobile customers.</li>
+        <li>After the paid step, Twilio texts your mobile from{" "}
+          <strong>{formatPhone(lim.otpSender)}</strong> asking you to reply YES. Reply within{" "}
+          {smsCount(lim.otpHours)} hours.</li>
+      </ul>
+    </div>
+  );
+}
+
+/** The no-EIN form: the person, their own mobile, an address, and the two policy pages. No EIN,
+ *  business type, legal business name, job title or role, because a sole proprietor's Starter
+ *  profile has none of them (Twilio ISV sole-prop guide, step 1). The website is optional for
+ *  them; the privacy and terms pages are not (Ahsan 2026-10-27: they bring their own). Country is
+ *  here because the route is open to Canada as well as the US, and an address with no way to say
+ *  so would make the box above a promise the form could not keep. */
+function SmsSolePropFields({ form, setForm, urls, setUrls, readOnly }) {
+  const ca = form.isoCountry === "CA";
+  return (
+    <div data-ss-sms-sole-form="">
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
+        <SmsField label="Legal first name" hint="Your own name, as on your ID. The carriers register you under it, so no nicknames or business names.">
+          <input style={SMS_INPUT} value={form.repFirstName} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, repFirstName: e.target.value })} />
+        </SmsField>
+        <SmsField label="Legal last name">
+          <input style={SMS_INPUT} value={form.repLastName} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, repLastName: e.target.value })} />
+        </SmsField>
+        <SmsField label="Email" hint="A personal address is fine. Use one you check, because Twilio may write to it about the registration.">
+          <input style={SMS_INPUT} value={form.repEmail} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, repEmail: e.target.value })} />
+        </SmsField>
+        <SmsField label="Your mobile number" hint="Your own mobile, not a Twilio, VoIP or Google Voice number. Twilio texts it asking you to reply YES.">
+          {/* formatPhone hoists from 12-shell.jsx; see the same note on the EIN form below. */}
+          <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="(555) 123-4567"
+            onChange={(e) => setForm({ ...form, repPhone: formatPhone(e.target.value) })} />
+        </SmsField>
+
+        <SmsField label="Street address" hint="A P.O. box is fine." wide>
+          <input style={SMS_INPUT} value={form.street} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, street: e.target.value })} />
+        </SmsField>
+        <SmsField label="City">
+          <input style={SMS_INPUT} value={form.city} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, city: e.target.value })} />
+        </SmsField>
+        <SmsField label={ca ? "Province / postal code" : "State / ZIP"}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={{ ...SMS_INPUT, width: 70 }} value={form.region} disabled={readOnly} placeholder={ca ? "ON" : "TX"} maxLength={2}
+              onChange={(e) => setForm({ ...form, region: e.target.value.toUpperCase() })} />
+            <input style={SMS_INPUT} value={form.postalCode} disabled={readOnly} placeholder={ca ? "K1A 0B1" : "78701"}
+              onChange={(e) => setForm({ ...form, postalCode: e.target.value })} />
+          </div>
+        </SmsField>
+        <SmsField label="Country">
+          <select style={SMS_INPUT} value={ca ? "CA" : "US"} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, isoCountry: e.target.value })}>
+            <option value="US">United States</option>
+            <option value="CA">Canada</option>
+          </select>
+        </SmsField>
+
+        <SmsField label="Website (optional)" hint="Leave it blank if you don't have one. If you put one in, it has to be live and public." wide>
+          <input style={SMS_INPUT} value={form.websiteUrl} disabled={readOnly} placeholder="https://"
+            onChange={(e) => setForm({ ...form, websiteUrl: e.target.value })} />
+        </SmsField>
+        <SmsField label="Privacy policy page" hint="Required, website or not: a public page the carriers can open.">
+          <input style={SMS_INPUT} value={urls.privacyPolicyUrl} disabled={readOnly} placeholder="https://"
+            onChange={(e) => setUrls({ ...urls, privacyPolicyUrl: e.target.value })} />
+        </SmsField>
+        <SmsField label="Terms page" hint="Required too, and it should cover texting.">
+          <input style={SMS_INPUT} value={urls.termsUrl} disabled={readOnly} placeholder="https://"
+            onChange={(e) => setUrls({ ...urls, termsUrl: e.target.value })} />
+        </SmsField>
+      </div>
+    </div>
+  );
+}
+
+/** "Reply YES to Twilio's text": the one brand_pending card that asks the builder to DO something
+ *  (smsOtpWaiting). Twilio sends the first text by itself when the brand turns APPROVED; any later
+ *  one has to be asked for (POST BrandRegistrations/{BN}/SmsOtp), which is what "Text me again"
+ *  does through portal-sms resend_otp. The server holds a 10-minute cooldown and says when the
+ *  next ask is allowed in `otpResendAvailableAt`; the button stays greyed until then and says the
+ *  time, and the view re-renders at that moment by itself (the timer in SmsMessagingView), so it
+ *  never needs a refresh to come back. */
+function SmsOtpCard({ data, limits, busy, readOnly, card, onResend }) {
+  const lim = limits;
+  const at = Date.parse(data.otpResendAvailableAt || "");
+  const cooling = Number.isFinite(at) && at > Date.now();
+  const when = cooling ? new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+  return (
+    <div style={card} data-ss-sms-otp="">
+      <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Reply YES to Twilio&rsquo;s text</h4>
+      <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        The carriers approved you. To finish, Twilio has texted your mobile from{" "}
+        <strong>{formatPhone(lim.otpSender)}</strong> asking you to confirm. Reply{" "}
+        <strong>YES</strong> to that text within {smsCount(lim.otpHours)} hours of getting it. This
+        page moves on by itself once you have.
+      </p>
+      <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }}>
+        This has to be done within {smsCount(lim.verifyWithinDays)} days of registering. After that
+        the carriers can cancel the registration, and it has to be started over.
+      </div>
+      {readOnly ? (
+        <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+          Only an owner, or an admin with billing access, can ask Twilio for the text again.
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy || cooling} data-ss-sms-otp-resend="" onClick={onResend}
+            style={{ background: busy || cooling ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: busy || cooling ? "default" : "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
+            {busy ? "Sending…" : "Text me again"}
+          </button>
+          <span data-ss-sms-otp-when="" style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+            {cooling
+              ? `Sent. You can ask for another one at ${when}.`
+              : `Didn't get it, or it's been more than ${smsCount(lim.otpHours)} hours? Ask for a new one.`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN. This file's siblings guard with
   // early returns and a hook added below one white-screens the page on React #310 — which
@@ -602,7 +863,22 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   const [data, setData] = useState(() => ssCacheGet("portal-sms", "status", clientId));
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [hasEin, setHasEin] = useState(true);
+  // ⚠️ SEEDED FROM THE SERVER'S TIER, UNTIL THE PERSON ANSWERS (2026-10-27). This was a bare
+  // `true` and never looked at `brandTier`, so a builder registering WITHOUT an EIN came back the
+  // next day to the EIN form, and its Save would have quietly re-filed them as a company
+  // (save_intake sets brand_tier from this answer). The cache paints a revisit with the right
+  // answer synchronously; refresh() keeps it in step — but only while `einPicked` is false: once
+  // they have pressed Yes or No on this page, their answer is theirs and no status read (one runs
+  // after every action and every minute while pending) may flip it back mid-form. For a builder
+  // with an EIN, brandTier is never "sole_proprietor", so this is the old `true` exactly.
+  const [hasEin, setHasEin] = useState(() => {
+    const c = ssCacheGet("portal-sms", "status", clientId);
+    return !(c && c.brandTier === "sole_proprietor");
+  });
+  const einPicked = useRef(false);
+  // Re-renders the view at the moment the "Text me again" cooldown ends (SmsOtpCard). Only the
+  // setter is used: the render reads the clock itself, this just asks for one.
+  const [, setClockTick] = useState(0);
   const [form, setForm] = useState({
     legalBusinessName: "", ein: "", businessType: "Limited Liability Corporation",
     businessIndustry: "CONSTRUCTION", websiteUrl: "", street: "", city: "", region: "",
@@ -634,6 +910,9 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       setData(d);
       ssCachePut("portal-sms", "status", clientId, d);
       setErr(null);
+      // The EIN answer follows the registration's tier until the person answers it themselves
+      // (see `hasEin` above). A server that sends no brandTier reads as "has an EIN", as before.
+      if (!einPicked.current) setHasEin(d.brandTier !== "sole_proprietor");
       // Seed the form from the echo so a returning builder sees what they typed.
       if (d.intake && d.intake.legalBusinessName) {
         setForm((f) => ({ ...f, legalBusinessName: d.intake.legalBusinessName, websiteUrl: d.intake.websiteUrl || "" }));
@@ -680,13 +959,24 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   // card below is the only way on, so the "nothing for you to do" line must not sit above it.
   const adoptUnfinished = !!data && data.status !== "campaign_approved" && SMS_ADOPT_STATES.includes(data.status)
     && !!smsAdoptNumber(data.numbers);
-  const waitingOnYou = data && (data.status === "profile_pending" || adoptUnfinished);
+  // A sole proprietor whose brand is approved but whose YES text is unanswered (smsOtpWaiting) is
+  // the builder's move too: the Reply-YES card is what moves it on. It stays `pending`, so the
+  // minute poll still picks up the VERIFIED the moment Twilio reports it.
+  const waitingOnYou = data && (data.status === "profile_pending" || adoptUnfinished || smsOtpWaiting(data));
   const pending = data && ["profile_pending", "brand_pending", "campaign_pending", "number_pending"].includes(data.status);
   useEffect(() => {
     if (!pending) return undefined;
     const t = setInterval(() => { refresh(); }, 60000);
     return () => clearInterval(t);
   }, [pending, refresh]);
+  // One re-render when the "Text me again" cooldown runs out, so the button comes back on its own.
+  const otpResendAt = data ? data.otpResendAvailableAt : null;
+  useEffect(() => {
+    const ms = otpResendAt ? Date.parse(otpResendAt) - Date.now() : NaN;
+    if (!(ms > 0)) return undefined;
+    const t = setTimeout(() => setClockTick((n) => n + 1), Math.min(ms + 250, 2147483000));
+    return () => clearTimeout(t);
+  }, [otpResendAt]);
 
   const act = async (fn) => {
     if (busy) return;
@@ -701,6 +991,14 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   const status = data.status || "none";
   const copyFor = SMS_STATE_COPY[status] || SMS_STATE_COPY.none;
   const readOnly = !canEdit;
+  // The no-EIN form shows only for a "No" on a builder the route is switched on for. Everything
+  // else (a "Yes", or a "No" with the switch off) renders exactly what it did before 2026-10-27.
+  const soleForm = hasEin === false && !!data.soleProprietorAvailable;
+  const soleLimits = smsSoleLimits(data);
+  const otpWait = smsOtpWaiting(data);
+  // The intake every Save, Submit and Resubmit sends. With an EIN it is the expression these three
+  // buttons always sent; without one it is rebuilt clean (smsSolePropIntake).
+  const intakeOut = () => (soleForm ? smsSolePropIntake(form) : { ...form, repPhone: smsE164(form.repPhone) });
 
   const card = {
     background: "#fff", border: "1px solid #E2E8F0", borderRadius: 12, padding: 18, marginBottom: 14,
@@ -734,7 +1032,9 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           </button>
         </div>
         <SmsSteps status={status} />
-        <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>{copyFor.blurb}</p>
+        <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+          {otpWait ? "The carriers approved you. One last step is yours: reply YES to the text Twilio sent your mobile." : copyFor.blurb}
+        </p>
 
         {data.needsAttention && data.attentionNote && (
           <div style={{ marginTop: 12, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#991B1B" }}>
@@ -746,7 +1046,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         {Array.isArray(data.errors) && data.errors.length > 0 && (
           <ul style={{ marginTop: 10, paddingLeft: 18, fontSize: 12, color: "#B91C1C" }}>
             {data.errors.slice(0, 5).map((e, i) => {
-              const help = SMS_ERROR_HELP[String((e && e.error_code) || "")];
+              const help = smsErrorHelp(e && e.error_code, data.brandTier === "sole_proprietor");
               return <li key={i} style={{ marginBottom: 3 }}>{help ? help.title : ((e && (e.description || e.message)) || String(e))}</li>;
             })}
           </ul>
@@ -782,7 +1082,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         />
       )}
 
-      {["none", "intake", "aup_pending", "ready", "brand_failed"].includes(status) && (
+      {["none", "intake", "aup_pending", "ready", "brand_failed"].includes(status) && !soleForm && (
         <div style={card}>
           <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Two things we cannot check for you</h4>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#334155", lineHeight: 1.7 }}>
@@ -791,6 +1091,24 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
               the most expensive one on the list: it fails the paid step.</li>
             <li><strong>If your EIN was issued in the last 90 days, wait.</strong> It takes that
               long to reach the databases the carriers check, and registering early just fails.</li>
+          </ul>
+        </div>
+      )}
+      {/* The same card for a registration WITHOUT an EIN. The one above talks about the IRS
+          letter and the 90-day wait, which mean nothing to someone who has no EIN; these are the
+          two facts that fail THEIR paid step and that only they can know. The three-uses cap on
+          a mobile is TCR's, across every company that has ever registered it (Twilio's
+          sole-prop guide), so a number used up elsewhere is refused for a reason we cannot see. */}
+      {["none", "intake", "aup_pending", "ready", "brand_failed"].includes(status) && soleForm && (
+        <div style={card} data-ss-sms-sole-cannot-check="">
+          <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Two things we cannot check for you</h4>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#334155", lineHeight: 1.7 }}>
+            <li><strong>That your business really has no EIN.</strong> If it has one (every LLC
+              and corporation does), the carriers turn this registration down and the fee is not
+              refunded. Answer &ldquo;Yes&rdquo; above instead.</li>
+            <li><strong>That the mobile is your own, and has not been used too often.</strong> One
+              mobile can be used for at most three registrations like this, ever, with any company.
+              A number that has run out fails the paid step.</li>
           </ul>
         </div>
       )}
@@ -809,7 +1127,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             hint="Almost every LLC, Inc. or Corp. has one. If you file taxes under your own Social Security number instead, answer no.">
             <div style={{ display: "flex", gap: 8 }}>
               {[["yes", true], ["no", false]].map(([lbl, v]) => (
-                <button key={lbl} type="button" disabled={readOnly} onClick={() => setHasEin(v)}
+                <button key={lbl} type="button" disabled={readOnly} onClick={() => { einPicked.current = true; setHasEin(v); }}
                   style={{
                     padding: "8px 18px", borderRadius: 8, cursor: readOnly ? "default" : "pointer",
                     fontSize: 13, fontWeight: 700, fontFamily: "inherit",
@@ -822,11 +1140,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           </SmsField>
 
           {/* ⚠️ SAY IT THE MOMENT THEY ANSWER NO, not after they have filled fifteen fields.
-              The server refuses this intake (validateIntake), so without this the builder
-              completes the whole form and is turned away at Save — the worst possible place
-              to learn it. Sole proprietor needs a different Twilio chain that is not built:
-              a Starter profile, no EIN fields, and the mobile carried on the brand. */}
-          {hasEin === false && (
+              While the no-EIN route is switched OFF for this builder (every builder unless an
+              operator has set client_settings.sms_sole_prop, migration 342), the server refuses
+              this intake (portal-sms save_intake), so without this the builder completes the
+              whole form and is turned away at Save — the worst possible place to learn it. This
+              box and everything under it are byte-for-byte what they were before the route was
+              built (2026-10-27); with the switch ON, the box below takes its place instead. */}
+          {hasEin === false && !data.soleProprietorAvailable && (
             <div style={{
               border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 8,
               padding: "11px 13px", margin: "0 0 14px",
@@ -844,89 +1164,99 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             </div>
           )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
-            <SmsField label="Legal business name" hint="Exactly as it appears on your IRS letter." wide>
-              <input style={SMS_INPUT} value={form.legalBusinessName} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, legalBusinessName: e.target.value })} />
-            </SmsField>
-            {hasEin && (
-              <SmsField label="EIN" hint="Nine digits, like 12-3456789.">
-                <input style={SMS_INPUT} value={form.ein} disabled={readOnly} placeholder="12-3456789"
-                  onChange={(e) => setForm({ ...form, ein: e.target.value })} />
-              </SmsField>
-            )}
-            {hasEin && (
-              <SmsField label="Business type">
-                <select style={SMS_INPUT} value={form.businessType} disabled={readOnly}
-                  onChange={(e) => setForm({ ...form, businessType: e.target.value })}>
-                  {(data.businessTypes || []).map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </SmsField>
-            )}
-            <SmsField label="Website" hint="Must be live and public." wide>
-              <input style={SMS_INPUT} value={form.websiteUrl} disabled={readOnly} placeholder="https://"
-                onChange={(e) => setForm({ ...form, websiteUrl: e.target.value })} />
-            </SmsField>
-            <SmsField label="Privacy policy page">
-              <input style={SMS_INPUT} value={urls.privacyPolicyUrl} disabled={readOnly} placeholder="https://"
-                onChange={(e) => setUrls({ ...urls, privacyPolicyUrl: e.target.value })} />
-            </SmsField>
-            <SmsField label="Terms page">
-              <input style={SMS_INPUT} value={urls.termsUrl} disabled={readOnly} placeholder="https://"
-                onChange={(e) => setUrls({ ...urls, termsUrl: e.target.value })} />
-            </SmsField>
+          {soleForm && <SmsSolePropIntro limits={soleLimits} />}
 
-            <SmsField label="Street address" wide>
-              <input style={SMS_INPUT} value={form.street} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, street: e.target.value })} />
-            </SmsField>
-            <SmsField label="City">
-              <input style={SMS_INPUT} value={form.city} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, city: e.target.value })} />
-            </SmsField>
-            <SmsField label="State / ZIP">
-              <div style={{ display: "flex", gap: 8 }}>
-                <input style={{ ...SMS_INPUT, width: 70 }} value={form.region} disabled={readOnly} placeholder="TX" maxLength={2}
-                  onChange={(e) => setForm({ ...form, region: e.target.value.toUpperCase() })} />
-                <input style={SMS_INPUT} value={form.postalCode} disabled={readOnly} placeholder="78701"
-                  onChange={(e) => setForm({ ...form, postalCode: e.target.value })} />
+          {soleForm && <SmsSolePropFields form={form} setForm={setForm} urls={urls} setUrls={setUrls} readOnly={readOnly} />}
+
+          {/* Everything from here to the problems list is the form as it always was, for a "Yes"
+              and for a "No" with the switch off. Wrapped, not edited. */}
+          {!soleForm && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
+                <SmsField label="Legal business name" hint="Exactly as it appears on your IRS letter." wide>
+                  <input style={SMS_INPUT} value={form.legalBusinessName} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, legalBusinessName: e.target.value })} />
+                </SmsField>
+                {hasEin && (
+                  <SmsField label="EIN" hint="Nine digits, like 12-3456789.">
+                    <input style={SMS_INPUT} value={form.ein} disabled={readOnly} placeholder="12-3456789"
+                      onChange={(e) => setForm({ ...form, ein: e.target.value })} />
+                  </SmsField>
+                )}
+                {hasEin && (
+                  <SmsField label="Business type">
+                    <select style={SMS_INPUT} value={form.businessType} disabled={readOnly}
+                      onChange={(e) => setForm({ ...form, businessType: e.target.value })}>
+                      {(data.businessTypes || []).map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </SmsField>
+                )}
+                <SmsField label="Website" hint="Must be live and public." wide>
+                  <input style={SMS_INPUT} value={form.websiteUrl} disabled={readOnly} placeholder="https://"
+                    onChange={(e) => setForm({ ...form, websiteUrl: e.target.value })} />
+                </SmsField>
+                <SmsField label="Privacy policy page">
+                  <input style={SMS_INPUT} value={urls.privacyPolicyUrl} disabled={readOnly} placeholder="https://"
+                    onChange={(e) => setUrls({ ...urls, privacyPolicyUrl: e.target.value })} />
+                </SmsField>
+                <SmsField label="Terms page">
+                  <input style={SMS_INPUT} value={urls.termsUrl} disabled={readOnly} placeholder="https://"
+                    onChange={(e) => setUrls({ ...urls, termsUrl: e.target.value })} />
+                </SmsField>
+
+                <SmsField label="Street address" wide>
+                  <input style={SMS_INPUT} value={form.street} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, street: e.target.value })} />
+                </SmsField>
+                <SmsField label="City">
+                  <input style={SMS_INPUT} value={form.city} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, city: e.target.value })} />
+                </SmsField>
+                <SmsField label="State / ZIP">
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input style={{ ...SMS_INPUT, width: 70 }} value={form.region} disabled={readOnly} placeholder="TX" maxLength={2}
+                      onChange={(e) => setForm({ ...form, region: e.target.value.toUpperCase() })} />
+                    <input style={SMS_INPUT} value={form.postalCode} disabled={readOnly} placeholder="78701"
+                      onChange={(e) => setForm({ ...form, postalCode: e.target.value })} />
+                  </div>
+                </SmsField>
               </div>
-            </SmsField>
-          </div>
 
-          <h4 style={{ margin: "14px 0 10px", fontSize: 14 }}>Who the carriers can contact</h4>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
-            <SmsField label="First name">
-              <input style={SMS_INPUT} value={form.repFirstName} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repFirstName: e.target.value })} />
-            </SmsField>
-            <SmsField label="Last name">
-              <input style={SMS_INPUT} value={form.repLastName} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repLastName: e.target.value })} />
-            </SmsField>
-            <SmsField label="Work email" hint="Must be on your own company domain — not gmail, yahoo or outlook.">
-              <input style={SMS_INPUT} value={form.repEmail} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repEmail: e.target.value })} />
-            </SmsField>
-            <SmsField label="Mobile number" hint={hasEin ? "In case the carriers need to reach you." : "You will get a text with a code you must reply to within 24 hours."}>
-              {/* formatPhone lives in 12-shell.jsx, a LATER part — but the parts are
-                  concatenated into one IIFE and it is a `function` declaration, so it hoists
-                  across the whole scope. (The "part order is load-bearing" rule in CLAUDE.md
-                  is about `const`, which does not hoist. This is the exception.) */}
-              <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="(555) 123-4567"
-                onChange={(e) => setForm({ ...form, repPhone: formatPhone(e.target.value) })} />
-            </SmsField>
-            <SmsField label="Job title">
-              <input style={SMS_INPUT} value={form.repBusinessTitle} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repBusinessTitle: e.target.value })} />
-            </SmsField>
-            <SmsField label="Role">
-              <select style={SMS_INPUT} value={form.repJobPosition} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repJobPosition: e.target.value })}>
-                {(data.jobPositions || []).map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </SmsField>
-          </div>
+              <h4 style={{ margin: "14px 0 10px", fontSize: 14 }}>Who the carriers can contact</h4>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
+                <SmsField label="First name">
+                  <input style={SMS_INPUT} value={form.repFirstName} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repFirstName: e.target.value })} />
+                </SmsField>
+                <SmsField label="Last name">
+                  <input style={SMS_INPUT} value={form.repLastName} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repLastName: e.target.value })} />
+                </SmsField>
+                <SmsField label="Work email" hint="Must be on your own company domain — not gmail, yahoo or outlook.">
+                  <input style={SMS_INPUT} value={form.repEmail} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repEmail: e.target.value })} />
+                </SmsField>
+                <SmsField label="Mobile number" hint={hasEin ? "In case the carriers need to reach you." : "You will get a text with a code you must reply to within 24 hours."}>
+                  {/* formatPhone lives in 12-shell.jsx, a LATER part — but the parts are
+                      concatenated into one IIFE and it is a `function` declaration, so it hoists
+                      across the whole scope. (The "part order is load-bearing" rule in CLAUDE.md
+                      is about `const`, which does not hoist. This is the exception.) */}
+                  <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="(555) 123-4567"
+                    onChange={(e) => setForm({ ...form, repPhone: formatPhone(e.target.value) })} />
+                </SmsField>
+                <SmsField label="Job title">
+                  <input style={SMS_INPUT} value={form.repBusinessTitle} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repBusinessTitle: e.target.value })} />
+                </SmsField>
+                <SmsField label="Role">
+                  <select style={SMS_INPUT} value={form.repJobPosition} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repJobPosition: e.target.value })}>
+                    {(data.jobPositions || []).map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </SmsField>
+              </div>
+            </>
+          )}
 
           {problems.length > 0 && (
             <ul style={{ margin: "6px 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
@@ -938,7 +1268,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             <button type="button" disabled={busy}
               onClick={() => act(async () => {
                 const d = await call("save_intake", {
-                  hasEin, intake: { ...form, repPhone: smsE164(form.repPhone) },
+                  hasEin, intake: intakeOut(),
                   privacyPolicyUrl: urls.privacyPolicyUrl, termsUrl: urls.termsUrl,
                 }).catch((e) => { throw e; });
                 void d;
@@ -990,7 +1320,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
               <button type="button" disabled={busy || smsCopyProblems(copy).length > 0}
                 onClick={() => act(async () => {
                   await call("save_copy", { copy });
-                  await call("advance", { intake: { ...form, repPhone: smsE164(form.repPhone) }, copy });
+                  await call("advance", { intake: intakeOut(), copy });
                 })}
                 style={{ background: smsCopyProblems(copy).length > 0 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", cursor: smsCopyProblems(copy).length > 0 ? "default" : "pointer", fontWeight: 800, fontSize: 14, fontFamily: "inherit" }}>
                 {busy ? "Submitting…" : "Submit to the carriers"}
@@ -1057,6 +1387,14 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         </div>
       )}
 
+      {/* A sole proprietor's brand is approved and waiting on their YES (smsOtpWaiting). Without
+          this card the screen said "the carriers are checking your business" while the only
+          thing that could move it on was a text sitting unanswered on the builder's own phone. */}
+      {otpWait && (
+        <SmsOtpCard data={data} limits={soleLimits} busy={busy} readOnly={readOnly} card={card}
+          onResend={() => act(() => call("resend_otp"))} />
+      )}
+
       {/* Brand approved → the campaign goes next, same copy form. */}
       {status === "brand_approved" && !readOnly && (
         <div style={card}>
@@ -1096,7 +1434,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             after that it has to go through support.
           </p>
           <button type="button" disabled={busy || data.brandUpdatesLeft < 1}
-            onClick={() => act(() => call("advance", { intake: { ...form, repPhone: smsE164(form.repPhone) }, copy }))}
+            onClick={() => act(() => call("advance", { intake: intakeOut(), copy }))}
             style={{ background: data.brandUpdatesLeft < 1 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: data.brandUpdatesLeft < 1 ? "default" : "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
             Resubmit
           </button>
@@ -1123,7 +1461,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             charge for sending it again, and no limit on how many times you can.
           </p>
 
-          <SmsErrorList errors={data.errors} />
+          <SmsErrorList errors={data.errors} soleProp={data.brandTier === "sole_proprietor"} />
           {(data.errors || []).length === 0 && (
             <div style={{ margin: "0 0 12px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
               We are fetching the reasons from the carriers — press Refresh in a moment. If they

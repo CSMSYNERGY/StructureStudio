@@ -5228,7 +5228,428 @@ const SS_CLADDING_BASES = [
   ["pct_estimate_total", "pct estimate total"],
 ];
 
-function CladdingView({ viewingLabel = null, clientId = null }) {
+// ─── The library (migration 339; Carolyn's 10-26 call, Ahsan's answers 2026-10-27) ───
+// Cladding, Doors and Windows each carry a Library card above their own list: a search and a Browse
+// button over the StructureStudio templates (Ahsan 2026-10-27), where the builder imports templates,
+// renames or removes what they imported, and requests what is not there. A builder USES a template under their own name and may edit their
+// copy (a lap course, a door look, a window grid); only their copy changes. Their rows then pick
+// from these entries (the cladding table's dropdown, a door's "How it looks in 3D", a window's
+// grid), and an entry's edit moves every row on it (339 writes it through).
+//
+// Shown only with client_settings.library_beta on: the card reads the catalog first (joining the
+// same in-flight read as the list beside it, so it costs nothing) and asks for `library` only when
+// libraryBeta says yes. Asking with the flag off would answer 403, and every 4xx is an info row.
+//
+// Names here are prefixed ssLib / SsLib: portal/01..12 are ONE lexical scope once concatenated.
+const SS_LIB_NOUN = { cladding: "cladding", door: "door", window: "window" };
+const SS_LIB_DOOR_LOOKS = [
+  ["auto", "Use the door's photo"], ["plank", "Board-and-batten (built in 3D)"], ["zbrace", "Board-and-batten with a Z brace"],
+  ["xbrace", "Board-and-batten with an X brace"], ["rollup", "Roll-up / garage door"], ["american", "American (built in 3D)"],
+  ["basic", "Basic (built in 3D)"], ["classic", "Classic (built in 3D)"], ["dutch", "Dutch (built in 3D)"],
+];
+const SS_LIB_CLADDING_NAMES = { panel: "Panel Siding", lap: "7\" LP Lap Siding", vinyl: "4.5\" Vinyl Siding", batten: "Board & Batten", agpanel: "AG Panel" };
+const SS_LIB_REQ_STATUS = {
+  submitted: ["Sent", "#1D4ED8", "#DBEAFE"], in_progress: ["Being built", "#92400E", "#FEF3C7"], generating: ["Being built", "#92400E", "#FEF3C7"],
+  review: ["Being checked", "#92400E", "#FEF3C7"], ready: ["Ready", "#15803D", "#DCFCE7"], done: ["Ready", "#15803D", "#DCFCE7"],
+  refused: ["Not possible", "#B91C1C", "#FEE2E2"], failed: ["Didn't work", "#B91C1C", "#FEE2E2"], cancelled: ["Cancelled", "#475569", "#F1F5F9"],
+};
+// What a look IS, in words, for the line under an entry's name.
+function ssLibLookWords(category, look) {
+  const l = look || {};
+  if (category === "cladding") {
+    const base = SS_LIB_CLADDING_NAMES[l.profile] || l.profile || "Cladding";
+    return l.profile === "lap" && l.exposureIn != null ? `${base}, ${l.exposureIn} in boards` : base;
+  }
+  if (category === "door") return (SS_LIB_DOOR_LOOKS.find(([k]) => k === l.doorStyle) || [null, "Door"])[1];
+  if (l.liteRows == null) return "Standard grid (sized to the window)";
+  const n = Number(l.liteRows) * Number(l.liteCols);
+  return n < 2 ? "No grid" : `${n}-lite: ${l.liteRows} ${Number(l.liteRows) === 1 ? "row" : "rows"} of ${l.liteCols}`;
+}
+// A small drawing of a look: courses or grooves for cladding, the panel for a door, the grid for a
+// window. Not the 3D (that is the designer's job), just enough to tell entries apart at a glance.
+function SsLibPic({ category, look, size = 44 }) {
+  const l = look || {};
+  const w = size, h = Math.round(size * 0.82), stroke = "#334155";
+  const lines = [];
+  if (category === "cladding") {
+    const p = l.profile;
+    if (p === "lap" || p === "vinyl") {
+      const step = p === "vinyl" ? 4 : Math.max(4, Math.min(9, Number(l.exposureIn || 7)));
+      for (let y = step; y < h; y += step) lines.push(<line key={y} x1="0" y1={y} x2={w} y2={y} stroke="#64748B" strokeWidth={p === "vinyl" ? 0.8 : 1.2} />);
+    } else if (p === "batten") {
+      for (let x = 7; x < w; x += 9) lines.push(<rect key={x} x={x} y="0" width="2.2" height={h} fill="#64748B" />);
+    } else if (p === "agpanel") {
+      for (let x = 4; x < w; x += 8) lines.push(<path key={x} d={`M${x} 0V${h}`} stroke="#475569" strokeWidth="2.4" />);
+    } else {
+      for (let x = 6; x < w; x += 6) lines.push(<line key={x} x1={x} y1="0" x2={x} y2={h} stroke="#94A3B8" strokeWidth="0.8" />);
+    }
+    return <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" style={{ background: "#E2E8F0", borderRadius: 4, flexShrink: 0 }}>{lines}</svg>;
+  }
+  if (category === "window") {
+    const R = l.liteRows == null ? 2 : Number(l.liteRows), C = l.liteRows == null ? 2 : Number(l.liteCols);
+    for (let i = 1; i < R; i++) lines.push(<line key={"r" + i} x1="3" y1={3 + ((h - 6) * i) / R} x2={w - 3} y2={3 + ((h - 6) * i) / R} stroke={stroke} strokeWidth="1.2" strokeDasharray={l.liteRows == null ? "2 2" : null} />);
+    for (let j = 1; j < C; j++) lines.push(<line key={"c" + j} x1={3 + ((w - 6) * j) / C} y1="3" x2={3 + ((w - 6) * j) / C} y2={h - 3} stroke={stroke} strokeWidth="1.2" strokeDasharray={l.liteRows == null ? "2 2" : null} />);
+    return <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" style={{ flexShrink: 0 }}><rect x="2" y="2" width={w - 4} height={h - 4} fill="#F0F9FF" stroke={stroke} strokeWidth="2" />{lines}</svg>;
+  }
+  // A door: frame, then what the look puts in its panels.
+  const s = l.doorStyle, dw = Math.round(h * 0.62), x0 = (w - dw) / 2, mid = h * 0.42;
+  const mark = [];
+  if (s === "auto") mark.push(<path key="cam" d={`M${x0 + dw * 0.25} ${h * 0.55}h${dw * 0.5}v${h * 0.2}h${-dw * 0.5}z`} fill="#94A3B8" />);
+  if (s === "plank" || s === "zbrace" || s === "xbrace") for (let x = x0 + 4; x < x0 + dw - 2; x += 4) mark.push(<line key={x} x1={x} y1="3" x2={x} y2={h - 3} stroke="#94A3B8" strokeWidth="0.8" />);
+  if (s === "zbrace") mark.push(<path key="z" d={`M${x0 + 2} ${h - 4}L${x0 + dw - 2} 4`} stroke={stroke} strokeWidth="2" />);
+  if (s === "xbrace") mark.push(<path key="x" d={`M${x0 + 2} ${mid}L${x0 + dw - 2} ${h - 3}M${x0 + dw - 2} ${mid}L${x0 + 2} ${h - 3}`} stroke={stroke} strokeWidth="1.6" />);
+  if (s === "rollup") for (let y = 5; y < h - 2; y += 3.5) mark.push(<line key={y} x1={x0 + 1} y1={y} x2={x0 + dw - 1} y2={y} stroke="#64748B" strokeWidth="0.9" />);
+  if (s === "american" || s === "basic" || s === "classic" || s === "dutch") mark.push(<line key="m" x1={x0} y1={mid} x2={x0 + dw} y2={mid} stroke={stroke} strokeWidth="2" />);
+  if (s === "american") for (let k = 1; k <= 3; k++) mark.push(<line key={"p" + k} x1={x0 + (dw * k) / 4} y1={mid} x2={x0 + (dw * k) / 4} y2={h - 3} stroke={stroke} strokeWidth="2" />);
+  if (s === "classic") mark.push(<path key="cl" d={`M${x0 + 3} ${mid + 2}L${x0 + dw - 3} ${h - 4}M${x0 + dw - 3} ${mid + 2}L${x0 + 3} ${h - 4}M${x0 + dw / 2} ${mid * 0.35}l${dw * 0.18} ${mid * 0.25}l${-dw * 0.18} ${mid * 0.25}l${-dw * 0.18} ${-mid * 0.25}z`} stroke={stroke} strokeWidth="1.4" fill="none" />);
+  if (s === "dutch") mark.push(<rect key="v" x={x0 + dw * 0.3} y={h * 0.62} width={dw * 0.4} height={h * 0.18} fill="#334155" />);
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" style={{ flexShrink: 0 }}>
+      <rect x={x0} y="2" width={dw} height={h - 4} fill="#FEF3C7" stroke={stroke} strokeWidth="2" />{mark}
+    </svg>
+  );
+}
+
+// The look editor for one entry (or a template being copied): the course on lap, the built look on a
+// door, the grid on a window. Cladding other than lap has nothing to edit but its name.
+function SsLibLookEdit({ category, look, onChange }) {
+  const l = look || {};
+  if (category === "cladding") {
+    if (l.profile !== "lap") return null;
+    return (
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#475569" }}>
+        Board size (in)
+        <input type="number" min="3" max="12" step="0.25" value={l.exposureIn == null ? "" : l.exposureIn} placeholder="7"
+          onChange={(e) => onChange(e.target.value === "" ? { profile: "lap" } : { profile: "lap", exposureIn: Number(e.target.value) })}
+          style={{ ...S.input, width: 80 }} />
+      </label>
+    );
+  }
+  if (category === "door") {
+    return (
+      <select value={l.doorStyle || "auto"} onChange={(e) => onChange({ doorStyle: e.target.value })} style={{ ...S.input, width: "auto", minWidth: 0 }}>
+        {SS_LIB_DOOR_LOOKS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}
+      </select>
+    );
+  }
+  const R = l.liteRows == null ? "" : String(l.liteRows), C = l.liteCols == null ? "1" : String(l.liteCols);
+  const nums = [1, 2, 3, 4, 5, 6, 7, 8];
+  return (
+    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+      <select value={R} onChange={(e) => onChange(e.target.value === "" ? {} : { liteRows: Number(e.target.value), liteCols: Number(C) })} style={{ ...S.input, width: "auto", minWidth: 0 }}>
+        <option value="">Standard grid</option>
+        {nums.map((n) => <option key={n} value={String(n)}>{n} {n === 1 ? "row" : "rows"}</option>)}
+      </select>
+      {R !== "" && <>
+        <span style={{ color: "#64748B" }}>×</span>
+        <select value={C} onChange={(e) => onChange({ liteRows: Number(R), liteCols: Number(e.target.value) })} style={{ ...S.input, width: "auto", minWidth: 0 }}>
+          {nums.map((n) => <option key={n} value={String(n)}>{n} across</option>)}
+        </select>
+      </>}
+    </span>
+  );
+}
+
+function SsLibrarySection({ category, viewingLabel = null, clientId = null, onChanged = null }) {
+  // Hooks first, every one of them, above every early return (React #310 otherwise).
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [on, setOn] = useState(null);           // null = still asking the catalog; false = flag off
+  const [lib, setLib] = useState(null);         // { templates, entries, requests, requestPrice }
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [browse, setBrowse] = useState(false);
+  const [q, setQ] = useState("");
+  const [adding, setAdding] = useState(null);   // { template, name, look }
+  const [editing, setEditing] = useState(null); // { id, name, look }
+  const [reqOpen, setReqOpen] = useState(false);
+  const [reqDraft, setReqDraft] = useState(null);
+  const seeded = useRef(false);
+  const rootRef = useRef(null);
+  const noun = SS_LIB_NOUN[category];
+
+  const call = async (body) => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped(body) });
+    if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    return data;
+  };
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const cat = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (!cat || cat.error || !cat.data || cat.data.libraryBeta !== true) { setOn(false); return; }
+    setOn(true);
+    try {
+      let d = await call({ action: "library" });
+      // First open: copy in what the builder uses today, so their rows keep working (Ahsan
+      // 2026-10-27). Once only, and only while the library is empty; it creates nothing twice.
+      if (!seeded.current && !(d.entries || []).length) {
+        seeded.current = true;
+        try { await call({ action: "library_seed_mine" }); d = await call({ action: "library" }); if (onChanged) onChanged(); }
+        catch (_s) { /* a view-only login cannot seed; the empty library says so below */ }
+      }
+      setLib(d);
+    } catch (e) { setMsg({ err: e.message }); }
+  };
+  useEffect(() => { load(); }, []);
+  // "Find more in the library..." in a door's or a window's look picker opens this card.
+  useEffect(() => {
+    const open = (ev) => {
+      if (!ev || !ev.detail || ev.detail.category !== category) return;
+      setBrowse(true);
+      if (rootRef.current) rootRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+    window.addEventListener("ss:library-open", open);
+    return () => window.removeEventListener("ss:library-open", open);
+  }, [category]);
+
+  // Nothing until the catalog has said the flag is on, so a builder without the library never sees a
+  // card appear and then go (it did, with a loading bar, until 2026-10-27).
+  if (on !== true) return null;
+  if (!lib) {
+    return <div style={S.card} ref={rootRef}><div style={S.h2}>Library</div>{msg && msg.err ? <div style={S.err}>{msg.err}</div> : <SkelBar />}</div>;
+  }
+
+  const mine = (lib.entries || []).filter((e) => e.category === category);
+  const needle = q.trim().toLowerCase();
+  const hit = (t) => !needle || [t.name, t.description || "", ...(t.searchTerms || [])].some((s) => String(s).toLowerCase().includes(needle));
+  const templates = (lib.templates || []).filter((t) => t.category === category && hit(t));
+  const requests = (lib.requests || []).filter((r) => r.category === category);
+  const price = lib.requestPrice;
+  const priceLine = !price ? null
+    : price.exempt ? "Requests are free on your account."
+    : !price.active ? "Requests are free right now."
+    : price.priceCents != null ? `A request costs $${(price.priceCents / 100).toFixed(2)}, taken from your wallet when you send it, and credited back if we can't build it or you cancel before we start.`
+    : null;
+
+  const run = async (key, fn, ok) => {
+    setBusy(key); setMsg(null);
+    try { await fn(); await load(); if (onChanged) onChanged(); if (ok) setMsg({ ok }); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const addEntry = () => run("add", async () => {
+    await call({ action: "library_add", templateId: adding.template.id, name: adding.name, look: adding.look });
+    setAdding(null);
+  }, `Imported. Pick it on your ${noun === "cladding" ? "styles" : noun + "s"} below.`);
+  const saveEdit = () => run("edit:" + editing.id, async () => {
+    await call({ action: "library_edit", id: editing.id, name: editing.name, look: editing.look });
+    setEditing(null);
+  }, "Saved. Everything using it now shows the change.");
+  const remove = (e) => run("rm:" + e.id, () => call({ action: "library_remove", id: e.id }), `Removed "${e.name}".`);
+  const cancelReq = (r) => run("cx:" + r.id, () => call({ action: "library_request_cancel", id: r.id }), "Request cancelled." + (r.chargedCents ? " It was credited back to your wallet." : ""));
+
+  const openRequest = () => {
+    setReqDraft({ name: "", widthIn: "", heightIn: "", supplierUrl: "", notes: "", photos: [], key: "lr" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36), uploading: false });
+    setReqOpen(true);
+  };
+  const addPhotos = async (files) => {
+    const list = Array.from(files || []).slice(0, Math.max(0, 4 - reqDraft.photos.length));
+    if (!list.length) return;
+    setReqDraft((d) => ({ ...d, uploading: true })); setMsg(null);
+    try {
+      const added = [];
+      for (const f of list) {
+        const fit = await ssFitImageForUpload(f).catch(() => f);
+        const file = fit && fit.size ? fit : f;
+        const ct = ["image/jpeg", "image/png", "image/webp"].includes(file.type) ? file.type : "image/jpeg";
+        const up = await call({ action: "library_request_upload_url", contentType: ct });
+        const { error } = await sb.storage.from("library-refs").uploadToSignedUrl(up.path, up.token, file, { contentType: ct });
+        if (error) throw new Error("A photo didn't upload: " + error.message);
+        added.push({ path: up.path, role: "front", name: f.name, preview: URL.createObjectURL(file) });
+      }
+      setReqDraft((d) => ({ ...d, photos: [...d.photos, ...added], uploading: false }));
+    } catch (e) { setMsg({ err: e.message }); setReqDraft((d) => ({ ...d, uploading: false })); }
+  };
+  const sendRequest = () => run("req", async () => {
+    const d = reqDraft;
+    await call({
+      action: "library_request", category, name: d.name, widthIn: d.widthIn, heightIn: d.heightIn,
+      supplierUrl: d.supplierUrl.trim(), notes: d.notes, idempotencyKey: d.key, photos: d.photos.map((p) => ({ path: p.path, role: p.role })),
+    });
+    setReqOpen(false); setReqDraft(null);
+  }, "Request sent. You'll see it below as we work on it.");
+
+  // THE CARD IS A SEARCH AND A BROWSE BUTTON (Ahsan 2026-10-27: "the library tab should only show a search
+  // bar and Browse the StructureStudio library button ... import the template from the library into the
+  // subaccount and then user can select the doors in the dropdown of How it looks in 3D"). Importing happens
+  // in the list; what is already imported is managed in the same list (Imported as <name>, Rename, Remove),
+  // and the pickers on the page below are where imported entries are used. A request for something missing
+  // sits at the bottom of the list, with the builder's requests.
+  const total = (lib.templates || []).filter((t) => t.category === category).length;
+  const templateIds = new Set((lib.templates || []).map((t) => t.id));
+  const importedFrom = (t) => mine.filter((e) => e.templateId === t.id);
+  // Entries with no live template behind them (a grid the builder already used that no template matches,
+  // one CSM made from a request, or one whose template was archived) are listed after the templates.
+  const own = mine.filter((e) => !e.templateId || !templateIds.has(e.templateId));
+  const ownHits = needle ? own.filter((e) => e.name.toLowerCase().includes(needle)) : own;
+  const open = browse || !!needle;
+  const usedWords = (e) => (e.usedOn && e.usedOn.length
+    ? `used on ${e.usedOn.length}: ${e.usedOn.slice(0, 4).join(", ")}${e.usedOn.length > 4 ? "…" : ""}`
+    : "not used yet");
+  const rowStyle = { display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: "1px solid #F1F5F9", flexWrap: "wrap" };
+  const smallBtn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "6px 12px", fontSize: 12.5 };
+  const tinyBtn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "3px 10px", fontSize: 12 };
+  // One imported entry: its name, how it differs from the template, where it is used, Rename and Remove.
+  const entryLine = (e, label) => (editing && editing.id === e.id ? (
+    <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+      <input type="text" value={editing.name} maxLength={60} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })} style={{ ...S.input, width: 240 }} aria-label="Name" />
+      <SsLibLookEdit category={category} look={editing.look} onChange={(look) => setEditing({ ...editing, look })} />
+      <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "edit:" + e.id} onClick={saveEdit}>{busy === "edit:" + e.id ? "Saving…" : "Save"}</button>
+      <button style={smallBtn} onClick={() => setEditing(null)}>Cancel</button>
+    </div>
+  ) : (
+    <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 12.5, color: "#334155" }}>
+      {label && <span style={{ fontWeight: 800, color: "#15803D" }}>✓ {label}</span>}
+      <b>{e.name}</b>
+      <span style={{ color: "#64748B" }}>· {ssLibLookWords(category, e.look)} · {usedWords(e)}</span>
+      <button style={tinyBtn} onClick={() => { setEditing({ id: e.id, name: e.name, look: e.look || {} }); setMsg(null); }}>Rename</button>
+      <button style={{ ...tinyBtn, color: "#B91C1C" }} disabled={busy === "rm:" + e.id} onClick={() => remove(e)}>{busy === "rm:" + e.id ? "Removing…" : "Remove"}</button>
+    </div>
+  ));
+  return (
+    <div style={S.card} ref={rootRef} data-ss-library={category}>
+      <div style={{ ...S.h2, display: "flex", alignItems: "center", gap: 8 }}>Library <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 999, padding: "2px 8px" }}>Beta</span></div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px", maxWidth: 720, lineHeight: 1.5 }}>
+        Import {noun === "cladding" ? "claddings" : noun + "s"} from the StructureStudio library under your own names. Everything you import shows up
+        {category === "door" && <> in each door&rsquo;s <b>How it looks in 3D</b> below.</>}
+        {category === "window" && <> in each window&rsquo;s <b>Grid</b> below.</>}
+        {category === "cladding" && <> in each style&rsquo;s <b>Cladding</b> column below.</>}
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search the StructureStudio library"
+          placeholder={category === "cladding" ? "Search: lap, metal, T1-11, vinyl…" : category === "door" ? "Search: barn, roll-up, pickets…" : "Search: transom, 6 lite, slider…"}
+          style={{ ...S.input, maxWidth: 380 }} />
+        <button style={smallBtn} onClick={() => { setBrowse((b) => !(b || !!needle)); if (needle) setQ(""); }} aria-expanded={open}>
+          {open ? "Hide the StructureStudio library" : `Browse the StructureStudio library (${total})`}
+        </button>
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", borderRadius: 10, padding: "4px 12px 12px" }} data-ss-library-browse="1">
+          {!templates.length && !ownHits.length && (
+            <div style={{ fontSize: 13, color: "#64748B", padding: "10px 0" }}>Nothing matches “{q}”.{category !== "door" ? " Request it below and we’ll build it." : ""}</div>
+          )}
+          {templates.map((t) => {
+            const imp = importedFrom(t);
+            const addingThis = adding && adding.template.id === t.id;
+            return (
+              <div key={t.id} style={rowStyle} data-ss-library-template={t.name}>
+                <SsLibPic category={category} look={addingThis ? adding.look : t.look} />
+                <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, color: "#1E293B" }}>{t.name}</div>
+                  <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.45 }}>{t.description || ssLibLookWords(category, t.look)}</div>
+                  {imp.map((e) => entryLine(e, "Imported as"))}
+                  {addingThis && (
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                      <input type="text" value={adding.name} maxLength={60} placeholder="Your name for it" onChange={(e) => setAdding({ ...adding, name: e.target.value })} style={{ ...S.input, width: 240 }} aria-label="Your name for it" />
+                      <SsLibLookEdit category={category} look={adding.look} onChange={(look) => setAdding({ ...adding, look })} />
+                      <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "add"} onClick={addEntry}>{busy === "add" ? "Importing…" : "Import"}</button>
+                      <button style={smallBtn} onClick={() => setAdding(null)}>Cancel</button>
+                    </div>
+                  )}
+                </div>
+                {!addingThis && (
+                  <button style={smallBtn} onClick={() => { setAdding({ template: t, name: imp.length ? "" : t.name, look: t.look || {} }); setMsg(null); }}>
+                    {imp.length ? "Import again" : "Import"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {ownHits.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B" }}>Yours, not from a template</div>
+              {ownHits.map((e) => (
+                <div key={e.id} style={rowStyle}>
+                  <SsLibPic category={category} look={editing && editing.id === e.id ? editing.look : e.look} />
+                  <div style={{ flex: "1 1 320px", minWidth: 0 }}>{entryLine(e, null)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {category === "door" ? (
+            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Don&rsquo;t see your door? Making a 3D door from your supplier&rsquo;s photo is coming next.</div>
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              {!reqOpen && <button style={smallBtn} onClick={openRequest}>Can&rsquo;t find yours? Request it</button>}
+              {reqOpen && reqDraft && (
+                <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, background: "#F8FAFC" }} data-ss-library-request-form="1">
+                  <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>Request a {noun}</div>
+                  <div style={{ display: "grid", gap: 8, maxWidth: 560 }}>
+                    <input type="text" value={reqDraft.name} maxLength={80} placeholder={category === "window" ? "Product name, e.g. Arched top window" : "Product name, e.g. Stone veneer panel"}
+                      onChange={(e) => setReqDraft({ ...reqDraft, name: e.target.value })} style={S.input} aria-label="Product name" />
+                    {category === "window" && (
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input type="number" min="1" max="600" value={reqDraft.widthIn} placeholder="Width (in)" onChange={(e) => setReqDraft({ ...reqDraft, widthIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Width in inches" />
+                        <input type="number" min="1" max="600" value={reqDraft.heightIn} placeholder="Height (in)" onChange={(e) => setReqDraft({ ...reqDraft, heightIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Height in inches" />
+                      </div>
+                    )}
+                    <input type="url" value={reqDraft.supplierUrl} placeholder="Link to the product on your supplier's site (https://…)" onChange={(e) => setReqDraft({ ...reqDraft, supplierUrl: e.target.value })} style={S.input} aria-label="Supplier link" />
+                    <textarea value={reqDraft.notes} maxLength={2000} rows={3} placeholder="Anything we should know (colours, sizes you sell, how it's installed)" onChange={(e) => setReqDraft({ ...reqDraft, notes: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Notes" />
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      {reqDraft.photos.map((p) => <img key={p.path} src={p.preview} alt="" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid #CBD5E1" }} />)}
+                      {reqDraft.photos.length < 4 && (
+                        <label style={{ ...smallBtn, display: "inline-block" }}>
+                          {reqDraft.uploading ? "Uploading…" : "Add photos"}
+                          <input type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }} disabled={reqDraft.uploading} onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
+                        </label>
+                      )}
+                      <span style={{ fontSize: 12, color: "#64748B" }}>A clear, straight-on photo from the supplier&rsquo;s website works best.</span>
+                    </div>
+                    {priceLine && <div style={{ fontSize: 12.5, color: "#475569" }} data-ss-library-request-price="1">{priceLine}</div>}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button style={S.btn(DOOR_MINT, "#0F4C46")} disabled={busy === "req" || reqDraft.uploading} onClick={sendRequest}>{busy === "req" ? "Sending…" : "Send request"}</button>
+                      <button style={smallBtn} onClick={() => { setReqOpen(false); setReqDraft(null); }}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {requests.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", marginBottom: 2 }}>Your requests</div>
+              {requests.map((r) => {
+                const st = SS_LIB_REQ_STATUS[r.status] || [r.status, "#475569", "#F1F5F9"];
+                return (
+                  <div key={r.id} style={{ ...rowStyle, alignItems: "center" }} data-ss-library-request={r.name}>
+                    <span style={{ fontSize: 11.5, fontWeight: 800, color: st[1], background: st[2], borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>{st[0]}</span>
+                    <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{r.name}</div>
+                      <div style={{ fontSize: 12, color: "#64748B" }}>
+                        Sent {new Date(r.createdAt).toLocaleDateString()}
+                        {r.chargedCents ? ` · $${(r.chargedCents / 100).toFixed(2)}${r.refundedCents ? `, $${(r.refundedCents / 100).toFixed(2)} credited back` : ""}` : ""}
+                        {r.resultNote ? ` · ${r.resultNote}` : ""}
+                      </div>
+                    </div>
+                    {r.status === "submitted" && <button style={smallBtn} disabled={busy === "cx:" + r.id} onClick={() => cancelReq(r)}>{busy === "cx:" + r.id ? "Cancelling…" : "Cancel"}</button>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Settings → Options → Cladding: the Library card (339) above the per-style table, which re-reads its
+// choices when an entry changes. With the library off the card renders nothing and this is the table.
+function SsCladdingPage({ viewingLabel = null, clientId = null }) {
+  const [libRev, setLibRev] = useState(0);
+  return (
+    <>
+      <SsLibrarySection category="cladding" viewingLabel={viewingLabel} clientId={clientId} onChanged={() => setLibRev((n) => n + 1)} />
+      <CladdingView viewingLabel={viewingLabel} clientId={clientId} refreshKey={libRev} />
+    </>
+  );
+}
+
+function CladdingView({ viewingLabel = null, clientId = null, refreshKey = 0 }) {
   // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [cat, setCat] = useState(null);
@@ -5238,6 +5659,10 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   // Can this database hold a lap course size (style_cladding.exposure_in, 275)? portal-settings
   // answers false only before 275, and then the box is hidden rather than offered and lost.
   const [courses, setCourses] = useState(false);
+  // The builder's library (339), when client_settings.library_beta is on: each style then lists only
+  // what it offers, and the CLADDING column is a dropdown of the builder's own entries (Carolyn
+  // 10-26: "This becomes a dropdown from the library, from their library"). null = the table as before.
+  const [lib, setLib] = useState(null);
 
   const load = async () => {
     const body = scoped({ action: "catalog" });
@@ -5247,6 +5672,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
     setCourses(data.claddingCourses === true);
+    const libOn = data.libraryBeta === true && data.library ? data.library : null;
+    setLib(libOn);
+    const links = (libOn && libOn.claddingLinks) || {};
     const saved = {};
     (data.cladding || []).forEach((r) => { (saved[r.style_id] = saved[r.style_id] || {})[r.cladding_id] = r; });
     const m = {};
@@ -5270,12 +5698,16 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
           // which the 3D scales the courses by. Blank = the standard lap, 7 in. NOT the reveal: the
           // standard 7 in board shows about 6 in, so asking "how much shows" got the wrong number.
           exposureIn: c.id === "lap" && r && r.exposure_in != null ? String(r.exposure_in) : "",
+          // The library entry this row offers (339), or null; and whether it was just added here.
+          clientLibraryId: (r && links[r.id]) || null,
+          added: false,
         };
       });
     });
     setByStyle(m);
   };
-  useEffect(() => { load(); }, []);
+  // refreshKey: the Library card above bumps it after an entry changes, so the dropdowns follow.
+  useEffect(() => { load(); }, [refreshKey]);
 
   const setRow = (styleId, idx, field, val) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
@@ -5299,6 +5731,11 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
       if (courses && course !== "" && !(Number.isFinite(Number(course)) && Number(course) >= 3 && Number(course) <= 12)) {
         throw new Error("Nothing was saved — the lap course has to be between 3 and 12 inches (leave it blank for 7).");
       }
+      // A cladding just added from the library needs its price: blank would save it as not offered.
+      const unpriced = lib ? rows.filter((r) => r.added && String(r.rate == null ? "" : r.rate).trim() === "") : [];
+      if (unpriced.length) {
+        throw new Error("Nothing was saved — give these a rate (0 = included) or remove them: " + unpriced.map((r) => r.labelOverride || r.builtIn).join(", "));
+      }
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
           action: "save_cladding",
@@ -5314,6 +5751,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
             // Sent on the lap row only, and only where the database can hold it: a row that does
             // not name it leaves the stored size alone.
             ...(courses && r.claddingId === "lap" ? { exposureIn: String(r.exposureIn == null ? "" : r.exposureIn).trim() } : {}),
+            // The library entry (339), sent only with the library on. Its name and course win on the
+            // server; null takes a row off the library.
+            ...(lib ? { clientLibraryId: r.clientLibraryId || null } : {}),
           })),
         }),
       });
@@ -5325,7 +5765,108 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
     setBusyId(null);
   };
 
+  // ── The library version of a style's table (339) ──────────────────────────────────────────
+  // Only what the style offers (a rate, or a library link, or just added here), each row's cladding a
+  // dropdown of the builder's entries OF THAT LOOK (the 207 key allows one row per look per style),
+  // and an "Add" dropdown of the entries whose look the style does not offer yet. A row still offered
+  // but not on any entry stays visible and is marked, so nothing a customer can buy disappears.
+  const libEntries = lib ? (lib.entries || []).filter((e) => e.category === "cladding" && e.active !== false) : [];
+  const pickEntry = (styleId, idx, entryId) => {
+    const e = libEntries.find((x) => x.id === entryId) || null;
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i !== idx ? r : e
+      ? { ...r, clientLibraryId: e.id, labelOverride: e.name, exposureIn: e.look && e.look.exposureIn != null ? String(e.look.exposureIn) : "" }
+      : { ...r, clientLibraryId: null })) }));
+  };
+  const addFromLibrary = (styleId, entryId) => {
+    const e = libEntries.find((x) => x.id === entryId);
+    if (!e) return;
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r) => (r.claddingId !== (e.look && e.look.profile) ? r
+      : { ...r, added: true, active: true, clientLibraryId: e.id, labelOverride: e.name, exposureIn: e.look && e.look.exposureIn != null ? String(e.look.exposureIn) : "" })) }));
+  };
+  const removeFromStyle = (styleId, idx) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, rate: "", clientLibraryId: null, added: false } : r)) }));
+  const renderLibSection = (st) => {
+    const rows = byStyle[st.id] || [];
+    const visible = rows.map((r, i) => ({ r, i })).filter(({ r }) => r.added || r.clientLibraryId || String(r.rate == null ? "" : r.rate).trim() !== "");
+    const offeredLooks = new Set(visible.map(({ r }) => r.claddingId));
+    const addable = libEntries.filter((e) => e.look && !offeredLooks.has(e.look.profile));
+    return (
+      <div key={st.id} style={{ ...S.card, marginBottom: 12 }} data-ss-cladding-style={st.label}>
+        <div style={S.h2}>{st.label}</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 860 }}>
+            <thead><tr>
+              <th style={S.th} title="Picked from your library above. The name is what your customers see.">Cladding</th>
+              <th style={S.th} title="The same seven methods the rest of Options uses — the definitions are above the table.">How it&rsquo;s priced</th>
+              <th style={S.th} title="0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
+              <th style={S.th} />
+            </tr></thead>
+            <tbody>
+              {!visible.length && (
+                <tr><td colSpan={6} style={{ ...S.td, color: "#64748B" }}>Nothing offered on this style yet. Add a cladding from your library below.</td></tr>
+              )}
+              {visible.map(({ r, i }) => {
+                const choices = libEntries.filter((e) => e.look && e.look.profile === r.claddingId);
+                const entry = r.clientLibraryId ? libEntries.find((e) => e.id === r.clientLibraryId) : null;
+                return (
+                  <tr key={r.claddingId} data-ss-cladding-row={entry ? entry.name : r.builtIn}>
+                    <td style={S.td}>
+                      <select value={r.clientLibraryId || ""} onChange={(e) => pickEntry(st.id, i, e.target.value)}
+                        aria-label={`${st.label} cladding`} style={{ ...S.input, width: 240 }}>
+                        {!r.clientLibraryId && <option value="">{(r.labelOverride || r.builtIn) + " (not in your library)"}</option>}
+                        {choices.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                      <div style={{ fontSize: 11.5, color: entry ? "#64748B" : "#B45309", marginTop: 4 }}>
+                        {entry ? ssLibLookWords("cladding", entry.look) : "Not in your library: pick one, or add it to your library above."}
+                      </div>
+                    </td>
+                    <td style={S.td}>
+                      <select value={r.basis} onChange={(e) => setRow(st.id, i, "basis", e.target.value)} style={{ ...S.input, width: 230 }}>
+                        {SS_CLADDING_BASES.map(([v, lbl]) => <option key={v} value={v}>{lbl}</option>)}
+                      </select>
+                    </td>
+                    <td style={S.td}>
+                      <input type="number" min="0" step="0.01" value={r.rate} placeholder={r.added ? "enter a rate" : "not offered"}
+                        aria-label={`${st.label} ${entry ? entry.name : r.builtIn} rate`}
+                        onChange={(e) => setRow(st.id, i, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <input type="checkbox" checked={r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)}
+                        style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)}
+                        style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                    </td>
+                    <td style={S.td}>
+                      <button type="button" title="Stop offering it on this style" aria-label={`Remove from ${st.label}`} onClick={() => removeFromStyle(st.id, i)}
+                        style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 18, cursor: "pointer", padding: 0 }}>×</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {addable.length > 0 && (
+            <select value="" onChange={(e) => addFromLibrary(st.id, e.target.value)} aria-label={`Add a cladding to ${st.label}`} style={{ ...S.input, width: "auto", minWidth: 0 }}>
+              <option value="">+ Add a cladding from your library…</option>
+              {addable.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+          )}
+          <button onClick={() => save(st.id, st.label)} disabled={busyId === st.id} style={S.btn(DOOR_MINT, "#0F4C46")}>
+            {busyId === st.id ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const renderSection = (st) => {
+    if (lib) return renderLibSection(st);
     const rows = byStyle[st.id] || [];
     return (
       <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
@@ -5401,7 +5942,14 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   return (
     <div style={S.card}>
       <div style={S.h2}>Cladding</div>
-      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+      {lib && (
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }} data-ss-cladding-library-intro="1">
+          The siding a customer can choose, per building style. Each style lists only what you offer
+          there: pick from <b>your library</b> above, set the price, and the customer sees your name for
+          it. Enter <b>0</b> and it is included at no charge; anything else is an upcharge.
+        </p>
+      )}
+      {!lib && <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
         The siding a customer can choose, per building style — not every style takes every
         cladding, and metal in particular is far from universal. Leave a rate <b>blank</b> and you
         do not offer it on that style; enter <b>0</b> and it is included at no charge; anything
@@ -5418,7 +5966,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
             same boards at 4.5 in, and you price it on its own.
           </>
         )}
-      </p>
+      </p>}
       {/* The SAME wording as the Options header, because it is the same vocabulary. Two
           sentences are appended for cladding specifically: a whole-building option has no area
           or length of its own, so `sqft option` and `lineal ft` need their meaning stated here
@@ -6139,6 +6687,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // ticks shown: a line restricted to the Greenhouse while the only other style is hidden must not
   // save as "every style" on a price edit, or the restriction is gone when that style comes back.
   const [allStyleIds, setAllStyleIds] = useState([]);
+  // The builder's library (339) when client_settings.library_beta is on: a door's "How it looks in
+  // 3D" and a window's grid then pick from the builder's own entries. null = the editor as before.
+  const [lib, setLib] = useState(null);
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -6183,7 +6734,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       () => sb.functions.invoke("portal-settings", { body }),
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
-    const list = (data.fixtures || []).filter((f) => (f.category || "door") === category).map(mapRow);
+    const libOn = data.libraryBeta === true && data.library ? data.library : null;
+    setLib(libOn);
+    const links = (libOn && libOn.fixtureLinks) || {};
+    const list = (data.fixtures || []).filter((f) => (f.category || "door") === category)
+      .map((d) => ({ ...mapRow(d), client_library_id: links[d.id] || null }));
     // Display order = the order drag persists: live items first, archived sink to the bottom.
     setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
     if (isDoorCat) setDoorColors((data.colors || []).filter((c) => c.door === true && c.active !== false));
@@ -6240,6 +6795,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     ...(isDoorCat ? { sillIn: ftInToInches(r.sill_in) } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
     taxable: r.taxable !== false,
+    // The library entry (339), doors and windows, only with the library on. Its look wins on the
+    // server; null takes the line off the library. Absent (library off) leaves any link alone.
+    ...(lib && (isDoorCat || isWindowCat) ? { clientLibraryId: r.client_library_id || null } : {}),
   });
 
   const saveLine = async () => {
@@ -6767,15 +7325,37 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         return (
           <div style={{ marginBottom: 12 }}>
             <div style={fldLbl}>Grid (lites)</div>
+            {lib && (() => {
+              // A grid from the builder's library (339). Picking one sets rows and lites across; the
+              // two selects below still fine-tune, which takes the line off the library entry.
+              const winEntries = (lib.entries || []).filter((x) => x.category === "window" && x.active !== false);
+              const cur = edit.draft.client_library_id || null;
+              const val = cur && winEntries.some((x) => x.id === cur) ? cur : "";
+              return (
+                <select data-ss-window-grid-library="1" value={val} style={{ ...S.input, minWidth: 0, width: "auto", marginBottom: 8, display: "block" }}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "__more") { window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "window" } })); return; }
+                    const x = winEntries.find((y) => y.id === v);
+                    if (!x) { setDraft({ client_library_id: null }); return; }
+                    const l = x.look || {};
+                    setDraft({ client_library_id: x.id, lite_rows: l.liteRows == null ? "" : String(l.liteRows), lite_cols: l.liteRows == null ? "" : String(l.liteCols) });
+                  }}>
+                  <option value="">{val ? "Custom (set below)" : "Custom, or pick from your library…"}</option>
+                  {winEntries.map((x) => <option key={x.id} value={x.id}>{x.name} ({ssLibLookWords("window", x.look)})</option>)}
+                  <option value="__more">Find more in the library…</option>
+                </select>
+              );
+            })()}
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <select data-ss-window-lite-rows="1" value={lr} onChange={(e) => setDraft(e.target.value === "" ? { lite_rows: "", lite_cols: "" } : { lite_rows: e.target.value, lite_cols: lc })}
+              <select data-ss-window-lite-rows="1" value={lr} onChange={(e) => setDraft({ ...(e.target.value === "" ? { lite_rows: "", lite_cols: "" } : { lite_rows: e.target.value, lite_cols: lc }), ...(lib ? { client_library_id: null } : {}) })}
                 style={{ ...S.input, minWidth: 0, width: "auto" }}>
                 <option value="">Automatic (as before)</option>
                 {nums.map((n) => <option key={n} value={String(n)}>{n} {n === 1 ? "row" : "rows"}</option>)}
               </select>
               {R > 0 && <>
                 <span style={{ color: "#64748B" }}>×</span>
-                <select data-ss-window-lite-cols="1" value={lc} onChange={(e) => setDraft({ lite_cols: e.target.value })}
+                <select data-ss-window-lite-cols="1" value={lc} onChange={(e) => setDraft({ lite_cols: e.target.value, ...(lib ? { client_library_id: null } : {}) })}
                   style={{ ...S.input, minWidth: 0, width: "auto" }}>
                   {nums.map((n) => <option key={n} value={String(n)}>{n} across</option>)}
                 </select>
@@ -6844,6 +7424,32 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       {isDoorCat && (
         <div style={{ marginBottom: 12 }}>
           <div style={fldLbl}>How it looks in 3D</div>
+          {lib ? (() => {
+            // From the builder's library (339; Carolyn 10-26: "everything in the library that is doors
+            // then comes in as an option in here"). The line's current look stays pickable even when it
+            // is in no entry, so opening and saving a line never changes how it draws.
+            const doorEntries = (lib.entries || []).filter((x) => x.category === "door" && x.active !== false);
+            const cur = edit.draft.client_library_id || null;
+            const curStyle = D3_DOOR_STYLES.includes(edit.draft.door_style) ? edit.draft.door_style : "auto";
+            const val = cur && doorEntries.some((x) => x.id === cur) ? "lib:" + cur : "style:" + curStyle;
+            return (
+              <select data-ss-door-look-library="1" value={val} style={{ ...S.input, minWidth: 0, maxWidth: 380 }}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__more") { window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "door" } })); return; }
+                  if (v.startsWith("lib:")) {
+                    const x = doorEntries.find((y) => y.id === v.slice(4));
+                    if (x) setDraft({ client_library_id: x.id, door_style: (x.look && x.look.doorStyle) || "auto" });
+                    return;
+                  }
+                  setDraft({ client_library_id: null, door_style: v.slice(6) });
+                }}>
+                {doorEntries.map((x) => <option key={x.id} value={"lib:" + x.id}>{x.name}</option>)}
+                {val.startsWith("style:") && <option value={val}>{ssLibLookWords("door", { doorStyle: curStyle })} (not in your library)</option>}
+                <option value="__more">Find more in the library…</option>
+              </select>
+            );
+          })() : (
           <select value={D3_DOOR_STYLES.includes(edit.draft.door_style) ? edit.draft.door_style : "auto"}
             onChange={(e) => setDraft({ door_style: e.target.value })}
             style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
@@ -6857,6 +7463,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
             <option value="classic">Classic (built in 3D)</option>
             <option value="dutch">Dutch (built in 3D)</option>
           </select>
+          )}
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
             {D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto}
           </div>
@@ -7080,8 +7687,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
 }
 
 function DoorsView({ viewingLabel = null, clientId = null }) {
+  // Bumped by the Library card after an entry changes, so the door lines re-read their choices.
+  const [libRev, setLibRev] = useState(0);
   return (
     <>
+    <SsLibrarySection category="door" viewingLabel={viewingLabel} clientId={clientId} onChanged={() => setLibRev((n) => n + 1)} />
     <div style={S.card}>
       <div style={S.h2}>Doors</div>
       <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -7091,7 +7701,7 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
         other you’ve checked). Sizes are feet/inches — 8', 6'3", 36" (no spaces). <b>Export Excel</b> to edit in bulk and
         re-import — rows are matched by the ID column, and rows missing from the file are never deleted.
       </p>
-      <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+      <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={libRev} />
     </div>
     <LayoutPricing group="doors" viewingLabel={viewingLabel} clientId={clientId} />
     </>
@@ -7490,8 +8100,11 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
   // Bumped when the window-color list saves → remounts the catalog's data (refreshKey), so
   // a just-added color appears in each window's availability checkboxes immediately.
   const [colorsSavedAt, setColorsSavedAt] = useState(0);
+  // Bumped by the Library card after an entry changes (339), the same way the colors are.
+  const [libRev, setLibRev] = useState(0);
   return (
     <>
+    <SsLibrarySection category="window" viewingLabel={viewingLabel} clientId={clientId} onChanged={() => setLibRev((n) => n + 1)} />
     <div style={S.card}>
       <div style={S.h2}>Windows</div>
       <WindowColorsEditor viewingLabel={viewingLabel} clientId={clientId} onSaved={() => setColorsSavedAt((n) => n + 1)} />
@@ -7502,7 +8115,7 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
         (no spaces). <b>Export Excel</b> to edit in bulk and re-import — rows are matched by the ID column, and rows missing
         from the file are never deleted.
       </p>
-      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={colorsSavedAt} />
+      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={colorsSavedAt * 1000 + libRev} />
     </div>
     <LayoutPricing group="windows" viewingLabel={viewingLabel} clientId={clientId} />
     </>

@@ -313,3 +313,15 @@ Deno.test("a video meeting still waiting for its link says one will follow, and 
   assert(!ready.html.includes("will follow"));
   assert(ready.html.includes("https://zoom.us/j/999"));
 });
+
+// 341: the host's own Google / Outlook calendar sent the invite, so the email must not claim an attachment.
+Deno.test("when the host's calendar sent the invite, the email points at it and never mentions an attachment", () => {
+  const booked = meetingBookedEmail({ ...F, inviteFromHost: true });
+  assert(booked.html.includes("has sent you a calendar invite"));
+  assert(!booked.html.includes("attached"));
+  const moved = meetingRescheduledEmail({ ...F, inviteFromHost: true, previousStartsAt: F.startsAt });
+  assert(moved.html.includes("calendar invite has been updated"));
+  assert(!moved.html.includes("attached invite"));
+  // Without it, nothing changed.
+  assert(meetingBookedEmail(F).html.includes("We've attached a calendar invite"));
+});

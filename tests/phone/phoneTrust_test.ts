@@ -382,7 +382,8 @@ Deno.test("both actions are in GATES, and each one's FIRST act is the operator g
 
 Deno.test("setup: the profile comes from the texting registration (or, internal only, the primary), then runTrustSetup with the shared flow", () => {
   const b = slice(SRC, 'if (action === "phone_trust_setup") {', "\n  }\n", "phone_trust_setup branch");
-  assert(/\.from\("sms_registrations"\)\s*\.select\("customer_profile_sid"\)/.test(b));
+  // brand_tier rides along since no-EIN texting (2026-10-27): a sole proprietor's profile is refused.
+  assert(/\.from\("sms_registrations"\)\s*\.select\("customer_profile_sid, brand_tier"\)/.test(b));
   assert(/isInternalTenant\(admin, clientId\)/.test(b));
   assert(/const primaryProfileSid = Deno\.env\.get\("TWILIO_PRIMARY_PROFILE_SID"\) \?\? null;/.test(b));
   assert(/runTrustSetup\(\{/.test(b) && /setup: \(s\) => setupVoiceTrust\(s, trustHubHttp\(creds\)\)/.test(b)

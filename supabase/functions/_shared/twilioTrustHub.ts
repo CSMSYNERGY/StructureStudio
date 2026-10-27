@@ -11,7 +11,9 @@
  * parent, each holding that builder's Secondary Customer Profile, Brand, Campaign, Messaging
  * Service and numbers (Workstream 2; until 2026-10 this was "architecture #4", everything on the
  * parent). structure-studio stays ON THE PARENT (the pilot number, the primary profile, its own
- * brand), with Verify, the setup-test app and NTS.
+ * brand), with Verify, the setup-test app and NTS. A builder with NO EIN gets a Starter profile and
+ * a Sole Proprietor Trust Product in place of the Secondary pair (the "Sole Proprietor chain"
+ * section, 2026-10-27), in the same sub-account, linked to the same parent primary.
  *
  * ⚠️ EVERY CALL RUNS WITH ONE ACCOUNT'S OWN CREDENTIALS. Main-account API keys are denied on
  * sub-account resources, and every endpoint below except the /Accounts/{sid} ones lives on a
@@ -43,6 +45,20 @@ const MESSAGING = "https://messaging.twilio.com/v1";
  *  stable across accounts — they identify the POLICY, not our tenant. */
 export const POLICY_SECONDARY_CUSTOMER_PROFILE = "RNdfbf3fae0e1107f8aded0e7cead80bf5";
 export const POLICY_A2P_TRUST_PRODUCT = "RNb0d4771c2c98518d916a3d4cd70a8f8b";
+
+/** ...and the two the SOLE PROPRIETOR chain is built on instead (a builder with no EIN), from
+ *  Twilio's ISV sole-prop guide steps 1.1 and 2.1 (onboarding-isv-api-sole-prop-new, read
+ *  2026-10-27; 2.1 calls its SID a "hard-coded value"). Not interchangeable with the two above:
+ *  the sole-prop Trust Product accepts ONLY a Starter profile, so a Secondary profile can never be
+ *  reused for this tier. ⚠️ The guide's own 1.1 sample response shows the PRIMARY business policy
+ *  under the Starter SID (EIN fields and all); its 1.7 evaluation sample is the reliable one:
+ *  starter_customer_profile_information, customer_profile_address and the primary profile. */
+export const POLICY_STARTER_CUSTOMER_PROFILE = "RN806dd6cd175f314e1f96a9727ee271f4";
+export const POLICY_SOLE_PROP_TRUST_PRODUCT = "RN670d5d2e282a6130ae063b234b6019c8";
+
+/** The number Twilio's "reply YES" text to a sole proprietor comes FROM (guide §3.1). The person
+ *  has never seen it, so the portal names it before they need to recognise it. */
+export const SOLE_PROP_OTP_SENDER = "+19152782000";
 
 function accountSid(): string | null { return Deno.env.get("TWILIO_ACCOUNT_SID") || null; }
 function apiKey(): string | null { return Deno.env.get("TWILIO_API_KEY") || null; }
@@ -170,21 +186,35 @@ async function call(
 // The builder's compliance intake
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * What the builder types on the texting details screen. ONE shape for both tiers, because the
+ * portal posts one form; which fields matter depends on the EIN answer (validateIntake):
+ *
+ *   with an EIN (Low-Volume Standard)  everything below except where marked.
+ *   without one (Sole Proprietor)      the person's own first and last name, email, mobile and
+ *                                      address. `ein`, `businessType` and the job fields are
+ *                                      ignored, `websiteUrl` may be blank, and the legal name
+ *                                      Twilio registers is the PERSON'S name
+ *                                      (soleProprietorBrandName), not legalBusinessName.
+ *
+ * `ein` and `businessType` are optional in the TYPE since 2026-10-27 because a sole proprietor
+ * has neither; validateIntake(…, true) still refuses an EIN intake without them, exactly as before.
+ */
 export type BuilderIntake = {
-  legalBusinessName: string;      // EXACTLY as on the IRS CP 575 / 147C letter
-  ein: string;                    // 00-0000000
-  businessType: string;           // Corporation | Limited Liability Corporation | ...
+  legalBusinessName: string;      // EXACTLY as on the IRS CP 575 / 147C letter (sole prop: "First Last")
+  ein?: string;                   // 00-0000000 (EIN tier only)
+  businessType?: string;          // Corporation | Limited Liability Corporation | ... (EIN tier only)
   businessIndustry: string;       // CONSTRUCTION
-  websiteUrl: string;
+  websiteUrl: string;             // sole prop: optional
   street: string;
   city: string;
   region: string;                 // 2-letter
   postalCode: string;
-  isoCountry: string;             // US
+  isoCountry: string;             // US (sole prop: US or CA)
   repFirstName: string;
   repLastName: string;
-  repEmail: string;               // ⚠️ must be on the company domain — gmail is a rejection
-  repPhone: string;               // E.164
+  repEmail: string;               // ⚠️ EIN tier: must be on the company domain — gmail is a rejection. Sole prop: their own, gmail is fine
+  repPhone: string;               // E.164 (sole prop: their OWN mobile — Twilio texts it for the YES)
   repBusinessTitle: string;
   repJobPosition: string;         // Director | GM | VP | CEO | CFO | General Counsel | Other
 };
@@ -215,38 +245,20 @@ export function suggestBrandTier(hasEin: boolean): "low_volume_standard" | "sole
  *  Twilio rejection cause, and catching them locally is the difference between a form error
  *  and a $19.50 lesson a week later. */
 export function validateIntake(intake: Partial<BuilderIntake>, hasEin: boolean): string[] {
+  // ⚠️ NO EIN IS A DIFFERENT RULE BOOK, not this one with the EIN line skipped. Until 2026-10-27
+  // the no-EIN answer was refused outright here (the Sole Proprietor chain did not exist, and this
+  // function is the one choke point save_intake and the ready->submit path BOTH call, so the
+  // refusal could not be routed around). The chain exists now (createStarterCustomerProfile,
+  // createSoleProprietorTrustProduct), and the refusal that still applies to a builder whose
+  // operator has not switched it on lives in portal-sms, where the switch is read.
+  if (!hasEin) return validateSoleProprietorIntake(intake);
+
   const problems: string[] = [];
   const name = String(intake.legalBusinessName ?? "").trim();
   if (!name) problems.push("The legal business name is required, exactly as it appears on the IRS letter.");
 
-  if (hasEin) {
-    if (!/^\d{2}-?\d{7}$/.test(String(intake.ein ?? "").trim())) {
-      problems.push("The EIN must be nine digits, like 12-3456789.");
-    }
-  } else if (/\b(LLC|L\.L\.C\.|Inc\.?|Corp\.?|Corporation|Incorporated)\b/i.test(name)) {
-    // Twilio error 30915 verbatim cause. Refuse it here rather than pay to be told.
-    problems.push(
-      "This business name looks like a registered company (LLC, Inc. or Corp.), which means it has an EIN. " +
-      "Companies with a tax ID cannot register as a sole proprietor — go back and enter the EIN.");
-  } else {
-    // SOLE PROPRIETOR IS NOT BUILT, AND THIS REFUSAL IS WHAT STOPS SOMEBODY PAYING FOR IT.
-    // Verified against Twilio's docs 2026-08-31: sole proprietor is a DIFFERENT CHAIN, not a
-    // flag on this one. It needs a STARTER customer profile (we create a Secondary), the EIN
-    // fields OMITTED (we hardcode business_registration_identifier "EIN"), and the mobile
-    // number carried on the BRAND (we put it on the profile's authorized representative).
-    // Only BrandType branches today, so a no-EIN builder would submit the standard-tier shape
-    // and be rejected — after the registration fee had already been taken.
-    //
-    // The OTP everyone worries about is NOT the problem: Twilio texts the sole proprietor and
-    // they reply within 24 hours, which needs no code from us at all. The chain above it does.
-    //
-    // Refused HERE rather than at the submit step because this function is the one choke point
-    // that save_intake and the ready->submit path BOTH already call, so it cannot be routed
-    // around by a third caller added later.
-    problems.push(
-      "Texting can only be set up for a business that has an EIN at the moment. Registering without " +
-      "one goes through a different carrier process that we have not built yet — if that is your " +
-      "situation, contact support and we will tell you where it stands.");
+  if (!/^\d{2}-?\d{7}$/.test(String(intake.ein ?? "").trim())) {
+    problems.push("The EIN must be nine digits, like 12-3456789.");
   }
 
   const site = String(intake.websiteUrl ?? "").trim();
@@ -275,6 +287,110 @@ export function validateIntake(intake: Partial<BuilderIntake>, hasEin: boolean):
   }
   for (const [label, v] of [["street", intake.street], ["city", intake.city], ["region", intake.region], ["postal code", intake.postalCode]] as const) {
     if (!String(v ?? "").trim()) problems.push(`The registered ${label} is required.`);
+  }
+  return problems;
+}
+
+/**
+ * A word that says "registered company": the 30915 signal. Twilio (changelog 2026-07-17, error
+ * 30915 "Sole Proprietor classification is invalid – business is a registered legal entity") lists
+ * LLC / Inc. / Corp. in the name among its triggers; Ltd., Limited and Co. are the same claim in
+ * other words (Limited is a Canadian corporation's suffix, and Canada is in scope), and PLLC / LLP
+ * are registered entities too.
+ *
+ * ⚠️ "Co." ONLY WITH ITS PERIOD. A bare "Co" is a real surname, and refusing a person's own last
+ * name would be worse than the rejection this prevents. And the period-ended forms sit OUTSIDE the
+ * \b(...)\b group on purpose: "L.L.C." at the very end of a name has no word boundary after its
+ * last period, so the old pattern (`L\.L\.C\.` inside the group) never matched it there.
+ */
+const ENTITY_WORD = /\b(LLC|PLLC|LLP|Inc|Corp|Corporation|Incorporated|Ltd|Limited)\b|\bL\.L\.C\b|\bCo\.(?!\w)/i;
+
+/**
+ * The legal name a sole proprietor registers under: their own first and last name, trimmed, with
+ * single spaces. This is what goes on the Trust Product's `brand_name`, and so what the carriers
+ * hold as the brand.
+ *
+ * ⚠️ THE PERSON, NOT THE TRADE NAME. Twilio's error 30914 rejects a sole-proprietor campaign whose
+ * title does not match the sole proprietor's name, and lists "a business name, DBA, or alias" among
+ * the causes. The guide elsewhere accepts a DBA as brand_name; the two disagree, and the person's
+ * own legal name is the one value both accept. The campaign's samples then name the same person.
+ *
+ * Partial on purpose: save_intake reads a Partial intake off the request.
+ */
+export function soleProprietorBrandName(intake: Partial<Pick<BuilderIntake, "repFirstName" | "repLastName">>): string {
+  return `${String(intake?.repFirstName ?? "")} ${String(intake?.repLastName ?? "")}`.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The rules for a builder with NO EIN (Twilio's Sole Proprietor tier), from the ISV sole-prop guide
+ * (https://www.twilio.com/docs/messaging/compliance/a2p-10dlc/onboarding-isv-api-sole-prop-new,
+ * read 2026-10-27) and its troubleshooting page. Each one is a documented rejection, and a
+ * sole-prop rejection is expensive in a way an LVS one is not: the brand fee is charged at
+ * creation and a re-registration pays it again.
+ *
+ *   name     the person's own first and last name. No company words anywhere (30915), including
+ *            legalBusinessName when one is sent.
+ *   email    their own, well formed. A FREE ADDRESS IS FINE HERE, unlike the EIN tier: the
+ *            "no gmail" rejection is for a PUBLIC company's brand contact, and 30915's fix text
+ *            says the name and email should reflect the same individual. Twilio refuses
+ *            disposable addresses, but we hold no list of those, so none is guessed at.
+ *   mobile   +1 and ten digits, and it has to be the person's OWN mobile: Twilio texts it from
+ *            +1 (915) 278-2000 when the brand is approved and the person replies YES. VoIP and
+ *            CPaaS numbers (a Twilio number, Google Voice) are refused by the carriers, which we
+ *            can only say, not check.
+ *   address  street, city, state, ZIP. US or Canada only. A P.O. box is allowed (the guide says
+ *            so in as many words).
+ *   website  optional. The sole-prop bundles have no website field; the campaign's privacy and
+ *            terms URLs are still required, and portal-sms checks those separately.
+ * No EIN, business type or job position: a sole proprietor has none, and Twilio asks for none.
+ */
+function validateSoleProprietorIntake(intake: Partial<BuilderIntake>): string[] {
+  const problems: string[] = [];
+  const first = String(intake.repFirstName ?? "").trim();
+  const last = String(intake.repLastName ?? "").trim();
+  if (!first) problems.push("Your legal first name is required.");
+  if (!last) problems.push("Your legal last name is required.");
+
+  // Twilio error 30915's verbatim cause. Refuse it here rather than pay to be told.
+  const business = String(intake.legalBusinessName ?? "").trim();
+  if (business && ENTITY_WORD.test(business)) {
+    problems.push(
+      "This business name looks like a registered company (LLC, Inc., Corp., Ltd. or Co.), which means it has an EIN. " +
+      "Companies with a tax ID cannot register as a sole proprietor — go back and enter the EIN.");
+  }
+  if (ENTITY_WORD.test(first) || ENTITY_WORD.test(last)) {
+    problems.push(
+      "Enter your own first and last name, not a company name. A name with LLC, Inc., Corp., Ltd. or Co. in it " +
+      "means a registered company, which has an EIN and cannot register as a sole proprietor — go back and enter the EIN.");
+  }
+
+  const email = String(intake.repEmail ?? "").trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    problems.push("A valid email address is required. Your personal address (gmail and the like) is fine.");
+  }
+
+  if (!/^\+1\d{10}$/.test(String(intake.repPhone ?? "").trim())) {
+    problems.push(
+      "Your mobile number must be a US or Canadian number in +1XXXXXXXXXX form, and it has to be your own " +
+      "mobile phone, not a Twilio, VoIP or Google Voice number: Twilio texts it and you reply YES to confirm.");
+  }
+
+  const country = String(intake.isoCountry ?? "").trim().toUpperCase() || "US";
+  if (country !== "US" && country !== "CA") {
+    problems.push("Registering without an EIN is only open to businesses in the US or Canada.");
+  }
+  for (const [label, v] of [
+    ["street address (a P.O. box is fine)", intake.street], ["city", intake.city],
+    ["state or province", intake.region], ["ZIP or postal code", intake.postalCode],
+  ] as const) {
+    if (!String(v ?? "").trim()) problems.push(`Your ${label} is required.`);
+  }
+
+  const site = String(intake.websiteUrl ?? "").trim();
+  if (site && !/^https?:\/\/.+\..+/.test(site)) {
+    problems.push(
+      "That website address does not look right. Use the full address, like https://example.com, " +
+      "or leave it blank: a website is optional without an EIN.");
   }
   return problems;
 }
@@ -457,24 +573,29 @@ export const PRIMARY_LINK_UNANSWERED = "primary_profile_link_unanswered";
  *   refused       Twilio answered and said no (the cause was `permanent`). false = it never
  *                 answered (network, 5xx, 429): a retry is the whole fix, and nothing about the
  *                 cross-account link has been learned.
+ *   profileKind   "secondary" (the EIN tier) or "starter" (a sole proprietor's profile, which
+ *                 takes the same primary link: createStarterCustomerProfile). Only the wording of
+ *                 the message changes; the markers it starts with do not.
  * Codes only travel outward (this file's header rule); `detail` keeps Twilio's body for app_errors.
  */
 export class PrimaryProfileLinkError extends TrustHubError {
   readonly profileSid: string;
   readonly crossAccount: boolean;
   readonly refused: boolean;
-  constructor(cause: TrustHubError, profileSid: string, crossAccount: boolean) {
+  readonly profileKind: "secondary" | "starter";
+  constructor(cause: TrustHubError, profileSid: string, crossAccount: boolean, profileKind: "secondary" | "starter" = "secondary") {
     const where = crossAccount ? " across accounts" : "";
     super({
       message: cause.permanent
-        ? `${PRIMARY_LINK_REFUSED}: Twilio refused to link the primary customer profile to the secondary one${where} (HTTP ${cause.status}, code ${cause.code}).`
-        : `${PRIMARY_LINK_UNANSWERED}: Twilio did not answer the link of the primary customer profile to the secondary one${where} (HTTP ${cause.status}, code ${cause.code}).`,
+        ? `${PRIMARY_LINK_REFUSED}: Twilio refused to link the primary customer profile to the ${profileKind} one${where} (HTTP ${cause.status}, code ${cause.code}).`
+        : `${PRIMARY_LINK_UNANSWERED}: Twilio did not answer the link of the primary customer profile to the ${profileKind} one${where} (HTTP ${cause.status}, code ${cause.code}).`,
       status: cause.status, code: cause.code, permanent: cause.permanent, detail: cause.detail,
     });
     this.name = "PrimaryProfileLinkError";
     this.profileSid = profileSid;
     this.crossAccount = crossAccount;
     this.refused = cause.permanent;
+    this.profileKind = profileKind;
   }
 }
 
@@ -506,17 +627,32 @@ export async function primaryProfileLinked(profileSid: string, primaryProfileSid
  * evaluate and submit the profile if it is still a draft. Every step is read first, so pressing it
  * again on a finished profile sends nothing. A refused link is a PrimaryProfileLinkError again.
  * `crossAccount` only labels that error (see PrimaryProfileLinkError).
+ *
+ * ⚠️ THE POLICY IS THE PROFILE'S OWN (2026-10-27). A sole proprietor's half-made STARTER profile
+ * resumes here too, and evaluating it against the Secondary policy would judge it by the EIN tier's
+ * rules. Pass POLICY_STARTER_CUSTOMER_PROFILE for one, either as `opts.policySid` or as the last
+ * argument; with neither it is the Secondary policy, exactly as every caller before had it. Only
+ * the two customer-profile policies are accepted, so a Trust Product policy passed by mistake is
+ * refused before any request. The caller reads which policy a recorded profile was made under
+ * BEFORE calling this: the policy here only picks the Evaluation, it does not check the profile.
  */
 export async function finishSecondaryCustomerProfile(
-  profileSid: string, primaryProfileSid: string, http: TrustHubHttp = viaCall, opts: { crossAccount?: boolean } = {},
+  profileSid: string, primaryProfileSid: string, http: TrustHubHttp = viaCall,
+  opts: { crossAccount?: boolean; policySid?: string; policy?: string } = {},
+  policySid?: string,
 ): Promise<{ linked: boolean; submitted: boolean; status: TrustProductStatus | null }> {
   if (!SID.bundle.test(profileSid) || !SID.bundle.test(primaryProfileSid)) throw badInput("A customer profile SID is malformed.");
+  const policy = policySid ?? opts.policySid ?? opts.policy ?? POLICY_SECONDARY_CUSTOMER_PROFILE;
+  if (policy !== POLICY_SECONDARY_CUSTOMER_PROFILE && policy !== POLICY_STARTER_CUSTOMER_PROFILE) {
+    throw badInput("A customer profile can only be evaluated against the Secondary or the Starter policy.");
+  }
+  const kind = policy === POLICY_STARTER_CUSTOMER_PROFILE ? "starter" : "secondary";
   let linked = false;
   if (!(await profileObjects(profileSid, http)).includes(primaryProfileSid)) {
     try {
       await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, { ObjectSid: primaryProfileSid });
     } catch (e) {
-      if (e instanceof TrustHubError) throw new PrimaryProfileLinkError(e, profileSid, opts.crossAccount === true);
+      if (e instanceof TrustHubError) throw new PrimaryProfileLinkError(e, profileSid, opts.crossAccount === true, kind);
       throw e;
     }
     linked = true;
@@ -525,7 +661,7 @@ export async function finishSecondaryCustomerProfile(
   let status = trustProductStatus(p?.status);
   let submitted = false;
   if (status === "draft") {
-    await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, { PolicySid: POLICY_SECONDARY_CUSTOMER_PROFILE });
+    await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, { PolicySid: policy });
     const s = await http("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
     status = trustProductStatus(s?.status) ?? "pending-review";
     submitted = true;
@@ -577,6 +713,238 @@ export async function createA2pTrustProduct(opts: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Stages 1 and 2 for a builder with NO EIN — the Sole Proprietor chain
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Built 2026-10-27 from Twilio's "New Sole Proprietor A2P 10DLC Registration for ISVs: API
+// Walkthrough" (https://www.twilio.com/docs/messaging/compliance/a2p-10dlc/onboarding-isv-api-sole-prop-new,
+// page dated 2026-07-21). It is a DIFFERENT CHAIN, not the EIN chain with a flag, which is why it
+// was refused outright until now (validateIntake used to say so):
+//
+//   EIN tier (above)                               Sole Proprietor (below)
+//   Secondary Customer Profile (RNdfbf…)           Starter Customer Profile (RN806d…)
+//     business info EndUser with the EIN             starter_customer_profile_information:
+//     + authorized_representative_1                  the person's name, email, phone. No EIN.
+//   A2P Trust Product (RNb0d4…)                    Sole Proprietor Trust Product (RN670d…)
+//     us_a2p_messaging_profile_information           sole_proprietor_information: brand_name
+//                                                    (the person's name), their MOBILE, vertical
+//   Brand STANDARD (+ SkipAutomaticSecVet)         Brand SOLE_PROPRIETOR (registerBrand already
+//                                                  branches on the tier), then an OTP to the
+//                                                  mobile, then the campaign (use case
+//                                                  SOLE_PROPRIETOR, ONE number)
+//
+// Both bundles carry the BUILDER's own email (the sole-prop guide's step 1.2 and 2.2 say "your
+// customer's email address", where the standard ISV guide says the opposite for its bundles). The
+// address, its supporting document and the cross-account link to the parent's PRIMARY profile are
+// the same as the Secondary profile's, and so is the PrimaryProfileLinkError a refused link becomes.
+//
+// ⚠️ NOT PROVEN ON A REAL ACCOUNT. Ahsan's decision 2026-10-27: no spend, no mock, so this is pinned
+// against a stubbed Twilio (twilioTrustHubSoleProp.test.ts) only. In particular, a STARTER profile
+// in a builder's sub-account linking to the parent's primary is the guide's documented shape but has
+// not been tried on ours (the Secondary one was, on 10-13). The feature ships dark behind a
+// per-builder switch (client_settings.sms_sole_prop) for exactly that reason.
+
+type ProfileResult = { profileSid: string; endUserSid: string; addressSid: string; repSid: string };
+type ProfileOpts = { intake: BuilderIntake; primaryProfileSid: string; friendlyName: string };
+
+function isIntakeOpts(a: unknown): a is { intake: BuilderIntake } {
+  return !!a && typeof a === "object" && !!(a as { intake?: unknown }).intake && typeof (a as { intake?: unknown }).intake === "object";
+}
+
+/**
+ * The Starter Customer Profile for a sole proprietor (the guide's step 1): the EndUser
+ * `starter_customer_profile_information` {email, first_name, last_name, phone_number}, the Address,
+ * the `customer_profile_address` SupportingDocument, the profile itself (PolicySid
+ * POLICY_STARTER_CUSTOMER_PROFILE, Email = the builder's own), the two assignments, the parent's
+ * PRIMARY profile linked across accounts, an Evaluation against the Starter policy, then
+ * Status=pending-review. The guide's step 1.8: move on once it is in review; it only reaches
+ * twilio-approved after the brand is OTP-verified, so nothing waits for that.
+ *
+ * Returns the same shape as createSecondaryCustomerProfile. `endUserSid` and `repSid` are the SAME
+ * EndUser: the sole proprietor is the business and its representative at once (Twilio's own
+ * wording), and there is no second object.
+ *
+ * ⚠️ A REFUSED (or unanswered) PRIMARY LINK IS A PrimaryProfileLinkError carrying the profile it
+ * stopped on, profileKind "starter", exactly like the Secondary one: a caller in a sub-account
+ * writes the profile down and FINISHES it next time (finishSecondaryCustomerProfile with
+ * POLICY_STARTER_CUSTOMER_PROFILE) instead of making a second set of objects.
+ *
+ * Call shapes: the options object createSecondaryCustomerProfile takes (so the two branches in
+ * portal-sms read alike), or the intake first and the rest after it (as an object or positional).
+ */
+export function createStarterCustomerProfile(opts: ProfileOpts, creds?: TrustHubCreds | null): Promise<ProfileResult>;
+export function createStarterCustomerProfile(intake: BuilderIntake, opts: { primaryProfileSid: string; friendlyName: string }, creds?: TrustHubCreds | null): Promise<ProfileResult>;
+export function createStarterCustomerProfile(intake: BuilderIntake, primaryProfileSid: string, friendlyName: string, creds?: TrustHubCreds | null): Promise<ProfileResult>;
+export async function createStarterCustomerProfile(a: unknown, b?: unknown, c?: unknown, d?: unknown): Promise<ProfileResult> {
+  let o: ProfileOpts, creds: TrustHubCreds | null | undefined;
+  if (isIntakeOpts(a)) {
+    o = a as ProfileOpts;
+    creds = b as TrustHubCreds | null | undefined;
+  } else if (typeof b === "string") {
+    o = { intake: a as BuilderIntake, primaryProfileSid: b, friendlyName: typeof c === "string" ? c : "" };
+    creds = (typeof c === "string" ? d : c) as TrustHubCreds | null | undefined;
+  } else {
+    const rest = (b ?? {}) as { primaryProfileSid?: string; friendlyName?: string };
+    o = { intake: a as BuilderIntake, primaryProfileSid: String(rest.primaryProfileSid ?? ""), friendlyName: String(rest.friendlyName ?? "") };
+    creds = c as TrustHubCreds | null | undefined;
+  }
+  const intake = o.intake;
+  const name = soleProprietorBrandName(intake);
+  const friendlyName = String(o.friendlyName ?? "").trim() || name;
+  const acct = acctOf(creds);
+  // Refused before the first request: every object below is real and lingers on the account, so a
+  // chain that cannot finish must not start.
+  if (!SID.bundle.test(String(o.primaryProfileSid ?? ""))) throw badInput("The primary customer profile SID is malformed.");
+  if (!acct || !SID.account.test(acct)) throw badInput("TWILIO_ACCOUNT_SID is not configured.");
+  if (!name) throw badInput("The sole proprietor's first and last name are required.");
+
+  const as = (method: "GET" | "POST", url: string, form?: Record<string, string>) => call(method, url, form, undefined, creds);
+  const email = String(intake.repEmail ?? "").trim();
+
+  const person = await as("POST", `${TRUSTHUB}/EndUsers`, {
+    FriendlyName: `${friendlyName} — starter profile info`,
+    Type: "starter_customer_profile_information",
+    "Attributes": JSON.stringify({
+      email,
+      // The same spelling the brand name is built from (soleProprietorBrandName), so the profile,
+      // the Trust Product's brand_name and the campaign all name the person identically.
+      first_name: String(intake.repFirstName ?? "").replace(/\s+/g, " ").trim(),
+      last_name: String(intake.repLastName ?? "").replace(/\s+/g, " ").trim(),
+      phone_number: String(intake.repPhone ?? "").trim(),
+    }),
+  });
+
+  const address = await as("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/Addresses.json`, {
+    CustomerName: name,
+    Street: intake.street,
+    City: intake.city,
+    Region: intake.region,
+    PostalCode: intake.postalCode,
+    IsoCountry: String(intake.isoCountry ?? "").trim().toUpperCase() || "US",
+  });
+  const addressSid = String(address?.sid ?? "");
+
+  const doc = await as("POST", `${TRUSTHUB}/SupportingDocuments`, {
+    FriendlyName: `${friendlyName} — address`,
+    Type: "customer_profile_address",
+    "Attributes": JSON.stringify({ address_sids: addressSid }),
+  });
+
+  const profile = await as("POST", `${TRUSTHUB}/CustomerProfiles`, {
+    FriendlyName: friendlyName,
+    Email: email,
+    PolicySid: POLICY_STARTER_CUSTOMER_PROFILE,
+  });
+  const profileSid = String(profile?.sid ?? "");
+  if (!SID.bundle.test(profileSid)) {
+    throw new TrustHubError({ message: "Twilio did not return a customer profile SID.", status: 0, code: 0, permanent: false, detail: profile });
+  }
+
+  for (const objectSid of [person?.sid, doc?.sid]) {
+    if (!objectSid) continue;
+    await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, { ObjectSid: String(objectSid) });
+  }
+  // The guide's step 1.6.3: "ISV customers should already have Primary Customer Profile setup in
+  // their parent/main account", and the Starter policy's evaluation lists primary_customer_profile
+  // as a requirement, so the link is not optional for us.
+  try {
+    await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/EntityAssignments`, { ObjectSid: o.primaryProfileSid });
+  } catch (e) {
+    if (e instanceof TrustHubError) throw new PrimaryProfileLinkError(e, profileSid, crossAccount(creds), "starter");
+    throw e;
+  }
+
+  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}/Evaluations`, { PolicySid: POLICY_STARTER_CUSTOMER_PROFILE });
+  await as("POST", `${TRUSTHUB}/CustomerProfiles/${profileSid}`, { Status: "pending-review" });
+
+  const personSid = String(person?.sid ?? "");
+  return { profileSid, endUserSid: personSid, addressSid, repSid: personSid };
+}
+
+type SoleProprietorTrustOpts = {
+  intake: BuilderIntake;
+  /** The STARTER profile's BU… (createStarterCustomerProfile). `profileSid` is accepted too, the
+   *  name createA2pTrustProduct uses. */
+  customerProfileSid?: string;
+  profileSid?: string;
+  friendlyName?: string;
+  email?: string;
+};
+
+/**
+ * The Sole Proprietor A2P Trust Product (the guide's step 2): the EndUser `sole_proprietor_information`
+ * {brand_name, mobile_phone_number, vertical: "CONSTRUCTION"}, the Trust Product (PolicySid
+ * POLICY_SOLE_PROP_TRUST_PRODUCT, Email = the builder's own), the EndUser and the STARTER profile
+ * assigned onto it, an Evaluation against the sole-prop policy, then Status=pending-review. Returns
+ * the same shape as createA2pTrustProduct, so the row's a2p_profile_sid holds it either way.
+ *
+ * ⚠️ THE MOBILE GOES HERE, on this EndUser, not on the brand and not on the profile: it is where
+ * Twilio sends the "reply YES" text once the brand is approved. BrandRegistrations takes no number.
+ * brand_name is the person's own name (soleProprietorBrandName; error 30914 is why).
+ *
+ * ⚠️ ONLY A STARTER PROFILE IS ACCEPTED by this policy (starter_customer_profile_type_business for
+ * an ISV's customer). A Secondary profile attached here is a rejection, which is why portal-sms
+ * reads a recorded profile's policy before it builds on one.
+ *
+ * Call shapes: (intake, the Starter profile's SID, creds?), or an options object first, like
+ * createA2pTrustProduct. FriendlyName defaults to the brand name (the guide's 2.2: "the customer's
+ * business name").
+ */
+export function createSoleProprietorTrustProduct(intake: BuilderIntake, customerProfileSid: string, creds?: TrustHubCreds | null, opts?: { friendlyName?: string; email?: string }): Promise<{ a2pProfileSid: string }>;
+export function createSoleProprietorTrustProduct(opts: SoleProprietorTrustOpts, creds?: TrustHubCreds | null): Promise<{ a2pProfileSid: string }>;
+export async function createSoleProprietorTrustProduct(a: unknown, b?: unknown, c?: unknown, d?: unknown): Promise<{ a2pProfileSid: string }> {
+  let o: SoleProprietorTrustOpts, creds: TrustHubCreds | null | undefined;
+  if (isIntakeOpts(a)) {
+    o = a as SoleProprietorTrustOpts;
+    creds = b as TrustHubCreds | null | undefined;
+  } else {
+    const extra = (d ?? {}) as { friendlyName?: string; email?: string };
+    o = { intake: a as BuilderIntake, customerProfileSid: String(b ?? ""), friendlyName: extra.friendlyName, email: extra.email };
+    creds = c as TrustHubCreds | null | undefined;
+  }
+  const intake = o.intake;
+  const profileSid = String(o.customerProfileSid ?? o.profileSid ?? "");
+  const brandName = soleProprietorBrandName(intake);
+  const mobile = String(intake.repPhone ?? "").trim();
+  if (!SID.bundle.test(profileSid)) throw badInput("The Starter customer profile SID is malformed.");
+  if (!brandName) throw badInput("The sole proprietor's first and last name are required.");
+  if (!/^\+1\d{10}$/.test(mobile)) throw badInput("The sole proprietor's mobile number must be in +1XXXXXXXXXX form.");
+  const friendlyName = String(o.friendlyName ?? "").trim() || brandName;
+  const email = String(o.email ?? intake.repEmail ?? "").trim();
+
+  const as = (method: "GET" | "POST", url: string, form?: Record<string, string>) => call(method, url, form, undefined, creds);
+  const info = await as("POST", `${TRUSTHUB}/EndUsers`, {
+    FriendlyName: `${friendlyName} — sole proprietor info`,
+    Type: "sole_proprietor_information",
+    "Attributes": JSON.stringify({
+      brand_name: brandName,
+      mobile_phone_number: mobile,
+      // One of Twilio's fixed verticals (the guide's 2.3 list). Every builder here builds sheds,
+      // barns and garages, the same reason the EIN tier's business_industry is CONSTRUCTION.
+      vertical: "CONSTRUCTION",
+    }),
+  });
+
+  const tp = await as("POST", `${TRUSTHUB}/TrustProducts`, {
+    FriendlyName: friendlyName,
+    Email: email,
+    PolicySid: POLICY_SOLE_PROP_TRUST_PRODUCT,
+  });
+  const a2pProfileSid = String(tp?.sid ?? "");
+  if (!SID.bundle.test(a2pProfileSid)) {
+    throw new TrustHubError({ message: "Twilio did not return a Trust Product SID.", status: 0, code: 0, permanent: false, detail: tp });
+  }
+
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, { ObjectSid: String(info?.sid ?? "") });
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/EntityAssignments`, { ObjectSid: profileSid });
+
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}/Evaluations`, { PolicySid: POLICY_SOLE_PROP_TRUST_PRODUCT });
+  await as("POST", `${TRUSTHUB}/TrustProducts/${a2pProfileSid}`, { Status: "pending-review" });
+
+  return { a2pProfileSid };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Stage 3 — Brand
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -601,6 +969,11 @@ export async function registerBrand(opts: {
     A2PProfileBundleSid: opts.a2pProfileBundleSid,
     // ⚠️ SENT EXPLICITLY. The docs give a default only for `mock`; BrandType carries no
     // documented default, so relying on one is relying on undocumented behaviour.
+    // SOLE_PROPRIETOR takes the Starter profile and the sole-prop Trust Product (the two
+    // functions above), never the Secondary pair, and Twilio's brand resource page has an example
+    // labelled sole proprietor that sends STANDARD: ignore it, the sole-prop guide's §3 is right.
+    // An approved sole-prop brand is NOT ready yet: Twilio texts the person and waits for a YES
+    // (brandReadyForCampaign, resendBrandOtp below).
     BrandType: opts.tier === "sole_proprietor" ? "SOLE_PROPRIETOR" : "STANDARD",
   };
   // ⚠️ THIS BOOLEAN IS "Low-Volume Standard". LVS is not a BrandType — the enum has only
@@ -646,6 +1019,54 @@ export async function fetchBrand(brandSid: string, creds?: TrustHubCreds | null)
 export async function updateBrand(brandSid: string, creds?: TrustHubCreds | null): Promise<{ status: string }> {
   const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}`, {}, undefined, creds);
   return { status: String(b?.status ?? "") };
+}
+
+/**
+ * May this brand move on to its campaign?
+ *
+ *   sole_proprietor  APPROVED **and** identity VERIFIED. Twilio texts the person's mobile from
+ *                    +1 (915) 278-2000 when the brand is approved, and only their YES flips
+ *                    identity_status from UNVERIFIED to VERIFIED while status stays APPROVED. The
+ *                    guide (§3.2): "wait until the Sole Proprietor Brand is approved and verified
+ *                    before moving on". VETTED_VERIFIED (the enum's stronger form) counts as
+ *                    verified too: refusing it would leave a builder waiting for a YES they already
+ *                    gave.
+ *   every other tier APPROVED, exactly the test both brand paths made before this existed.
+ *
+ * ⚠️ WHY THIS EXISTS (2026-10-27): the Event Streams `brand-unverified` event arrives as
+ * brandstatus "registered" + identitystatus "unverified", normalizeBrandStatus maps "registered"
+ * to APPROVED, and both twilio-events and portal-sms's poll moved brand_pending → brand_approved on
+ * APPROVED alone. For a sole proprietor that would have built the campaign before the person had
+ * replied YES. The status is normalised here as well, so a caller passing the raw event word gets
+ * the same answer as one passing the REST word (normalising twice changes nothing).
+ */
+export function brandReadyForCampaign(
+  tier: string | null | undefined,
+  brandStatus: string | null | undefined,
+  identityStatus: string | null | undefined,
+): boolean {
+  if (normalizeBrandStatus(String(brandStatus ?? "")) !== "APPROVED") return false;
+  if (String(tier ?? "").trim() !== "sole_proprietor") return true;
+  const identity = String(identityStatus ?? "").trim().toUpperCase();
+  return identity === "VERIFIED" || identity === "VETTED_VERIFIED";
+}
+
+/**
+ * Ask Twilio to text a sole proprietor the "reply YES" message again:
+ * POST messaging/v1/a2p/BrandRegistrations/{BN}/SmsOtp, no body (the guide's §3.1; the resource
+ * shows it as the brand's `brand_registration_otps` link). Free, and answers {account_sid,
+ * brand_registration_sid}, which nothing needs.
+ *
+ * ⚠️ THE FIRST TEXT IS AUTOMATIC, EVERY LATER ONE IS THIS CALL. This file used to say the OTP
+ * "needs no code from us at all"; the guide says otherwise. The text is valid for 24 hours, and a
+ * brand still unverified 30 days after registration may be EXPIRED by TCR, which only a Console
+ * delete and a second (paid) brand undo. So the person needs a "text me again" button, and this is
+ * it. Twilio allows 10 requests a second per account; the caller's cooldown is what keeps a person
+ * from being texted every time they press it.
+ */
+export async function resendBrandOtp(brandSid: string, creds?: TrustHubCreds | null): Promise<void> {
+  if (!SID.brand.test(String(brandSid ?? ""))) throw badInput("The brand registration SID is malformed.");
+  await call("POST", `${MESSAGING}/a2p/BrandRegistrations/${brandSid}/SmsOtp`, undefined, undefined, creds);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1015,6 +1436,7 @@ const SID = {
   bundle: /^BU[0-9a-f]{32}$/i,
   account: /^AC[0-9a-f]{32}$/i,
   endUser: /^IT[0-9a-f]{32}$/i,
+  brand: /^BN[0-9a-f]{32}$/i,
 };
 function badInput(message: string): TrustHubError {
   return new TrustHubError({ message, status: 400, code: 0, permanent: true });
