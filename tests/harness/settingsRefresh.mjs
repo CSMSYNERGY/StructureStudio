@@ -72,7 +72,11 @@ async function routeLive(page) {
 const innerFixtures = (page) => page.evaluate(() => {
   const root = document.getElementById("root");
   const k = Object.keys(root).find((x) => x.startsWith("__reactContainer"));
-  const q = [root[k]]; let n = 0;
+  // The container holds the HostRoot fiber of the FIRST render; after an update the committed tree may
+  // be its alternate. FiberRoot.current is always the committed one (reading the other one returned the
+  // pre-refresh props in 3 of 4 runs on another machine while the 3D, read from the engine, had moved).
+  const hr = root[k];
+  const q = [(hr && hr.stateNode && hr.stateNode.current) || hr]; let n = 0;
   while (q.length && n < 80000) {
     const f = q.shift(); n++; if (!f) continue;
     const nm = f.type && (f.type.name || f.type.displayName);
