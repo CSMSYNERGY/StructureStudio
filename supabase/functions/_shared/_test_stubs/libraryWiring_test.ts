@@ -98,8 +98,8 @@ function world(): World {
       library_requests: [],
       wallet_accounts: [],
       door_looks: [
-        { id: LOOK_READY, client_id: OWN, name: "Our photo door", base: "classic", status: "ready", thumb_url: "https://stub.supabase.co/storage/v1/object/public/fixtures/acme-sheds/door-look-1.png" },
-        { id: LOOK_DRAFT, client_id: OWN, name: "A draft", base: "plank", status: "draft", thumb_url: null },
+        { id: LOOK_READY, client_id: OWN, name: "Our photo door", base: "classic", status: "ready", version: 1, spec: { v: 1, base: "classic", src: { leaves: 1, hinge: "left" } }, thumb_url: "https://stub.supabase.co/storage/v1/object/public/fixtures/acme-sheds/door-look-1.png" },
+        { id: LOOK_DRAFT, client_id: OWN, name: "A draft", base: "plank", status: "draft", version: 1, spec: { v: 1, base: "plank", src: { leaves: 1, hinge: "left" } }, thumb_url: null },
         { id: LOOK_OLD, client_id: OWN, name: "An old one", base: "dutch", status: "archived", thumb_url: null },
         { id: LOOK_THEIRS, client_id: OTHER, name: "Their photo door", base: "zbrace", status: "ready", thumb_url: null },
       ],
@@ -111,8 +111,10 @@ const has = (ops: any[][], op: string) => ops.some((o) => o[0] === op);
 const argOf = (ops: any[][], op: string) => (ops.find((o) => o[0] === op) ?? []).slice(1);
 /** Apply the query's filters to a row. */
 function matches(r: Row, ops: any[][]): boolean {
+  // A JSON path filter (`look->>doorLookId`), as PostgREST reads one.
+  const val = (c: string) => { const i = c.indexOf("->>"); return i < 0 ? r[c] : (r[c.slice(0, i)] ?? {})[c.slice(i + 3)]; };
   for (const o of ops) {
-    if (o[0] === "eq" && r[o[1]] !== o[2]) return false;
+    if (o[0] === "eq" && val(o[1]) !== o[2]) return false;
     if (o[0] === "is" && o[2] === null && r[o[1]] != null) return false;
     if (o[0] === "not" && o[2] === "is" && o[3] === null && r[o[1]] == null) return false;
     if (o[0] === "in" && !(o[2] as unknown[]).includes(r[o[1]])) return false;
@@ -139,7 +141,7 @@ function answer(w: World, t: Trace, table: string, ops: any[][]): any {
     case "client_settings": {
       const sel = String(argOf(ops, "select")[0] ?? "");
       if (sel.includes("library_beta") && w.flag === "missing") return { data: null, error: { code: "42703", message: "column client_settings.library_beta does not exist" } };
-      return { data: { library_beta: w.flag === true, billing_exempt: false, internal_account: false }, error: null };
+      return { data: { library_beta: w.flag === true, door_looks_beta: w.flag === true, billing_exempt: false, internal_account: false }, error: null };
     }
     case "usage_prices":
       return { data: w.meter ? { visible: true, ...w.meter } : null, error: null };
@@ -505,4 +507,28 @@ Deno.test("save_fixture: one look per door row", async () => {
   const up = link.t.writes.find((x) => x.table === "fixture_items")!.row;
   assertEquals([up.client_library_id, up.door_style, up.door_look_id], [U(613), "classic", null], "the entry goes on, drawn over its base, and the row's own look comes off");
   scopedToOwn(link.t);
+});
+
+Deno.test("seed_mine leaves a door on its own 3D look alone (an entry would replace that look, 345)", async () => {
+  const w = world();
+  w.tables.fixture_items.push({ id: U(34), client_id: OWN, category: "door", name: "Photo door", door_style: "classic", lite_rows: null, lite_cols: null, client_library_id: null, door_look_id: LOOK_READY, sort_order: 1 });
+  const r = await call({ action: "library_seed_mine" }, w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(w.tables.fixture_items.find((x) => x.id === U(34))!.client_library_id, null, "the door on its own look is not linked");
+  assertEquals(w.tables.fixture_items.find((x) => x.id === U(34))!.door_look_id, LOOK_READY, "...and keeps it");
+  assert(w.tables.fixture_items.find((x) => x.id === U(31))!.client_library_id != null, "the other door is still linked");
+});
+
+Deno.test("save_door_look: a look in the library keeps its base and is not replaced away (345), in words, before any row moves", async () => {
+  const w = world();
+  w.tables.client_library.push({ id: U(614), client_id: OWN, category: "door", name: "Front door", look: { doorStyle: "classic", doorLookId: LOOK_READY }, library_item_id: null });
+  const rebase = await call({ action: "save_door_look", id: LOOK_READY, version: 1, name: "Our photo door", spec: { v: 1, base: "dutch", src: { leaves: 1, hinge: "left" } } }, w);
+  assertEquals([rebase.status, rebase.body.code], [409, "door_look_in_library"], JSON.stringify(rebase.body));
+  assert(/in your library as "Front door"/.test(rebase.body.error), rebase.body.error);
+  assert(!rebase.t.writes.some((x) => x.table === "door_looks"), "nothing written");
+  const rename = await call({ action: "save_door_look", id: LOOK_READY, version: 1, name: "Our photo door, renamed" }, w);
+  assertEquals(rename.status, 200, "a save that keeps the base still goes through");
+  const replace = await call({ action: "save_door_look", id: LOOK_DRAFT, version: 1, name: "A draft", replaceId: LOOK_READY }, w);
+  assertEquals([replace.status, replace.body.code], [409, "door_look_in_library"], JSON.stringify(replace.body));
+  assert(!replace.t.writes.some((x) => x.table === "fixture_items" || x.table === "door_looks"), "no door row moved and no look written");
 });

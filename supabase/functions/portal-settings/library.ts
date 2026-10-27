@@ -260,12 +260,16 @@ const gridName = (look: Look) => (look.liteRows == null ? "Standard window" : `$
  * door's photo" (the plan's default). Rows already linked are left alone.
  */
 export async function seedMine(admin: Db, clientId: string): Promise<{ created: number; linked: number; skipped: number } | { dbError: unknown; where: string }> {
-  const [tpl, ent, sc, fx] = await Promise.all([
+  // A door on its own 3D look (343) is left out: an entry put on it would replace that look (345's one
+  // look per row), and seeding runs by itself on the first open. A database without 343 has no such door.
+  const unlinked = () => admin.from("fixture_items").select("id, category, door_style, lite_rows, lite_cols").eq("client_id", clientId).in("category", ["door", "window"]).is("client_library_id", null);
+  let [tpl, ent, sc, fx] = await Promise.all([
     admin.from("library_items").select("id, category, slug, name, look, version, status"),
     admin.from("client_library").select("id, category, name, look").eq("client_id", clientId),
     admin.from("style_cladding").select("id, cladding_id, label_override, exposure_in, rate, active").eq("client_id", clientId).is("client_library_id", null),
-    admin.from("fixture_items").select("id, category, door_style, lite_rows, lite_cols").eq("client_id", clientId).in("category", ["door", "window"]).is("client_library_id", null),
+    unlinked().is("door_look_id", null),
   ]);
+  if (fx.error && librarySchemaMissing(fx.error)) fx = await unlinked();
   for (const r of [tpl, ent, sc, fx]) if (r.error) return { dbError: r.error, where: "read your catalog" };
   const templates: Template[] = (tpl.data ?? []) as Template[];
   const entries: Entry[] = (ent.data ?? []).map((e: Entry) => ({ ...e, look: (e.look ?? {}) as Look }));

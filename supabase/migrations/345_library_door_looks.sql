@@ -129,8 +129,11 @@ begin
       raise exception 'A door made from a photo keeps its look; rename it, or add a new entry instead' using errcode = '23514';
     end if;
     if new.category = 'door' and new.look ? 'doorLookId' then
+      -- FOR SHARE: an archive of this look racing this insert waits for it, and its guard then sees
+      -- the entry (or this check sees the archive), so an entry can never name a look that is not ready.
       select dl.base, dl.status into l from public.door_looks dl
-       where dl.client_id = new.client_id and dl.id = (new.look ->> 'doorLookId')::uuid;
+       where dl.client_id = new.client_id and dl.id = (new.look ->> 'doorLookId')::uuid
+       for share;
       if not found then
         raise exception 'That 3D door look isn''t in this catalog' using errcode = '23503';
       end if;
@@ -177,6 +180,10 @@ begin
         new.door_look_id := null;          -- a library entry was put on: it replaces the row's own look
       else
         new.client_library_id := null;     -- a look was put on (or both arrived at once): the look wins
+        -- ...and the row is drawn over the LOOK's base (343's rule), not the entry's, which 339's link
+        -- trigger wrote just before this one.
+        new.door_style := coalesce((select dl.base from public.door_looks dl
+                                     where dl.client_id = new.client_id and dl.id = new.door_look_id), new.door_style);
       end if;
     end if;
     return new;

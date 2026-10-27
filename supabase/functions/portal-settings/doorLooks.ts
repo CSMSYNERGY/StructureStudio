@@ -396,6 +396,30 @@ export async function handleDoorLookAction(x: DoorLookCtx): Promise<Response> {
       if (!old.data || old.data.status === "archived") return json({ error: "The look you're replacing isn't there any more. Reload the page.", code: "door_look_replace" }, 404);
     }
 
+    // 345: a look a library entry names keeps its base and stays ready until the entry is removed, so a
+    // new base for it, or replacing it, is refused here, before any row moves (the guard would refuse
+    // the write anyway, after Replace had already moved the rows).
+    const namedInLibrary = async (lookId: string): Promise<{ name: string } | null | { error: unknown }> => {
+      const r = await admin.from("client_library").select("id, name").eq("client_id", clientId).eq("category", "door").eq("look->>doorLookId", lookId).limit(1);
+      if (r.error) return lookSchemaMissing(r.error) ? null : { error: r.error };
+      return (r.data ?? [])[0] ?? null;
+    };
+    for (const [lookId, why] of [
+      ...(cleaned && cleaned.base !== cur.data.base ? [[id as string, "rebase"] as const] : []),
+      ...(replaceId !== null ? [[replaceId as string, "replace"] as const] : []),
+    ]) {
+      const n = await namedInLibrary(lookId);
+      if (n && "error" in n) return dbFail(req, clientId, "check your library", n.error);
+      if (n) {
+        return json({
+          error: why === "rebase"
+            ? `This 3D door is in your library as "${n.name}", so it keeps its look. Make a new one instead.`
+            : `The look you're replacing is in your library as "${n.name}". Remove it from the library first, then replace it.`,
+          code: "door_look_in_library",
+        }, 409);
+      }
+    }
+
     const same = (r: Record<string, unknown>) => r.status === "ready" && r.name === name
       && (cleaned === null || canonicalJson(r.spec) === canonicalJson(cleaned.spec))
       && (thumbUrl === undefined || (r.thumb_url ?? null) === thumbUrl);
@@ -415,7 +439,12 @@ export async function handleDoorLookAction(x: DoorLookCtx): Promise<Response> {
     // Compare-and-swap on the version: a save that raced this one past the read above writes nothing.
     // A new base reaches every door row on the look in the same statement (343's trigger).
     const up = await admin.from("door_looks").update(next).eq("client_id", clientId).eq("id", id).eq("version", version).select(LOOK_COLS).maybeSingle();
-    if (up.error) return dbFail(req, clientId, "save that door look", up.error);
+    if (up.error) {
+      if (String(up.error.code ?? "") === "23514" && /in your library/.test(String(up.error.message ?? ""))) {
+        return json({ error: "This 3D door is in your library, so it keeps its look. Make a new one instead.", code: "door_look_in_library" }, 409);
+      }
+      return dbFail(req, clientId, "save that door look", up.error);
+    }
     if (!up.data) {
       const now = await admin.from("door_looks").select(LOOK_COLS).eq("client_id", clientId).eq("id", id).maybeSingle();
       if (now.error || !now.data) return dbFail(req, clientId, "save that door look", now.error ?? { message: "the look went away mid-save" });

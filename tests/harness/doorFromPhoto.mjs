@@ -180,6 +180,12 @@ const handler = async (route) => {
   if (url.includes("/rest/v1/")) return json(route, []);
   if (url.includes("/auth/v1/user")) return json(route, USER);
   if (url.includes("/auth/v1/")) return json(route, SESSION);
+  // A tile the page uploaded, read back from the public bucket (the library shows it).
+  const pub = /\/storage\/v1\/object\/public\/fixtures\/(.+)$/.exec(url);
+  if (pub) {
+    const up = uploads.find((u) => u.bucket === "fixtures" && u.path === decodeURIComponent(pub[1]));
+    return up ? route.fulfill({ status: 200, contentType: "image/png", headers: H, body: up.bytes }) : route.fulfill({ status: 404, headers: H, body: "" });
+  }
   if (url.includes("/storage/v1/")) {
     const m = /\/object\/upload\/sign\/([^/]+)\/(.+?)\?/.exec(url);
     uploads.push({ bucket: m ? m[1] : null, path: m ? decodeURIComponent(m[2]) : null, ...fileOf(req.postDataBuffer() || Buffer.alloc(0), req.headers()["content-type"] || "") });
@@ -301,7 +307,6 @@ try {
   writeFileSync(join(shots, "00-made-up-door-photo.jpg"), photo);
   await page.locator("[data-ss-door-front]").setInputFiles({ name: "barn-door.jpg", mimeType: "image/jpeg", buffer: photo });
   await page.waitForTimeout(300);
-  await page.screenshot({ path: join(shots, "02-photo-step.png") });
   await page.getByRole("button", { name: "Next: mark the corners" }).click();
   await page.waitForSelector("[data-ss-door-corners]");
   await page.waitForTimeout(300);
@@ -312,9 +317,11 @@ try {
   await page.locator("[data-ss-door-studio]").getByRole("button", { name: "Straighten", exact: true }).click();
   await page.waitForTimeout(400);
   ok("D the size typed the wrong way round is refused, before anything is uploaded", /doesn't match the door's size/.test(await page.locator("[data-ss-door-error]").innerText().catch(() => "")) && actions("door_ref_upload_url").length === 0);
+  await page.screenshot({ path: join(shots, "03b-wrong-size-refused.png") });
   await page.locator("[data-ss-door-studio]").getByRole("button", { name: "Back", exact: true }).click();
   await page.getByRole("spinbutton", { name: "Width in inches" }).fill("36");
   await page.getByRole("spinbutton", { name: "Height in inches" }).fill("80");
+  await page.screenshot({ path: join(shots, "02-photo-step.png") });
   await page.getByRole("button", { name: "Next: mark the corners" }).click();
   await page.waitForSelector("[data-ss-door-corners]");
   for (let i = 0; i < 4; i++) await dragDot(i, PHOTO.quad[i]);
@@ -377,8 +384,8 @@ try {
   await page.locator("[data-ss-library='door']").getByRole("button", { name: /Browse the StructureStudio library/ }).click();
   await page.waitForTimeout(400);
   const ent = page.locator("[data-ss-library-entry='Ranch barn door']");
-  ok("H the library lists it, made from the photo, with its tile", (await ent.count()) === 1 && /Made from your photo, drawn over Board-and-batten with a Z brace/.test(await ent.innerText())
-    && (await page.locator("[data-ss-library='door'] img[src*='door-look-']").count()) >= 1);
+  const tileShown = await page.locator("[data-ss-library='door'] img[src*='door-look-']").first().evaluate((el) => el.complete && el.naturalWidth > 0).catch(() => false);
+  ok("H the library lists it, made from the photo, with its tile", (await ent.count()) === 1 && /Made from your photo, drawn over Board-and-batten with a Z brace/.test(await ent.innerText()) && tileShown);
   await ent.getByRole("button", { name: "Rename" }).click();
   ok("H ...rename only: no look picker on it", (await page.locator("[data-ss-library-entry='Ranch barn door'] select").count()) === 0);
   await page.locator("[data-ss-library-entry='Ranch barn door']").getByRole("button", { name: "Cancel" }).click();
@@ -387,6 +394,9 @@ try {
   const opts = await page.locator("[data-ss-door-look-library] option").evaluateAll((els) => els.map((e) => e.textContent));
   ok("H a door's How it looks in 3D lists it, and Make one from a photo…", opts.includes("Ranch barn door") && opts.includes("Make one from a photo…"), JSON.stringify(opts));
   await page.locator("[data-ss-door-look-library]").selectOption({ label: "Ranch barn door" });
+  await page.locator("[data-ss-door-look-library]").evaluate((el) => el.scrollIntoView({ block: "center" }));
+  await page.waitForTimeout(300);
+  ok("H ...and the line under it says it's their door from the photo, not the base look's words", (await page.getByText("Your door, drawn in 3D from your photo.").count()) === 1);
   await page.screenshot({ path: join(shots, "09-door-look-picker.png") });
   await page.getByRole("button", { name: /^Save( door)?$/ }).last().click();
   await page.waitForTimeout(1200);

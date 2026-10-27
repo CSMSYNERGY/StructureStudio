@@ -8067,7 +8067,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           </select>
           )}
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto}
+            {(() => {
+              // A door made from a photo (345) draws its own look, not its base's description.
+              const e = lib && edit.draft.client_library_id ? (lib.entries || []).find((x) => x.id === edit.draft.client_library_id) : null;
+              return e && e.look && e.look.doorLookId
+                ? "Your door, drawn in 3D from your photo. It follows this door's colours."
+                : D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto;
+            })()}
           </div>
         </div>
       )}

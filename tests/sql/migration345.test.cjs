@@ -362,6 +362,22 @@ const item = async (db, c, id) => ((await fixOf(db, c)).items || []).find((i) =>
       values ('00000000-0000-4000-8000-0000000000d9', '${A}', 'door', 'New door', 36, 80, 300, 'zbrace', '${LOOK}', '${ENTRY}')`);
     row = await one(db, "select door_look_id, client_library_id from public.fixture_items where id = '00000000-0000-4000-8000-0000000000d9'");
     ok(row.door_look_id === LOOK && row.client_library_id === null, "...on an insert too", JSON.stringify(row));
+    // An entry on one base and a look on another, in one save: the look wins, drawn over ITS base (339's
+    // link trigger wrote the entry's just before; the review, 2026-10-27).
+    const plain = (await one(db, "select id from public.client_library where client_id = $1 and name = 'Plain plank'", [A])).id;
+    await db.exec(`update public.fixture_items set door_look_id = null, client_library_id = null, door_style = 'basic' where id = '${SLAB}'`);
+    await db.exec(`update public.fixture_items set door_look_id = '${LOOK}', client_library_id = '${plain}' where id = '${SLAB}'`);
+    row = await one(db, "select door_look_id, client_library_id, door_style from public.fixture_items where id = $1", [SLAB]);
+    ok(row.door_look_id === LOOK && row.client_library_id === null && row.door_style === "zbrace", "a plank entry and a Z look in one save: the look, drawn over ITS base", JSON.stringify(row));
+    await db.exec(`insert into public.fixture_items (id, client_id, category, name, width_in, height_in, price, door_style, door_look_id, client_library_id)
+      values ('00000000-0000-4000-8000-0000000000da', '${A}', 'door', 'Another door', 36, 80, 300, 'basic', '${LOOK}', '${plain}')`);
+    row = await one(db, "select door_look_id, client_library_id, door_style from public.fixture_items where id = '00000000-0000-4000-8000-0000000000da'");
+    ok(row.door_look_id === LOOK && row.client_library_id === null && row.door_style === "zbrace", "...on an insert too, over the look's base", JSON.stringify(row));
+    await db.exec(`update public.fixture_items set door_look_id = null, door_style = 'plank', client_library_id = '${plain}' where id = '${SLAB}'`);
+    await db.exec(`update public.fixture_items set door_look_id = '${LOOK}' where id = '${SLAB}'`);
+    row = await one(db, "select door_look_id, client_library_id, door_style from public.fixture_items where id = $1", [SLAB]);
+    ok(row.door_look_id === LOOK && row.client_library_id === null && row.door_style === "zbrace", "a look put on a linked row by itself: the look, over its base", JSON.stringify(row));
+    ok(/for share;/.test(MIG()), "the entry check locks the look it reads (an archive racing it waits)");
     ok(Number((await one(db, "select count(*) n from public.fixture_items where door_look_id is not null and client_library_id is not null")).n) === 0, "no row holds both");
     await db.exec("alter table public.fixture_items disable trigger fixture_items_one_look");
     const r = await refused(db, `update public.fixture_items set client_library_id = '${ENTRY}' where id = '${DOOR}'`, /fixture_items_one_look_chk/);
