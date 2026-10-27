@@ -298,22 +298,34 @@ export function doorPhrases(v: unknown, most = DOOR_MAX_GAPS): string[] {
 // sharing a thing with a group joins the first such group (and never merges two groups, which could lose a
 // real gap). MODEL-WRITTEN TEXT, already through doorPhrases.
 const GAP_SYNONYMS: Record<string, string> = Object.fromEntries([
-  ...["latch", "catch", "keeper", "lock", "escutcheon", "bolt", "hasp", "fitting", "knob", "hardware"].map((w) => [w, "latch"]),
+  ...["latch", "catch", "keeper", "lock", "escutcheon", "bolt", "hasp", "fitting", "hardware"].map((w) => [w, "latch"]),
+  ...["knob", "doorknob"].map((w) => [w, "knob"]),
   ...["logo", "sticker", "decal", "label", "badge", "plaque", "brand", "maker", "dealer"].map((w) => [w, "logo"]),
   ...["astragal", "joint", "meeting", "meet"].map((w) => [w, "meet"]),
   ...["vent", "louvre", "louver", "louvred", "louvered"].map((w) => [w, "vent"]),
+  ...["arch", "arched", "archtop"].map((w) => [w, "arch"]),
+  ...["weatherstrip", "weatherstripping", "weather"].map((w) => [w, "weatherstrip"]),
+  ...["peephole", "peep"].map((w) => [w, "peephole"]),
 ]);
+// Words that place, size, colour or make a thing, or only join words: never the thing itself.
 const GAP_NOT_A_THING = new Set((
   "a an the of on in at to with and or near by each both one two three four its it is are be not no nor rather than from for as " +
   "that this which like looks look appear appears show shows just only also between instead seems " +
+  "along above below under over beneath across around about beside behind next through without within up down halfway " +
+  "has have sits sit set mounted fitted " +
   "left right top bottom upper lower middle mid centre center side edge leaf leave door panel rail stile corner front back " +
   "black white grey gray dark light brown silver bronze red green blue tan cream beige " +
+  "metal metallic steel iron brass chrome nickel aluminium aluminum galvanized galvanised stainless rubber vinyl wood wooden glass painted " +
   "small large little big tiny short long tall wide narrow plain solid flat visible clearly clear faint thin thick inset round square " +
-  "plate strip line piece part shape block type kind style"
+  "plate strip line piece part shape block type kind style handle lever frame board"
 ).split(" "));
+// A phrase names its thing before any word that places it by another thing ("a deadbolt above the knob"):
+// the knob there only says where, so it must not join the deadbolt to the knob's group.
+const GAP_PLACED_BY = /\b(?:above|below|beneath|under|over|next to|beside|near|by|rather than|instead of)\b/;
 function gapThings(phrase: string): string[] {
-  return phrase.toLowerCase().replace(/'s\b/g, "").split(/[^a-z]+/).flatMap((w) => {
-    const s = w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w;
+  const own = phrase.toLowerCase().replace(/'s\b/g, "").split(GAP_PLACED_BY)[0];
+  return own.split(/[^a-z]+/).flatMap((w) => {
+    const s = /(ch|sh|x)es$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w;
     return !s || GAP_NOT_A_THING.has(w) || GAP_NOT_A_THING.has(s) ? [] : [GAP_SYNONYMS[s] ?? s];
   });
 }
@@ -396,7 +408,8 @@ export function finishDoorDraft(c: DoorConsensus, spec: DoorLook, warnings: read
   if (mismatches.length) pushWarning(ws, mismatchWarning(mismatches));
   if (wanted.knownGaps.includes(DOOR_SIX_PANEL_GAP)) pushWarning(ws, pressWarning("six_panel"));
   if (unexplained.length) pushWarning(ws, gapWarning(unexplained));
-  const vocabGaps = doorPhrases([...wanted.knownGaps, ...unexplained]);
+  // Room for the known gaps too, so every phrase the warning names is filed.
+  const vocabGaps = doorPhrases([...wanted.knownGaps, ...unexplained], DOOR_MAX_GAPS + wanted.knownGaps.length);
   return { spec: out, warnings: ws, vocabGaps, mismatches, unexplained, stageBAdded };
 }
 

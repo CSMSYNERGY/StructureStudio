@@ -625,9 +625,11 @@ Deno.test("one vocabulary gap per thing: three reads naming one thing three ways
     "dealer logo sticker on left upper panel", "small black lock escutcheon on each mid rail",
     "logo sticker on upper left panel", "plain joint between leaves, no strip visible",
   ]), ["small black slide latch on each leaf's mid rail", "maker logo sticker on left upper panel", "no visible astragal strip, leaves butt at the meeting line"]);
-  // The Classic's press 4-6 (round hardware three ways, a badge two ways) and the Dutch's vent said twice.
+  // The Classic's press 4-6 (round hardware three ways, a badge two ways): a knob is its own thing, so the
+  // knobs file apart from the fittings (the safe way round: two rows for one thing beats losing one).
   assertEquals(doorGapPhrases(["small round fittings on each mid rail", "maker's logo sticker on left leaf", "round bolt hardware on each mid rail", "small maker badge top left", "small round knobs on each mid rail"]),
-    ["small round fittings on each mid rail", "maker's logo sticker on left leaf"]);
+    ["small round fittings on each mid rail", "maker's logo sticker on left leaf", "small round knobs on each mid rail"]);
+  // The Dutch's vent said twice.
   assertEquals(doorGapPhrases(["small logo plate near top of left leaf", "vent is a plain dark square block, louvres not clearly visible", "vent is a solid dark square block, not louvred"]),
     ["small logo plate near top of left leaf", "vent is a plain dark square block, louvres not clearly visible"]);
   // Different things stay apart, even when they share a place, a colour or a generic word ("plate").
@@ -635,4 +637,35 @@ Deno.test("one vocabulary gap per thing: three reads naming one thing three ways
     ["an arched top", "small black lock plate on each mid rail", "maker's logo plate top left", "a round window", "a kick plate"]);
   // A phrase naming two groups' things joins the first, and the second stays its own.
   assertEquals(doorGapPhrases(["a small knob", "a logo badge", "knob with a logo on it"]), ["a small knob", "a logo badge"]);
+  // Place, joining and material words are no thing (review wf_86ca727a-4a8): two things placed alike stay two.
+  assertEquals(doorGapPhrases(["metal kick plate along the bottom", "rubber weatherstrip along the bottom", "kick plate along the bottom", "door sweep weatherstrip along the bottom"]),
+    ["metal kick plate along the bottom", "rubber weatherstrip along the bottom"]);
+  assertEquals(doorGapPhrases(["glass transom above the door", "peephole above the lever", "brass peephole viewer above the lever"]), ["glass transom above the door", "peephole above the lever"]);
+  assertEquals(doorGapPhrases(["brass kick plate", "brass doorknob"]), ["brass kick plate", "brass doorknob"]);
+  assertEquals(doorGapPhrases(["flat steel slab with no frame boards", "steel kick plate"]), ["flat steel slab with no frame boards", "steel kick plate"]);
+  assertEquals(doorGapPhrases(["lever handle instead of knob", "keyed deadbolt above the handle"]), ["lever handle instead of knob", "keyed deadbolt above the handle"]);
+  for (const order of [["metal kick plate along the bottom", "rubber weatherstrip along the bottom", "weatherstrip at the bottom"], ["weatherstrip at the bottom", "rubber weatherstrip along the bottom", "metal kick plate along the bottom"]]) {
+    assertEquals(doorGapPhrases(order).length, 2, order.join(" / "));
+  }
+  // A knob is a handle type the vocabulary lacks, a deadbolt or a bolt another fitting; a thing named only
+  // to place another ("above the knob") does not join them.
+  assertEquals(doorGapPhrases(["round knob rather than lever", "keyed deadbolt lock above the knob", "small round knob, no lever", "keyed deadbolt above the handle"]),
+    ["round knob rather than lever", "keyed deadbolt lock above the knob"]);
+  assertEquals(doorGapPhrases(["round knob rather than lever", "barrel bolt at the top of the leaf"]), ["round knob rather than lever", "barrel bolt at the top of the leaf"]);
+  // Repeats the words alone missed: doorknob / knob, -ches plurals, arch, weatherstrip, peephole.
+  assertEquals(doorGapPhrases(["round doorknob", "round door knob", "knob instead of a lever"]), ["round doorknob"]);
+  assertEquals(doorGapPhrases(["small black latches on the mid rails", "small black latch on each mid rail", "small black catches on each mid rail"]), ["small black latches on the mid rails"]);
+  assertEquals(doorGapPhrases(["weatherstrip along the bottom", "weather strip at the bottom", "rubber weatherstripping"]), ["weatherstrip along the bottom"]);
+  assertEquals(doorGapPhrases(["peephole", "peep hole"]), ["peephole"]);
+  assertEquals(doorGapPhrases(["arched top", "arch-top door"]), ["arched top"]);
+});
+
+Deno.test("with the 6-panel's known gap, every phrase the warning names is also filed", () => {
+  const { read, ctx } = singleDoor();
+  const many = ["an arched top", "a peephole", "a kick plate", "a mail slot", "a doorbell", "a transom", "a sidelight", "a weatherstrip"];
+  const r = doorDraftFromReads([0, 1, 2].map(() => ({ ...read, observed: ["6-panel door"], unexplained: ["6-panel", ...many] })), ctx);
+  if (r.outcome !== "draft") throw new Error(r.outcome);
+  const text = r.warnings.find((w) => w.code === "vocab_gap")?.text ?? "";
+  for (const m of text.matchAll(/"([^"]+)"/g)) assert(r.vocabGaps.includes(m[1]), `"${m[1]}" is in the warning but not filed`);
+  assertEquals([r.vocabGaps.length, r.vocabGaps[0]], [9, "6-panel"]);
 });
