@@ -191,6 +191,9 @@ export function doorMeetWindow(p: XY, photo: XY, padPx: number): CloseUpWindow {
 export const DOOR_STAGEB_MAX_TOKENS = 12000;
 export const DOOR_STAGEB_MIN_LEFT_MS = 120_000;
 export const DOOR_MAX_GAPS = 8;
+// The gap rows a press files (and Stage B is asked about): more than the warning names, so rewordings the
+// grouping keeps apart never push a real gap out of the ledger.
+export const DOOR_MAX_GAP_ROWS = 16;
 
 // ─── WARNINGS P4 ADDS ─────────────────────────────────────────────────────────────────────────────
 // doorLook.ts's DOOR_WARNINGS cover the reads and the close-ups. These cover what a press itself did.
@@ -207,7 +210,11 @@ const mismatchWarning = (xs: string[]): DoorWarning => ({
   code: "observed_mismatch",
   text: `We saw ${quoted(xs)} in your photo but couldn't place ${xs.length === 1 ? "it" : "them"} on the door. Check ${xs.length === 1 ? "it" : "them"} before you save.`,
 });
-const gapWarning = (xs: string[]): DoorWarning => ({ code: "vocab_gap", text: `We can't draw ${quoted(xs)} yet. We've noted it so we can add it.` });
+// Names the first DOOR_MAX_GAPS; every one it names is filed (vocabGaps holds up to DOOR_MAX_GAP_ROWS).
+const gapWarning = (xs: string[]): DoorWarning => {
+  const shown = xs.slice(0, DOOR_MAX_GAPS), more = xs.length - shown.length;
+  return { code: "vocab_gap", text: `We can't draw ${quoted(shown)}${more > 0 ? ` (and ${more} more)` : ""} yet. We've noted it so we can add it.` };
+};
 function pushWarning(list: DoorWarning[], w: DoorWarning) {
   if (!list.some((x) => x.code === w.code)) list.push(w);
 }
@@ -300,7 +307,8 @@ export function doorPhrases(v: unknown, most = DOOR_MAX_GAPS): string[] {
 // keeps its first wording's things, so a phrase that names two things never pulls the second one's own
 // phrase in. Losing a real gap is worse than filing one twice. MODEL-WRITTEN TEXT, already through doorPhrases.
 const GAP_FAMILIES: Record<string, string> = Object.fromEntries([
-  ...["latch", "catch", "keeper", "lock", "escutcheon", "bolt", "deadbolt", "hasp", "fitting", "hardware"].map((w) => [w, "latch"]),
+  ...["latch", "catch", "keeper", "lock", "escutcheon", "bolt", "hasp", "fitting", "hardware"].map((w) => [w, "latch"]),
+  ...["deadbolt"].map((w) => [w, "deadbolt"]),
   ...["knob", "doorknob"].map((w) => [w, "knob"]),
   ...["logo", "sticker", "decal", "label", "badge", "plaque", "brand", "maker", "dealer"].map((w) => [w, "logo"]),
   ...["astragal", "joint", "meeting", "meet"].map((w) => [w, "meet"]),
@@ -330,7 +338,7 @@ const GAP_PLACED_BY = /\b(?:above|below|beneath|under|over|next to|beside|near|b
 function gapThings(phrase: string): string[] {
   const own = phrase.toLowerCase()
     .replace(/'s\b|\b[a-z]+n't\b/g, " ") // possessives and negated verbs ("doesn't")
-    .replace(/\bkick[- ]?plate/g, "kickplate").replace(/\bmail[- ]?slot/g, "mailslot").replace(/\bdead[- ]?bolt/g, "deadbolt")
+    .replace(/\bkick[- ]?plate/g, "kickplate").replace(/\bmail[- ]?slot/g, "mailslot").replace(/\bdead[- ]?bolt(?: lock)?/g, "deadbolt")
     .split(GAP_PLACED_BY)[0];
   return [...new Set(own.split(/[^a-z]+/).flatMap((w) => {
     const s = /(ss|ch|sh|x)es$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w;
@@ -345,7 +353,7 @@ export function doorGapPhrases(phrases: readonly string[]): string[] {
     const things = gapThings(p);
     if (!groups.some((g) => sameThing(g.things, things))) groups.push({ first: p, things: new Set(things) });
   }
-  return groups.slice(0, DOOR_MAX_GAPS).map((g) => g.first);
+  return groups.slice(0, DOOR_MAX_GAP_ROWS).map((g) => g.first);
 }
 
 export function doorObservedMismatches(observed: readonly string[], spec: DoorLook): string[] {
@@ -417,7 +425,7 @@ export function finishDoorDraft(c: DoorConsensus, spec: DoorLook, warnings: read
   if (wanted.knownGaps.includes(DOOR_SIX_PANEL_GAP)) pushWarning(ws, pressWarning("six_panel"));
   if (unexplained.length) pushWarning(ws, gapWarning(unexplained));
   // Room for the known gaps too, so every phrase the warning names is filed.
-  const vocabGaps = doorPhrases([...wanted.knownGaps, ...unexplained], DOOR_MAX_GAPS + wanted.knownGaps.length);
+  const vocabGaps = doorPhrases([...wanted.knownGaps, ...unexplained], DOOR_MAX_GAP_ROWS + wanted.knownGaps.length);
   return { spec: out, warnings: ws, vocabGaps, mismatches, unexplained, stageBAdded };
 }
 

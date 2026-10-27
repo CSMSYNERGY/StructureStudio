@@ -673,6 +673,12 @@ Deno.test("one vocabulary gap per thing: three reads naming one thing three ways
   assertEquals(doorGapPhrases(["brass kickplate", "brass kick plate"]), ["brass kickplate"]);
   assertEquals(doorGapPhrases(["keyed deadbolt", "dead bolt lock"]), ["keyed deadbolt"]);
   assertEquals(doorGapPhrases(["panel recess", "panel recesses"]), ["panel recess"]);
+  // A deadbolt is its own fitting: it never merges with a latch or a hasp (round-3 check).
+  assertEquals(doorGapPhrases(["small black slide latch on each mid rail", "keyed deadbolt"]).length, 2);
+  assertEquals(doorGapPhrases(["hasp and padlock on the mid rail", "keyed deadbolt"]).length, 2);
+  // More than the warning's 8 things: every group is still filed, up to DOOR_MAX_GAP_ROWS.
+  const twelve = ["an arched top", "a peephole", "a kick plate", "a mail slot", "a doorbell", "a transom", "a sidelight", "a weatherstrip", "a closer", "a sweep", "a threshold ramp", "a pet door"];
+  assertEquals(doorGapPhrases(twelve), twelve);
 });
 
 Deno.test("with the 6-panel's known gap, every phrase the warning names is also filed", () => {
@@ -683,4 +689,9 @@ Deno.test("with the 6-panel's known gap, every phrase the warning names is also 
   const text = r.warnings.find((w) => w.code === "vocab_gap")?.text ?? "";
   for (const m of text.matchAll(/"([^"]+)"/g)) assert(r.vocabGaps.includes(m[1]), `"${m[1]}" is in the warning but not filed`);
   assertEquals([r.vocabGaps.length, r.vocabGaps[0]], [9, "6-panel"]);
+  // Twelve things: all twelve are filed, the warning names eight and counts the rest.
+  const more = ["an arched top", "a peephole", "a kick plate", "a mail slot", "a doorbell", "a transom", "a sidelight", "a weatherstrip", "a closer", "a sweep", "a threshold ramp", "a pet door"];
+  const r2 = doorDraftFromReads([0, 1, 2].map(() => ({ ...read, unexplained: more })), ctx);
+  assertEquals(r2.vocabGaps, more);
+  assert((r2.warnings.find((w) => w.code === "vocab_gap")?.text ?? "").includes("(and 4 more)"));
 });
