@@ -128,10 +128,13 @@ export function doubleDoor(o: DoorOpts & { meetIn?: number; oneLite?: boolean } 
 // 40 in (50%), three butt hinges on the LEFT and a lever on the mid rail. The read gives the gussets as
 // diagonals, as board parts with `asParts`, or both ways with `both`. `double` is a 72 in pair of these
 // leaves, each hinged on its own outer jamb with gussets at its own four corners, the handle on the
-// RIGHT leaf.
-export function gussetDoor(o: { asParts?: boolean; both?: boolean; double?: boolean; panels?: unknown[] } = {}): { read: Rec; ctx: DoorMeasureCtx } {
-  const W = o.double ? 72 : 36, H = 80, d = inches(W, H);
-  const leafX = o.double ? [[0, 36], [36, 72]] : [[0, 36]];
+// RIGHT leaf just past the meeting line; `meetIn` moves the meeting line (the leaves are then unequal).
+// `observed` and `unexplained` replace the read's own words (a real read lists gussets as unexplained).
+export function gussetDoor(
+  o: { asParts?: boolean; both?: boolean; double?: boolean; meetIn?: number; panels?: unknown[]; observed?: string[]; unexplained?: string[] } = {},
+): { read: Rec; ctx: DoorMeasureCtx } {
+  const W = o.double ? 72 : 36, H = 80, d = inches(W, H), M = o.meetIn ?? 36;
+  const leafX = o.double ? [[0, M], [M, 72]] : [[0, 36]];
   // Each gusset as [x0, y0, x1, y1] in inches: bottom left, bottom right, top left, top right.
   const corners = leafX.flatMap(([x0, x1]) => [
     [x0 + 1.5, 7.5, x0 + 7.5, 1.5],
@@ -146,13 +149,13 @@ export function gussetDoor(o: { asParts?: boolean; both?: boolean; double?: bool
   const measure: Rec = {
     size: d.size,
     leaves: leafX.map(([x0, x1]) => [d.p(x0, 0), d.p(x1, 0), d.p(x1, H), d.p(x0, H)]),
-    ...(o.double ? { meet: d.line(36, 2, 36, 78) } : {}),
+    ...(o.double ? { meet: d.line(M, 2, M, 78) } : {}),
     rails: leafX.flatMap(([x0, x1]) => [d.rail(x0 + 1.5, x1 - 1.5, 0, 1.5), d.rail(x0 + 1.5, x1 - 1.5, 38.5, 41.5), d.rail(x0 + 1.5, x1 - 1.5, 78.5, 80)]),
     stiles: leafX.flatMap(([x0, x1]) => [{ inner: d.line(x0 + 1.5, 2, x0 + 1.5, 78) }, { inner: d.line(x1 - 1.5, 2, x1 - 1.5, 78) }]),
     seams: [],
     braces: o.asParts ? [] : corners.map(gusset),
     hinges: [10, 40, 70].flatMap((y) => [{ pivot: d.p(0.5, y) }, ...(o.double ? [{ pivot: d.p(71.5, y) }] : [])]),
-    handle: o.double ? d.p(38, 40) : d.p(34, 40),
+    handle: o.double ? d.p(M + 2, 40) : d.p(34, 40),
     parts: o.asParts || o.both ? corners.map((c) => ({ t: "board", ...gusset(c), role: "members" })) : [],
   };
   const read: Rec = {
@@ -166,8 +169,8 @@ export function gussetDoor(o: { asParts?: boolean; both?: boolean; double?: bool
     panels: o.panels ?? ["none", "none"],
     hinges: { type: "butt" },
     handle: { type: "lever" },
-    observed: ["four short corner gussets"],
-    unexplained: [],
+    observed: o.observed ?? ["four short corner gussets"],
+    unexplained: o.unexplained ?? [],
   };
   return { read, ctx: { widthIn: W, heightIn: H, leaves: o.double ? 2 : 1, photo: d.size } };
 }

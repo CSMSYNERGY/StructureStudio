@@ -587,11 +587,18 @@ const DOOR_HINGE_TOL = 0.05; // one hinge
 const DOOR_FRAME_BAND = 0.12; // a rail centred this close to the head or sill is the frame's own rail
 const DOOR_MATCH = 0.08; // two boards' ends this close are one board
 // A diagonal in a panel is that panel's Z or X only when it rises at least DOOR_PANEL_DIAG_RISE of the
-// panel's height (rail centre to rail centre) AND runs at least DOOR_PANEL_DIAG_RUN of its leaf's width.
-// Shorter, it is a board part (a corner gusset). The corpus (2026-10-27): a panel's Z or X rises >= 0.75
-// and runs >= 0.61; a corner gusset or Classic's octagon brace rises <= 0.22 and runs <= 0.22.
+// panel's height (rail centre to rail centre) AND runs at least DOOR_PANEL_DIAG_RUN of the panel's
+// opening (its leaf less the two stiles, never under half the leaf). Shorter, it is a board part (a
+// corner gusset). The corpus (2026-10-27): a panel's Z or X rises >= 0.75 and runs >= 0.61 of its leaf;
+// a corner gusset or Classic's octagon brace rises <= 0.22 and runs <= 0.22.
 export const DOOR_PANEL_DIAG_RISE = 0.5;
 export const DOOR_PANEL_DIAG_RUN = 0.4;
+// Two diagonals are one board cut in two (an X's second board is usually butted against the first) when
+// they are parallel within DOOR_CUT_SIN (the sine of the angle, about 8 degrees), each end of one lies
+// within a board's width of the other's line, and their nearest ends are at most two board widths apart.
+// A board whose width the read did not give counts as DOOR_CUT_W_IN.
+const DOOR_CUT_SIN = 0.14;
+const DOOR_CUT_W_IN = 4;
 
 export type DoorHingeSideSource = "hinges" | "brace" | "handle" | "latch" | "default" | "given";
 export type DoorMeasureCtx = {
@@ -724,27 +731,50 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const panelAt = (v: number) => effRails.filter((r) => r <= v).length;
 
   // Diagonals. One that crosses a mid rail and runs at least half the leaf's height is a brace across
-  // the whole leaf; the rest belong to the panel their middle is in, and are `full` when they run most
-  // of that panel (DOOR_PANEL_DIAG_RISE and _RUN) -- a short one is a corner gusset.
+  // the whole leaf; the rest belong to the panel their middle is in. Whether one of those is the panel's
+  // Z or X or a short corner gusset is decided with the panels, since it needs the stiles' width.
   const braceList = Array.isArray(m.braces) ? m.braces.filter((b): b is Rec => isRec(b) && isXY(b.a) && isXY(b.b)) : null;
-  const braces = (braceList ?? []).map((b) => {
-    const a = fr(b.a as XY), c = fr(b.b as XY);
+  const diagOf = (a: XY, c: XY, wIn: number | null) => {
     const [lo, hi] = a[1] >= c[1] ? [a, c] : [c, a]; // a larger y is lower in the image
-    const vLo = 1 - lo[1], vHi = 1 - hi[1];
-    const leaf = leafOfX((a[0] + c[0]) / 2), panel = panelAt((vLo + vHi) / 2);
-    const panelH = (effRails[panel] ?? 1) - (effRails[panel - 1] ?? 0);
-    const leafW = leaves === 1 ? 1 : leaf === 0 ? mx : 1 - mx;
+    const vLo = 1 - lo[1], vHi = 1 - hi[1], panel = panelAt((vLo + vHi) / 2);
     return {
       a,
       c,
       lo,
-      leaf,
+      leaf: leafOfX((a[0] + c[0]) / 2),
       span: vHi - vLo >= 0.5 && effRails.some((r) => r > vLo && r < vHi),
       panel,
-      full: vHi - vLo >= DOOR_PANEL_DIAG_RISE * panelH && Math.abs(c[0] - a[0]) >= DOOR_PANEL_DIAG_RUN * leafW,
-      wIn: acrossIn(b.across),
+      rise: (vHi - vLo) / ((effRails[panel] ?? 1) - (effRails[panel - 1] ?? 0) || 1), // of its panel's height
+      runIn: Math.abs(c[0] - a[0]) * ctx.widthIn,
+      wIn,
     };
-  });
+  };
+  const braces = (braceList ?? []).map((b) => diagOf(fr(b.a as XY), fr(b.b as XY), acrossIn(b.across)));
+  // A board cut in two is one diagonal (DOOR_CUT_SIN): join such a pair in one leaf and panel, end to end,
+  // and measure the joined board again. Gussets at opposite corners are parallel but on lines far apart.
+  const inIn = (p: XY): XY => [p[0] * ctx.widthIn, p[1] * ctx.heightIn];
+  const apartIn = (p: XY, q: XY) => Math.hypot((p[0] - q[0]) * ctx.widthIn, (p[1] - q[1]) * ctx.heightIn);
+  const offLineIn = (p: XY, a: XY, c: XY) => {
+    const [P, A, C] = [inIn(p), inIn(a), inIn(c)];
+    return Math.abs((C[0] - A[0]) * (A[1] - P[1]) - (A[0] - P[0]) * (C[1] - A[1])) / (Math.hypot(C[0] - A[0], C[1] - A[1]) || 1);
+  };
+  for (let i = 0; i < braces.length; i++) {
+    for (let j = i + 1; j < braces.length; j++) {
+      const p = braces[i], q = braces[j];
+      if (p.span || q.span || p.leaf !== q.leaf || p.panel !== q.panel) continue;
+      const w = Math.max(p.wIn ?? 0, q.wIn ?? 0) || DOOR_CUT_W_IN;
+      const [A, C, B, D] = [p.a, p.c, q.a, q.c].map(inIn);
+      const u = [C[0] - A[0], C[1] - A[1]], v = [D[0] - B[0], D[1] - B[1]];
+      const sin = Math.abs(u[0] * v[1] - u[1] * v[0]) / (Math.hypot(u[0], u[1]) * Math.hypot(v[0], v[1]) || 1);
+      if (sin > DOOR_CUT_SIN || offLineIn(q.a, p.a, p.c) > w || offLineIn(q.c, p.a, p.c) > w) continue;
+      const across: [XY, XY][] = [[p.a, q.a], [p.a, q.c], [p.c, q.a], [p.c, q.c]];
+      if (Math.min(...across.map(([x, y]) => apartIn(x, y))) > 2 * w) continue;
+      const [e0, e1] = [[p.a, p.c] as [XY, XY], [q.a, q.c] as [XY, XY], ...across].reduce((best, e) => (apartIn(e[0], e[1]) > apartIn(best[0], best[1]) ? e : best));
+      braces[i] = diagOf(e0, e1, medianOf([p.wIn, q.wIn]));
+      braces.splice(j, 1);
+      j = i; // the joined board may meet a third piece
+    }
+  }
   const hingeList = Array.isArray(m.hinges) ? m.hinges.filter((h): h is Rec => isRec(h) && isXY(h.pivot)) : [];
   const pivots = hingeList.map((h) => ({ p: fr(h.pivot as XY), tip: isXY(h.tip) ? fr(h.tip) : null, leaf: 0 as 0 | 1 }));
   for (const h of pivots) h.leaf = leafOfX(h.p[0]);
@@ -821,13 +851,24 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     const fit = src.length <= nPanels ? src : [...src.slice(0, nPanels - 1), src[src.length - 1]];
     panels = Array.from({ length: nPanels }, (_, i) => (fit[i] ? { ...fit[i] } : { fill: null }));
     if (braceList && rails) {
+      // A panel's diagonal is its Z or X when it rises most of the panel and runs most of the panel's
+      // opening: its leaf less the two stiles, never under half the leaf (a bad stile read cannot shrink
+      // the opening to nothing). The rest are corner gussets.
+      type Diag = (typeof braces)[number];
+      const full = (b: Diag) =>
+        b.rise >= DOOR_PANEL_DIAG_RISE && b.runIn >= DOOR_PANEL_DIAG_RUN * Math.max(leafWIn(b.leaf) - 2 * (fIn ?? 0), leafWIn(b.leaf) / 2);
+      const hingeHalf = (b: Diag) => uOf((b.a[0] + b.c[0]) / 2, b.leaf) < 0.5;
       panels.forEach((p, i) => {
         const own = braces.filter((b) => !b.span && b.panel === i);
         const decides = p.fill === null || p.fill === "none" || p.fill === "z" || p.fill === "x";
-        const inside = latchFirst(decides ? own.filter((b) => b.full) : own);
+        const inside = latchFirst(decides ? own.filter(full) : own);
         if (decides) {
           p.fill = inside.length === 0 ? (p.fill === null ? null : "none") : inside.length === 1 ? "z" : "x";
-          gussets.push(...own.filter((b) => !b.full));
+          // The latch leaf's own gussets, and the other leaf's only at a corner (the hinge half or the latch
+          // half) where the latch leaf has none: mirrored by fraction, the two leaves' copies of one gusset
+          // do not meet when the leaves are unequal.
+          const short = own.filter((b) => !full(b)), mine = short.filter((b) => b.leaf === latchLeaf);
+          gussets.push(...mine, ...short.filter((b) => b.leaf !== latchLeaf && !mine.some((q) => hingeHalf(q) === hingeHalf(b))));
         }
         if (p.fill === "z" && inside.length === 1) p.zFrom = fromOf(inside[0].lo, inside[0].leaf);
         const w = medianOf(inside.map((b) => b.wIn));
