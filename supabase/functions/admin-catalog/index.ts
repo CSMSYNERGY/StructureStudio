@@ -561,6 +561,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     if (TAX_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
       return json({ error: "This operator account cannot see or change sales tax billing." }, 403);
     }
+    // A library request refund (339) credits a builder's wallet: the money grant, like wallet_credit.
+    if (String(action ?? "") === "library_request_refund" && !identity.canBill) {
+      return json({ error: "This operator account cannot refund a builder." }, 403);
+    }
     // Workstream 2, phase 9: making a builder's Twilio sub-account starts a bill at Twilio (its
     // numbers and registrations are billed to our parent account), and closing one releases its
     // numbers for good. Both on the money grant; suspending (reversible) needs can_write only.
@@ -568,10 +572,6 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // sub too, with TWILIO_SUBACCOUNTS "on" only (twilioAtCreate.ts). An empty sub costs nothing,
     // and with the switch "on" the builder's own number search or purchase makes the same sub with
     // no operator at all; buying a number in it needs the money grant wherever that happens.
-    // A library request refund (339) credits a builder's wallet: the money grant, like wallet_credit.
-    if (String(action ?? "") === "library_request_refund" && !identity.canBill) {
-      return json({ error: "This operator account cannot refund a builder." }, 403);
-    }
     if ((String(action ?? "") === "twilio_account_provision" || String(action ?? "") === "twilio_account_close") && !identity.canBill) {
       return json({ error: "This operator account cannot create or close a builder's phone account." }, 403);
     }
