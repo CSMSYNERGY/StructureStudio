@@ -565,8 +565,11 @@ function vote<T>(vals: (T | null | undefined)[]): DoorVote<T> {
 // One read of the door, the model's own JSON (section 4's answer shape), to the numbers of a spec in the
 // latch leaf's u, v. Every point is normalised by the size the model ECHOED, because that is the image
 // the points were read off; a read whose echoed size is more than 2% off the photo's own shape read some
-// other image, and is dropped. The photo is straightened to the leaves' outer edges, so a point's x over
-// the width is its fraction across the door and its y the fraction down it.
+// other image, and is dropped. The photo is straightened to the leaves' outer edges, so a point's y over
+// the height is its fraction down the door. Across, the photo also shows a strip ctx.padIn inches wide
+// past each side edge (DOOR_LOOK_V2: the knuckles of butt hinges sit ON the edge, so a photo cut there
+// halves them), so the door runs from padIn to padIn + widthIn of the photo's widthIn + 2 x padIn inches;
+// with padIn 0, a point's x over the width is its fraction across the door.
 //
 // The measure shape (the P4 prompt asks for exactly this; points are [x, y] pixels):
 //   size [w, h]                       the image's size, echoed first
@@ -610,6 +613,9 @@ export type DoorMeasureCtx = {
   heightIn: number;
   leaves: 1 | 2; // what the builder typed
   photo: XY; // the straightened photo's own size in pixels
+  // Inches of photo past each side edge of the door (the edge strips); 0 or absent: the photo's own side
+  // edges are the leaves'.
+  padIn?: number;
   // The 5 x 5 median at a photo pixel (samplePatch over the decoded photo). Absent: no colour roles.
   colorAt?: (p: XY) => RGB | null;
   // Measure in a frame already decided (Stage B, against the consensus): no side or leaf inference.
@@ -689,8 +695,12 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const size = m.size;
   if (!isXY(size) || size[0] <= 0 || size[1] <= 0) return { ok: false, drop: "no_size" };
   if (Math.abs(size[0] / size[1] / (ctx.photo[0] / ctx.photo[1]) - 1) > DOOR_SIZE_ASPECT_TOL + 1e-9) return { ok: false, drop: "size_aspect" };
-  const fr = (p: XY): XY => [clampTo(p[0] / size[0], 0, 1), clampTo(p[1] / size[1], 0, 1)];
-  const toPhoto = (f: XY): XY => [f[0] * ctx.photo[0], f[1] * ctx.photo[1]];
+  // Image to door fractions, and back to photo pixels. Across, the photo is the door plus a strip of padIn
+  // inches each side: a point in a strip (a butt hinge's knuckle) lands on the door's edge.
+  const pad = Math.max(0, ctx.padIn ?? 0), spanIn = ctx.widthIn + 2 * pad;
+  const frX = (x: number) => clampTo(((x / size[0]) * spanIn - pad) / ctx.widthIn, 0, 1);
+  const fr = (p: XY): XY => [frX(p[0]), clampTo(p[1] / size[1], 0, 1)];
+  const toPhoto = (f: XY): XY => [((pad + f[0] * ctx.widthIn) / spanIn) * ctx.photo[0], f[1] * ctx.photo[1]];
   const midX = (l: [XY, XY]) => (fr(l[0])[0] + fr(l[1])[0]) / 2;
   const midY = (l: [XY, XY]) => (fr(l[0])[1] + fr(l[1])[1]) / 2;
   // A width measured across two points, in inches (the door's own scale both ways).
@@ -821,7 +831,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     const runs = fieldDir === "h"
       ? [{ at: seams.map((y) => 1 - clampTo(y / size[1], 0, 1)), scale: ctx.heightIn }]
       : ([0, 1] as const).map((leaf) => ({
-        at: seams.map((x) => clampTo(x / size[0], 0, 1)).filter((x) => leafOfX(x) === leaf).map((x) => uOf(x, leaf)),
+        at: seams.map(frX).filter((x) => leafOfX(x) === leaf).map((x) => uOf(x, leaf)),
         scale: leafWIn(leaf),
       }));
     for (const run of runs) {
@@ -1100,7 +1110,9 @@ export type DoorConsensusResult =
   | DoorConsensus
   | { ok: false; refuse: DoorRefuseCode; leaves?: number }
   | { ok: false; fail: "unparseable"; dropped: { read: number; why: string }[] };
-export type DoorConsensusOpts = { typedLeaves: 1 | 2; photo: XY; quorum?: number };
+// `edge`: the photo's edge strips (DoorMeasureCtx.padIn) and the door's width, for the meeting edge's
+// close-up points in photo pixels; absent, the photo's own side edges are the leaves'.
+export type DoorConsensusOpts = { typedLeaves: 1 | 2; photo: XY; quorum?: number; edge?: { padIn: number; widthIn: number } };
 
 const swapFrom = <T extends string | null | undefined>(f: T) => (f === "hinge" ? "strike" : f === "strike" ? "hinge" : f) as T;
 // The same read with the hinge on the other side of a single: u becomes 1 - u.
@@ -1289,6 +1301,8 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
 
   const b = ds[best];
   const [W, H] = opts.photo;
+  const pad = Math.max(0, opts.edge?.padIn ?? 0), spanIn = (opts.edge?.widthIn ?? 1) + 2 * pad;
+  const meetPx = meetX === null ? null : ((pad + meetX * (spanIn - 2 * pad)) / spanIn) * W;
   return {
     ok: true,
     spec,
@@ -1304,7 +1318,7 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
       meetType: vote(ds.map((d) => d.stageA.meetType)),
       finish: vote(ds.map((d) => d.finish)),
     },
-    closeUpAt: { hinges: b.px.hinges, handle: b.px.handle, meet: meetX === null ? [] : [[meetX * W, 0.5 * H], [meetX * W, 0.94 * H]] },
+    closeUpAt: { hinges: b.px.hinges, handle: b.px.handle, meet: meetPx === null ? [] : [[meetPx, 0.5 * H], [meetPx, 0.94 * H]] },
     aligned: ds,
     used: reads.map((x) => x.i),
     dropped,
@@ -1316,7 +1330,12 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
 
 // Stage A end to end: each raw read measured, then merged.
 export function stageADoorLook(raws: unknown[], ctx: DoorMeasureCtx, quorum = 2): DoorConsensusResult {
-  return consensusDoorLooks(raws.map((r) => doorLookFromMeasure(r, ctx)), { typedLeaves: ctx.leaves, photo: ctx.photo, quorum });
+  return consensusDoorLooks(raws.map((r) => doorLookFromMeasure(r, ctx)), {
+    typedLeaves: ctx.leaves,
+    photo: ctx.photo,
+    quorum,
+    edge: { padIn: ctx.padIn ?? 0, widthIn: ctx.widthIn },
+  });
 }
 
 // ─── CLOSE-UPS, AND WHAT STANDS IN WHEN ONE IS SKIPPED ────────────────────────────────────────────
