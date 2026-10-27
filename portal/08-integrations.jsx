@@ -3602,7 +3602,10 @@ const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'
 // (a family calendar, a shared team one). And which calendar new bookings are written to. The
 // list is read LIVE from Google / Microsoft when opened (portal-meetings list_calendars), never
 // stored: a calendar renamed or deleted there must not linger here.
-function MyCalendarChoices({ provider, conn, call, onSaved, viewing = false }) {
+// hostId on both calls: portal-meetings lets only a person below meetings-edit leave it out and
+// mean themselves, so an owner or admin (meetings:edit) got "Which person's calendar did you mean?"
+// from Choose calendars and from Save (release review, 2026-10-27).
+function MyCalendarChoices({ provider, conn, call, onSaved, viewing = false, hostId = null }) {
   const [list, setList] = useState(null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -3613,13 +3616,13 @@ function MyCalendarChoices({ provider, conn, call, onSaved, viewing = false }) {
 
   const loadList = async () => {
     setOpen(true); setErr(null);
-    try { const d = await call("list_calendars", { provider }); setList(d.calendars || []); }
+    try { const d = await call("list_calendars", { provider, hostId }); setList(d.calendars || []); }
     catch (e) { setErr(e.message); setList([]); }
   };
   const save = async () => {
     setBusy(true); setErr(null);
     try {
-      await call("save_calendar_prefs", { provider, busyCalendarIds: [...picked], writeCalendarId: writeId });
+      await call("save_calendar_prefs", { provider, hostId, busyCalendarIds: [...picked], writeCalendarId: writeId });
       onSaved && onSaved(`Saved. Your ${name} choices apply from the next check, within five minutes.`);
       setOpen(false);
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
@@ -3832,7 +3835,7 @@ function MyConnectionsCard({ clientId, viewing = false }) {
                   )}
                 </>),
                 ok ? "#10B981" : c ? "#F59E0B" : "#CBD5E1")}
-              {ok && <MyCalendarChoices provider={prov} conn={c} call={call} viewing={viewing} onSaved={(t) => { setMsg({ ok: t }); load(); }} />}
+              {ok && <MyCalendarChoices provider={prov} conn={c} call={call} viewing={viewing} hostId={host && host.id} onSaved={(t) => { setMsg({ ok: t }); load(); }} />}
             </div>
           );
         };
@@ -3863,7 +3866,7 @@ function MyConnectionsCard({ clientId, viewing = false }) {
         // ── Calendars ───────────────────────────────────────────────────────────────────
         const okCals = conns.filter((c) => (c.provider === "google" || c.provider === "microsoft") && c.status === "connected");
         const setBookingsTo = (to) => run(async () => {
-          await call("save_calendar_prefs", { bookingsTo: to });
+          await call("save_calendar_prefs", { hostId: host.id, bookingsTo: to });
           await load();
           setMsg({ ok: `New bookings now go on your ${to === "google" ? "Google" : "Outlook"} calendar.` });
         });
@@ -6558,6 +6561,15 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
 function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
   const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
   const set = (k, v) => onChange({ ...draft, [k]: v });
+  // A NEW LINK PER BOOKING NEEDS ITS PROVIDER SWITCHED ON (release review, 2026-10-27). Without it
+  // every booking falls back to the room link, and with no room link the booking is marked failed
+  // and the customer is told a link will follow, which nobody can make. So the option can't be
+  // picked until the provider is ready, and a type already set that way can't be saved without a
+  // room link.
+  const vProv = draft.conferenceProvider || "none";
+  const vNeedsRoom = draft.locationKind === "video" && draft.conferenceMode === "generate"
+    && ["zoom", "google_meet", "teams"].includes(vProv) && !(video && video.ready && video.ready[vProv])
+    && !String(draft.conferenceUrl || "").trim();
   const num = (k, v) => set(k, v === "" ? "" : Math.max(0, Math.trunc(Number(v)) || 0));
   return (
     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #E2E8F0" }}>
@@ -6613,12 +6625,16 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
 
             {gen && (
               <div style={{ marginBottom: 10 }} role="radiogroup" aria-label={`How the ${gen[0]} link is made`}>
-                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 6, cursor: "pointer" }}>
-                  <input type="radio" name="ss-conf-mode" checked={generate} onChange={() => set("conferenceMode", "generate")} style={{ marginTop: 2 }} />
-                  <span><strong>A new {gen[0]} {provider === "zoom" ? "meeting" : "link"} for every booking</strong><span style={{ color: "#64748B" }}>
-                    {provider === "zoom"
-                      ? " — made in the host's own Zoom account the moment someone books, and moved or deleted with the booking"
-                      : ` — made on the booking's event in the host's own ${gen[2]} calendar, which also invites the customer`}
+                <label data-ss-conf-generate={genReady ? "ready" : "off"}
+                  style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: genReady ? "#334155" : "#94A3B8", marginBottom: 6, cursor: genReady ? "pointer" : "not-allowed" }}>
+                  <input type="radio" name="ss-conf-mode" checked={generate} disabled={!genReady}
+                    onChange={() => set("conferenceMode", "generate")} style={{ marginTop: 2 }} />
+                  <span><strong>A new {gen[0]} {provider === "zoom" ? "meeting" : "link"} for every booking</strong><span style={{ color: genReady ? "#64748B" : "#94A3B8" }}>
+                    {!genReady
+                      ? ` — not available until ${gen[2]} is switched on for Structure Studio`
+                      : provider === "zoom"
+                        ? " — made in the host's own Zoom account the moment someone books, and moved or deleted with the booking"
+                        : ` — made on the booking's event in the host's own ${gen[2]} calendar, which also invites the customer`}
                   </span></span>
                 </label>
                 <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", cursor: "pointer" }}>
@@ -6631,7 +6647,9 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
             {provider !== "none" && (
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 240px" }}>
-                  <span style={lbl}>{generate ? "Room link to use if a new meeting can't be made (optional)" : "Your meeting room link"}</span>
+                  <span style={lbl}>{!generate ? "Your meeting room link"
+                    : genReady ? "Room link to use if a new meeting can't be made (optional)"
+                    : `Room link (needed until ${gen[2]} is switched on)`}</span>
                   <input value={draft.conferenceUrl || ""} maxLength={500}
                     onChange={(e) => set("conferenceUrl", e.target.value)}
                     placeholder="https://zoom.us/j/1234567890"
@@ -6715,7 +6733,13 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
         <input type="checkbox" checked={draft.active !== false} onChange={(e) => set("active", e.target.checked)} />
         <span><strong>Offered</strong><span style={{ color: "#64748B" }}> — switch it off to stop it being bookable without losing its history</span></span>
       </label>
-      <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !String(draft.name || "").trim()} onClick={() => onSave(draft)}>
+      {vNeedsRoom && (
+        <div data-ss-conf-needs-room="" style={{ fontSize: 12, color: "#B91C1C", marginBottom: 8, lineHeight: 1.5 }}>
+          Add a room link above before saving. This type makes a new link for every booking, and that
+          isn't switched on for Structure Studio yet, so a booking would have no link at all.
+        </div>
+      )}
+      <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !String(draft.name || "").trim() || vNeedsRoom} onClick={() => onSave(draft)}>
         {busy ? "Saving…" : "Save meeting type"}
       </button>
     </div>
