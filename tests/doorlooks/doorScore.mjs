@@ -55,12 +55,19 @@ export const DOOR_RENDER_RULES = [
   { name: "TRIM_STRAP", needle: ": trim ? Math.min(w * 0.15, 0.5) : Math.min(w * 0.5, 1.15);" },
   { name: "PLANK_STRAP", needle: ": trim ? Math.min(w * 0.15, 0.5) : Math.min(w * 0.5, 1.15);" },
   { name: "STRAP_START", needle: "iron(0.11 + rowLen * 0.55, 0.11 + rowLen," },
+  // TRIM_HINGES and PLANK_HINGES pin the no-look branch only; a look takes the SPEC_* lines.
   { name: "TRIM_HINGES", needle: "(h >= 5 ? [y0 + F / 2, midY, hTop] : [y0 + F / 2, hTop])" },
   { name: "PLANK_HINGES", needle: "(h >= 5 ? [y0 + h * 0.13, midY, hTop(0.13)] : [y0 + h * 0.18, hTop(0.18)])" },
+  { name: "SPEC_HINGE_COUNT", needle: "const count = hs.count != null ? hs.count : h >= 5 ? 3 : 2;" },
+  { name: "SPEC_NO_HINGES", needle: 'if (type === "hidden" || !count) rows = [];' },
+  { name: "BUTT_NO_STRAP", needle: 'if (type === "butt") {' },
+  { name: "MID_RAIL_NEAREST_HALF", needle: "const byMid = mids.slice().sort((p, q) => Math.abs(p - (y0 + h / 2)) - Math.abs(q - (y0 + h / 2)));" },
   { name: "SPEC_RAILS_HINGES", needle: 'else if (hs.at === "rails" || trim) {' },
   { name: "SPEC_PLANK_HINGES", needle: "rows = count === 3 ? [y0 + h * 0.13, byMid.length ? byMid[0] : L.railAt, y1 - h * 0.13]" },
   { name: "SPEC_PLANK_HINGES_2", needle: ": count === 2 ? [y0 + h * 0.18, y1 - h * 0.18] : spread(y0 + h * 0.13, y1 - h * 0.13, count);" },
   { name: "RAIL_AT", needle: "railAt: y0 + h * lp.def.rails[0]" },
+  { name: "FINISH_DEFAULT", needle: 'SS_DOOR_FINISH_HEX[f.finish || "black"]' },
+  { name: "FINISH_OWN", needle: "hinge: finish(spec.hinges), handle: finish(spec.handle)," },
   { name: "LEAF_X", needle: '[[o.a0 + 0.05, o.a - 0.03, "a0", false], [o.a + 0.03, o.a1 - 0.05, "a1", true]]' },
   { name: "LEAF_Y", needle: "const y0d = o.y0 + 0.05, y1d = o.y1 - 0.05;" },
 ];
@@ -118,7 +125,9 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
   const braceT = (isRec(spec.brace) && spec.brace.t) || def.brace;
   const h = isRec(spec.hinges) ? spec.hinges : {};
   const type = h.type ?? "tstrap";
-  const count = num(h.count) ?? (leaf ? (leaf.h >= 5 ? 3 : 2) : null);
+  // A hidden set draws no hinge rows whatever count Stage A left on it (SPEC_NO_HINGES); otherwise
+  // today's rule, 3 from 5 ft up (SPEC_HINGE_COUNT).
+  const count = type === "hidden" ? 0 : num(h.count) ?? (leaf ? (leaf.h >= 5 ? 3 : 2) : null);
   let at = null;
   if (count === 0) at = [];
   else if (Array.isArray(h.at)) at = [...h.at].sort((a, b) => a - b);
@@ -131,7 +140,8 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
       : PLANK_HINGES[count] ?? Array.from({ length: count }, (_, i) => (count === 1 ? 0.5 : 0.13 + (0.74 * i) / (count - 1)));
   }
   let lenIn = null;
-  if (count !== 0 && type !== "hidden") {
+  // A butt hinge is two plates and a knuckle: doorHardware returns before the strap (BUTT_NO_STRAP).
+  if (count !== 0 && type !== "hidden" && type !== "butt") {
     if (num(h.lenIn) !== null) lenIn = leaf ? Math.min(h.lenIn, leaf.w * FT * STRAP_CAP_W) : h.lenIn;
     else if (leaf) lenIn = (0.11 + (trim ? Math.min(leaf.w * 0.15, 0.5) : Math.min(leaf.w * 0.5, 1.15))) * FT;
   }
@@ -285,7 +295,8 @@ export function scoreSpec(truthCase, truthSpec, gotSpec) {
   else if (none) add(na("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, "no hinges to place"));
   else if (T.hinges.count !== G.hinges.count) add(na("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, "hinge count differs (scored there)"));
   else add(list("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, BAR.hingeAt.tol));
-  if (none || T.hinges.type === "hidden" || G.hinges.type === "hidden") add(na("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, "no visible hinges"));
+  const strapless = (t) => t === "hidden" || t === "butt";
+  if (none || strapless(T.hinges.type) || strapless(G.hinges.type)) add(na("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, "no strap drawn"));
   else add(numeric("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, BAR.hingeLen.tol));
   add(list("frame.rails", "rails", T.rails, G.rails, BAR.rails.tol));
   add(numeric("frame.fIn", "frame", T.fIn, G.fIn, BAR.frame.tol));
