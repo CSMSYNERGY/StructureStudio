@@ -918,21 +918,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const handleV = handle ? (effRails.some((r) => Math.abs(1 - handle[1] - r) <= DOOR_RAIL_TOL) ? "rail" : 1 - handle[1]) : null;
 
   // Parts, in the latch leaf. On a double the other leaf's copy of a part is the same part mirrored, so
-  // it is kept only when the latch leaf has nothing there. Where the rails were measured, a part a panel's
-  // fill already draws is that fill: a board standing upright in a pickets panel is one of its pickets,
-  // and in Stage A a vent near the middle of a plain panel is the panel's vent (dutch's), drawn as its fill.
-  // (Stage B, measured in ctx.frame, may only add parts, so its vent stays a part and keepStageBParts
-  // judges it.)
-  const panelOf = (v: number) => (panels && rails ? panels[panelAt(v)] ?? null : null);
-  const picketOf = (p: DraftPart & { leaf: 0 | 1 }) =>
-    panelOf(((p.v0 ?? 0) + (p.v1 ?? 0)) / 2)?.fill === "pickets" &&
-    Math.abs((p.u1 ?? 0) - (p.u0 ?? 0)) * leafWIn(p.leaf) <= 0.25 * Math.abs((p.v1 ?? 0) - (p.v0 ?? 0)) * ctx.heightIn;
-  const ventFillOf = (p: DraftPart) => {
-    const cv = ((p.v0 ?? 0) + (p.v1 ?? 0)) / 2, cu = ((p.u0 ?? 0) + (p.u1 ?? 0)) / 2, panel = panelOf(cv);
-    if (!panel || (panel.fill !== null && panel.fill !== "none" && panel.fill !== "vent")) return null;
-    const i = panelAt(cv), lo = effRails[i - 1] ?? 0, hi = effRails[i] ?? 1, q = (hi - lo) / 4;
-    return cu >= 0.25 && cu <= 0.75 && cv >= lo + q && cv <= hi - q ? panel : null;
-  };
+  // it is kept only when the latch leaf has nothing there.
   const placed: (DraftPart & { leaf: 0 | 1 })[] = [];
   for (const raw of Array.isArray(m.parts) ? m.parts.slice(0, 48) : []) {
     if (!isRec(raw)) continue;
@@ -948,7 +934,6 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
       const w = acrossIn(raw.across), role = enumIn(raw.role, ["frame", "members"]);
       if (w !== null) part.wIn = w;
       if (role) part.role = role;
-      if (picketOf(part)) continue;
       placed.push(part);
     } else if (t && isLine(raw.box)) {
       const [a, b] = raw.box.map(fr), leaf = leafOfX((a[0] + b[0]) / 2);
@@ -959,12 +944,38 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
         if (rows !== undefined) part.rows = Math.round(rows);
         if (cols !== undefined) part.cols = Math.round(cols);
       }
-      const ventPanel = t === "vent" && !ctx.frame ? ventFillOf(part) : null;
-      if (ventPanel) {
-        ventPanel.fill = "vent";
-        continue;
-      }
       placed.push(part);
+    }
+  }
+  // Where the rails were measured, a part its panel's fill already draws is that fill (fillDraws): an
+  // upright board in a pickets panel is one of its pickets, and in Stage A the one vent near the middle
+  // of a plain panel, sized like the fill's, is that panel's vent (dutch's). Any other vent keeps its own
+  // box, and then a panel the read called "vent" (or a dutch's unsaid one) is plain, or the fill would
+  // draw a second vent over it. (Stage B, measured in ctx.frame, may only add parts, so its vents stay
+  // parts and keepStageBParts judges them against the spec's own fills.)
+  if (panels && rails) {
+    const fills = panels, rs = rails, midV = (p: DraftPart) => ((p.v0 ?? 0) + (p.v1 ?? 0)) / 2;
+    const geom = (leaf: 0 | 1): FillGeom => ({ rails: rs, leafWIn: leafWIn(leaf), heightIn: ctx.heightIn, fIn, railHIn });
+    const ventsIn = (leaf: 0 | 1, i: number) => placed.filter((q) => q.t === "vent" && q.leaf === leaf && panelAt(midV(q)) === i).length;
+    const folded = new Set<number>(), keptVent = new Set<number>();
+    const kept = placed.filter((p) => {
+      const i = panelAt(midV(p)), pn = fills[i];
+      if (!pn) return true;
+      if (p.t === "board") return !fillDraws(p, pn.fill, geom(p.leaf));
+      if (p.t !== "vent" || ctx.frame) return true;
+      const plain = pn.fill === null || pn.fill === "none" || pn.fill === "vent";
+      if (plain && ventsIn(p.leaf, i) === 1 && fillDraws(p, "vent", geom(p.leaf))) {
+        folded.add(i);
+        return false;
+      }
+      if (plain) keptVent.add(i);
+      return true;
+    });
+    placed.splice(0, placed.length, ...kept);
+    for (const i of folded) fills[i].fill = "vent";
+    for (const i of keptVent) {
+      const pn = fills[i];
+      if (!folded.has(i) && (pn.fill === "vent" || (pn.fill === null && DOOR_LOOK_BASE_DEFAULTS[base ?? "plank"].panels[i] === "vent"))) pn.fill = "none";
     }
   }
   // The corner gussets, as the board a read gives one as. After the read's own parts, so a gusset given
@@ -1037,6 +1048,29 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   return { ok: true, draft, warnings };
 }
 
+// Whether a panel with this fill already draws the part p (u, v in its leaf): a board standing upright
+// in a pickets panel is one of its pickets; a vent in a vent panel is that panel's vent when it sits in
+// the middle half of the panel and is about the size and shape the fill draws (P2's ventFill: a third of
+// the opening's width, square, capped at 70% of its height). A louvre, a tall vent or a small one keeps
+// its own box. Inches: the leaf's width, the frame boards' width and the mid rails' height (the frame's
+// own when the read gave none).
+type FillGeom = { rails: number[]; leafWIn: number; heightIn: number; fIn: number | null; railHIn: number | null };
+const DOOR_VENT_FILL_TOL = 1.7; // each side within this factor of the fill's side, either way
+const DOOR_VENT_FILL_ASPECT = 1.4; // long side over short side
+function fillDraws(p: DraftPart, fill: DoorPanelFill | null, g: FillGeom): boolean {
+  const wIn = Math.abs((p.u1 ?? 0) - (p.u0 ?? 0)) * g.leafWIn, hIn = Math.abs((p.v1 ?? 0) - (p.v0 ?? 0)) * g.heightIn;
+  if (p.t === "board") return fill === "pickets" && wIn <= 0.25 * hIn;
+  if (p.t !== "vent" || fill !== "vent") return false;
+  const cu = ((p.u0 ?? 0) + (p.u1 ?? 0)) / 2, cv = ((p.v0 ?? 0) + (p.v1 ?? 0)) / 2;
+  const i = g.rails.filter((r) => r <= cv).length, lo = g.rails[i - 1] ?? 0, hi = g.rails[i] ?? 1, q = (hi - lo) / 4;
+  if (cu < 0.25 || cu > 0.75 || cv < lo + q || cv > hi - q) return false;
+  const f = g.fIn ?? 4, rh = g.railHIn ?? f;
+  const openHIn = (hi - lo) * g.heightIn - (i > 0 ? rh / 2 : f) - (i < g.rails.length ? rh / 2 : f);
+  const side = Math.min(0.3 * (g.leafWIn - 2 * f), 0.7 * openHIn);
+  const [short, long] = wIn < hIn ? [wIn, hIn] : [hIn, wIn];
+  return side > 0 && short >= side / DOOR_VENT_FILL_TOL && long <= side * DOOR_VENT_FILL_TOL && long <= DOOR_VENT_FILL_ASPECT * short;
+}
+
 function panelOfAnswer(v: unknown): DraftPanel {
   if (!isRec(v)) return { fill: enumIn(v, DOOR_PANEL_FILLS) };
   const p: DraftPanel = { fill: enumIn(v.fill, DOOR_PANEL_FILLS) };
@@ -1100,9 +1134,13 @@ export function colorRolesOf(s: { infill?: RGB | null; frame?: RGB | null; membe
   return out;
 }
 
+// Bronze is a brown, so only a warm patch (red clearly over blue) may snap to it. Black iron in daylight
+// photographs as a neutral grey of 55-85, which is nearer #5A4632 than #23272E; bronze itself is 40 warm.
+export const DOOR_BRONZE_WARMTH = 20;
 export function snapFinish(rgb: RGB): "black" | "galv" | "bronze" {
   const hex = (h: string): RGB => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) as RGB;
-  const all = (["black", "galv", "bronze"] as const).map((f) => ({ f, d: rgbDist(rgb, hex(DOOR_FINISH_HEX[f])) }));
+  const of = rgb[0] - rgb[2] >= DOOR_BRONZE_WARMTH ? (["black", "galv", "bronze"] as const) : (["black", "galv"] as const);
+  const all = of.map((f) => ({ f, d: rgbDist(rgb, hex(DOOR_FINISH_HEX[f])) }));
   return all.sort((a, b) => a.d - b.d)[0].f;
 }
 
@@ -1438,14 +1476,25 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
 // ─── STAGE B'S PARTS ──────────────────────────────────────────────────────────────────────────────
 // Stage B is one read, so a part it proposes would skip the 2-of-3 rule. It is kept only when a Stage A
 // read also has it (same type, overlapping as consensus counts it); otherwise it is a warning, not a part.
+// A part the spec's own fill already draws (the vent or pickets Stage A folded into a fill) is neither.
 export function keepStageBParts(c: DoorConsensus, spec: DoorLook, stageB: unknown, ctx: DoorMeasureCtx): { spec: DoorLook; added: number; warnings: DoorWarning[] } {
   const r = doorLookFromMeasure(stageB, { ...ctx, frame: { leaves: c.leaves, side: c.side, meetX: c.meetX } });
   const warnings: DoorWarning[] = [];
   if (!r.ok) return { spec, added: 0, warnings };
   const have = (Array.isArray(spec.parts) ? spec.parts : []) as DraftPart[];
   const next = [...have];
+  const def = DOOR_LOOK_BASE_DEFAULTS[spec.base as DoorLookBase] ?? DOOR_LOOK_BASE_DEFAULTS.plank;
+  const frame = isRec(spec.frame) ? spec.frame : {}, own = Array.isArray(spec.panels) ? spec.panels : [];
+  const rails = Array.isArray(frame.rails) ? frame.rails as number[] : def.rails;
+  const mx = c.meetX ?? 0.5, latchW = c.leaves === 1 ? 1 : c.side === "right" ? 1 - mx : mx;
+  const geom: FillGeom = { rails, leafWIn: latchW * ctx.widthIn, heightIn: ctx.heightIn, fIn: numOf(frame.fIn) ?? null, railHIn: numOf(frame.railHIn) ?? null };
+  const fillAt = (v: number) => {
+    const i = rails.filter((x) => x <= v).length, p = own[i];
+    return (isRec(p) ? enumIn(p.fill, DOOR_PANEL_FILLS) : null) ?? def.panels[i] ?? "none";
+  };
   for (const p of r.draft.parts) {
     if (next.some((q) => samePart(q, p))) continue;
+    if (fillDraws(p, fillAt(((p.v0 ?? 0) + (p.v1 ?? 0)) / 2), geom)) continue;
     if (next.length < 12 && c.aligned.some((d) => d.parts.some((q) => samePart(q, p)))) next.push(p);
     else pushWarning(warnings, stageBWarning(p.t));
   }
