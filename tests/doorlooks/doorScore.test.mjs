@@ -496,3 +496,31 @@ test("the needles catch a renderer that hangs hinges on another mid rail, or dra
   const fin = drawnDoorLook({ v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" }, hinges: { finish: "galv" }, handle: { type: "lever" } }, { sizeIn: [36, 80], leaves: 1 });
   assert.deepEqual([fin.hinges.finish, fin.handle.finish], ["galv", "black"]);
 });
+
+test("hinge rows are held on the leaf as P2 holds them: by the reach of the piece drawn", () => {
+  // A basic single 36 x 80 with a 1.5 in frame: butt hinges at the table's 0.01 / 0.99 are drawn a knuckle's
+  // half-height (0.16 ft) in from the leaf's ends, a pintle's pin 1.2 plates (0.075 ft); a strap's plate
+  // (half the frame board, 0.0625 ft) is under 1% of the leaf, so a strap at 0.01 stays.
+  const base = { v: 1, base: "basic", src: { leaves: 1, hinge: "left" }, frame: { fIn: 1.5 } };
+  const drawnAt = (hinges) => drawnDoorLook({ ...base, hinges }, { sizeIn: [36, 80], leaves: 1 }).hinges.at;
+  const leafH = doorLeafFt([36, 80], 1, "basic").h;
+  const butt = drawnAt({ type: "butt", count: 2, at: [0.01, 0.99] });
+  assert.ok(Math.abs(butt[0] - 0.16 / leafH) < 1e-9 && Math.abs(butt[1] - (1 - 0.16 / leafH)) < 1e-9, JSON.stringify(butt));
+  const pintle = drawnAt({ type: "pintle", count: 2, at: [0.01, 0.99] });
+  assert.ok(Math.abs(pintle[0] - 0.075 / leafH) < 1e-9, JSON.stringify(pintle));
+  assert.deepEqual(drawnAt({ type: "strap", count: 2, at: [0.01, 0.99] }), [0.01, 0.99]);
+  assert.deepEqual(drawnAt({ type: "tstrap", count: 3, at: [0.2, 0.5, 0.8] }), [0.2, 0.5, 0.8]);
+  // The renderer's halves of these rules are pinned: changing them breaks a needle.
+  for (const f of ["StructureStudio.jsx", "structure-studio.component.js"]) {
+    const src = readFileSync(join(REPO_ROOT, f), "utf8");
+    for (const [from, to] of [
+      ['const reachH = type === "butt" ? Math.max(plateH, Math.min(0.16, h * 0.05))', 'const reachH = type === "butt" ? plateH'],
+      [') : null;\n    return hex', ') : SS_DOOR_FINISH_HEX.galv;\n    return hex'],
+      ["2 * bh, 12), hingeMat, wf, he, cy, 0.172), tagH);\n        return;", "2 * bh, 12), hingeMat, wf, he, cy, 0.172), tagH);"],
+    ]) {
+      const out = src.split(from).join(to);
+      if (out === src) continue; // that mutation's text is not on one line in this twin
+      assert.ok(DOOR_RENDER_RULES.some((r) => !out.includes(r.needle)), `${f}: "${to.slice(0, 40)}" passes every needle`);
+    }
+  }
+});
