@@ -232,6 +232,9 @@ Deno.test("Claude is asked with Sonnet 5.5 at low effort, the fallback, strict t
   assertEquals(system[0].cache_control, { type: "ephemeral" }, "the shared prefix is the breakpoint");
   assert(system[0].text.includes(KNOWLEDGE), "the knowledge is in the cached block");
   assert(!system[0].text.includes("Demo Sheds"), "no tenant data in the shared, cached block");
+  // Live run 10-27: with only the words of earlier turns kept, later turns "corrected" answers
+  // that HAD been checked ("I hadn't run that lookup"). The rules now say earlier answers stand.
+  assert(/never retract one for that reason/.test(system[0].text), "earlier answers are treated as checked");
   assert(system[1].text.includes("Pat") && system[1].text.includes("Demo Sheds") && !system[1].cache_control, "the per-person line is after the breakpoint");
   assertEquals(body.messages, [{ role: "user", content: "How do I add a door?" }]);
   assertEquals(w.stored.map((s) => s.role), ["user", "assistant"]);

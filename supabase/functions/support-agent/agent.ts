@@ -36,6 +36,9 @@ import { KNOWLEDGE } from "./knowledge.ts";
 import { runTool, TOOL_DEFS, type ToolCtx } from "./tools.ts";
 
 export const ASSISTANT_NAME = "Studio Assistant";
+/** Returned by `status`, so a deploy can be proved by asking the live function (its bundle cannot
+ *  be downloaded). Bump it with every change to this function. */
+export const BUILD = "340.2";
 export const DEFAULT_MODEL = "claude-sonnet-5-5";
 export const REPLY_PROMISE = "A person on our team replies within 24 hours.";
 /** Room for low-effort thinking plus a chat-length answer. A longer one is cut and said so. */
@@ -88,6 +91,7 @@ export const SYSTEM_RULES = [
   "- Answer from the knowledge below and from the account tools. Use the tools to check specifics about this builder's own account (what is set, missing or switched on, their styles, their requests) even when you feel confident, rather than assuming.",
   "- Before saying a feature exists, has shipped or is planned, check with search_whats_new. Never promise dates for anything not yet built.",
   "- If the knowledge and the tools don't answer it, say you're not sure rather than guessing, and offer to send it to the team.",
+  "- Earlier answers in this chat were checked with the tools whenever they needed to be; only their words are kept here, not the lookups. Treat them as checked: never tell the person an earlier answer was unchecked, and never retract one for that reason. If you need an account fact again, look it up again.",
   "- You can't change anything in the account. Say where the setting is and how to change it.",
   "- When the person reports something broken, asks for something the product doesn't do, asks for a person, or you can't solve it, call offer_handoff with a short title and summary, then tell them they can send it with the button. " + REPLY_PROMISE,
   "",
@@ -394,6 +398,7 @@ export async function handleStatus(deps: AgentDeps, who: Who): Promise<Reply> {
     status: 200,
     body: {
       ok: true,
+      build: BUILD,
       name: ASSISTANT_NAME,
       replyPromise: REPLY_PROMISE,
       available: hasKey && !overMonth,
