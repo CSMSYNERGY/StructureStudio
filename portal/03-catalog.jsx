@@ -5229,9 +5229,9 @@ const SS_CLADDING_BASES = [
 ];
 
 // ─── The library (migration 339; Carolyn's 10-26 call, Ahsan's answers 2026-10-27) ───
-// Cladding, Doors and Windows each carry a Library card above their own list: the builder's own
-// entries on top ("Your library"), the StructureStudio templates below with a search, and a request
-// form for what is not there. A builder USES a template under their own name and may edit their
+// Cladding, Doors and Windows each carry a Library card above their own list: a search and a Browse
+// button over the StructureStudio templates (Ahsan 2026-10-27), where the builder imports templates,
+// renames or removes what they imported, and requests what is not there. A builder USES a template under their own name and may edit their
 // copy (a lap course, a door look, a window grid); only their copy changes. Their rows then pick
 // from these entries (the cladding table's dropdown, a door's "How it looks in 3D", a window's
 // grid), and an entry's edit moves every row on it (339 writes it through).
@@ -5429,7 +5429,7 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
   const addEntry = () => run("add", async () => {
     await call({ action: "library_add", templateId: adding.template.id, name: adding.name, look: adding.look });
     setAdding(null);
-  }, `Added to your library. Pick it on your ${noun}s below.`);
+  }, `Imported. Pick it on your ${noun === "cladding" ? "styles" : noun + "s"} below.`);
   const saveEdit = () => run("edit:" + editing.id, async () => {
     await call({ action: "library_edit", id: editing.id, name: editing.name, look: editing.look });
     setEditing(null);
@@ -5468,140 +5468,167 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
     setReqOpen(false); setReqDraft(null);
   }, "Request sent. You'll see it below as we work on it.");
 
-  const rowStyle = { display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid #F1F5F9", flexWrap: "wrap" };
+  // THE CARD IS A SEARCH AND A BROWSE BUTTON (Ahsan 2026-10-27: "the library tab should only show a search
+  // bar and Browse the StructureStudio library button ... import the template from the library into the
+  // subaccount and then user can select the doors in the dropdown of How it looks in 3D"). Importing happens
+  // in the list; what is already imported is managed in the same list (Imported as <name>, Rename, Remove),
+  // and the pickers on the page below are where imported entries are used. A request for something missing
+  // sits at the bottom of the list, with the builder's requests.
+  const total = (lib.templates || []).filter((t) => t.category === category).length;
+  const templateIds = new Set((lib.templates || []).map((t) => t.id));
+  const importedFrom = (t) => mine.filter((e) => e.templateId === t.id);
+  // Entries with no live template behind them (a grid the builder already used that no template matches,
+  // one CSM made from a request, or one whose template was archived) are listed after the templates.
+  const own = mine.filter((e) => !e.templateId || !templateIds.has(e.templateId));
+  const ownHits = needle ? own.filter((e) => e.name.toLowerCase().includes(needle)) : own;
+  const open = browse || !!needle;
+  const usedWords = (e) => (e.usedOn && e.usedOn.length
+    ? `used on ${e.usedOn.length}: ${e.usedOn.slice(0, 4).join(", ")}${e.usedOn.length > 4 ? "…" : ""}`
+    : "not used yet");
+  const rowStyle = { display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: "1px solid #F1F5F9", flexWrap: "wrap" };
   const smallBtn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "6px 12px", fontSize: 12.5 };
+  const tinyBtn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "3px 10px", fontSize: 12 };
+  // One imported entry: its name, how it differs from the template, where it is used, Rename and Remove.
+  const entryLine = (e, label) => (editing && editing.id === e.id ? (
+    <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+      <input type="text" value={editing.name} maxLength={60} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })} style={{ ...S.input, width: 240 }} aria-label="Name" />
+      <SsLibLookEdit category={category} look={editing.look} onChange={(look) => setEditing({ ...editing, look })} />
+      <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "edit:" + e.id} onClick={saveEdit}>{busy === "edit:" + e.id ? "Saving…" : "Save"}</button>
+      <button style={smallBtn} onClick={() => setEditing(null)}>Cancel</button>
+    </div>
+  ) : (
+    <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 12.5, color: "#334155" }}>
+      {label && <span style={{ fontWeight: 800, color: "#15803D" }}>✓ {label}</span>}
+      <b>{e.name}</b>
+      <span style={{ color: "#64748B" }}>· {ssLibLookWords(category, e.look)} · {usedWords(e)}</span>
+      <button style={tinyBtn} onClick={() => { setEditing({ id: e.id, name: e.name, look: e.look || {} }); setMsg(null); }}>Rename</button>
+      <button style={{ ...tinyBtn, color: "#B91C1C" }} disabled={busy === "rm:" + e.id} onClick={() => remove(e)}>{busy === "rm:" + e.id ? "Removing…" : "Remove"}</button>
+    </div>
+  ));
   return (
     <div style={S.card} ref={rootRef} data-ss-library={category}>
       <div style={{ ...S.h2, display: "flex", alignItems: "center", gap: 8 }}>Library <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 999, padding: "2px 8px" }}>Beta</span></div>
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px", maxWidth: 720, lineHeight: 1.5 }}>
-        {category === "cladding" && <>The sidings you sell, under your own names. Each style below picks from this list, so a style shows only what you offer there. </>}
-        {category === "door" && <>The door looks you sell, under your own names. Each door below picks its 3D look from this list. </>}
-        {category === "window" && <>The window grids you use, under your own names. Each window below picks its grid from this list. </>}
-        Start from a StructureStudio template and name it what your customers know it as. Changing yours never changes the template, and every {noun} using it follows your change.
+        Import {noun === "cladding" ? "claddings" : noun + "s"} from the StructureStudio library under your own names. Everything you import shows up
+        {category === "door" && <> in each door&rsquo;s <b>How it looks in 3D</b> below.</>}
+        {category === "window" && <> in each window&rsquo;s <b>Grid</b> below.</>}
+        {category === "cladding" && <> in each style&rsquo;s <b>Cladding</b> column below.</>}
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
-
-      <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", margin: "4px 0 2px" }}>Your library</div>
-      {!mine.length && <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>Nothing yet. Add one from the StructureStudio library below.</div>}
-      {mine.map((e) => (
-        <div key={e.id} style={rowStyle} data-ss-library-entry={e.name}>
-          <SsLibPic category={category} look={editing && editing.id === e.id ? editing.look : e.look} />
-          {editing && editing.id === e.id ? (
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", flex: "1 1 320px" }}>
-              <input type="text" value={editing.name} maxLength={60} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })} style={{ ...S.input, width: 240 }} aria-label="Name" />
-              <SsLibLookEdit category={category} look={editing.look} onChange={(look) => setEditing({ ...editing, look })} />
-              <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "edit:" + e.id} onClick={saveEdit}>{busy === "edit:" + e.id ? "Saving…" : "Save"}</button>
-              <button style={smallBtn} onClick={() => setEditing(null)}>Cancel</button>
-            </div>
-          ) : (
-            <div style={{ flex: "1 1 320px", minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 13.5, color: "#1E293B" }}>{e.name}</div>
-              <div style={{ fontSize: 12, color: "#64748B" }}>
-                {ssLibLookWords(category, e.look)} · {e.usedOn && e.usedOn.length ? `used on ${e.usedOn.length}: ${e.usedOn.slice(0, 4).join(", ")}${e.usedOn.length > 4 ? "…" : ""}` : "not used yet"}
-              </div>
-            </div>
-          )}
-          {!(editing && editing.id === e.id) && (
-            <span style={{ display: "flex", gap: 6 }}>
-              <button style={smallBtn} onClick={() => { setEditing({ id: e.id, name: e.name, look: e.look || {} }); setMsg(null); }}>Edit</button>
-              <button style={{ ...smallBtn, color: "#B91C1C" }} disabled={busy === "rm:" + e.id} onClick={() => remove(e)}>{busy === "rm:" + e.id ? "Removing…" : "Remove"}</button>
-            </span>
-          )}
-        </div>
-      ))}
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
-        <button style={smallBtn} onClick={() => setBrowse((b) => !b)} aria-expanded={browse}>
-          {browse ? "Hide the StructureStudio library" : `Browse the StructureStudio library (${(lib.templates || []).filter((t) => t.category === category).length})`}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search the StructureStudio library"
+          placeholder={category === "cladding" ? "Search: lap, metal, T1-11, vinyl…" : category === "door" ? "Search: barn, roll-up, pickets…" : "Search: transom, 6 lite, slider…"}
+          style={{ ...S.input, maxWidth: 380 }} />
+        <button style={smallBtn} onClick={() => { setBrowse((b) => !(b || !!needle)); if (needle) setQ(""); }} aria-expanded={open}>
+          {open ? "Hide the StructureStudio library" : `Browse the StructureStudio library (${total})`}
         </button>
-        {category !== "door" && <button style={smallBtn} onClick={openRequest}>Can&rsquo;t find yours? Request it</button>}
       </div>
 
-      {browse && (
-        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", borderRadius: 10, padding: 12 }}>
-          <input type="search" value={q} placeholder={category === "cladding" ? "Search: lap, metal, T1-11, vinyl…" : category === "door" ? "Search: barn, roll-up, pickets…" : "Search: transom, 6 lite, slider…"}
-            onChange={(e) => setQ(e.target.value)} style={{ ...S.input, maxWidth: 380, marginBottom: 6 }} aria-label="Search the StructureStudio library" />
-          {!templates.length && <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>Nothing matches “{q}”. Request it below and we&rsquo;ll build it.</div>}
-          {templates.map((t) => (
-            <div key={t.id} style={rowStyle} data-ss-library-template={t.name}>
-              <SsLibPic category={category} look={adding && adding.template.id === t.id ? adding.look : t.look} />
-              <div style={{ flex: "1 1 320px", minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 13.5, color: "#1E293B" }}>{t.name}</div>
-                <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.45 }}>{t.description || ssLibLookWords(category, t.look)}</div>
-                {adding && adding.template.id === t.id && (
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
-                    <input type="text" value={adding.name} maxLength={60} placeholder="Your name for it" onChange={(e) => setAdding({ ...adding, name: e.target.value })} style={{ ...S.input, width: 240 }} aria-label="Your name for it" />
-                    <SsLibLookEdit category={category} look={adding.look} onChange={(look) => setAdding({ ...adding, look })} />
-                    <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "add"} onClick={addEntry}>{busy === "add" ? "Adding…" : "Add to my library"}</button>
-                    <button style={smallBtn} onClick={() => setAdding(null)}>Cancel</button>
-                  </div>
-                )}
-              </div>
-              {!(adding && adding.template.id === t.id) && (
-                <button style={smallBtn} onClick={() => { setAdding({ template: t, name: t.name, look: t.look || {} }); setMsg(null); }}>Use</button>
-              )}
-            </div>
-          ))}
-          {category === "door" && (
-            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Don&rsquo;t see your door? Making a 3D door from your supplier&rsquo;s photo is coming next.</div>
+      {open && (
+        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", borderRadius: 10, padding: "4px 12px 12px" }} data-ss-library-browse="1">
+          {!templates.length && !ownHits.length && (
+            <div style={{ fontSize: 13, color: "#64748B", padding: "10px 0" }}>Nothing matches “{q}”.{category !== "door" ? " Request it below and we’ll build it." : ""}</div>
           )}
-        </div>
-      )}
-
-      {reqOpen && reqDraft && (
-        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, background: "#F8FAFC" }} data-ss-library-request-form="1">
-          <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>Request a {noun}</div>
-          <div style={{ display: "grid", gap: 8, maxWidth: 560 }}>
-            <input type="text" value={reqDraft.name} maxLength={80} placeholder={category === "window" ? "Product name, e.g. Arched top window" : "Product name, e.g. Stone veneer panel"}
-              onChange={(e) => setReqDraft({ ...reqDraft, name: e.target.value })} style={S.input} aria-label="Product name" />
-            {category === "window" && (
-              <div style={{ display: "flex", gap: 8 }}>
-                <input type="number" min="1" max="600" value={reqDraft.widthIn} placeholder="Width (in)" onChange={(e) => setReqDraft({ ...reqDraft, widthIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Width in inches" />
-                <input type="number" min="1" max="600" value={reqDraft.heightIn} placeholder="Height (in)" onChange={(e) => setReqDraft({ ...reqDraft, heightIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Height in inches" />
-              </div>
-            )}
-            <input type="url" value={reqDraft.supplierUrl} placeholder="Link to the product on your supplier's site (https://…)" onChange={(e) => setReqDraft({ ...reqDraft, supplierUrl: e.target.value })} style={S.input} aria-label="Supplier link" />
-            <textarea value={reqDraft.notes} maxLength={2000} rows={3} placeholder="Anything we should know (colours, sizes you sell, how it's installed)" onChange={(e) => setReqDraft({ ...reqDraft, notes: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Notes" />
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              {reqDraft.photos.map((p) => <img key={p.path} src={p.preview} alt="" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid #CBD5E1" }} />)}
-              {reqDraft.photos.length < 4 && (
-                <label style={{ ...smallBtn, display: "inline-block" }}>
-                  {reqDraft.uploading ? "Uploading…" : "Add photos"}
-                  <input type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }} disabled={reqDraft.uploading} onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
-                </label>
-              )}
-              <span style={{ fontSize: 12, color: "#64748B" }}>A clear, straight-on photo from the supplier&rsquo;s website works best.</span>
-            </div>
-            {priceLine && <div style={{ fontSize: 12.5, color: "#475569" }} data-ss-library-request-price="1">{priceLine}</div>}
-            <div style={{ display: "flex", gap: 8 }}>
-              <button style={S.btn(DOOR_MINT, "#0F4C46")} disabled={busy === "req" || reqDraft.uploading} onClick={sendRequest}>{busy === "req" ? "Sending…" : "Send request"}</button>
-              <button style={smallBtn} onClick={() => { setReqOpen(false); setReqDraft(null); }}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {requests.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 2 }}>Your requests</div>
-          {requests.map((r) => {
-            const st = SS_LIB_REQ_STATUS[r.status] || [r.status, "#475569", "#F1F5F9"];
+          {templates.map((t) => {
+            const imp = importedFrom(t);
+            const addingThis = adding && adding.template.id === t.id;
             return (
-              <div key={r.id} style={rowStyle} data-ss-library-request={r.name}>
-                <span style={{ fontSize: 11.5, fontWeight: 800, color: st[1], background: st[2], borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>{st[0]}</span>
+              <div key={t.id} style={rowStyle} data-ss-library-template={t.name}>
+                <SsLibPic category={category} look={addingThis ? adding.look : t.look} />
                 <div style={{ flex: "1 1 320px", minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13.5 }}>{r.name}</div>
-                  <div style={{ fontSize: 12, color: "#64748B" }}>
-                    Sent {new Date(r.createdAt).toLocaleDateString()}
-                    {r.chargedCents ? ` · $${(r.chargedCents / 100).toFixed(2)}${r.refundedCents ? `, $${(r.refundedCents / 100).toFixed(2)} credited back` : ""}` : ""}
-                    {r.resultNote ? ` · ${r.resultNote}` : ""}
-                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, color: "#1E293B" }}>{t.name}</div>
+                  <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.45 }}>{t.description || ssLibLookWords(category, t.look)}</div>
+                  {imp.map((e) => entryLine(e, "Imported as"))}
+                  {addingThis && (
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                      <input type="text" value={adding.name} maxLength={60} placeholder="Your name for it" onChange={(e) => setAdding({ ...adding, name: e.target.value })} style={{ ...S.input, width: 240 }} aria-label="Your name for it" />
+                      <SsLibLookEdit category={category} look={adding.look} onChange={(look) => setAdding({ ...adding, look })} />
+                      <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "add"} onClick={addEntry}>{busy === "add" ? "Importing…" : "Import"}</button>
+                      <button style={smallBtn} onClick={() => setAdding(null)}>Cancel</button>
+                    </div>
+                  )}
                 </div>
-                {r.status === "submitted" && <button style={smallBtn} disabled={busy === "cx:" + r.id} onClick={() => cancelReq(r)}>{busy === "cx:" + r.id ? "Cancelling…" : "Cancel"}</button>}
+                {!addingThis && (
+                  <button style={smallBtn} onClick={() => { setAdding({ template: t, name: imp.length ? "" : t.name, look: t.look || {} }); setMsg(null); }}>
+                    {imp.length ? "Import again" : "Import"}
+                  </button>
+                )}
               </div>
             );
           })}
+          {ownHits.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B" }}>Yours, not from a template</div>
+              {ownHits.map((e) => (
+                <div key={e.id} style={rowStyle}>
+                  <SsLibPic category={category} look={editing && editing.id === e.id ? editing.look : e.look} />
+                  <div style={{ flex: "1 1 320px", minWidth: 0 }}>{entryLine(e, null)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {category === "door" ? (
+            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Don&rsquo;t see your door? Making a 3D door from your supplier&rsquo;s photo is coming next.</div>
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              {!reqOpen && <button style={smallBtn} onClick={openRequest}>Can&rsquo;t find yours? Request it</button>}
+              {reqOpen && reqDraft && (
+                <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, background: "#F8FAFC" }} data-ss-library-request-form="1">
+                  <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>Request a {noun}</div>
+                  <div style={{ display: "grid", gap: 8, maxWidth: 560 }}>
+                    <input type="text" value={reqDraft.name} maxLength={80} placeholder={category === "window" ? "Product name, e.g. Arched top window" : "Product name, e.g. Stone veneer panel"}
+                      onChange={(e) => setReqDraft({ ...reqDraft, name: e.target.value })} style={S.input} aria-label="Product name" />
+                    {category === "window" && (
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input type="number" min="1" max="600" value={reqDraft.widthIn} placeholder="Width (in)" onChange={(e) => setReqDraft({ ...reqDraft, widthIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Width in inches" />
+                        <input type="number" min="1" max="600" value={reqDraft.heightIn} placeholder="Height (in)" onChange={(e) => setReqDraft({ ...reqDraft, heightIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Height in inches" />
+                      </div>
+                    )}
+                    <input type="url" value={reqDraft.supplierUrl} placeholder="Link to the product on your supplier's site (https://…)" onChange={(e) => setReqDraft({ ...reqDraft, supplierUrl: e.target.value })} style={S.input} aria-label="Supplier link" />
+                    <textarea value={reqDraft.notes} maxLength={2000} rows={3} placeholder="Anything we should know (colours, sizes you sell, how it's installed)" onChange={(e) => setReqDraft({ ...reqDraft, notes: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Notes" />
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      {reqDraft.photos.map((p) => <img key={p.path} src={p.preview} alt="" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid #CBD5E1" }} />)}
+                      {reqDraft.photos.length < 4 && (
+                        <label style={{ ...smallBtn, display: "inline-block" }}>
+                          {reqDraft.uploading ? "Uploading…" : "Add photos"}
+                          <input type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }} disabled={reqDraft.uploading} onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
+                        </label>
+                      )}
+                      <span style={{ fontSize: 12, color: "#64748B" }}>A clear, straight-on photo from the supplier&rsquo;s website works best.</span>
+                    </div>
+                    {priceLine && <div style={{ fontSize: 12.5, color: "#475569" }} data-ss-library-request-price="1">{priceLine}</div>}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button style={S.btn(DOOR_MINT, "#0F4C46")} disabled={busy === "req" || reqDraft.uploading} onClick={sendRequest}>{busy === "req" ? "Sending…" : "Send request"}</button>
+                      <button style={smallBtn} onClick={() => { setReqOpen(false); setReqDraft(null); }}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {requests.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", marginBottom: 2 }}>Your requests</div>
+              {requests.map((r) => {
+                const st = SS_LIB_REQ_STATUS[r.status] || [r.status, "#475569", "#F1F5F9"];
+                return (
+                  <div key={r.id} style={{ ...rowStyle, alignItems: "center" }} data-ss-library-request={r.name}>
+                    <span style={{ fontSize: 11.5, fontWeight: 800, color: st[1], background: st[2], borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>{st[0]}</span>
+                    <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{r.name}</div>
+                      <div style={{ fontSize: 12, color: "#64748B" }}>
+                        Sent {new Date(r.createdAt).toLocaleDateString()}
+                        {r.chargedCents ? ` · $${(r.chargedCents / 100).toFixed(2)}${r.refundedCents ? `, $${(r.refundedCents / 100).toFixed(2)} credited back` : ""}` : ""}
+                        {r.resultNote ? ` · ${r.resultNote}` : ""}
+                      </div>
+                    </div>
+                    {r.status === "submitted" && <button style={smallBtn} disabled={busy === "cx:" + r.id} onClick={() => cancelReq(r)}>{busy === "cx:" + r.id ? "Cancelling…" : "Cancel"}</button>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>
