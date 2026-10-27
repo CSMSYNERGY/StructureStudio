@@ -1,19 +1,19 @@
-// Execute migration 346 (a StructureStudio door template can be a promoted door made from a photo) for
+// Execute migration 347 (a StructureStudio door template can be a promoted door made from a photo) for
 // real in PGlite, after 339 (the library) and 343 (door looks), piece by piece as live. Checks:
-//   * P0 claims 346 once; P1 adds library_items.door_spec and its CHECK; R1 reads true, true, 0;
+//   * P0 claims 347 once; P1 adds library_items.door_spec and its CHECK; R1 reads true, true, 0;
 //     a second apply changes nothing; the header's rollback leaves the table as 339 made it;
 //   * every template 339 seeded still passes; a door template may carry a spec on its own base only,
 //     at version 1, an object, at most 4096 bytes; never on a window or cladding, never over "auto";
 //   * P1 before 343 aborts with nothing changed.
 // Nothing here touches the live project. The repo is public: no real client id belongs in a fixture.
 //
-//   node tests/sql/migration346.test.cjs   exit 0 = ALL CHECKS PASSED
+//   node tests/sql/migration347.test.cjs   exit 0 = ALL CHECKS PASSED
 const fs = require("fs");
 const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 const WT = path.resolve(__dirname, "../..");
 const read = (f) => fs.readFileSync(path.join(WT, "supabase/migrations", f), "utf8").replace(/\r/g, "");
-const MIG = () => (process.env.MIG_FILE ? fs.readFileSync(process.env.MIG_FILE, "utf8").replace(/\r/g, "") : read("346_library_door_templates.sql"));
+const MIG = () => (process.env.MIG_FILE ? fs.readFileSync(process.env.MIG_FILE, "utf8").replace(/\r/g, "") : read("347_library_door_templates.sql"));
 const piece = (n, text) => {
   const out = [];
   let on = false;
@@ -85,7 +85,7 @@ const SPEC = (base, extra = {}) => JSON.stringify({ v: 1, base, src: { leaves: 1
 const tpl = (slug, category, look, spec) => `insert into public.library_items (category, slug, name, look, source, door_spec) values ('${category}', '${slug}', '${slug} name', '${JSON.stringify(look)}'::jsonb, 'csm', ${spec === null ? "null" : `'${spec}'::jsonb`})`;
 
 (async () => {
-  console.log("migration 346: applies after 339 and 343");
+  console.log("migration 347: applies after 339 and 343");
   const db = await fresh();
   {
     for (const n of ["P0", "P1", "R1"]) {
@@ -94,8 +94,8 @@ const tpl = (slug, category, look, spec) => `insert into public.library_items (c
     }
     const seeded = Number((await one(db, "select count(*) n from public.library_items")).n);
     const { err, p0, r1 } = await apply(db);
-    ok(err === null, "346 applied cleanly", err);
-    ok(p0 && p0.length === 1 && p0[0].version === "346", "P0 claims 346");
+    ok(err === null, "347 applied cleanly", err);
+    ok(p0 && p0.length === 1 && p0[0].version === "347", "P0 claims 347");
     ok(r1 && r1.column_ready === true && r1.check_ready === true && Number(r1.promoted_doors) === 0, "R1 (THE RECORD) reads true, true, 0", JSON.stringify(r1));
     ok(Number((await one(db, "select count(*) n from public.library_items where door_spec is null")).n) === seeded && seeded >= 20, `the ${seeded} seeded templates are untouched`);
     const again = await apply(db);
@@ -114,6 +114,12 @@ const tpl = (slug, category, look, spec) => `insert into public.library_items (c
     ok(r && !r.startsWith("WRONG"), "a window never carries one", r);
     r = await refused(db, tpl("bad-v", "door", { doorStyle: "zbrace" }, JSON.stringify({ v: 2, base: "zbrace" })), /library_items_door_spec_chk/);
     ok(r && !r.startsWith("WRONG"), "a spec of another version is refused", r);
+    r = await refused(db, tpl("bad-nov", "door", { doorStyle: "zbrace" }, JSON.stringify({ base: "zbrace" })), /library_items_door_spec_chk/);
+    ok(r && !r.startsWith("WRONG"), "a spec with no version is refused (a missing key is not a pass)", r);
+    r = await refused(db, tpl("bad-empty", "door", { doorStyle: "auto" }, "{}"), /library_items_door_spec_chk/);
+    ok(r && !r.startsWith("WRONG"), "an empty spec is refused", r);
+    r = await refused(db, tpl("bad-nosrc", "door", { doorStyle: "zbrace" }, JSON.stringify({ v: 1, base: "zbrace" })), /library_items_door_spec_chk/);
+    ok(r && !r.startsWith("WRONG"), "a spec with no src (leaves, hinge side) is refused", r);
     r = await refused(db, tpl("bad-arr", "door", { doorStyle: "zbrace" }, JSON.stringify([1])), /library_items_door_spec_chk/);
     ok(r && !r.startsWith("WRONG"), "a spec that is not an object is refused", r);
     r = await refused(db, tpl("bad-big", "door", { doorStyle: "zbrace" }, SPEC("zbrace", { pad: "x".repeat(4200) })), /library_items_door_spec_chk/);

@@ -6014,7 +6014,7 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
     setBusy(null);
   };
   const addEntry = () => run("add", async () => {
-    // A promoted door (346) is copied with its own look; the server takes no look for it.
+    // A promoted door (347) is copied with its own look; the server takes no look for it.
     await call({ action: "library_add", templateId: adding.template.id, name: adding.name, ...(adding.template.fromPhoto ? {} : { look: adding.look }) });
     setAdding(null);
   }, `Imported. Pick it on your ${noun === "cladding" ? "styles" : noun + "s"} below.`);

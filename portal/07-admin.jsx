@@ -2222,7 +2222,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
 // SsLibLookEdit are the builder side's (portal/03-catalog.jsx), so both sides describe a look alike.
 const ADM_LIB_CATS = [["cladding", "Claddings"], ["door", "Doors"], ["window", "Windows"]];
 const ADM_LIB_BLANK_LOOK = { cladding: { profile: "lap" }, door: { doorStyle: "plank" }, window: { liteRows: 2, liteCols: 2 } };
-// Doors builders made from photos (346; Carolyn's 10-27 call): every builder's saved 3D door, for an
+// Doors builders made from photos (347; Carolyn's 10-27 call): every builder's saved 3D door, for an
 // operator to copy into the StructureStudio library under a NEW name. The template carries no builder
 // name or id (Ahsan 10-27: promote freely, strip the name); the builder keeps their own copy.
 function AdmLibraryDoorLooks({ items, onPromoted }) {

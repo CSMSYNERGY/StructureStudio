@@ -21,7 +21,7 @@
 //   H  the library shows it ("Made from your photo, drawn over ...", with its tile), and a door's "How it
 //      looks in 3D" lists it beside "Make one from a photo…"; picking it saves its clientLibraryId and
 //      the look's base as doorStyle.
-//   J  an operator promotes it (346): Admin → Master Catalog → Doors lists the builder's saved door;
+//   J  an operator promotes it (347): Admin → Master Catalog → Doors lists the builder's saved door;
 //      "Add to the StructureStudio library" sends its look id and a NEW name; the list then says it is in
 //      the library; back on Doors the template shows its tile, and importing it sends no look of its own.
 //   I  no page errors.
@@ -104,7 +104,7 @@ function settings(body) {
     }
     case "library_add": {
       if (body.templateId) {
-        // A promoted door (346): the builder's own ready copy of its spec, and an entry naming it.
+        // A promoted door (347): the builder's own ready copy of its spec, and an entry naming it.
         const tp = W.templates.find((x) => x.id === body.templateId);
         if (!tp || !tp.fromPhoto) return [{ error: "Not in this harness." }, 400];
         const copy = { ...W.looks.find((x) => x.id === tp.fromLook), id: U(seq++), name: body.name, status: "ready", version: 1, fromPhoto: false };

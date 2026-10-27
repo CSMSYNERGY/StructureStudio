@@ -1,4 +1,4 @@
--- 346_library_door_templates.sql — a StructureStudio door template can be a door a builder made from
+-- 347_library_door_templates.sql — a StructureStudio door template can be a door a builder made from
 -- a photo, promoted by an operator (Carolyn's 10-27 call: "take any of the ones that they create and
 -- then add it to a Structure Studio library"; Ahsan 10-27: promote freely, under a new name, with no
 -- builder details on the template).
@@ -7,14 +7,14 @@
 --    never `--file`, never inside begin;/commit;. One inline call per piece (CLI `db query --linked` or
 --    the Supabase connector's execute_sql):
 --
---   F=supabase/migrations/346_library_door_templates.sql
+--   F=supabase/migrations/347_library_door_templates.sql
 --   piece() { awk -v n="$1" '{sub(/\r$/,"")} $0=="-- >>> "n{on=1;next} $0=="-- <<< "n{on=0} on' "$F" | grep -v '^--'; }
---   "$SB" db query --linked "$(piece P0)"      # must print ONE row: 346, 346_library_door_templates
+--   "$SB" db query --linked "$(piece P0)"      # must print ONE row: 347, 347_library_door_templates
 --   "$SB" db query --linked "$(piece P1)"
 --   "$SB" db query --linked "$(piece R1)"      # THE RECORD
 --
--- P0 claims the number first: no row back means another session took 346, so rename this file, its test
--- (tests/sql/migration346.test.cjs) and every '346' below. Read the max first, numbered rows only:
+-- P0 claims the number first: no row back means another session took 347, so rename this file, its test
+-- (tests/sql/migration347.test.cjs) and every '347' below. Read the max first, numbered rows only:
 -- select max(version) filter (where version ~ '^\d{3}$') from supabase_migrations.schema_migrations;
 --
 -- ── WHAT IT DOES ─────────────────────────────────────────────────────────────────────────
@@ -33,46 +33,48 @@
 -- ── ROLLBACK ─────────────────────────────────────────────────────────────────────────────
 --   alter table public.library_items drop constraint if exists library_items_door_spec_chk;
 --   alter table public.library_items drop column if exists door_spec;
---   delete from supabase_migrations.schema_migrations where version = '346' returning version;
+--   delete from supabase_migrations.schema_migrations where version = '347' returning version;
 -- (Builders' copies are their own door_looks rows and keep working.)
 --
 -- The repo is public: no builder names or ids in here.
 
 -- >>> P0
 insert into supabase_migrations.schema_migrations (version, name)
-values ('346', '346_library_door_templates')
+values ('347', '347_library_door_templates')
 on conflict (version) do nothing
 returning version, name;
 -- <<< P0
 
 -- >>> P1
-do $m346_p1$
+do $m347_p1$
 begin
   perform set_config('lock_timeout', '5s', true);
   if to_regclass('public.library_items') is null or to_regclass('public.door_looks') is null then
-    raise exception '346: apply 339_library and 343_door_looks first; nothing changed';
+    raise exception '347: apply 339_library and 343_door_looks first; nothing changed';
   end if;
   alter table public.library_items add column if not exists door_spec jsonb;
   if not exists (select 1 from pg_constraint where conname = 'library_items_door_spec_chk'
                   and conrelid = 'public.library_items'::regclass) then
     alter table public.library_items
+      -- coalesce: a missing key makes a comparison NULL, and a CHECK passes on NULL.
       add constraint library_items_door_spec_chk check (
         door_spec is null
-        or (category = 'door'
+        or coalesce(category = 'door'
             and jsonb_typeof(door_spec) = 'object'
             and octet_length(door_spec::text) <= 4096
             and door_spec -> 'v' = '1'::jsonb
+            and jsonb_typeof(door_spec -> 'src') = 'object'
             and door_spec ->> 'base' in ('plank', 'zbrace', 'xbrace', 'american', 'basic', 'classic', 'dutch')
-            and door_spec ->> 'base' = look ->> 'doorStyle'));
+            and door_spec ->> 'base' = look ->> 'doorStyle', false));
   end if;
   comment on column public.library_items.door_spec is
-    'A door a builder made from a photo, promoted by an operator (346): the cleaned door-look spec '
+    'A door a builder made from a photo, promoted by an operator (347): the cleaned door-look spec '
     '(343''s shape), drawn over look.doorStyle (its base). NULL for every other template. A builder who '
     'imports it gets their own ready door_looks copy and a library entry naming it (345). No builder '
     'id on the row; admin_audit says where it came from.';
   perform pg_notify('pgrst', 'reload schema');
 end
-$m346_p1$;
+$m347_p1$;
 -- <<< P1
 
 -- THE RECORD. Expect: true, true, 0.

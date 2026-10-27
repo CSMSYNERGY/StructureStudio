@@ -20,7 +20,7 @@
 //     library read carries the look's tile; such an entry is rename-only; a template never takes a
 //     doorLookId; save_fixture refuses a save naming both looks, and an entry put on a row clears the
 //     row's own look (one look per door row).
-//   * a door promoted from a builder's photo (346): shown only to a builder with door looks on, marked
+//   * a door promoted from a builder's photo (347): shown only to a builder with door looks on, marked
 //     fromPhoto; importing it gives the builder their OWN ready copy of its spec and an entry naming it;
 //     a name already taken leaves no copy behind; seeding never links a plain door to it.
 //

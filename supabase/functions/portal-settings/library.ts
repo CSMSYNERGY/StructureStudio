@@ -58,7 +58,7 @@ const DOOR_LOOK_NOT_FOUND: Refusal = { status: 404, code: "library_door_look_not
 const DOOR_LOOK_NOT_READY: Refusal = { status: 409, code: "library_door_look_not_ready", error: "Save that 3D door first, then add it to your library." };
 const DOOR_LOOK_FIXED: Refusal = { status: 400, code: "library_door_look_fixed", error: "A door made from your photo keeps its look. Rename it here, or make a new one from a photo." };
 const DOOR_LOOKS_NOT_YET: Refusal = { status: 503, code: "library_door_looks_unavailable", error: "Doors made from photos can't go in the library yet. Try again later." };
-/** The templates that are promoted doors (346): id -> their spec. A database without 346 has none. */
+/** The templates that are promoted doors (347): id -> their spec. A database without 347 has none. */
 async function promotedDoors(admin: Db): Promise<{ map: Map<string, Record<string, unknown>>; error?: unknown }> {
   const map = new Map<string, Record<string, unknown>>();
   const r = await admin.from("library_items").select("id, door_spec").not("door_spec", "is", null);
@@ -280,7 +280,7 @@ export async function seedMine(admin: Db, clientId: string): Promise<{ created: 
   ]);
   const fx = fxOwn.error && librarySchemaMissing(fxOwn.error) ? await unlinked() : fxOwn;
   for (const r of [tpl, ent, sc, fx]) if (r.error) return { dbError: r.error, where: "read your catalog" };
-  // A promoted door (346) draws its own spec over its base, so a plain row is never linked to one.
+  // A promoted door (347) draws its own spec over its base, so a plain row is never linked to one.
   const promoted = await promotedDoors(admin);
   if (promoted.error) return { dbError: promoted.error, where: "read the StructureStudio library" };
   const templates: Template[] = ((tpl.data ?? []) as Template[]).filter((x) => !promoted.map.has(String(x.id)));
@@ -378,7 +378,7 @@ export async function handleLibraryAction(c: LibraryCtx): Promise<Response> {
     if (usage.error) return failOr(usage.error, "load your library");
     const looks = await doorLooksOf(admin, clientId, ent.data ?? []);
     if (looks.error) return failOr(looks.error, "load your library");
-    // Doors promoted from a builder's photo (346): only for a builder with door looks on, since using one
+    // Doors promoted from a builder's photo (347): only for a builder with door looks on, since using one
     // gives them their own 3D look. A failed flag read hides them.
     const promoted = await promotedDoors(admin);
     if (promoted.error) return failOr(promoted.error, "load your library");
@@ -437,7 +437,7 @@ export async function handleLibraryAction(c: LibraryCtx): Promise<Response> {
     if (t.error) return failOr(t.error, "read that template");
     if (!t.data || t.data.status !== "active") return refuse(TEMPLATE_NOT_FOUND);
     const cat = t.data.category as Category;
-    // A door promoted from a builder's photo (346): the builder gets their OWN ready 3D look with its
+    // A door promoted from a builder's photo (347): the builder gets their OWN ready 3D look with its
     // spec (free, no AI), and an entry naming it (345), so it draws in their designer like one they made.
     const promoted = cat === "door" ? await promotedDoors(admin) : { map: new Map<string, Record<string, unknown>>() };
     if ("error" in promoted && promoted.error) return failOr(promoted.error, "read that template");
