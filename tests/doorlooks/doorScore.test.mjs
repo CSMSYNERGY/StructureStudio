@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  checkTruthCase, DOOR_RENDER_RULES, DOOR_SCORE_BARS, doorLeafFt, drawnDoorLook, formatReport, scoreCorpus,
+  checkTruthCase, DOOR_RENDER_RULES, DOOR_SCORE_BARS, doorLeafFt, drawnDoorLook, formatReport, scoreCorpus, scoreRun,
 } from "./doorScore.mjs";
 import { insideRepo, liveGate, liveGenerate, main, recordedRuns, REPO_ROOT, runFromDoorLedgerRows, truthRuns } from "./doorSim.mjs";
 import { fakeModel } from "../../supabase/functions/_shared/_test_stubs/doorModel.ts";
@@ -81,6 +81,8 @@ test("drawnDoorLook resolves an absent key through today's rule, at the row's re
   const plank = drawnDoorLook({ v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" } }, { sizeIn: [36, 80], leaves: 1 });
   close(plank.fIn, 3.6); // 0.3 ft
   assert.deepEqual(plank.hinges.at, [0.13, 0.55, 0.87]);
+  // P2 hangs a board door's middle hinge on its own mid rail, wherever the spec puts it.
+  assert.deepEqual(drawnDoorLook({ v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" }, frame: { rails: [0.48] } }, { sizeIn: [36, 80], leaves: 1 }).hinges.at, [0.13, 0.48, 0.87]);
   close(plank.hinges.lenIn, (0.11 + 1.15) * 12);
   assert.deepEqual(plank.brace, { t: "z", from: "hinge" });
   assert.equal(plank.meet, null);
@@ -270,10 +272,10 @@ test("see-through rays and vocabulary gaps: zero", () => {
   assert.equal(bar(scoreCorpus([c], [draft("z", ZDOOR, 1, { vocabGaps: ["arched top"] })]), "vocabGaps").ok, false);
 });
 
-test("the bar table is section 9's, one row a bar", () => {
+test("the bar table is section 9's (plus the hardware finish, 10-27), one row a bar", () => {
   assert.deepEqual(DOOR_SCORE_BARS.map((b) => b.key), [
     "leaves", "base", "hingeSide", "sideGuessNoWarn", "hingeCount", "hingeType", "hingeNoWarn", "hingeAt", "hingeLen",
-    "rails", "frame", "braceDir", "panelFills", "parts", "handleMeet", "colorRoles", "refusals", "goodRefused", "edgeF1",
+    "rails", "frame", "braceDir", "panelFills", "parts", "handleMeet", "hardwareFinish", "colorRoles", "refusals", "goodRefused", "edgeF1",
     "timeP50", "timeMax", "costMax", "rayMisses", "vocabGaps",
   ]);
 });
@@ -485,4 +487,57 @@ test("a press's ledger rows to its run record: the last row decides, costs and t
   assert.deepEqual([refused.outcome, refused.refuse], ["refused", { code: "ai_door_unsupported", reason: "unsupported" }]);
   assert.deepEqual([runFromDoorLedgerRows([failed], { case: "a", run: 1 }).error, runFromDoorLedgerRows([], { case: "a", run: 1 }).error], ["ai_door_unparseable", "no_row"]);
   assert.equal(runFromDoorLedgerRows([{ ...failed, tokens: { ...failed.tokens, skipped: { leanRetryClock: true } } }], { case: "a", run: 1 }).skipped.leanRetryClock, true);
+});
+
+// ─── the hardware's finish ────────────────────────────────────────────────────────────────────────
+test("the hinge and handle finish is barred: black iron drafted as bronze fails it, and a finish warning covers it", () => {
+  const c = tcase("z", ZDOOR);
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.finish", "bronze"), 1), "hardwareFinish").ok, true, "1 of 20 is within 0.9");
+  assert.equal(bar(score(c, edit(edit(ZDOOR, "hinges.finish", "bronze"), "handle.finish", "bronze"), 10), "hardwareFinish").ok, false);
+  const run = draft("z", edit(ZDOOR, "handle.finish", "bronze"), 1, { warnings: [{ code: "handle_finish_unsure" }] });
+  const row = scoreRun(c, run).rows.find((r) => r.path === "handle.finish");
+  assert.deepEqual([row.status, row.warned], ["fail", true]);
+  // Hidden hinges have no finish to score.
+  const hidden = edit(edit(ZDOOR, "hinges.type", "hidden"), "hinges.count", 0);
+  const rows = scoreRun(tcase("h", hidden), draft("h", hidden)).rows;
+  assert.equal(rows.some((r) => r.path === "hinges.finish"), false);
+});
+
+// ─── what P2 draws for hidden and butt hinges, and the guards on its rules ───────────────────────
+test("hidden hinges draw none whatever count Stage A left; butt hinges draw no strap, so no length is scored", () => {
+  const hiddenRun = edit(edit(ZDOOR, "hinges.type", "hidden"), "hinges.count", 3);
+  const drawn = drawnDoorLook(hiddenRun, { sizeIn: [36, 80], leaves: 1 }).hinges;
+  assert.deepEqual([drawn.count, drawn.at, drawn.lenIn], [0, [], null]);
+  const hiddenTruth = edit(edit(ZDOOR, "hinges.type", "hidden"), "hinges.count", 0);
+  const res = score(tcase("h", hiddenTruth), hiddenRun, 20);
+  assert.deepEqual([bar(res, "hingeCount").ok, bar(res, "hingeNoWarn").ok], [true, true]);
+  // Butt: no strap is drawn, with or without lenIn, so the length row is "na" either way round.
+  const butt = edit(ZDOOR, "hinges.type", "butt");
+  assert.equal(drawnDoorLook(butt, { sizeIn: [36, 80], leaves: 1 }).hinges.lenIn, null);
+  for (const lenIn of [3, 12, 30]) {
+    const row = scoreRun(tcase("b", butt), draft("b", edit(butt, "hinges.lenIn", lenIn))).rows.find((r) => r.path === "hinges.lenIn");
+    assert.equal(row.status, "na", `lenIn ${lenIn}`);
+  }
+  const rows = scoreRun(tcase("z", ZDOOR), draft("z", butt)).rows;
+  assert.deepEqual([rows.find((r) => r.path === "hinges.lenIn").status, rows.find((r) => r.path === "hinges.type").status], ["na", "fail"]);
+});
+
+test("the needles catch a renderer that hangs hinges on another mid rail, or draws another finish by default", () => {
+  const mutate = (src, from, to) => {
+    const out = src.replace(from, to);
+    assert.notEqual(out, src, `the mutation found nothing to change: ${from}`);
+    return out;
+  };
+  for (const f of ["StructureStudio.jsx", "structure-studio.component.js"]) {
+    const src = readFileSync(join(REPO_ROOT, f), "utf8");
+    const lowestFirst = mutate(src, "const byMid = mids.slice().sort((p, q) => Math.abs(p - (y0 + h / 2)) - Math.abs(q - (y0 + h / 2)));", "const byMid = mids.slice().sort((p, q) => p - q);");
+    assert.ok(DOOR_RENDER_RULES.some((r) => !lowestFirst.includes(r.needle)), `${f}: reordering the mid rails passes every needle`);
+    const galv = mutate(src, 'SS_DOOR_FINISH_HEX[f.finish || "black"]', 'SS_DOOR_FINISH_HEX[f.finish || "galv"]');
+    assert.ok(DOOR_RENDER_RULES.some((r) => !galv.includes(r.needle)), `${f}: another default finish passes every needle`);
+    const sixFt = mutate(src, "const count = hs.count != null ? hs.count : h >= 5 ? 3 : 2;", "const count = hs.count != null ? hs.count : h >= 6 ? 3 : 2;");
+    assert.ok(DOOR_RENDER_RULES.some((r) => !sixFt.includes(r.needle)), `${f}: another hinge-count rule passes every needle`);
+  }
+  // The scorer's half of the finish rule: its own finish, else black.
+  const fin = drawnDoorLook({ v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" }, hinges: { finish: "galv" }, handle: { type: "lever" } }, { sizeIn: [36, 80], leaves: 1 });
+  assert.deepEqual([fin.hinges.finish, fin.handle.finish], ["galv", "black"]);
 });

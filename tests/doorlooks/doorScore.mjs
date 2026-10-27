@@ -42,19 +42,32 @@ import { cleanDoorLook, DOOR_LOOK_BASE_DEFAULTS, DOOR_PLANK_FAMILY } from "../..
 
 // ─── renderer mirrors ─────────────────────────────────────────────────────────────────────────────
 // Today's rules, copied from the designer twins (StructureStudio.jsx and structure-studio.component.js).
-// If the renderer moves, these move: doorScore.test.mjs fails when a needle is no longer in BOTH twins
-// (P2 replaces the hinge code with doorHardware and will have to re-anchor these).
+// If the renderer moves, these move: doorScore.test.mjs fails when a needle is no longer in BOTH twins.
+// Re-anchored 2026-10-27 to P2's ssDoorLeafPlan and doorHardware (a look's frame, rails, hinges, straps).
 export const DOOR_RENDER_RULES = [
   { name: "TRIM_F", needle: "return Math.min(0.29, w * 0.16, h * 0.09);" },
   { name: "TRIM_MID", needle: "mid = h * 0.42;" },
   { name: "TRIM_SILL", needle: "SS_TRIM_DOOR_SILL_FT = 0.2," },
-  { name: "TRIM_STRAP", needle: "const sLen = Math.min(w * 0.15, 0.5);" },
+  { name: "SPEC_F", needle: "const F = fr.fIn != null ? Math.min(fr.fIn / 12, w * 0.2, h * 0.12)" },
+  { name: "PLANK_F", needle: ": trim ? ssTrimDoorBoardFt(w, h) : Math.min(0.3, w * 0.16, h * 0.09);" },
+  { name: "PLANK_MID", needle: "const railH = fr.railHIn != null ? Math.min(fr.railHIn / 12, h * 0.12) : trim ? F : Math.min(0.26, h * 0.06);" },
+  { name: "SPEC_STRAP", needle: "const sLen = hs.lenIn != null ? Math.max(0.05, Math.min(hs.lenIn / 12, w * 0.7) - 0.11)" },
+  { name: "TRIM_STRAP", needle: ": trim ? Math.min(w * 0.15, 0.5) : Math.min(w * 0.5, 1.15);" },
+  { name: "PLANK_STRAP", needle: ": trim ? Math.min(w * 0.15, 0.5) : Math.min(w * 0.5, 1.15);" },
+  { name: "STRAP_START", needle: "iron(0.11 + rowLen * 0.55, 0.11 + rowLen," },
+  // TRIM_HINGES and PLANK_HINGES pin the no-look branch only; a look takes the SPEC_* lines.
   { name: "TRIM_HINGES", needle: "(h >= 5 ? [y0 + F / 2, midY, hTop] : [y0 + F / 2, hTop])" },
-  { name: "PLANK_F", needle: "const F = Math.min(0.3, w * 0.16, h * 0.09);" },
-  { name: "PLANK_MID", needle: "const midY = y0 + h * 0.55, midH = Math.min(0.26, h * 0.06);" },
-  { name: "PLANK_STRAP", needle: "const sLen = Math.min(w * 0.5, 1.15);" },
   { name: "PLANK_HINGES", needle: "(h >= 5 ? [y0 + h * 0.13, midY, hTop(0.13)] : [y0 + h * 0.18, hTop(0.18)])" },
-  { name: "STRAP_START", needle: "iron(0.11 + sLen * 0.55, 0.11 + sLen," },
+  { name: "SPEC_HINGE_COUNT", needle: "const count = hs.count != null ? hs.count : h >= 5 ? 3 : 2;" },
+  { name: "SPEC_NO_HINGES", needle: 'if (type === "hidden" || !count) rows = [];' },
+  { name: "BUTT_NO_STRAP", needle: 'if (type === "butt") {' },
+  { name: "MID_RAIL_NEAREST_HALF", needle: "const byMid = mids.slice().sort((p, q) => Math.abs(p - (y0 + h / 2)) - Math.abs(q - (y0 + h / 2)));" },
+  { name: "SPEC_RAILS_HINGES", needle: 'else if (hs.at === "rails" || trim) {' },
+  { name: "SPEC_PLANK_HINGES", needle: "rows = count === 3 ? [y0 + h * 0.13, byMid.length ? byMid[0] : L.railAt, y1 - h * 0.13]" },
+  { name: "SPEC_PLANK_HINGES_2", needle: ": count === 2 ? [y0 + h * 0.18, y1 - h * 0.18] : spread(y0 + h * 0.13, y1 - h * 0.13, count);" },
+  { name: "RAIL_AT", needle: "railAt: y0 + h * lp.def.rails[0]" },
+  { name: "FINISH_DEFAULT", needle: 'SS_DOOR_FINISH_HEX[f.finish || "black"]' },
+  { name: "FINISH_OWN", needle: "hinge: finish(spec.hinges), handle: finish(spec.handle)," },
   { name: "LEAF_X", needle: '[[o.a0 + 0.05, o.a - 0.03, "a0", false], [o.a + 0.03, o.a1 - 0.05, "a1", true]]' },
   { name: "LEAF_Y", needle: "const y0d = o.y0 + 0.05, y1d = o.y1 - 0.05;" },
 ];
@@ -112,17 +125,23 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
   const braceT = (isRec(spec.brace) && spec.brace.t) || def.brace;
   const h = isRec(spec.hinges) ? spec.hinges : {};
   const type = h.type ?? "tstrap";
-  const count = num(h.count) ?? (leaf ? (leaf.h >= 5 ? 3 : 2) : null);
+  // A hidden set draws no hinge rows whatever count Stage A left on it (SPEC_NO_HINGES); otherwise
+  // today's rule, 3 from 5 ft up (SPEC_HINGE_COUNT).
+  const count = type === "hidden" ? 0 : num(h.count) ?? (leaf ? (leaf.h >= 5 ? 3 : 2) : null);
   let at = null;
   if (count === 0) at = [];
   else if (Array.isArray(h.at)) at = [...h.at].sort((a, b) => a - b);
   else if (count !== null && (h.at === "rails" || (h.at === undefined && trim))) {
     at = leaf && fIn !== null ? railHinges(count, rails, fIn / FT, leaf.h) : null;
   } else if (count !== null) {
-    at = PLANK_HINGES[count] ?? Array.from({ length: count }, (_, i) => (count === 1 ? 0.5 : 0.13 + (0.74 * i) / (count - 1)));
+    // Three hang the middle one on the mid rail nearest half way (the base's own when there is none).
+    const mid = rails.length ? [...rails].sort((a, b) => Math.abs(a - 0.5) - Math.abs(b - 0.5))[0] : def.rails[0];
+    at = count === 3 ? [PLANK_HINGES[3][0], mid, PLANK_HINGES[3][2]].sort((a, b) => a - b)
+      : PLANK_HINGES[count] ?? Array.from({ length: count }, (_, i) => (count === 1 ? 0.5 : 0.13 + (0.74 * i) / (count - 1)));
   }
   let lenIn = null;
-  if (count !== 0 && type !== "hidden") {
+  // A butt hinge is two plates and a knuckle: doorHardware returns before the strap (BUTT_NO_STRAP).
+  if (count !== 0 && type !== "hidden" && type !== "butt") {
     if (num(h.lenIn) !== null) lenIn = leaf ? Math.min(h.lenIn, leaf.w * FT * STRAP_CAP_W) : h.lenIn;
     else if (leaf) lenIn = (0.11 + (trim ? Math.min(leaf.w * 0.15, 0.5) : Math.min(leaf.w * 0.5, 1.15))) * FT;
   }
@@ -142,7 +161,7 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
     panels,
     parts: Array.isArray(spec.parts) ? spec.parts : [],
     hinges: { type, count, at, lenIn, finish: h.finish ?? "black" },
-    handle: { type: handle.type ?? "barn", v: handle.v ?? "rail" },
+    handle: { type: handle.type ?? "barn", v: handle.v ?? "rail", finish: handle.finish ?? "black" },
     meet: rowLeaves === 2 ? { type: meet.type ?? "astragal", wIn: meet.wIn ?? 1.5 } : null,
     colors: { infill: colors.infill ?? "door", frame: frameRole, members: colors.members ?? frameRole },
   };
@@ -170,6 +189,8 @@ export const DOOR_SCORE_BARS = [
   { key: "panelFills", label: "Panel fills (and the leaf brace)", kind: "rate", min: 0.9 },
   { key: "parts", label: "Parts F1", kind: "f1", min: 0.8 },
   { key: "handleMeet", label: "Handle type, meet", kind: "rate", min: 0.9 },
+  // Not in section 9: added 2026-10-27, when black iron drafted as bronze passed every bar.
+  { key: "hardwareFinish", label: "Hinge and handle finish", kind: "rate", min: 0.9 },
   { key: "colorRoles", label: "Colour roles", kind: "rate", min: 0.9 },
   { key: "refusals", label: "Refusal set refused with the right code", kind: "rate", min: 1 },
   { key: "goodRefused", label: "Good photos refused", kind: "share", max: 0.05 },
@@ -191,6 +212,8 @@ export const DOOR_WARNING_COVERS = {
   "hinges.count": ["hinge_count_split"],
   "hinges.type": ["hinge_type_split", "closeup_hinges"],
   "handle.type": ["closeup_handle"],
+  "hinges.finish": ["closeup_hinges", "hinge_finish_unsure"],
+  "handle.finish": ["closeup_handle", "handle_finish_unsure"],
   "meet.type": ["closeup_meet"],
   "brace.t": ["base_split"],
   "brace.from": ["base_split", "hinge_side_brace"],
@@ -272,7 +295,8 @@ export function scoreSpec(truthCase, truthSpec, gotSpec) {
   else if (none) add(na("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, "no hinges to place"));
   else if (T.hinges.count !== G.hinges.count) add(na("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, "hinge count differs (scored there)"));
   else add(list("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, BAR.hingeAt.tol));
-  if (none || T.hinges.type === "hidden" || G.hinges.type === "hidden") add(na("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, "no visible hinges"));
+  const strapless = (t) => t === "hidden" || t === "butt";
+  if (none || strapless(T.hinges.type) || strapless(G.hinges.type)) add(na("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, "no strap drawn"));
   else add(numeric("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, BAR.hingeLen.tol));
   add(list("frame.rails", "rails", T.rails, G.rails, BAR.rails.tol));
   add(numeric("frame.fIn", "frame", T.fIn, G.fIn, BAR.frame.tol));
@@ -290,9 +314,10 @@ export function scoreSpec(truthCase, truthSpec, gotSpec) {
   add(exact("handle.type", "handleMeet", T.handle.type, G.handle.type, acc));
   if (T.meet) add(exact("meet.type", "handleMeet", T.meet.type, G.meet.type, acc));
   for (const k of ["infill", "frame", "members"]) add(exact(`colors.${k}`, "colorRoles", T.colors[k], G.colors[k], acc));
+  if (!none && T.hinges.type !== "hidden" && G.hinges.type !== "hidden") add(exact("hinges.finish", "hardwareFinish", T.hinges.finish, G.hinges.finish, acc));
+  if (T.handle.type !== "none" && G.handle.type !== "none") add(exact("handle.finish", "hardwareFinish", T.handle.finish, G.handle.finish, acc));
   // Reported, with no bar of their own.
   add({ ...exact("field.dir", null, T.fieldDir, G.fieldDir, acc), bar: null });
-  add({ ...exact("hinges.finish", null, T.hinges.finish, G.hinges.finish, acc), bar: null });
   add({ ...exact("handle.v", null, T.handle.v, G.handle.v, acc), bar: null });
 
   // What the photo cannot say is not scored, whatever the run answered.
