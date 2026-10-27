@@ -384,16 +384,30 @@ try {
   await page.waitForTimeout(1500);
   const wEdit = page.locator("button", { hasText: /^Edit$/ });
   for (let i = 0; i < (await wEdit.count()) && (await page.locator("[data-ss-window-grid-library]").count()) === 0; i++) { await wEdit.nth(i).click().catch(() => {}); await page.waitForTimeout(300); }
-  const gsel = page.locator("[data-ss-window-grid-library]");
-  await gsel.selectOption({ label: "Transom 4 (4-lite: 1 row of 4)" });
-  const pic = await page.locator("[data-ss-window-lite-pic]").getAttribute("data-ss-window-lite-pic").catch(() => null);
-  ok("G a grid from the library sets rows and lites across", pic === "1x4", String(pic));
+  // The window's grid is the designer's old picker now (Carolyn, 10-27), with the builder's library grids
+  // as chips above it.
+  await page.locator("[data-ss-window-grid-library] [data-ss-window-grid-library-entry='Transom 4']").click();
+  await page.waitForTimeout(200);
+  const pic = await page.locator("[data-ss-window-grid] [data-ss-window-lite-pic]").getAttribute("data-ss-window-lite-pic").catch(() => null);
+  const t4On = ((await page.locator("[data-ss-window-grid-library-entry='Transom 4']").getAttribute("style")) || "").includes("224, 242, 254");
+  ok("G a grid from the library (a chip) sets rows and lites across, and shows as picked", pic === "1x4" && t4On, `${pic} ${t4On}`);
+  ok("G ...no dropdowns left in the window's grid", (await page.locator("[data-ss-window-grid] select").count()) === 0);
+  await page.locator("[data-ss-window-grid]").screenshot({ path: join(shots, "g-window-grid-chips.png") }).catch(() => {});
   await page.screenshot({ path: join(shots, "g-window-grid-from-library.png"), fullPage: true });
   await page.getByRole("button", { name: /^Save( window)?$/ }).last().click();
   await page.waitForTimeout(1200);
   const sw = actions("save_fixture").pop();
   const t4 = W.entries.find((e) => e.name === "Transom 4");
   ok("G it saves rows, lites and clientLibraryId", !!sw && sw.liteRows === 1 && sw.liteCols === 4 && t4 && sw.clientLibraryId === t4.id, JSON.stringify(sw && { liteRows: sw.liteRows, liteCols: sw.liteCols, clientLibraryId: sw.clientLibraryId }));
+  // A change by hand takes the window off the entry: one more row, saved as 2 x 4 with no library link.
+  for (let i = 0; i < (await wEdit.count()) && (await page.locator("[data-ss-window-grid]").count()) === 0; i++) { await wEdit.nth(i).click().catch(() => {}); await page.waitForTimeout(300); }
+  await page.locator("[data-ss-window-grid]").getByRole("button", { name: "More rows" }).click();
+  await page.waitForTimeout(200);
+  await page.getByRole("button", { name: /^Save( window)?$/ }).last().click();
+  await page.waitForTimeout(1200);
+  const sw2 = actions("save_fixture").pop();
+  ok("G a change by hand saves 2 x 4 and unlinks the entry", !!sw2 && sw2 !== sw && sw2.liteRows === 2 && sw2.liteCols === 4 && sw2.clientLibraryId === null,
+    JSON.stringify(sw2 && { liteRows: sw2.liteRows, liteCols: sw2.liteCols, clientLibraryId: sw2.clientLibraryId }));
 
   // ── H: admin ──
   await go("/console/master");

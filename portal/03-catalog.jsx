@@ -5313,6 +5313,67 @@ function SsLibPic({ category, look, size = 44, thumbUrl = null }) {
   );
 }
 
+// A window's grid of lites (335), set here in Settings and nowhere else. Carolyn, 10-27 call: "The
+// customer can't select the grid" (the designer's grid picker is gone), and "The way it's in the
+// Designer is how I want it here ... no grids or then one grid, vertical, horizontal, whatever, to
+// replace this drop-down". So this is that picker: No grid, rows and lites across with a little drawing
+// of the grid, and Standard (the grid every window drew before 335, sized to the window). `look` is
+// { liteRows, liteCols }, or {} for Standard. With `entries` (the builder's imported window grids, 339),
+// each is a chip that takes its grid from the library; `linkedId` marks the one in use. Used by the
+// window editor, the Library card's grid editor and the operator's library (07-admin).
+function SsGridPicker({ look, onChange, entries = null, linkedId = null, onPickEntry = null, onFindMore = null }) {
+  const l = look || {};
+  const cur = l.liteRows == null ? null : { rows: Number(l.liteRows), cols: Number(l.liteCols) || 1 };
+  const base = cur || { rows: 1, cols: 1 };
+  const set = (rows, cols) => { if (rows >= 1 && cols >= 1 && rows <= 8 && cols <= 8) onChange({ liteRows: rows, liteCols: cols }); };
+  const ink = "#334155", line = "#E2E8F0", accent = "#0284C7";
+  const chip = (key, on, text, onClick, extra) => (
+    <button key={key} type="button" onClick={onClick} data-ss-lites-chip={key} {...(extra || {})}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700, cursor: "pointer",
+        border: `2px solid ${on ? accent : line}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : ink }}>{text}</button>
+  );
+  const step = (key, n, onDown, onUp, unit) => (
+    <span key={key} data-ss-lites-step={key} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: ink, fontWeight: 600 }}>
+      <button type="button" onClick={onDown} disabled={n <= 1} aria-label={`Fewer ${key === "rows" ? "rows" : "across"}`}
+        style={{ width: 26, height: 26, borderRadius: 6, border: `1px solid ${line}`, background: "#FFF", color: ink, cursor: n <= 1 ? "default" : "pointer", padding: 0, fontWeight: 800, opacity: n <= 1 ? 0.45 : 1 }}>−</button>
+      <span style={{ minWidth: 14, textAlign: "center", fontWeight: 800 }}>{n}</span>
+      <button type="button" onClick={onUp} disabled={n >= 8} aria-label={`More ${key === "rows" ? "rows" : "across"}`}
+        style={{ width: 26, height: 26, borderRadius: 6, border: `1px solid ${line}`, background: "#FFF", color: ink, cursor: n >= 8 ? "default" : "pointer", padding: 0, fontWeight: 800, opacity: n >= 8 ? 0.45 : 1 }}>+</button>
+      <span>{unit}</span>
+    </span>
+  );
+  return (
+    <div data-ss-grid-picker="1">
+      {entries && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }} data-ss-window-grid-library="1">
+          <span style={{ fontSize: 12, fontWeight: 700, color: "#64748B" }}>From your library:</span>
+          {entries.map((x) => chip("lib-" + x.id, linkedId === x.id, <><SsLibPic category="window" look={x.look} size={22} />{x.name}</>, () => onPickEntry && onPickEntry(x),
+            { "data-ss-window-grid-library-entry": x.name, title: ssLibLookWords("window", x.look) }))}
+          {onFindMore && chip("more", false, "Find more in the library…", onFindMore)}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        {chip("plain", !!cur && cur.rows === 1 && cur.cols === 1, "No grid", () => set(1, 1))}
+        {step("rows", base.rows, () => set(base.rows - 1, base.cols), () => set(base.rows + 1, base.cols), base.rows === 1 ? "row" : "rows")}
+        <span style={{ color: ink, fontSize: 12 }}>×</span>
+        {step("cols", base.cols, () => set(base.rows, base.cols - 1), () => set(base.rows, base.cols + 1), "across")}
+        <span aria-hidden="true" data-ss-window-lite-pic={cur ? `${cur.rows}x${cur.cols}` : "auto"}
+          style={{ width: 36, height: 28, boxSizing: "border-box", border: `2px solid ${ink}`, background: "#F0F9FF", display: "grid",
+            gridTemplateRows: `repeat(${cur ? cur.rows : 2}, 1fr)`, gridTemplateColumns: `repeat(${cur ? cur.cols : 2}, 1fr)`, borderStyle: cur ? "solid" : "dashed" }}>
+          {Array.from({ length: cur ? cur.rows * cur.cols : 4 }, (_, k) => {
+            const rr = cur ? cur.rows : 2, cc = cur ? cur.cols : 2;
+            return <span key={k} style={{ borderRight: (k % cc) < cc - 1 ? `1px ${cur ? "solid" : "dashed"} ${ink}` : "none", borderBottom: Math.floor(k / cc) < rr - 1 ? `1px ${cur ? "solid" : "dashed"} ${ink}` : "none" }} />;
+          })}
+        </span>
+        <span data-ss-lites-name="1" style={{ fontSize: 12, color: "#64748B" }}>
+          {!cur ? "sized to the window, as before" : cur.rows * cur.cols < 2 ? "1 lite, no bars" : `${cur.rows * cur.cols}-lite (${cur.rows} ${cur.rows === 1 ? "row" : "rows"} of ${cur.cols})`}
+        </span>
+        {chip("standard", !cur, "Standard", () => onChange({}), { title: "The grid windows had before: two rows of two or three lites by width (one row in a transom)" })}
+      </div>
+    </div>
+  );
+}
+
 // The look editor for one entry (or a template being copied): the course on lap, the built look on a
 // door, the grid on a window. Cladding other than lap has nothing to edit but its name.
 function SsLibLookEdit({ category, look, onChange }) {
@@ -5335,22 +5396,7 @@ function SsLibLookEdit({ category, look, onChange }) {
       </select>
     );
   }
-  const R = l.liteRows == null ? "" : String(l.liteRows), C = l.liteCols == null ? "1" : String(l.liteCols);
-  const nums = [1, 2, 3, 4, 5, 6, 7, 8];
-  return (
-    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-      <select value={R} onChange={(e) => onChange(e.target.value === "" ? {} : { liteRows: Number(e.target.value), liteCols: Number(C) })} style={{ ...S.input, width: "auto", minWidth: 0 }}>
-        <option value="">Standard grid</option>
-        {nums.map((n) => <option key={n} value={String(n)}>{n} {n === 1 ? "row" : "rows"}</option>)}
-      </select>
-      {R !== "" && <>
-        <span style={{ color: "#64748B" }}>×</span>
-        <select value={C} onChange={(e) => onChange({ liteRows: Number(R), liteCols: Number(e.target.value) })} style={{ ...S.input, width: "auto", minWidth: 0 }}>
-          {nums.map((n) => <option key={n} value={String(n)}>{n} across</option>)}
-        </select>
-      </>}
-    </span>
-  );
+  return <SsGridPicker look={l} onChange={onChange} />;
 }
 
 // ─── "Don't see your door? Make it from a photo" (door looks from a photo, P6; Ahsan 2026-10-27) ───
@@ -7914,67 +7960,35 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         </div>
       )}
       {/* Grid (migration 335; Carolyn, 2026-10-23: "every window shows grids although nobody asked for
-          them"; spec Ahsan, 2026-10-24). The window's DEFAULT grid of lites, ROWS x lites ACROSS, for this
-          window on a wall, in a door's upper panel and as a transom; the rep can change it per window in
-          the designer. 1 x 1 is no grid; a transom of five is 1 row of 5; a "6-lite" is 3 rows of 2.
-          Automatic is the look every window had before. A window with a photo shows the photo instead.
-          It replaced 324's Panes select. Windows only. */}
+          them"; spec Ahsan, 2026-10-24). The window's grid of lites, ROWS x lites ACROSS, for this window
+          on a wall, in a door's upper panel and as a transom. Since Carolyn's 10-27 call it is set HERE
+          only: "The customer can't select the grid", so the designer has no picker, and this one is built
+          the way that one was. 1 x 1 is no grid; a transom of five is 1 row of 5; a "6-lite" is 3 rows of 2.
+          Standard is the look every window had before. A window with a photo shows the photo instead.
+          With the library (339) the builder's imported grids sit above it as chips; picking one links the
+          window to that entry, and any other change unlinks it. Windows only. */}
       {isWindowCat && (() => {
         const lr = edit.draft.lite_rows || "", lc = edit.draft.lite_cols || "1";
         const R = Number(lr) || 0, Cn = Number(lc) || 1;
-        const nums = [1, 2, 3, 4, 5, 6, 7, 8];
+        const winEntries = lib ? (lib.entries || []).filter((x) => x.category === "window" && x.active !== false) : null;
+        const cur = edit.draft.client_library_id || null;
+        const linked = winEntries && cur && winEntries.some((x) => x.id === cur) ? cur : null;
+        const draftOf = (l) => ({ lite_rows: l.liteRows == null ? "" : String(l.liteRows), lite_cols: l.liteRows == null ? "" : String(l.liteCols) });
         return (
-          <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 12 }} data-ss-window-grid="1">
             <div style={fldLbl}>Grid (lites)</div>
-            {lib && (() => {
-              // A grid from the builder's library (339). Picking one sets rows and lites across; the
-              // two selects below still fine-tune, which takes the line off the library entry.
-              const winEntries = (lib.entries || []).filter((x) => x.category === "window" && x.active !== false);
-              const cur = edit.draft.client_library_id || null;
-              const val = cur && winEntries.some((x) => x.id === cur) ? cur : "";
-              return (
-                <select data-ss-window-grid-library="1" value={val} style={{ ...S.input, minWidth: 0, width: "auto", marginBottom: 8, display: "block" }}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (v === "__more") { window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "window" } })); return; }
-                    const x = winEntries.find((y) => y.id === v);
-                    if (!x) { setDraft({ client_library_id: null }); return; }
-                    const l = x.look || {};
-                    setDraft({ client_library_id: x.id, lite_rows: l.liteRows == null ? "" : String(l.liteRows), lite_cols: l.liteRows == null ? "" : String(l.liteCols) });
-                  }}>
-                  <option value="">{val ? "Custom (set below)" : "Custom, or pick from your library…"}</option>
-                  {winEntries.map((x) => <option key={x.id} value={x.id}>{x.name} ({ssLibLookWords("window", x.look)})</option>)}
-                  <option value="__more">Find more in the library…</option>
-                </select>
-              );
-            })()}
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <select data-ss-window-lite-rows="1" value={lr} onChange={(e) => setDraft({ ...(e.target.value === "" ? { lite_rows: "", lite_cols: "" } : { lite_rows: e.target.value, lite_cols: lc }), ...(lib ? { client_library_id: null } : {}) })}
-                style={{ ...S.input, minWidth: 0, width: "auto" }}>
-                <option value="">Automatic (as before)</option>
-                {nums.map((n) => <option key={n} value={String(n)}>{n} {n === 1 ? "row" : "rows"}</option>)}
-              </select>
-              {R > 0 && <>
-                <span style={{ color: "#64748B" }}>×</span>
-                <select data-ss-window-lite-cols="1" value={lc} onChange={(e) => setDraft({ lite_cols: e.target.value, ...(lib ? { client_library_id: null } : {}) })}
-                  style={{ ...S.input, minWidth: 0, width: "auto" }}>
-                  {nums.map((n) => <option key={n} value={String(n)}>{n} across</option>)}
-                </select>
-                <span aria-hidden="true" data-ss-window-lite-pic={`${R}x${Cn}`}
-                  style={{ width: 36, height: 28, boxSizing: "border-box", border: "2px solid #334155", background: "#F0F9FF", display: "grid",
-                    gridTemplateRows: `repeat(${R}, 1fr)`, gridTemplateColumns: `repeat(${Cn}, 1fr)` }}>
-                  {Array.from({ length: R * Cn }, (_, k) => (
-                    <span key={k} style={{ borderRight: (k % Cn) < Cn - 1 ? "1px solid #334155" : "none", borderBottom: Math.floor(k / Cn) < R - 1 ? "1px solid #334155" : "none" }} />
-                  ))}
-                </span>
-              </>}
-            </div>
+            <SsGridPicker look={R > 0 ? { liteRows: R, liteCols: Cn } : {}}
+              onChange={(l) => setDraft({ ...draftOf(l), ...(lib ? { client_library_id: null } : {}) })}
+              entries={winEntries} linkedId={linked}
+              onPickEntry={(x) => setDraft({ client_library_id: x.id, ...draftOf(x.look || {}) })}
+              onFindMore={lib ? () => window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "window" } })) : null} />
             <div data-ss-window-lite-hint="1" style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
               {R === 0
-                ? "Automatic is the look windows had before: two rows of two or three lites by width (one row in a transom). Pick rows to set this window's grid."
+                ? "Standard is the look windows had before: two rows of two or three lites by width (one row in a transom)."
                 : R * Cn < 2
-                  ? "No grid: one clear lite. Reps can change the grid on each window in the designer."
-                  : `${R * Cn}-lite: ${R} ${R === 1 ? "row" : "rows"} of ${Cn}, all the same size. Reps can change the grid on each window in the designer.`}
+                  ? "No grid: one clear lite."
+                  : `${R * Cn}-lite: ${R} ${R === 1 ? "row" : "rows"} of ${Cn}, all the same size.`}
+              {" "}Customers get this grid on this window; they can't change it in the designer.
             </div>
           </div>
         );

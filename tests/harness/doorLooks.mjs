@@ -51,14 +51,14 @@
 //      stiles, boards and braces stopping below it, the Classic's octagon and diamond shrunk under it,
 //      the slab's upper panel moved down, no strap across the glass, vertical muntins only. The 3D
 //      footer row takes it out and puts it back, and Get Estimate sends doorWindowAt 'top' per leaf.
-//   LT. THE GRID OF LITES (migration 335, in place of 324's Panes): a window row's default grid, rows x
-//      columns, and the rep's override per placed window or door. Exactly rows - 1 horizontal and
+//   LT. THE GRID OF LITES (migration 335, in place of 324's Panes): a window row's grid, rows x columns,
+//      set in Settings, and an older override a SAVED design still carries. Exactly rows - 1 horizontal and
 //      columns - 1 vertical bars, equal lites, no double-hung rail: no grid (1 x 1) plain, a 6-lite 3 x 2,
-//      a 9-lite door lite 3 x 3 and the rep's 2 x 2, Carolyn's transom one row of 5; a window with no
-//      grid set draws as it always did. The 3D footer changes the selected window's grid in place, and
-//      Get Estimate sends each window's grid.
-//   LTP. The window picker's Grid row (Default, No grid, rows and lites across) and the door picker's grid
-//      for its window, stamped on what they place.
+//      a 9-lite door lite 3 x 3 and a saved 2 x 2, Carolyn's transom one row of 5; a window with no
+//      grid set draws as it always did. Since Carolyn's 10-27 call ("The customer can't select the grid")
+//      the 3D footer has no grid control for a selected window, and Get Estimate sends each window's grid.
+//   LTP. No grid picker in the designer (10-27): the window picker and the door picker's window row offer
+//      none, and what they place stamps null, so it takes its row's grid from Settings.
 //   N. NO SEE-THROUGH GAP (door looks P0, 2026-10-26): every line through every look's opening, single and
 //      double, with and without the windows it may take, and through partition doors, square on and at an
 //      angle, must hit the door; the gap closures are where they belong, and a double still reads as two
@@ -853,32 +853,18 @@ async function runLites3D(browser, rect) {
     await settle(page, 300);
     await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}wall-${name}.png`) });
   }
-  // The 3D footer: select the 6-lite, set it to no grid, add a lite across, then back to its default.
+  // The 3D footer: selecting the 6-lite shows no grid control (Carolyn, 10-27: "The customer can't select
+  // the grid"; it is set in Settings only).
   const six = LTPLAN.findIndex((d) => d.key === "six"), sixId = items[six].id;
   const clip = await aimAt(page, sixId, "west", 1.6);
   await settle(page, 300);
   await page.mouse.click(clip.x + clip.width / 2, clip.y + clip.height / 2);
   await settle(page, 600);
-  const row3 = page.locator("[data-ss-lites-3d]");
-  const rowText = (await row3.count()) ? (await row3.innerText()).replace(/\s+/g, " ") : "";
-  ok("LT the 3D footer shows the selected window's grid, its default named", /Window grid/i.test(rowText) && /Default \(6-lite\)/.test(rowText) && /6-lite \(3 rows of 2\)/.test(rowText), rowText || "no row");
+  const picked = await page.getByRole("button", { name: /Remove .*Six-lite/ }).count();
+  const gridCtl = (await page.locator("[data-ss-lites-3d], [data-ss-lites], [data-ss-lites-chip]").count())
+    + (await page.getByRole("button", { name: /^(More|Fewer) (rows|across)$/ }).count());
+  ok("LT a window selected in 3D has no grid control in the footer", picked > 0 && gridCtl === 0, `selected ${picked}, grid controls ${gridCtl}`);
   await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}footer.png`) });
-  const barsNow = async () => ltBars(ltPieces(LTPLAN[six], (await doorMeshes(page, sixId)) || []));
-  const itemNow = async () => ((await readItems(page)) || []).find((it) => it.id === sixId);
-  const waitBars = async (nv, nh) => { let b; for (let k = 0; k < 20; k++) { await settle(page, 250); b = await barsNow(); if (b.v.length === nv && b.h.length === nh) break; } return b; };
-  if (await row3.count()) {
-    await row3.locator('[data-ss-lites-chip="plain"]').click();
-    let b = await waitBars(0, 0), it = await itemNow();
-    ok("LT No grid in the footer: plain glass, stamped 1 x 1 on the window", b.v.length === 0 && b.h.length === 0 && it && it.liteRows === 1 && it.liteCols === 1,
-      `${b.v.length}/${b.h.length} ${JSON.stringify(it && [it.liteRows, it.liteCols])}`);
-    await row3.getByRole("button", { name: "More across" }).click();
-    b = await waitBars(1, 0); it = await itemNow();
-    ok("LT ...one more across: 1 row of 2", b.v.length === 1 && b.h.length === 0 && it && it.liteRows === 1 && it.liteCols === 2, `${b.v.length}/${b.h.length} ${JSON.stringify(it && [it.liteRows, it.liteCols])}`);
-    await row3.locator('[data-ss-lites-chip="default"]').click();
-    b = await waitBars(1, 2); it = await itemNow();
-    ok("LT ...Default puts the row's 6-lite back and clears the override", b.v.length === 1 && b.h.length === 2 && it && it.liteRows === null && it.liteCols === null,
-      `${b.v.length}/${b.h.length} ${JSON.stringify(it && [it.liteRows, it.liteCols])}`);
-  }
   // The estimate: each windows[] line sends the grid it is drawn with.
   await page.evaluate(() => {
     const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "✕" && x.previousElementSibling && /^3D Preview/.test(x.previousElementSibling.textContent.trim()));
@@ -931,54 +917,34 @@ async function runLitesPickers(browser, rect) {
   };
   const ids = async () => new Set(((await readItems(page)) || []).map((i) => i.id));
   const newest = async (seen) => ((await readItems(page)) || []).find((i) => !seen.has(i.id));
-  // The window picker: the 6-lite's Grid row reads its default; the rep picks No grid.
+  // Any grid control on the page: the old rows, its chips and steppers.
+  const gridCtl = async () => (await page.locator("[data-ss-window-lites-row], [data-ss-door-window-lites], [data-ss-lites], [data-ss-lites-chip]").count())
+    + (await page.getByRole("button", { name: /^(More|Fewer) (rows|across)$/ }).count());
+  // The window picker: the 6-lite chosen, and no Grid row (Carolyn, 10-27: "The customer can't select the grid").
   await clickWall(/Window wall$/, true, 0.3, "Choose a window");
   await page.getByText("Six-lite window", { exact: true }).first().click();
   await settle(page, 300);
-  const wrow = page.locator("[data-ss-window-lites-row]");
-  const wText = (await wrow.count()) ? (await wrow.innerText()).replace(/\s+/g, " ") : "";
-  ok("LTP the window picker has a Grid row: Default (6-lite), No grid, rows and lites across", /Grid/.test(wText) && /Default \(6-lite\)/.test(wText) && /No grid/.test(wText) && /across/.test(wText), wText || "no row");
-  ok("LTP ...drawing the default, 3 rows of 2", (await wrow.count()) > 0 && (await wrow.locator("[data-ss-lites-pic]").getAttribute("data-ss-lites-pic")) === "3x2");
-  if (await wrow.count()) {
-    await wrow.locator('[data-ss-lites-chip="plain"]').click();
-    await settle(page, 200);
-    ok("LTP ...No grid draws one lite", (await wrow.locator("[data-ss-lites-pic]").getAttribute("data-ss-lites-pic")) === "1x1");
-  }
+  ok("LTP the window picker offers no grid", (await page.getByRole("button", { name: "Place window" }).count()) === 1 && (await gridCtl()) === 0 && !/Default \(/.test(await page.innerText("body")),
+    `${await gridCtl()} grid controls`);
   await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}window-picker.png`) });
   let seen = await ids();
   await page.getByRole("button", { name: "Place window" }).click();
   await settle(page, 700);
   let placed = await newest(seen);
-  ok("LTP the placed window carries the rep's grid, 1 x 1", !!placed && placed.liteRows === 1 && placed.liteCols === 1, JSON.stringify(placed && [placed.liteRows, placed.liteCols]));
-  // A window placed at its default stamps nulls (it follows Settings).
-  await clickWall(/Window wall$/, true, 0.7, "Choose a window");
-  await page.getByText("Six-lite window", { exact: true }).first().click();
-  await settle(page, 300);
-  seen = await ids();
-  await page.getByRole("button", { name: "Place window" }).click();
-  await settle(page, 700);
-  placed = await newest(seen);
-  ok("LTP a window placed at its default stamps null, null (it follows Settings)", !!placed && placed.liteRows === null && placed.liteCols === null, JSON.stringify(placed && [placed.liteRows, placed.liteCols]));
-  // The door picker: a Classic with the 9-lite lite; the rep takes a row off: 2 rows of 3.
+  ok("LTP the placed window stamps null, null: it takes its row's grid from Settings", !!placed && placed.liteRows === null && placed.liteCols === null, JSON.stringify(placed && [placed.liteRows, placed.liteCols]));
+  // The door picker: a Classic with the 9-lite lite; its window row has no grid either.
   await clickWall(/^Door wall$/, false, 0.3, "Choose a door");
   await page.getByText("classic single", { exact: true }).first().click();
   await settle(page, 300);
   await page.getByText(/^Nine-lite door lite/).first().click();
   await settle(page, 300);
-  const drow = page.locator("[data-ss-door-window-lites]");
-  const dText = (await drow.count()) ? (await drow.innerText()).replace(/\s+/g, " ") : "";
-  ok("LTP the door picker shows the chosen window's grid, Default (9-lite)", /Default \(9-lite\)/.test(dText), dText || "no row");
-  if (await drow.count()) {
-    await drow.getByRole("button", { name: "Fewer rows" }).click();
-    await settle(page, 200);
-    ok("LTP ...one row fewer: 2 rows of 3", (await drow.locator("[data-ss-lites-pic]").getAttribute("data-ss-lites-pic")) === "2x3");
-  }
+  ok("LTP the door picker offers the window but no grid for it", (await page.getByRole("button", { name: "Place door" }).count()) === 1 && (await gridCtl()) === 0, `${await gridCtl()} grid controls`);
   await page.screenshot({ path: join(shots, `lites-${SHOT_TAG}door-picker.png`) });
   seen = await ids();
   await page.getByRole("button", { name: "Place door" }).click();
   await settle(page, 700);
   placed = await newest(seen);
-  ok("LTP the placed door carries its window's grid, 2 x 3", !!placed && placed.doorWindowId === "w-nine" && placed.doorWindowLiteRows === 2 && placed.doorWindowLiteCols === 3,
+  ok("LTP the placed door carries the window and stamps no grid of its own (it takes the 9-lite's)", !!placed && placed.doorWindowId === "w-nine" && placed.doorWindowLiteRows === null && placed.doorWindowLiteCols === null,
     JSON.stringify(placed && [placed.doorWindowId, placed.doorWindowLiteRows, placed.doorWindowLiteCols]));
   ok("LTP no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
