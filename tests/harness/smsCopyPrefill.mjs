@@ -325,7 +325,8 @@ try {
       if (b) b.click();
     });
     await s.page.waitForTimeout(500);
-    await tap(tabBtn(s.page, "SMS"));
+    // The composer tab is "Send SMS" since 20f7f292; "SMS" is now the history chip.
+    await tap(tabBtn(s.page, "Send SMS"));
     await s.page.waitForTimeout(500);
     await tap(s.page.locator("button").filter({ hasText: /They already gave permission/ }).first());
     await s.page.waitForTimeout(300);

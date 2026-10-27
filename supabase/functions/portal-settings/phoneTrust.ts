@@ -144,10 +144,19 @@ export function cnamNumberRefusal(e164: unknown): string | null {
  *     hand in the Console, as the pilot's number may have been) stays there even when it also
  *     has a secondary: a number sits on one business profile, so moving it would only fail.
  *     `numberOnPrimary` is only ever asked for an internal tenant.
+ *   * NO profile for a builder whose texting is registered WITHOUT an EIN (`brandTier`
+ *     "sole_proprietor", no-EIN texting 2026-10-27), whatever is recorded: the profile in
+ *     customer_profile_sid is then a STARTER customer profile, a person with no business identity,
+ *     and SHAKEN/STIR, Voice Integrity and CNAM are all built on a business profile (CNAM needs an
+ *     EIN or a DUNS outright). Refused with its own code, so the Phone tab does not offer the
+ *     business-profile form, which runTrustProfile refuses for the same reason.
  */
 export function trustProfileFor(o: {
   secondaryProfileSid: string | null; internal: boolean; primaryProfileSid: string | null; numberOnPrimary?: boolean;
+  /** sms_registrations.brand_tier. Absent = what every caller passed before 2026-10-27. */
+  brandTier?: string | null;
 }): { ok: true; profileSid: string; which: "secondary" | "primary" } | { ok: false; error: string; code?: string } {
+  if (o.brandTier === "sole_proprietor") return { ok: false, code: SOLE_PROP_PROFILE_CODE, error: SOLE_PROP_PROFILE_SENTENCE };
   const sec = String(o.secondaryProfileSid ?? "").trim();
   const pri = String(o.primaryProfileSid ?? "").trim();
   if (o.internal && o.numberOnPrimary && BU.test(pri)) return { ok: true, profileSid: pri, which: "primary" };
@@ -167,6 +176,12 @@ export const NO_PROFILE_CODE = "no_business_profile";
 export const NO_PROFILE_SENTENCE =
   "Caller ID registration needs this business's details at Twilio first. Structure Studio adds them here, or the Text Messaging registration adds them when it is submitted.";
 
+/** A builder registered for texting WITHOUT an EIN (sole proprietor): no business profile to build
+ *  caller ID on, and none can be added here without one (trustProfileFor, runTrustProfile). */
+export const SOLE_PROP_PROFILE_CODE = "sole_proprietor_no_business_profile";
+export const SOLE_PROP_PROFILE_SENTENCE =
+  "This business's texting is registered without an EIN, as a sole proprietor. Caller ID registration needs a business registered with an EIN, so it can't be set up for this account.";
+
 export type TrustProfileChoice =
   | { ok: true; profileSid: string; which: "secondary" | "primary" }
   | { ok: false; kind: "refused"; status: 409; error: string; code?: string }
@@ -182,13 +197,14 @@ export type TrustProfileChoice =
  * profile. Now a failed read is a 502 and nothing is sent. A bug (not a TrustHubError) is thrown.
  */
 export async function chooseTrustProfile(
-  o: { secondaryProfileSid: string | null; internal: boolean; primaryProfileSid: string | null; numberSid: string },
+  o: { secondaryProfileSid: string | null; internal: boolean; primaryProfileSid: string | null; numberSid: string; brandTier?: string | null },
   deps: { numberOnProfile: (profileSid: string, numberSid: string) => Promise<boolean> },
 ): Promise<TrustProfileChoice> {
   const pri = String(o.primaryProfileSid ?? "").trim();
   const sec = String(o.secondaryProfileSid ?? "").trim();
   let numberOnPrimary = false;
-  if (o.internal && BU.test(pri) && BU.test(sec)) {
+  // A sole proprietor is refused by trustProfileFor whatever this read says, so it is not made.
+  if (o.internal && BU.test(pri) && BU.test(sec) && o.brandTier !== "sole_proprietor") {
     try {
       numberOnPrimary = await deps.numberOnProfile(pri, o.numberSid);
     } catch (e) {
@@ -199,7 +215,7 @@ export async function chooseTrustProfile(
       };
     }
   }
-  const prof = trustProfileFor({ secondaryProfileSid: o.secondaryProfileSid, internal: o.internal, primaryProfileSid: o.primaryProfileSid, numberOnPrimary });
+  const prof = trustProfileFor({ secondaryProfileSid: o.secondaryProfileSid, internal: o.internal, primaryProfileSid: o.primaryProfileSid, numberOnPrimary, brandTier: o.brandTier });
   return prof.ok ? prof : { ok: false, kind: "refused", status: 409, error: prof.error, ...(prof.code ? { code: prof.code } : {}) };
 }
 
@@ -450,6 +466,8 @@ export async function runTrustStatus(
 export type RegistrationRow = {
   status?: string | null; customer_profile_sid?: string | null; twilio_account_sid?: string | null;
   legal_business_name?: string | null; ein_last4?: string | null; rep_email_domain?: string | null; website_url?: string | null;
+  /** Absent on a row read without it: treated as before 2026-10-27 (see runTrustProfile step 2). */
+  brand_tier?: string | null;
 } | null;
 
 export type TrustProfileOutcome =
@@ -467,16 +485,25 @@ export const TRUST_PROFILE_INTERNAL_SENTENCE =
 /** A recorded profile Twilio rejected: nothing here can change a submitted profile's details. */
 export const TRUST_PROFILE_REJECTED_SENTENCE =
   "Twilio rejected this business's profile. Correct it in Twilio's Console (this business's own account, Trust Hub, Customer profiles) and submit it again there; caller ID and texting wait for it.";
+/** A texting registration made without an EIN: its profile is a Starter one and must stay so. */
+export const TRUST_PROFILE_SOLE_PROP_SENTENCE =
+  "This business's texting is registered without an EIN, as a sole proprietor, so its details at Twilio are a person's, not a business's. A business profile for caller ID needs an EIN, and adding one here would replace the texting registration's details, so nothing was changed.";
 
 /**
  * phone_trust_profile, in the order it has to happen:
  *   1. Our internal account: refused (it uses the primary profile).
+ *   1b. A texting registration made WITHOUT an EIN (brand_tier "sole_proprietor", no-EIN texting
+ *      2026-10-27): refused before anything is read or locked. Its customer_profile_sid is a STARTER
+ *      profile, and the steps below would either finish it against the SECONDARY policy (step 2) or
+ *      write a Secondary over the column texting's chain is built on (step 7). Neither can back
+ *      caller ID anyway (trustProfileFor). A row read without brand_tier carries on as before.
  *   2. A profile already recorded: nothing is made. Under the registration's lock it is FINISHED
  *      (the primary link and the submit, each read first: a finished profile costs two reads and
  *      sends nothing), on the parent as in a sub-account, and one Twilio rejected is reported
  *      (TRUST_PROFILE_REJECTED_SENTENCE).
  *   3. The details, checked by the same rules texting uses (validateIntake, EIN required: CNAM and
- *      the carriers need it, and no-EIN registration is not built).
+ *      the carriers need it, and this makes a Secondary BUSINESS profile; texting's no-EIN route
+ *      makes a Starter one in portal-sms and never through here, see 1b).
  *   4. The registration's lock (advance_lock_until, the one portal-sms's submit takes, so this and a
  *      texting submit can never both make a profile). Busy → 409.
  *   5. In a sub-account, the registration names its account BEFORE anything is made there (292's
@@ -502,6 +529,9 @@ export async function runTrustProfile(
   },
 ): Promise<TrustProfileOutcome> {
   if (o.internal) return { ok: false, kind: "refused", status: 409, error: TRUST_PROFILE_INTERNAL_SENTENCE };
+  if (o.registration?.brand_tier === "sole_proprietor") {
+    return { ok: false, kind: "refused", status: 409, error: TRUST_PROFILE_SOLE_PROP_SENTENCE };
+  }
   const reg = o.registration ?? {};
   const recorded = String(reg.customer_profile_sid ?? "").trim();
   if (!BU.test(recorded)) {

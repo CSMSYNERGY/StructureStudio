@@ -130,7 +130,8 @@ async function openPortal() {
 // accident). Each item's text is its .lbl span.
 const railLabels = (page) => page.locator("aside.ss-side-settings .ss-set-nav a .lbl").evaluateAll((els) => els.map((e) => e.textContent.trim()));
 // The sub-tab row a hub renders, and which one is current.
-const subTabs = (page) => page.locator("button[aria-current='page'], button").evaluateAll((els) => els
+// Links since 684a21d3 (right-click opens a new tab); buttons before it.
+const subTabs = (page) => page.locator("a, button").evaluateAll((els) => els
   .filter((e) => e.style && e.style.borderBottom && /solid/.test(e.style.borderBottom))
   .map((e) => ({ label: e.textContent.trim(), current: e.getAttribute("aria-current") === "page" })));
 
@@ -214,7 +215,7 @@ try {
   }
 
   // ── C: the second tab ──
-  const loginTab = page.getByRole("button", { name: "Customer login", exact: true });
+  const loginTab = page.getByRole("link", { name: "Customer login", exact: true }).or(page.getByRole("button", { name: "Customer login", exact: true }));
   ok("C: the Customer login tab is clickable", await loginTab.count() > 0);
   if (await loginTab.count() > 0) {
     await loginTab.first().click();

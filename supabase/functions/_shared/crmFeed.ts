@@ -311,9 +311,9 @@ export async function buildCrmFeed(
     // them, and most are about no one design), the design's own on a design record. Cancelled
     // ones are read too: "they cancelled" is the part of the story you most need later.
     q(opts.contactId
-      ? admin.from("meetings").select("id, short_code, starts_at, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).eq("contact_id", opts.contactId)
+      ? admin.from("meetings").select("id, short_code, starts_at, booked_time_zone, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).eq("contact_id", opts.contactId)
       : (codes.length
-        ? admin.from("meetings").select("id, short_code, starts_at, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).in("short_code", codes)
+        ? admin.from("meetings").select("id, short_code, starts_at, booked_time_zone, status, customer_name, cancelled_at, cancel_reason, updated_at, created_at, meeting_types(name)").eq("client_id", clientId).in("short_code", codes)
         : Promise.resolve({ data: [] }))),
   ]);
 
@@ -447,7 +447,23 @@ export async function buildCrmFeed(
   // the record's Planned section (CLAUDE.md, "Planned"); this is its history.
   for (const m of meets as any[]) {
     const name = (m.meeting_types && m.meeting_types.name) || "Meeting";
-    const when = m.starts_at ? new Date(m.starts_at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : null;
+    // IN THE BOOKING'S OWN ZONE. This runs in an edge function, where the default zone is
+    // UTC — so a 10:00 AM Denver meeting printed "4:00 PM" in History while the Planned row
+    // above it said 10:00, from the same record. Caught on beta 2026-10-26. booked_time_zone
+    // is what the customer picked when they booked; without one, fall back to UTC rather than
+    // to the server's idea of local time, and say so.
+    const tz = m.booked_time_zone || "UTC";
+    const when = m.starts_at
+      ? (() => {
+        try {
+          return new Date(m.starts_at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: tz })
+            + (m.booked_time_zone ? "" : " UTC");
+        } catch {
+          // An unknown zone name must not cost the event its row.
+          return new Date(m.starts_at).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }) + " UTC";
+        }
+      })()
+      : null;
     push({ id: `mt:${m.id}`, type: "meeting_booked", at: iso(m.created_at), title: `${name} booked`, body: when ? `for ${when}` : null, code: m.short_code, icon: "meeting" });
     if (m.status === "cancelled") {
       push({ id: `mtx:${m.id}`, type: "meeting_cancelled", at: iso(m.cancelled_at || m.updated_at), title: `${name} cancelled`, body: m.cancel_reason || null, code: m.short_code, icon: "meeting" });

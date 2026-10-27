@@ -17,7 +17,13 @@
 //   D. the row is switched to "classic" and the save announced in the same tab (the window event):
 //      the 3D redraws it with the Classic's diamond
 //   E. a CONFIG change is offered, not applied: the line "Your settings changed..." appears, the plan
-//      stays; "Not now" hides it; "Reload designer" reloads the config and the line goes
+//      stays; "Not now" hides it and the SAME change is not offered again; a later change is;
+//      "Reload designer" reloads the config and the line goes
+//   G. a designer on a Settings page that IS an editor (Advanced) takes a config change quietly,
+//      while the main designer offers it (the release review, 2026-10-27: the line showed right after
+//      the builder's own save there, and a reload would have dropped the page's unsaved sections)
+//   H. a save the designer made ITSELF (through setup3d, as Save 3D look does) is taken quietly by
+//      that designer; the main designer, which did not make it, still offers it
 //   F. no page errors
 //
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED. The
@@ -72,7 +78,11 @@ async function routeLive(page) {
 const innerFixtures = (page) => page.evaluate(() => {
   const root = document.getElementById("root");
   const k = Object.keys(root).find((x) => x.startsWith("__reactContainer"));
-  const q = [root[k]]; let n = 0;
+  // The container holds the HostRoot fiber of the FIRST render; after an update the committed tree may
+  // be its alternate. FiberRoot.current is always the committed one (reading the other one returned the
+  // pre-refresh props in 3 of 4 runs on another machine while the 3D, read from the engine, had moved).
+  const hr = root[k];
+  const q = [(hr && hr.stateNode && hr.stateNode.current) || hr]; let n = 0;
   while (q.length && n < 80000) {
     const f = q.shift(); n++; if (!f) continue;
     const nm = f.type && (f.type.name || f.type.displayName);
@@ -172,12 +182,80 @@ try {
   await page.getByRole("button", { name: "Not now" }).click();
   await settle(page, 300);
   ok("E Not now hides it", !LINE.test(await page.innerText("body")));
+  const cfgN = counts.get_config;
   await announce(CONFIG.clientId);
-  await waitFor(async () => LINE.test(await page.innerText("body")), 8000);
+  await waitFor(async () => counts.get_config > cfgN, 8000);
+  await settle(page, 800);
+  ok("E Not now sticks: the same change is not offered again", counts.get_config > cfgN && !LINE.test(await page.innerText("body")), `${counts.get_config - cfgN} config reads`);
+  live.config = { ...CONFIG, branding: { ...CONFIG.branding, companyName: "Acme Sheds and Barns II" } };
+  await announce(CONFIG.clientId);
+  ok("E ...a later change is", !!(await waitFor(async () => LINE.test(await page.innerText("body")), 8000)));
   const cfg0 = counts.get_config;
   await page.getByRole("button", { name: "Reload designer" }).click();
   const reloaded = await waitFor(async () => counts.get_config > cfg0 && !LINE.test(await page.innerText("body")) && (await innerFixtures(page)) === "d-dbl:classic", 20000);
   ok("E Reload designer reloads the config and the line goes", !!reloaded, `${counts.get_config - cfg0} config reads`);
+
+  // A second designer in this page, mounted the way the portal mounts its own (embedded, by client id).
+  // Its setup3d is a stand-in whose save announces itself as the portal's does after a Settings write.
+  const mountSecond = (id, props) => page.evaluate(({ id, props }) => {
+    const el = document.createElement("div");
+    el.id = id;
+    document.body.appendChild(el);
+    const setup3d = props.withSetup3d ? {
+      onSaveSpec: async () => {
+        await new Promise((r) => setTimeout(r, 200));
+        window.dispatchEvent(new CustomEvent("ss:settings-saved", { detail: { clientId: props.clientId } }));
+        return { ok: true };
+      },
+    } : null;
+    const root = ReactDOM.createRoot(el);
+    root.render(React.createElement(window.StructureStudio, { clientId: props.clientId, embedded: true, advancedOnly: !!props.advancedOnly, setup3d }));
+    (window.__ssSecond = window.__ssSecond || {})[id] = root;
+  }, { id, props });
+  const unmountSecond = (id) => page.evaluate((id) => { window.__ssSecond[id].unmount(); document.getElementById(id).remove(); }, id);
+  // Finds StructureStudioInner under one container; with `save`, calls its setup3d.onSaveSpec (the
+  // wrapped one the designer itself would call).
+  const secondInner = (id, save = false) => page.evaluate(({ id, save }) => {
+    const el = document.getElementById(id);
+    const k = el && Object.keys(el).find((x) => x.startsWith("__reactContainer"));
+    const hr = k && el[k];
+    const q = [(hr && hr.stateNode && hr.stateNode.current) || hr]; let n = 0;
+    while (q.length && n < 80000) {
+      const f = q.shift(); n++; if (!f) continue;
+      const nm = f.type && (f.type.name || f.type.displayName);
+      if (nm === "StructureStudioInner") {
+        if (save) f.memoizedProps.setup3d.onSaveSpec("utility", {}, []);
+        return true;
+      }
+      if (f.child) q.push(f.child);
+      if (f.sibling) q.push(f.sibling);
+    }
+    return false;
+  }, { id, save });
+  const lineIn = async (sel) => LINE.test(await page.locator(sel).innerText());
+
+  await mountSecond("ss-adv", { clientId: CONFIG.clientId, advancedOnly: true });
+  ok("G an Advanced-page designer mounts", !!(await waitFor(() => secondInner("ss-adv"), 30000)));
+  await settle(page, 800);
+  live.config = { ...CONFIG, branding: { ...CONFIG.branding, companyName: "Acme Sheds and Barns III" } };
+  await announce(CONFIG.clientId);
+  ok("G the main designer offers the change", !!(await waitFor(() => lineIn("#root"), 8000)));
+  await settle(page, 1000);
+  ok("G the Advanced page's designer takes it quietly", !(await lineIn("#ss-adv")));
+  await page.screenshot({ path: join(shots, "g-advanced-quiet.png") });
+  await unmountSecond("ss-adv");
+  await page.locator("#root").getByRole("button", { name: "Not now" }).click();
+
+  await mountSecond("ss-own", { clientId: CONFIG.clientId, withSetup3d: true });
+  ok("H a second designer with setup3d mounts", !!(await waitFor(() => secondInner("ss-own"), 30000)));
+  await settle(page, 800);
+  live.config = { ...CONFIG, branding: { ...CONFIG.branding, companyName: "Acme Sheds and Barns IV" } };
+  await secondInner("ss-own", true);
+  ok("H the main designer offers a save it did not make", !!(await waitFor(() => lineIn("#root"), 8000)));
+  await settle(page, 1000);
+  ok("H the designer that saved takes its own save quietly", !(await lineIn("#ss-own")));
+  await page.screenshot({ path: join(shots, "h-own-save-quiet.png") });
+  await unmountSecond("ss-own");
   ok("F no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
 } finally {

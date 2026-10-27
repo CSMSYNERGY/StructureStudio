@@ -2,6 +2,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { sendMeetingEmail } from "../_shared/meetingSend.ts";
+import { syncAllBusy } from "../_shared/meetingCalendar.ts";
+import { denoVideoEnv } from "../_shared/meetingVideo.ts";
 
 // MEETING-REMINDERS — the cron half of Meetings phase 2. Migration 327.
 //
@@ -119,6 +121,16 @@ Deno.serve(withErrorLog("meeting-reminders", async (req: Request) => {
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
+  // ── Busy times from hosts' Google / Outlook calendars (migration 341) ─────────────────────
+  // This tick (the phone-api Worker's, every 5 minutes) is the only scheduler on the project, so
+  // the calendar sync rides it rather than needing a Worker change. It runs AFTER the reminders
+  // and can never stop them: syncAllBusy never throws, and it has its own time budget.
+  const finish = async (body: Record<string, unknown>) => {
+    let busy: unknown = null;
+    try { busy = await syncAllBusy(admin, denoVideoEnv(), { limit: 40, budgetMs: 25_000 }); } catch { busy = { error: true }; }
+    return json({ ...body, busy });
+  };
+
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
   const horizonIso = new Date(now + HORIZON_MS).toISOString();
@@ -141,7 +153,7 @@ Deno.serve(withErrorLog("meeting-reminders", async (req: Request) => {
     if (hours.length) wants.set(row.client_id, hours);
   }
   // Nobody has asked for a reminder: stop before touching the meetings table at all.
-  if (!wants.size) return json({ ok: true, considered: 0, sent: 0, skippedLate: 0, noEmail: 0, failed: 0, candidates: 0 });
+  if (!wants.size) return await finish({ ok: true, considered: 0, sent: 0, skippedLate: 0, noEmail: 0, failed: 0, candidates: 0 });
 
   // Candidates: booked meetings starting between now and the horizon, on a tenant that asked
   // for at least one reminder. The `meetings_reminder_due` index (327) serves the time window,
@@ -216,5 +228,5 @@ Deno.serve(withErrorLog("meeting-reminders", async (req: Request) => {
     }
   }
 
-  return json({ ok: true, considered, sent, skippedLate, noEmail, failed, candidates: (rows ?? []).length });
+  return await finish({ ok: true, considered, sent, skippedLate, noEmail, failed, candidates: (rows ?? []).length });
 }));

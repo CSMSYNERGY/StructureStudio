@@ -62,6 +62,7 @@ const TEMPLATES = [
 ].map((t) => ({ ...t, id: U(t.id) }));
 const W = {
   flag: false,
+  catalogDelayMs: 0,   // A: the catalog answers late, so a card shown while it is asked would be seen
   styles: [
     { id: STYLE_U, key: "utility", label: "Utility", active: true },
     { id: STYLE_D, key: "deluxe", label: "Deluxe", active: true },
@@ -215,6 +216,7 @@ const handler = async (route) => {
   if (url.includes("/portal-billing")) return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], features: {}, status: "active" }, wallet: null });
   if (url.includes("/portal-settings")) {
     sent.push({ fn: "portal-settings", ...body });
+    if (body.action === "catalog" && W.catalogDelayMs) await new Promise((r) => setTimeout(r, W.catalogDelayMs));
     const out = settings(body);
     return Array.isArray(out) ? json(route, out[0], out[1]) : json(route, out);
   }
@@ -236,6 +238,15 @@ try {
   await page.waitForTimeout(800);
 
   // ── A: library off ──
+  // Any "Library" heading that appears at all, even for the moment the catalog is being asked (the
+  // release review, 2026-10-27: a loading card showed for every builder, then went).
+  W.catalogDelayMs = 1500;
+  await page.evaluate(() => {
+    window.__libFlash = 0;
+    const look = () => { for (const el of document.querySelectorAll("div")) if (el.childElementCount === 0 && el.textContent === "Library") { window.__libFlash++; return; } };
+    window.__libObs = new MutationObserver(look);
+    window.__libObs.observe(document.body, { childList: true, subtree: true });
+  });
   await go("/settings/cladding");
   await page.waitForFunction(() => /Cladding/.test(document.body.innerText) && document.querySelectorAll("table").length > 0, null, { timeout: 20000 }).catch(() => {});
   const offRows = await page.locator("table tbody tr").count();
@@ -246,6 +257,10 @@ try {
   await go("/settings/windows");
   await page.waitForTimeout(600);
   ok("A windows with the library off: no Library card", (await page.locator("[data-ss-library]").count()) === 0);
+  await page.waitForTimeout(1600);
+  const flash = await page.evaluate(() => { window.__libObs.disconnect(); return window.__libFlash; });
+  W.catalogDelayMs = 0;
+  ok("A ...not even while the catalog is still being asked", flash === 0, `${flash} sightings`);
   ok("A `library` is never asked with the flag off", actions("library").length === 0 && actions("library_seed_mine").length === 0, JSON.stringify(sent.filter((x) => String(x.action || "").startsWith("library")).map((x) => x.action)));
   await page.screenshot({ path: join(shots, "a-windows-library-off.png"), fullPage: true });
 
@@ -254,14 +269,23 @@ try {
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await go("/settings/cladding");
+  await page.waitForSelector("[data-ss-library='cladding'] input[type=search]", { timeout: 20000 }).catch(() => {});
+  await page.waitForFunction(() => /Browse the StructureStudio library/.test((document.querySelector("[data-ss-library='cladding']") || {}).innerText || ""), null, { timeout: 20000 }).catch(() => {});
+  // Ahsan 2026-10-27: the card is a search and a Browse button, nothing else.
+  const closed = page.locator("[data-ss-library='cladding']");
+  ok("B the card shows only a search and the Browse button", (await closed.locator("input[type=search]").count()) === 1
+    && (await closed.locator("[data-ss-library-entry]").count()) === 0 && (await closed.locator("[data-ss-library-template]").count()) === 0
+    && (await closed.getByRole("button").count()) === 1);
+  await page.screenshot({ path: join(shots, "b0-library-card-search-and-browse.png"), fullPage: true });
+  await page.getByRole("button", { name: /Browse the StructureStudio library/ }).first().click();
   await page.waitForSelector("[data-ss-library='cladding'] [data-ss-library-entry]", { timeout: 20000 }).catch(() => {});
   const mine = await page.locator("[data-ss-library='cladding'] [data-ss-library-entry]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-library-entry")));
   ok("B first open fills the library once from what the builder uses", actions("library_seed_mine").length === 1 && mine.includes('7" LP Lap Siding') && mine.includes("Smooth panel"), JSON.stringify(mine));
-  ok("B each entry says where it is used", /used on 2: Utility, Deluxe/.test(await page.locator("[data-ss-library='cladding']").innerText()));
+  ok("B each import says where it is used, under its template (Imported as)", /Imported as/.test(await page.locator("[data-ss-library-template='7\" LP Lap Siding']").innerText())
+    && /used on 2: Utility, Deluxe/.test(await page.locator("[data-ss-library='cladding']").innerText()));
   await page.screenshot({ path: join(shots, "b-cladding-library-seeded.png"), fullPage: true });
 
-  // ── C: search, use, edit, remove ──
-  await page.getByRole("button", { name: /Browse the StructureStudio library/ }).first().click();
+  // ── C: search, import, rename, remove ──
   const search = page.getByRole("searchbox", { name: "Search the StructureStudio library" });
   await search.fill("LP");
   const lp = await page.locator("[data-ss-library-template]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-library-template")));
@@ -270,13 +294,15 @@ try {
   const metal = await page.locator("[data-ss-library-template]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-library-template")));
   ok('C search "metal" finds AG Panel', metal.length === 1 && metal[0] === "AG Panel", JSON.stringify(metal));
   await page.screenshot({ path: join(shots, "c-search-metal.png"), fullPage: true });
-  await page.locator("[data-ss-library-template='AG Panel']").getByRole("button", { name: "Use" }).click();
+  await page.locator("[data-ss-library-template='AG Panel']").getByRole("button", { name: "Import" }).click();
   await page.getByRole("textbox", { name: "Your name for it" }).fill("Metal ribbed panel");
-  await page.getByRole("button", { name: "Add to my library" }).click();
+  await page.locator("[data-ss-library-template='AG Panel']").getByRole("button", { name: "Import" }).click();
   await page.waitForTimeout(900);
   const added = actions("library_add").pop();
-  ok("C Use AG Panel adds it under the builder's own name", !!added && added.name === "Metal ribbed panel" && added.look && added.look.profile === "agpanel" && (await page.locator("[data-ss-library-entry='Metal ribbed panel']").count()) === 1, JSON.stringify(added));
-  await page.locator("[data-ss-library-entry='7\" LP Lap Siding']").getByRole("button", { name: "Edit" }).click();
+  await search.fill("");
+  ok("C Import AG Panel adds it under the builder's own name", !!added && added.name === "Metal ribbed panel" && added.look && added.look.profile === "agpanel" && (await page.locator("[data-ss-library-entry='Metal ribbed panel']").count()) === 1, JSON.stringify(added));
+  await page.getByRole("button", { name: /Browse the StructureStudio library/ }).first().click().catch(() => {});
+  await page.locator("[data-ss-library-entry='7\" LP Lap Siding']").getByRole("button", { name: "Rename" }).click();
   await page.locator("[data-ss-library-entry='7\" LP Lap Siding'] input[type=number]").fill("8");
   await page.locator("[data-ss-library-entry='7\" LP Lap Siding']").getByRole("button", { name: "Save" }).click();
   await page.waitForTimeout(900);
@@ -306,6 +332,7 @@ try {
   await page.screenshot({ path: join(shots, "d-cladding-dropdown-from-library.png"), fullPage: true });
 
   // ── E: a request ──
+  if (!(await page.locator("[data-ss-library='cladding'] [data-ss-library-browse]").count())) await page.locator("[data-ss-library='cladding']").getByRole("button", { name: /Browse the StructureStudio library/ }).click();
   await page.locator("[data-ss-library='cladding']").getByRole("button", { name: /Request it/ }).click();
   await page.getByRole("textbox", { name: "Product name" }).fill("Stone veneer panel");
   await page.getByRole("textbox", { name: "Supplier link" }).fill("https://example.test/stone-veneer");
@@ -334,9 +361,9 @@ try {
   ok("F the door's 3D look lists the builder's door entries and Find more", opts.includes("Use the door's photo") && opts.includes("Find more in the library…"), JSON.stringify(opts));
   // Add American to the library first, through the card.
   await page.locator("[data-ss-library='door']").getByRole("button", { name: /Browse the StructureStudio library/ }).click();
-  await page.locator("[data-ss-library='door'] [data-ss-library-template='American (built in 3D)']").getByRole("button", { name: "Use" }).click();
+  await page.locator("[data-ss-library='door'] [data-ss-library-template='American (built in 3D)']").getByRole("button", { name: /^Import/ }).click();
   await page.locator("[data-ss-library='door']").getByRole("textbox", { name: "Your name for it" }).fill("Our American");
-  await page.locator("[data-ss-library='door']").getByRole("button", { name: "Add to my library" }).click();
+  await page.locator("[data-ss-library='door'] [data-ss-library-template='American (built in 3D)']").getByRole("button", { name: "Import" }).click();
   await page.waitForTimeout(1500);
   for (let i = 0; i < (await doorEdit.count()) && (await page.locator("[data-ss-door-look-library]").count()) === 0; i++) { await doorEdit.nth(i).click().catch(() => {}); await page.waitForTimeout(300); }
   await page.locator("[data-ss-door-look-library]").selectOption({ label: "Our American" });
@@ -351,9 +378,9 @@ try {
   await go("/settings/windows");
   await page.waitForSelector("[data-ss-library='window']", { timeout: 20000 }).catch(() => {});
   await page.locator("[data-ss-library='window']").getByRole("button", { name: /Browse the StructureStudio library/ }).click();
-  await page.locator("[data-ss-library='window'] [data-ss-library-template='4-lite transom (1 row of 4)']").getByRole("button", { name: "Use" }).click();
+  await page.locator("[data-ss-library='window'] [data-ss-library-template='4-lite transom (1 row of 4)']").getByRole("button", { name: /^Import/ }).click();
   await page.locator("[data-ss-library='window']").getByRole("textbox", { name: "Your name for it" }).fill("Transom 4");
-  await page.locator("[data-ss-library='window']").getByRole("button", { name: "Add to my library" }).click();
+  await page.locator("[data-ss-library='window'] [data-ss-library-template='4-lite transom (1 row of 4)']").getByRole("button", { name: "Import" }).click();
   await page.waitForTimeout(1500);
   const wEdit = page.locator("button", { hasText: /^Edit$/ });
   for (let i = 0; i < (await wEdit.count()) && (await page.locator("[data-ss-window-grid-library]").count()) === 0; i++) { await wEdit.nth(i).click().catch(() => {}); await page.waitForTimeout(300); }

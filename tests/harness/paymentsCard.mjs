@@ -126,7 +126,9 @@ if (process.env.SS_PORTAL_ARTIFACT) {
 const text = () => page.evaluate(() => document.body.innerText);
 const waitText = (s, timeout = 15000) => page.waitForFunction((x) => document.body.innerText.includes(x), s, { timeout }).then(() => true, () => false);
 const callsOf = (action) => calls.filter((c) => c.action === action);
-const tabButton = () => page.getByRole("button", { name: "Payments", exact: true });
+// The Company tab row is links since 684a21d3 (right-click opens a new tab); a build before it has
+// buttons. Either counts.
+const tabButton = () => page.getByRole("link", { name: "Payments", exact: true }).or(page.getByRole("button", { name: "Payments", exact: true }));
 const card = () => page.locator("[data-payments-card]");
 const cardText = () => card().innerText().catch(() => "");
 const LIVE_ON = { payments_online_enabled: true, cardpointe_merchid: MID, cardpointe_env: "prod" };
@@ -222,7 +224,7 @@ try {
   // ── F ──
   await boot({ role: "user", access: { settings_team: "view", settings_branding: "none", settings_crm: "none" } });
   await waitText("Locations", 8000);
-  ok("F: a Team-only member sees the Company tabs", (await page.getByRole("button", { name: "Locations", exact: true }).count()) === 1);
+  ok("F: a Team-only member sees the Company tabs", (await page.getByRole("link", { name: "Locations", exact: true }).or(page.getByRole("button", { name: "Locations", exact: true })).count()) === 1);
   ok("F: …and no Payments tab", (await tabButton().count()) === 0);
   ok("F: …and payments_status is never called", callsOf("payments_status").length === 0);
   ok("F: a member granted Branding:view reaches the card", await boot({ role: "user", access: { settings_branding: "view" } }) && await openPayments() && await waitStatus());
@@ -230,7 +232,7 @@ try {
   // ── G ──
   await boot({}, "/settings/payments");
   ok("G: /settings/payments opens on the card", await card().waitFor({ timeout: 10000 }).then(() => true, () => false));
-  ok("G: …with the Payments tab current", (await page.locator('button[aria-current="page"]', { hasText: "Payments" }).count()) === 1);
+  ok("G: …with the Payments tab current", (await page.locator('a[aria-current="page"], button[aria-current="page"]', { hasText: "Payments" }).count()) === 1);
 
   ok("no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {
