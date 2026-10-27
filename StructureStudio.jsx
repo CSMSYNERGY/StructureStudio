@@ -4326,8 +4326,15 @@ function ssNewPartition(id, type, ends, iw) {
   };
 }
 function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
-  if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
-  const pricing = C.layoutPricing;
+  if (!C) return { rows: [] };
+  // "Hide pricing" is a CUSTOMER-FACING setting (migration 337), not a reason to stop listing what
+  // is ON THE PLAN. It used to return nothing here, so a hide-prices tenant's quote lost the window
+  // and the workbench along with their money — the shutters note further down is the same lesson
+  // learned the expensive way: a line that has no second home must print even when it costs
+  // nothing. `priced` false now means every row below is built exactly as it always was and the
+  // money comes off in ONE pass at the end, so no block here grows a second pricing rule.
+  const priced = !!C.showPricing;
+  const pricing = C.layoutPricing || {};
   const styleKey = sel && sel.style;
   // Resolve rate + method for an item_key: a per-style override wins over the default,
   // matching submit-estimate's layoutRates precedence.
@@ -4441,7 +4448,11 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   for (const key of LAYOUT_PRICE_ORDER) {
     const m = measures[key];
     if (!m || !m.count) continue;
-    const rp = resolve(key);
+    // With pricing hidden there are no rates to resolve, so the row falls back to the measure the
+    // item is counted in — a workbench still reads 9 ft, a window still reads 2. A PRICED tenant
+    // keeps the old rule: no rate configured, no row.
+    const rp = resolve(key)
+      || (priced ? null : { rate: 0, method: m.lengthFt != null ? "lineal_ft" : m.optionSqft != null ? "sqft_option" : "each" });
     if (!rp) continue;
     const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || (LEGACY_LAYOUT_FALLBACK[key] && LEGACY_LAYOUT_FALLBACK[key].label) || key;
     // Net out the included quantity for this item (loft = sq ft, others = count).
@@ -4465,7 +4476,8 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     let unit;
     if (measured && inc > 0) {
       const u2 = rp.method === "sqft_option" ? "sq ft" : "ft";
-      unit = [`${placedMeasure} ${u2} placed`, `${inc} ${u2} included in base price`, `${chargeable} ${u2} billable @ ${fmtMoney2(rp.rate)}/${u2}`].join(" · ");
+      unit = [`${placedMeasure} ${u2} placed`, `${inc} ${u2} included in base price`]
+        .concat(priced ? [`${chargeable} ${u2} billable @ ${fmtMoney2(rp.rate)}/${u2}`] : []).join(" · ");
     } else {
       unit = ln.unit;
     }
@@ -4509,12 +4521,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       const ch = ssPartitionCharge(p, iw.method, wallFt, roofAt);
       const total = Math.round(rate * ch.qty * 100) / 100;
       const per = ch.method === "sqft_option" ? " / sq ft" : " / ft";
-      rows.push({ key: ssPriceRowKey("partition", p.id), label: "Interior wall", qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + stud + " framing · " + fmtMoney2(rate) + per,
+      // The size and the framing are plan facts, not money, so they survive a hidden-pricing pass
+      // (the strip at the end of this function only rewrites a unit that quotes a rate).
+      rows.push({ key: ssPriceRowKey("partition", p.id), label: "Interior wall", qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + stud + " framing" + (priced ? " · " + fmtMoney2(rate) + per : ""),
         total, method: ch.method, ...ssPriceable(rate, ch.qty, ch.per) });
       nonPctSubtotal += total;
       for (const o of (p.openings || [])) {
         const price = o.price != null ? Number(o.price) : 0;
-        if (!(price > 0)) continue;   // $0 / unpriced = free, no line (the doors' rule above)
+        if (priced && !(price > 0)) continue;   // $0 / unpriced = free, no line (the doors' rule above)
         rows.push({ key: ssPriceRowKey("partition", p.id, o.id), label: (o.name || (o.kind === "window" ? "Window" : "Door")) + " (in interior wall)",
           qty: 1, unit: fmtMoney2(price) + " each", total: price, method: "each", ...ssPriceable(price, 1, "each") });
         nonPctSubtotal += price;
@@ -4581,7 +4595,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
-    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    if (priced && !(g.price > 0)) continue;   // $0 / unpriced = free, no line — but with pricing hidden EVERY placed item lines up
     const total = Math.round(g.price * chargeable * 100) / 100;
     rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
       ...ssPriceable(g.price, chargeable, "each") });
@@ -4622,7 +4636,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
-    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    if (priced && !(g.price > 0)) continue;   // $0 / unpriced = free, no line — but with pricing hidden EVERY placed item lines up
     const total = Math.round(g.price * chargeable * 100) / 100;
     rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
       ...ssPriceable(g.price, chargeable, "each") });
@@ -4703,7 +4717,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
-    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    if (priced && !(g.price > 0)) continue;   // $0 / unpriced = free, no line — but with pricing hidden EVERY placed item lines up
     const total = Math.round(g.price * chargeable * 100) / 100;
     rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
       ...ssPriceable(g.price, chargeable, "each") });
@@ -4773,6 +4787,24 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const netBuilding = buildingRow && buildingRow.total != null ? Number(buildingRow.total) : buildingPrice;
     const base = netBuilding + selectionTaxable + nonPctSubtotal + roTotal + customTotal;
     for (const d of deferred) d.row.total = (d.pct / 100) * base * (d.row.qty || 1); // ×count: the server bills GHL line = qty×amount, so the preview must scale by count too or it under-shows (audit #F1)
+  }
+
+  // ── Hidden pricing: the lines stay, the money goes ──────────────────────────────────────────
+  // ONE pass, at the end, so every block above keeps the single pricing rule it was written with.
+  // A unit string is the only other place a rate can hide ("$5.00 / ft", "… billable @ $5.00/ft"),
+  // so a unit that quotes money is replaced by the measure it was pricing; a unit that carries no
+  // "$" is a plan fact (an interior wall's size and framing, a dressing's window count, the word
+  // "included") and is left exactly as it reads. ssPriceable's fields go too: they are what the
+  // rep's price-override input binds to, and there is nothing to override here.
+  if (!priced) {
+    for (const r of rows) {
+      r.total = null;
+      delete r.listUnit; delete r.chargeQty; delete r.per;
+      delete r.listTotal; delete r.unitPrice; delete r.overridden;
+      if (r.unit && r.unit.indexOf("$") >= 0) {
+        r.unit = r.method === "lineal_ft" ? `${r.qty} ft` : r.method === "sqft_option" ? `${r.qty} sq ft` : "";
+      }
+    }
   }
 
   // (Declined included items are no longer shown here — they're itemized under the building line
@@ -10313,6 +10345,10 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // (That erasure is not hypothetical: this field was missing until 2026-08-25 and did
     // exactly that, silently widening two-cladding styles back to four on save.)
     claddingChoices: Array.isArray(o.claddingChoices) ? o.claddingChoices : (base.claddingChoices || undefined),
+    // THE FRAMING VIEW's stud spacing (2026-10-27, building_styles.d3.framing.studOcIn: 16 or 24). Named for the
+    // gableVent reason: the literal drops what it does not list, and the calibration panel round-trips through this
+    // resolver. Only when set, so every style without it resolves to the object it always did (and has no button).
+    ...(o.framing && (o.framing.studOcIn === 16 || o.framing.studOcIn === 24) ? { framing: { studOcIn: o.framing.studOcIn } } : {}),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
   // THE CUSTOMER'S FOUNDATION PICK (2026-09-28, Carolyn: "if they choose piers, we could show it on
@@ -10631,7 +10667,9 @@ function d3CssColor(v, fallback) {
 // stays white-based) and a BUMP canvas (grayscale relief) at 512px, with a
 // seeded PRNG so the variegation is identical every session — a quote PDF
 // captured today must match one captured tomorrow.
-const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "agroof", "bnb"]);
+// "lumber" and "osb" (2026-10-27) are the Framing view's (buildFraming3D): a stud's long grain and a
+// sheet's pressed flakes. Nothing else asks for them, so no building's look moves.
+const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "agroof", "bnb", "lumber", "osb"]);
 const _d3TexCanvases = {};
 function _d3Rng(seed) {
   let a = seed >>> 0;
@@ -10811,6 +10849,41 @@ function _d3RasterKind(kind) {
     for (let x = 0; x < N; x += seam) {                // the butt seam the batten covers
       g.fillStyle = "rgba(0,0,0,0.28)"; g.fillRect(x, 0, 2, N);
       b.fillStyle = "#5c5c5c"; b.fillRect(x, 0, 2, N);
+    }
+  } else if (kind === "lumber") {
+    // Kiln-dried spruce-pine-fir, the stud in the reference photos: pale, long grain running along u (the
+    // board's length in buildFraming3D's boxes), soft tone bands a board's length apart and a few knots.
+    for (let x = 0; x < N; x += 64) {
+      const v = 0.9 + rng() * 0.12;
+      const gray = Math.round(245 * Math.min(1.02, v));
+      g.fillStyle = `rgb(${gray},${gray},${gray})`;
+      g.fillRect(x, 0, 64, N);
+    }
+    for (let i = 0; i < 70; i++) {
+      const y = rng() * N, a = 0.03 + rng() * 0.07, amp = 2 + rng() * 5, ph = rng() * 6.28;
+      g.strokeStyle = `rgba(120,80,30,${a})`;
+      g.lineWidth = 1 + rng() * 1.6;
+      g.beginPath();
+      for (let x = 0; x <= N; x += 16) { const yy = y + Math.sin(x / 70 + ph) * amp; if (x) g.lineTo(x, yy); else g.moveTo(x, yy); }
+      g.stroke();
+    }
+    for (let i = 0; i < 4; i++) {
+      const x = rng() * N, y = rng() * N, r = 4 + rng() * 6;
+      g.fillStyle = "rgba(110,70,30,0.45)";
+      g.beginPath(); g.ellipse(x, y, r * 1.6, r, 0, 0, 6.283); g.fill();
+      b.fillStyle = "#606060"; b.beginPath(); b.ellipse(x, y, r * 1.6, r, 0, 0, 6.283); b.fill();
+    }
+  } else if (kind === "osb") {
+    // Oriented strand board: long pressed flakes in a hundred tones, mostly lying one way.
+    for (let i = 0; i < 1400; i++) {
+      const x = rng() * N, y = rng() * N, w = 10 + rng() * 34, h = 3 + rng() * 9, ang = (rng() - 0.5) * 0.9;
+      const v = 0.72 + rng() * 0.36;
+      const gray = Math.round(240 * Math.min(1.05, v));
+      g.save(); g.translate(x, y); g.rotate(ang);
+      g.fillStyle = `rgb(${gray},${Math.round(gray * 0.97)},${Math.round(gray * 0.92)})`;
+      g.fillRect(-w / 2, -h / 2, w, h);
+      g.restore();
+      if (rng() < 0.25) { b.fillStyle = rng() < 0.5 ? "#707070" : "#909090"; b.fillRect(x, y, w * 0.6, h * 0.6); }
     }
   } else {
     // "groove" — vertical T1-11 style panel: grooves with soft shoulders + grain.
@@ -11234,6 +11307,659 @@ function d3TimedBuild(fn) {
   performance.measure("ss3d:rebuild", "ss3d:rebuild:start", "ss3d:rebuild:end");
   return out;
 }
+
+// ── FRAMING LAYOUT ──
+// The stick framing the 3D view's Framing button draws (Carolyn, 2026-10-26 call: "Show interior 2x4 studs
+// at 16" or 24" OC, set per building"; the sheeting off, studs, plates, framed openings, 4x8 floor sheets,
+// A-frame and barn trusses). Stick framing only: post-frame is "a whole different build" and is not drawn.
+//
+// PURE: no THREE, no DOM, nothing from outside this block but Math, so framing_test.ts lifts the block and
+// runs it as written. Every length is in FEET except the on-centre spacing, which a builder measures in
+// inches (16 or 24, building_styles.d3.framing.studOcIn). buildFraming3D below turns what these return into
+// lumber; nothing here knows what a mesh is.
+const SS_FRAME_OC_IN = [16, 24];
+// A 2x's thickness and a 2x4's depth. A wall in the 3D is D3.WALL_T (0.3 ft) thick, a 2x4's 3.5 in and a
+// little, so a stud fills it.
+const SS_FRAME_T = 1.5 / 12;
+const SS_FRAME_D = 3.5 / 12;
+// The style's spacing, or null: no Framing view on a style until a builder picks 16 or 24 (Ahsan, 10-27).
+function ssFrameOcIn(spec) {
+  const v = spec && spec.framing ? Number(spec.framing.studOcIn) : NaN;
+  return SS_FRAME_OC_IN.indexOf(v) >= 0 ? v : null;
+}
+// Member centres along a run from a0 to a1 at ocIn on centre: the first flush with a0, the last flush with
+// a1, and the layout marks a0 + k x oc between them, as a framer pulls them off the end of a plate. A mark
+// that would stand closer than a member to the last one is dropped, not doubled up against it. A 12 ft
+// wall: 10 at 16", 7 at 24".
+function ssFrameLayout(a0, a1, ocIn) {
+  const oc = ocIn / 12, t = SS_FRAME_T, len = a1 - a0;
+  if (!(len > 1e-6)) return [];
+  if (len <= 2 * t) return [a0 + len / 2];
+  const out = [a0 + t / 2];
+  for (let k = 1; a0 + k * oc < a1 - 1.5 * t - 1e-6; k++) out.push(a0 + k * oc);
+  out.push(a1 - t / 2);
+  return out;
+}
+// A header's depth for an opening `span` feet wide: a doubled 2x6 to 4 ft, a 2x8 to 6 ft, a 2x10 beyond.
+function ssFrameHeaderFt(span) {
+  return span <= 4 + 1e-6 ? 5.5 / 12 : span <= 6 + 1e-6 ? 7.25 / 12 : 9.25 / 12;
+}
+// One wall's framing, in the wall's own frame (`a` along it, `y` up). o:
+//   a0, a1   the run framed, a corner's overlap included
+//   bot      the floor under it (0; a clerestory stands on a wing roof)
+//   tops     [[a0, a1, top]] the wall's own top in pieces (null: `top` from end to end)
+//   top      its top where `tops` says nothing
+//   ocIn     16 or 24
+//   ops      its openings [{ a0, a1, y0, y1 }], the spans buildOneWall cut the cladding round
+//   ends     [n0, n1] studs added beside each end stud (the third stud of a corner), default none
+// Returns members [{ kind, a0, a1, y0, y1 }], each one 2x seen in the wall's face (its depth across the wall
+// is the drawing's): "plate" (the bottom plate, cut at a door), "top" (each of the doubled top plate's two),
+// "stud", "corner", "king", "jack", "header" (one doubled header), "cripple" and "sill".
+function ssFrameWall(o) {
+  const t = SS_FRAME_T, A0 = o.a0, A1 = o.a1, bot = o.bot || 0;
+  const out = [];
+  if (!(A1 - A0 > 1e-6)) return out;
+  const top0 = o.top != null ? o.top : 8;
+  // The top in pieces over the run, with any stretch the pieces miss at `top`.
+  let tops = (o.tops && o.tops.length ? o.tops : [[A0, A1, top0]])
+    .map((p) => [Math.max(A0, p[0]), Math.min(A1, p[1]), p[2]])
+    .filter((p) => p[1] - p[0] > 1e-6)
+    .sort((p, q) => p[0] - q[0]);
+  const filled = [];
+  let cur = A0;
+  tops.forEach((p) => { if (p[0] > cur + 1e-6) filled.push([cur, p[0], top0]); filled.push(p); cur = Math.max(cur, p[1]); });
+  if (cur < A1 - 1e-6) filled.push([cur, A1, top0]);
+  tops = filled;
+  // The lowest top over [a, b]: a member standing across a step stops under the lower plate.
+  const topOver = (a, b) => tops.reduce((m, p) => (p[1] > a + 1e-6 && p[0] < b - 1e-6 ? Math.min(m, p[2]) : m), Infinity);
+  const under = (a, b) => { const v = topOver(a, b); return (isFinite(v) ? v : top0) - 2 * t; };
+  // The openings in the run, overlapping ones merged (a window over a door), as buildOneWall merges them.
+  const ops = [];
+  (o.ops || []).map((p) => ({ a0: Math.max(A0, p.a0), a1: Math.min(A1, p.a1), y0: Math.max(bot, p.y0), y1: p.y1 }))
+    .filter((p) => p.a1 - p.a0 > 0.05 && p.y1 - p.y0 > 0.05)
+    .sort((p, q) => p.a0 - q.a0)
+    .forEach((p) => {
+      const last = ops[ops.length - 1];
+      if (last && p.a0 < last.a1 + 2 * t) { last.a1 = Math.max(last.a1, p.a1); last.y0 = Math.min(last.y0, p.y0); last.y1 = Math.max(last.y1, p.y1); }
+      else ops.push({ ...p });
+    });
+  // A door stands on the floor: its bottom plate is cut out between the jacks.
+  const isDoor = (p) => p.y0 <= bot + t + 0.02;
+  // Bottom plate, cut at every door.
+  let pc = A0;
+  ops.filter(isDoor).forEach((p) => { if (p.a0 > pc + 1e-6) out.push({ kind: "plate", a0: pc, a1: p.a0, y0: bot, y1: bot + t }); pc = Math.max(pc, p.a1); });
+  if (A1 > pc + 1e-6) out.push({ kind: "plate", a0: pc, a1: A1, y0: bot, y1: bot + t });
+  // The doubled top plate, piece by piece under a stepped top.
+  tops.forEach((p) => {
+    out.push({ kind: "top", a0: p[0], a1: p[1], y0: p[2] - 2 * t, y1: p[2] - t });
+    out.push({ kind: "top", a0: p[0], a1: p[1], y0: p[2] - t, y1: p[2] });
+  });
+  // Where the openings' own framing stands: no layout stud in it.
+  const busy = ops.map((p) => [p.a0 - 2 * t, p.a1 + 2 * t]);
+  const free = (a) => !busy.some((b) => a + t / 2 > b[0] + 1e-6 && a - t / 2 < b[1] - 1e-6);
+  const stud = (kind, a, y0, y1) => { if (y1 - y0 > 0.05) out.push({ kind, a0: a - t / 2, a1: a + t / 2, y0, y1 }); };
+  const marks = ssFrameLayout(A0, A1, o.ocIn || 16);
+  // At a step in the top, a stud under each end of the higher plate.
+  const steps = [];
+  tops.forEach((p, i) => { if (i > 0 && Math.abs(p[2] - tops[i - 1][2]) > 1e-6) steps.push(p[0] - t / 2, p[0] + t / 2); });
+  const studAt = marks.concat(steps.filter((s) => s > A0 + t && s < A1 - t && !marks.some((m) => Math.abs(m - s) < t - 1e-6)));
+  studAt.forEach((a) => { if (free(a)) stud("stud", a, bot + t, under(a - t / 2, a + t / 2)); });
+  // The third stud of a corner, beside the end stud.
+  const ends = o.ends || [0, 0];
+  for (let k = 1; k <= (ends[0] || 0); k++) { const a = A0 + t / 2 + k * t; if (free(a)) stud("corner", a, bot + t, under(a - t / 2, a + t / 2)); }
+  for (let k = 1; k <= (ends[1] || 0); k++) { const a = A1 - t / 2 - k * t; if (free(a)) stud("corner", a, bot + t, under(a - t / 2, a + t / 2)); }
+  ops.forEach((p) => {
+    const lim = under(p.a0 - 2 * t, p.a1 + 2 * t);
+    // A king either side, plate to plate, then a jack inside it up to the header. One that would stand past
+    // the end of the run is left out: the end stud is there.
+    const hd = Math.min(ssFrameHeaderFt(p.a1 - p.a0), Math.max(0, lim - p.y1));
+    const jackTop = hd > 0.05 ? p.y1 : lim;
+    [[p.a0 - 1.5 * t, p.a0 - 0.5 * t], [p.a1 + 1.5 * t, p.a1 + 0.5 * t]].forEach(([k, j]) => {
+      if (k - t / 2 >= A0 - 1e-6 && k + t / 2 <= A1 + 1e-6) stud("king", k, bot + t, under(k - t / 2, k + t / 2));
+      if (j - t / 2 >= A0 - 1e-6 && j + t / 2 <= A1 + 1e-6) stud("jack", j, bot + t, jackTop);
+    });
+    if (hd > 0.05) out.push({ kind: "header", a0: Math.max(A0, p.a0 - t), a1: Math.min(A1, p.a1 + t), y0: p.y1, y1: p.y1 + hd });
+    // Cripples on the layout marks the opening took: over the header to the plate, and for a window under
+    // its sill down to the bottom plate.
+    const inside = marks.filter((a) => a - t / 2 > p.a0 + 1e-6 && a + t / 2 < p.a1 - 1e-6);
+    if (hd > 0.05) inside.forEach((a) => stud("cripple", a, p.y1 + hd, under(a - t / 2, a + t / 2)));
+    if (!isDoor(p)) {
+      const sill = p.y0 - t;
+      if (sill > bot + t + 0.05) {
+        out.push({ kind: "sill", a0: p.a0, a1: p.a1, y0: sill, y1: p.y0 });
+        inside.forEach((a) => stud("cripple", a, bot + t, sill));
+      }
+    }
+  });
+  return out;
+}
+// The vertical extent of a polygon (given as triangles [[u, y], [u, y], [u, y]]) along the line u, as
+// [lo, hi], or null where the line misses it.
+function ssFrameSpanAt(tris, u) {
+  let lo = Infinity, hi = -Infinity;
+  tris.forEach((tr) => {
+    for (let i = 0; i < 3; i++) {
+      const P = tr[i], Q = tr[(i + 1) % 3];
+      const du = Q[0] - P[0];
+      if (Math.abs(du) < 1e-9) {
+        if (Math.abs(u - P[0]) < 1e-6) { lo = Math.min(lo, P[1], Q[1]); hi = Math.max(hi, P[1], Q[1]); }
+        continue;
+      }
+      const r = (u - P[0]) / du;
+      if (r < -1e-9 || r > 1 + 1e-9) continue;
+      const y = P[1] + r * (Q[1] - P[1]);
+      lo = Math.min(lo, y); hi = Math.max(hi, y);
+    }
+  });
+  return hi > lo + 1e-6 ? [lo, hi] : null;
+}
+// Studs filling a wall that is not a plain rectangle: a gable's triangle over the plate, a barn's pentagon,
+// a lean-to's end wall, a dormer's cheek. `tris` is the face as triangles in its own plane (u across, y up).
+// Each stud stands on the layout from the face's left edge, from its bottom (on a bottom plate when the face
+// starts at the floor, `plate`) to its top less `cut` measured square to the top edge, so it stops under the
+// rafter that edge carries. Returns [{ u, y0, y1 }]; the bottom plate is { plate: [u0, u1, y] } when drawn.
+function ssFrameFace(tris, ocIn, o) {
+  const opt = o || {};
+  let u0 = Infinity, u1 = -Infinity, yLo = Infinity;
+  tris.forEach((tr) => tr.forEach((p) => { u0 = Math.min(u0, p[0]); u1 = Math.max(u1, p[0]); yLo = Math.min(yLo, p[1]); }));
+  const res = { studs: [], plate: null };
+  if (!(u1 - u0 > 0.2)) return res;
+  const t = SS_FRAME_T, cut = opt.cut || 0;
+  const plate = !!opt.plate;
+  if (plate) res.plate = [u0, u1, yLo];
+  ssFrameLayout(u0, u1, ocIn).forEach((u) => {
+    // The face's lowest top and highest bottom across the stud's own thickness, so a stud on a slope
+    // stays inside the face on both of its edges.
+    const a = ssFrameSpanAt(tris, Math.max(u0 + 1e-4, u - t / 2)), b = ssFrameSpanAt(tris, Math.min(u1 - 1e-4, u + t / 2));
+    if (!a || !b) return;
+    const hiA = a[1], hiB = b[1], lo = Math.max(a[0], b[0]) + (plate ? t : 0);
+    const slope = Math.abs(hiB - hiA) / t;
+    const hi = Math.min(hiA, hiB) - cut * Math.sqrt(1 + slope * slope);
+    if (hi - lo > 0.15) res.studs.push({ u, y0: lo, y1: hi });
+  });
+  return res;
+}
+// The two things a truss has besides its rafters, read off the roof's profile (d3RoofProfile's dedup, eave
+// to ridge to eave, on plate H): a plywood gusset over every joint where two slopes meet (a gable's ridge;
+// a barn's two knees and its peak) and one collar tie (a gable's a third of the way down from the ridge;
+// a barn's across from knee to knee). No bottom chord (Ahsan, 10-27): the loft space stays open, as on
+// the reference sheds. Returns { gussets: [{ u, y, kind: "peak" | "knee" }], ties: [{ u0, u1, y }] }.
+function ssFrameTruss(dedup, H) {
+  const res = { gussets: [], ties: [] };
+  if (!dedup || dedup.length < 3) return res;
+  // A joint is a vertex between two sloped (not vertical) edges.
+  const sloped = (P, Q) => Math.abs(Q[0] - P[0]) > 1e-6;
+  let peak = dedup[0];
+  dedup.forEach((p) => { if (p[1] > peak[1]) peak = p; });
+  const joints = [];
+  for (let i = 1; i + 1 < dedup.length; i++) {
+    if (sloped(dedup[i - 1], dedup[i]) && sloped(dedup[i], dedup[i + 1])) joints.push(dedup[i]);
+  }
+  joints.forEach((p) => res.gussets.push({ u: p[0], y: p[1], kind: p === peak ? "peak" : "knee" }));
+  const knees = joints.filter((p) => p !== peak);
+  const span = (y) => {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i + 1 < dedup.length; i++) {
+      const P = dedup[i], Q = dedup[i + 1];
+      if ((P[1] - y) * (Q[1] - y) > 1e-12 || Math.abs(Q[1] - P[1]) < 1e-9) continue;
+      const u = P[0] + (Q[0] - P[0]) * ((y - P[1]) / (Q[1] - P[1]));
+      lo = Math.min(lo, u); hi = Math.max(hi, u);
+    }
+    return hi > lo ? [lo, hi] : null;
+  };
+  if (knees.length === 2) {
+    const y = Math.min(knees[0][1], knees[1][1]) - 0.35;
+    const s = span(y);
+    if (s && y > H + 0.3) res.ties.push({ u0: s[0], u1: s[1], y });
+  } else if (joints.length === 1 && peak[1] - H > 1.2) {
+    const y = peak[1] - (peak[1] - H) / 3;
+    const s = span(y);
+    if (s) res.ties.push({ u0: s[0], u1: s[1], y });
+  }
+  return res;
+}
+// The floor's 4x8 sheets over a W x D footprint (plan feet, x along W, z along D): rows 4 ft wide across the
+// short side, each sheet's 8 ft along the long side, every other row started 4 ft in so no two joints line
+// up. Cut round `notches` (the open ground beside a part-wall wing, d3WingNotches' rectangles). A 12x16
+// floor is 3 rows, the middle one offset 4 ft. Returns [{ x0, x1, z0, z1 }].
+function ssFloorSheets(W, D, notches) {
+  const out = [];
+  const alongX = W > D;
+  const L = alongX ? W : D, S = alongX ? D : W;
+  for (let r = 0, s0 = 0; s0 < S - 1e-6; r++, s0 += 4) {
+    const s1 = Math.min(S, s0 + 4);
+    const cuts = [0];
+    for (let c = r % 2 ? 4 : 8; c < L - 1e-6; c += 8) cuts.push(c);
+    cuts.push(L);
+    for (let i = 0; i + 1 < cuts.length; i++) {
+      const a0 = cuts[i], a1 = cuts[i + 1];
+      out.push(alongX ? { x0: a0, x1: a1, z0: s0, z1: s1 } : { x0: s0, x1: s1, z0: a0, z1: a1 });
+    }
+  }
+  if (!notches || !notches.length) return out;
+  // A rectangle less another, as up to four rectangles.
+  const minus = (r, n) => {
+    if (n.x1 <= r.x0 || n.x0 >= r.x1 || n.y1 <= r.z0 || n.y0 >= r.z1) return [r];
+    const res = [];
+    if (n.x0 > r.x0) res.push({ x0: r.x0, x1: n.x0, z0: r.z0, z1: r.z1 });
+    if (n.x1 < r.x1) res.push({ x0: n.x1, x1: r.x1, z0: r.z0, z1: r.z1 });
+    const xa = Math.max(r.x0, n.x0), xb = Math.min(r.x1, n.x1);
+    if (n.y0 > r.z0) res.push({ x0: xa, x1: xb, z0: r.z0, z1: n.y0 });
+    if (n.y1 < r.z1) res.push({ x0: xa, x1: xb, z0: n.y1, z1: r.z1 });
+    return res;
+  };
+  let rs = out;
+  notches.forEach((n) => { rs = rs.flatMap((r) => minus(r, n)); });
+  return rs.filter((r) => r.x1 - r.x0 > 0.05 && r.z1 - r.z0 > 0.05);
+}
+// A loft's joists laid across `width` feet at ocIn, a rim joist at each side included (the layout's two end
+// members). Returns their centres across the width, from 0.
+function ssLoftJoists(width, ocIn) {
+  return ssFrameLayout(0, width, ocIn);
+}
+// ── END FRAMING LAYOUT ──
+
+// ── FRAMING 3D ──
+// The Framing view's lumber, built from a FINISHED buildShed3DModel model the first time the customer turns
+// the view on, and never by buildShed3DModel itself: the estimate's picture, its four corners and the
+// self-check shots build models of their own and none of them ever asks for this, so no quote can show it.
+//
+// It reads what the model already drew rather than a second copy of how it is shaped:
+//   walls     every wall buildOneWall built, from the very openings it cut the cladding round
+//             (model.frameData.walls), so a stud can never stand in a doorway the cladding left open;
+//   faces     every other clad face in the roof group (a gable's triangle, a barn's pentagon, a wing's
+//             end, a lean-to's walls, a dormer's cheeks), found by its material, studs cut to its top;
+//   rafters   under every roof deck, at the style's spacing, their tops on the deck's underside;
+//   trusses   the main roof's gussets and collar ties (ssFrameTruss), at the rafters' own stations;
+//   floor     4x8 sheets (ssFloorSheets);
+//   inside    a loft, a workbench and a shelf in wood, and each interior wall framed in its own studs.
+// So a porch, a lean-to, a wing or a dormer is framed by the same few rules as the box under it.
+const SS_FRAME_COLORS = { lumber: "#E9D2A6", osb: "#D6B27C", seam: "#5E4A33" };
+// One merged mesh per material: a building's framing is a few thousand pieces, and one draw call each would
+// cost more than the rest of the scene. Boxes and flat plates go in as triangles; grain runs along each box's
+// longest side (u in feet) with a per-piece offset so no two boards show the same knots.
+function ssFrameBatch() {
+  const pos = [], nor = [], uv = [], idx = [];
+  let n = 0;
+  const quad = (P, N, UV) => {
+    for (let k = 0; k < 4; k++) { pos.push(P[k][0], P[k][1], P[k][2]); nor.push(N[0], N[1], N[2]); uv.push(UV[k][0], UV[k][1]); }
+    idx.push(n, n + 1, n + 2, n, n + 2, n + 3);
+    n += 4;
+  };
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  // A box at centre c, its sides along unit axes ex and ey (ez = ex x ey), sx, sy, sz feet long.
+  const box = (c, ex, ey, sx, sy, sz, seed) => {
+    const ez = cross(ex, ey);
+    const ax = [[ex, sx], [ey, sy], [ez, sz]];
+    const g = sx >= sy && sx >= sz ? 0 : sy >= sz ? 1 : 2;
+    const off = (((seed || 0) * 2654435761) % 997) / 997 * 6;
+    [[0, 1, 2], [0, 2, 1], [1, 2, 0], [1, 0, 2], [2, 0, 1], [2, 1, 0]].forEach(([i, a, b]) => {
+      // Normal along +axis i when (a, b) is the right-handed pair, else along -axis i.
+      const sign = (a + 1) % 3 === b ? 1 : -1;
+      const nv = ax[i][0], na = ax[a][0], nb = ax[b][0], hn = ax[i][1] / 2, ha = ax[a][1] / 2, hb = ax[b][1] / 2;
+      const N = [nv[0] * sign, nv[1] * sign, nv[2] * sign];
+      const P = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([s, t]) => [0, 1, 2].map((k) => c[k] + N[k] * hn + na[k] * s * ha + nb[k] * t * hb));
+      const UV = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([s, t]) => {
+        const da = s * ha, db = t * hb;
+        return a === g ? [da + off, db * 2] : b === g ? [db + off, da * 2] : [da * 0.3, db * 2];
+      });
+      quad(P, N, UV);
+    });
+  };
+  // A flat plate `th` thick: the polygon `pts` ([x, y] along unit axes ex and ey from origin o, convex or
+  // nearly so, either winding) laid in that plane and centred on it.
+  const plate = (o, ex, ey, pts, th) => {
+    const ez = cross(ex, ey);
+    let area = 0;
+    pts.forEach((p, i) => { const q = pts[(i + 1) % pts.length]; area += p[0] * q[1] - q[0] * p[1]; });
+    const ring = area < 0 ? pts.slice().reverse() : pts;
+    const at = (p, s) => [0, 1, 2].map((k) => o[k] + ex[k] * p[0] + ey[k] * p[1] + ez[k] * s * th / 2);
+    // Each face fanned from its first corner; the sides one quad per edge.
+    [1, -1].forEach((s) => {
+      for (let i = 1; i + 1 < ring.length; i++) {
+        const tri = s > 0 ? [ring[0], ring[i], ring[i + 1]] : [ring[0], ring[i + 1], ring[i]];
+        tri.forEach((p) => { const v = at(p, s); pos.push(v[0], v[1], v[2]); nor.push(ez[0] * s, ez[1] * s, ez[2] * s); uv.push(p[0], p[1]); });
+        idx.push(n, n + 1, n + 2);
+        n += 3;
+      }
+    });
+    ring.forEach((p, i) => {
+      const q = ring[(i + 1) % ring.length], e = [q[0] - p[0], q[1] - p[1]], l = Math.hypot(e[0], e[1]) || 1;
+      const N = [0, 1, 2].map((k) => (ex[k] * e[1] - ey[k] * e[0]) / l);
+      quad([at(p, -1), at(q, -1), at(q, 1), at(p, 1)], N, [[0, 0], [l, 0], [l, th], [0, th]]);
+    });
+  };
+  const mesh = (THREE, material) => {
+    if (!n) return null;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+    geo.setIndex(n > 65535 ? new THREE.Uint32BufferAttribute(idx, 1) : new THREE.Uint16BufferAttribute(idx, 1));
+    geo.computeBoundingBox(); geo.computeBoundingSphere();
+    const m = new THREE.Mesh(geo, material);
+    m.castShadow = true;
+    m.raycast = () => {};   // never picked: a click goes through the framing to the door or the wall item
+    return m;
+  };
+  return { box, plate, mesh };
+}
+function buildFraming3D(THREE, model, ocIn) {
+  const fd = model.frameData;
+  const t = SS_FRAME_T, D = fd.rafterFt || SS_FRAME_D;
+  const group = new THREE.Group();
+  group.userData.ssFraming = true;
+  const texMat = (kind, hex, rep) => {
+    const m = new THREE.MeshStandardMaterial({ color: hex, roughness: 0.92, metalness: 0 });
+    m.name = "ss-frame-" + kind;
+    const tx = d3MakeTexture(THREE, kind);
+    if (tx) { tx.repeat.set(rep[0], rep[1]); m.map = tx; }
+    return m;
+  };
+  const lumberMat = texMat("lumber", SS_FRAME_COLORS.lumber, [1 / 4, 1 / 2]);
+  const osbMat = texMat("osb", SS_FRAME_COLORS.osb, [1 / 4, 1 / 4]);
+  const seamMat = new THREE.MeshStandardMaterial({ color: SS_FRAME_COLORS.seam, roughness: 1, metalness: 0 });
+  seamMat.name = "ss-frame-seam";
+  // Each roof deck framed: how many rafters went under it and where the middle one's top is (x, z), for the harness.
+  let decks = [];
+  const parts = {};
+  const V = new THREE.Vector3(), V2 = new THREE.Vector3();
+  model.root.updateMatrixWorld(true);
+  const rootInv = new THREE.Matrix4().copy(model.root.matrixWorld).invert();
+  // An object's matrix in the model root's frame, where the framing group lives.
+  const toRoot = (o) => new THREE.Matrix4().multiplyMatrices(rootInv, o.matrixWorld);
+  const put = (key, meshes) => {
+    if (parts[key]) parts[key].forEach((m) => { group.remove(m); m.geometry.dispose(); });
+    parts[key] = meshes.filter(Boolean);
+    parts[key].forEach((m) => { m.userData.ssFramePart = key; group.add(m); });
+  };
+  // Members laid in a wall frame { O, U, N } (wallBox's): a along U, y up, across the wall `dep` deep at `off`.
+  const wallMembers = (B, wf, ms, dep, off, seed0) => {
+    const ex = [wf.U[0], 0, wf.U[1]], ey = [0, 1, 0];
+    ms.forEach((m, i) => {
+      const a = (m.a0 + m.a1) / 2, y = (m.y0 + m.y1) / 2;
+      B.box([wf.O[0] + wf.U[0] * a + wf.N[0] * off, y, wf.O[1] + wf.U[1] * a + wf.N[1] * off], ex, ey, m.a1 - m.a0, m.y1 - m.y0, dep, seed0 + i);
+    });
+  };
+  // ── WALLS: the outside walls as buildOneWall cut them, and the interior walls ──
+  const buildWalls = () => {
+    const B = ssFrameBatch();
+    Object.keys(fd.walls).forEach((key, wi) => {
+      const w = fd.walls[key], wf = w.wf;
+      // At a corner the walls running along x go through and the walls along z butt into them, so the
+      // corner is three studs: the through wall's end stud and the one beside it, and the butting end stud.
+      // A wall that is not one of the four (a clerestory, a part-wall wing's face) runs its own length.
+      const along = Math.abs(wf.U[0]) > 0.5, four = !!w.footprint;
+      const ext = four ? (along ? fd.T / 2 : -fd.T / 2) : 0;
+      const a0 = (wf.start || 0) - ext, a1 = wf.len + ext;
+      // A roof raised on its rafters (roof.seat): an eave wall's plate is under the rafters, the lift below
+      // the shell; a gable end's wall goes on up to the cap, which starts at the shell.
+      const eave = along !== !!fd.uAxisIsX;   // it runs with the ridge
+      const lift = fd.lift > 0 && eave ? fd.lift : 0;
+      const tops = wf.tops ? wf.tops.map((p) => [p[0], p[1], p[2] - lift]) : null;
+      const ms = ssFrameWall({ a0, a1, bot: wf.bot || 0, tops, top: (wf.top != null ? wf.top : fd.H) - lift, ocIn, ops: w.ops, ends: four && along ? [1, 1] : [0, 0] });
+      wallMembers(B, wf, ms, SS_FRAME_D, 0, wi * 1000);
+    });
+    // Each interior wall in its own studs (2x4 or 2x6), at the same spacing.
+    model.interiorGroup.children.forEach((g, gi) => {
+      const pw = g.userData && g.userData.ssFrameWall;
+      if (!pw) return;
+      const ms = ssFrameWall({ a0: 0, a1: pw.len, bot: 0, tops: pw.tops, top: pw.top, ocIn, ops: pw.ops });
+      wallMembers(B, pw.wf, ms, pw.studFt, 0, 50000 + gi * 1000);
+    });
+    put("walls", [B.mesh(THREE, lumberMat)]);
+  };
+  // ── THE ROOF: faces, rafters and the main roof's trusses ──
+  const buildRoof = () => {
+    const B = ssFrameBatch(), G = ssFrameBatch();
+    const roofMat = model.roofMat;
+    decks = [];
+    model.roofGroup.updateMatrixWorld(true);
+    // Every clad face in the roof group, grouped by the plane it lies in. A face T thick (a lean-to's wall, a
+    // dormer's cheek) has its two sides in two planes T apart: one wall, framed once, on the plane between.
+    // A body drawn solid in a skin of its own (model.frameFaceMats: a gable dormer's box) is framed the same way.
+    const planes = [];
+    const faceMats = model.frameFaceMats;
+    const faceTris = (o) => {
+      const mats = Array.isArray(o.material) ? o.material : null;
+      if (!(mats ? mats.some((m) => faceMats.has(m)) : faceMats.has(o.material))) return;
+      const geo = o.geometry, P = geo.attributes.position;
+      if (!P) return;
+      const prm = geo.parameters || {};
+      // A relief strip (a batten, a lap course) is clad too, and is not a wall.
+      if (geo.type === "BoxGeometry" && Math.min(prm.width, prm.height, prm.depth) < 0.2) return;
+      const M = toRoot(o);
+      const ix = geo.index ? geo.index.array : null;
+      const groups = geo.groups && geo.groups.length ? geo.groups : [{ start: 0, count: ix ? ix.length : P.count, materialIndex: 0 }];
+      const c = new THREE.Vector3();
+      if (!geo.boundingBox) geo.computeBoundingBox();
+      geo.boundingBox.getCenter(c).applyMatrix4(M);
+      groups.forEach((gr) => {
+        if (mats && !faceMats.has(mats[gr.materialIndex])) return;
+        for (let k = gr.start; k + 2 < gr.start + gr.count; k += 3) {
+          const tri = [0, 1, 2].map((j) => { const vi = ix ? ix[k + j] : k + j; return new THREE.Vector3(P.getX(vi), P.getY(vi), P.getZ(vi)).applyMatrix4(M); });
+          const nrm = new THREE.Vector3().subVectors(tri[1], tri[0]).cross(V.subVectors(tri[2], tri[0]));
+          if (nrm.lengthSq() < 1e-10) continue;
+          nrm.normalize();
+          if (Math.abs(nrm.y) > 0.08) continue;   // only upright faces are walls
+          if (nrm.x < -1e-3 || (Math.abs(nrm.x) <= 1e-3 && nrm.z < 0)) nrm.negate();
+          const d = nrm.dot(tri[0]);
+          let pl = planes.find((q) => q.n.dot(nrm) > 0.999 && Math.abs(q.d - d) < 0.02);
+          if (!pl) { pl = { n: nrm.clone(), d, tris: [], inward: 0 }; planes.push(pl); }
+          pl.tris.push(tri);
+          pl.inward += Math.sign(nrm.dot(c) - d) || 0;
+        }
+      });
+    };
+    model.roofGroup.traverse((o) => { if (o.isMesh) faceTris(o); });
+    // A plane with a twin T or less behind it is one thin wall: frame it once, between the two.
+    const used = new Set();
+    planes.forEach((pl, i) => {
+      if (used.has(i)) return;
+      let mid = null;
+      planes.forEach((q, j) => { if (j !== i && !used.has(j) && q.n.dot(pl.n) > 0.999 && Math.abs(q.d - pl.d) < 0.45 && Math.abs(q.d - pl.d) > 0.02) { mid = (pl.d + q.d) / 2; used.add(j); pl.tris = pl.tris.concat(q.tris); } });
+      used.add(i);
+      const n = pl.n, ux = [n.z, 0, -n.x];   // across the face, horizontal
+      const centre = mid != null ? mid : pl.d + (pl.inward >= 0 ? 1 : -1) * (D / 2);
+      const tris2 = pl.tris.map((tr) => tr.map((p) => [p.x * ux[0] + p.z * ux[2], p.y]));
+      let yLo = Infinity;
+      tris2.forEach((tr) => tr.forEach((p) => { yLo = Math.min(yLo, p[1]); }));
+      const f = ssFrameFace(tris2, ocIn, { cut: D, plate: yLo < 0.3 });
+      const at = (u, y) => [u * ux[0] + n.x * centre, y, u * ux[2] + n.z * centre];
+      f.studs.forEach((s, k) => B.box(at(s.u, (s.y0 + s.y1) / 2), ux, [0, 1, 0], t, s.y1 - s.y0, SS_FRAME_D, 70000 + i * 100 + k));
+      if (f.plate) B.box(at((f.plate[0] + f.plate[1]) / 2, f.plate[2] + t / 2), ux, [0, 1, 0], f.plate[1] - f.plate[0], t, SS_FRAME_D, 90000 + i);
+    });
+    // Rafters under every roof deck: the deck's own box, a rafter's depth under its underside, at the
+    // stations along its run (userData.ssRafters, where the builder of the deck says where its run is: the
+    // ridge between the gable ends, a lean-to's wall). A deck that says nothing is inset by the overhang.
+    // The projecting porch's sheet (ssPorchPart) is left alone: its own 2x6 rafters are already drawn under it.
+    model.roofGroup.traverse((o) => {
+      if (!o.isMesh || o.material !== roofMat || (o.userData && o.userData.ssPorchPart)) return;
+      const geo = o.geometry;
+      if (!geo.boundingBox) geo.computeBoundingBox();
+      const bb = geo.boundingBox, sx = bb.max.x - bb.min.x, sy = bb.max.y - bb.min.y, sz = bb.max.z - bb.min.z;
+      if (!(sy >= 0.1 && sy <= 0.35 && sx > 0.8 && sz > 0.8)) return;
+      const M = toRoot(o);
+      const ax = new THREE.Vector3().setFromMatrixColumn(M, 0).normalize(), az = new THREE.Vector3().setFromMatrixColumn(M, 2).normalize();
+      const tag = o.userData && o.userData.ssRafters;
+      // Along the run: the deck's level side (the other one is the slope).
+      const alongZ = tag ? tag.axis !== "x" : (Math.abs(Math.abs(az.y) - Math.abs(ax.y)) < 0.02 ? sz >= sx : Math.abs(az.y) < Math.abs(ax.y));
+      const lo = alongZ ? bb.min.z : bb.min.x, hi = alongZ ? bb.max.z : bb.max.x;
+      const ins = Math.min(fd.OV, (hi - lo) * 0.1);
+      const r0 = tag ? tag.a0 : lo + ins, r1 = tag ? tag.a1 : hi - ins;
+      const sLen = alongZ ? sx : sz, sMid = alongZ ? (bb.min.x + bb.max.x) / 2 : (bb.min.z + bb.max.z) / 2;
+      const yc = bb.min.y - D / 2;
+      const exL = alongZ ? [1, 0, 0] : [0, 0, 1];
+      const exW = new THREE.Vector3(...exL).transformDirection(M);
+      const eyW = new THREE.Vector3(0, 1, 0).transformDirection(M);
+      const at = ssFrameLayout(r0, r1, ocIn);
+      at.forEach((s, k) => {
+        V2.set(alongZ ? sMid : s, yc, alongZ ? s : sMid).applyMatrix4(M);
+        B.box([V2.x, V2.y, V2.z], [exW.x, exW.y, exW.z], [eyW.x, eyW.y, eyW.z], sLen, D, t, 30000 + k);
+        if (k === Math.floor(at.length / 2)) decks.push({ rafters: at.length, at: [V2.x + eyW.x * D / 2, V2.z + eyW.z * D / 2] });
+      });
+      if (!at.length) decks.push({ rafters: 0, at: null });
+    });
+    // The main roof's trusses: a gusset over every joint, on both faces, and a collar tie, at every station.
+    (fd.secs || []).forEach((sec) => {
+      const tr = ssFrameTruss(sec.dedup, sec.Hr);
+      const M = toRoot(sec.G);
+      const xW = new THREE.Vector3(1, 0, 0).transformDirection(M), yW = new THREE.Vector3(0, 1, 0).transformDirection(M);
+      const xA = [xW.x, xW.y, xW.z], yA = [yW.x, yW.y, yW.z];
+      const stations = ssFrameLayout(sec.z0, sec.z1, ocIn);
+      const gT = 0.5 / 12;
+      // A gusset's outline in the profile's plane: from the joint down each of its two slopes, then in under
+      // the rafters, so its top edges lie along the rafters' tops and it never stands proud of the deck.
+      const gussetPts = (gs) => {
+        const i = sec.dedup.findIndex((p) => Math.abs(p[0] - gs.u) < 1e-6 && Math.abs(p[1] - gs.y) < 1e-6);
+        if (i <= 0 || i >= sec.dedup.length - 1) return null;
+        const P = sec.dedup[i], len = gs.kind === "peak" ? 0.85 : 0.7, deep = D + 0.12;
+        const leg = (Q) => {
+          const dx = Q[0] - P[0], dy = Q[1] - P[1], l = Math.hypot(dx, dy) || 1, ux = dx / l, uy = dy / l;
+          // In under the slope: the side of it the building is on (the polygon's inside, below the line).
+          const nx = uy, ny = -ux, sgn = ny < 0 ? 1 : -1;
+          const A = [P[0] + ux * len, P[1] + uy * len];
+          return [A, [A[0] + nx * sgn * deep, A[1] + ny * sgn * deep]];
+        };
+        const [a, a2] = leg(sec.dedup[i - 1]), [b, b2] = leg(sec.dedup[i + 1]);
+        return [[P[0], P[1] - 0.01], a, a2, [P[0], P[1] - deep * 1.1], b2, b];
+      };
+      stations.forEach((z, k) => {
+        const last = k === stations.length - 1;
+        tr.ties.forEach((ti) => {
+          // Its top edge's span, so its ends are cut to the rafters' line and never poke through the deck.
+          const span = d3ProfSpanAt(sec.dedup, ti.y + D / 2) || [ti.u0, ti.u1];
+          V2.set((span[0] + span[1]) / 2, ti.y, z + (last ? -t : t)).applyMatrix4(M);
+          B.box([V2.x, V2.y, V2.z], xA, yA, span[1] - span[0], D, t, 40000 + k);
+        });
+        tr.gussets.forEach((gs) => {
+          const pts = gussetPts(gs);
+          if (!pts) return;
+          [-1, 1].forEach((side) => {
+            V2.set(0, 0, z + side * (t / 2 + gT / 2)).applyMatrix4(M);
+            G.plate([V2.x, V2.y, V2.z], xA, yA, pts, gT);
+          });
+        });
+      });
+    });
+    put("roof", [B.mesh(THREE, lumberMat), G.mesh(THREE, osbMat)]);
+  };
+  // ── THE FLOOR: 4x8 sheets on the slab, a dark line at every seam ──
+  const buildFloor = () => {
+    const B = ssFrameBatch(), S = ssFrameBatch(), gap = 0.02;
+    ssFloorSheets(fd.bldgW, fd.bldgH, fd.notches).forEach((r, k) => {
+      const x0 = r.x0 - fd.bldgW / 2, x1 = r.x1 - fd.bldgW / 2, z0 = r.z0 - fd.bldgH / 2, z1 = r.z1 - fd.bldgH / 2;
+      B.box([(x0 + x1) / 2, 0.013, (z0 + z1) / 2], [1, 0, 0], [0, 1, 0], x1 - x0 - 2 * gap, 0.014, z1 - z0 - 2 * gap, 80000 + k);
+      // Under each sheet, a little larger: what shows in the gap between two sheets.
+      S.box([(x0 + x1) / 2, 0.0045, (z0 + z1) / 2], [1, 0, 0], [0, 1, 0], x1 - x0, 0.003, z1 - z0, 0);
+    });
+    const ms = [B.mesh(THREE, osbMat), S.mesh(THREE, seamMat)];
+    ms.forEach((m) => { if (m) { m.castShadow = false; m.receiveShadow = true; } });
+    put("floor", ms);
+  };
+  // ── INSIDE: the loft, the workbench and the shelves in wood ──
+  // Built into each item's own group (so a drag carries it), hidden there until Framing is on; the item's
+  // drawn look (userData.ssFrameSolid) hides while it shows. The rules the item's look follows are kept:
+  // a loft's ledgers and its posts only at a free corner (Carolyn 08-25), a bench's legs only at the front
+  // against a wall (09-08), a double shelf's uprights only between its boards (09-01).
+  const buildWood = () => {
+    // Materials of their own: an item group is disposed whole when the inside is rebuilt, and must not take the
+    // framing group's materials with it.
+    const wLumber = texMat("lumber", SS_FRAME_COLORS.lumber, [1 / 4, 1 / 2]), wOsb = texMat("osb", SS_FRAME_COLORS.osb, [1 / 4, 1 / 4]);
+    let used = false;
+    model.interiorGroup.children.forEach((g) => {
+      const wd = g.userData && g.userData.ssWood;
+      if (!wd) return;
+      const old = g.children.find((c) => c.userData && c.userData.ssFrameWood);
+      if (old) { g.remove(old); old.traverse((c) => { if (c.isMesh) c.geometry.dispose(); }); }
+      const B = ssFrameBatch(), P = ssFrameBatch();
+      if (wd.kind === "loft") {
+        // Joists across the span its ledgers carry, a rim at each end, a 3/4 in deck: LOFT_T in all.
+        const deckT = 0.75 / 12, jd = wd.T - deckT, xAlong = wd.spanX;
+        const width = xAlong ? wd.d : wd.w, span = xAlong ? wd.w : wd.d;
+        ssLoftJoists(width, ocIn).forEach((c, k) => {
+          const off = c - width / 2;
+          B.box([wd.cx + (xAlong ? 0 : off), wd.elev - deckT - jd / 2, wd.cz + (xAlong ? off : 0)], xAlong ? [1, 0, 0] : [0, 0, 1], [0, 1, 0], span, jd, t, k);
+        });
+        P.box([wd.cx, wd.elev - deckT / 2, wd.cz], [1, 0, 0], [0, 1, 0], wd.w, deckT, wd.d, 7);
+        wd.ledgers.forEach((l, k) => B.box([l.x, l.y, l.z], l.alongX ? [1, 0, 0] : [0, 0, 1], [0, 1, 0], l.len, SS_FRAME_D, t, 300 + k));
+        wd.posts.forEach((p, k) => B.box([p.x, p.h / 2, p.z], [1, 0, 0], [0, 1, 0], SS_FRAME_D, p.h, SS_FRAME_D, 400 + k));
+      } else if (wd.kind === "bench") {
+        // A plywood top on a 2x4 frame: a rail round the edge and one every 2 ft across, legs where its
+        // drawn look has them, and a cleat on the wall under the back edge when it stands against one.
+        const topT = 0.75 / 12, yTop = wd.H - topT, yRail = yTop - SS_FRAME_D / 2;
+        P.box([0, wd.H - topT / 2, 0], [1, 0, 0], [0, 1, 0], wd.w, topT, wd.d, 11);
+        B.box([0, yRail, -wd.d / 2 + t / 2], [1, 0, 0], [0, 1, 0], wd.w, SS_FRAME_D, t, 1);
+        B.box([0, yRail, wd.d / 2 - t / 2], [1, 0, 0], [0, 1, 0], wd.w, SS_FRAME_D, t, 2);
+        ssFrameLayout(-wd.w / 2, wd.w / 2, 24).forEach((x, k) => B.box([x, yRail, 0], [0, 0, 1], [0, 1, 0], wd.d - 2 * t, SS_FRAME_D, t, 10 + k));
+        wd.legs.forEach((l, k) => B.box([l.x, (yRail - SS_FRAME_D / 2) / 2, l.z], [1, 0, 0], [0, 1, 0], SS_FRAME_D, yRail - SS_FRAME_D / 2, SS_FRAME_D, 50 + k));
+      } else if (wd.kind === "shelf") {
+        // Each board on a 2x4 cleat at the back and a rail along the front; a double's uprights between them.
+        const bt = 0.75 / 12;
+        wd.tiers.forEach((y, k) => {
+          P.box([0, y - bt / 2, 0], [1, 0, 0], [0, 1, 0], wd.w, bt, wd.d, 20 + k);
+          [-1, 1].forEach((s) => B.box([0, y - bt - SS_FRAME_D / 2, s * (wd.d / 2 - t / 2)], [1, 0, 0], [0, 1, 0], wd.w, SS_FRAME_D, t, 30 + k * 2 + s));
+        });
+        wd.posts.forEach((x, k) => B.box([x, (wd.tiers[0] + wd.tiers[1] - bt) / 2, 0], [1, 0, 0], [0, 1, 0], t, wd.tiers[1] - wd.tiers[0] - bt, Math.min(SS_FRAME_D, wd.d), 60 + k));
+      }
+      const wg = new THREE.Group();
+      wg.userData.ssFrameWood = true;
+      [B.mesh(THREE, wLumber), P.mesh(THREE, wOsb)].forEach((m) => { if (m) { wg.add(m); used = true; } });
+      wg.visible = false;
+      g.add(wg);
+    });
+    if (!used) [wLumber, wOsb].forEach((m) => { if (m.map) m.map.dispose(); m.dispose(); });
+  };
+  buildWalls(); buildRoof(); buildFloor(); buildWood();
+  const built = { walls: fd.wallsRev, interior: fd.interiorRev };
+  // What the view hides while it is on: the walls' cladding (the whole group), the clad and roofed skins in
+  // the roof group (by material, less anything tagged to stay), the casings, a gable vent, and each wooden
+  // item's drawn look and each interior wall's slab and trim. Each is put back as it was found, so a mesh
+  // the model keeps hidden for its own reasons stays hidden when the view goes off.
+  const was = new Map();
+  const hide = (o, on) => {
+    if (on) { if (!was.has(o)) was.set(o, o.visible); o.visible = false; }
+    else if (was.has(o)) { o.visible = was.get(o); was.delete(o); }
+  };
+  const skins = [];
+  model.roofGroup.traverse((o) => {
+    if (!o.isMesh || (o.userData && (o.userData.ssLeanToPost || o.userData.ssFrameKeep))) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    // The projecting porch's ceiling boards are its roof's sheathing: off, so its rafters show.
+    if (mats.some((m) => model.skinMats.has(m)) || (o.userData && (o.userData.ssFrameSkin || o.userData.ssPorchPart === "ceiling"))) skins.push(o);
+  });
+  // (The rooms behind the glass are applyShellMode's, beside Look inside, which hides them too.)
+  const casing = (o) => o.userData && (o.userData.ssCasing || o.userData.ssDoorPart === "header");
+  return {
+    group,
+    // Make the framing match the model after a scoped rebuild (a door dragged, a loft moved): walls and
+    // interior walls when a wall or the inside was rebuilt, the wood when the inside was.
+    sync() {
+      if (built.walls !== fd.wallsRev || built.interior !== fd.interiorRev) buildWalls();
+      if (built.interior !== fd.interiorRev) buildWood();
+      built.walls = fd.wallsRev; built.interior = fd.interiorRev;
+    },
+    // On or off. `roofOn` is the Roof toggle and Look inside together: the rafters go with the roof.
+    show(on, roofOn) {
+      // Forget what a scoped rebuild has since taken out of the model (its casings, its items).
+      const inModel = (o) => { for (let p = o; p; p = p.parent) if (p === model.root) return true; return false; };
+      was.forEach((_v, o) => { if (!inModel(o)) was.delete(o); });
+      group.visible = on;
+      (parts.roof || []).forEach((m) => { m.visible = on && roofOn; });
+      model.wallsGroup.visible = !on;
+      skins.forEach((o) => hide(o, on));
+      // A vent in the gable sits on the cap, which is gone: it hides with it (applyShellMode sets it a moment
+      // before this, from the roof, so it needs nothing put back).
+      model.openingsGroup.traverse((o) => { if (casing(o)) hide(o, on); if (o.userData && o.userData.gable && on) o.visible = false; });
+      model.interiorGroup.traverse((o) => {
+        if (o.userData && o.userData.ssFrameWood) o.visible = on;
+        else if (o.userData && o.userData.ssFrameSolid) hide(o, on);
+      });
+    },
+    decks: () => decks,
+  };
+}
+// ── END FRAMING 3D ──
 
 // Build the whole parametric building as one Group. World units are FEET; the
 // footprint is centered on the origin with the floor top at y=0; +x = east and
@@ -12111,6 +12837,12 @@ function buildShed3DModel(THREE, p) {
   };
   const wallsGroup = new THREE.Group();     // ghosted in "look inside" mode
   const openingsGroup = new THREE.Group();  // frames + door/window fills (stay solid)
+  // WHAT THE FRAMING VIEW READS (buildFraming3D, 2026-10-27): each wall's frame and the openings buildOneWall cut in
+  // it, the main roof's sections, and the materials that are skin. Numbers only, written as the model is built; no
+  // stick is drawn here, so a model that is never framed (the estimate's picture, its four corners) pays nothing.
+  // The revisions tell the view a scoped rebuild changed a wall or the inside.
+  const frameData = { walls: {}, wallsRev: 0, interiorRev: 0, secs: [] };
+  const frameSkinMats = [];
 
   // Place a box on wall `wf` spanning [a0,a1] along it and [y0,y1] vertically,
   // `out` ft toward the exterior, `depth` ft thick (defaults to wall thickness).
@@ -12895,10 +13627,12 @@ function buildShed3DModel(THREE, p) {
     const f = D3_CASE_F;
     const Tw = tw || T;
     if (!inset) {
-      og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, tw ? tw + 0.08 : casingDepth));
+      const sc = wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, tw ? tw + 0.08 : casingDepth);
       // Sill nose: a slightly wider, deeper board under the casing — the one
       // horizontal shadow line that makes the window read as installed.
-      og.add(wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, Tw / 2 + 0.04, 0.16));
+      const sn = wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, Tw / 2 + 0.04, 0.16);
+      sc.userData.ssCasing = sn.userData.ssCasing = true;   // hidden in the Framing view, as the casing is
+      og.add(sc); og.add(sn);
     }
     // Sash: a slim dark inner ring set INTO the opening. The depth step
     // between casing → sash → glass is what turns the old flat decal into
@@ -13070,6 +13804,9 @@ function buildShed3DModel(THREE, p) {
         return { it, a, a0: a - w / 2, a1: a + w / 2, y0: span[0], y1: span[1] };
       })
       .sort((q, r) => q.a0 - r.a0);
+    // The Framing view frames this wall round exactly these openings, so no stud stands in a doorway.
+    frameData.walls[wname] = { wf, footprint: !!WALLS[wname], ops: ops.map((o) => ({ a0: o.a0, a1: o.a1, y0: o.y0, y1: o.y1 })) };
+    frameData.wallsRev++;
 
     // Union overlapping opening ranges (e.g. a window over a door — the 2D
     // collision check only guards door-vs-door) so wall segments never
@@ -13222,9 +13959,10 @@ function buildShed3DModel(THREE, p) {
       const casingMat = (o.it.type === "fixtureDoor" && o.it.trimColorHex) ? mat(o.it.trimColorHex) : trimMat;
       // Every opening but a vent: a vent's own frame is its casing (see the vent branch below).
       if (!isVentItem(o.it)) {
-        og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
-        og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
-        og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
+        // userData.ssCasing: hidden while the Framing view is on, where it would stand in front of the studs.
+        [wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth),
+          wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth),
+          wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth)].forEach((m) => { m.userData.ssCasing = true; og.add(m); });
       }
       // Bound to THIS opening's group and this wall — d3PhotoLayer above says what the layer is
       // and why the photo goes IN FRONT of the parametric fill instead of replacing it.
@@ -14153,6 +14891,7 @@ function buildShed3DModel(THREE, p) {
     // userData.ssLeanTo on every member: the projecting porch's clearance scan below measures a
     // lean-to by what hangs over the porch, not by its box.
     lslab.userData.ssLeanTo = tag;
+    lslab.userData.ssRafters = { a0: -len / 2, a1: len / 2 };   // the Framing view's rafters: its run along the wall
     rg.add(lslab);
     if (enclosed) ltWalls(tag, "eave", { dir, uW, u0, u1, y0, y1, z0, z1 });
     else {
@@ -14217,6 +14956,7 @@ function buildShed3DModel(THREE, p) {
     lslab.rotation.x = Math.atan2(-dy, dz);
     lslab.position.set((uA + uB) / 2, (q.ya + q.y1) / 2 + uy * OV / 2 + D3.ROOF_T / 2, (q.zW + q.zO) / 2 + uz * OV / 2);
     lslab.userData.ssLeanTo = q.i;
+    lslab.userData.ssRafters = { axis: "x", a0: -len / 2, a1: len / 2 };
     rg.add(lslab);
     if (q.enclosed) { ltWalls(q.i, "gable", { uA, uB, zW: q.zW, zO: q.zO, sz: q.sz, y0: q.ya, y1: q.y1 }); return; }
     const inset = Math.min(0.8, len * 0.08);
@@ -14412,6 +15152,7 @@ function buildShed3DModel(THREE, p) {
       [J0, J1].filter(Boolean).map(ltHipF).concat(ltPorchCuts([J0, J1], (J) => (x, z) => J.sz * (z - J.zC) - J.eP)), false);
     lslab.userData.ssLeanTo = tag;
     lslab.userData.ssLeanToSlab = true;
+    lslab.userData.ssRafters = { a0: q.a0 - (zA + zB) / 2, a1: q.a1 - (zA + zB) / 2 };
     rg.add(lslab);
     [J0, J1].forEach((J) => { if (J) ltHipStrip(tag, J, 1, place, slen + OV, zB - zA, false, lslab); });
     if (q.enclosed) {
@@ -14459,6 +15200,7 @@ function buildShed3DModel(THREE, p) {
       [J0, J1].filter(Boolean).map(keep).concat(ltPorchCuts([J0, J1], (J) => (x, z) => J.dir * (x - (J.uC - mass.uc)) - J.eP)), true);
     lslab.userData.ssLeanTo = tag;
     lslab.userData.ssLeanToSlab = true;
+    lslab.userData.ssRafters = { axis: "x", a0: uA - (xA + xB) / 2, a1: uB - (xA + xB) / 2 };
     rg.add(lslab);
     [J0, J1].forEach((J) => { if (J) ltHipStrip(tag, J, -1, place, xB - xA, slen + OV, true, lslab); });
     // Where the side-wall one's outer line is, in rg's u.
@@ -14938,6 +15680,7 @@ function buildShed3DModel(THREE, p) {
     const baseY = dormerYAt(dU);
     const dDepth = 2.0;
     const dormMat = mat(bodyColor);
+    frameSkinMats.push(dormMat);   // the dormer's solid body hides in the Framing view; its cheeks are framed
     const body = box(dormMat, dDepth, dRise, dormW);
     body.position.set(dU, baseY + dRise / 2, L / 2);
     rg.add(body);
@@ -15071,6 +15814,7 @@ function buildShed3DModel(THREE, p) {
       tslab.position.set((uTop + uOut) / 2 + (du / slen) * OV / 2,
                          (yTop + yOut) / 2 + (dy / slen) * OV / 2 + D3.ROOF_T / 2,
                          L / 2);
+      tslab.userData.ssRafters = { a0: -dormW / 2, a1: dormW / 2 };
       rg.add(tslab);
     }
   }
@@ -15489,6 +16233,8 @@ function buildShed3DModel(THREE, p) {
     // A wing's slab round a corner (sec.hips, roof.wingCornersMeet): the same box, cut on each hip and capped.
     // Cut members are tagged by what they are (ssWingSlab, ssWingEave) for tests/harness/wingList.mjs case J.
     if (sec.hips) { slab = hipCutBox(slab, slen + extA + extB, D3.ROOF_T, sec.zLen, sec.hips); slab.userData.ssWingSlab = true; }
+    // The Framing view's rafters run z0..z1 under it, the run of ridge between its gable ends (in the slab's own z).
+    slab.userData.ssRafters = { a0: sec.z0 - sec.zMid, a1: sec.z1 - sec.zMid };
     G.add(slab);
     if (sec.hips) sec.hips.forEach((h) => hipStrip(G, slab, slen + extA + extB, sec.zLen, h));
     // Eave fascia: a trim board hung on the slab's LOW edge, the finish
@@ -15762,6 +16508,7 @@ function buildShed3DModel(THREE, p) {
       if (gl) { [[0, gl.z0, true], [gl.z0, gl.z1, false], [gl.z1, L, true]].filter((q) => q[1] - q[0] > 1e-6).forEach((q) => buildSlope(sl, secOf(q[0], q[1], q[2]))); return; }
       buildSlope(sl, sl.hipSec ? sl.hipSec(whole) : sl.partSec ? sl.partSec(whole) : whole);
     });
+    frameData.secs.push({ G: rg, dedup, Hr, z0: whole.z0, z1: whole.z1 });
   } else {
     const zJ = STEP.stepFt;
     const front = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L - zJ + OV, zMid: (zJ + L + OV) / 2, z0: zJ, z1: L, end0: false, endL: true, boxes: [] };
@@ -15769,6 +16516,7 @@ function buildShed3DModel(THREE, p) {
     const rear = { Hr: rearProf.H, peak: rearProf.peak, joint: jointPartnerIn(rearProf.slopes), zLen: zJ + OV, zMid: (zJ - OV) / 2, z0: 0, z1: zJ, end0: true, endL: false, boxes: [] };
     rearProf.slopes.forEach((sl) => buildSlope(sl, rear));
     stepSecs = { front, rear };
+    frameData.secs.push({ G: rg, dedup, Hr, z0: zJ, z1: L }, { G: rg, dedup: rearProf.dedup, Hr: rearProf.H, z0: 0, z1: zJ });
   }
   // ── THE ROOF STEP: THE WEDGE AT THE JOINT (d3RoofStep, 2026-09-28) ───────────────────────────────
   // Where the two sections meet, the higher one's roof stands above the lower one's by the rise at
@@ -16534,6 +17282,7 @@ function buildShed3DModel(THREE, p) {
     const louvD = Math.max(0.03, face - 0.06 - back);
     const put = (m, bw, bh, d, du_, dy_, off) => {
       const b = box(m, bw, bh, d);
+      b.userData.ssFrameSkin = true;   // on the cap's face: hidden with it in the Framing view
       b.position.set(cu + du_, cy + dy_, z0 + s * off);
       parent.add(b);
     };
@@ -17073,11 +17822,13 @@ function buildShed3DModel(THREE, p) {
     const trimOn = (m) => { m.userData.ssPartitionTrim = true; g.add(m); };
     const { solid, holes } = ssPartitionPieces(it);
     solid.forEach(([a0, a1]) => g.add(piece(wm, a0, a1, 0)));
+    const frameOps = [];   // the Framing view's openings: these holes, as cut
     holes.forEach(({ o, a0, a1 }) => {
       const f = D3_CASE_F, cd = PT + 0.08;
       const sp = ssPartitionOpeningSpanIn(o);
       const top = Math.max(0.5, Math.min(sp[1] / 12, Hp - 0.2));
       const y0 = Math.max(0, Math.min(sp[0] / 12, top - 0.5));
+      frameOps.push({ a0, a1, y0, y1: top });
       if (y0 > 0.01) g.add(wallBox(wm, wf, a0, a1, 0, y0, 0, PT));
       if (roofLine || Hp - top > 0.01) g.add(piece(wm, a0, a1, top));
       trimOn(wallBox(pTrim, wf, a0 - f, a0, y0, top + f, 0, cd));
@@ -17144,6 +17895,12 @@ function buildShed3DModel(THREE, p) {
       seat(dg);
     });
     g.traverse((o) => { if (o.isMesh && o.material === trimMat) o.material = pTrim; });
+    // THE FRAMING VIEW frames it in its own studs (2x4 or 2x6) round these openings, its top stepped every half
+    // foot under the roof when it goes to the rafters; its slab and casings hide, its doors and windows stay.
+    g.children.forEach((m) => { if (m.isMesh) m.userData.ssFrameSolid = true; });
+    const fN = Math.max(1, Math.ceil(pg.len / 0.5));
+    g.userData.ssFrameWall = { wf, len: pg.len, studFt: SS_PARTITION_STUD_IN[ssPartitionStud(it, pcfg.standardStud)] / 12, top: Hp, ops: frameOps,
+      tops: roofLine ? Array.from({ length: fN }, (_, k) => { const a = (k * pg.len) / fN, b = ((k + 1) * pg.len) / fN; return [a, b, Math.min(faceTop(a, 1), faceTop(a, -1), faceTop(b, 1), faceTop(b, -1))]; }) : null };
     interiorGroup.add(g);
   };
   // Where a loft's floor top is DRAWN (LOFT HEIGHT): on the plate over its footprint, a rep's height
@@ -17242,6 +17999,14 @@ function buildShed3DModel(THREE, p) {
         post.position.set(cx + sx * (w / 2 - 0.25), ph / 2, cz + sz * (d / 2 - 0.25));
         lg.add(post);
       });
+      // THE FRAMING VIEW's wood loft (buildFraming3D): joists across the span its ledgers carry, under a 3/4 in deck,
+      // LOFT_T in all, with the ledgers and the free-corner posts this look has (Carolyn, 08-25).
+      lg.children.forEach((m) => { m.userData.ssFrameSolid = true; });
+      const fLy = elev - D3.LOFT_T - SS_FRAME_D / 2, fLx = SS_FRAME_T / 2;
+      lg.userData.ssWood = { kind: "loft", cx, cz, w, d, elev, T: D3.LOFT_T, spanX: onW && onE ? true : onN && onS ? false : w <= d,
+        ledgers: [onW && { x: cx - w / 2 + fLx, y: fLy, z: cz, alongX: false, len: d }, onE && { x: cx + w / 2 - fLx, y: fLy, z: cz, alongX: false, len: d },
+          onN && { x: cx, y: fLy, z: cz - d / 2 + fLx, alongX: true, len: w }, onS && { x: cx, y: fLy, z: cz + d / 2 - fLx, alongX: true, len: w }].filter(Boolean),
+        posts: [[-1, -1, onW || onN], [1, -1, onE || onN], [-1, 1, onW || onS], [1, 1, onE || onS]].filter((q) => !q[2]).map(([sx, sz]) => ({ x: cx + sx * (w / 2 - 0.25), z: cz + sz * (d / 2 - 0.25), h: ph })) };
       interiorGroup.add(lg);
     } else if (it.type === "workbench") {
       const w = it.widthFt || c.width, d = it.heightFt || c.height;
@@ -17273,6 +18038,7 @@ function buildShed3DModel(THREE, p) {
       const bxF = (it.x - mgX) / scale, bzF = (it.y - mgY) / scale;
       const benchTol = 0.3;
       const benchWallLine = { north: ["z", 0], south: ["z", bldgH], west: ["x", 0], east: ["x", bldgW] }[it.wall];
+      const benchLegs = [];
       [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach((sgn) => {
         // three.js rotation.y = +PI/2 maps local (x, z) -> world (z, -x).
         const ex = sgn[0] * (w / 2), ez = sgn[1] * (d / 2);
@@ -17282,11 +18048,15 @@ function buildShed3DModel(THREE, p) {
         if (carried) return;
         const leg = box(benchMat, 0.18, D3.BENCH_H - 0.22, 0.18);
         leg.position.set(sgn[0] * (w / 2 - 0.15), (D3.BENCH_H - 0.22) / 2, sgn[1] * (d / 2 - 0.15));
+        benchLegs.push({ x: leg.position.x, z: leg.position.z });
         g.add(leg);
       });
       if (benchRot) g.rotation.y = Math.PI / 2;
       g.position.set(ftX(it.x), 0, ftZ(it.y));
       g.userData = { itemId: it.id, floorItem: true };
+      // THE FRAMING VIEW's wood bench (buildFraming3D), on the same legs (Carolyn, 09-08: front legs only against a wall).
+      g.children.forEach((m) => { m.userData.ssFrameSolid = true; });
+      g.userData.ssWood = { kind: "bench", w, d, H: D3.BENCH_H, legs: benchLegs };
       interiorGroup.add(g);
     } else if (c && (c.modelKey === "wallShelf" || c.modelKey === "wallShelfDouble")) {
       // A mounted board hugging its wall at the builder's height. A double gets a second board
@@ -17326,6 +18096,12 @@ function buildShed3DModel(THREE, p) {
       if (it.rotation === 90) g.rotation.y = Math.PI / 2;
       g.position.set(ftX(it.x), 0, ftZ(it.y));
       g.userData = { itemId: it.id, floorItem: true };
+      // THE FRAMING VIEW's wood shelf (buildFraming3D): each board on a cleat and a front rail at the same top, a
+      // double's uprights between its boards (Carolyn, 09-01), one at each end and then every 4 ft or less.
+      g.children.forEach((m) => { m.userData.ssFrameSolid = true; });
+      const fBays = Math.max(1, Math.ceil(w / 4));
+      g.userData.ssWood = { kind: "shelf", w, d, tiers: tiers.map((y) => y + 0.06),
+        posts: isDouble && baseY - 0.12 > 0.05 ? Array.from({ length: fBays + 1 }, (_, k) => -w / 2 + SS_FRAME_T / 2 + (k / fBays) * (w - SS_FRAME_T)) : [] };
       interiorGroup.add(g);
     } else if (it.type === "ramp") {
       const wf = WALLS[it.wall];
@@ -17496,6 +18272,13 @@ function buildShed3DModel(THREE, p) {
   // tests/harness/gradeFall.mjs.
   model.gradeFall = d3GradeFall(p.styleSpec);
   model.gradeCorners = FALL;
+  // THE FRAMING VIEW's inputs (buildFraming3D): what it frames and what it hides while it is on.
+  Object.assign(frameData, { T, H, Hplate, lift: H - Hplate, OV, bldgW, bldgH, notches: NOTCH, uAxisIsX: mass.uAxisIsX,
+    rafterFt: Math.min(11.25, Math.max(3.5, Number(roofCfg.rafterDepthIn) || 3.5)) / 12 });
+  model.frameData = frameData;
+  model.roofMat = roofMat;
+  model.skinMats = new Set([wallMat, gableMat, roofMat, battenMat, cornerMat, fasciaMat].concat(_tailMat ? [_tailMat] : [], frameSkinMats));
+  model.frameFaceMats = new Set([wallMat].concat(frameSkinMats));   // the faces it frames: the cladding's, and a body's skin
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -17517,6 +18300,7 @@ function buildShed3DModel(THREE, p) {
   model.loftElevFt = loftElevOf;
   model.rebuildInterior = (itemsNow) => {
     Array.from(interiorGroup.children).forEach((g) => { interiorGroup.remove(g); disposeSubtree(g, null); });
+    frameData.interiorRev++;
     buildInterior(itemsNow);
     porchStepsVsRamps();
     setShadowFlags(interiorGroup);
@@ -18136,6 +18920,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const capturedRef = useRef(false);
   const [phase, setPhase] = useState("loading"); // loading | ready | error
   const [interior, setInterior] = useState(false);
+  // THE FRAMING VIEW (buildFraming3D): whether it is on, and the style's on-centre spacing, null on a style a builder
+  // has not set one for, which has no Framing button (Ahsan, 10-27).
+  const [framing, setFraming] = useState(false);
+  const frameOc = ssFrameOcIn(style3d);
   const [itemsOpen, setItemsOpen] = useState(false);   // the stored-items chooser
   // SmartBuild-style view options: roof on/off, landscape (grass/sky/labels)
   // on/off, and the 3×3 camera-preset popover.
@@ -18565,7 +19353,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         }
         // The rooms behind glass (glassRoom: doors and wall windows) hide with the walls: seen through
         // ghosted walls from above they would be boxes standing inside the building.
-        e.model.openingsGroup.traverse((o) => { if (o.userData && o.userData.ssGlassRoom) o.visible = !e.interior; });
+        const framingOn = !!e.framing && !!ssFrameOcIn(spec);
+        e.model.openingsGroup.traverse((o) => { if (o.userData && o.userData.ssGlassRoom) o.visible = !e.interior && !framingOn; });
         if (e.model.battenMat) {
           // Board & batten's proud strips sit ON the walls in wallsGroup, so without this
           // "look inside" leaves a cage of opaque battens floating over a ghosted building.
@@ -18573,6 +19362,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           e.model.battenMat.opacity = e.interior ? 0.14 : 1;
           e.model.battenMat.depthWrite = !e.interior;
           e.model.battenMat.needsUpdate = true;
+        }
+        // THE FRAMING VIEW (2026-10-27): built from this model the first time it is asked for (buildFraming3D: never in
+        // the estimate's picture, which builds models of its own), kept in step with a scoped rebuild (sync: a door
+        // dragged reframes its wall), and shown or put away with the skins it replaces. Its rafters go with the roof.
+        if (framingOn && !e.model.ssFraming) {
+          e.model.ssFraming = buildFraming3D(THREE, e.model, ssFrameOcIn(spec));
+          e.model.root.add(e.model.ssFraming.group);
+        }
+        if (e.model.ssFraming) {
+          if (framingOn) e.model.ssFraming.sync();
+          e.model.ssFraming.show(framingOn, e.model.roofGroup.visible);
         }
         // Every caller changed what casts or shows shadow (rebuild flush, roof
         // toggle, look-inside) - re-render the cached shadow map next frame.
@@ -19851,7 +20651,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, metalEnv, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, setDormerWindow, place3Fixture: placeFixture3, place3Ramp: placeRamp3, place3Wall: (key, x, y) => (itemTypes[key] ? place3(key, itemTypes[key], x, y) : false), delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, metalEnv, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, setDormerWindow, place3Fixture: placeFixture3, place3Ramp: placeRamp3, place3Wall: (key, x, y) => (itemTypes[key] ? place3(key, itemTypes[key], x, y) : false), delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true, framing: false };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -19890,9 +20690,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     e.interior = interior;             // survives live rebuilds during drags
     e.roofOn = roofOn;
     e.envOn = envOn;
+    e.framing = framing;
     e.applyShellMode(e);
     e.render();
-  }, [interior, roofOn, envOn, phase]);
+  }, [interior, roofOn, envOn, framing, phase]);
 
   const capture = () => {
     const e = engineRef.current;
@@ -19900,6 +20701,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
     // The quote page must be sharp even if a touch interaction just lowered
     // the DPR — restore base resolution before the frame we read back.
     if (e.baseDpr && e.renderer.getPixelRatio() !== e.baseDpr) e.renderer.setPixelRatio(e.baseDpr);
+    // THE ESTIMATE SHOWS THE FINISHED BUILDING, never its framing (2026-10-27): the Framing view is put away for the
+    // one frame read back here and brought straight back, so the picture is the one a quote has always had.
+    const framed = !!e.framing;
+    if (framed) { e.framing = false; e.applyShellMode(e); }
     e.render(); // fresh buffer right before reading it back
     try {
       const c = e.renderer.domElement;
@@ -19911,7 +20716,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const url = c.toDataURL("image/jpeg", 0.9);
       if (!url || url.length < 128) return null;
       return { url, w: c.width, h: c.height };
-    } catch (_) { return null; }
+    } catch (_) { return null; } finally {
+      if (framed) { e.framing = true; e.applyShellMode(e); e.render(); }
+    }
   };
   // This image becomes page 2 of the quote the customer signs against, so it must
   // never be read while a fixture photo is still loading — that would ship a quote
@@ -20368,6 +21175,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               📦 Items {itemsOpen ? "▾" : "▴"}
             </button>
           </div>
+          )}
+          {/* THE FRAMING VIEW (Carolyn, 2026-10-26): the building with its siding off, its studs at the style's own 16" or
+              24" on centre, its trusses, its 4x8 floor sheets and a wood loft, bench and shelves. Only on a style with a
+              spacing set (frameOc), and for every viewer, shoppers included (Ahsan, 10-27). */}
+          {frameOc && (
+            <button onClick={() => setFraming((v) => !v)} disabled={phase !== "ready"} title={`The framing: studs at ${frameOc}" on centre, with the siding off`}
+              style={{ background: framing ? accent : "#1E293B", color: framing ? ssOnFill(accent) : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+              🪵 Framing
+            </button>
           )}
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
@@ -24997,6 +25813,10 @@ function SSAdvArt({ kind }) {
     blocks: <><rect x="16" y="6" width="24" height="18" {...p} />{[16, 25, 34].map((x) => <rect key={x} x={x} y="26" width="6" height="7" fill="currentColor" stroke="none" opacity=".6" />)}{ground}</>,
     piers: <><rect x="16" y="4" width="24" height="17" {...p} />{[18, 27, 36].map((x) => <line key={x} x1={x} y1="21" x2={x} y2="34" stroke="currentColor" strokeWidth="2.5" />)}{ground}</>,
     none: <>{ground}{box(18)}<polyline points="10,20 28,6 46,20" {...p} /></>,
+    // Wall framing (2026-10-27): a wall's plates with its studs, closer at 16 than at 24, and none when not set.
+    nostuds: <><rect x="12" y="6" width="32" height="26" {...p} /></>,
+    studs16: <><rect x="12" y="6" width="32" height="26" {...p} />{[18.4, 24.8, 31.2, 37.6].map((x) => <line key={x} x1={x} y1="6" x2={x} y2="32" stroke="currentColor" strokeWidth="2" />)}</>,
+    studs24: <><rect x="12" y="6" width="32" height="26" {...p} />{[22.7, 33.3].map((x) => <line key={x} x1={x} y1="6" x2={x} y2="32" stroke="currentColor" strokeWidth="2" />)}</>,
     recessed: <>{ground}<polyline points="14,34 14,18 42,18 42,34" {...p} /><polyline points="10,20 28,6 46,20" {...p} /><rect x="30" y="22" width="12" height="12" fill="currentColor" stroke="none" opacity=".25" /></>,
     projecting: <>{ground}<rect x="8" y="18" width="24" height="16" {...p} /><polyline points="4,20 20,8 36,20" {...p} /><polyline points="32,22 50,26" {...p} /><line x1="48" y1="26" x2="48" y2="34" {...p} /></>,
   };
@@ -35913,6 +36733,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {advSwitch("plateBand", roof.plateBand === true, "Trim band at the top of the gable walls", "Trim band at the top of the gable walls", () => calSetPlateBand(roof.plateBand !== true))}
               {advNoteEl("A board across the gable ends, where wall meets roof.")}
             </div>
+            {/* THE FRAMING VIEW's spacing (d3.framing.studOcIn, 2026-10-27): the 3D's Framing button shows on a style with
+                one, studs and rafters drawn this far apart. "Not set" saves null, so it clears (carryForwardFraming keeps a
+                spacing over an older designer's silence, never over this). Read-only on a locked style (Ahsan, 10-27). */}
+            {advTiles({ f: "framing", label: "Wall framing", value: ssFrameOcIn(spec) || "", disabled: scan.status === "locked",
+              pick: (v) => calSet({ framing: v ? { studOcIn: v } : null }),
+              opts: [["", "Not set", "nostuds"], [16, "16 in on center", "studs16"], [24, "24 in on center", "studs24"]],
+              note: scan.status === "locked" ? ["This style's 3D setup is locked. Unlock it to change the framing."]
+                : ["Studs and rafters on center. Not set: no Framing button in 3D.", "How far apart this style's wall studs and roof rafters stand, measured center to center. Pick one and the 3D shows a Framing button that takes the siding off and draws the framing this way, for you and for your customers. Not set: no Framing button."] })}
           </div>
         </div>
         <div className="ssd-card">
@@ -39159,7 +39987,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // [action 28px], gap 6 — so every amount lines up in one column. Rows with
             // no action get a 28px spacer; rows with no qty just omit that cell.
             const selRows = computeSelectionRows(priceSel, paintColors, C, items);
-            const priceRows = C.showPricing ? computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows : [];
+            // No `C.showPricing ?` here any more: a hide-prices tenant used to get an EMPTY list,
+            // which is why a window and a workbench on the plan were missing from Details entirely
+            // while the cladding and the roof (selection rows, never gated) still listed. The rows
+            // now come back with total null, and every amount cell below renders blank for them.
+            const priceRows = computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows;
             const roList = items.filter((i) => ssIsRO(i.type));
             // Rough-opening rate: same per-style resolution as the estimate (layoutPricing,
             // byStyle override wins) — the old C.layoutPrices read was a stale key that

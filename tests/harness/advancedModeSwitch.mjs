@@ -26,6 +26,10 @@
 //      would look broken), and the 3D card is still there.
 //   H  UNSAVED WORK on the Advanced page: turning Advanced off asks first; No keeps it on and sends
 //      nothing.
+//   N  NOT LAUNCHED (2026-10-27, the default run): a builder whose advanced_mode is on gets no card,
+//      no item, and a cold /advanced lands on the Designer; an operator viewing them sees the same.
+//      A, B, E, F and H need the launched switch (SS_ADVANCED_LAUNCHED=1, see LAUNCHED below); C, D
+//      and G run either way.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine except the
 // three.js module GETs the 3D needs). Nothing is written anywhere: save_advanced_mode is answered by
@@ -52,6 +56,12 @@ const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
 const ARTIFACT = process.env.SS_PORTAL_ARTIFACT ? readFileSync(process.env.SS_PORTAL_ARTIFACT, "utf8") : null;
 const SHOTS = shotsDir("advanced-mode-switch");
 const TAG = ARTIFACT ? "-override" : "";
+// THE BUILDER SWITCH IS NOT LAUNCHED (2026-10-27, SS_ADVANCED_FOR_BUILDERS in portal/01-core.jsx).
+// The shipped portal gives builders no switch and no Advanced item, whatever advanced_mode says. The
+// launched behaviour is still checked here, but only with SS_ADVANCED_LAUNCHED=1 against a portal
+// compiled with that line flipped to true: the minifier folds the constant, so the shipped bundle
+// cannot be flipped from a harness.
+const LAUNCHED = process.env.SS_ADVANCED_LAUNCHED === "1";
 
 const BUILDER = "harness-advmode";
 const OURS = "harness-internal";
@@ -207,8 +217,36 @@ const cardAbove3d = (page) => page.evaluate(() => {
 const waitFor = (page, fnBody, arg, timeout = 15000) => page.waitForFunction(fnBody, arg, { timeout }).then(() => true, () => false);
 
 try {
+  // ── N: NOT LAUNCHED: a builder who switched it on gets no card, no item, no page ──────────
+  if (!LAUNCHED) {
+    const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: true }) };
+    const { ctx, page, calls, errors } = await open(S, "/advanced");
+    await settle(page, 3500);
+    const at = await page.evaluate(() => location.pathname);
+    ok(`N${TAG}: a builder with advanced_mode ON: a cold /advanced ends on /designer`, at === "/designer", at);
+    ok(`N${TAG}: …and there is no Advanced item`, (await advItem(page).count()) === 0, (await navOrder(page)).join(" "));
+    await settingsDesigner(page);
+    ok(`N${TAG}: Settings → Designer has no Advanced mode card`, (await card(page).count()) === 0);
+    ok(`N${TAG}: …and the 3D settings are still there`, await page.getByText("Give each building style its own 3D look").count() === 1);
+    await page.screenshot({ path: join(SHOTS, `N-not-launched-builder${TAG}.png`) });
+    ok(`N${TAG}: nothing was saved`, saves(calls).length === 0);
+    ok(`N${TAG}: no page errors`, errors.length === 0, errors.join(" | "));
+    await ctx.close();
+  }
+  if (!LAUNCHED) {
+    const S = { own: OPS, operator: true, statusFor: () => statusAnswer({ adv: true }) };
+    const { ctx, page, calls, errors } = await open(S, `/designs?view=${BUILDER}`);
+    await page.waitForFunction(() => /Viewing|Exit/.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {});
+    await settingsDesigner(page);
+    ok(`N2${TAG}: an operator viewing that builder: no Advanced mode card`, (await card(page).count()) === 0);
+    ok(`N2${TAG}: …and no Advanced item`, (await advItem(page).count()) === 0);
+    ok(`N2${TAG}: nothing was saved`, saves(calls).length === 0);
+    ok(`N2${TAG}: no page errors`, errors.length === 0, errors.join(" | "));
+    await ctx.close();
+  }
+
   // ── A: an owner with 3D turns it on, opens it, and turns it off ───────────────────────────
-  {
+  if (LAUNCHED) {
     let adv = false;
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv }), onSave: (_t, body) => { adv = body.enabled === true; return null; } };
     const { ctx, page, calls, errors } = await open(S, "/designs");
@@ -254,7 +292,7 @@ try {
   }
 
   // ── B: no 3D ────────────────────────────────────────────────────────────────────────────
-  {
+  if (LAUNCHED) {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: false, has3d: false }) };
     const { ctx, page, calls, errors } = await open(S, "/designs");
     await settingsDesigner(page);
@@ -299,7 +337,7 @@ try {
   }
 
   // ── E: view-as ──────────────────────────────────────────────────────────────────────────
-  {
+  if (LAUNCHED) {
     let adv = false;
     const S = {
       own: OPS, operator: true,
@@ -327,7 +365,7 @@ try {
   }
 
   // ── F: a refused save ───────────────────────────────────────────────────────────────────
-  {
+  if (LAUNCHED) {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: false }), onSave: () => ({ status: 500, body: { error: "Couldn't turn Advanced mode on. Please try again." } }) };
     const { ctx, page, calls } = await open(S, "/designs");
     await settingsDesigner(page);
@@ -355,7 +393,7 @@ try {
   }
 
   // ── H: unsaved work on the Advanced page ──────────────────────────────────────────────────
-  {
+  if (LAUNCHED) {
     const S = { own: BUILDER, statusFor: () => statusAnswer({ adv: true }), dialogAnswer: false };
     const { ctx, page, calls, errors, dialogs } = await open(S, "/advanced");
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
