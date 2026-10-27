@@ -7,6 +7,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   type DoorCloseUps,
+  type RGB,
   type DoorConsensus,
   type DoorConsensusResult,
   type DoorMeasureCtx,
@@ -133,6 +134,25 @@ Deno.test("corner gussets, two reads giving them as diagonals and one as boards:
     board(0.792, 0.981, 0.958, 0.906),
   ]);
   assertEquals(s.codes, []);
+});
+
+Deno.test("the handle's finish: its close-up, else the photo at the handle, and only then the hinge's", () => {
+  // Silver butt-hinge knuckles beside a black handle (a steel door; with V2's strips the hardware point
+  // lands on a knuckle).
+  const { read, ctx } = withStrips(singleDoor(), 2);
+  const m = read.measure as Rec, hw = (m.colorAt as Record<string, [number, number]>).hardware, h = m.handle as [number, number];
+  const near = (p: [number, number], q: [number, number]) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 8;
+  const colorAt = (p: [number, number]) => (near(p, hw) ? [154, 154, 156] as RGB : near(p, h) ? [20, 21, 25] as RGB : null);
+  const c = cons(stageADoorLook([read, read, read], { ...ctx, colorAt }));
+  const finishes = (ups: DoorCloseUps) => {
+    const s = settled(c, ups).spec;
+    return [(s.hinges as Rec).finish, (s.handle as Rec).finish];
+  };
+  for (const handle of [undefined, { status: "skipped" as const }, { status: "failed" as const }]) {
+    assertEquals(finishes({ hinges: ASKED.hinges, ...(handle ? { handle } : {}) }), ["black", "black"], JSON.stringify(handle ?? "no handle ask"));
+    assertEquals(finishes({ ...(handle ? { handle } : {}) }), ["galv", "black"], "the hinges' own snap is galv");
+  }
+  assertEquals(finishes({ handle: ok({ type: "lever", finish: "galv" }, { type: "lever", finish: "galv" }, { type: "lever", finish: "black" }) }), ["galv", "galv"], "a handle close-up that decides wins");
 });
 
 Deno.test("edge strips: the meeting edge's close-ups are cut at the joint in the photo, past the strip", () => {
