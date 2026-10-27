@@ -1694,12 +1694,13 @@ function windowDressStamps(d) {
 // (L-I-T-E): no grid is 1 x 1, her transom one row of 5 (vertical bars only), a "6-lite" window 3
 // rows of 2, a "9-lite" door window 3 x 3. Rows and columns say horizontal-only, vertical-only and
 // both without the words being misread.
-// Set in two places: a DEFAULT per window row in Settings (fixture_items.lite_rows / lite_cols,
-// migration 335, which replaced 324's Panes), read live off the catalog like the window's photo; and
-// the rep's OVERRIDE per placed window (liteRows / liteCols on a window item, doorWindowLiteRows /
-// doorWindowLiteCols on a door for the window in it). Null on the item follows the catalog; null on
-// the catalog row is AUTOMATIC, the grid every window drew before 335 (two rows of two or three by
-// width, a transom one row).
+// Set in Settings only: a DEFAULT per window row (fixture_items.lite_rows / lite_cols, migration 335,
+// which replaced 324's Panes), read live off the catalog like the window's photo. Carolyn, 10-27 call:
+// "The customer can't select the grid", so the designer has had no grid picker since. A window placed
+// before that may still carry an OVERRIDE (liteRows / liteCols on a window item, doorWindowLiteRows /
+// doorWindowLiteCols on a door for the window in it), and it keeps drawing and pricing as it was
+// quoted. Null on the item follows the catalog; null on the catalog row is AUTOMATIC, the grid every
+// window drew before 335 (two rows of two or three by width, a transom one row).
 const SS_LITES_MAX = 8;
 // A valid pair as { rows, cols }, or null.
 function ssLites(rows, cols) {
@@ -1729,59 +1730,11 @@ function ssLitesWords(l) {
 }
 // The two fields a placed window stamps for its grid, null for "the window's default". Written on
 // every placement path, like windowDressStamps, so a swap never keeps the old window's grid by
-// accident (the picker seeds itself from the window it replaces, so a kept grid is a choice).
+// accident (WindowPicker keeps an older override only for the same window row).
 function windowLiteStamps(l) {
   return { liteRows: l ? l.rows : null, liteCols: l ? l.cols : null };
 }
 // ── END WINDOW LITES ──
-// The grid chooser, in the window picker, the door picker's window row and the 3D footer. `value` is
-// the override ({ rows, cols } or null for the default), `dflt` what the default draws (null =
-// automatic). Default, No grid, then rows and columns of lites, with a little drawing of the grid and
-// its name. `dark` is the 3D footer's palette.
-function SSLitesPicker({ value, dflt, onChange, dark = false, accent = FIXTURE_WINDOW_COLOR, disabled = false, label = "Grid" }) {
-  const eff = value || dflt;
-  const base = eff || { rows: 1, cols: 1 };
-  const set = (rows, cols) => { const l = ssLites(rows, cols); if (l) onChange(l); };
-  const name = (l) => (!l ? "automatic" : l.rows * l.cols < 2 ? "no grid" : `${l.rows * l.cols}-lite`);
-  const ink = dark ? "#CBD5E1" : "#334155", line = dark ? "#334155" : "#E2E8F0";
-  const chip = (key, on, text, onClick, title) => (
-    <button key={key} type="button" title={title || text} onClick={onClick} disabled={disabled} data-ss-lites-chip={key}
-      style={{ padding: dark ? "5px 9px" : "6px 12px", borderRadius: dark ? 7 : 20, fontSize: 12, fontWeight: 700, cursor: disabled ? "default" : "pointer",
-        border: dark ? "1px solid #334155" : `2px solid ${on ? accent : line}`, background: on ? (dark ? accent : "#E0F2FE") : (dark ? "#1E293B" : "#FFF"),
-        color: on ? (dark ? ssOnFill(accent) : "#075985") : ink, opacity: disabled ? 0.5 : 1 }}>{text}</button>
-  );
-  const step = (key, n, onDown, onUp, unit) => (
-    <span key={key} data-ss-lites-step={key} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: ink, fontWeight: 600 }}>
-      <button type="button" onClick={onDown} disabled={disabled || n <= 1} aria-label={`Fewer ${unit}`}
-        style={{ width: 24, height: 24, borderRadius: 6, border: `1px solid ${line}`, background: dark ? "#1E293B" : "#FFF", color: ink, cursor: "pointer", padding: 0, fontWeight: 800 }}>−</button>
-      <span style={{ minWidth: 14, textAlign: "center", fontWeight: 800 }}>{n}</span>
-      <button type="button" onClick={onUp} disabled={disabled || n >= SS_LITES_MAX} aria-label={`More ${unit}`}
-        style={{ width: 24, height: 24, borderRadius: 6, border: `1px solid ${line}`, background: dark ? "#1E293B" : "#FFF", color: ink, cursor: "pointer", padding: 0, fontWeight: 800 }}>+</button>
-      <span>{unit}</span>
-    </span>
-  );
-  const pic = eff || null;
-  return (
-    <div data-ss-lites="1" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: dark ? "center" : "flex-start" }}>
-      <span style={dark ? { color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" } : { fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 86 }}>{label}</span>
-      {chip("default", !value, `Default (${name(dflt)})`, () => onChange(null), "The grid this window comes with (Settings)")}
-      {chip("plain", !!value && value.rows === 1 && value.cols === 1, "No grid", () => set(1, 1))}
-      {step("rows", base.rows, () => set(base.rows - 1, base.cols), () => set(base.rows + 1, base.cols), base.rows === 1 ? "row" : "rows")}
-      <span style={{ color: ink, fontSize: 12 }}>×</span>
-      {step("cols", base.cols, () => set(base.rows, base.cols - 1), () => set(base.rows, base.cols + 1), "across")}
-      <span aria-hidden="true" data-ss-lites-pic={pic ? `${pic.rows}x${pic.cols}` : "auto"}
-        style={{ width: 30, height: 24, boxSizing: "border-box", border: `2px solid ${ink}`, background: dark ? "#0F172A" : "#F0F9FF",
-          display: "grid", gridTemplateRows: `repeat(${pic ? pic.rows : 1}, 1fr)`, gridTemplateColumns: `repeat(${pic ? pic.cols : 1}, 1fr)` }}>
-        {pic ? Array.from({ length: pic.rows * pic.cols }, (_, k) => (
-          <span key={k} style={{ borderRight: (k % pic.cols) < pic.cols - 1 ? `1px solid ${ink}` : "none", borderBottom: Math.floor(k / pic.cols) < pic.rows - 1 ? `1px solid ${ink}` : "none" }} />
-        )) : null}
-      </span>
-      <span data-ss-lites-name="1" style={{ fontSize: 12, color: dark ? "#94A3B8" : "#64748B" }}>
-        {!pic ? "as today (by width)" : pic.rows * pic.cols < 2 ? "1 lite, no bars" : ssLitesWords(pic)}
-      </span>
-    </div>
-  );
-}
 // How far off the interior FLOOR a catalog window sits, and whether the customer may slide
 // it (139). Stamped at placement like every other fixture field, so a design keeps the
 // height it was drawn with even if the builder later re-specs the window.
@@ -2812,10 +2765,6 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
   const [doorColor, setDoorColor] = useState(null);
   const [trimColor, setTrimColor] = useState(null);
   const [doorWindow, setDoorWindow] = useState(null);
-  // The grid of the window in the door (335): null = that window's default from Settings. A new
-  // window choice starts at its own default.
-  const [doorWinLites, setDoorWinLites] = useState(null);
-  useEffect(() => { setDoorWinLites(null); }, [doorWindow]);
   const colorList = Array.isArray(doorColors) ? doorColors : [];
   useEffect(() => {
     setDoorWindow(null);
@@ -2941,16 +2890,11 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
             {operation === "double" && pickedWin && (
               <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 6 }}>One in each door of the pair.</div>
             )}
-            {pickedWin && (
-              <div data-ss-door-window-lites="1" style={{ marginTop: 10 }}>
-                <SSLitesPicker value={doorWinLites} dflt={ssLites(pickedWin.liteRows, pickedWin.liteCols)} onChange={setDoorWinLites} accent={FIXTURE_DOOR_COLOR} />
-              </div>
-            )}
           </div>
         )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, swing, operation, doorColor, sel.hasTrimColor ? trimColor : null, pickedWin, pickedWin ? doorWinLites : null))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place door"}</button>
+          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, swing, operation, doorColor, sel.hasTrimColor ? trimColor : null, pickedWin, null))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place door"}</button>
         </div>
       </div>
     </div>
@@ -19778,19 +19722,6 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   const doorWinTops = doorWinShown.filter((w) => doorWinAt(w) === "top").length;
   const doorWinHead = doorWinTops === 0 ? "Window in door" : doorWinTops === doorWinShown.length ? "Transom" : "Window or transom";
   const pickDoorWindow = (w) => { if (sel3dItem) commitDoorColors([{ id: sel3dItem.id, patch: doorWindowStamps(w) }]); };
-  // ── The grid of the selected window, or of the window in the selected door (335) ──
-  // The rep's per-window override, changed in place through the same recolorItems3 path: a window
-  // re-stamps liteRows / liteCols, a door its doorWindowLite* pair, and only that wall is rebuilt.
-  // Default is the window row's own grid from Settings. Not on a vent (a type:"window" item too).
-  const sel3dWin = sel3dItem && sel3dItem.type === "window" && !isVentItem(sel3dItem) ? sel3dItem : null;
-  const litesDoor = !sel3dWin && doorWinRowOn && sel3dItem && sel3dItem.doorWindowId ? sel3dItem : null;
-  const litesItem = sel3dWin || litesDoor;
-  const litesFx = litesItem ? (fixtures || []).find((f) => String(f.id) === String(sel3dWin ? sel3dWin.fixtureItemId : litesDoor.doorWindowId)) || null : null;
-  const litesCur = sel3dWin ? ssLites(sel3dWin.liteRows, sel3dWin.liteCols) : litesDoor ? ssLites(litesDoor.doorWindowLiteRows, litesDoor.doorWindowLiteCols) : null;
-  const pickLites = (l) => {
-    if (!litesItem) return;
-    commitDoorColors([{ id: litesItem.id, patch: sel3dWin ? windowLiteStamps(l) : { doorWindowLiteRows: l ? l.rows : null, doorWindowLiteCols: l ? l.cols : null } }]);
-  };
 
   useEffect(() => {
     let disposed = false;
@@ -21842,13 +21773,6 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
                 </button>
               );
             })}
-          </div>
-        )}
-        {/* The grid of the selected window, or of the window in the selected door (335). */}
-        {litesItem && (
-          <div data-ss-lites-3d="1">
-            <SSLitesPicker dark value={litesCur} dflt={litesFx ? ssLites(litesFx.liteRows, litesFx.liteCols) : null} onChange={pickLites}
-              accent={accent} disabled={phase !== "ready"} label={sel3dWin ? "Window grid" : litesDoor.doorWindowAt === "top" ? "Transom grid" : "Window grid"} />
           </div>
         )}
         <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -25045,11 +24969,11 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
   const [shutterColor, setShutterColor] = useState(() => (swapFrom ? byId(swapFrom.shutterColorId) : null));
   const [flowerBox, setFlowerBox] = useState(!!(swapFrom && swapFrom.flowerBox));
   const [flowerBoxColor, setFlowerBoxColor] = useState(() => (swapFrom ? byId(swapFrom.flowerBoxColorId) : null));
-  // The grid of lites (335): null = the window's own default from Settings, else the rep's rows x
-  // columns for this one window. Seeded from the window being swapped, as the dressing is, so
-  // changing a size keeps the grid the customer chose. Not offered for an interior wall's window
-  // (litesOn false): that one always takes its row's default.
-  const [lites, setLites] = useState(() => (swapFrom ? ssLites(swapFrom.liteRows, swapFrom.liteCols) : null));
+  // The grid of lites (335) is the builder's, set per window in Settings (Carolyn, 10-27: "The customer
+  // can't select the grid"), so there is no picker here. A window swapped for the SAME row keeps an
+  // older override it was quoted with; any other window takes its own row's grid, and so does an
+  // interior wall's window (litesOn false).
+  const keptLites = (fx) => (litesOn && swapFrom && fx && String(swapFrom.fixtureItemId) === String(fx.id) ? ssLites(swapFrom.liteRows, swapFrom.liteCols) : null);
   const pickStyle = (st) => { setRoOn(false); setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
@@ -25134,15 +25058,9 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
             ))}
           </div>
         )}
-        {/* The grid (335): Default is what the builder set for this window in Settings. */}
-        {sel && litesOn && (
-          <div data-ss-window-lites-row="1" style={{ marginBottom: 14 }}>
-            <SSLitesPicker value={lites} dflt={ssLites(sel.liteRows, sel.liteCols)} onChange={setLites} />
-          </div>
-        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, color, { shutters, shutterColor, flowerBox, flowerBoxColor }, litesOn ? lites : null))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place window"}</button>
+          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, color, { shutters, shutterColor, flowerBox, flowerBoxColor }, keptLites(sel)))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place window"}</button>
         </div>
       </div>
     </div>
