@@ -538,6 +538,32 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
   const [handoff, setHandoff] = useState(null);   // { title, summary } from offer_handoff
   const listRef = useRef(null);
   const inputRef = useRef(null);
+  const panelRef = useRef(null);
+
+  // On a phone the sheet is pinned to the VISIBLE viewport, not the layout one. A page wider than
+  // the phone (the design list's table) grows the layout viewport past the screen, and focusing the
+  // text box then scrolls the visible part down inside it: found 10-27 with the header cut off by
+  // 29 px at 375 px. The on-screen keyboard shrinks the visible part the same way. Above 640 px the
+  // CSS position stands and these inline values are cleared.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const fit = () => {
+      const el = panelRef.current;
+      if (!el) return;
+      const phone = window.matchMedia && window.matchMedia("(max-width:640px)").matches;
+      el.style.top = phone ? vv.offsetTop + "px" : "";
+      el.style.left = phone ? vv.offsetLeft + "px" : "";
+      el.style.width = phone ? vv.width + "px" : "";
+      el.style.height = phone ? vv.height + "px" : "";
+      el.style.right = phone ? "auto" : "";
+      el.style.bottom = phone ? "auto" : "";
+    };
+    fit();
+    vv.addEventListener("resize", fit);
+    vv.addEventListener("scroll", fit);
+    return () => { vv.removeEventListener("resize", fit); vv.removeEventListener("scroll", fit); };
+  }, []);
 
   const load = useCallback(async () => {
     setLoadErr("");
@@ -556,7 +582,9 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    // Escape belongs to the ticket dialog while it is open over the chat (it is aria-modal; the
+    // chat is not): closing both at once threw away the chat the builder was handing off.
+    const onKey = (e) => { if (e.key === "Escape" && !document.querySelector('[aria-modal="true"]')) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -608,7 +636,7 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
   const goTo = (page, sub) => { onNavigate(page, sub); if (window.innerWidth < 640) onClose(); };
 
   return (
-    <div className="ss-sup-chat" role="dialog" aria-label={name}>
+    <div className="ss-sup-chat" role="dialog" aria-label={name} ref={panelRef}>
       <div className="ss-sup-head">
         <div className="ss-sup-title">
           <span>{name}</span>

@@ -97,6 +97,7 @@ export const SYSTEM_RULES = [
   "",
   "How to write:",
   "- Be warm, plain and brief: a sentence or two, or a short numbered list for steps. No headings, no tables, no bold, no emoji.",
+  "- Never guess anyone's pronouns from their name. In a ticket summary, use the person's name or \"they\".",
   "- Name places as Page > Tab, e.g. Settings > Company > Branding. When a link helps, put the page's address from the knowledge on its own, e.g. /settings/branding. Never give any other link, website or email address.",
   "",
   "Boundaries:",
