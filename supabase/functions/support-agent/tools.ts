@@ -109,7 +109,8 @@ export const TOOL_DEFS = [
     description:
       "Offer to send this conversation to a person on the Structure Studio team as a ticket. Use it when the builder reports " +
       "something broken, asks for something the product does not do, asks for a person, or you cannot answer. It changes " +
-      "nothing by itself: the builder sees a \"Send this to our team\" button with your title and summary, and decides.",
+      "nothing by itself: the builder sees a \"Send this to our team\" button with your title and summary, and decides. " +
+      "Call it AFTER any account lookups you need, never alongside them, so the summary says what you found.",
     strict: true,
     input_schema: {
       type: "object",
