@@ -5147,7 +5147,19 @@ function PaymentsCard() {
 // The underline strip Settings itself used to wear before the rail replaced it. Kept, and now
 // shared by both hubs: within ONE page it is a sub-navigation, which is what it is good at;
 // across fourteen pages it was a wall, which is why the rail exists.
-function SubTabs({ tabs, sub, onSub }) {
+//
+// THE TABS ARE REAL LINKS where the caller gives an `href` (2026-10-26). Carolyn: "I need to be
+// able to click on the top row navigation in the settings pages and have it open in a new tab when
+// right clicked and selected" — the same ask that made the rail anchors on 2026-09-11, one level
+// down. Every settings hub tab IS a /settings/<slug> address already (ssSettingsHubs), so the href
+// is just ssPagePath and the left click stays same-document through ssNavClick: right click,
+// middle click and ctrl/cmd-click all come free from the anchor being an anchor.
+//
+// `href` is a FUNCTION of the tab id and it is OPTIONAL on purpose — not every SubTabs row is
+// addressable. My connections' Calendars/Zoom/Meet/Teams tabs are card-local state with no URL of
+// their own, so that caller passes none and still renders buttons; handing them a /settings/zoom
+// href would offer a new tab that 404s. A row is a link only where the address exists.
+function SubTabs({ tabs, sub, onSub, href = null }) {
   const active = tabs.find((t) => t[0] === sub) || tabs[0];
   // GROUPED when the tabs carry a 4th element, flat when they do not — Company, Colors and
   // Billing pass three-element tuples and render exactly as before. The clustering rule is the
@@ -5160,19 +5172,29 @@ function SubTabs({ tabs, sub, onSub }) {
     if (!last || last.group !== (t[3] || null)) groups.push({ group: t[3] || null, items: [t] });
     else last.items.push(t);
   });
-  const tab = ([id, label]) => (
-    <button key={id} type="button" onClick={() => onSub(id)}
-      aria-current={sub === id ? "page" : undefined}
-      style={{
-        background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
-        padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
-        color: sub === id ? ACCENT : "#64748B",
-        borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
-        marginBottom: -2,
-      }}>
-      {label}
-    </button>
-  );
+  // One style object for both elements, so an anchor row and a button row are pixel-identical.
+  // `textDecoration` and `display` are the only additions the anchor needs: a bare <a> is
+  // underlined and inline, and the strip's alignment depends on it being a block of its own.
+  const tabStyle = (id) => ({
+    background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+    padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+    color: sub === id ? ACCENT : "#64748B",
+    borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+    marginBottom: -2, textDecoration: "none", display: "block",
+  });
+  const tab = ([id, label]) => (href
+    ? (
+      <a key={id} href={href(id)} onClick={ssNavClick(() => onSub(id))}
+        aria-current={sub === id ? "page" : undefined} style={tabStyle(id)}>
+        {label}
+      </a>
+    )
+    : (
+      <button key={id} type="button" onClick={() => onSub(id)}
+        aria-current={sub === id ? "page" : undefined} style={tabStyle(id)}>
+        {label}
+      </button>
+    ));
   const labelled = groups.some((g) => g.group);
   return (<>
     {/* One shared bottom rule under the whole bar either way, so the active tab's underline
@@ -5203,7 +5225,7 @@ function OptionsShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
   const p = { viewingLabel, clientId };
   return (
     <div>
-      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} href={(id) => ssPagePath("settings", id)} />
       {sub === "options" && <WallHeights {...p} />}
       {sub === "doors" && <DoorsView {...p} />}
       {sub === "windows" && <WindowsView {...p} />}
@@ -5230,7 +5252,7 @@ function ColorsShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   const section = sub === "shingles" ? "shingle" : sub === "metal" ? "metal" : "paint";
   return (
     <div>
-      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} href={(id) => ssPagePath("settings", id)} />
       <ColorsView viewingLabel={viewingLabel} section={section} />
     </div>
   );
@@ -5244,7 +5266,7 @@ function BillingShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
   return (
     <div>
-      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} href={(id) => ssPagePath("settings", id)} />
       <BillingView viewingLabel={viewingLabel} section={sub === "wallet" ? "wallet" : "subscription"} />
     </div>
   );
@@ -5259,7 +5281,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
   return (
     <div>
-      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} href={(id) => ssPagePath("settings", id)} />
       {/* Business Details and Branding are the SAME component in two sections. Its form state
           covers every field whichever section renders and its save is global, so the two tabs
           cannot save half a form between them — see the note at the top of SettingsView. */}
@@ -5306,7 +5328,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
   return (
     <div>
-      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} href={(id) => ssPagePath("settings", id)} />
       {sub === "pipelines" && (crmUnlocked || crmPending
         ? <PipelineSettings viewing={!!viewingLabel} />
         : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
