@@ -4329,8 +4329,15 @@ function ssNewPartition(id, type, ends, iw) {
   };
 }
 function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
-  if (!C || !C.showPricing || !C.layoutPricing) return { rows: [] };
-  const pricing = C.layoutPricing;
+  if (!C) return { rows: [] };
+  // "Hide pricing" is a CUSTOMER-FACING setting (migration 337), not a reason to stop listing what
+  // is ON THE PLAN. It used to return nothing here, so a hide-prices tenant's quote lost the window
+  // and the workbench along with their money — the shutters note further down is the same lesson
+  // learned the expensive way: a line that has no second home must print even when it costs
+  // nothing. `priced` false now means every row below is built exactly as it always was and the
+  // money comes off in ONE pass at the end, so no block here grows a second pricing rule.
+  const priced = !!C.showPricing;
+  const pricing = C.layoutPricing || {};
   const styleKey = sel && sel.style;
   // Resolve rate + method for an item_key: a per-style override wins over the default,
   // matching submit-estimate's layoutRates precedence.
@@ -4444,7 +4451,11 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   for (const key of LAYOUT_PRICE_ORDER) {
     const m = measures[key];
     if (!m || !m.count) continue;
-    const rp = resolve(key);
+    // With pricing hidden there are no rates to resolve, so the row falls back to the measure the
+    // item is counted in — a workbench still reads 9 ft, a window still reads 2. A PRICED tenant
+    // keeps the old rule: no rate configured, no row.
+    const rp = resolve(key)
+      || (priced ? null : { rate: 0, method: m.lengthFt != null ? "lineal_ft" : m.optionSqft != null ? "sqft_option" : "each" });
     if (!rp) continue;
     const label = (C.layoutItems && C.layoutItems[key] && C.layoutItems[key].label) || (LEGACY_LAYOUT_FALLBACK[key] && LEGACY_LAYOUT_FALLBACK[key].label) || key;
     // Net out the included quantity for this item (loft = sq ft, others = count).
@@ -4468,7 +4479,8 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     let unit;
     if (measured && inc > 0) {
       const u2 = rp.method === "sqft_option" ? "sq ft" : "ft";
-      unit = [`${placedMeasure} ${u2} placed`, `${inc} ${u2} included in base price`, `${chargeable} ${u2} billable @ ${fmtMoney2(rp.rate)}/${u2}`].join(" · ");
+      unit = [`${placedMeasure} ${u2} placed`, `${inc} ${u2} included in base price`]
+        .concat(priced ? [`${chargeable} ${u2} billable @ ${fmtMoney2(rp.rate)}/${u2}`] : []).join(" · ");
     } else {
       unit = ln.unit;
     }
@@ -4512,12 +4524,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       const ch = ssPartitionCharge(p, iw.method, wallFt, roofAt);
       const total = Math.round(rate * ch.qty * 100) / 100;
       const per = ch.method === "sqft_option" ? " / sq ft" : " / ft";
-      rows.push({ key: ssPriceRowKey("partition", p.id), label: "Interior wall", qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + stud + " framing · " + fmtMoney2(rate) + per,
+      // The size and the framing are plan facts, not money, so they survive a hidden-pricing pass
+      // (the strip at the end of this function only rewrites a unit that quotes a rate).
+      rows.push({ key: ssPriceRowKey("partition", p.id), label: "Interior wall", qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + stud + " framing" + (priced ? " · " + fmtMoney2(rate) + per : ""),
         total, method: ch.method, ...ssPriceable(rate, ch.qty, ch.per) });
       nonPctSubtotal += total;
       for (const o of (p.openings || [])) {
         const price = o.price != null ? Number(o.price) : 0;
-        if (!(price > 0)) continue;   // $0 / unpriced = free, no line (the doors' rule above)
+        if (priced && !(price > 0)) continue;   // $0 / unpriced = free, no line (the doors' rule above)
         rows.push({ key: ssPriceRowKey("partition", p.id, o.id), label: (o.name || (o.kind === "window" ? "Window" : "Door")) + " (in interior wall)",
           qty: 1, unit: fmtMoney2(price) + " each", total: price, method: "each", ...ssPriceable(price, 1, "each") });
         nonPctSubtotal += price;
@@ -4584,7 +4598,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
-    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    if (priced && !(g.price > 0)) continue;   // $0 / unpriced = free, no line — but with pricing hidden EVERY placed item lines up
     const total = Math.round(g.price * chargeable * 100) / 100;
     rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
       ...ssPriceable(g.price, chargeable, "each") });
@@ -4625,7 +4639,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
-    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    if (priced && !(g.price > 0)) continue;   // $0 / unpriced = free, no line — but with pricing hidden EVERY placed item lines up
     const total = Math.round(g.price * chargeable * 100) / 100;
     rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
       ...ssPriceable(g.price, chargeable, "each") });
@@ -4706,7 +4720,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
-    if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
+    if (priced && !(g.price > 0)) continue;   // $0 / unpriced = free, no line — but with pricing hidden EVERY placed item lines up
     const total = Math.round(g.price * chargeable * 100) / 100;
     rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
       ...ssPriceable(g.price, chargeable, "each") });
@@ -4776,6 +4790,24 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const netBuilding = buildingRow && buildingRow.total != null ? Number(buildingRow.total) : buildingPrice;
     const base = netBuilding + selectionTaxable + nonPctSubtotal + roTotal + customTotal;
     for (const d of deferred) d.row.total = (d.pct / 100) * base * (d.row.qty || 1); // ×count: the server bills GHL line = qty×amount, so the preview must scale by count too or it under-shows (audit #F1)
+  }
+
+  // ── Hidden pricing: the lines stay, the money goes ──────────────────────────────────────────
+  // ONE pass, at the end, so every block above keeps the single pricing rule it was written with.
+  // A unit string is the only other place a rate can hide ("$5.00 / ft", "… billable @ $5.00/ft"),
+  // so a unit that quotes money is replaced by the measure it was pricing; a unit that carries no
+  // "$" is a plan fact (an interior wall's size and framing, a dressing's window count, the word
+  // "included") and is left exactly as it reads. ssPriceable's fields go too: they are what the
+  // rep's price-override input binds to, and there is nothing to override here.
+  if (!priced) {
+    for (const r of rows) {
+      r.total = null;
+      delete r.listUnit; delete r.chargeQty; delete r.per;
+      delete r.listTotal; delete r.unitPrice; delete r.overridden;
+      if (r.unit && r.unit.indexOf("$") >= 0) {
+        r.unit = r.method === "lineal_ft" ? `${r.qty} ft` : r.method === "sqft_option" ? `${r.qty} sq ft` : "";
+      }
+    }
   }
 
   // (Declined included items are no longer shown here — they're itemized under the building line
@@ -39953,7 +39985,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // [action 28px], gap 6 — so every amount lines up in one column. Rows with
             // no action get a 28px spacer; rows with no qty just omit that cell.
             const selRows = computeSelectionRows(priceSel, paintColors, C, items);
-            const priceRows = C.showPricing ? computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows : [];
+            // No `C.showPricing ?` here any more: a hide-prices tenant used to get an EMPTY list,
+            // which is why a window and a workbench on the plan were missing from Details entirely
+            // while the cladding and the roof (selection rows, never gated) still listed. The rows
+            // now come back with total null, and every amount cell below renders blank for them.
+            const priceRows = computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows;
             const roList = items.filter((i) => ssIsRO(i.type));
             // Rough-opening rate: same per-style resolution as the estimate (layoutPricing,
             // byStyle override wins) — the old C.layoutPrices read was a stale key that
