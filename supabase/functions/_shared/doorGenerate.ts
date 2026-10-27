@@ -208,8 +208,12 @@ function pushWarning(list: DoorWarning[], w: DoorWarning) {
 // The reads' own words (`observed`) against the draft itself: "Z brace" in observed with no Z brace, no
 // Z fill and no diagonal board is a mismatch. The server does not rely on the model's `unexplained`
 // alone. Only the construction is checked; the hardware is the close-ups' to decide and they warn.
-type Feature = "brace_z" | "brace_x" | "fill_z" | "fill_x" | "pickets" | "lite" | "vent" | "raised" | "diamond" | "split" | "board_diag";
+type Feature = "brace_z" | "brace_x" | "fill_z" | "fill_x" | "pickets" | "lite" | "vent" | "raised" | "diamond" | "split" | "board_diag" | "board_gusset";
+// Short corner gussets: doorLook.ts drafts a short diagonal as a board part, and a diamond's octagon is
+// four of them. Checked before the X rule, so "corner cross braces" asks for gussets, not an X.
+export const DOOR_GUSSET = /\b(gussets?|corner (cross[- ]?)?brac(e|es|ed|ing))\b/i;
 const OBSERVED_RULES: { re: RegExp; any: Feature[] }[] = [
+  { re: DOOR_GUSSET, any: ["board_gusset", "diamond"] },
   { re: /\bz[- ]?brac/i, any: ["brace_z", "fill_z", "board_diag"] },
   { re: /\b(x[- ]?(brac|shape|pattern)|an x\b|crossbuck|cross[- ]?brac)/i, any: ["brace_x", "fill_x", "board_diag"] },
   { re: /\b(pickets?|spindles?|balusters?)\b/i, any: ["pickets"] },
@@ -249,7 +253,12 @@ export function doorLookFeatures(spec: DoorLook): Set<Feature> {
   if (brace === "x") out.add("brace_x");
   for (const part of Array.isArray(spec.parts) ? spec.parts : []) {
     if (!isRec(part)) continue;
-    if (part.t === "board" && Math.abs(Number(part.u1) - Number(part.u0)) > 0.1 && Math.abs(Number(part.v1) - Number(part.v0)) > 0.1) out.add("board_diag");
+    if (part.t === "board") {
+      // A long diagonal board, or a short one across a corner (it rises well under a third of the door).
+      const du = Math.abs(Number(part.u1) - Number(part.u0)), dv = Math.abs(Number(part.v1) - Number(part.v0));
+      if (du > 0.1 && dv > 0.1) out.add("board_diag");
+      else if (du > 0.02 && dv > 0.02 && dv <= 0.3) out.add("board_gusset");
+    }
     if (part.t === "lite" || part.t === "vent" || part.t === "raised" || part.t === "split") out.add(part.t as Feature);
   }
   return out;
@@ -281,6 +290,14 @@ export function doorObservedMismatches(observed: readonly string[], spec: DoorLo
   return out;
 }
 
+// The unexplained phrases that are still open: not the 6-panel's known gap, and not short corner gussets
+// once the draft holds them (the reads call them unexplained because the prompt has no word for them, but
+// the maths drafts each as a board part).
+function openGaps(phrases: string[], spec: DoorLook): string[] {
+  const have = doorLookFeatures(spec), gussets = have.has("board_gusset") || have.has("diamond");
+  return phrases.filter((s) => !DOOR_SIX_PANEL.test(s) && !(gussets && DOOR_GUSSET.test(s)));
+}
+
 // What Stage B would be asked about: the mismatches, and the unexplained phrases that are not a gap we
 // already know cannot be closed. `knownGaps` are filed whatever Stage B says.
 export type DoorStageBWanted = { needed: boolean; missing: string[]; unexplained: string[]; knownGaps: string[] };
@@ -288,7 +305,7 @@ export function doorStageBWanted(c: Pick<DoorConsensus, "observed" | "unexplaine
   const said = [...c.observed, ...c.unexplained];
   const knownGaps = said.some((s) => DOOR_SIX_PANEL.test(s)) ? [DOOR_SIX_PANEL_GAP] : [];
   const missing = doorObservedMismatches(c.observed, spec);
-  const unexplained = doorPhrases(c.unexplained).filter((s) => !DOOR_SIX_PANEL.test(s));
+  const unexplained = openGaps(doorPhrases(c.unexplained), spec);
   return { needed: missing.length > 0 || unexplained.length > 0, missing, unexplained, knownGaps };
 }
 
@@ -316,7 +333,7 @@ export function finishDoorDraft(c: DoorConsensus, spec: DoorLook, warnings: read
     for (const w of kept.warnings) pushWarning(ws, w);
     // Stage B's own list is the latest word on what our vocabulary cannot say.
     if (isRec(stageB.answer) && Array.isArray(stageB.answer.unexplained)) {
-      unexplained = doorPhrases(stageB.answer.unexplained).filter((s) => !DOOR_SIX_PANEL.test(s));
+      unexplained = openGaps(doorPhrases(stageB.answer.unexplained), out);
     }
   } else if (wanted.needed) pushWarning(ws, pressWarning("stageb_skipped"));
   const mismatches = doorObservedMismatches(c.observed, out);

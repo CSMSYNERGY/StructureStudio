@@ -304,6 +304,35 @@ Deno.test("anything still unexplained is a vocabulary gap with a plain warning",
   assertEquals(r.warnings.find((w) => w.code === "vocab_gap")?.text, 'We can\'t draw "an arched top" yet. We\'ve noted it so we can add it.');
 });
 
+Deno.test("short corner gussets the draft draws are no vocabulary gap and ask no Stage B, lean or not", async () => {
+  // As the first door generated from a photo was read (2026-10-27): every read put its gussets in
+  // unexplained, since the prompt has no word for them, though the maths drafts each as a board part.
+  const said = ["short diagonal gussets at the four door corners, not panel braces", "short corner braces at the leaf's four outer corners"];
+  const { read, ctx } = gussetDoor({ unexplained: said });
+  for (const lean of [false, true]) {
+    const { run, m } = press({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK }, { ctx, lean });
+    const r = await run;
+    assertEquals(r.outcome, "draft", JSON.stringify(r.failure));
+    assertEquals([m.count("stageB"), r.vocabGaps, r.mismatches, ((r.spec as Rec).parts as Rec[]).length], [0, [], [], 4], `lean ${lean}`);
+    assertFalse(codes(r.warnings).includes("vocab_gap") || codes(r.warnings).includes("stageb_skipped"), codes(r.warnings).join());
+  }
+  // A door that draws no gusset still files the phrase, and a gusset door still files what it cannot draw.
+  const plain = singleDoor();
+  assertEquals(doorDraftFromReads([0, 1, 2].map(() => ({ ...plain.read, unexplained: ["short corner gussets"] })), plain.ctx).vocabGaps, ["short corner gussets"]);
+  const brackets = gussetDoor({ unexplained: ["black L-shaped iron corner brackets"] });
+  assertEquals(doorDraftFromReads([brackets.read, brackets.read, brackets.read], brackets.ctx).vocabGaps, ["black L-shaped iron corner brackets"]);
+});
+
+Deno.test("the observed check: corner gussets are drawn by short corner boards or a diamond's octagon, never by an X", () => {
+  const plank = { v: 1, base: "plank", src: { leaves: 1, hinge: "left" } } as DoorLook;
+  const gusset = { ...plank, base: "basic", parts: [{ t: "board", u0: 0.042, v0: 0.094, u1: 0.208, v1: 0.019, wIn: 2, role: "members" }] } as DoorLook;
+  const seen = ["four short corner gussets", "corner cross braces"];
+  assertEquals(doorObservedMismatches(seen, gusset), []);
+  assertEquals(doorObservedMismatches(seen, { ...plank, base: "xbrace" } as DoorLook), seen, "an X is not a gusset");
+  assertEquals(doorObservedMismatches(["an octagon of short corner braces"], { ...plank, base: "classic" } as DoorLook), []);
+  assertEquals(doorObservedMismatches(["black corner brackets"], plank), [], "brackets are hardware, not gussets");
+});
+
 Deno.test("the observed check reads the draft as drawn: the base's own fills count, a negation never does", () => {
   const plank = { v: 1, base: "plank", src: { leaves: 1, hinge: "left" } } as DoorLook;
   assertEquals(doorObservedMismatches(["a Z brace", "an X in the lower panel"], plank), ["a Z brace", "an X in the lower panel"]);
