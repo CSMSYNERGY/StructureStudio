@@ -21304,7 +21304,11 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // The dormer window is in the signature for the same reason the style spec is: it changes
   // GEOMETRY (the opening is sized to the chosen fixture), so there is nothing to recolour in
   // place and the scene has to be rebuilt.
-  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0, bodyColors, trimColors, dormerWindowId || "", Number(dormerWindowOffset) || 0]);
+  // The catalog rows are in it too (2026-10-27): the designer now refreshes them while it is open, and
+  // a door whose 3D look was changed in Settings must redraw here, not on the next unrelated edit.
+  // Memoised on the list's identity, which only changes when that refresh brings a different list.
+  const fxSig = useMemo(() => JSON.stringify(Array.isArray(fixtures) ? fixtures : []), [fixtures]);
+  const geomSig = JSON.stringify([fxSig, style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0, bodyColors, trimColors, dormerWindowId || "", Number(dormerWindowOffset) || 0]);
 
   useEffect(() => {
     let disposed = false;
@@ -41169,6 +41173,15 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
   ));
+  // SETTINGS SAVED WHILE THIS DESIGNER IS OPEN (2026-10-27; Carolyn's 10-26 call). The portal keeps
+  // one designer mounted for the whole session, so the catalog it fetched at mount was the one it
+  // drew with until a page reload: she set a door row to "American (built in 3D)" in Settings ->
+  // Doors, went back to the designer, and got the plain slab that row drew before her save. The save
+  // had landed; the designer had not asked again. The effect further down fixes that. cfgSigRef is
+  // the config as loaded, so a change there can be OFFERED rather than swapped under a design in
+  // progress (cfgChanged shows the line that offers it).
+  const cfgSigRef = useRef(null);
+  const [cfgChanged, setCfgChanged] = useState(false);
 
   // White-label the browser tab: show the tenant's business name once config loads.
   // Skipped when embedded — the host page (the portal) owns its own tab title.
@@ -41302,6 +41315,8 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
           }
         } catch (_e) { /* non-fatal */ }
         if (cancelled) return;
+        cfgSigRef.current = JSON.stringify(cfg);
+        setCfgChanged(false);
         setState({ status: "ready", config: { ...cfg, clientId, fixtures, rampSettings, windowColors } });
       } catch (e) {
         if (cancelled) return;
@@ -41311,6 +41326,75 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
     })();
     return () => { cancelled = true; };
   }, [state.status]);
+
+  // The refresh. ONLY the fixture rows (doors, windows, vents, ramps, window colours) are swapped
+  // live: they were built to be read live (fixtureDoorStyle, the photo and the lite lookups all
+  // resolve by fixtureItemId at draw time, and a placed item keeps the price and name it was placed
+  // with), so a refreshed list redraws doors and windows and moves no quote. The CONFIG is not
+  // swapped: StructureStudioInner reads parts of it once, in useState initialisers, so a half-applied
+  // config would be its own bug. A changed config raises a line under the designer instead.
+  //
+  // Signals: "ss:settings-saved" on this window and the "ss-settings" BroadcastChannel, both sent by
+  // the portal after a successful Settings write (portal/01-core.jsx), so a designer open in ANOTHER
+  // tab of the same browser hears it too (Carolyn's case: Settings in one tab, the designer in the
+  // other). And, for the portal's mount only, the tab coming back into view at most every 30 s, which
+  // covers a save made on another computer. Each refresh is two read RPCs; nothing changes when
+  // nothing changed.
+  useEffect(() => {
+    if (configProp || state.status !== "ready" || typeof window === "undefined") return undefined;
+    const clientId = state.config.clientId;
+    let stopped = false, timer = null, lastAt = Date.now(), sb = null, bc = null;
+    const refresh = async () => {
+      timer = null;
+      lastAt = Date.now();
+      try {
+        if (!sb) sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssDesignerFetch } });
+        const both = await Promise.all([
+          Promise.resolve(sb.rpc("get_fixtures", { p_client_id: clientId })).catch(() => null),
+          Promise.resolve(sb.rpc("get_config", { p_client_id: clientId })).catch(() => null),
+        ]);
+        if (stopped) return;
+        const fx = both[0] && !both[0].error ? both[0].data : null;
+        if (fx) {
+          // The same two shapes the loader reads: the legacy array, or { items, ramp, windowColors }.
+          const next = Array.isArray(fx) ? { fixtures: fx } : {
+            fixtures: Array.isArray(fx.items) ? fx.items : [],
+            rampSettings: fx.ramp || null,
+            windowColors: Array.isArray(fx.windowColors) ? fx.windowColors : [],
+          };
+          setState((st) => {
+            if (st.status !== "ready" || st.config.clientId !== clientId) return st;
+            const c = st.config;
+            const same = Object.keys(next).every((k) => JSON.stringify(c[k] || null) === JSON.stringify(next[k] || null));
+            return same ? st : { ...st, config: { ...c, ...next } };
+          });
+        }
+        const cfg = both[1] && !both[1].error ? both[1].data : null;
+        if (cfg && cfgSigRef.current != null && JSON.stringify(cfg) !== cfgSigRef.current) setCfgChanged(true);
+      } catch (_e) { /* best-effort: the designer keeps what it has */ }
+    };
+    // One save sends on both channels (and a multi-row save several times): coalesce them.
+    const poke = (cid) => {
+      if (stopped || timer || (cid && cid !== clientId)) return;
+      timer = setTimeout(refresh, 300);
+    };
+    const onSettingsSaved = (ev) => poke(ev && ev.detail && ev.detail.clientId);
+    const onVisible = () => { if (document.visibilityState === "visible" && Date.now() - lastAt > 30000) poke(null); };
+    window.addEventListener("ss:settings-saved", onSettingsSaved);
+    try {
+      bc = new BroadcastChannel("ss-settings");
+      bc.onmessage = (m) => poke(m && m.data && m.data.clientId);
+    } catch (_b) { bc = null; }   // no BroadcastChannel: same-tab saves still arrive by the event
+    if (embedded) document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("ss:settings-saved", onSettingsSaved);
+      if (bc) bc.close();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.status, state.status === "ready" ? state.config.clientId : null]);
 
   if (state.status === "loading") {
     return (
@@ -41329,7 +41413,17 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} canOverridePrice={canOverridePrice} /></DesignerErrorBoundary>;
+  // Reloading remounts StructureStudioInner, which is the only way a changed config is applied whole.
+  // It clears an unsaved plan, so it is offered, never done: "Not now" keeps the designer as it is
+  // until the next change.
+  const cfgLine = cfgChanged ? (
+    <div role="status" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "0 0 8px", padding: "8px 12px", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8, fontFamily: "system-ui, -apple-system, sans-serif", fontSize: 13, color: "#78350F" }}>
+      <span style={{ flex: "1 1 260px" }}>Your settings changed after this designer opened. Reload it to use them. A plan you haven't saved will be cleared.</span>
+      <button type="button" onClick={() => { setCfgChanged(false); setState({ status: "loading" }); }} style={{ padding: "5px 12px", background: "#92400E", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Reload designer</button>
+      <button type="button" onClick={() => setCfgChanged(false)} style={{ padding: "5px 10px", background: "transparent", color: "#92400E", border: "1px solid #FCD34D", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Not now</button>
+    </div>
+  ) : null;
+  return <>{cfgLine}<DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} canOverridePrice={canOverridePrice} /></DesignerErrorBoundary></>;
 }
 
 // Publish for the host pages' thin mount blocks (cross-block const sharing does not

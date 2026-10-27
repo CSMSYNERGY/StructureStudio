@@ -238,6 +238,9 @@ import { AI_TRANSCRIPTS_NOT_READY, AI_TRANSCRIPTS_VIEW_AS, readAiTranscripts, sa
 // Settings → Customer Hub → Forms + Email Templates (migration 325): every action in ./leadForms.ts.
 import { handleLeadFormAction } from "./leadForms.ts";
 import { handleCrmFieldAction, readBuiltinOverrides, readCustomFields } from "./crmFields.ts";
+// The library of claddings, doors and windows (migration 339): its actions, the catalog's share, and
+// the rule for a library entry named on a cladding or door/window save, in ./library.ts.
+import { catalogLibrary, claddingLinkFor, fixtureLinkFor, handleLibraryAction } from "./library.ts";
 import { coerceFieldValue } from "../_shared/crmFields.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
@@ -369,6 +372,17 @@ const GATES: GateTable = {
   delete_fixture:                 { area: "settings_options", level: "edit" },
   reorder_fixtures:               { area: "settings_options", level: "edit" },
   import_fixtures:                { area: "settings_options", level: "edit" },
+  // The library (339), beside the rows it feeds. Each branch ALSO refuses unless
+  // client_settings.library_beta is on for the tenant (./library.ts). library_request spends from the
+  // wallet ($2 a request once its meter is armed), the same gate as the photo background change.
+  library:                        { area: "settings_options", level: "view" },
+  library_seed_mine:              { area: "settings_options", level: "edit" },
+  library_add:                    { area: "settings_options", level: "edit" },
+  library_edit:                   { area: "settings_options", level: "edit" },
+  library_remove:                 { area: "settings_options", level: "edit" },
+  library_request_upload_url:     { area: "settings_options", level: "edit" },
+  library_request:                { area: "settings_options", level: "edit" },
+  library_request_cancel:         { area: "settings_options", level: "edit" },
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
   set_layout_item_taxable:        { area: "settings_options", level: "edit" },
@@ -2736,6 +2750,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         };
       } catch (_) { return null; }
     })();
+    // The library (339): the flag and, when it is on, the builder's entries and which rows use them,
+    // for the Cladding, Doors and Windows pickers. Never rejects and is outside the error loop: a
+    // database without 339, or a failed read, gives libraryBeta false and the pages as they were.
+    const libraryRead = catalogLibrary(admin, clientId);
     // Cladding offered per style (207), with each lap row's course size (style_cladding.exposure_in,
     // migration 275) in the same read. On a database before 275 PostgREST answers 42703 for the whole
     // select, so it is read again without the column and `courses` answers false: the card then
@@ -2856,7 +2874,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       interiorWallCoverings: iwCoveringsRes.data ?? [],
       // Can the Cladding card offer a lap course size (275)? False only on a database before it.
       claddingCourses: claddingRes.courses === true,
-      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
+      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet,
+      // libraryBeta + library (339). Started with the reads above, so it costs no extra round trip.
+      ...(await libraryRead) });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -6278,6 +6298,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // rate; a cladding row also holds the customer-facing name, the basis and the tax flag, and
   // deleting it would throw away a label a builder typed while they were still deciding what
   // to charge. get_config's `rate is not null` filter is what withholds it from the customer.
+  // The library (339): every action NAMED here, so preflight's GATES <-> branch cross-check sees them.
+  if (action === "library" ||
+      action === "library_seed_mine" ||
+      action === "library_add" ||
+      action === "library_edit" ||
+      action === "library_remove" ||
+      action === "library_request_upload_url" ||
+      action === "library_request" ||
+      action === "library_request_cancel") {
+    return await handleLibraryAction({
+      admin, req, clientId, userId: userId ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, audit,
+    });
+  }
+
   if (action === "save_cladding") {
     const styleId = String((payload as Record<string, unknown>).styleId ?? "").trim();
     if (!styleId) return json({ error: "styleId required" }, 400);
@@ -6350,6 +6385,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
       }
 
+      // The builder's library entry this row offers (339). Absent = leave the link alone (the old
+      // portal); null = take it off; an id = this entry, which then names the row and sets its course
+      // (./library.ts claddingLinkFor). Refused only when an entry is NAMED: the library filters the
+      // picker, it is never a rule on a save that does not mention it.
+      const link = await claddingLinkFor(admin, clientId, cid, row && "clientLibraryId" in row ? row.clientLibraryId : undefined);
+      if ("refuse" in link) { skipped.push(`${cid}: ${link.refuse.error}`); i++; continue; }
+      if ("dbError" in link) return dbFail(req, clientId, link.where, link.dbError);
+
       const patch = {
         label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
         rate,
@@ -6359,6 +6402,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         internal_only: row?.internalOnly === true,
         sort_order: i,
         ...courses,
+        ...link.write,
         updated_at: new Date().toISOString(),
       };
       const up = await admin.from("style_cladding")
@@ -7360,6 +7404,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       v.rec!.style_ids = kept;
     }
     const id = String(payload?.id ?? "").trim();
+    // The builder's library entry this door or window draws (339): absent = leave the link alone (the
+    // old portal sends doorStyle on every save and no clientLibraryId), null = take it off, an id = this
+    // entry, whose look then wins over the doorStyle / grid in the same save (./library.ts).
+    {
+      const ln = await fixtureLinkFor(admin, clientId, category, Object.prototype.hasOwnProperty.call(payload ?? {}, "clientLibraryId") ? payload.clientLibraryId : undefined);
+      if ("refuse" in ln) return json({ error: `${v.rec!.name}: ${ln.refuse.error}`, code: ln.refuse.code }, ln.refuse.status);
+      if ("dbError" in ln) return dbFail(req, clientId, ln.where, ln.dbError);
+      Object.assign(v.rec!, ln.write);
+    }
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
         .eq("id", id).eq("client_id", clientId).eq("category", category);
