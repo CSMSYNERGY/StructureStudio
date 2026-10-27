@@ -593,11 +593,15 @@ const DOOR_MATCH = 0.08; // two boards' ends this close are one board
 // a corner gusset or Classic's octagon brace rises <= 0.22 and runs <= 0.22.
 export const DOOR_PANEL_DIAG_RISE = 0.5;
 export const DOOR_PANEL_DIAG_RUN = 0.4;
-// Two diagonals are one board cut in two (an X's second board is usually butted against the first) when
-// they are parallel within DOOR_CUT_SIN (the sine of the angle, about 8 degrees), each end of one lies
-// within a board's width of the other's line, and their nearest ends are at most two board widths apart.
-// A board whose width the read did not give counts as DOOR_CUT_W_IN.
+// Two diagonals are one board cut in two (an X's second board is usually butted against the first) when,
+// measured against the board they would join into (their two farthest ends): every end of both lies
+// within a board's width of its line, each runs along it within DOOR_CUT_SIN (the sine of the angle,
+// about 8 degrees), and the gap between them along it is no more than the crossing board's footprint
+// (w / sin 2a for a board at angle a, sin 2a never under DOOR_CUT_SIN2_MIN) plus a board width, and never
+// under two widths. Overlapping pieces have no gap. A board whose width the read did not give counts as
+// DOOR_CUT_W_IN.
 const DOOR_CUT_SIN = 0.14;
+const DOOR_CUT_SIN2_MIN = 0.25;
 const DOOR_CUT_W_IN = 4;
 
 export type DoorHingeSideSource = "hinges" | "brace" | "handle" | "latch" | "default" | "given";
@@ -750,27 +754,30 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     };
   };
   const braces = (braceList ?? []).map((b) => diagOf(fr(b.a as XY), fr(b.b as XY), acrossIn(b.across)));
-  // A board cut in two is one diagonal (DOOR_CUT_SIN): join such a pair in one leaf and panel, end to end,
-  // and measure the joined board again. Gussets at opposite corners are parallel but on lines far apart.
+  // A board cut in two is one diagonal (DOOR_CUT_SIN): join such a pair in one leaf, end to end, and
+  // measure the joined board again. In one panel always; across panels only when the joined board is a
+  // brace across the leaf (an X over the whole leaf, its second board butted at the crossing). Gussets at
+  // opposite corners are parallel but on lines far apart; a Z in each panel is two lines too.
   const inIn = (p: XY): XY => [p[0] * ctx.widthIn, p[1] * ctx.heightIn];
   const apartIn = (p: XY, q: XY) => Math.hypot((p[0] - q[0]) * ctx.widthIn, (p[1] - q[1]) * ctx.heightIn);
-  const offLineIn = (p: XY, a: XY, c: XY) => {
-    const [P, A, C] = [inIn(p), inIn(a), inIn(c)];
-    return Math.abs((C[0] - A[0]) * (A[1] - P[1]) - (A[0] - P[0]) * (C[1] - A[1])) / (Math.hypot(C[0] - A[0], C[1] - A[1]) || 1);
-  };
   for (let i = 0; i < braces.length; i++) {
     for (let j = i + 1; j < braces.length; j++) {
       const p = braces[i], q = braces[j];
-      if (p.span || q.span || p.leaf !== q.leaf || p.panel !== q.panel) continue;
+      if (p.span || q.span || p.leaf !== q.leaf) continue;
       const w = Math.max(p.wIn ?? 0, q.wIn ?? 0) || DOOR_CUT_W_IN;
-      const [A, C, B, D] = [p.a, p.c, q.a, q.c].map(inIn);
-      const u = [C[0] - A[0], C[1] - A[1]], v = [D[0] - B[0], D[1] - B[1]];
-      const sin = Math.abs(u[0] * v[1] - u[1] * v[0]) / (Math.hypot(u[0], u[1]) * Math.hypot(v[0], v[1]) || 1);
-      if (sin > DOOR_CUT_SIN || offLineIn(q.a, p.a, p.c) > w || offLineIn(q.c, p.a, p.c) > w) continue;
-      const across: [XY, XY][] = [[p.a, q.a], [p.a, q.c], [p.c, q.a], [p.c, q.c]];
-      if (Math.min(...across.map(([x, y]) => apartIn(x, y))) > 2 * w) continue;
-      const [e0, e1] = [[p.a, p.c] as [XY, XY], [q.a, q.c] as [XY, XY], ...across].reduce((best, e) => (apartIn(e[0], e[1]) > apartIn(best[0], best[1]) ? e : best));
-      braces[i] = diagOf(e0, e1, medianOf([p.wIn, q.wIn]));
+      const pairs: [XY, XY][] = [[p.a, p.c], [q.a, q.c], [p.a, q.a], [p.a, q.c], [p.c, q.a], [p.c, q.c]];
+      const [e0, e1] = pairs.reduce((best, e) => (apartIn(e[0], e[1]) > apartIn(best[0], best[1]) ? e : best));
+      const [E0, E1] = [inIn(e0), inIn(e1)], E = [E1[0] - E0[0], E1[1] - E0[1]], L = Math.hypot(E[0], E[1]) || 1;
+      const off = (x: XY) => { const P = inIn(x); return Math.abs(E[0] * (E0[1] - P[1]) - (E0[0] - P[0]) * E[1]) / L; };
+      const along = (x: XY) => { const P = inIn(x); return ((P[0] - E0[0]) * E[0] + (P[1] - E0[1]) * E[1]) / L; };
+      const sinTo = (a: XY, c: XY) => { const [A, C] = [inIn(a), inIn(c)]; return Math.abs((C[0] - A[0]) * E[1] - (C[1] - A[1]) * E[0]) / ((Math.hypot(C[0] - A[0], C[1] - A[1]) || 1) * L); };
+      if ([p.a, p.c, q.a, q.c].some((x) => off(x) > w) || sinTo(p.a, p.c) > DOOR_CUT_SIN || sinTo(q.a, q.c) > DOOR_CUT_SIN) continue;
+      const [p0, p1] = [along(p.a), along(p.c)].sort((x, y) => x - y), [q0, q1] = [along(q.a), along(q.c)].sort((x, y) => x - y);
+      const sin2 = Math.max((2 * Math.abs(E[0] * E[1])) / (L * L), DOOR_CUT_SIN2_MIN);
+      if (Math.max(q0 - p1, p0 - q1, 0) > Math.max(2 * w, w / sin2 + w)) continue;
+      const joined = diagOf(e0, e1, medianOf([p.wIn, q.wIn]));
+      if (p.panel !== q.panel && !joined.span) continue;
+      braces[i] = joined;
       braces.splice(j, 1);
       j = i; // the joined board may meet a third piece
     }
@@ -857,18 +864,19 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
       type Diag = (typeof braces)[number];
       const full = (b: Diag) =>
         b.rise >= DOOR_PANEL_DIAG_RISE && b.runIn >= DOOR_PANEL_DIAG_RUN * Math.max(leafWIn(b.leaf) - 2 * (fIn ?? 0), leafWIn(b.leaf) / 2);
-      const hingeHalf = (b: Diag) => uOf((b.a[0] + b.c[0]) / 2, b.leaf) < 0.5;
+      // Which corner of its panel a gusset is at: the hinge or latch half, the top or bottom half.
+      const cornerOf = (b: Diag) =>
+        (uOf((b.a[0] + b.c[0]) / 2, b.leaf) < 0.5 ? 1 : 0) + (1 - (b.a[1] + b.c[1]) / 2 >= ((rails[b.panel - 1] ?? 0) + (rails[b.panel] ?? 1)) / 2 ? 2 : 0);
       panels.forEach((p, i) => {
         const own = braces.filter((b) => !b.span && b.panel === i);
         const decides = p.fill === null || p.fill === "none" || p.fill === "z" || p.fill === "x";
         const inside = latchFirst(decides ? own.filter(full) : own);
         if (decides) {
           p.fill = inside.length === 0 ? (p.fill === null ? null : "none") : inside.length === 1 ? "z" : "x";
-          // The latch leaf's own gussets, and the other leaf's only at a corner (the hinge half or the latch
-          // half) where the latch leaf has none: mirrored by fraction, the two leaves' copies of one gusset
-          // do not meet when the leaves are unequal.
+          // The latch leaf's own gussets, and the other leaf's only at a corner where the latch leaf has none:
+          // mirrored by fraction, the two leaves' copies of one gusset do not meet when the leaves are unequal.
           const short = own.filter((b) => !full(b)), mine = short.filter((b) => b.leaf === latchLeaf);
-          gussets.push(...mine, ...short.filter((b) => b.leaf !== latchLeaf && !mine.some((q) => hingeHalf(q) === hingeHalf(b))));
+          gussets.push(...mine, ...short.filter((b) => b.leaf !== latchLeaf && !mine.some((q) => cornerOf(q) === cornerOf(b))));
         }
         if (p.fill === "z" && inside.length === 1) p.zFrom = fromOf(inside[0].lo, inside[0].leaf);
         const w = medianOf(inside.map((b) => b.wIn));
