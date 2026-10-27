@@ -658,6 +658,21 @@ Deno.test("one vocabulary gap per thing: three reads naming one thing three ways
   assertEquals(doorGapPhrases(["weatherstrip along the bottom", "weather strip at the bottom", "rubber weatherstripping"]), ["weatherstrip along the bottom"]);
   assertEquals(doorGapPhrases(["peephole", "peep hole"]), ["peephole"]);
   assertEquals(doorGapPhrases(["arched top", "arch-top door"]), ["arched top"]);
+  // Round 2 (wf_73ef8d61-d20). A group keeps its first wording's things: a phrase naming two things joins
+  // the first group and never pulls the second thing's own phrase in, in either order.
+  assertEquals(doorGapPhrases(["a small knob", "knob with a logo on it", "a logo badge"]), ["a small knob", "a logo badge"]);
+  assertEquals(doorGapPhrases(["small round knob rather than lever", "keyed dead bolt above the knob", "knob with a keyed deadbolt"]), ["small round knob rather than lever", "keyed dead bolt above the knob"]);
+  // Counting, measuring and state words join nothing.
+  assertEquals(doorGapPhrases(["grilles on all the lites", "woodgrain on all the panels"]).length, 2);
+  assertEquals(doorGapPhrases(["kick plate 8 inches high", "transom 12 inches high"]).length, 2);
+  assertEquals(doorGapPhrases(["latch missing on the left leaf", "hinge pin missing", "brace missing"]).length, 3);
+  // A curly apostrophe or a contraction leaves no one-letter word to join on.
+  assertEquals(doorGapPhrases(["maker\u2019s logo", "door\u2019s kick plate", "owner\u2019s name plate"]).length, 3);
+  assertEquals(doorGapPhrases(["vent doesn\u2019t show louvres", "transom isn\u2019t glazed", "peephole can\u2019t be seen clearly"]).length, 3);
+  // Compounds and -sses plurals are one word.
+  assertEquals(doorGapPhrases(["brass kickplate", "brass kick plate"]), ["brass kickplate"]);
+  assertEquals(doorGapPhrases(["keyed deadbolt", "dead bolt lock"]), ["keyed deadbolt"]);
+  assertEquals(doorGapPhrases(["panel recess", "panel recesses"]), ["panel recess"]);
 });
 
 Deno.test("with the 6-panel's known gap, every phrase the warning names is also filed", () => {
