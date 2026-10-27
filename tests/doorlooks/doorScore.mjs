@@ -64,7 +64,9 @@ export const DOOR_RENDER_RULES = [
   { name: "BUTT_NO_STRAP", needle: ["put(wallMesh(new THREE.CylinderGeometry(0.03, 0.03, 2 * bh, 12), hingeMat, wf, he, cy, 0.172), tagH);", "        return;"].join(String.fromCharCode(10)) },
   // A look's hinge rows are held on the leaf by the reach of the piece drawn (drawnDoorLook's clamp).
   { name: "SPEC_PLATE_H", needle: "const plateH = !spec ? (trim ? F / 2 : Math.min(0.17, h * 0.03)) : trim ? Math.max(0.06, Math.min(0.17, F / 2)) : Math.min(0.17, h * 0.03);" },
-  { name: "HINGE_REACH", needle: 'const reachH = type === "butt" ? Math.max(plateH, Math.min(0.16, h * 0.05)) : type === "pintle" ? plateH * 1.2 : plateH;' },
+  { name: "SPEC_S1", needle: "const s1 = trim ? Math.max(spec ? 0.03 : 0, Math.min(0.085, F * 0.3)) : 0.085," },
+  { name: "HINGE_REACH", needle: 'const reachH = Math.max(plateH, type === "butt" ? Math.min(0.16, h * 0.05) : type === "pintle" ? Math.max(plateH * 1.2, sw0)' },
+  { name: "HINGE_REACH_2", needle: ': type === "tstrap" ? s1 : type === "strap" ? sw0 : type === "scroll" ? sw0 * 1.65 : 0);' },
   { name: "HINGE_CLAMP", needle: "rows = rows.map((cy) => Math.max(y0 + reachH, Math.min(cy, cap))).sort((p, q) => p - q);" },
   { name: "MID_RAIL_NEAREST_HALF", needle: "const byMid = mids.slice().sort((p, q) => Math.abs(p - (y0 + h / 2)) - Math.abs(q - (y0 + h / 2)));" },
   { name: "SPEC_RAILS_HINGES", needle: 'else if (hs.at === "rails" || trim) {' },
@@ -145,11 +147,14 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
     at = count === 3 ? [PLANK_HINGES[3][0], mid, PLANK_HINGES[3][2]].sort((a, b) => a - b)
       : PLANK_HINGES[count] ?? Array.from({ length: count }, (_, i) => (count === 1 ? 0.5 : 0.13 + (0.74 * i) / (count - 1)));
   }
-  // Every row is held on the leaf by the reach of the piece drawn (SPEC_PLATE_H, HINGE_REACH, HINGE_CLAMP):
-  // a strap's plate, a butt's plates and knuckle, a pintle's pin. Needs the leaf's size.
+  // Every row is held on the leaf by the reach of the tallest piece its type draws (SPEC_PLATE_H, SPEC_S1,
+  // HINGE_REACH, HINGE_CLAMP): the plate, a T-strap's wide half, a strap's end disc, a scroll's curl, a
+  // butt's plates and knuckle, a pintle's pin. Needs the leaf's size.
   if (at && at.length && leaf && fIn !== null) {
     const F = fIn / FT, plateH = trim ? Math.max(0.06, Math.min(0.17, F / 2)) : Math.min(0.17, leaf.h * 0.03);
-    const reach = (type === "butt" ? Math.max(plateH, Math.min(0.16, leaf.h * 0.05)) : type === "pintle" ? plateH * 1.2 : plateH) / leaf.h;
+    const s1 = trim ? Math.max(0.03, Math.min(0.085, F * 0.3)) : 0.085, sw0 = s1 * 0.8;
+    const reach = Math.max(plateH, type === "butt" ? Math.min(0.16, leaf.h * 0.05) : type === "pintle" ? Math.max(plateH * 1.2, sw0)
+      : type === "tstrap" ? s1 : type === "strap" ? sw0 : type === "scroll" ? sw0 * 1.65 : 0) / leaf.h;
     at = at.map((v) => Math.max(reach, Math.min(v, 1 - reach)));
   }
   let lenIn = null;
