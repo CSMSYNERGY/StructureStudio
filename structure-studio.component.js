@@ -4278,11 +4278,12 @@ const SS_DOOR_LOOK_RULES = {
     if (b.u1 - b.u0 < 0.08 - 1e-9 || b.v1 - b.v0 < 0.08 - 1e-9) return undefined;
     return { ...o, ...b };
   },
-  // A board runs between its two ends, which must be apart.
+  // A board runs between its two ends, which must be apart: 0.05 of the leaf one way or the other (the
+  // server's DOOR_BOARD_MIN; 0.08 dropped real corner gussets read a little short).
   line(o) {
     const [u0, u1, v0, v1] = [o.u0, o.u1, o.v0, o.v1];
     if (typeof u0 !== "number" || typeof u1 !== "number" || typeof v0 !== "number" || typeof v1 !== "number") return o;
-    return Math.max(Math.abs(u1 - u0), Math.abs(v1 - v0)) < 0.08 - 1e-9 ? undefined : o;
+    return Math.max(Math.abs(u1 - u0), Math.abs(v1 - v0)) < 0.05 - 1e-9 ? undefined : o;
   },
 };
 // The clean spec, or null: not an object, a key missing, another version, 3+ leaves, too big.

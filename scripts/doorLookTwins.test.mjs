@@ -79,6 +79,9 @@ const HAND = [
   { v: 1, base: "basic", src: { leaves: 1, hinge: "left" }, hinges: { count: 0, type: "tstrap", at: [0.2] } },
   { v: 1, base: "basic", src: { leaves: 1, hinge: "left" }, hinges: { at: [0.2, 0.5], count: 3, finish: "custom" }, handle: { finish: "custom", hex: "abcdef" } },
   { v: 1, base: "basic", src: { leaves: 1, hinge: "left" }, hinges: { finish: "custom", hex: "#00ff00" }, colors: { infill: "#ABCDEF", frame: "Trim", members: "blue" } },
+  // Boards either side of the floor (DOOR_BOARD_MIN): a corner gusset read short (0.059 by 0.044) stays, and one
+  // 0.045 by 0.044 goes. The fuzz below rarely lands between 0.05 and 0.08, so these say it outright.
+  { v: 1, base: "basic", src: { leaves: 1, hinge: "left" }, parts: [{ t: "board", u0: 0.03, v0: 0.94, u1: 0.089, v1: 0.984 }, { t: "board", u0: 0.97, v0: 0.06, u1: 0.925, v1: 0.016 }] },
   { v: 1, base: "basic", src: { leaves: 1, hinge: "left" }, parts: [{ t: "lite", u0: 0.5, v0: 0.5, u1: 0.55, v1: 0.9 }, { t: "board", u0: 0.1, v0: 0.1, u1: 0.12, v1: 0.12 }, null, 7, { t: "wat" }] },
   { v: 1, base: "basic", src: { leaves: 1, hinge: "left" }, parts: Array.from({ length: 20 }, (_, i) => ({ t: "split", v: 0.2 + i * 0.01 })) },
   { v: 2, base: "basic", src: { leaves: 1, hinge: "left" } },
