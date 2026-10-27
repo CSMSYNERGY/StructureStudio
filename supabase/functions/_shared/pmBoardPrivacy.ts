@@ -145,6 +145,17 @@ export async function boardsForAction(
     return { ok: true, boardIds: [...ids] };
   }
 
+  // Moving a card BETWEEN boards names both ends: the board the cards live on (through the
+  // ids) and the board they are headed for. Both have to be open to the caller, or a move
+  // becomes a way to read a private board (send a card in and read it back) or to write
+  // into one (send a card in and leave it there).
+  if (action === "move_plan" || action === "move_to_board") {
+    const rowIds = (Array.isArray(payload?.ids) ? payload.ids : []).map((x: unknown) => s(x)).filter(Boolean);
+    await rowBoard("pm_items", rowIds);
+    add(payload?.toBoardId);
+    return { ok: true, boardIds: [...ids] };
+  }
+
   // move_items: the items being moved AND the group they land in — a cross-board move is
   // refused by the action itself, but the check must not depend on that staying true.
   if (action === "move_items") {
