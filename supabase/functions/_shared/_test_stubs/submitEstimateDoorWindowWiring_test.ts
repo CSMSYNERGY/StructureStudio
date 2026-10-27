@@ -57,8 +57,12 @@ const PAY_START = "ssDoorWindowLines(items, C.fixtures).map((w) => {", PAY_END =
 const LABEL_START = "function getDisplayLabel(", LABEL_END = "// How to name a wall in a sentence";
 // The grid of lites (335): the window's rows x columns, which the payload block resolves per window.
 const LITES_START = "// ── WINDOW LITES (335) ──\n", LITES_END = "// ── END WINDOW LITES ──\n";
+// A door's own look (door looks P2): the window rules measure a look's leaf (ssDoorCustomLookOf and the
+// leaf it draws), so they are lifted with the helpers.
+const LOOKS_START = "// ── DOOR LOOKS: A BUILDER'S OWN 3D DOOR", LOOKS_END = "// ── END DOOR LOOKS ──\n";
 const regions = (src: string, file: string) => ({
   lites: lift(src, file, LITES_START, LITES_END),
+  looks: lift(src, file, LOOKS_START, LOOKS_END),
   help: lift(src, file, HELP_START, HELP_END),
   pay: lift(src, file, PAY_START, PAY_END),
   label: lift(src, file, LABEL_START, LABEL_END),
@@ -68,8 +72,9 @@ Deno.test("the lifted door-window helpers and payload block are byte-identical i
   assertEquals(R_JSX.help, R_CMP.help);
   assertEquals(R_JSX.pay, R_CMP.pay);
   assertEquals(R_JSX.lites, R_CMP.lites);
+  assertEquals(R_JSX.looks, R_CMP.looks);
 });
-const W = new Function(`${R_CMP.lites}\n${R_CMP.help}\n${R_CMP.label}\n; return {
+const W = new Function(`${R_CMP.lites}\n${R_CMP.looks}\n${R_CMP.help}\n${R_CMP.label}\n; return {
   ssDoorWindowCount, ssDoorWindowFit, ssDoorLeafFt, ssDoorWindowLines, doorWindowStamps, ssItemPlacesKey, ssRemoveFromRow,
   ssDoorWindowLookOk, ssDoorPhotoOf, ssLites, ssLitesWords, ssItemLites,
   payload: (items, C, frontWall) => ${R_CMP.pay}\n          }),
@@ -286,6 +291,22 @@ Deno.test("ssDoorWindowCount: one per leaf on the four built looks, only when th
   // The window sits in the UPPER panel: above the mid rail at 42%, below the top rail.
   const r = W.ssDoorWindowFit(single.w, single.h, 18, 24);
   assert(r.y0 > single.h * 0.42 && r.y1 < single.h, JSON.stringify(r));
+});
+
+// A door's own look (door looks P2, get_fixtures' doorLook on the row) is read by the same rule: glass of
+// the look's own in its top panel takes the lite's place, so it is neither drawn nor charged nor placed.
+Deno.test("a door look with glass up top charges no lite; the same row with a plain look or none does", () => {
+  const glassTop = { v: 1, base: "classic", src: { leaves: 1, hinge: "left" }, panels: [{ fill: "x" }, { fill: "lite", rows: 2, cols: 2 }] };
+  const plain = { v: 1, base: "classic", src: { leaves: 1, hinge: "left" } };
+  const withLook = (spec: any) => DESIGNER_FIXTURES.map((f: any) => (f.id === "fx-classic" ? { ...f, doorLook: { id: "look-1", v: 1, spec, thumbUrl: null } } : f));
+  const classic = [ITEMS[0]];
+  assertEquals(classic[0].fixtureItemId, "fx-classic");
+  assertEquals(W.ssDoorWindowLines(classic, DESIGNER_FIXTURES).length, 1, "no look");
+  assertEquals(W.ssDoorWindowLines(classic, withLook(plain)).length, 1, "a look that says nothing takes its base's lite");
+  assertEquals(W.ssDoorWindowLines(classic, withLook(glassTop)).length, 0, "glass of its own up top takes the lite's place");
+  assertEquals(W.ssDoorWindowLines(classic, withLook({ ...glassTop, base: "basic" })).length, 1, "a look whose base is not the row's is ignored");
+  assert(W.ssItemPlacesKey(classic[0], "fx-lite", withLook(plain)), "placed for the size's inclusion with a plain look");
+  assertFalse(W.ssItemPlacesKey(classic[0], "fx-lite", withLook(glassTop)), "and not with glass of its own up top");
 });
 
 Deno.test("the designer's payload: one inDoor window line per drawn leaf, naming its door, at the stamped price", () => {

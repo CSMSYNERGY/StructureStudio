@@ -383,6 +383,11 @@ function cleanObj(node: Extract<DoorFieldNode, { k: "obj" }>, raw: unknown, path
   return Object.keys(ordered).length ? ordered : undefined;
 }
 
+// A board whose ends are closer than this both ways (of the leaf's width across, of its height up) is no
+// board. It was 0.08, which on an 80 in door is 6.4 in up: a real corner gusset read a little short
+// (the first door generated from a photo: 0.06 by 0.04 of the leaf, about 2 by 3.5 in) was dropped.
+export const DOOR_BOARD_MIN = 0.05;
+
 // The rules one key's limits cannot say. Each gets the cleaned object and returns it (changed), or
 // undefined when the object is not a thing that can be drawn.
 const RULES: Record<string, (o: Rec, path: string, cx: CleanCx) => Rec | undefined> = {
@@ -432,11 +437,11 @@ const RULES: Record<string, (o: Rec, path: string, cx: CleanCx) => Rec | undefin
     if (box.u1 - box.u0 < 0.08 - 1e-9 || box.v1 - box.v0 < 0.08 - 1e-9) return undefined;
     return { ...o, ...box };
   },
-  // A board runs between its two ends, which must be apart.
+  // A board runs between its two ends, which must be apart (DOOR_BOARD_MIN one way or the other).
   line(o) {
     const [u0, u1, v0, v1] = [o.u0, o.u1, o.v0, o.v1];
     if (typeof u0 !== "number" || typeof u1 !== "number" || typeof v0 !== "number" || typeof v1 !== "number") return o;
-    return Math.max(Math.abs(u1 - u0), Math.abs(v1 - v0)) < 0.08 - 1e-9 ? undefined : o;
+    return Math.max(Math.abs(u1 - u0), Math.abs(v1 - v0)) < DOOR_BOARD_MIN - 1e-9 ? undefined : o;
   },
 };
 
@@ -475,6 +480,8 @@ export const DOOR_WARNINGS = {
   closeup_hinges: "We didn't get a close look at the hinges. Check the hinge type before you save.",
   closeup_handle: "We didn't get a close look at the handle. Check the handle before you save.",
   closeup_meet: "We didn't get a close look at where the two doors meet. Check how they meet before you save.",
+  hinge_finish_unsure: "We couldn't tell the hinges' colour from the close look. Check their finish before you save.",
+  handle_finish_unsure: "We couldn't tell the handle's colour from the close look. Check its finish before you save.",
 } as const;
 const warn = (code: keyof typeof DOOR_WARNINGS): DoorWarning => ({ code, text: DOOR_WARNINGS[code] });
 const BASE_NAMES: Record<DoorLookBase, string> = {
@@ -565,8 +572,11 @@ function vote<T>(vals: (T | null | undefined)[]): DoorVote<T> {
 // One read of the door, the model's own JSON (section 4's answer shape), to the numbers of a spec in the
 // latch leaf's u, v. Every point is normalised by the size the model ECHOED, because that is the image
 // the points were read off; a read whose echoed size is more than 2% off the photo's own shape read some
-// other image, and is dropped. The photo is straightened to the leaves' outer edges, so a point's x over
-// the width is its fraction across the door and its y the fraction down it.
+// other image, and is dropped. The photo is straightened to the leaves' outer edges, so a point's y over
+// the height is its fraction down the door. Across, the photo also shows a strip ctx.padIn inches wide
+// past each side edge (DOOR_LOOK_V2: the knuckles of butt hinges sit ON the edge, so a photo cut there
+// halves them), so the door runs from padIn to padIn + widthIn of the photo's widthIn + 2 x padIn inches;
+// with padIn 0, a point's x over the width is its fraction across the door.
 //
 // The measure shape (the P4 prompt asks for exactly this; points are [x, y] pixels):
 //   size [w, h]                       the image's size, echoed first
@@ -584,8 +594,26 @@ export const DOOR_SIZE_ASPECT_TOL = 0.02;
 export const DOOR_UNEQUAL_TOL = 0.1; // a meeting line further off centre than this, of the door's width
 const DOOR_RAIL_TOL = 0.04; // one rail; a handle "on the rail"; one split line (the section 9 bar)
 const DOOR_HINGE_TOL = 0.05; // one hinge
+const DOOR_RAIL_BOARD_IN = 3.5; // a frame rail's height when no read measured the frame
 const DOOR_FRAME_BAND = 0.12; // a rail centred this close to the head or sill is the frame's own rail
 const DOOR_MATCH = 0.08; // two boards' ends this close are one board
+// A diagonal in a panel is that panel's Z or X only when it rises at least DOOR_PANEL_DIAG_RISE of the
+// panel's height (rail centre to rail centre) AND runs at least DOOR_PANEL_DIAG_RUN of the panel's
+// opening (its leaf less the two stiles, never under half the leaf). Shorter, it is a board part (a
+// corner gusset). The corpus (2026-10-27): a panel's Z or X rises >= 0.75 and runs >= 0.61 of its leaf;
+// a corner gusset or Classic's octagon brace rises <= 0.22 and runs <= 0.22.
+export const DOOR_PANEL_DIAG_RISE = 0.5;
+export const DOOR_PANEL_DIAG_RUN = 0.4;
+// Two diagonals are one board cut in two (an X's second board is usually butted against the first) when,
+// measured against the board they would join into (their two farthest ends): every end of both lies
+// within a board's width of its line, each runs along it within DOOR_CUT_SIN (the sine of the angle,
+// about 8 degrees), and the gap between them along it is no more than the crossing board's footprint
+// (w / sin 2a for a board at angle a, sin 2a never under DOOR_CUT_SIN2_MIN) plus a board width, and never
+// under two widths. Overlapping pieces have no gap. A board whose width the read did not give counts as
+// DOOR_CUT_W_IN.
+const DOOR_CUT_SIN = 0.14;
+const DOOR_CUT_SIN2_MIN = 0.25;
+const DOOR_CUT_W_IN = 4;
 
 export type DoorHingeSideSource = "hinges" | "brace" | "handle" | "latch" | "default" | "given";
 export type DoorMeasureCtx = {
@@ -593,6 +621,9 @@ export type DoorMeasureCtx = {
   heightIn: number;
   leaves: 1 | 2; // what the builder typed
   photo: XY; // the straightened photo's own size in pixels
+  // Inches of photo past each side edge of the door (the edge strips); 0 or absent: the photo's own side
+  // edges are the leaves'.
+  padIn?: number;
   // The 5 x 5 median at a photo pixel (samplePatch over the decoded photo). Absent: no colour roles.
   colorAt?: (p: XY) => RGB | null;
   // Measure in a frame already decided (Stage B, against the consensus): no side or leaf inference.
@@ -620,6 +651,7 @@ export type DoorReadDraft = {
   parts: DraftPart[];
   colors: { infill?: string; frame?: string; members?: string } | null;
   finish: "black" | "galv" | "bronze" | null;
+  handleFinish: "black" | "galv" | "bronze" | null; // the snap at measure.handle
   stageA: { hingeType: string | null; handleType: string | null; meetType: string | null };
   px: { hinges: XY[]; handle: XY | null }; // photo pixels, where the close-ups are cut
   observed: string[];
@@ -672,8 +704,13 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const size = m.size;
   if (!isXY(size) || size[0] <= 0 || size[1] <= 0) return { ok: false, drop: "no_size" };
   if (Math.abs(size[0] / size[1] / (ctx.photo[0] / ctx.photo[1]) - 1) > DOOR_SIZE_ASPECT_TOL + 1e-9) return { ok: false, drop: "size_aspect" };
-  const fr = (p: XY): XY => [clampTo(p[0] / size[0], 0, 1), clampTo(p[1] / size[1], 0, 1)];
-  const toPhoto = (f: XY): XY => [f[0] * ctx.photo[0], f[1] * ctx.photo[1]];
+  // Image to door fractions, and back to photo pixels. Across, the photo is the door plus a strip of padIn
+  // inches each side: a point in a strip (a butt hinge's knuckle) lands on the door's edge.
+  const pad = Math.max(0, ctx.padIn ?? 0), spanIn = ctx.widthIn + 2 * pad;
+  const rawX = (x: number) => ((x / size[0]) * spanIn - pad) / ctx.widthIn; // under 0 or over 1: in a strip
+  const frX = (x: number) => clampTo(rawX(x), 0, 1);
+  const fr = (p: XY): XY => [frX(p[0]), clampTo(p[1] / size[1], 0, 1)];
+  const toPhoto = (f: XY): XY => [((pad + f[0] * ctx.widthIn) / spanIn) * ctx.photo[0], f[1] * ctx.photo[1]];
   const midX = (l: [XY, XY]) => (fr(l[0])[0] + fr(l[1])[0]) / 2;
   const midY = (l: [XY, XY]) => (fr(l[0])[1] + fr(l[1])[1]) / 2;
   // A width measured across two points, in inches (the door's own scale both ways).
@@ -718,22 +755,55 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const panelAt = (v: number) => effRails.filter((r) => r <= v).length;
 
   // Diagonals. One that crosses a mid rail and runs at least half the leaf's height is a brace across
-  // the whole leaf; the rest belong to the panel their middle is in.
+  // the whole leaf; the rest belong to the panel their middle is in. Whether one of those is the panel's
+  // Z or X or a short corner gusset is decided with the panels, since it needs the stiles' width.
   const braceList = Array.isArray(m.braces) ? m.braces.filter((b): b is Rec => isRec(b) && isXY(b.a) && isXY(b.b)) : null;
-  const braces = (braceList ?? []).map((b) => {
-    const a = fr(b.a as XY), c = fr(b.b as XY);
+  const diagOf = (a: XY, c: XY, wIn: number | null) => {
     const [lo, hi] = a[1] >= c[1] ? [a, c] : [c, a]; // a larger y is lower in the image
-    const vLo = 1 - lo[1], vHi = 1 - hi[1];
+    const vLo = 1 - lo[1], vHi = 1 - hi[1], panel = panelAt((vLo + vHi) / 2);
     return {
+      a,
+      c,
       lo,
       leaf: leafOfX((a[0] + c[0]) / 2),
       span: vHi - vLo >= 0.5 && effRails.some((r) => r > vLo && r < vHi),
-      panel: panelAt((vLo + vHi) / 2),
-      wIn: acrossIn(b.across),
+      panel,
+      rise: (vHi - vLo) / ((effRails[panel] ?? 1) - (effRails[panel - 1] ?? 0) || 1), // of its panel's height
+      runIn: Math.abs(c[0] - a[0]) * ctx.widthIn,
+      wIn,
     };
-  });
+  };
+  const braces = (braceList ?? []).map((b) => diagOf(fr(b.a as XY), fr(b.b as XY), acrossIn(b.across)));
+  // A board cut in two is one diagonal (DOOR_CUT_SIN): join such a pair in one leaf, end to end, and
+  // measure the joined board again. In one panel always; across panels only when the joined board is a
+  // brace across the leaf (an X over the whole leaf, its second board butted at the crossing). Gussets at
+  // opposite corners are parallel but on lines far apart; a Z in each panel is two lines too.
+  const inIn = (p: XY): XY => [p[0] * ctx.widthIn, p[1] * ctx.heightIn];
+  const apartIn = (p: XY, q: XY) => Math.hypot((p[0] - q[0]) * ctx.widthIn, (p[1] - q[1]) * ctx.heightIn);
+  for (let i = 0; i < braces.length; i++) {
+    for (let j = i + 1; j < braces.length; j++) {
+      const p = braces[i], q = braces[j];
+      if (p.span || q.span || p.leaf !== q.leaf) continue;
+      const w = Math.max(p.wIn ?? 0, q.wIn ?? 0) || DOOR_CUT_W_IN;
+      const pairs: [XY, XY][] = [[p.a, p.c], [q.a, q.c], [p.a, q.a], [p.a, q.c], [p.c, q.a], [p.c, q.c]];
+      const [e0, e1] = pairs.reduce((best, e) => (apartIn(e[0], e[1]) > apartIn(best[0], best[1]) ? e : best));
+      const [E0, E1] = [inIn(e0), inIn(e1)], E = [E1[0] - E0[0], E1[1] - E0[1]], L = Math.hypot(E[0], E[1]) || 1;
+      const off = (x: XY) => { const P = inIn(x); return Math.abs(E[0] * (E0[1] - P[1]) - (E0[0] - P[0]) * E[1]) / L; };
+      const along = (x: XY) => { const P = inIn(x); return ((P[0] - E0[0]) * E[0] + (P[1] - E0[1]) * E[1]) / L; };
+      const sinTo = (a: XY, c: XY) => { const [A, C] = [inIn(a), inIn(c)]; return Math.abs((C[0] - A[0]) * E[1] - (C[1] - A[1]) * E[0]) / ((Math.hypot(C[0] - A[0], C[1] - A[1]) || 1) * L); };
+      if ([p.a, p.c, q.a, q.c].some((x) => off(x) > w) || sinTo(p.a, p.c) > DOOR_CUT_SIN || sinTo(q.a, q.c) > DOOR_CUT_SIN) continue;
+      const [p0, p1] = [along(p.a), along(p.c)].sort((x, y) => x - y), [q0, q1] = [along(q.a), along(q.c)].sort((x, y) => x - y);
+      const sin2 = Math.max((2 * Math.abs(E[0] * E[1])) / (L * L), DOOR_CUT_SIN2_MIN);
+      if (Math.max(q0 - p1, p0 - q1, 0) > Math.max(2 * w, w / sin2 + w)) continue;
+      const joined = diagOf(e0, e1, medianOf([p.wIn, q.wIn]));
+      if (p.panel !== q.panel && !joined.span) continue;
+      braces[i] = joined;
+      braces.splice(j, 1);
+      j = i; // the joined board may meet a third piece
+    }
+  }
   const hingeList = Array.isArray(m.hinges) ? m.hinges.filter((h): h is Rec => isRec(h) && isXY(h.pivot)) : [];
-  const pivots = hingeList.map((h) => ({ p: fr(h.pivot as XY), tip: isXY(h.tip) ? fr(h.tip) : null, leaf: 0 as 0 | 1 }));
+  const pivots = hingeList.map((h) => ({ p: fr(h.pivot as XY), tip: isXY(h.tip) ? fr(h.tip) : null, raw: h.pivot as XY, rawTip: isXY(h.tip) ? h.tip : null, leaf: 0 as 0 | 1 }));
   for (const h of pivots) h.leaf = leafOfX(h.p[0]);
   const handle = isXY(m.handle) ? fr(m.handle) : null;
 
@@ -756,8 +826,10 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   };
   const fromOf = (lo: XY, leaf: 0 | 1) => (uOf(lo[0], leaf) < 0.5 ? "hinge" as const : "strike" as const);
 
-  // Frame: each stile's width is its inner edge's distance from its leaf's nearest edge.
-  const stiles = Array.isArray(m.stiles) ? m.stiles.filter((s): s is Rec => isRec(s) && isLine(s.inner)) : [];
+  // Frame: each stile's width is its inner edge's distance from its leaf's nearest edge. An edge read in an
+  // edge strip is on the jamb or casing, not the door: it is no stile (clamped, it would be one 0 in wide).
+  const inStrip = (l: [XY, XY]) => { const x = (rawX(l[0][0]) + rawX(l[1][0])) / 2; return x < 0 || x > 1; };
+  const stiles = Array.isArray(m.stiles) ? m.stiles.filter((s): s is Rec => isRec(s) && isLine(s.inner) && !inStrip(s.inner)) : [];
   const fIn = medianOf(stiles.map((s) => {
     const x = midX(s.inner as [XY, XY]), leaf = leafOfX(x), u = uOf(x, leaf);
     return Math.min(u, 1 - u) * leafWIn(leaf);
@@ -771,7 +843,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     const runs = fieldDir === "h"
       ? [{ at: seams.map((y) => 1 - clampTo(y / size[1], 0, 1)), scale: ctx.heightIn }]
       : ([0, 1] as const).map((leaf) => ({
-        at: seams.map((x) => clampTo(x / size[0], 0, 1)).filter((x) => leafOfX(x) === leaf).map((x) => uOf(x, leaf)),
+        at: seams.map(frX).filter((x) => leafOfX(x) === leaf).map((x) => uOf(x, leaf)),
         scale: leafWIn(leaf),
       }));
     for (const run of runs) {
@@ -794,22 +866,39 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   }
 
   // Panels: the read's own fills, bottom first, fitted to the rails the points found (one more panel
-  // than rails), then the diagonals in each panel overrule a none / z / x fill -- only when the rails
-  // were measured, since they are what says which panel a diagonal is in. Diamond, pickets and the rest
-  // have no point of their own, so the read's word stands.
+  // than rails), then the full diagonals in each panel overrule a none / z / x fill -- only when the
+  // rails were measured, since they are what says which panel a diagonal is in. A short diagonal in such
+  // a panel is a corner gusset and becomes a board part. Diamond, pickets and the rest have no point of
+  // their own, so the read's word stands and its diagonals stay its own (a diamond's octagon braces).
   const said2 = Array.isArray(read.panels) ? read.panels.slice(0, 8).map(panelOfAnswer) : null;
   const nPanels = rails ? rails.length + 1 : said2?.length ? Math.min(said2.length, 4) : 0;
   let panels: DraftPanel[] | null = null;
+  const gussets: typeof braces = [];
   if (nPanels) {
     const src = said2 ?? [];
     // Too many: keep the bottom ones and the top one (the top panel is the one a look is known by).
     const fit = src.length <= nPanels ? src : [...src.slice(0, nPanels - 1), src[src.length - 1]];
     panels = Array.from({ length: nPanels }, (_, i) => (fit[i] ? { ...fit[i] } : { fill: null }));
     if (braceList && rails) {
+      // A panel's diagonal is its Z or X when it rises most of the panel and runs most of the panel's
+      // opening: its leaf less the two stiles, never under half the leaf (a bad stile read cannot shrink
+      // the opening to nothing). The rest are corner gussets.
+      type Diag = (typeof braces)[number];
+      const full = (b: Diag) =>
+        b.rise >= DOOR_PANEL_DIAG_RISE && b.runIn >= DOOR_PANEL_DIAG_RUN * Math.max(leafWIn(b.leaf) - 2 * (fIn ?? 0), leafWIn(b.leaf) / 2);
+      // Which corner of its panel a gusset is at: the hinge or latch half, the top or bottom half.
+      const cornerOf = (b: Diag) =>
+        (uOf((b.a[0] + b.c[0]) / 2, b.leaf) < 0.5 ? 1 : 0) + (1 - (b.a[1] + b.c[1]) / 2 >= ((rails[b.panel - 1] ?? 0) + (rails[b.panel] ?? 1)) / 2 ? 2 : 0);
       panels.forEach((p, i) => {
-        const inside = latchFirst(braces.filter((b) => !b.span && b.panel === i));
-        if (p.fill === null || p.fill === "none" || p.fill === "z" || p.fill === "x") {
+        const own = braces.filter((b) => !b.span && b.panel === i);
+        const decides = p.fill === null || p.fill === "none" || p.fill === "z" || p.fill === "x";
+        const inside = latchFirst(decides ? own.filter(full) : own);
+        if (decides) {
           p.fill = inside.length === 0 ? (p.fill === null ? null : "none") : inside.length === 1 ? "z" : "x";
+          // The latch leaf's own gussets, and the other leaf's only at a corner where the latch leaf has none:
+          // mirrored by fraction, the two leaves' copies of one gusset do not meet when the leaves are unequal.
+          const short = own.filter((b) => !full(b)), mine = short.filter((b) => b.leaf === latchLeaf);
+          gussets.push(...mine, ...short.filter((b) => b.leaf !== latchLeaf && !mine.some((q) => cornerOf(q) === cornerOf(b))));
         }
         if (p.fill === "z" && inside.length === 1) p.zFrom = fromOf(inside[0].lo, inside[0].leaf);
         const w = medianOf(inside.map((b) => b.wIn));
@@ -819,7 +908,10 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   }
 
   // Hinges: positions up the latch leaf, one per hinge (both leaves of a double show the same ones);
-  // the strap's length from pivot to tip on every hinge that shows one.
+  // the strap's length from pivot to tip on every hinge that shows one. The length is taken from the
+  // points as read, since a T-strap's pivot sits on the jamb, in the edge strip, and clamped to the leaf
+  // it would lose that much. A strap only ever reads short (cut off by the photo's edge, hidden,
+  // foreshortened), never long, so the longer half of the straps decides.
   const hingeType = enumIn(isRec(read.hinges) ? read.hinges.type : null, DOOR_HINGE_TYPES);
   let hingeCount: number | null = null, hingeAt: number[] | null = null;
   const ownHinges = latchFirst(pivots);
@@ -827,7 +919,10 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     hingeAt = groups(ownHinges.map((h) => 1 - h.p[1]), (v) => v, DOOR_HINGE_TOL).map(median);
     hingeCount = hingeAt.length;
   } else if (hingeType === "hidden") [hingeCount, hingeAt] = [0, []];
-  const hingeLenIn = medianOf(pivots.map((h) => (h.tip ? Math.hypot((h.tip[0] - h.p[0]) * ctx.widthIn, (h.tip[1] - h.p[1]) * ctx.heightIn) : null)));
+  const strapIn = pivots.flatMap((h) =>
+    h.rawTip ? [Math.hypot((rawX(h.rawTip[0]) - rawX(h.raw[0])) * ctx.widthIn, ((h.rawTip[1] - h.raw[1]) / size[1]) * ctx.heightIn)] : []
+  ).sort((a, b) => a - b);
+  const hingeLenIn = medianOf(strapIn.slice(Math.floor(strapIn.length / 2)));
 
   const handleV = handle ? (effRails.some((r) => Math.abs(1 - handle[1] - r) <= DOOR_RAIL_TOL) ? "rail" : 1 - handle[1]) : null;
 
@@ -861,6 +956,44 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
       placed.push(part);
     }
   }
+  // Where the rails were measured, a part its panel's fill already draws is that fill (fillDraws): an
+  // upright board in a pickets panel is one of its pickets, and in Stage A the one vent near the middle
+  // of a plain panel, sized like the fill's, is that panel's vent (dutch's). Any other vent keeps its own
+  // box, and then a panel the read called "vent" (or a dutch's unsaid one) is plain, or the fill would
+  // draw a second vent over it. (Stage B, measured in ctx.frame, may only add parts, so its vents stay
+  // parts and keepStageBParts judges them against the spec's own fills.)
+  if (panels && rails) {
+    const fills = panels, rs = rails, midV = (p: DraftPart) => ((p.v0 ?? 0) + (p.v1 ?? 0)) / 2;
+    const geom = (leaf: 0 | 1): FillGeom => ({ rails: rs, leafWIn: leafWIn(leaf), heightIn: ctx.heightIn, fIn, railHIn });
+    const ventsIn = (leaf: 0 | 1, i: number) => placed.filter((q) => q.t === "vent" && q.leaf === leaf && panelAt(midV(q)) === i).length;
+    const folded = new Set<number>(), keptVent = new Set<number>();
+    const kept = placed.filter((p) => {
+      const i = panelAt(midV(p)), pn = fills[i];
+      if (!pn) return true;
+      if (p.t === "board") return !fillDraws(p, pn.fill, geom(p.leaf));
+      if (p.t !== "vent" || ctx.frame) return true;
+      const plain = pn.fill === null || pn.fill === "none" || pn.fill === "vent";
+      if (plain && ventsIn(p.leaf, i) === 1 && fillDraws(p, "vent", geom(p.leaf))) {
+        folded.add(i);
+        return false;
+      }
+      if (plain) keptVent.add(i);
+      return true;
+    });
+    placed.splice(0, placed.length, ...kept);
+    for (const i of folded) fills[i].fill = "vent";
+    for (const i of keptVent) {
+      const pn = fills[i];
+      if (!folded.has(i) && (pn.fill === "vent" || (pn.fill === null && DOOR_LOOK_BASE_DEFAULTS[base ?? "plank"].panels[i] === "vent"))) pn.fill = "none";
+    }
+  }
+  // The corner gussets, as the board a read gives one as. After the read's own parts, so a gusset given
+  // both ways is kept once (the read's own copy).
+  for (const b of gussets) {
+    const part: DraftPart & { leaf: 0 | 1 } = { t: "board", u0: uOf(b.a[0], b.leaf), v0: 1 - b.a[1], u1: uOf(b.c[0], b.leaf), v1: 1 - b.c[1], role: "members", leaf: b.leaf };
+    if (b.wIn !== null) part.wIn = b.wIn;
+    placed.push(part);
+  }
   const parts: DraftPart[] = [];
   for (const p of [...placed.filter((q) => q.leaf === latchLeaf), ...placed.filter((q) => q.leaf !== latchLeaf)]) {
     const { leaf: _leaf, ...part } = p;
@@ -876,6 +1009,13 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     if (Object.keys(roles).length) colors = roles;
     const hw = sample("hardware");
     if (hw) finish = snapFinish(hw);
+  }
+  // The handle's own finish, at its own point: colorAt.hardware is a hinge, and a steel door pairs silver
+  // butt hinges with a black handle.
+  let handleFinish: DoorReadDraft["handleFinish"] = null;
+  if (colorAt && handle) {
+    const hc = colorAt(toPhoto(handle));
+    if (hc) handleFinish = snapFinish(hc);
   }
 
   const words = (v: unknown) =>
@@ -900,6 +1040,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     parts,
     colors,
     finish,
+    handleFinish,
     stageA: {
       hingeType,
       handleType: enumIn(isRec(read.handle) ? read.handle.type : null, DOOR_HANDLE_TYPES),
@@ -914,6 +1055,29 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   if (sw) warnings.push(sw);
   if (meetX !== null && Math.abs(meetX - 0.5) > DOOR_UNEQUAL_TOL) warnings.push(warn("unequal_leaves"));
   return { ok: true, draft, warnings };
+}
+
+// Whether a panel with this fill already draws the part p (u, v in its leaf): a board standing upright
+// in a pickets panel is one of its pickets; a vent in a vent panel is that panel's vent when it sits in
+// the middle half of the panel and is about the size and shape the fill draws (P2's ventFill: a third of
+// the opening's width, square, capped at 70% of its height). A louvre, a tall vent or a small one keeps
+// its own box. Inches: the leaf's width, the frame boards' width and the mid rails' height (the frame's
+// own when the read gave none).
+type FillGeom = { rails: number[]; leafWIn: number; heightIn: number; fIn: number | null; railHIn: number | null };
+const DOOR_VENT_FILL_TOL = 1.7; // each side within this factor of the fill's side, either way
+const DOOR_VENT_FILL_ASPECT = 1.4; // long side over short side
+function fillDraws(p: DraftPart, fill: DoorPanelFill | null, g: FillGeom): boolean {
+  const wIn = Math.abs((p.u1 ?? 0) - (p.u0 ?? 0)) * g.leafWIn, hIn = Math.abs((p.v1 ?? 0) - (p.v0 ?? 0)) * g.heightIn;
+  if (p.t === "board") return fill === "pickets" && wIn <= 0.25 * hIn;
+  if (p.t !== "vent" || fill !== "vent") return false;
+  const cu = ((p.u0 ?? 0) + (p.u1 ?? 0)) / 2, cv = ((p.v0 ?? 0) + (p.v1 ?? 0)) / 2;
+  const i = g.rails.filter((r) => r <= cv).length, lo = g.rails[i - 1] ?? 0, hi = g.rails[i] ?? 1, q = (hi - lo) / 4;
+  if (cu < 0.25 || cu > 0.75 || cv < lo + q || cv > hi - q) return false;
+  const f = g.fIn ?? 4, rh = g.railHIn ?? f;
+  const openHIn = (hi - lo) * g.heightIn - (i > 0 ? rh / 2 : f) - (i < g.rails.length ? rh / 2 : f);
+  const side = Math.min(0.3 * (g.leafWIn - 2 * f), 0.7 * openHIn);
+  const [short, long] = wIn < hIn ? [wIn, hIn] : [hIn, wIn];
+  return side > 0 && short >= side / DOOR_VENT_FILL_TOL && long <= side * DOOR_VENT_FILL_TOL && long <= DOOR_VENT_FILL_ASPECT * short;
 }
 
 function panelOfAnswer(v: unknown): DraftPanel {
@@ -979,9 +1143,13 @@ export function colorRolesOf(s: { infill?: RGB | null; frame?: RGB | null; membe
   return out;
 }
 
+// Bronze is a brown, so only a warm patch (red clearly over blue) may snap to it. Black iron in daylight
+// photographs as a neutral grey of 55-85, which is nearer #5A4632 than #23272E; bronze itself is 40 warm.
+export const DOOR_BRONZE_WARMTH = 20;
 export function snapFinish(rgb: RGB): "black" | "galv" | "bronze" {
   const hex = (h: string): RGB => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) as RGB;
-  const all = (["black", "galv", "bronze"] as const).map((f) => ({ f, d: rgbDist(rgb, hex(DOOR_FINISH_HEX[f])) }));
+  const of = rgb[0] - rgb[2] >= DOOR_BRONZE_WARMTH ? (["black", "galv", "bronze"] as const) : (["black", "galv"] as const);
+  const all = of.map((f) => ({ f, d: rgbDist(rgb, hex(DOOR_FINISH_HEX[f])) }));
   return all.sort((a, b) => a.d - b.d)[0].f;
 }
 
@@ -1011,7 +1179,7 @@ export type DoorConsensus = {
   warnings: DoorWarning[];
   // The reads split on these. `rails` is the one the self-check may then change (DOOR_CHECK_ALLOW).
   split: { base: boolean; rails: boolean; hingeCount: boolean };
-  stageA: { hingeType: DoorVote<string>; handleType: DoorVote<string>; meetType: DoorVote<string>; finish: DoorVote<string> };
+  stageA: { hingeType: DoorVote<string>; handleType: DoorVote<string>; meetType: DoorVote<string>; finish: DoorVote<string>; handleFinish: DoorVote<string> };
   // Photo pixels: each hinge pivot (latch leaf), the handle, and the meeting edge at mid-height and at
   // the bottom (doubles). P4 cuts the close-ups here with closeUpWindow; the strips are div 8.
   closeUpAt: { hinges: XY[]; handle: XY | null; meet: XY[] };
@@ -1026,7 +1194,10 @@ export type DoorConsensusResult =
   | DoorConsensus
   | { ok: false; refuse: DoorRefuseCode; leaves?: number }
   | { ok: false; fail: "unparseable"; dropped: { read: number; why: string }[] };
-export type DoorConsensusOpts = { typedLeaves: 1 | 2; photo: XY; quorum?: number };
+// `edge`: the photo's edge strips (DoorMeasureCtx.padIn) and the door's width, for the meeting edge's
+// close-up points in photo pixels; absent, the photo's own side edges are the leaves'.
+// `heightIn`: the door's height, for telling hinges on the frame rails ("rails") from numbered ones.
+export type DoorConsensusOpts = { typedLeaves: 1 | 2; photo: XY; quorum?: number; edge?: { padIn: number; widthIn: number }; heightIn?: number };
 
 const swapFrom = <T extends string | null | undefined>(f: T) => (f === "hinge" ? "strike" : f === "strike" ? "hinge" : f) as T;
 // The same read with the hinge on the other side of a single: u becomes 1 - u.
@@ -1194,15 +1365,30 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
   if (rails) frame.rails = rails;
   if (Object.keys(frame).length) spec.frame = frame;
   const field: Rec = {};
-  const dir = vote(ds.map((d) => d.fieldDir)).value;
+  // A trim look's field is one sheet (the prompt says so): a read that called its grooves vertical boards
+  // read the sheet's grooves, so its "v" counts as grooved.
+  const dir = vote(ds.map((d) => (d.fieldDir === "v" && !DOOR_PLANK_FAMILY.includes(base) ? "grooved" : d.fieldDir))).value;
   if (dir) field.dir = dir;
   if (pitchIn !== null) field.pitchIn = pitchIn;
   if (Object.keys(field).length) spec.field = field;
   if (brace) spec.brace = brace;
   if (panels) spec.panels = panels;
   if (parts.length) spec.parts = parts;
+  // Hinges on the rails: the bottom one on the bottom frame rail, the top one on the top rail and the
+  // rest on the mid rails nearest half way, where P2 draws "rails". Such positions are written as
+  // "rails": as numbers the table holds them inside 0.05-0.95, which draws the end hinges off their rails.
+  const onRails = (at: number[] | null) => {
+    const H = opts.heightIn;
+    if (!H || !at || at.length < 2) return false;
+    const f = (fIn ?? DOOR_RAIL_BOARD_IN) / H, rh = (railHIn ?? fIn ?? DOOR_RAIL_BOARD_IN) / H, slack = DOOR_HINGE_TOL / 2;
+    const s = [...at].sort((a, b) => a - b), inner = s.slice(1, -1);
+    const mids = [...(rails ?? DOOR_LOOK_BASE_DEFAULTS[base].rails)].sort((p, q) => Math.abs(p - 0.5) - Math.abs(q - 0.5));
+    const byMid = mids.slice(0, inner.length).sort((a, b) => a - b);
+    return byMid.length === inner.length && s[0] <= f + slack && s[s.length - 1] >= 1 - f - slack &&
+      inner.every((v, k) => Math.abs(v - byMid[k]) <= rh / 2 + slack);
+  };
   const hinges: Rec = {};
-  if (hingeCount !== null) [hinges.count, hinges.at] = [hingeCount, hingeAt];
+  if (hingeCount !== null) [hinges.count, hinges.at] = [hingeCount, onRails(hingeAt) ? "rails" : hingeAt];
   if (lenIn !== null) hinges.lenIn = lenIn;
   spec.hinges = hinges;
   spec.handle = handleV === null ? {} : { v: handleV };
@@ -1215,6 +1401,8 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
 
   const b = ds[best];
   const [W, H] = opts.photo;
+  const pad = Math.max(0, opts.edge?.padIn ?? 0), spanIn = (opts.edge?.widthIn ?? 1) + 2 * pad;
+  const meetPx = meetX === null ? null : ((pad + meetX * (spanIn - 2 * pad)) / spanIn) * W;
   return {
     ok: true,
     spec,
@@ -1229,8 +1417,9 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
       handleType: vote(ds.map((d) => d.stageA.handleType)),
       meetType: vote(ds.map((d) => d.stageA.meetType)),
       finish: vote(ds.map((d) => d.finish)),
+      handleFinish: vote(ds.map((d) => d.handleFinish)),
     },
-    closeUpAt: { hinges: b.px.hinges, handle: b.px.handle, meet: meetX === null ? [] : [[meetX * W, 0.5 * H], [meetX * W, 0.94 * H]] },
+    closeUpAt: { hinges: b.px.hinges, handle: b.px.handle, meet: meetPx === null ? [] : [[meetPx, 0.5 * H], [meetPx, 0.94 * H]] },
     aligned: ds,
     used: reads.map((x) => x.i),
     dropped,
@@ -1242,7 +1431,13 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
 
 // Stage A end to end: each raw read measured, then merged.
 export function stageADoorLook(raws: unknown[], ctx: DoorMeasureCtx, quorum = 2): DoorConsensusResult {
-  return consensusDoorLooks(raws.map((r) => doorLookFromMeasure(r, ctx)), { typedLeaves: ctx.leaves, photo: ctx.photo, quorum });
+  return consensusDoorLooks(raws.map((r) => doorLookFromMeasure(r, ctx)), {
+    typedLeaves: ctx.leaves,
+    photo: ctx.photo,
+    quorum,
+    edge: { padIn: ctx.padIn ?? 0, widthIn: ctx.widthIn },
+    heightIn: ctx.heightIn,
+  });
 }
 
 // ─── CLOSE-UPS, AND WHAT STANDS IN WHEN ONE IS SKIPPED ────────────────────────────────────────────
@@ -1275,14 +1470,22 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
   if (ht && !ht.unanimous) pushWarning(warnings, warn("hinge_type_split"));
   if (!ht) pushWarning(warnings, warn("closeup_hinges"));
   hinges.type = ht?.value ?? stageAPick(c.stageA.hingeType) ?? doorLookDefault("hinges.type");
-  hinges.finish = decided(ups.hinges, "finish", DOOR_FINISHES.slice(0, 3))?.value ?? snap ?? doorLookDefault("hinges.finish");
+  // A close-up that settled the type but not the finish (split, or left out) also warns: the finish then
+  // falls back to the colour snap, which closeup_hinges would have flagged had the close-up not run.
+  const hf = decided(ups.hinges, "finish", DOOR_FINISHES.slice(0, 3));
+  if (ht && !hf) pushWarning(warnings, warn("hinge_finish_unsure"));
+  hinges.finish = hf?.value ?? snap ?? doorLookDefault("hinges.finish");
   spec.hinges = hinges;
 
   const handle: Rec = isRec(spec.handle) ? spec.handle : {};
   const hd = decided(ups.handle, "type", DOOR_HANDLE_TYPES);
   if (!hd) pushWarning(warnings, warn("closeup_handle"));
   handle.type = hd?.value ?? stageAPick(c.stageA.handleType) ?? doorLookDefault("handle.type");
-  handle.finish = decided(ups.handle, "finish", DOOR_FINISHES.slice(0, 3))?.value ?? snap ?? doorLookDefault("handle.finish");
+  // The handle's own snap before the hinge's: with DOOR_LOOK_V2's strips the hardware point is often a
+  // silver butt-hinge knuckle, beside a black handle.
+  const hdf = decided(ups.handle, "finish", DOOR_FINISHES.slice(0, 3));
+  if (hd && !hdf) pushWarning(warnings, warn("handle_finish_unsure"));
+  handle.finish = hdf?.value ?? stageAPick(c.stageA.handleFinish) ?? snap ?? doorLookDefault("handle.finish");
   spec.handle = handle;
 
   if (c.leaves === 2) {
@@ -1305,20 +1508,33 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
 // ─── STAGE B'S PARTS ──────────────────────────────────────────────────────────────────────────────
 // Stage B is one read, so a part it proposes would skip the 2-of-3 rule. It is kept only when a Stage A
 // read also has it (same type, overlapping as consensus counts it); otherwise it is a warning, not a part.
+// A part the spec's own fill already draws (the vent or pickets Stage A folded into a fill) is neither.
 export function keepStageBParts(c: DoorConsensus, spec: DoorLook, stageB: unknown, ctx: DoorMeasureCtx): { spec: DoorLook; added: number; warnings: DoorWarning[] } {
   const r = doorLookFromMeasure(stageB, { ...ctx, frame: { leaves: c.leaves, side: c.side, meetX: c.meetX } });
   const warnings: DoorWarning[] = [];
   if (!r.ok) return { spec, added: 0, warnings };
   const have = (Array.isArray(spec.parts) ? spec.parts : []) as DraftPart[];
   const next = [...have];
+  const def = DOOR_LOOK_BASE_DEFAULTS[spec.base as DoorLookBase] ?? DOOR_LOOK_BASE_DEFAULTS.plank;
+  const frame = isRec(spec.frame) ? spec.frame : {}, own = Array.isArray(spec.panels) ? spec.panels : [];
+  const rails = Array.isArray(frame.rails) ? frame.rails as number[] : def.rails;
+  const mx = c.meetX ?? 0.5, latchW = c.leaves === 1 ? 1 : c.side === "right" ? 1 - mx : mx;
+  const geom: FillGeom = { rails, leafWIn: latchW * ctx.widthIn, heightIn: ctx.heightIn, fIn: numOf(frame.fIn) ?? null, railHIn: numOf(frame.railHIn) ?? null };
+  const fillAt = (v: number) => {
+    const i = rails.filter((x) => x <= v).length, p = own[i];
+    return (isRec(p) ? enumIn(p.fill, DOOR_PANEL_FILLS) : null) ?? def.panels[i] ?? "none";
+  };
   for (const p of r.draft.parts) {
     if (next.some((q) => samePart(q, p))) continue;
+    if (fillDraws(p, fillAt(((p.v0 ?? 0) + (p.v1 ?? 0)) / 2), geom)) continue;
     if (next.length < 12 && c.aligned.some((d) => d.parts.some((q) => samePart(q, p)))) next.push(p);
     else pushWarning(warnings, stageBWarning(p.t));
   }
   if (next.length === have.length) return { spec, added: 0, warnings };
+  // Counted after cleaning: a part the cleaner drops (too small, say) was not added.
   const clean = cleanDoorLook({ ...spec, parts: next });
-  return clean.ok ? { spec: clean.spec, added: next.length - have.length, warnings } : { spec, added: 0, warnings };
+  const kept = clean.ok && Array.isArray(clean.spec.parts) ? clean.spec.parts.length : 0;
+  return clean.ok && kept > have.length ? { spec: clean.spec, added: kept - have.length, warnings } : { spec, added: 0, warnings };
 }
 
 // ─── THE SELF-CHECK'S RULES ───────────────────────────────────────────────────────────────────────
@@ -1418,6 +1634,7 @@ export function applyDoorCheck(spec: DoorLook, answer: unknown, ctx: DoorCheckCt
     } else if (path === "field.dir") {
       const v = enumIn(to, DOOR_FIELD_DIRS);
       if (!v) reject("bad_value");
+      else if (v === "v" && !family) reject("sheet_field"); // a trim look's field is one sheet, never boards
       else set(sub("field"), "dir", v);
     } else if (path === "frame.rails") {
       if (!ctx.railsSplit) {

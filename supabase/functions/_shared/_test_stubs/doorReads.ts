@@ -123,6 +123,58 @@ export function doubleDoor(o: DoorOpts & { meetIn?: number; oneLite?: boolean } 
   return { read, ctx: { widthIn: W, heightIn: H, leaves: 2, photo: d.size } };
 }
 
+// A 36 x 80 in steel-framed door with no brace, only a short gusset across each of its four outer
+// corners (6 in each way, 2 in wide): 1.5 in stiles, head and sill rails, a 3 in mid rail centred at
+// 40 in (50%), three butt hinges on the LEFT and a lever on the mid rail. The read gives the gussets as
+// diagonals, as board parts with `asParts`, or both ways with `both`. `double` is a 72 in pair of these
+// leaves, each hinged on its own outer jamb with gussets at its own four corners, the handle on the
+// RIGHT leaf just past the meeting line; `meetIn` moves the meeting line (the leaves are then unequal).
+// `observed` and `unexplained` replace the read's own words (a real read lists gussets as unexplained).
+export function gussetDoor(
+  o: { asParts?: boolean; both?: boolean; double?: boolean; meetIn?: number; panels?: unknown[]; observed?: string[]; unexplained?: string[] } = {},
+): { read: Rec; ctx: DoorMeasureCtx } {
+  const W = o.double ? 72 : 36, H = 80, d = inches(W, H), M = o.meetIn ?? 36;
+  const leafX = o.double ? [[0, M], [M, 72]] : [[0, 36]];
+  // Each gusset as [x0, y0, x1, y1] in inches: bottom left, bottom right, top left, top right.
+  const corners = leafX.flatMap(([x0, x1]) => [
+    [x0 + 1.5, 7.5, x0 + 7.5, 1.5],
+    [x1 - 7.5, 1.5, x1 - 1.5, 7.5],
+    [x0 + 1.5, 72.5, x0 + 7.5, 78.5],
+    [x1 - 7.5, 78.5, x1 - 1.5, 72.5],
+  ]);
+  const gusset = ([x0, y0, x1, y1]: number[]) => {
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    return { a: d.p(x0, y0), b: d.p(x1, y1), across: d.line(cx - 1, cy, cx + 1, cy) };
+  };
+  const measure: Rec = {
+    size: d.size,
+    leaves: leafX.map(([x0, x1]) => [d.p(x0, 0), d.p(x1, 0), d.p(x1, H), d.p(x0, H)]),
+    ...(o.double ? { meet: d.line(M, 2, M, 78) } : {}),
+    rails: leafX.flatMap(([x0, x1]) => [d.rail(x0 + 1.5, x1 - 1.5, 0, 1.5), d.rail(x0 + 1.5, x1 - 1.5, 38.5, 41.5), d.rail(x0 + 1.5, x1 - 1.5, 78.5, 80)]),
+    stiles: leafX.flatMap(([x0, x1]) => [{ inner: d.line(x0 + 1.5, 2, x0 + 1.5, 78) }, { inner: d.line(x1 - 1.5, 2, x1 - 1.5, 78) }]),
+    seams: [],
+    braces: o.asParts ? [] : corners.map(gusset),
+    hinges: [10, 40, 70].flatMap((y) => [{ pivot: d.p(0.5, y) }, ...(o.double ? [{ pivot: d.p(71.5, y) }] : [])]),
+    handle: o.double ? d.p(M + 2, 40) : d.p(34, 40),
+    parts: o.asParts || o.both ? corners.map((c) => ({ t: "board", ...gusset(c), role: "members" })) : [],
+  };
+  const read: Rec = {
+    measure,
+    refuse: null,
+    base: "basic",
+    leaves: o.double ? 2 : 1,
+    hingeSide: o.double ? "right" : "left",
+    field: "grooved",
+    brace: "none",
+    panels: o.panels ?? ["none", "none"],
+    hinges: { type: "butt" },
+    handle: { type: "lever" },
+    observed: o.observed ?? ["four short corner gussets"],
+    unexplained: o.unexplained ?? [],
+  };
+  return { read, ctx: { widthIn: W, heightIn: H, leaves: o.double ? 2 : 1, photo: d.size } };
+}
+
 // The same read with every pixel point moved by `f` (a reader's small error), size echo untouched. The
 // seams are x positions alone, so they move as points on the top edge.
 export function nudge(read: Rec, f: (p: XY) => XY): Rec {
@@ -135,4 +187,13 @@ export function nudge(read: Rec, f: (p: XY) => XY): Rec {
     return v;
   };
   return { ...read, measure: walk(read.measure, "measure") };
+}
+
+// The same door read on a photo that shows a strip `padIn` inches wide past each side edge (DOOR_LOOK_V2,
+// the browser's straightened photo): every x moved over by the strip, the image and its echo that much
+// wider, and the ctx saying so.
+export function withStrips(door: { read: Rec; ctx: DoorMeasureCtx }, padIn: number): { read: Rec; ctx: DoorMeasureCtx } {
+  const px = padIn * PX_PER_IN, photo: XY = [door.ctx.photo[0] + 2 * px, door.ctx.photo[1]];
+  const moved = nudge(door.read, (p) => [p[0] + px, p[1]]);
+  return { read: { ...moved, measure: { ...moved.measure as Rec, size: photo } }, ctx: { ...door.ctx, photo, padIn } };
 }
