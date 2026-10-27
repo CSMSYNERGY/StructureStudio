@@ -586,6 +586,12 @@ const DOOR_RAIL_TOL = 0.04; // one rail; a handle "on the rail"; one split line 
 const DOOR_HINGE_TOL = 0.05; // one hinge
 const DOOR_FRAME_BAND = 0.12; // a rail centred this close to the head or sill is the frame's own rail
 const DOOR_MATCH = 0.08; // two boards' ends this close are one board
+// A diagonal in a panel is that panel's Z or X only when it rises at least DOOR_PANEL_DIAG_RISE of the
+// panel's height (rail centre to rail centre) AND runs at least DOOR_PANEL_DIAG_RUN of its leaf's width.
+// Shorter, it is a board part (a corner gusset). The corpus (2026-10-27): a panel's Z or X rises >= 0.75
+// and runs >= 0.61; a corner gusset or Classic's octagon brace rises <= 0.22 and runs <= 0.22.
+export const DOOR_PANEL_DIAG_RISE = 0.5;
+export const DOOR_PANEL_DIAG_RUN = 0.4;
 
 export type DoorHingeSideSource = "hinges" | "brace" | "handle" | "latch" | "default" | "given";
 export type DoorMeasureCtx = {
@@ -718,17 +724,24 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const panelAt = (v: number) => effRails.filter((r) => r <= v).length;
 
   // Diagonals. One that crosses a mid rail and runs at least half the leaf's height is a brace across
-  // the whole leaf; the rest belong to the panel their middle is in.
+  // the whole leaf; the rest belong to the panel their middle is in, and are `full` when they run most
+  // of that panel (DOOR_PANEL_DIAG_RISE and _RUN) -- a short one is a corner gusset.
   const braceList = Array.isArray(m.braces) ? m.braces.filter((b): b is Rec => isRec(b) && isXY(b.a) && isXY(b.b)) : null;
   const braces = (braceList ?? []).map((b) => {
     const a = fr(b.a as XY), c = fr(b.b as XY);
     const [lo, hi] = a[1] >= c[1] ? [a, c] : [c, a]; // a larger y is lower in the image
     const vLo = 1 - lo[1], vHi = 1 - hi[1];
+    const leaf = leafOfX((a[0] + c[0]) / 2), panel = panelAt((vLo + vHi) / 2);
+    const panelH = (effRails[panel] ?? 1) - (effRails[panel - 1] ?? 0);
+    const leafW = leaves === 1 ? 1 : leaf === 0 ? mx : 1 - mx;
     return {
+      a,
+      c,
       lo,
-      leaf: leafOfX((a[0] + c[0]) / 2),
+      leaf,
       span: vHi - vLo >= 0.5 && effRails.some((r) => r > vLo && r < vHi),
-      panel: panelAt((vLo + vHi) / 2),
+      panel,
+      full: vHi - vLo >= DOOR_PANEL_DIAG_RISE * panelH && Math.abs(c[0] - a[0]) >= DOOR_PANEL_DIAG_RUN * leafW,
       wIn: acrossIn(b.across),
     };
   });
@@ -794,12 +807,14 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   }
 
   // Panels: the read's own fills, bottom first, fitted to the rails the points found (one more panel
-  // than rails), then the diagonals in each panel overrule a none / z / x fill -- only when the rails
-  // were measured, since they are what says which panel a diagonal is in. Diamond, pickets and the rest
-  // have no point of their own, so the read's word stands.
+  // than rails), then the full diagonals in each panel overrule a none / z / x fill -- only when the
+  // rails were measured, since they are what says which panel a diagonal is in. A short diagonal in such
+  // a panel is a corner gusset and becomes a board part. Diamond, pickets and the rest have no point of
+  // their own, so the read's word stands and its diagonals stay its own (a diamond's octagon braces).
   const said2 = Array.isArray(read.panels) ? read.panels.slice(0, 8).map(panelOfAnswer) : null;
   const nPanels = rails ? rails.length + 1 : said2?.length ? Math.min(said2.length, 4) : 0;
   let panels: DraftPanel[] | null = null;
+  const gussets: typeof braces = [];
   if (nPanels) {
     const src = said2 ?? [];
     // Too many: keep the bottom ones and the top one (the top panel is the one a look is known by).
@@ -807,9 +822,12 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     panels = Array.from({ length: nPanels }, (_, i) => (fit[i] ? { ...fit[i] } : { fill: null }));
     if (braceList && rails) {
       panels.forEach((p, i) => {
-        const inside = latchFirst(braces.filter((b) => !b.span && b.panel === i));
-        if (p.fill === null || p.fill === "none" || p.fill === "z" || p.fill === "x") {
+        const own = braces.filter((b) => !b.span && b.panel === i);
+        const decides = p.fill === null || p.fill === "none" || p.fill === "z" || p.fill === "x";
+        const inside = latchFirst(decides ? own.filter((b) => b.full) : own);
+        if (decides) {
           p.fill = inside.length === 0 ? (p.fill === null ? null : "none") : inside.length === 1 ? "z" : "x";
+          gussets.push(...own.filter((b) => !b.full));
         }
         if (p.fill === "z" && inside.length === 1) p.zFrom = fromOf(inside[0].lo, inside[0].leaf);
         const w = medianOf(inside.map((b) => b.wIn));
@@ -860,6 +878,13 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
       }
       placed.push(part);
     }
+  }
+  // The corner gussets, as the board a read gives one as. After the read's own parts, so a gusset given
+  // both ways is kept once (the read's own copy).
+  for (const b of gussets) {
+    const part: DraftPart & { leaf: 0 | 1 } = { t: "board", u0: uOf(b.a[0], b.leaf), v0: 1 - b.a[1], u1: uOf(b.c[0], b.leaf), v1: 1 - b.c[1], role: "members", leaf: b.leaf };
+    if (b.wIn !== null) part.wIn = b.wIn;
+    placed.push(part);
   }
   const parts: DraftPart[] = [];
   for (const p of [...placed.filter((q) => q.leaf === latchLeaf), ...placed.filter((q) => q.leaf !== latchLeaf)]) {

@@ -2,10 +2,11 @@
 // One read of a door photo, pixel points to the latch leaf's numbers (doorLook.ts doorLookFromMeasure):
 // the size echo and its 2% drop, points to fractions and inches, leaf assignment by the meeting line and
 // the mirroring, the hinge-side fallback chain with a warning on every guessed side, the points winning
-// over the read's own words, and 3 or more leaves refused rather than clamped.
+// over the read's own words, short corner gussets as board parts, and 3 or more leaves refused rather
+// than clamped.
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { colorRolesOf, type DoorReadDraft, type DoorReadResult, doorLookFromMeasure, samplePatch, snapFinish } from "./doorLook.ts";
-import { doubleDoor, inches, nudge, paintAt, singleDoor } from "./_test_stubs/doorReads.ts";
+import { doubleDoor, gussetDoor, inches, nudge, paintAt, PX_PER_IN, singleDoor } from "./_test_stubs/doorReads.ts";
 
 type Rec = Record<string, unknown>;
 const r2 = (x: number | null) => (x === null ? null : Math.round(x * 100) / 100);
@@ -198,6 +199,94 @@ Deno.test("the points win over the read's own words: rail count, brace, panel br
   // No rail points at all: the read's own panels, at its own count.
   const noRails = draftOf(doorLookFromMeasure({ ...withMeasure(door.read, { rails: undefined }), panels: ["x", "none", "lite"] }, door.ctx));
   assertEquals([noRails.rails, noRails.panels?.map((p) => p.fill)], [null, ["x", "none", "lite"]]);
+});
+
+// ─── Corner gussets ──────────────────────────────────────────────────────────────────────────────
+// Every board part as [u0, v0, u1, v1, wIn, role] to 2 decimals, its ends and the list each in one
+// order (a board is the same board either way round).
+const boards = (d: DoorReadDraft) =>
+  (rnd(d.parts) as Rec[]).filter((p) => p.t === "board").map((p) => {
+    const ends = [[p.u0, p.v0], [p.u1, p.v1]] as number[][];
+    ends.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    return [...ends[0], ...ends[1], p.wIn, p.role];
+  }).sort((a, b) => (a[0] as number) - (b[0] as number) || (a[1] as number) - (b[1] as number));
+// gussetDoor's four, from the hinge side: bottom and top by the hinges, bottom and top by the latch.
+const GUSSETS = [
+  [0.04, 0.09, 0.21, 0.02, 2, "members"],
+  [0.04, 0.91, 0.21, 0.98, 2, "members"],
+  [0.79, 0.02, 0.96, 0.09, 2, "members"],
+  [0.79, 0.98, 0.96, 0.91, 2, "members"],
+];
+const fills = (d: DoorReadDraft) => d.panels?.map((p) => p.fill);
+
+Deno.test("a short diagonal in a panel is a corner gusset: a board part, never the panel's Z or X", () => {
+  const d = draftOf(measure(gussetDoor()));
+  assertEquals(fills(d), ["none", "none"]);
+  assertEquals(d.brace, { t: "none", from: null, wIn: null });
+  assertEquals(boards(d), GUSSETS);
+  // The read calling them an X changes nothing: the points win.
+  assertEquals(fills(draftOf(measure(gussetDoor({ panels: ["x", "x"] })))), ["none", "none"]);
+});
+
+Deno.test("a diamond's corner braces stay its own (its octagon), never board parts", () => {
+  const d = draftOf(measure(gussetDoor({ panels: ["diamond", "none"] })));
+  assertEquals(rnd(d.panels), [{ fill: "diamond", braceWIn: 2 }, { fill: "none" }]);
+  assertEquals(boards(d), [GUSSETS[1], GUSSETS[3]], "only the plain top panel's gussets are parts");
+});
+
+Deno.test("a full diagonal and a gusset in one panel: the panel's Z, and one board part", () => {
+  const door = gussetDoor(), d = inches(36, 80);
+  const [gusset] = (door.read.measure as Rec).braces as Rec[];
+  const read = withMeasure(door.read, { braces: [{ a: d.p(3, 3), b: d.p(33, 37), across: d.line(16, 20, 20, 20) }, gusset] });
+  const r = draftOf(doorLookFromMeasure(read, door.ctx));
+  assertEquals(rnd(r.panels), [{ fill: "z", zFrom: "hinge", braceWIn: 4 }, { fill: "none" }], "the gusset's 2 in is not the Z's width");
+  assertEquals(boards(r), [GUSSETS[0]]);
+});
+
+Deno.test("the gusset line: a diagonal must rise half its panel AND run 0.4 of its leaf; on a double, of its own leaf", () => {
+  // The lower panel here is 40 in high and the leaf 36 in wide: 20 in up and 14.4 in across.
+  const door = gussetDoor(), d = inches(36, 80);
+  const lower = (x0: number, y0: number, x1: number, y1: number) => {
+    const r = draftOf(doorLookFromMeasure(withMeasure(door.read, { braces: [{ a: d.p(x0, y0), b: d.p(x1, y1) }] }), door.ctx));
+    return [r.panels?.[0].fill, r.parts.length];
+  };
+  assertEquals(lower(5, 5, 20, 26), ["z", 0], "21 in up, 15 in across");
+  assertEquals(lower(5, 5, 20, 24), ["none", 1], "19 in up");
+  assertEquals(lower(5, 5, 19, 26), ["none", 1], "14 in across");
+  // A double's leaf is 36 of its 72 in, and its lower panel (mid rail at 55%) 44 in high: 22 in up and
+  // 14.4 in across, though 15 in is far under 0.4 of the whole door.
+  const pair = doubleDoor({ brace: "none" }), p = inches(72, 80);
+  const latch = (x0: number) => {
+    const r = draftOf(doorLookFromMeasure(withMeasure(pair.read, { braces: [{ a: p.p(x0, 6), b: p.p(65, 30) }] }), pair.ctx));
+    return [r.panels?.[0].fill, r.parts.length];
+  };
+  assertEquals(latch(50), ["z", 0], "24 in up, 15 in across");
+  assertEquals(latch(51), ["none", 1], "14 in across");
+});
+
+Deno.test("a gusset given both ways, as a diagonal and as a board, is one part: the read's own board", () => {
+  const both = draftOf(measure(gussetDoor({ both: true })));
+  assertEquals([fills(both), boards(both)], [["none", "none"], GUSSETS]);
+  // The read's own copy is the one kept: widen its boards and the parts follow.
+  const door = gussetDoor({ both: true }), d = inches(36, 80);
+  const own = ((door.read.measure as Rec).parts as Rec[]).map((q) => ({ ...q, across: d.line(0, 40, 2.5, 40) }));
+  assertEquals(boards(draftOf(doorLookFromMeasure(withMeasure(door.read, { parts: own }), door.ctx))).map((b) => b[4]), [2.5, 2.5, 2.5, 2.5]);
+});
+
+Deno.test("diagonals in a pickets or lite panel stay that panel's own: no board parts", () => {
+  const d = draftOf(measure(gussetDoor({ panels: ["pickets", "lite"] })));
+  assertEquals(fills(d), ["pickets", "lite"]);
+  assertEquals(d.parts, []);
+});
+
+Deno.test("a double with gussets on both leaves: the latch leaf's four, the other leaf's copies folded in", () => {
+  const door = gussetDoor({ double: true });
+  const d = draftOf(measure(door));
+  assertEquals([d.leaves, d.side, fills(d)], [2, "right", ["none", "none"]]);
+  assertEquals(boards(d), GUSSETS);
+  // Only the other leaf's gussets read: the same four, mirrored in.
+  const braces = ((door.read.measure as Rec).braces as Rec[]).filter((b) => (b.a as number[])[0] < 36 * PX_PER_IN);
+  assertEquals(boards(draftOf(doorLookFromMeasure(withMeasure(door.read, { braces }), door.ctx))), GUSSETS);
 });
 
 Deno.test("the handle: on the mid rail it is 'rail', off it a height", () => {

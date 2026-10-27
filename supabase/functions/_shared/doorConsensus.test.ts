@@ -1,6 +1,7 @@
 // deno test --allow-read supabase/functions/_shared/doorConsensus.test.ts
 // Three reads to one door (doorLook.ts consensusDoorLooks): medians and majorities, the refusals, the
-// best-agreement base when the reads split, parts kept 2 of 3, the hinge side's best source; then the
+// best-agreement base when the reads split, parts kept 2 of 3 (corner gussets given as diagonals or as
+// boards among them), the hinge side's best source; then the
 // close-ups and what stands in for a skipped one (settleCloseUps), always with a warning; then Stage B's
 // parts, kept only when a Stage A read has them too.
 import { assert, assertEquals } from "jsr:@std/assert@1";
@@ -14,7 +15,7 @@ import {
   settleCloseUps,
   stageADoorLook,
 } from "./doorLook.ts";
-import { doubleDoor, inches, nudge, paintAt, singleDoor } from "./_test_stubs/doorReads.ts";
+import { doubleDoor, gussetDoor, inches, nudge, paintAt, singleDoor } from "./_test_stubs/doorReads.ts";
 
 type Rec = Record<string, unknown>;
 const ok = (...votes: unknown[]) => ({ status: "ok" as const, votes });
@@ -117,6 +118,21 @@ Deno.test("parts: kept when two of the three reads have one, at the median corne
   const two = settled(cons(stageADoorLook([lite, lite, bare], ctx)));
   assertEquals(two.spec.parts, [{ t: "lite", u0: 0.278, v0: 0.65, u1: 0.722, v1: 0.875, rows: 3, cols: 2 }]);
   assertEquals(settled(cons(stageADoorLook([lite, bare, bare], ctx))).spec.parts, undefined);
+});
+
+Deno.test("corner gussets, two reads giving them as diagonals and one as boards: plain panels and the four boards", () => {
+  const door = gussetDoor(), diag = door.read, boards = gussetDoor({ asParts: true }).read;
+  const c = cons(stageADoorLook([diag, nudge(boards, (p) => [p[0] + 3, p[1]]), nudge(diag, (p) => [p[0] - 3, p[1]])], door.ctx));
+  const s = settled(c, { hinges: thrice({ type: "butt", finish: "black" }), handle: thrice({ type: "lever" }) });
+  assertEquals([s.spec.brace, s.spec.panels], [{ t: "none" }, [{ fill: "none" }, { fill: "none" }]]);
+  const board = (u0: number, v0: number, u1: number, v1: number) => ({ t: "board", u0, v0, u1, v1, wIn: 2, role: "members" });
+  assertEquals(s.spec.parts, [
+    board(0.042, 0.094, 0.208, 0.019),
+    board(0.792, 0.019, 0.958, 0.094),
+    board(0.042, 0.906, 0.208, 0.981),
+    board(0.792, 0.981, 0.958, 0.906),
+  ]);
+  assertEquals(s.codes, []);
 });
 
 Deno.test("rails: the count the reads agree on, and a split recorded for the self-check", () => {
