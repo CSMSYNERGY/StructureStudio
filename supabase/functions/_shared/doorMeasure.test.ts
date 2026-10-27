@@ -79,6 +79,17 @@ Deno.test("edge strips: a photo with 2 in past each side edge measures the same 
   assertEquals([numbers(p), p.side, p.meetX, rnd(p.px.hinges)], [SINGLE, "right", 0.5, [[1837.5, 1740], [1837.5, 900], [1837.5, 260]]]);
 });
 
+Deno.test("edge strips: a stile edge read on the jamb (in a strip) is no stile, never a 0 in one", () => {
+  const door = withStrips(singleDoor(), 2), px = 2 * PX_PER_IN;
+  const jamb = { inner: [[px - 15, 5 * PX_PER_IN], [px - 15, 75 * PX_PER_IN]] }; // 0.6 in out, on the jamb
+  const [, right] = (door.read.measure as Rec).stiles as Rec[];
+  assertEquals(draftOf(doorLookFromMeasure(withMeasure(door.read, { stiles: [jamb, right] }), door.ctx)).fIn, 5.5, "the other stile's 5.5 in, not their median with 0");
+  assertEquals(draftOf(doorLookFromMeasure(withMeasure(door.read, { stiles: [jamb] }), door.ctx)).fIn, null, "no stile measured");
+  // With no strips nothing changes: an edge on the photo's own edge is still a 0 in stile, as before.
+  const cut = singleDoor();
+  assertEquals(draftOf(doorLookFromMeasure(withMeasure(cut.read, { stiles: [{ inner: [[0, 125], [0, 1875]] }] }), cut.ctx)).fIn, 0);
+});
+
 Deno.test("the same door hung the other way reads the same: u starts at the hinge", () => {
   const left = draftOf(measure(singleDoor({ lite: true }))), right = draftOf(measure(singleDoor({ lite: true, mirror: true })));
   assertEquals(right.side, "right");

@@ -643,6 +643,7 @@ export type DoorReadDraft = {
   parts: DraftPart[];
   colors: { infill?: string; frame?: string; members?: string } | null;
   finish: "black" | "galv" | "bronze" | null;
+  handleFinish: "black" | "galv" | "bronze" | null; // the snap at measure.handle
   stageA: { hingeType: string | null; handleType: string | null; meetType: string | null };
   px: { hinges: XY[]; handle: XY | null }; // photo pixels, where the close-ups are cut
   observed: string[];
@@ -698,7 +699,8 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   // Image to door fractions, and back to photo pixels. Across, the photo is the door plus a strip of padIn
   // inches each side: a point in a strip (a butt hinge's knuckle) lands on the door's edge.
   const pad = Math.max(0, ctx.padIn ?? 0), spanIn = ctx.widthIn + 2 * pad;
-  const frX = (x: number) => clampTo(((x / size[0]) * spanIn - pad) / ctx.widthIn, 0, 1);
+  const rawX = (x: number) => ((x / size[0]) * spanIn - pad) / ctx.widthIn; // under 0 or over 1: in a strip
+  const frX = (x: number) => clampTo(rawX(x), 0, 1);
   const fr = (p: XY): XY => [frX(p[0]), clampTo(p[1] / size[1], 0, 1)];
   const toPhoto = (f: XY): XY => [((pad + f[0] * ctx.widthIn) / spanIn) * ctx.photo[0], f[1] * ctx.photo[1]];
   const midX = (l: [XY, XY]) => (fr(l[0])[0] + fr(l[1])[0]) / 2;
@@ -816,8 +818,10 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   };
   const fromOf = (lo: XY, leaf: 0 | 1) => (uOf(lo[0], leaf) < 0.5 ? "hinge" as const : "strike" as const);
 
-  // Frame: each stile's width is its inner edge's distance from its leaf's nearest edge.
-  const stiles = Array.isArray(m.stiles) ? m.stiles.filter((s): s is Rec => isRec(s) && isLine(s.inner)) : [];
+  // Frame: each stile's width is its inner edge's distance from its leaf's nearest edge. An edge read in an
+  // edge strip is on the jamb or casing, not the door: it is no stile (clamped, it would be one 0 in wide).
+  const inStrip = (l: [XY, XY]) => { const x = (rawX(l[0][0]) + rawX(l[1][0])) / 2; return x < 0 || x > 1; };
+  const stiles = Array.isArray(m.stiles) ? m.stiles.filter((s): s is Rec => isRec(s) && isLine(s.inner) && !inStrip(s.inner)) : [];
   const fIn = medianOf(stiles.map((s) => {
     const x = midX(s.inner as [XY, XY]), leaf = leafOfX(x), u = uOf(x, leaf);
     return Math.min(u, 1 - u) * leafWIn(leaf);
@@ -961,6 +965,13 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     const hw = sample("hardware");
     if (hw) finish = snapFinish(hw);
   }
+  // The handle's own finish, at its own point: colorAt.hardware is a hinge, and a steel door pairs silver
+  // butt hinges with a black handle.
+  let handleFinish: DoorReadDraft["handleFinish"] = null;
+  if (colorAt && handle) {
+    const hc = colorAt(toPhoto(handle));
+    if (hc) handleFinish = snapFinish(hc);
+  }
 
   const words = (v: unknown) =>
     Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s.trim() !== "").slice(0, 20).map((s) => s.trim().slice(0, 120)) : [];
@@ -984,6 +995,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     parts,
     colors,
     finish,
+    handleFinish,
     stageA: {
       hingeType,
       handleType: enumIn(isRec(read.handle) ? read.handle.type : null, DOOR_HANDLE_TYPES),
@@ -1095,7 +1107,7 @@ export type DoorConsensus = {
   warnings: DoorWarning[];
   // The reads split on these. `rails` is the one the self-check may then change (DOOR_CHECK_ALLOW).
   split: { base: boolean; rails: boolean; hingeCount: boolean };
-  stageA: { hingeType: DoorVote<string>; handleType: DoorVote<string>; meetType: DoorVote<string>; finish: DoorVote<string> };
+  stageA: { hingeType: DoorVote<string>; handleType: DoorVote<string>; meetType: DoorVote<string>; finish: DoorVote<string>; handleFinish: DoorVote<string> };
   // Photo pixels: each hinge pivot (latch leaf), the handle, and the meeting edge at mid-height and at
   // the bottom (doubles). P4 cuts the close-ups here with closeUpWindow; the strips are div 8.
   closeUpAt: { hinges: XY[]; handle: XY | null; meet: XY[] };
@@ -1317,6 +1329,7 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
       handleType: vote(ds.map((d) => d.stageA.handleType)),
       meetType: vote(ds.map((d) => d.stageA.meetType)),
       finish: vote(ds.map((d) => d.finish)),
+      handleFinish: vote(ds.map((d) => d.handleFinish)),
     },
     closeUpAt: { hinges: b.px.hinges, handle: b.px.handle, meet: meetPx === null ? [] : [[meetPx, 0.5 * H], [meetPx, 0.94 * H]] },
     aligned: ds,
@@ -1375,7 +1388,9 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
   const hd = decided(ups.handle, "type", DOOR_HANDLE_TYPES);
   if (!hd) pushWarning(warnings, warn("closeup_handle"));
   handle.type = hd?.value ?? stageAPick(c.stageA.handleType) ?? doorLookDefault("handle.type");
-  handle.finish = decided(ups.handle, "finish", DOOR_FINISHES.slice(0, 3))?.value ?? snap ?? doorLookDefault("handle.finish");
+  // The handle's own snap before the hinge's: with DOOR_LOOK_V2's strips the hardware point is often a
+  // silver butt-hinge knuckle, beside a black handle.
+  handle.finish = decided(ups.handle, "finish", DOOR_FINISHES.slice(0, 3))?.value ?? stageAPick(c.stageA.handleFinish) ?? snap ?? doorLookDefault("handle.finish");
   spec.handle = handle;
 
   if (c.leaves === 2) {
