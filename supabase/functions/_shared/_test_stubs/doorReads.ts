@@ -188,3 +188,12 @@ export function nudge(read: Rec, f: (p: XY) => XY): Rec {
   };
   return { ...read, measure: walk(read.measure, "measure") };
 }
+
+// The same door read on a photo that shows a strip `padIn` inches wide past each side edge (DOOR_LOOK_V2,
+// the browser's straightened photo): every x moved over by the strip, the image and its echo that much
+// wider, and the ctx saying so.
+export function withStrips(door: { read: Rec; ctx: DoorMeasureCtx }, padIn: number): { read: Rec; ctx: DoorMeasureCtx } {
+  const px = padIn * PX_PER_IN, photo: XY = [door.ctx.photo[0] + 2 * px, door.ctx.photo[1]];
+  const moved = nudge(door.read, (p) => [p[0] + px, p[1]]);
+  return { read: { ...moved, measure: { ...moved.measure as Rec, size: photo } }, ctx: { ...door.ctx, photo, padIn } };
+}
