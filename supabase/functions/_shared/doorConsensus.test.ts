@@ -15,7 +15,7 @@ import {
   settleCloseUps,
   stageADoorLook,
 } from "./doorLook.ts";
-import { doubleDoor, gussetDoor, inches, nudge, paintAt, singleDoor } from "./_test_stubs/doorReads.ts";
+import { doubleDoor, gussetDoor, inches, nudge, paintAt, PX_PER_IN, singleDoor } from "./_test_stubs/doorReads.ts";
 
 type Rec = Record<string, unknown>;
 const ok = (...votes: unknown[]) => ({ status: "ok" as const, votes });
@@ -133,6 +133,14 @@ Deno.test("corner gussets, two reads giving them as diagonals and one as boards:
     board(0.792, 0.981, 0.958, 0.906),
   ]);
   assertEquals(s.codes, []);
+});
+
+Deno.test("edge strips: the meeting edge's close-ups are cut at the joint in the photo, past the strip", () => {
+  const door = doubleDoor({ meetIn: 30 }), px = 2 * PX_PER_IN, photo: [number, number] = [door.ctx.photo[0] + 2 * px, door.ctx.photo[1]];
+  const read = withMeasure(nudge(door.read, (p) => [p[0] + px, p[1]]), { size: photo });
+  const c = cons(stageADoorLook([read, read, read], { ...door.ctx, photo, padIn: 2 }));
+  assertEquals(Math.round(c.meetX! * 1000) / 1000, 0.417, "30 of the door's 72 in, not of the photo's 76");
+  assertEquals(c.closeUpAt.meet.map((p) => p.map((v) => Math.round(v * 10) / 10)), [[800, 1000], [800, 1880]], "30 in of 72, 2 in strips: x = 25 px x 32 in");
 });
 
 Deno.test("an X brace whose second board two of three reads give in two pieces: the panel's X, no stray boards", () => {
