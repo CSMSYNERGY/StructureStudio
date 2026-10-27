@@ -226,7 +226,7 @@ const gridName = (look: Look) => (look.liteRows == null ? "Standard window" : `$
  * Offered cladding rows only (a NULL rate is "not offered"); every door and window row; plus "Use the
  * door's photo" (the plan's default). Rows already linked are left alone.
  */
-export async function seedMine(admin: Db, clientId: string): Promise<{ created: number; linked: number } | { dbError: unknown; where: string }> {
+export async function seedMine(admin: Db, clientId: string): Promise<{ created: number; linked: number; skipped: number } | { dbError: unknown; where: string }> {
   const [tpl, ent, sc, fx] = await Promise.all([
     admin.from("library_items").select("id, category, slug, name, look, version, status"),
     admin.from("client_library").select("id, category, name, look").eq("client_id", clientId),
@@ -242,7 +242,7 @@ export async function seedMine(admin: Db, clientId: string): Promise<{ created: 
     templates.find((t) => t.category === cat && lookKey(cleanLook(cat, t.look) ?? {}) === lookKey(look) && t.status === "active")
     ?? templates.find((t) => t.category === cat && lookKey(cleanLook(cat, t.look) ?? {}) === lookKey(look))
     ?? null;
-  let created = 0, linked = 0;
+  let created = 0, linked = 0, skipped = 0;
   // One entry per (category, look, wanted name): an existing one is reused by that exact pair.
   const entryFor = async (cat: Category, look: Look, wantName: string): Promise<string | { dbError: unknown; where: string }> => {
     const same = entries.find((e) => e.category === cat && lookKey(cleanLook(cat, e.look) ?? {}) === lookKey(look)
@@ -266,6 +266,12 @@ export async function seedMine(admin: Db, clientId: string): Promise<{ created: 
     const look = cleanLook("cladding", { profile: r.cladding_id, exposureIn: r.cladding_id === "lap" ? r.exposure_in : undefined });
     if (!look) continue;
     const label = cleanName(r.label_override) ?? tplName("cladding", { profile: r.cladding_id }, String(r.cladding_id));
+    // A cladding entry's NAME is the row's customer-facing label (339 writes it through). If that name is
+    // already taken by an entry of another look (two styles showing one name over two courses), a new
+    // entry would need another name and the customer would see it change. Such a row stays unlinked
+    // (the Cladding page marks it "not in your library"); the builder links it by hand.
+    if (entries.some((e) => e.category === "cladding" && e.name.toLowerCase() === label.toLowerCase()
+      && lookKey(cleanLook("cladding", e.look) ?? {}) !== lookKey(look))) { skipped++; continue; }
     const id = await entryFor("cladding", look, label);
     if (typeof id !== "string") return id;
     const u = await admin.from("style_cladding").update({ client_library_id: id }).eq("client_id", clientId).eq("id", r.id);
@@ -290,7 +296,7 @@ export async function seedMine(admin: Db, clientId: string): Promise<{ created: 
     const id = await entryFor("door", look, tplName("door", look, "Use the door's photo"));
     if (typeof id !== "string") return id;
   }
-  return { created, linked };
+  return { created, linked, skipped };
 }
 
 // ── Request photos ─────────────────────────────────────────────────────────────────────────
@@ -335,7 +341,7 @@ export async function handleLibraryAction(c: LibraryCtx): Promise<Response> {
   if (action === "library_seed_mine") {
     const r = await seedMine(admin, clientId);
     if ("dbError" in r) return failOr(r.dbError, r.where);
-    await audit("portal_library_seed_mine", r.created + r.linked, `created=${r.created} linked=${r.linked}`).catch(() => {});
+    await audit("portal_library_seed_mine", r.created + r.linked, `created=${r.created} linked=${r.linked} skipped=${r.skipped}`).catch(() => {});
     return json({ ok: true, ...r });
   }
 

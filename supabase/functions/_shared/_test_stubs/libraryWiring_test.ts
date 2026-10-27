@@ -263,11 +263,11 @@ Deno.test("seed_mine: what they use today, named as they show it, and twice give
     `door:Use the door's photo:{"doorStyle":"auto"}`,
     'window:6-lite (3 rows of 2):{"liteRows":3,"liteCols":2}',
   ], "offered cladding only (batten has no rate), the label already shown, and the photo door");
-  assertEquals(a.body, { ok: true, created: 5, linked: 4 });
+  assertEquals(a.body, { ok: true, created: 5, linked: 4, skipped: 0 });
   assertEquals(w.tables.style_cladding.find((x) => x.id === U(23))!.client_library_id, null, "a cladding not offered is not linked");
   assertEquals(w.tables.style_cladding.find((x) => x.id === U(24))!.client_library_id, null, "another builder's row is never touched");
   const b = await call({ action: "library_seed_mine" }, w);
-  assertEquals(b.body, { ok: true, created: 0, linked: 0 });
+  assertEquals(b.body, { ok: true, created: 0, linked: 0, skipped: 0 });
   assertEquals(mine(), first, "the same rows");
   scopedToOwn(a.t); scopedToOwn(b.t);
 });
@@ -403,4 +403,17 @@ Deno.test("catalog: libraryBeta and the entries when on; a database without 339 
   const off = await call({ action: "catalog" }, w);
   assertEquals([off.body.libraryBeta, off.body.library], [false, null]);
   assert(!off.t.reads.some((x) => x.table === "client_library"), "the entries are not even read with the flag off");
+});
+
+Deno.test("seed_mine never renames a label: a second course under the same name stays unlinked", async () => {
+  const w = world();
+  // Two styles show the same built-in name, one at the standard course and one at 8 in.
+  w.tables.building_styles.push({ id: U(13), client_id: OWN, label: "Deluxe" });
+  w.tables.style_cladding.push({ id: U(25), client_id: OWN, style_id: U(13), cladding_id: "lap", label_override: null, exposure_in: 8, rate: 0, active: true, client_library_id: null });
+  const r = await call({ action: "library_seed_mine" }, w);
+  assertEquals(r.status, 200);
+  assertEquals(r.body.skipped, 1);
+  const laps = w.tables.client_library.filter((x) => x.client_id === OWN && x.category === "cladding" && x.look.profile === "lap");
+  assertEquals(laps.map((x) => x.name), ['7" LP Lap Siding'], "no renamed second entry");
+  assertEquals(w.tables.style_cladding.find((x) => x.id === U(25))!.client_library_id, null, "that row keeps its label and stays unlinked");
 });
