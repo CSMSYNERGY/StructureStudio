@@ -13078,8 +13078,11 @@ function buildShed3DModel(THREE, p) {
         rows = count === 3 ? [y0 + h * 0.13, byMid.length ? byMid[0] : L.railAt, y1 - h * 0.13]
           : count === 2 ? [y0 + h * 0.18, y1 - h * 0.18] : spread(y0 + h * 0.13, y1 - h * 0.13, count);
       }
-      const cap = top ? tr0 + F / 2 : y1 - plateH;
-      rows = rows.map((cy) => Math.max(y0 + plateH, Math.min(cy, cap))).sort((p, q) => p - q);
+      // Every piece stays on the leaf, whatever height a look gives (0.01-0.99): a butt hinge's plates and a
+      // pintle's pin reach further than a strap's plate.
+      const reachH = type === "butt" ? Math.max(plateH, Math.min(0.16, h * 0.05)) : type === "pintle" ? plateH * 1.2 : plateH;
+      const cap = top ? tr0 + F / 2 : y1 - reachH;
+      rows = rows.map((cy) => Math.max(y0 + reachH, Math.min(cy, cap))).sort((p, q) => p - q);
     }
     rows.forEach((cy) => {
       if (type === "butt") {
