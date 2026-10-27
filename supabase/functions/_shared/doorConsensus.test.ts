@@ -135,6 +135,16 @@ Deno.test("corner gussets, two reads giving them as diagonals and one as boards:
   assertEquals(s.codes, []);
 });
 
+Deno.test("an X brace whose second board two of three reads give in two pieces: the panel's X, no stray boards", () => {
+  const door = singleDoor({ brace: "none", base: "xbrace" }), d = inches(36, 80);
+  const board = (x0: number, y0: number, x1: number, y1: number) => ({ a: d.p(x0, y0), b: d.p(x1, y1), across: d.line(0, 20, 4, 20) });
+  const read = (braces: Rec[]) => ({ ...withMeasure(door.read, { braces }), panels: ["x", "none"] });
+  const cut = read([board(7, 7, 29, 40), board(29, 7, 19.7, 20.9), board(16.3, 26.1, 7, 40)]);
+  const whole = read([board(7, 7, 29, 40), board(29, 7, 7, 40)]);
+  const s = settled(cons(stageADoorLook([cut, nudge(cut, (p) => [p[0] + 3, p[1]]), whole], door.ctx)));
+  assertEquals([s.spec.panels, s.spec.parts], [[{ fill: "x", braceWIn: 4 }, { fill: "none" }], undefined]);
+});
+
 Deno.test("rails: the count the reads agree on, and a split recorded for the self-check", () => {
   const door = singleDoor(), d = inches(36, 80), [a, b, c] = three(door.read);
   const rails = (c.measure as Rec).rails as unknown[];
