@@ -41307,7 +41307,18 @@ export default function StructureStudio({ config: configProp = null, clientId: c
         if (cancelled) return;
         cfgSigRef.current = JSON.stringify(cfg);
         setCfgChanged(false);
-        setState({ status: "ready", config: { ...cfg, clientId, fixtures, rampSettings, windowColors } });
+        // WHICH PAGE this is decides whether money renders (338). get_config's `showPricing` is the
+        // CALLER's answer — true for the builder's own staff and for an operator even where the
+        // tenant hides prices (337) — and this component is the same on both pages, loaded from the
+        // same origin, so a signed-in rep opening the tenant's own public link restored the portal
+        // session and read the staff answer on the page a SHOPPER reads. Carolyn, 2026-10-26: "if
+        // pricing is off, that means no pricing". So the customer-facing page takes the tenant's own
+        // setting, `showPricingPublic`, and nothing else; the portal (embedded) keeps the caller's.
+        // Done here, once, rather than at the ~30 `C.showPricing` reads downstream.
+        const publicCfg = (!embedded && cfg.showPricingPublic != null)
+          ? { ...cfg, showPricing: !!cfg.showPricingPublic }
+          : cfg;
+        setState({ status: "ready", config: { ...publicCfg, clientId, fixtures, rampSettings, windowColors } });
       } catch (e) {
         if (cancelled) return;
         console.warn("Client config fetch error:", e);
