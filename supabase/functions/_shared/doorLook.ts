@@ -383,6 +383,11 @@ function cleanObj(node: Extract<DoorFieldNode, { k: "obj" }>, raw: unknown, path
   return Object.keys(ordered).length ? ordered : undefined;
 }
 
+// A board whose ends are closer than this both ways (of the leaf's width across, of its height up) is no
+// board. It was 0.08, which on an 80 in door is 6.4 in up: a real corner gusset read a little short
+// (the first door generated from a photo: 0.06 by 0.04 of the leaf, about 2 by 3.5 in) was dropped.
+export const DOOR_BOARD_MIN = 0.05;
+
 // The rules one key's limits cannot say. Each gets the cleaned object and returns it (changed), or
 // undefined when the object is not a thing that can be drawn.
 const RULES: Record<string, (o: Rec, path: string, cx: CleanCx) => Rec | undefined> = {
@@ -432,11 +437,11 @@ const RULES: Record<string, (o: Rec, path: string, cx: CleanCx) => Rec | undefin
     if (box.u1 - box.u0 < 0.08 - 1e-9 || box.v1 - box.v0 < 0.08 - 1e-9) return undefined;
     return { ...o, ...box };
   },
-  // A board runs between its two ends, which must be apart.
+  // A board runs between its two ends, which must be apart (DOOR_BOARD_MIN one way or the other).
   line(o) {
     const [u0, u1, v0, v1] = [o.u0, o.u1, o.v0, o.v1];
     if (typeof u0 !== "number" || typeof u1 !== "number" || typeof v0 !== "number" || typeof v1 !== "number") return o;
-    return Math.max(Math.abs(u1 - u0), Math.abs(v1 - v0)) < 0.08 - 1e-9 ? undefined : o;
+    return Math.max(Math.abs(u1 - u0), Math.abs(v1 - v0)) < DOOR_BOARD_MIN - 1e-9 ? undefined : o;
   },
 };
 
