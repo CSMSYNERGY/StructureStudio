@@ -504,7 +504,9 @@ __ssFunctions.invoke = async (name, opts) => {
       // error when a charged draft was lost. So this row is a countable info row under its own code,
       // never a fault on its own: a phone that backgrounds the tab mid-press is not an outage.
       // `status` still tells the two apart (null: broke off; 504: the deadline).
-      const ssDraftDropped = !ssAborted && Boolean(opts && opts.body && opts.body.action === "calibrate_style_ai" && opts.body.stream === true)
+      // A streamed door draft (generate_door_look, door looks from a photo) drops the same two ways and is
+      // picked up the same way (generate_door_look_recover).
+      const ssDraftDropped = !ssAborted && Boolean(opts && opts.body && (opts.body.action === "calibrate_style_ai" || opts.body.action === "generate_door_look") && opts.body.stream === true)
         && ((Boolean(res.error) && st === null && ["SyntaxError", "TypeError"].indexOf(res.error.name || "") !== -1)
           || (!res.error && Boolean(res.data) && res.data.code === "stream_deadline"));
       // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"

@@ -19048,8 +19048,25 @@ async function d3OffscreenShots(p, opts) {
     // that manufactured one would make the eave check answer confidently about our lighting.
     const sun = new THREE.DirectionalLight(0xFFF3E0, 2.6);
     scene.add(sun);
+    // ONE CALLER ASKS FOR SUN SHADOWS: the door preview (ssRenderDoorLookShots). Straight on, a brace
+    // or a rail stands proud of the boards by an inch in the same colour, so only its shadow shows it.
+    // `shadows.r` is the half-size of the shadow camera, which a shot's `sunAt` points at the door.
+    // Every other caller sends none, so the self-check above never sees a shadow we manufactured.
+    if (opts.shadows) {
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      sun.castShadow = true;
+      sun.shadow.mapSize.width = sun.shadow.mapSize.height = 2048;
+      const r = Number(opts.shadows.r) > 0 ? Number(opts.shadows.r) : 20;
+      sun.shadow.camera.left = -r; sun.shadow.camera.right = r;
+      sun.shadow.camera.top = r; sun.shadow.camera.bottom = -r;
+      sun.shadow.camera.near = 0.5; sun.shadow.camera.far = Number(opts.shadows.far) > 0 ? Number(opts.shadows.far) : 400;
+      sun.shadow.bias = -0.0005;
+      sun.shadow.camera.updateProjectionMatrix();
+    }
 
-    const cams = opts.cameras(p) || [];
+    // The built model and THREE ride along for a caller that frames on what was built (the door preview).
+    const cams = opts.cameras(p, model, THREE) || [];
     if (!cams.length) return null;
     const out = [];
     // The fixture-photo wait happens ONCE for the whole set, not once per shot: the textures
@@ -19061,6 +19078,7 @@ async function d3OffscreenShots(p, opts) {
       camera.position.set(c.eye[0], c.eye[1], c.eye[2]);
       camera.lookAt(c.at[0], c.at[1], c.at[2]);
       sun.position.set(c.sun[0], c.sun[1], c.sun[2]);
+      if (c.sunAt) { sun.target.position.set(c.sunAt[0], c.sunAt[1], c.sunAt[2]); sun.target.updateMatrixWorld(); }
       renderer.render(scene, camera);
       // Catalog fixture photos (a door's real photo on its slab) load asynchronously. Reading
       // the canvas before they land ships a building with blank doors, so wait the same
@@ -19070,7 +19088,7 @@ async function d3OffscreenShots(p, opts) {
         await d3WaitFixtureTextures(1500);
         renderer.render(scene, camera);
       }
-      const url = cv.toDataURL("image/jpeg", opts.quality);
+      const url = cv.toDataURL(opts.type || "image/jpeg", opts.quality);
       // A lost context yields "data:," — treat that as no snapshot rather than a broken page.
       if (!url || url.length < 512) return null;
       out.push({ ...c, url, w: W, h: H });
@@ -19525,6 +19543,81 @@ async function renderSelfCheckShots(p, frameMap) {
   if (!cams.length) return null;
   return await d3OffscreenShots(p, { w: SS_SHOT.W, h: SS_SHOT.H, quality: SS_SHOT.Q, cameras: () => cams });
 }
+
+// ─── A DOOR LOOK ON ITS OWN, OFF SCREEN (door looks from a photo, P6, 2026-10-27) ─────────
+// Settings → Options → Doors → Library → "Make it from a photo" shows the builder the 3D door we drafted
+// from their photo before they save it: straight on (beside their straightened photo) and turned 35°
+// each way. The portal has no designer on that page, so it calls this through the loaded module
+// (window.ssRenderDoorLookShots). It draws the door the way every designer draws a row with a look: a
+// made-up catalog row carrying the spec as get_fixtures sends it (doorLook), placed on the south wall of
+// a plain shed, built by buildShed3DModel and shot by d3OffscreenShots. Nothing here is saved.
+//
+// spec: a cleaned door look; widthIn/heightIn: the door's size; doorHex/trimHex: the Door and Door trim
+// picks to show it in (null = the look's own default). Returns [{ view, url, w, h }] for "front",
+// "left35" and "right35" (PNG data URLs, so the front one can be the look's tile), or null.
+const SS_DOOR_PREVIEW_VIEWS = [["front", 0], ["left35", -35], ["right35", 35]];
+async function ssRenderDoorLookShots(o) {
+  const spec = o && o.spec;
+  const widthIn = Number(o && o.widthIn), heightIn = Number(o && o.heightIn);
+  if (!spec || typeof spec !== "object" || !(widthIn > 0) || !(heightIn > 0)) return null;
+  const leaves = spec.src && spec.src.leaves === 2 ? 2 : 1;
+  const op = leaves === 2 ? "double" : spec.src && spec.src.hinge === "right" ? "right" : "left";
+  const bldgW = Math.max(12, Math.ceil(widthIn / 12) + 8), bldgH = 12;
+  const wallHeightFt = Math.max(8, Math.ceil(heightIn / 12) + 2);
+  const g = pageGeom(bldgW, bldgH);
+  const row = {
+    id: "ss-door-preview", category: "door", name: "Door preview", planLabel: "DOOR", widthIn, heightIn, price: 0, sortOrder: 0,
+    doorStyle: spec.base, doorLook: { id: "ss-door-preview", v: 1, spec, thumbUrl: null },
+    colorMode: "paint", hasTrimColor: true, imageUrl: null, opLeft: true, opRight: true, opDouble: true, opSlideUp: false, opDefault: op,
+    swingIn: false, swingOut: true, swingDefault: null, sillIn: null, sillMode: "fixed",
+  };
+  const hex = (v) => (typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v : null);
+  const doorHex = hex(o.doorHex), trimHex = hex(o.trimHex);
+  const item = {
+    id: 1, type: "fixtureDoor", x: g.mgX + (bldgW / 2) * g.scale, y: g.mgY + g.pH, rotation: 0, wall: "south",
+    widthFt: widthIn / 12, heightFt: 0.5, fixtureItemId: row.id, doorName: row.name, planLabel: row.planLabel, price: 0,
+    widthIn, heightIn, swing: "out", operation: op, sillMode: "fixed",
+    colorId: doorHex ? "ss-door-preview-door" : null, colorLabel: doorHex ? "Door" : null, colorHex: doorHex,
+    trimColorId: trimHex ? "ss-door-preview-trim" : null, trimColorLabel: trimHex ? "Trim" : null, trimColorHex: trimHex,
+    doorWindowId: null, doorWindowName: null, doorWindowWidthIn: null, doorWindowHeightIn: null, doorWindowPrice: null, doorWindowAt: null,
+  };
+  const p = {
+    bldgW, bldgH, items: [item], itemTypes: { fixtureDoor: FIXTURE_DOOR_CFG }, frontWall: "south",
+    painted: false, scale: g.scale, mgX: g.mgX, mgY: g.mgY, fixtures: [row], roofType: "Metal", roofColorHex: "#3a3d42",
+    style3d: {
+      roof: { eave: "fascia", type: "gable", pitch: 0.42, overhang: 0.8, ridgeOffset: 0 },
+      colors: { body: hex(o.wallHex) || "#c3c9cd", roof: "#3a3d42", trim: "#f2efe6" },
+      siding: "panel", foundation: "skids", roofMaterial: "metal", wallHeightFt,
+    },
+  };
+  // The canvas matches the door's own shape (plus the casing), so the front shot sits beside the photo.
+  const H = Math.max(240, Math.min(900, Math.round(Number(o.h) || 720)));
+  const W = Math.max(160, Math.min(1200, Math.round((H * (widthIn + 12)) / (heightIn + 8))));
+  const cameras = (_p, model, THREE) => {
+    const grp = model && model.openingsGroup && model.openingsGroup.children.find((c) => c.userData && c.userData.itemId === 1);
+    if (!grp || !THREE) return [];
+    const box = new THREE.Box3().setFromObject(grp);
+    if (box.isEmpty()) return [];
+    const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+    const n = c.z >= 0 ? 1 : -1;  // the south wall's outside
+    const fov = 14, t = Math.tan(((fov / 2) * Math.PI) / 180);
+    const dist = Math.max((s.y * 1.1) / 2 / t, (Math.max(s.x, 0.5) * 1.1) / 2 / (t * (W / H)));
+    // The door takes its OWN shadows here (a brace on its boards); every other path leaves an
+    // opening's receiveShadow as buildShed3DModel set it. This model is the preview's alone.
+    grp.traverse((m) => { if (m.isMesh && !(m.material && m.material.transparent)) m.receiveShadow = true; });
+    // One raking sun for all three shots, high and to the left, so they shade alike.
+    const sun = [c.x - Math.max(s.x, s.y) * 1.2, c.y + Math.max(s.x, s.y) * 1.6, c.z + n * Math.max(s.x, s.y) * 1.4];
+    return SS_DOOR_PREVIEW_VIEWS.map(([view, deg]) => {
+      const a = (deg * Math.PI) / 180;
+      const eye = [c.x + Math.sin(a) * dist, c.y, c.z + n * Math.cos(a) * dist];
+      return { view, fov, far: dist * 10, eye, at: [c.x, c.y, c.z], sun, sunAt: [c.x, c.y, c.z] };
+    });
+  };
+  const r = Math.max(widthIn, heightIn) / 12;
+  const shots = await d3OffscreenShots(p, { w: W, h: H, quality: 0.92, type: "image/png", cameras, shadows: { r, far: r * 12 } });
+  return shots ? shots.map((x) => ({ view: x.view, url: x.url, w: x.w, h: x.h })) : null;
+}
+if (typeof window !== "undefined") window.ssRenderDoorLookShots = ssRenderDoorLookShots;
 
 // Free every geometry/material a buildShed3DModel() group holds — Three.js
 // doesn't GC WebGL resources, and drag-to-move rebuilds the model live.
