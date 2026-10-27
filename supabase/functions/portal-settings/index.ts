@@ -11273,10 +11273,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Migration 266: the builder's Messaging Service while their texting is ON (sms_registrations
   // 'active'), else null. A failed read is null too: the new number stays calling-only, exactly
   // what happened before 266, and texting can be added to it later from the Phone tab.
+  // ⚠️ NEVER FOR A SOLE PROPRIETOR (no-EIN texting, 2026-10-27): Twilio's Sole Proprietor campaign
+  // takes EXACTLY ONE number, and with more than one in the Messaging Service it registers one of
+  // them at random (sole-prop guide §4/§6). So the business's one texting number stays the only
+  // one: every caller (phone_buy_number, phone_number_texting, phone_adopt_number, and the Phone
+  // tab's textingActive) reads null and the extra number stays calling-only.
   const textingServiceSid = async (): Promise<string | null> => {
     const { data, error } = await admin.from("sms_registrations")
-      .select("status, messaging_service_sid").eq("client_id", clientId).maybeSingle();
-    const r = (data ?? null) as { status?: string | null; messaging_service_sid?: string | null } | null;
+      .select("status, messaging_service_sid, brand_tier").eq("client_id", clientId).maybeSingle();
+    const r = (data ?? null) as { status?: string | null; messaging_service_sid?: string | null; brand_tier?: string | null } | null;
+    if (!error && r?.brand_tier === "sole_proprietor") return null;
     return !error && r?.status === "active" && /^MG[0-9a-f]{32}$/i.test(String(r.messaging_service_sid ?? "")) ? String(r.messaging_service_sid) : null;
   };
   // attachToTexting's Twilio and database steps for one number: portal-sms's own helpers, and the
@@ -11319,7 +11325,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   // Workstream 2, phase 6: the texting registration's profile and echo, which phone_trust_profile
   // reads and writes. No SID leaves: `exists` and the echo the operator's form starts from.
-  const REG_PROFILE_COLUMNS = "status, customer_profile_sid, twilio_account_sid, legal_business_name, ein_last4, rep_email_domain, website_url";
+  // brand_tier (no-EIN texting, 2026-10-27): runTrustProfile refuses a sole proprietor's row, whose
+  // customer_profile_sid is a STARTER profile it must neither finish nor overwrite (phoneTrust.ts 1b).
+  const REG_PROFILE_COLUMNS = "status, customer_profile_sid, twilio_account_sid, legal_business_name, ein_last4, rep_email_domain, website_url, brand_tier";
   const registrationRow = async (): Promise<{ row: RegistrationRow; error: unknown }> => {
     const { data, error } = await admin.from("sms_registrations").select(REG_PROFILE_COLUMNS).eq("client_id", clientId).maybeSingle();
     return { row: (data ?? null) as RegistrationRow, error };
@@ -12540,8 +12548,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes.res;
 
+    // brand_tier (no-EIN texting): a sole proprietor's profile is a Starter one, which cannot back
+    // caller ID; chooseTrustProfile refuses it with its own code (phoneTrust.ts trustProfileFor).
     const { data: reg, error: regErr } = await admin.from("sms_registrations")
-      .select("customer_profile_sid").eq("client_id", clientId).maybeSingle();
+      .select("customer_profile_sid, brand_tier").eq("client_id", clientId).maybeSingle();
     if (regErr) return dbFail(req, clientId, "load your texting registration", regErr);
     let internal = false;
     try { internal = await isInternalTenant(admin, clientId); } catch (e) {
@@ -12555,6 +12565,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       secondaryProfileSid: (reg as { customer_profile_sid?: string | null } | null)?.customer_profile_sid ?? null,
       internal,
       primaryProfileSid,
+      brandTier: (reg as { brand_tier?: string | null } | null)?.brand_tier ?? null,
       numberSid: sidRes.sid,
     }, { numberOnProfile: (p, num) => numberOnProfile(p, num, trustHubHttp(creds)) });
     if (!prof.ok) {

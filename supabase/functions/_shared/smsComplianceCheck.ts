@@ -76,6 +76,9 @@ export type Declared = {
   consentCompanyName: string;    // client_configs.company_name — the name in the consent box
   messageSamples: string[];
   hasEmbeddedLinks: boolean;
+  /** sms_registrations.brand_tier. Optional, and anything but "sole_proprietor" (absent included)
+   *  is the behaviour every caller had before 2026-10-27. See the name row below for what it skips. */
+  brandTier?: string | null;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -748,10 +751,19 @@ export function consistencyChecks(d: Declared): Check[] {
   // Structure Studio Suite" is one business, correctly registered, and MUST pass — warning at
   // it would send a builder off to "fix" something that is already right. `nameTokens` splits
   // on dba for exactly this pair.
+  //
+  // ⚠️ NOT ASKED OF A SOLE PROPRIETOR (2026-10-27). Without an EIN the name Twilio registers is the
+  // PERSON's own first and last name (twilioTrustHub.ts soleProprietorBrandName: error 30914 refuses
+  // anything else), so "Pat Example" against "Example Sheds" sharing no word is the registration
+  // being right, not a mismatch. Warning there would send the builder to "fix" their own legal name
+  // into a business name, which is the rejection. The row is left out rather than passed: there is
+  // nothing to compare. The example-message row below still asks for the name customers see.
   const consentToks = significantTokens(d.consentCompanyName);
   const legalToks = new Set(significantTokens(d.legalBusinessName));
   const sharedWord = consentToks.find((w) => legalToks.has(w)) ?? null;
-  if (!consentToks.length || !legalToks.size) {
+  if (d.brandTier === "sole_proprietor") {
+    // Skipped: see above.
+  } else if (!consentToks.length || !legalToks.size) {
     rows.push(row(
       "match.business_name", "consistency", "Business name matches the name on the tick box",
       "warn",

@@ -3,6 +3,13 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { normalizeBrandStatus, normalizeCampaignStatus } from "../_shared/twilioTrustHub.ts";
+// No-EIN texting (2026-10-27): a sole proprietor's brand is ready for its campaign only once the
+// owner has replied YES to Twilio's text, not at APPROVED. One rule, shared with portal-sms's poll.
+import { brandReadyForCampaign } from "../_shared/twilioTrustHub.ts";
+// ...and the sole proprietor's plain notes, shared with portal-sms (which reaches them through its
+// soleProp.ts): the code sentences for a refused brand, the event's errors in the portal's shape,
+// and which notes a promotion clears. Used ONLY for a row whose brand_tier is "sole_proprietor".
+import { brandEventErrors, clearSoleProprietorStepNote, soleProprietorBrandNote } from "../_shared/smsSoleProprietorNotes.ts";
 import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget, numberVerdictEffect } from "../_shared/twilioEventKey.ts";
 // Workstream 2, phase 4: whose Twilio account an event came from (only while TWILIO_SUBACCOUNTS is "on").
 import { eventAccountSid, eventAccountVerdict, subaccountsOn } from "../_shared/twilioAccount.ts";
@@ -119,6 +126,28 @@ Deno.serve(withErrorLog("twilio-events", async (req: Request) => {
   }
   return ok({ ok: true, received: events.length });
 }));
+
+/**
+ * A sole proprietor's brand failure that is OLDER than their last Resubmit (2026-10-27 review).
+ * The failure event can arrive late (Event Streams retries a 5xx) after the poll already saw
+ * FAILED and the builder fixed their details and pressed Resubmit. Applied then, it put the row
+ * back to brand_failed with the first attempt's errors while Twilio was reviewing the second,
+ * and the next Resubmit spent another of the three free brand updates. The resubmit is the
+ * `brand_resubmitted` row portal-sms's brand_failed stage writes; the comparison is the
+ * campaign's own (_shared/twilioEventKey.ts, the event's timestamp against it, with its margin).
+ * A read that fails reads as NOT stale, so the event is applied as it would have been before.
+ */
+// deno-lint-ignore no-explicit-any
+async function soleBrandFailureIsStale(admin: any, clientId: unknown, d: Record<string, unknown>): Promise<boolean> {
+  try {
+    const { data } = await admin.from("sms_registration_events").select("created_at")
+      .eq("client_id", clientId).eq("event_type", "brand_resubmitted")
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    return !!data && campaignVerdictPredatesResubmit(d, data.created_at);
+  } catch {
+    return false;
+  }
+}
 
 // deno-lint-ignore no-explicit-any
 async function processEvents(admin: any, events: any[]): Promise<void> {
@@ -322,25 +351,74 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     // ⚠️ Event statuses are lowercase and DISJOINT from the REST enum ("registered",
     // "vetting_failed"). Normalising here is what stops one column meaning two things
     // depending on which code path wrote it last.
+    //
+    // ⚠️ "APPROVED" IS NOT "READY" FOR A SOLE PROPRIETOR (2026-10-27). Twilio approves a
+    // SOLE_PROPRIETOR brand and THEN texts the owner's mobile asking them to reply YES; the brand
+    // stays APPROVED while identity goes UNVERIFIED → VERIFIED, and the campaign must wait for
+    // VERIFIED (sole-prop guide §3). The brand-unverified event arrives as brandstatus
+    // "registered" + identitystatus "unverified", which normalises to APPROVED, so promoting on
+    // APPROVED alone showed the builder "write your campaign" before they had replied, and the
+    // next press built a campaign on an unverified brand. brandReadyForCampaign is the one rule
+    // (portal-sms's poll asks the same): every other tier is ready at APPROVED, exactly as before.
+    // The identity this event carries counts first, else the one already on the row.
     const brandStatusRaw = String(d.brandstatus ?? d.brandStatus ?? "");
+    const identityRaw = String(d.identitystatus ?? d.identityStatus ?? "");
+    const identityNow = identityRaw ? identityRaw.toUpperCase() : (reg.brand_identity_status ?? null);
+    // ⚠️ Everything below that reads `soleProp` is the no-EIN route's and nothing else's. For every
+    // other tier this block does exactly what it did before 2026-10-27, statement for statement.
+    const soleProp = reg.brand_tier === "sole_proprietor";
     if (brandStatusRaw) {
       const s = normalizeBrandStatus(brandStatusRaw);
       patch.brand_status = s;
-      if (s === "APPROVED" && reg.status === "brand_pending") {
+      if (reg.status === "brand_pending" && brandReadyForCampaign(reg.brand_tier, s, identityNow)) {
         patch.status = "brand_approved";
         patch.next_poll_at = new Date(Date.now() + 60_000).toISOString();
+        // The YES landed: a sole proprietor's "still waiting for your YES" note (or another step
+        // note, _shared/smsSoleProprietorNotes.ts SOLE_PROP_STEP_NOTES) is untrue now. Only those;
+        // the row was read with select("*"), so attention_note is the one on the row.
+        if (soleProp) Object.assign(patch, clearSoleProprietorStepNote(reg.attention_note));
       }
-      if (s === "FAILED" || s === "SUSPENDED") {
+      // ⚠️ "registration_failed" IS THE BRAND-FAILURE EVENT'S OWN STATUS (Twilio's
+      // A2P.BrandRegistrationFailure schema, read 2026-10-27), and normalizeBrandStatus passes it
+      // through as REGISTRATION_FAILED, not FAILED. For a sole proprietor it counts as the failure
+      // it is, so the event path can carry the plain sentence for its code (30701, 30793, 30791)
+      // instead of leaving the row at brand_pending until a poll happens to run. The EIN tiers'
+      // test is left exactly as it was: changing what fails THEIR brand is not this change's call.
+      // A sole proprietor's failure that predates their last Resubmit is recorded and ignored
+      // (soleBrandFailureIsStale); the row keeps the resubmitted attempt's brand_status too.
+      const staleSoleFailure = soleProp && (s === "FAILED" || s === "SUSPENDED" || s === "REGISTRATION_FAILED")
+        && await soleBrandFailureIsStale(admin, reg.client_id, d);
+      if (staleSoleFailure) delete patch.brand_status;
+      if (!staleSoleFailure && (s === "FAILED" || s === "SUSPENDED" || (soleProp && s === "REGISTRATION_FAILED"))) {
         patch.status = "brand_failed";
         patch.next_poll_at = null;
         patch.needs_attention = true;
         patch.attention_note = s === "SUSPENDED"
           ? "The carriers suspended this brand. Only Twilio support can lift it."
           : "The carriers rejected this registration.";
+        if (soleProp) {
+          // A sole proprietor's refusal by event: the event's brandregistrationerrors[] stored the
+          // way the poll stores Twilio's REST errors ({error_code, description, fields}, which is
+          // what the portal reads), and the code's plain sentence portal-sms's poll would have
+          // written, the sentence above when no code has one. An event with no list leaves
+          // last_errors alone. Before 2026-10-27 the list was dropped and every refusal read
+          // "The carriers rejected this registration." with nothing to say which detail to fix.
+          const errs = brandEventErrors(d.brandregistrationerrors ?? d.brandRegistrationErrors);
+          if (errs) patch.last_errors = errs;
+          if (s !== "SUSPENDED") patch.attention_note = soleProprietorBrandNote(errs, String(patch.attention_note));
+        }
       }
       handled = true;
+    } else if (identityRaw && reg.brand_tier === "sole_proprietor" && reg.status === "brand_pending"
+      && brandReadyForCampaign(reg.brand_tier, reg.brand_status, identityNow)) {
+      // An identity-only event (no brandstatus in it) for a sole proprietor whose brand is already
+      // APPROVED on the row: the YES has landed, so it is ready now. Sole proprietor only, so an
+      // event like this on any other tier is recorded exactly as before. Its step notes go too.
+      patch.status = "brand_approved";
+      patch.next_poll_at = new Date(Date.now() + 60_000).toISOString();
+      Object.assign(patch, clearSoleProprietorStepNote(reg.attention_note));
+      handled = true;
     }
-    const identityRaw = String(d.identitystatus ?? d.identityStatus ?? "");
     if (identityRaw) patch.brand_identity_status = identityRaw.toUpperCase();
 
     const campaignRaw = String(d.campaignregistrationstatus ?? d.campaignStatus ?? "");
