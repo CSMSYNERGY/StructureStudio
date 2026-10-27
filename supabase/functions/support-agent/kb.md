@@ -118,7 +118,7 @@ Access areas (what each switch on the Team page covers):
 - **Repairs** (workspace): Service jobs and history
 - **Commissions** (workspace): Payouts — 'Own only' hides everyone else's
 - **Reports** (workspace): Sales, leads, revenue
-- **Meetings** (workspace): Booking pages and meetings — 'Own' is just this person's own calendar; 'Team' adds everyone's; Edit also changes the meeting types
+- **Meetings** (workspace): Booking pages and meetings — 'Own' is just this person's own calendar; 'View' also sees the whole team and books with anyone; 'Edit' also changes the meeting types, the booking pages and other people's hours
 - **Phone** (workspace): My Synergy Phone calls and voicemail — 'Own calls' is just their own; 'Team calls' adds the whole team's and the Calls report; Edit also changes phone settings
 - **Sheds** (Settings): Styles, sizes, base prices
 - **Options & Colors** (Settings): Doors, windows, ramps, palettes
