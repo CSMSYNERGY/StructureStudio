@@ -34,7 +34,7 @@ import {
 } from "./doorGenerate.ts";
 import { DOOR_CLOSEUP_LABELS, doorCloseUpPrompt, doorStageAPrompt, doorStageBPrompt } from "./doorLookPrompt.ts";
 import type { DoorLook, DoorMeasureCtx } from "./doorLook.ts";
-import { doubleDoor, inches, singleDoor } from "./_test_stubs/doorReads.ts";
+import { doubleDoor, gussetDoor, inches, singleDoor } from "./_test_stubs/doorReads.ts";
 import { fakeModel, pngHead, type Script } from "./_test_stubs/doorModel.ts";
 
 type Rec = Record<string, unknown>;
@@ -329,6 +329,18 @@ Deno.test("doorDraftFromReads: the press's own maths over saved answers, close-u
   const refused = doorDraftFromReads([{ refuse: "open" }, { refuse: "open" }, read], ctx);
   assertEquals([refused.outcome, refused.refuse?.code, refused.refuse?.reason], ["refused", "ai_door_refused", "open"]);
   assertEquals(doorDraftFromReads(["junk", "junk"], ctx).error, "ai_door_unparseable");
+});
+
+Deno.test("doorDraftFromReads: short corner gussets are drawn as four board parts, never as an X in each panel", () => {
+  // As the first door generated from a photo was read (2026-10-27): two reads gave the gussets as
+  // diagonals, one as boards.
+  const { read, ctx } = gussetDoor();
+  const r = doorDraftFromReads([read, gussetDoor({ asParts: true }).read, read], ctx);
+  assertEquals(r.outcome, "draft");
+  const spec = r.spec as Rec;
+  assertEquals([spec.brace, spec.panels], [{ t: "none" }, [{ fill: "none" }, { fill: "none" }]]);
+  const parts = spec.parts as Rec[];
+  assertEquals(parts.map((p) => [p.t, p.role, p.wIn]), Array(4).fill(["board", "members", 2]));
 });
 
 // ─── THE LEDGER ROW, AND RECOVER ──────────────────────────────────────────────────────────────────
