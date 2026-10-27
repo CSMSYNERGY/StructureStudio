@@ -10,9 +10,13 @@
 //        node scripts/doorLookLocal.mjs prepare --photo <file> --width <in> --height <in> --leaves 1|2 --out <dir>
 //             [--quad x,y,x,y,x,y,x,y]    the leaves' four outer corners in the photo, top-left, top-right,
 //                                         bottom-right, bottom-left (inside the casing, the bottom ones on
-//                                         the threshold): the photo is straightened to them, its shape the
-//                                         typed width over height. Without it the photo is taken as already
+//                                         the threshold): the photo is straightened to them, with a strip of
+//                                         --pad inches past each side edge (DOOR_LOOK_V2: a butt hinge's
+//                                         knuckle sits ON the edge), its shape the typed width plus the
+//                                         strips over the height. Without it the photo is taken as already
 //                                         straightened, and only shrunk.
+//             [--pad <in>]                the strips: DOOR_EDGE_PAD_IN with a quad, 0 without (a photo you
+//                                         straightened yourself says here how far it shows past the edges)
 //             [--hinge <file>] [--handle <file>] [--meet <file>]   the builder's own close-ups
 //
 //   2. settle: the answers through the REAL server maths (_shared/doorGenerate.ts doorDraftFromReads:
@@ -36,7 +40,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { doorFitSize, doorRequestBody, doorStageAPrompt, doorStageBPrompt, DOOR_LOOK_PROMPT_ID } from "../supabase/functions/_shared/doorLookPrompt.ts";
+import { DOOR_EDGE_PAD_IN, doorEdgePadPx, doorFitSize, doorRequestBody, doorStageAPrompt, doorStageBPrompt, DOOR_LOOK_PROMPT_ID } from "../supabase/functions/_shared/doorLookPrompt.ts";
 import { DOOR_READ_MAX_TOKENS, DOOR_READS, doorDraftFromReads } from "../supabase/functions/_shared/doorGenerate.ts";
 import { samplePatch } from "../supabase/functions/_shared/doorLook.ts";
 import { AI_MODEL_V2 } from "../supabase/functions/_shared/styleD3.ts";
@@ -78,7 +82,8 @@ const outside = (p, what) => {
 };
 
 // ─── THE IMAGE WORK, IN HEADLESS CHROMIUM ─────────────────────────────────────────────────────────
-// size(file) -> [w, h]; render({file, quad?, out}) -> JPEG bytes at exactly `out`; pixels(file) ->
+// size(file) -> [w, h]; render({file, quad?, out, padPx?}) -> JPEG bytes at exactly `out`, the quad
+// warped to the box `padPx` in from each side (the edge strips show what is past it); pixels(file) ->
 // {w, h, rgba}; crop({file, windows, zoom}) -> base64 JPEGs. One browser for the whole run; close() it.
 const MIME = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp" };
 const dataUrl = (file) => `data:${MIME[(file.match(/\.[a-z]+$/i)?.[0] ?? "").toLowerCase()] ?? "image/jpeg"};base64,${readFileSync(file).toString("base64")}`;
@@ -97,8 +102,8 @@ export async function playwrightImageOps() {
         return [img.naturalWidth, img.naturalHeight];
       }, [dataUrl(file), load]);
     },
-    async render({ file, quad = null, out }) {
-      const b64 = await page.evaluate(async ([src, l, quad, out]) => {
+    async render({ file, quad = null, out, padPx = 0 }) {
+      const b64 = await page.evaluate(async ([src, l, quad, out, padPx]) => {
         const img = await (0, eval)(l)(src);
         const [W, H] = out;
         const canvas = document.createElement("canvas");
@@ -121,8 +126,9 @@ export async function playwrightImageOps() {
           sctx.drawImage(img, 0, 0, sw, sh);
           const src = sctx.getImageData(0, 0, sw, sh).data;
           const q = quad.map(([x, y]) => [x * k, y * k]);
-          // The homography from the output rectangle to the quad: 8 unknowns, Gaussian elimination.
-          const dst = [[0, 0], [W, 0], [W, H], [0, H]];
+          // The homography from the output's door box (padPx in from each side) to the quad: 8 unknowns,
+          // Gaussian elimination. The strips outside the box are the same warp carried on past the corners.
+          const dst = [[padPx, 0], [W - padPx, 0], [W - padPx, H], [padPx, H]];
           const A = [];
           for (let i = 0; i < 4; i++) {
             const [x, y] = dst[i], [u, v] = q[i];
@@ -146,6 +152,13 @@ export async function playwrightImageOps() {
             for (let X = 0; X < W; X++) {
               const x = X + 0.5, y = Y + 0.5, d = h[6] * x + h[7] * y + 1;
               const sx = (h[0] * x + h[1] * y + h[2]) / d - 0.5, sy = (h[3] * x + h[4] * y + h[5]) / d - 0.5;
+              if (sx < -0.5 || sy < -0.5 || sx > sw - 0.5 || sy > sh - 0.5) {
+                // A strip reaching past the photo itself: plain grey, never the edge pixels smeared.
+                const at = (Y * W + X) * 4;
+                o[at] = o[at + 1] = o[at + 2] = 128;
+                o[at + 3] = 255;
+                continue;
+              }
               const x0 = Math.max(0, Math.min(sw - 1, Math.floor(sx))), y0 = Math.max(0, Math.min(sh - 1, Math.floor(sy)));
               const x1 = Math.min(sw - 1, x0 + 1), y1 = Math.min(sh - 1, y0 + 1);
               const fx = Math.max(0, Math.min(1, sx - x0)), fy = Math.max(0, Math.min(1, sy - y0));
@@ -161,7 +174,7 @@ export async function playwrightImageOps() {
           ctx.putImageData(outImg, 0, 0);
         }
         return canvas.toDataURL("image/jpeg", 0.92).split(",")[1];
-      }, [dataUrl(file), load, quad, out]);
+      }, [dataUrl(file), load, quad, out, padPx]);
       return Buffer.from(b64, "base64");
     },
     async pixels(file) {
@@ -200,16 +213,17 @@ export async function playwrightImageOps() {
 }
 
 // ─── PREPARE ──────────────────────────────────────────────────────────────────────────────────────
-// The straightened photo's own size: the typed shape at the largest size inside the limits that the
-// quad's own pixels can fill (never enlarged), or the photo's own shape, shrunk to fit.
-export function preparedSize({ src, quad, widthIn, heightIn }) {
+// The straightened photo's own size: the typed shape plus `padIn` each side, at the largest size inside
+// the limits that the quad's own pixels can fill (never enlarged), or the photo's own shape, shrunk to fit.
+export function preparedSize({ src, quad, widthIn, heightIn, padIn = 0 }) {
   if (!quad) return doorFitSize(src);
   const len = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
   const w = Math.max(len(quad[0], quad[1]), len(quad[3], quad[2])), h = Math.max(len(quad[0], quad[3]), len(quad[1], quad[2]));
-  const aspect = widthIn / heightIn;
-  // The quad's pixels at the typed shape: its height, or its width, whichever runs out first.
+  const aspect = widthIn / heightIn, span = (widthIn + 2 * padIn) / widthIn;
+  // The quad's pixels at the typed shape: its height, or its width, whichever runs out first; then the
+  // strips, at the door's own scale.
   const natural = h * aspect <= w ? [h * aspect, h] : [w, w / aspect];
-  return doorFitSize([Math.round(natural[0]), Math.round(natural[1])], aspect);
+  return doorFitSize([Math.round(natural[0] * span), Math.round(natural[1])], aspect * span);
 }
 
 export function parseQuad(s) {
@@ -227,9 +241,11 @@ export async function prepare(o, ops) {
   if (!o.photo || !existsSync(o.photo)) throw new Error(`no photo at ${o.photo}`);
   mkdirSync(out, { recursive: true });
   const quad = parseQuad(o.quad);
+  const padIn = o.pad !== undefined ? Number(o.pad) : quad ? DOOR_EDGE_PAD_IN : 0;
+  if (!(padIn >= 0) || padIn > 6) throw new Error("--pad is the inches shown past each side edge, 0 to 6");
   const src = await ops.size(o.photo);
-  const photo = preparedSize({ src, quad, widthIn, heightIn });
-  writeFileSync(join(out, "photo.jpg"), await ops.render({ file: o.photo, quad, out: photo }));
+  const photo = preparedSize({ src, quad, widthIn, heightIn, padIn });
+  writeFileSync(join(out, "photo.jpg"), await ops.render({ file: o.photo, quad, out: photo, padPx: quad ? doorEdgePadPx(photo[0], widthIn, padIn) : 0 }));
   const closeUps = [];
   for (const k of ["hinge", "handle", "meet"]) {
     if (!o[k]) continue;
@@ -238,13 +254,13 @@ export async function prepare(o, ops) {
     writeFileSync(join(out, `closeup-${k}.jpg`), await ops.render({ file: o[k], out: doorFitSize(s) }));
     closeUps.push(k);
   }
-  const text = doorStageAPrompt({ widthIn, heightIn, leaves, photo, closeUps });
+  const text = doorStageAPrompt({ widthIn, heightIn, leaves, photo, padIn, closeUps });
   const images = ["photo.jpg", ...closeUps.map((k) => `closeup-${k}.jpg`)];
   // The request the server would send, the images named by their files here (the server sends signed URLs).
   const body = doorRequestBody({ model: AI_MODEL_V2, maxTokens: DOOR_READ_MAX_TOKENS, effort: "high", images: images.map((f) => ({ url: `file:${f}` })), text });
   const request = {
     prompt: DOOR_LOOK_PROMPT_ID, model: AI_MODEL_V2, effort: "high", maxTokens: DOOR_READ_MAX_TOKENS, reads: DOOR_READS,
-    widthIn, heightIn, leaves, photo, expectSize: photo, images, closeUps,
+    widthIn, heightIn, leaves, photo, padIn, expectSize: photo, images, closeUps,
     // Not the photo's own path: a vault path can name the builder.
     source: { size: src, ...(quad ? { quad } : {}) }, body,
   };
@@ -278,7 +294,8 @@ export async function settle(o, ops = null) {
   const files = o.reads ?? [];
   if (!files.length) throw new Error("--reads needs the model's answers (one file each)");
   const answers = files.map(readAnswer);
-  const ctx = { widthIn: request.widthIn, heightIn: request.heightIn, leaves: request.leaves, photo: request.photo };
+  // padIn: the photo's edge strips (a request from before DOOR_LOOK_V2 has none: its photo was cut at the leaves).
+  const ctx = { widthIn: request.widthIn, heightIn: request.heightIn, leaves: request.leaves, photo: request.photo, padIn: request.padIn ?? 0 };
   let colorNote = "colours skipped (--no-colors)";
   if (ops) {
     const px = await ops.pixels(join(prep, "photo.jpg"));
@@ -315,12 +332,13 @@ export async function settle(o, ops = null) {
   writeFileSync(outFile, JSON.stringify(result, null, 2) + "\n");
   // Stage B, when the agreement check wants it and none was given: its exact prompt, for a hand run.
   if (r.spec && r.stageB?.needed && stageB === undefined) {
-    writeFileSync(join(dirname(outFile), "stageB-prompt.txt"), doorStageBPrompt({ photo: ctx.photo, widthIn: ctx.widthIn, heightIn: ctx.heightIn, spec: r.spec, missing: r.stageB.missing, unexplained: r.stageB.unexplained }));
+    writeFileSync(join(dirname(outFile), "stageB-prompt.txt"), doorStageBPrompt({ photo: ctx.photo, widthIn: ctx.widthIn, heightIn: ctx.heightIn, padIn: ctx.padIn, spec: r.spec, missing: r.stageB.missing, unexplained: r.stageB.unexplained }));
   }
   if (o.record) {
     const recFile = outside(o.record, "--record");
-    const rec = existsSync(recFile) ? JSON.parse(readFileSync(recFile, "utf8")) : { photo: ctx.photo, runs: [] };
+    const rec = existsSync(recFile) ? JSON.parse(readFileSync(recFile, "utf8")) : { photo: ctx.photo, padIn: ctx.padIn, runs: [] };
     if (JSON.stringify(rec.photo) !== JSON.stringify(ctx.photo)) throw new Error(`--record ${recFile} is for a ${rec.photo?.join(" x ")} photo, not ${ctx.photo.join(" x ")}`);
+    if ((rec.padIn ?? 0) !== ctx.padIn) throw new Error(`--record ${recFile} is for a photo with ${rec.padIn ?? 0} in strips, not ${ctx.padIn}`);
     rec.runs.push({ reads: answers, ...(closeUps ? { closeUps } : {}), ...(stageB !== undefined ? { stageB } : {}), vocabGaps: r.vocabGaps, prompt: request.prompt });
     mkdirSync(dirname(recFile), { recursive: true });
     writeFileSync(recFile, JSON.stringify(rec, null, 2) + "\n");

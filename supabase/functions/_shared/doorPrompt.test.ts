@@ -4,12 +4,14 @@
 // reads, the close-up and Stage B asks, the request body, the photo limits and reading an answer back.
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
 import {
+  DOOR_EDGE_PAD_IN,
   DOOR_LOOK_PROMPT_ID,
   DOOR_PHOTO_MAX_LONG,
   DOOR_PHOTO_MAX_PIXELS,
   DOOR_STAGE_A_ANSWER,
   doorAnswerOf,
   doorCloseUpPrompt,
+  doorEdgePadPx,
   doorFitSize,
   doorPhotoFits,
   doorRequestBody,
@@ -36,7 +38,6 @@ Deno.test("Stage A: the plan's eleven sections, in order, then the answer shape"
 
 Deno.test("Stage A: the known size, the straightened frame and the size to echo", () => {
   assert(PROMPT.includes("72 in wide and 80 in tall, a double door"));
-  assert(PROMPT.includes("Its edges are the outer edges of the leaves, inside the casing, from the top of the threshold to the top of the leaves."));
   assert(PROMPT.includes("This image is 1092 x 1213 pixels."));
   assert(PROMPT.includes("measure.size: [1092, 1213]"));
   assert(doorStageAPrompt({ widthIn: 36, heightIn: 80, leaves: 1, photo: [700, 1556] }).includes("36 in wide and 80 in tall, a single door"));
@@ -44,6 +45,27 @@ Deno.test("Stage A: the known size, the straightened frame and the size to echo"
   const ups = doorStageAPrompt({ widthIn: 72, heightIn: 80, leaves: 2, photo: [1092, 1213], closeUps: ["hinge", "meet"] });
   assert(ups.includes("The 2 images after the first are the builder's own close-ups: a close-up of one hinge; a close-up of the middle of the double door"));
   assert(ups.includes("never give a point on them"), "close-ups are not measured against the door");
+});
+
+Deno.test("V2's edge strips: where the door is in the photo, a butt hinge's knuckle as its pivot, Stage B told the same", () => {
+  // 2 in past each side of a 72 in door on a 1092 px photo: 1092 x 2 / 76 = 28.7 px a strip.
+  assertEquals([DOOR_LOOK_PROMPT_ID, DOOR_EDGE_PAD_IN, Math.round(doorEdgePadPx(1092, 72) * 10) / 10, doorEdgePadPx(1092, 72, 0)], ["DOOR_LOOK_V2", 2, 28.7, 0]);
+  const strips = "The door's leaves fill it across from x = 29 to x = 1063, and down from the top of the leaves (the top edge) to the top of the threshold (the bottom edge). " +
+    "The strip 29 pixels wide down each side is just past the leaves' outer edges: the jamb or casing, and the knuckles of butt hinges, which sit on the edge.";
+  assert(PROMPT.includes(strips));
+  assert(PROMPT.includes("give a point in them only for a hinge"));
+  assert(PROMPT.includes("on a butt hinge, the middle of its knuckle"));
+  // The wider photo shows the dark jamb down both sides, and reads of a steel door's ribbed sheet drifted
+  // to plank (4 of 6, against 0 of 3 before the strips); the truth files call a framed sheet basic.
+  assert(PROMPT.includes("A frame filled with one sheet (ribbed or corrugated metal, or grooved siding) is basic with field grooved"));
+  assertFalse(PROMPT.includes("Its edges are the outer edges of the leaves"));
+  // A photo cut at the leaves (padIn 0) keeps the old words.
+  const cut = doorStageAPrompt({ widthIn: 72, heightIn: 80, leaves: 2, photo: [1092, 1213], padIn: 0 });
+  assert(cut.includes("Its edges are the outer edges of the leaves, inside the casing, from the top of the threshold to the top of the leaves."));
+  assertFalse(cut.includes("pixels wide down each side"));
+  const spec = { v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" } } as DoorLook;
+  const b = doorStageBPrompt({ photo: [1092, 1213], widthIn: 72, heightIn: 80, spec, missing: [], unexplained: ["an arched top"] });
+  assert(b.includes(strips));
 });
 
 Deno.test("Stage A: every base by its drawn look, the slab and the 6-panel door drafted as basic", () => {

@@ -32,6 +32,7 @@
 //
 // <corpus>/reads/<id>.json, for --mode recorded:
 //   { "photo": [w, h],                      the straightened photo's size in pixels
+//     "padIn"?: n,                          its edge strips in inches (DOOR_LOOK_V2); absent: 0
 //     "runs": [ { "reads": [<Stage A answer>, ...],   the model's own JSON, as doorLook.ts reads it
 //                 "closeUps"?: {hinges?, handle?, meet?},   {status:"ok", votes:[...]} | {status:"skipped"}
 //                 "stageB"?: <Stage B answer>,
@@ -43,6 +44,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkTruthCase, formatReport, loadRuns, loadTruth, scoreCorpus, scoreRun } from "./doorScore.mjs";
 import { cleanDoorLook, samplePatch } from "../../supabase/functions/_shared/doorLook.ts";
 import { DoorCeiling, DOOR_LEAN_MIN_LEFT_MS, DOOR_PRESS_CLOCK_MS, doorDraftFromReads, doorLedgerFields, runDoorDraft } from "../../supabase/functions/_shared/doorGenerate.ts";
+import { DOOR_EDGE_PAD_IN, doorEdgePadPx } from "../../supabase/functions/_shared/doorLookPrompt.ts";
 import { insideGitWorkTree, insideRepo as insideRepoReal, playwrightImageOps, preparedSize } from "../../scripts/doorLookLocal.mjs";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -86,7 +88,7 @@ export function recordedRuns(cases, corpusDir) {
       continue;
     }
     const rec = JSON.parse(readFileSync(file, "utf8"));
-    const ctx = { widthIn: t.sizeIn[0], heightIn: t.sizeIn[1], leaves: t.leaves, photo: rec.photo };
+    const ctx = { widthIn: t.sizeIn[0], heightIn: t.sizeIn[1], leaves: t.leaves, photo: rec.photo, padIn: rec.padIn ?? 0 };
     (rec.runs ?? []).forEach((r, k) => {
       const d = doorDraftFromReads(r.reads ?? [], ctx, { closeUps: r.closeUps, stageB: r.stageB });
       // The gaps the maths finds, and any the record carries.
@@ -160,8 +162,10 @@ export async function liveGenerate(t, k, { corpusDir, env = process.env, fetchIm
   try {
     const file = join(corpusDir, t.photo.file);
     const quad = Array.isArray(t.photo.quad) ? t.photo.quad : null;
-    const photo = preparedSize({ src: await ops.size(file), quad, widthIn, heightIn });
-    const jpeg = await ops.render({ file, quad, out: photo });
+    // Straightened as the browser does it, with the edge strips; a photo sent as it is has none.
+    const padIn = quad ? DOOR_EDGE_PAD_IN : 0;
+    const photo = preparedSize({ src: await ops.size(file), quad, widthIn, heightIn, padIn });
+    const jpeg = await ops.render({ file, quad, out: photo, padPx: doorEdgePadPx(photo[0], widthIn, padIn) });
     const prepared = join(corpusDir, "runs", ".live-photo.jpg");
     mkdirSync(dirname(prepared), { recursive: true });
     writeFileSync(prepared, jpeg);
@@ -171,7 +175,7 @@ export async function liveGenerate(t, k, { corpusDir, env = process.env, fetchIm
       fetch: (url, init) => fetchImpl(url, init), apiKey,
       cut: (windows, zoom) => ops.crop({ file: prepared, windows, zoom }), ...(colorAt ? { colorAt } : {}),
     };
-    const input = { widthIn, heightIn, leaves, photo, front: { base64: Buffer.from(jpeg).toString("base64"), mediaType: "image/jpeg" } };
+    const input = { widthIn, heightIn, leaves, photo, padIn, front: { base64: Buffer.from(jpeg).toString("base64"), mediaType: "image/jpeg" } };
     const pressStart = now();
     const rows = [];
     const tryOnce = async (lean) => {

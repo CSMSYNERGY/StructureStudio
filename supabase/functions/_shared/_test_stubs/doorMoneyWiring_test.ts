@@ -26,7 +26,8 @@
 import { assert, assertEquals, assertFalse, assertRejects } from "jsr:@std/assert";
 import { call, FakeDb, OTHER, OWN, USER_ID, type Row } from "./doorLookFake.ts";
 import { fakeImageLibrary, fakeModel, pngHead, type Script } from "./doorModel.ts";
-import { singleDoor } from "./doorReads.ts";
+import { singleDoor, withStrips } from "./doorReads.ts";
+import { DOOR_EDGE_PAD_IN } from "../doorLookPrompt.ts";
 import { doorGenHooks, doorWalletKey } from "../../portal-settings/doorGenerate.ts";
 
 const { lib } = fakeImageLibrary();
@@ -38,7 +39,7 @@ const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0
 const FRONT = `${OWN}/door-ref-${uuid(0xf01)}.png`;
 const HINGE = `${OWN}/door-ref-${uuid(0xf02)}.png`;
 const BODY = { action: "generate_door_look", idempotencyKey: KEY, widthIn: 36, heightIn: 80, leaves: 1, name: "Our barn door", photos: { front: FRONT } };
-const READ = singleDoor().read;
+const READ = withStrips(singleDoor(), DOOR_EDGE_PAD_IN).read; // read off the browser's photo, edge strips and all
 const GOOD: Script = { stageA: [READ, READ, READ], hinges: { type: "strap", finish: "black" }, handle: { type: "barn", finish: "black" } };
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 // What a first try that failed retryably leaves on its row (doorLedgerFields): the failure, and its spend.
@@ -50,8 +51,9 @@ function seed(o: { settings?: Row; calls?: Row[] } = {}): FakeDb {
     ai_door_calls: o.calls ?? [],
     door_looks: [],
   });
-  // 700 x 1556: inside the photo limits, and the reads' 900 x 2000 shape within 2%.
-  db.files[`door-refs/${FRONT}`] = pngHead(700, 1556);
+  // 770 x 1540: inside the photo limits, the typed 36 x 80 plus 2 in strips each side (40 x 80), and the
+  // reads' 1000 x 2000 shape within 2%.
+  db.files[`door-refs/${FRONT}`] = pngHead(770, 1540);
   db.files[`door-refs/${HINGE}`] = pngHead(600, 600);
   return db;
 }
@@ -83,10 +85,10 @@ Deno.test("meter inactive: wallet_hold still asked (door meter, the press's key)
   assertEquals(steps(db), ["insert ai_door_calls", "wallet_hold", "insert door_looks", "update ai_door_calls:done"]);
   const row = db.rows("ai_door_calls")[0];
   assertEquals([row.client_id, row.user_id, row.idem_key, row.status, row.effort, row.photo_paths], [OWN, USER_ID, KEY, "done", "high", [FRONT]]);
-  assertEquals([row.dims.widthIn, row.dims.heightIn, row.dims.leaves, row.dims.photo], [36, 80, 1, [700, 1556]]);
+  assertEquals([row.dims.widthIn, row.dims.heightIn, row.dims.leaves, row.dims.photo, row.dims.padIn], [36, 80, 1, [770, 1540], 2]);
   // The press clock runs from the request, which came before the row.
   assert(Date.parse(row.dims.pressStartedAt) <= Date.parse(row.created_at) && r.body.pressStartedAt === row.dims.pressStartedAt);
-  assert(row.tokens.costCents > 0 && row.tokens.prompt === "DOOR_LOOK_V1");
+  assert(row.tokens.costCents > 0 && row.tokens.prompt === "DOOR_LOOK_V2");
   assertEquals([row.charged_cents, row.wallet_tx_id], [undefined, undefined], "nothing charged");
   const look = db.rows("door_looks")[0];
   assertEquals([look.client_id, look.status, look.base, look.ai_call_id, look.created_by, look.spec.base], [OWN, "draft", "zbrace", row.id, USER_ID, "zbrace"]);
@@ -375,6 +377,13 @@ Deno.test("photos: only this tenant's exact paths, read back and checked before 
   const huge = seed();
   huge.files[`door-refs/${FRONT}`] = pngHead(2400, 3200);
   assertEquals((await press(huge)).body.code, "door_photo_too_big");
+  // A front photo cut at the leaves (the typed 36 x 80, no edge strips: before DOOR_LOOK_V2) is refused
+  // before anything is held: its points would land in the wrong place on the door.
+  const cut = seed();
+  cut.files[`door-refs/${FRONT}`] = pngHead(700, 1556);
+  const refused = await press(cut);
+  assertEquals([refused.status, refused.body.code, refused.body.error], [400, "door_photo_shape", "This photo isn't straightened to the door's size. Straighten it again, then press Generate."]);
+  assertEquals([cut.writes.length, rpcs(cut).length], [0, 0]);
   // The close-ups are held to the same limits: the ceiling prices every image as one inside them.
   const bigHinge = seed();
   bigHinge.files[`door-refs/${HINGE}`] = pngHead(4000, 3000);

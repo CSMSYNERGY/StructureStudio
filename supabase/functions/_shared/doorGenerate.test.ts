@@ -33,9 +33,10 @@ import {
   recoverDoorAnswer,
   runDoorDraft,
 } from "./doorGenerate.ts";
-import { DOOR_CLOSEUP_LABELS, doorCloseUpPrompt, doorStageAPrompt, doorStageBPrompt } from "./doorLookPrompt.ts";
+import { DOOR_CLOSEUP_LABELS, DOOR_EDGE_PAD_IN, doorCloseUpPrompt, doorStageAPrompt, doorStageBPrompt } from "./doorLookPrompt.ts";
 import type { DoorLook, DoorMeasureCtx } from "./doorLook.ts";
-import { doubleDoor, gussetDoor, inches, singleDoor } from "./_test_stubs/doorReads.ts";
+import type { CloseUpWindow } from "./closeUp.ts";
+import { doubleDoor, gussetDoor, inches, PX_PER_IN, singleDoor, withStrips } from "./_test_stubs/doorReads.ts";
 import { fakeModel, pngHead, type Script } from "./_test_stubs/doorModel.ts";
 
 type Rec = Record<string, unknown>;
@@ -64,6 +65,35 @@ function press(script: Script, over: Partial<DoorDraftInput> & { ctx?: DoorMeasu
 const codes = (ws: { code: string }[]) => ws.map((w) => w.code);
 
 // ─── STAGE A ──────────────────────────────────────────────────────────────────────────────────────
+Deno.test("V2's edge strips: the press measures the door through them, finds butt hinges by their knuckles, and cuts its crops there", async () => {
+  // The browser's photo: the door plus DOOR_EDGE_PAD_IN past each side. The three butt hinges' knuckles
+  // sit on the hinge edge, read 0.2 in out into the strip.
+  const door = withStrips(singleDoor(), DOOR_EDGE_PAD_IN), px = DOOR_EDGE_PAD_IN * PX_PER_IN, photo = door.ctx.photo;
+  const knuckles = [10.4, 44, 69.6].map((y) => ({ pivot: [px - 5, (80 - y) * PX_PER_IN] }));
+  const read = { ...door.read, measure: { ...door.read.measure as Rec, hinges: knuckles }, hinges: { type: "butt" } };
+  const m = fakeModel({ stageA: [read, read, read], hinges: { type: "butt", finish: "galv" }, handle: HANDLE_OK });
+  const windows: CloseUpWindow[][] = [];
+  const r = await runDoorDraft({
+    fetch: m.fetch, apiKey: "test-key", random: () => 0,
+    cut: (w) => {
+      windows.push([...w]);
+      return Promise.resolve(w.map((_, i) => `crop${i}`));
+    },
+  }, {
+    widthIn: 36, heightIn: 80, leaves: 1, photo, front: { url: "https://stub.supabase.co/storage/v1/object/sign/door-refs/x/door-ref-1.jpg?token=t" },
+    lean: false, deadlineAt: Date.now() + 300_000, ceiling: new DoorCeiling(0),
+  });
+  assertEquals(r.outcome, "draft", JSON.stringify(r.failure));
+  const spec = r.spec as Rec, hinges = spec.hinges as Rec;
+  assertEquals([(spec.src as Rec).hinge, hinges.type, hinges.count, hinges.at, hinges.finish], ["left", "butt", 3, [0.13, 0.55, 0.87], "galv"]);
+  assertEquals((spec.frame as Rec).fIn, 5.5, "the stiles measured from the door's edge, not the photo's");
+  assert(m.sent[0].text.includes(`The door's leaves fill it across from x = ${px} to x = ${photo[0] - px}`));
+  // The hinge crops (the first three windows cut; the handle's follows): one per knuckle, at its height,
+  // reaching over the strip and the knuckle in it.
+  const hingeCrops = windows[0].slice(0, 3);
+  assertEquals(hingeCrops.map((w, i) => [w.x <= px - 5 && w.x + w.w > px, Math.abs(w.y + w.h / 2 - knuckles[i].pivot[1]) <= 1]), [[true, true], [true, true], [true, true]]);
+});
+
 Deno.test("a single door: three reads at effort high, the close-ups decide the hardware, nothing else asked", async () => {
   const { read } = singleDoor();
   const { run, m, cuts } = press({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK });
@@ -406,7 +436,7 @@ Deno.test("the ledger row keeps the spec, the warnings and the money for recover
   const f = doorLedgerFields(r);
   assertEquals([f.status, (f.drafted as Rec).base], ["done", "zbrace"]);
   const t = f.tokens as Rec;
-  assertEquals([t.prompt, t.model, t.effort, t.outcome, t.sideFrom], ["DOOR_LOOK_V1", "claude-opus-5-5", "high", "draft", "hinges"]);
+  assertEquals([t.prompt, t.model, t.effort, t.outcome, t.sideFrom], ["DOOR_LOOK_V2", "claude-opus-5-5", "high", "draft", "hinges"]);
   assertEquals([t.costCents, t.ceilingCents], [r.costCents, r.ceilingCents]);
   assertEquals((f.reads as Rec[]).length, 3);
   assert(typeof f.draft_ms === "number");

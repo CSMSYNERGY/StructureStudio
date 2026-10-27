@@ -12,14 +12,15 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { call, FakeDb, OWN, type Row } from "./doorLookFake.ts";
 import { fakeImageLibrary, fakeModel, pngHead } from "./doorModel.ts";
-import { singleDoor } from "./doorReads.ts";
+import { singleDoor, withStrips } from "./doorReads.ts";
 import { doorGenHooks } from "../../portal-settings/doorGenerate.ts";
+import { DOOR_EDGE_PAD_IN } from "../doorLookPrompt.ts";
 
 doorGenHooks.loadImageLibrary = (() => Promise.resolve(fakeImageLibrary().lib)) as any;
 const FRONT = `${OWN}/door-ref-00000000-0000-4000-8000-000000000f01.png`;
 const BODY = { action: "generate_door_look", idempotencyKey: "press-1", widthIn: 36, heightIn: 80, leaves: 1, photos: { front: FRONT } };
 const ON = { DOOR_LOOK_AI_ENABLED: "1", ANTHROPIC_API_KEY: "test-key" };
-const R = singleDoor().read;
+const R = withStrips(singleDoor(), DOOR_EDGE_PAD_IN).read; // read off the browser's photo, edge strips and all
 
 function seed(settings: Row): FakeDb {
   const db = new FakeDb({
@@ -28,7 +29,7 @@ function seed(settings: Row): FakeDb {
     client_feature_grants: [],
     billing_subscriptions: [],
   });
-  db.files[`door-refs/${FRONT}`] = pngHead(700, 1556);
+  db.files[`door-refs/${FRONT}`] = pngHead(770, 1540); // 36 x 80 plus 2 in strips each side
   return db;
 }
 function untouched(db: FakeDb, sent: number) {

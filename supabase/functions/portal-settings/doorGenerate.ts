@@ -60,7 +60,7 @@ import {
   runDoorDraft,
   doorWorkDeadline,
 } from "../_shared/doorGenerate.ts";
-import { type DoorCloseUpKind, type DoorImageSource, DOOR_PHOTO_MAX_BYTES, doorPhotoFits } from "../_shared/doorLookPrompt.ts";
+import { type DoorCloseUpKind, DOOR_EDGE_PAD_IN, type DoorImageSource, DOOR_PHOTO_MAX_BYTES, doorPhotoFits } from "../_shared/doorLookPrompt.ts";
 import { DOOR_LOOK_NAME_MAX, DOOR_LOOKS_OFF, DOOR_LOOKS_UNAVAILABLE, doorRefPathOk, readDoorLooksFlag, type Refusal } from "./doorLooks.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -97,6 +97,10 @@ const DOOR_DEFAULT_NAME = "Door look from a photo";
 const WIDTH_IN = [12, 240] as const;
 const HEIGHT_IN = [24, 192] as const;
 const MIN_PHOTO_SIDE = 200;
+// The browser straightens the front photo to the typed width plus the edge strips over the height
+// (DOOR_LOOK_V2). Further off than this, the photo was cut some other way (cut at the leaves, as before
+// V2), and every point on it would land in the wrong place on the door.
+const PHOTO_SHAPE_TOL = 0.03;
 
 // ── The kill switch ───────────────────────────────────────────────────────────────────────────
 // DOOR_LOOK_AI_ENABLED gates the two actions that call the model (generate_door_look here, and P5's
@@ -271,6 +275,9 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
   const frontBytes = bytes.front!;
   const frontHead = imageHeadOf(frontBytes)!;
   const photo: XY = [frontHead.width, frontHead.height];
+  if (Math.abs(photo[0] / photo[1] / ((v.widthIn + 2 * DOOR_EDGE_PAD_IN) / v.heightIn) - 1) > PHOTO_SHAPE_TOL) {
+    return refuse({ status: 400, code: "door_photo_shape", error: "This photo isn't straightened to the door's size. Straighten it again, then press Generate." });
+  }
   let colorAt: ((p: XY) => RGB | null) | undefined;
   let decodeError: string | null = null;
   try {
@@ -291,7 +298,7 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
   const pressStartedAt = new Date(pressStartMs).toISOString();
   const ins = await admin.from("ai_door_calls").insert({
     client_id: clientId, user_id: userId, idem_key: v.idemKey, status: "running",
-    dims: { widthIn: v.widthIn, heightIn: v.heightIn, leaves: v.leaves, photo, pressStartedAt }, photo_paths: kinds.map((k) => v.paths[k]!),
+    dims: { widthIn: v.widthIn, heightIn: v.heightIn, leaves: v.leaves, photo, padIn: DOOR_EDGE_PAD_IN, pressStartedAt }, photo_paths: kinds.map((k) => v.paths[k]!),
     effort: v.lean ? "low" : "high", streamed,
   }).select("id, created_at").single();
   if (ins.error || !ins.data?.id) return await loggedRefusal(UNAVAILABLE("ai_door_ledger_failed"), `Could not write the door ledger row: ${ins.error?.message ?? "no row"}`);

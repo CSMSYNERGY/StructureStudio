@@ -40,6 +40,7 @@ import {
   type DoorCloseUpKind,
   doorCloseUpPrompt,
   type DoorImageSource,
+  DOOR_EDGE_PAD_IN,
   DOOR_LOOK_PROMPT_ID,
   doorRequestBody,
   doorStageAPrompt,
@@ -494,7 +495,10 @@ export type DoorDraftInput = {
   widthIn: number;
   heightIn: number;
   leaves: 1 | 2;
-  photo: XY; // the straightened front photo's size in pixels
+  photo: XY; // the straightened front photo's size in pixels, edge strips included
+  // The photo's edge strips in inches: DOOR_EDGE_PAD_IN, as the browser straightens every door photo,
+  // unless a caller sends a photo it did not straighten (the sim's photo with no quad: 0).
+  padIn?: number;
   front: DoorImageSource;
   builder?: Partial<Record<DoorCloseUpKind, DoorImageSource>>; // the builder's own close-ups
   lean: boolean; // the one automatic retry: effort low, no Stage B
@@ -510,7 +514,10 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
   const t0 = now();
   const model = input.model ?? AI_MODEL_V2;
   const effort: "low" | "high" = input.lean ? "low" : "high";
-  const ctx: DoorMeasureCtx = { widthIn: input.widthIn, heightIn: input.heightIn, leaves: input.leaves, photo: input.photo, ...(deps.colorAt ? { colorAt: deps.colorAt } : {}) };
+  // The photo shows DOOR_EDGE_PAD_IN past each side edge (the browser straightens it so); the prompts say
+  // where the door is in it, and the maths reads the points through the strips.
+  const padIn = input.padIn ?? DOOR_EDGE_PAD_IN;
+  const ctx: DoorMeasureCtx = { widthIn: input.widthIn, heightIn: input.heightIn, leaves: input.leaves, photo: input.photo, padIn, ...(deps.colorAt ? { colorAt: deps.colorAt } : {}) };
   const usage = { input: 0, output: 0 };
   let known = 0;
   const count = (a: { usage: { input: number; output: number } | null }) => {
@@ -541,7 +548,7 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
 
   // ── STAGE A: three reads, a quorum of two ─────────────────────────────────────────────────────
   const ups = (["hinge", "handle", "meet"] as const).filter((k) => input.builder?.[k] && (k !== "meet" || input.leaves === 2));
-  const text = doorStageAPrompt({ widthIn: input.widthIn, heightIn: input.heightIn, leaves: input.leaves, photo: input.photo, closeUps: [...ups] });
+  const text = doorStageAPrompt({ widthIn: input.widthIn, heightIn: input.heightIn, leaves: input.leaves, photo: input.photo, padIn, closeUps: [...ups] });
   const images = [input.front, ...ups.map((k) => input.builder![k]!)];
   const body = JSON.stringify(doorRequestBody({ model, maxTokens: DOOR_READ_MAX_TOKENS, effort, images, text }));
   const worst = doorCallWorstCents(DOOR_READ_MAX_TOKENS, doorInputTokensEst(text, images.length));
@@ -736,7 +743,7 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
       result.stageB = { status: "skipped", reason };
       result.skipped.stageB = reason;
     };
-    const textB = doorStageBPrompt({ photo: input.photo, widthIn: input.widthIn, heightIn: input.heightIn, spec: settled.spec, missing: wanted.missing, unexplained: wanted.unexplained });
+    const textB = doorStageBPrompt({ photo: input.photo, widthIn: input.widthIn, heightIn: input.heightIn, padIn, spec: settled.spec, missing: wanted.missing, unexplained: wanted.unexplained });
     if (input.lean) skipB("lean");
     else if (leftMs() < DOOR_STAGEB_MIN_LEFT_MS) skipB("time");
     else {

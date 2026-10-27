@@ -20,8 +20,8 @@ function fakeOps(paint = [150, 110, 70]) {
   return {
     calls,
     size: async (file) => JSON.parse(readFileSync(file, "utf8")).size,
-    render: async ({ file, quad, out }) => {
-      calls.push({ op: "render", file, quad, out });
+    render: async ({ file, quad, out, padPx }) => {
+      calls.push({ op: "render", file, quad, out, padPx });
       return Buffer.from(JSON.stringify({ size: out }));
     },
     pixels: async (file) => {
@@ -50,11 +50,12 @@ test("prepare: the photo fitted to the limits, the exact Stage A prompt, the req
     const r = await main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "1", "--out", out, "--hinge", hinge, "--meet", hinge], async () => ops);
     assert.deepEqual(r.photo, [950, 1267], "1.15 MP at the photo's own shape");
     const req = JSON.parse(readFileSync(join(out, "request.json"), "utf8"));
-    assert.deepEqual([req.prompt, req.model, req.maxTokens, req.effort, req.reads], ["DOOR_LOOK_V1", "claude-opus-5-5", 12000, "high", 3]);
+    assert.deepEqual([req.prompt, req.model, req.maxTokens, req.effort, req.reads], ["DOOR_LOOK_V2", "claude-opus-5-5", 12000, "high", 3]);
     assert.deepEqual(req.expectSize, [950, 1267]);
     assert.deepEqual(req.images, ["photo.jpg", "closeup-hinge.jpg"], "a single door has no meeting edge");
     const text = readFileSync(join(out, "prompt.txt"), "utf8");
-    assert.equal(text, doorStageAPrompt({ widthIn: 36, heightIn: 80, leaves: 1, photo: [950, 1267], closeUps: ["hinge"] }), "byte for byte the server's prompt");
+    assert.equal(text, doorStageAPrompt({ widthIn: 36, heightIn: 80, leaves: 1, photo: [950, 1267], padIn: 0, closeUps: ["hinge"] }), "byte for byte the server's prompt; not straightened here, so no edge strips");
+    assert.equal(req.padIn, 0);
     assert.equal(req.body.messages[0].content.at(-1).text, text);
     assert.match(readFileSync(join(out, "HOW-TO-RUN.txt"), "utf8"), /measure\.size must be \[950, 1267\]/);
     assert.ok(existsSync(join(out, "photo.jpg")) && existsSync(join(out, "closeup-hinge.jpg")));
@@ -75,6 +76,16 @@ test("prepare: a quad straightens the photo to the typed shape; outputs inside t
     const ops = fakeOps();
     await main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "1", "--out", join(w.dir, "p"), "--quad", quad.flat().join(",")], async () => ops);
     assert.deepEqual(ops.calls[0].quad, quad);
+    // DOOR_LOOK_V2: straightened with 2 in past each side edge, so a butt hinge's knuckle stays whole.
+    const strip = preparedSize({ src: [3000, 4000], quad, widthIn: 36, heightIn: 80, padIn: 2 });
+    assert.ok(Math.abs(strip[0] / strip[1] - 0.5) < 0.003, `40 x 80 in shape: ${strip}`);
+    assert.deepEqual(ops.calls[0].out, strip);
+    assert.ok(Math.abs(ops.calls[0].padPx - strip[0] * 2 / 40) < 1e-9, "the door's box starts one strip in");
+    const req = JSON.parse(readFileSync(join(w.dir, "p", "request.json"), "utf8"));
+    assert.equal(req.padIn, 2);
+    assert.match(readFileSync(join(w.dir, "p", "prompt.txt"), "utf8"), /The door's leaves fill it across from x = \d+ to x = \d+/);
+    await main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "1", "--out", join(w.dir, "p0"), "--quad", quad.flat().join(","), "--pad", "0"], async () => fakeOps());
+    assert.equal(JSON.parse(readFileSync(join(w.dir, "p0", "request.json"), "utf8")).padIn, 0, "--pad 0: cut at the leaves");
     await assert.rejects(main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "1", "--out", join(REPO_ROOT, "tmp-prep")], async () => fakeOps()), /outside the repo/);
     await assert.rejects(main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "3", "--out", join(w.dir, "q")], async () => fakeOps()), /--leaves is 1 or 2/);
   } finally {
