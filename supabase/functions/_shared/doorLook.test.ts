@@ -234,7 +234,12 @@ Deno.test("parts: at most 12, boxes put the right way up, too small or shapeless
   assertEquals((r.spec.parts as unknown[]).length, 12);
   assert(r.dropped.includes("parts[0]") && r.dropped.includes("parts[1]"), "the unknown type and the 0.05-wide lite");
   assertEquals(clean(withMin({ parts: [{ t: "raised", u0: 0.6, v0: 0.5, u1: 0.2, v1: 0.1 }] })).spec.parts, [{ t: "raised", u0: 0.2, v0: 0.1, u1: 0.6, v1: 0.5 }]);
-  assertEquals(clean(withMin({ parts: [{ t: "board", u0: 0.5, v0: 0.5, u1: 0.52, v1: 0.55 }] })).spec.parts, undefined, "a board with no length");
+  assertEquals(clean(withMin({ parts: [{ t: "board", u0: 0.5, v0: 0.5, u1: 0.52, v1: 0.53 }] })).spec.parts, undefined, "a board with no length");
+  // A real corner gusset read a little short (0.06 by 0.04 of the leaf, about 2 by 3.5 in on 36 x 80)
+  // is a board: the floor is DOOR_BOARD_MIN (0.05) one way or the other.
+  const gusset = { t: "board", u0: 0.03, v0: 0.94, u1: 0.089, v1: 0.984 };
+  assertEquals(clean(withMin({ parts: [gusset] })).spec.parts, [gusset]);
+  assertEquals(clean(withMin({ parts: [{ t: "board", u0: 0.03, v0: 0.94, u1: 0.075, v1: 0.984 }] })).spec.parts, undefined, "0.045 by 0.044: under the floor both ways");
   assertEquals(clean(withMin({ parts: [{ t: "lite", u0: 0.2, v0: 0.2, u1: 0.6 }] })).spec.parts, undefined, "a missing corner drops the part");
   assertEquals(clean(withMin({ parts: [{ t: "split", v: 0.95 }] })).spec.parts, [{ t: "split", v: 0.8 }]);
   // A list padded with thousands of entries is cut short before it is read.
