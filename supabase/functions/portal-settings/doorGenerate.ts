@@ -99,8 +99,11 @@ const HEIGHT_IN = [24, 192] as const;
 const MIN_PHOTO_SIDE = 200;
 // The browser straightens the front photo to the typed width plus the edge strips over the height
 // (DOOR_LOOK_V2). Further off than this, the photo was cut some other way (cut at the leaves, as before
-// V2), and every point on it would land in the wrong place on the door.
+// V2), and every point on it would land in the wrong place on the door. A photo cut at the leaves is only
+// 2 x DOOR_EDGE_PAD_IN / (width + 2 x DOOR_EDGE_PAD_IN) narrower, under 3% on a door over about 120 in, so
+// the tolerance also stops halfway to it (photoShapeTol): such a photo is refused at every width.
 const PHOTO_SHAPE_TOL = 0.03;
+const photoShapeTol = (widthIn: number) => Math.min(PHOTO_SHAPE_TOL, DOOR_EDGE_PAD_IN / (widthIn + 2 * DOOR_EDGE_PAD_IN));
 
 // ── The kill switch ───────────────────────────────────────────────────────────────────────────
 // DOOR_LOOK_AI_ENABLED gates the two actions that call the model (generate_door_look here, and P5's
@@ -275,7 +278,7 @@ export async function handleGenerateDoorLook(x: DoorGenCtx, streamed: boolean): 
   const frontBytes = bytes.front!;
   const frontHead = imageHeadOf(frontBytes)!;
   const photo: XY = [frontHead.width, frontHead.height];
-  if (Math.abs(photo[0] / photo[1] / ((v.widthIn + 2 * DOOR_EDGE_PAD_IN) / v.heightIn) - 1) > PHOTO_SHAPE_TOL) {
+  if (Math.abs(photo[0] / photo[1] / ((v.widthIn + 2 * DOOR_EDGE_PAD_IN) / v.heightIn) - 1) > photoShapeTol(v.widthIn)) {
     return refuse({ status: 400, code: "door_photo_shape", error: "This photo isn't straightened to the door's size. Straighten it again, then press Generate." });
   }
   let colorAt: ((p: XY) => RGB | null) | undefined;

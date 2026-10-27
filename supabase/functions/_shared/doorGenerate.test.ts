@@ -94,6 +94,31 @@ Deno.test("V2's edge strips: the press measures the door through them, finds but
   assertEquals(hingeCrops.map((w, i) => [w.x <= px - 5 && w.x + w.w > px, Math.abs(w.y + w.h / 2 - knuckles[i].pivot[1]) <= 1]), [[true, true], [true, true], [true, true]]);
 });
 
+Deno.test("V2's edge strips: the meeting edge's crops are 1/8 of the door's width, as the meet ask says, on the joint", async () => {
+  for (const padIn of [DOOR_EDGE_PAD_IN, 0]) {
+    for (const meetIn of [36, 30]) {
+      const door = padIn ? withStrips(doubleDoor({ meetIn }), padIn) : doubleDoor({ meetIn });
+      const m = fakeModel({ stageA: [door.read, door.read, door.read], hinges: HINGES_OK, handle: HANDLE_OK, meet: MEET_OK });
+      const windows: CloseUpWindow[] = [];
+      await runDoorDraft({
+        fetch: m.fetch, apiKey: "test-key", random: () => 0,
+        cut: (w) => {
+          windows.push(...w);
+          return Promise.resolve(w.map((_, i) => `crop${i}`));
+        },
+      }, {
+        widthIn: 72, heightIn: 80, leaves: 2, photo: door.ctx.photo, padIn, front: { url: "https://stub.supabase.co/storage/v1/object/sign/door-refs/x/door-ref-1.jpg?token=t" },
+        lean: false, deadlineAt: Date.now() + 300_000, ceiling: new DoorCeiling(0),
+      });
+      const meet = windows.filter((w) => w.h === 250); // 1/8 of the photo's height; the hinge and handle crops are 1/6
+      const said = Number(/Each crop is ([\d.]+) in wide on the door/.exec(m.sent.find((s) => s.kind === "meet")!.text)![1]);
+      const at = `padIn ${padIn}, meet ${meetIn} in`;
+      assertEquals(meet.map((w) => [w.w, Math.abs(w.x + w.w / 2 - (padIn + meetIn) * PX_PER_IN) <= 1]), [[225, true], [225, true]], at);
+      assertEquals(said, 225 / PX_PER_IN, at);
+    }
+  }
+});
+
 Deno.test("a single door: three reads at effort high, the close-ups decide the hardware, nothing else asked", async () => {
   const { read } = singleDoor();
   const { run, m, cuts } = press({ stageA: [read, read, read], hinges: HINGES_OK, handle: HANDLE_OK });
@@ -352,6 +377,18 @@ Deno.test("short corner gussets the draft draws are no vocabulary gap and ask no
   assertEquals(doorDraftFromReads([0, 1, 2].map(() => ({ ...plain.read, unexplained: ["short corner gussets"] })), plain.ctx).vocabGaps, ["short corner gussets"]);
   const brackets = gussetDoor({ unexplained: ["black L-shaped iron corner brackets"] });
   assertEquals(doorDraftFromReads([brackets.read, brackets.read, brackets.read], brackets.ctx).vocabGaps, ["black L-shaped iron corner brackets"]);
+});
+
+Deno.test("a remark on where a measured rail sits is no vocabulary gap and asks no Stage B; with no rails measured it stays one", () => {
+  // 4 of 12 reads of the first door generated from a photo said so of its mid rail, drawn at 0.508 anyway.
+  const { read, ctx } = gussetDoor({ unexplained: ["mid rail at about 49% rather than 42%"] });
+  const r = doorDraftFromReads([read, read, read], ctx);
+  assertEquals([r.vocabGaps, r.stageB?.needed], [[], false]);
+  const noRails = { ...read, measure: { ...read.measure as Rec, rails: undefined } };
+  assertEquals(doorDraftFromReads([noRails, noRails, noRails], ctx).vocabGaps, ["mid rail at about 49 rather than 42"]);
+  // Not every phrase with a rail in it: one with no place in it is still a gap.
+  const { read: r2 } = gussetDoor({ unexplained: ["a curved rail"] });
+  assertEquals(doorDraftFromReads([r2, r2, r2], ctx).vocabGaps, ["a curved rail"]);
 });
 
 Deno.test("the observed check: corner gussets are drawn by short corner boards or a diamond's octagon, never by an X", () => {

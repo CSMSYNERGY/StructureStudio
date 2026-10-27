@@ -41,6 +41,7 @@ import {
   doorCloseUpPrompt,
   type DoorImageSource,
   DOOR_EDGE_PAD_IN,
+  doorEdgePadPx,
   DOOR_LOOK_PROMPT_ID,
   doorRequestBody,
   doorStageAPrompt,
@@ -179,8 +180,14 @@ export const DOOR_CLOSEUP_MAX_TOKENS = 4000;
 export const DOOR_CLOSEUP_CALL_MS = 40_000;
 export const DOOR_CLOSEUP_MIN_LEFT_MS = 45_000;
 export const DOOR_CLOSEUP_DIV = 6; // a hinge or handle crop: 1/6 of the photo each way
-export const DOOR_MEET_DIV = 8; // a meeting-edge strip: 1/8 of the door's width
+export const DOOR_MEET_DIV = 8; // a meeting-edge strip: 1/8 of the door's width (doorMeetWindow)
 export const DOOR_CLOSEUP_ZOOM = 6;
+// A meeting-edge window: 1/8 of the DOOR's width (the photo less its two edge strips, padPx each), as the
+// meet ask states it in inches; cut in the door's own box, then moved back over the strip.
+export function doorMeetWindow(p: XY, photo: XY, padPx: number): CloseUpWindow {
+  const w = closeUpWindow([p[0] - padPx, p[1]], [photo[0] - 2 * padPx, photo[1]], DOOR_MEET_DIV);
+  return { ...w, x: w.x + Math.round(padPx) };
+}
 export const DOOR_STAGEB_MAX_TOKENS = 12000;
 export const DOOR_STAGEB_MIN_LEFT_MS = 120_000;
 export const DOOR_MAX_GAPS = 8;
@@ -299,12 +306,15 @@ export function doorObservedMismatches(observed: readonly string[], spec: DoorLo
   return out;
 }
 
-// The unexplained phrases that are still open: not the 6-panel's known gap, and not short corner gussets
-// once the draft holds them (the reads call them unexplained because the prompt has no word for them, but
-// the maths drafts each as a board part).
+// The unexplained phrases that are still open: not the 6-panel's known gap, not short corner gussets once
+// the draft holds them (the reads call them unexplained because the prompt has no word for them, but the
+// maths drafts each as a board part), and not a remark on where a rail sits once the rails are measured
+// ("mid rail at about 49 rather than 42": a rail is drawn where its points put it, whatever the base says).
+const railSpot = (s: string) => /\brails?\b/i.test(s) && /\d|\b(height|high|higher|low|lower|half|middle|cent(er|re))\b/i.test(s);
 function openGaps(phrases: string[], spec: DoorLook): string[] {
   const have = doorLookFeatures(spec), gussets = have.has("board_gusset") || have.has("diamond");
-  return phrases.filter((s) => !DOOR_SIX_PANEL.test(s) && !(gussets && DOOR_GUSSET.test(s)));
+  const rails = isRec(spec.frame) && Array.isArray(spec.frame.rails) && spec.frame.rails.length > 0;
+  return phrases.filter((s) => !DOOR_SIX_PANEL.test(s) && !(gussets && DOOR_GUSSET.test(s)) && !(rails && railSpot(s)));
 }
 
 // What Stage B would be asked about: the mismatches, and the unexplained phrases that are not a gap we
@@ -664,7 +674,7 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
       ? c.closeUpAt.hinges.slice(0, 4).map((p) => closeUpWindow(p, input.photo, DOOR_CLOSEUP_DIV))
       : ask === "handle"
       ? (c.closeUpAt.handle ? [closeUpWindow(c.closeUpAt.handle, input.photo, DOOR_CLOSEUP_DIV)] : [])
-      : c.closeUpAt.meet.map((p) => closeUpWindow(p, input.photo, DOOR_MEET_DIV));
+      : c.closeUpAt.meet.map((p) => doorMeetWindow(p, input.photo, doorEdgePadPx(input.photo[0], input.widthIn, padIn)));
     const builder = input.builder?.[CLOSEUP_OF[ask]];
     const skip = (reason: string) => {
       ups2[ask] = { status: "skipped" };

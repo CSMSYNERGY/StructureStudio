@@ -56,8 +56,10 @@ Deno.test("V2's edge strips: where the door is in the photo, a butt hinge's knuc
   assert(PROMPT.includes("give a point in them only for a hinge"));
   assert(PROMPT.includes("on a butt hinge, the middle of its knuckle"));
   // The wider photo shows the dark jamb down both sides, and reads of a steel door's ribbed sheet drifted
-  // to plank (4 of 6, against 0 of 3 before the strips); the truth files call a framed sheet basic.
-  assert(PROMPT.includes("A frame filled with one sheet (ribbed or corrugated metal, or grooved siding) is basic with field grooved"));
+  // to plank (4 of 6, against 1 of 3 before the strips); the truth files call a framed sheet a trim look:
+  // basic, or american, classic or dutch by what is laid over it.
+  assert(PROMPT.includes("A frame filled with one sheet (ribbed or corrugated metal, or grooved siding) is a trim look with field grooved"));
+  assert(PROMPT.includes("american, classic or dutch when it has their pickets, octagon and X, or vent, and basic otherwise"));
   assertFalse(PROMPT.includes("Its edges are the outer edges of the leaves"));
   // A photo cut at the leaves (padIn 0) keeps the old words.
   const cut = doorStageAPrompt({ widthIn: 72, heightIn: 80, leaves: 2, photo: [1092, 1213], padIn: 0 });

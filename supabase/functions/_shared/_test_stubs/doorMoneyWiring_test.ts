@@ -384,6 +384,16 @@ Deno.test("photos: only this tenant's exact paths, read back and checked before 
   const refused = await press(cut);
   assertEquals([refused.status, refused.body.code, refused.body.error], [400, "door_photo_shape", "This photo isn't straightened to the door's size. Straighten it again, then press Generate."]);
   assertEquals([cut.writes.length, rpcs(cut).length], [0, 0]);
+  // A wide door too: cut at the leaves, a 240 x 120 in photo is only 1.6% narrow (under 3%), and is still
+  // refused; straightened with the strips (doorFitSize: 1565 x 770) it passes the check.
+  const wide = { ...BODY, widthIn: 240, heightIn: 120 };
+  const wideCut = seed();
+  wideCut.files[`door-refs/${FRONT}`] = pngHead(1552, 776);
+  assertEquals((await press(wideCut, wide)).body.code, "door_photo_shape");
+  assertEquals([wideCut.writes.length, rpcs(wideCut).length], [0, 0]);
+  const wideStrip = seed();
+  wideStrip.files[`door-refs/${FRONT}`] = pngHead(1565, 770);
+  assertFalse((await press(wideStrip, wide)).body.code === "door_photo_shape");
   // The close-ups are held to the same limits: the ceiling prices every image as one inside them.
   const bigHinge = seed();
   bigHinge.files[`door-refs/${HINGE}`] = pngHead(4000, 3000);
