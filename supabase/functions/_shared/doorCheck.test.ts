@@ -64,6 +64,12 @@ Deno.test("locked: the leaves, the hinge side, everything measured, and the hard
   assertEquals(check(ZBRACE, [{ path: "frame.rails", to: [0.4] }]).rejected, [{ path: "frame.rails", why: "locked" }]);
 });
 
+Deno.test("a trim look's field is one sheet: the self-check may not make it boards", () => {
+  assertEquals(check(CLASSIC, [{ path: "field.dir", to: "v" }]).rejected, [{ path: "field.dir", why: "sheet_field" }]);
+  assertEquals(check(CLASSIC, [{ path: "field.dir", to: "smooth" }]).applied, ["field.dir"]);
+  assertEquals(check(ZBRACE, [{ path: "field.dir", to: "h" }]).applied, ["field.dir"]);
+});
+
 Deno.test("the base and the leaf brace move only within plank / zbrace / xbrace", () => {
   assertEquals(check(ZBRACE, [{ path: "base", to: "classic" }]).rejected, [{ path: "base", why: "base_family" }]);
   assertEquals(check(CLASSIC, [{ path: "base", to: "basic" }]).rejected, [{ path: "base", why: "base_family" }]);
