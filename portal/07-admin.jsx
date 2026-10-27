@@ -1966,7 +1966,7 @@ const ADM_TABS = [
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
   ["pricing", "Pricing",        "Bulk price and inclusion import/export by CSV",                 "client"],
-  ["master",  "Master Catalog", "The global layout-item palette and Avalara tax code list every builder draws from", "global"],
+  ["master",  "Master Catalog", "The global layout-item palette, the cladding/door/window library and the Avalara tax code list every builder draws from", "global"],
 ];
 
 function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
@@ -2172,6 +2172,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       )}
 
       {sub === "clients" && <AdmNumberRequests onPick={pickClient} onFlash={flash} />}
+      {sub === "clients" && <AdmLibraryRequests onPick={pickClient} onFlash={flash} />}
       {sub === "clients" && (
         <AdmClients clients={clients} features={features} sel={sel}
           onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
@@ -2180,6 +2181,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       {sub === "billing" && <AdmPhoneBilling clients={clients} />}
       {sub === "billing" && <AdmTaxLookups />}
       {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
+      {sub === "master" && <AdmLibrary />}
       {sub === "master" && <AdmTaxCodes />}
 
       {needsClient && !sel && clients && (
@@ -2208,6 +2210,249 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
         <AdmClientPicker clients={clients || []} current={sel}
           onPick={pickClient} onClose={() => setPickerOpen(false)} />
       )}
+    </div>
+  );
+}
+
+// ── The StructureStudio library (global; migration 339) ──────────────────────────────────────
+// The templates every builder copies from: claddings, doors and windows. A builder's copy is theirs
+// (Ahsan 2026-10-27), so nothing edited here changes a builder's entry or any of their rows; the
+// "copies" count says how many builders' entries came from each one. Every edit is a new version.
+// Archive hides a template from new picks and leaves every copy alone. ssLibLookWords, SsLibPic and
+// SsLibLookEdit are the builder side's (portal/03-catalog.jsx), so both sides describe a look alike.
+const ADM_LIB_CATS = [["cladding", "Claddings"], ["door", "Doors"], ["window", "Windows"]];
+const ADM_LIB_BLANK_LOOK = { cladding: { profile: "lap" }, door: { doorStyle: "plank" }, window: { liteRows: 2, liteCols: 2 } };
+function AdmLibrary() {
+  const [items, setItems] = useState(null);
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);
+  const [cat, setCat] = useState("cladding");
+  const [edit, setEdit] = useState(null);       // { id|null, category, name, description, searchTerms, look, sortOrder }
+  const [busy, setBusy] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await adminApi("library_items_list", {});
+      setInstalled(r.installed !== false);
+      setItems(r.items || []);
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+      setMsg({ err: e.message || "Couldn't load the library." });
+      setItems([]);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  if (hidden) return null;
+  const list = (items || []).filter((t) => t.category === cat);
+  const save = async () => {
+    setBusy("save"); setMsg(null);
+    try {
+      const body = { name: edit.name, description: edit.description, searchTerms: edit.searchTerms, look: edit.look };
+      if (edit.id) await adminApi("library_item_save", { id: edit.id, ...body });
+      else await adminApi("library_item_save", { category: edit.category, ...body, sortOrder: (list.length + 1) * 10 });
+      setMsg({ ok: edit.id ? `Saved "${edit.name}". Builders' copies are unchanged.` : `Added "${edit.name}". Builders can use it now.` });
+      setEdit(null);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const archive = async (t) => {
+    setBusy(t.id); setMsg(null);
+    try {
+      await adminApi("library_item_save", { id: t.id, status: t.status === "archived" ? "active" : "archived" });
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const move = async (idx, dir) => {
+    const ids = list.map((t) => t.id);
+    const j = idx + dir;
+    if (j < 0 || j >= ids.length) return;
+    [ids[idx], ids[j]] = [ids[j], ids[idx]];
+    setBusy("order"); setMsg(null);
+    try { await adminApi("library_items_reorder", { category: cat, orderedIds: ids }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const editor = edit && (
+    <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, margin: "8px 0", background: "#F8FAFC", display: "grid", gap: 8, maxWidth: 640 }} data-adm-library-editor="1">
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <SsLibPic category={edit.category} look={edit.look} />
+        <input type="text" value={edit.name} maxLength={80} placeholder="Name builders see" onChange={(e) => setEdit({ ...edit, name: e.target.value })} style={{ ...S.input, width: 280 }} aria-label="Template name" />
+        {edit.category === "cladding" && !edit.id && (
+          <select value={edit.look.profile} onChange={(e) => setEdit({ ...edit, look: { profile: e.target.value } })} style={{ ...S.input, width: "auto", minWidth: 0 }} aria-label="Drawn as">
+            {Object.keys(SS_LIB_CLADDING_NAMES).map((k) => <option key={k} value={k}>Drawn as {SS_LIB_CLADDING_NAMES[k]}</option>)}
+          </select>
+        )}
+        <SsLibLookEdit category={edit.category} look={edit.look} onChange={(look) => setEdit({ ...edit, look })} />
+      </div>
+      <textarea rows={2} maxLength={600} value={edit.description} placeholder="What it looks like, in a sentence" onChange={(e) => setEdit({ ...edit, description: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Description" />
+      <input type="text" value={edit.searchTerms} placeholder="Search words, comma separated (e.g. lap, clapboard, engineered wood)" onChange={(e) => setEdit({ ...edit, searchTerms: e.target.value })} style={S.input} aria-label="Search words" />
+      <div style={{ fontSize: 11.5, color: "#64748B" }}>No builder or supplier names here: every builder sees these.{edit.category === "cladding" && edit.id ? " A cladding keeps the look it is drawn as; add a new template for another." : ""}</div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" disabled={busy === "save"} onClick={save} style={S.btn(ACCENT, "#FFF")}>{busy === "save" ? "Saving…" : edit.id ? "Save template" : "Add template"}</button>
+        <button type="button" onClick={() => setEdit(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+      </div>
+    </div>
+  );
+  return (
+    <div style={S.card} data-adm-library="1">
+      <CardHead title="StructureStudio library" count={items ? items.length : null}
+        desc="The cladding, door and window templates every builder with the library turned on can copy. A builder's copy is theirs: editing or archiving a template here never changes a builder's entry or anything they sell." />
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {!installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 339 isn't applied on this database yet.</div>}
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+        {ADM_LIB_CATS.map(([k, t]) => (
+          <button key={k} type="button" onClick={() => { setCat(k); setEdit(null); }}
+            style={{ ...S.btn(cat === k ? ACCENT : "#F1F5F9", cat === k ? "#FFF" : "#334155"), padding: "6px 12px", fontSize: 12.5 }}>{t}</button>
+        ))}
+        <button type="button" onClick={() => setEdit({ id: null, category: cat, name: "", description: "", searchTerms: "", look: ADM_LIB_BLANK_LOOK[cat] })}
+          style={{ ...S.btn("#ECFDF5", "#047857"), padding: "6px 12px", fontSize: 12.5 }}>+ Add a {cat} template</button>
+      </div>
+      {edit && !edit.id && editor}
+      {!items && <SkelBar />}
+      {list.map((t, i) => (
+        <div key={t.id}>
+          <div style={{ ...ADM_ROW, opacity: t.status === "archived" ? 0.55 : 1, flexWrap: "wrap" }} data-adm-library-item={t.name}>
+            <SsLibPic category={t.category} look={t.look} size={38} />
+            <div style={{ flex: "1 1 300px", minWidth: 0, fontSize: 12.5 }}>
+              <div style={{ fontWeight: 800, color: "#1E293B" }}>{t.name} <span style={{ fontWeight: 500, color: "#94A3B8" }}>v{t.version}</span></div>
+              <div style={{ color: "#64748B" }}>{ssLibLookWords(t.category, t.look)}{t.searchTerms && t.searchTerms.length ? ` · ${t.searchTerms.join(", ")}` : ""}</div>
+            </div>
+            <AdmChip tone={t.copies ? "on" : "neutral"}>{t.copies} {t.copies === 1 ? "copy" : "copies"}</AdmChip>
+            {t.status === "archived" && <AdmChip tone="warn">Archived</AdmChip>}
+            <button type="button" disabled={!!busy || i === 0} onClick={() => move(i, -1)} title="Move up" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↑</button>
+            <button type="button" disabled={!!busy || i === list.length - 1} onClick={() => move(i, 1)} title="Move down" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↓</button>
+            <button type="button" onClick={() => setEdit({ id: t.id, category: t.category, name: t.name, description: t.description || "", searchTerms: (t.searchTerms || []).join(", "), look: t.look || {} })}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>Edit</button>
+            <button type="button" disabled={busy === t.id} onClick={() => archive(t)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>{t.status === "archived" ? "Restore" : "Archive"}</button>
+          </div>
+          {edit && edit.id === t.id && editor}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Library requests (global; migration 339) ─────────────────────────────────────────────────
+// A builder asking for a window or a cladding that is not in the library. Windows and cladding are
+// built by hand: "Take it", then "Done" with the template it became (and, ticked by default, a copy
+// in that builder's library under the name they asked for, so it is in their pickers at once), or
+// "Not possible" with a note. A charged request is refunded from here with a reason (the money grant;
+// the server says so to an operator without it). Photos are one-hour signed links.
+const ADM_LIBREQ_WORDS = { submitted: "New", in_progress: "Being built", done: "Done", refused: "Not possible", cancelled: "Cancelled", failed: "Failed", generating: "Generating", review: "In review", ready: "Ready" };
+function AdmLibraryRequests({ onPick, onFlash }) {
+  const [list, setList] = useState(null);
+  const [templates, setTemplates] = useState([]);
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const [form, setForm] = useState(null);       // { id, kind: "done"|"refuse"|"refund", ... }
+  const load = useCallback(async () => {
+    try {
+      const [r, t] = await Promise.all([adminApi("library_requests_list", {}), adminApi("library_items_list", {})]);
+      setInstalled(r.installed !== false);
+      setList(r.requests || []);
+      setTemplates((t.items || []).filter((x) => x.status !== "archived"));
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+      onFlash({ err: e.message || "Couldn't load the library requests." });
+      setList([]);
+    }
+  }, [onFlash]);
+  useEffect(() => { load(); }, []);
+  if (hidden) return null;
+  const open = (list || []).filter((r) => ["submitted", "in_progress", "generating", "review", "ready"].includes(r.status));
+  const act = async (key, fn, ok) => {
+    setBusy(key);
+    try { await fn(); onFlash({ ok }); setForm(null); await load(); }
+    catch (e) { onFlash({ err: e.message }); }
+    setBusy(null);
+  };
+  const smallBtn = (bg, fg) => ({ ...S.btn(bg, fg), padding: "5px 10px", fontSize: 12 });
+  return (
+    <div style={S.card} data-adm-library-requests={open.length}>
+      <CardHead title={`Library requests${open.length ? ` (${open.length} open)` : ""}`}
+        desc="Builders asking for a window or a cladding that isn't in the StructureStudio library. Build it, add it as a template under Master Catalog, then mark it Done with that template: it lands in the builder's library under the name they asked for." />
+      {!list && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
+      {list && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 339 isn't applied on this database yet.</div>}
+      {list && installed && list.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B" }}>No requests.</div>}
+      {list && list.map((r) => {
+        const owed = (r.chargedCents || 0) - (r.refundedCents || 0);
+        const forThis = form && form.id === r.id ? form : null;
+        const fits = templates.filter((t) => t.category === r.category);
+        return (
+          <div key={r.id} data-adm-library-request={r.status} style={{ ...ADM_ROW, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 340px", minWidth: 240, fontSize: 12.5, color: "#1E293B", lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 800 }}>{r.name} <span style={{ fontWeight: 500, color: "#64748B" }}>· a {r.category} for {r.companyName || r.clientId}</span></div>
+              <div style={{ color: "#475569" }}>
+                {r.widthIn || r.heightIn ? `${r.widthIn || "?"} × ${r.heightIn || "?"} in · ` : ""}
+                asked {new Date(r.createdAt).toLocaleDateString()}
+                {r.chargedCents ? ` · paid $${(r.chargedCents / 100).toFixed(2)}${r.refundedCents ? `, $${(r.refundedCents / 100).toFixed(2)} refunded` : ""}` : " · free"}
+              </div>
+              {r.supplierUrl && <div><a href={r.supplierUrl} target="_blank" rel="noopener noreferrer nofollow" style={{ color: ACCENT }}>Supplier link</a></div>}
+              {r.notes && <div style={{ color: "#334155", whiteSpace: "pre-wrap" }}>{r.notes}</div>}
+              {r.photos && r.photos.length > 0 && (
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  {r.photos.map((p, k) => p.url
+                    ? <a key={k} href={p.url} target="_blank" rel="noopener noreferrer"><img src={p.url} alt={`Photo ${k + 1}`} style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 6, border: "1px solid #CBD5E1" }} /></a>
+                    : <span key={k} style={{ width: 64, height: 64, borderRadius: 6, background: "#F1F5F9", display: "inline-block" }} title="Photo unavailable" />)}
+                </div>
+              )}
+              {r.resultNote && <div style={{ color: "#047857" }}>Told them: {r.resultNote}</div>}
+              {forThis && forThis.kind === "done" && (
+                <div style={{ display: "grid", gap: 6, marginTop: 8, maxWidth: 520 }}>
+                  <select value={forThis.itemId} onChange={(e) => setForm({ ...forThis, itemId: e.target.value })} style={S.input} aria-label="The template it became">
+                    <option value="">The template it became (add it under Master Catalog first)…</option>
+                    {fits.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input type="checkbox" checked={forThis.addToBuilder} onChange={(e) => setForm({ ...forThis, addToBuilder: e.target.checked })} />
+                    Add it to their library as “{r.name}”
+                  </label>
+                  <input type="text" value={forThis.note} maxLength={1000} placeholder="Note to the builder (optional)" onChange={(e) => setForm({ ...forThis, note: e.target.value })} style={S.input} />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button type="button" disabled={!!busy || !forThis.itemId} onClick={() => act(r.id, () => adminApi("library_request_set", { id: r.id, status: "done", resultItemId: forThis.itemId, addToBuilder: forThis.addToBuilder, resultNote: forThis.note }), "Marked done.")}
+                      style={smallBtn("#ECFDF5", "#047857")}>Mark done</button>
+                    <button type="button" onClick={() => setForm(null)} style={smallBtn("#F1F5F9", "#334155")}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {forThis && (forThis.kind === "refuse" || forThis.kind === "refund") && (
+                <div style={{ display: "grid", gap: 6, marginTop: 8, maxWidth: 520 }}>
+                  <input type="text" value={forThis.note} maxLength={300} placeholder={forThis.kind === "refuse" ? "Why it isn't possible (the builder sees this)" : "Why it's refunded (the builder sees this)"}
+                    onChange={(e) => setForm({ ...forThis, note: e.target.value })} style={S.input} />
+                  {owed > 0 && forThis.kind === "refuse" && (
+                    <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input type="checkbox" checked={forThis.refund} onChange={(e) => setForm({ ...forThis, refund: e.target.checked })} />
+                      Refund the ${(owed / 100).toFixed(2)} they paid
+                    </label>
+                  )}
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button type="button" disabled={!!busy || !forThis.note.trim()} style={smallBtn(forThis.kind === "refuse" ? "#FEE2E2" : "#FEF3C7", forThis.kind === "refuse" ? "#991B1B" : "#92400E")}
+                      onClick={() => act(r.id, async () => {
+                        if (forThis.kind === "refuse") await adminApi("library_request_set", { id: r.id, status: "refused", resultNote: forThis.note });
+                        if ((forThis.kind === "refuse" && forThis.refund && owed > 0) || forThis.kind === "refund") await adminApi("library_request_refund", { id: r.id, reason: forThis.note });
+                      }, forThis.kind === "refuse" ? "Marked not possible." : "Refunded.")}>
+                      {forThis.kind === "refuse" ? "Mark not possible" : `Refund $${(owed / 100).toFixed(2)}`}
+                    </button>
+                    <button type="button" onClick={() => setForm(null)} style={smallBtn("#F1F5F9", "#334155")}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <AdmChip tone={r.status === "submitted" ? "warn" : r.status === "in_progress" ? "on" : r.status === "done" ? "good" : r.status === "refused" ? "danger" : "neutral"}>{ADM_LIBREQ_WORDS[r.status] || r.status}</AdmChip>
+              {r.status === "submitted" && <button type="button" disabled={!!busy} onClick={() => act(r.id, () => adminApi("library_request_set", { id: r.id, status: "in_progress" }), "Taken.")} style={smallBtn(ACCENT, "#FFF")}>Take it</button>}
+              {(r.status === "submitted" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => setForm({ id: r.id, kind: "done", itemId: "", addToBuilder: true, note: "" })} style={smallBtn("#ECFDF5", "#047857")}>Done…</button>}
+              {(r.status === "submitted" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => setForm({ id: r.id, kind: "refuse", note: "", refund: true })} style={smallBtn("#F1F5F9", "#334155")}>Not possible…</button>}
+              {owed > 0 && !(r.status === "submitted" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => setForm({ id: r.id, kind: "refund", note: "" })} style={smallBtn("#F1F5F9", "#334155")}>Refund…</button>}
+              <button type="button" onClick={() => onPick(r.clientId)} style={smallBtn("#F1F5F9", "#334155")}>Open builder</button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

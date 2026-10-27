@@ -3867,9 +3867,13 @@ function Dashboard({ session }) {
                 /* My Profile's "How the Contacts tab opens" shows the default that applies,
                    which follows the CRM for someone who never picked one. Until the CRM answer
                    is in (own portal only, as the hub's crmKnown), crmUnlocked's false means "not
-                   known yet", so the card must not padlock the boards or refuse them on that. */
+                   known yet", so the card must not padlock the boards or refuse them on that.
+                   In view-as it is pending until viewedCtx lands: featureOn reads generous until
+                   then, so without this My Profile's Meetings cards asked portal-meetings for a
+                   builder without the CRM and showed its refusal for a moment (2026-10-27). Every
+                   other reader takes crmUnlocked || crmPending, true either way during that load. */
                 crmUnlocked={crmUnlocked}
-                crmPending={!viewing && !entitlementSettled}
+                crmPending={viewing ? !viewedCtx : !entitlementSettled}
                 /* ...and offers only the views this person may open, the hub's own answer. */
                 hubReach={hubReach}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
