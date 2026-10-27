@@ -16,9 +16,9 @@
 // and the portal offers "Make the link". Every provider call has a timeout, so a hung Zoom
 // costs a customer a few seconds on the booking page, never the booking.
 //
-// Only Zoom is wired today. Google Meet and Teams will come from the Google / Microsoft
-// calendar connections; they report 'not_available' until then and the type editor does not
-// offer them for generation.
+// Only ZOOM is made here. A Meet or Teams link is what Google / Microsoft hand back when the
+// booking's event is created on the host's calendar, so those types are left to
+// meetingCalendar.ts (migration 341) — ensureConference answers 'via_calendar' for them.
 
 import { logEdgeError } from "./logError.ts";
 import {
@@ -31,6 +31,8 @@ import {
   zoomRefresh,
   zoomUpdateMeeting,
 } from "./zoomApi.ts";
+import { googleCredsFromEnv } from "./googleCalendarApi.ts";
+import { msCredsFromEnv } from "./microsoftGraphApi.ts";
 
 export interface VideoEnv {
   get: (key: string) => string | undefined;
@@ -49,7 +51,8 @@ export type ConferenceOutcome =
 
 /** Which providers can generate a link right now. Drives what the Settings page offers. */
 export function videoReadiness(get: (k: string) => string | undefined) {
-  return { zoom: !!zoomCredsFromEnv(get), google_meet: false, teams: false };
+  // Meet and Teams ride the Google / Microsoft calendar connections (341).
+  return { zoom: !!zoomCredsFromEnv(get), google_meet: !!googleCredsFromEnv(get), teams: !!msCredsFromEnv(get) };
 }
 
 /** A pending claim older than this belongs to a request that died; it may be taken again. */
@@ -188,6 +191,9 @@ export async function ensureConference(admin: Admin, meetingId: string, env: Vid
     if (m.status !== "booked") return { status: "skipped", reason: "not_booked" };
     if (m.meeting_types?.conference_mode !== "generate") return { status: "skipped", reason: "room_link" };
     if (m.conference_external_id) return { status: "generated" };
+    // Meet / Teams: the calendar event makes the link (meetingCalendar.ensureCalendarEvent).
+    const vp = m.meeting_types?.conference_provider;
+    if (vp === "google_meet" || vp === "teams") return { status: "skipped", reason: "via_calendar" };
 
     // ── The claim ──
     const stale = new Date(now - STALE_CLAIM_MS).toISOString();

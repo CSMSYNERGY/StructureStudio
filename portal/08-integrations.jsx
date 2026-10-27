@@ -3597,6 +3597,75 @@ const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'
 //
 // It loads `overview` itself rather than taking props, because Settings → Meetings is now a
 // different page and may not be mounted at all.
+// ─── Which of my calendars count (migration 341) ─────────────────────────────────────────────
+// Carolyn 2026-10-26: the primary calendar always blocks booking times; a person may tick others
+// (a family calendar, a shared team one). And which calendar new bookings are written to. The
+// list is read LIVE from Google / Microsoft when opened (portal-meetings list_calendars), never
+// stored: a calendar renamed or deleted there must not linger here.
+function MyCalendarChoices({ provider, conn, call, onSaved, viewing = false }) {
+  const [list, setList] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [picked, setPicked] = useState(() => new Set(conn.busyCalendarIds || []));
+  const [writeId, setWriteId] = useState(conn.writeCalendarId || "primary");
+  const [open, setOpen] = useState(false);
+  const name = provider === "google" ? "Google" : "Outlook";
+
+  const loadList = async () => {
+    setOpen(true); setErr(null);
+    try { const d = await call("list_calendars", { provider }); setList(d.calendars || []); }
+    catch (e) { setErr(e.message); setList([]); }
+  };
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await call("save_calendar_prefs", { provider, busyCalendarIds: [...picked], writeCalendarId: writeId });
+      onSaved && onSaved(`Saved. Your ${name} choices apply from the next check, within five minutes.`);
+      setOpen(false);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const extra = (conn.busyCalendarIds || []).length;
+  if (!open) return (
+    <div style={{ ...sub, margin: "6px 0 2px 20px" }}>
+      Your main calendar blocks booking times{extra ? ` — plus ${extra} more` : ""}. Bookings go on {conn.writeCalendarId ? "the calendar you picked" : "your main calendar"}.{" "}
+      {!viewing && (
+        <button type="button" onClick={loadList}
+          style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+          Choose calendars
+        </button>
+      )}
+    </div>
+  );
+  return (
+    <div style={{ border: "1px solid #E2E8F0", borderRadius: 9, padding: "10px 12px", margin: "6px 0 2px 20px", background: "#F8FAFC" }}>
+      {err && <div style={{ ...S.err, marginBottom: 8 }}>{err}</div>}
+      {!list ? <div style={sub}>Reading your {name} calendars…</div> : (<>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>These block your booking times</div>
+        {list.map((c) => (
+          <label key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: "#334155", marginBottom: 4, cursor: c.primary ? "default" : "pointer" }}>
+            <input type="checkbox" disabled={c.primary || busy} checked={c.primary || picked.has(c.id)}
+              onChange={(e) => setPicked((s0) => { const n = new Set(s0); if (e.target.checked) n.add(c.id); else n.delete(c.id); return n; })} />
+            <span>{c.name}{c.primary ? <span style={{ color: "#94A3B8" }}> — your main calendar, always counts</span> : ""}</span>
+          </label>
+        ))}
+        <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", margin: "10px 0 4px" }}>Put new bookings on</div>
+        <select value={writeId} onChange={(e) => setWriteId(e.target.value)} disabled={busy}
+          style={{ ...S.input, maxWidth: 320, width: "100%", boxSizing: "border-box" }}>
+          {list.filter((c) => c.canWrite || c.primary).map((c) => (
+            <option key={c.id} value={c.primary ? "primary" : c.id}>{c.name}{c.primary ? " (main)" : ""}</option>
+          ))}
+        </select>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button style={S.btn(ACCENT, "#FFF")} disabled={busy} onClick={save}>{busy ? "Saving…" : "Save"}</button>
+          <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" }} disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+        </div>
+      </>)}
+    </div>
+  );
+}
+
 function MyConnectionsCard({ clientId, viewing = false }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -3623,17 +3692,20 @@ function MyConnectionsCard({ clientId, viewing = false }) {
     try {
       const p = new URLSearchParams(window.location.search);
       if (!p.has("video")) return;
+      const prov = p.get("provider") || "zoom";
+      const nm = prov === "google" ? "Google" : prov === "microsoft" ? "Microsoft" : "Zoom";
       const reasons = {
-        denied: "You cancelled at Zoom, so nothing was connected.",
-        state: "That connection attempt expired or didn't match. Press Connect Zoom again.",
-        exchange: "Zoom didn't accept the connection. Try again.",
+        denied: `You cancelled at ${nm}, so nothing was connected.`,
+        state: `That connection attempt expired or didn't match. Press Connect ${nm} again.`,
+        exchange: `${nm} didn't accept the connection. Try again.`,
         save: "The connection couldn't be saved. Try again, and tell us if it keeps happening.",
-        not_set_up: "Zoom isn't switched on for Structure Studio yet.",
+        not_set_up: `${nm} isn't switched on for Structure Studio yet.`,
       };
-      setLanding(p.get("video") === "connected"
-        ? { ok: "Zoom connected. Video meeting types set to “a new Zoom meeting for every booking” now make one for you." }
-        : { err: reasons[p.get("reason")] || "The Zoom connection didn't complete. Try again." });
-      setTab("zoom");
+      const okText = prov === "zoom"
+        ? "Zoom connected. Video meeting types set to “a new Zoom meeting for every booking” now make one for you."
+        : `${nm} connected. Your bookings now go on your ${prov === "google" ? "Google" : "Outlook"} calendar, and anything already on it blocks those times.`;
+      setLanding(p.get("video") === "connected" ? { ok: okText } : { err: reasons[p.get("reason")] || `The ${nm} connection didn't complete. Try again.` });
+      setTab(prov === "zoom" ? "zoom" : "calendars");
       p.delete("video"); p.delete("reason"); p.delete("provider");
       const qs = p.toString();
       window.history.replaceState(window.history.state, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
@@ -3655,23 +3727,11 @@ function MyConnectionsCard({ clientId, viewing = false }) {
       {right}
     </div>
   );
-  // What a connector that needs setup on our side says. NOT a dead Connect button: a button that
-  // opens nothing is the greyed-WhatsApp-tab mistake, "a promise nobody intended to keep, sitting
-  // on a screen Carolyn shows at a trade show".
-  const comingSoon = (name, what) => (<>
-    {row(name, "Not available yet", null, "#CBD5E1")}
-    <div style={{ ...sub, marginTop: 8 }}>
-      {what} It needs setup on our side before anyone can connect, so there's nothing to press
-      here yet. Your meeting types can still send a link you paste in yourself, and Zoom is
-      ready today.
-    </div>
-  </>);
-
   const TABS = [
     ["calendars", "Calendars", "Google Calendar or Outlook — so your own calendar blocks a slot too"],
     ["zoom", "Zoom", "Make a fresh Zoom meeting for every booking, in your own account"],
-    ["meet", "Google Meet", "A Google Meet link for every booking"],
-    ["teams", "Teams", "A Microsoft Teams link for every booking"],
+    ["meet", "Google Meet", "A Google Meet link for every booking — comes with your Google connection"],
+    ["teams", "Teams", "A Teams link for every booking — comes with your Outlook connection"],
   ];
 
   if (err && !data) return (<div style={S.card}><CardHead title="My connections" /><div style={S.err}>{err}</div></div>);
@@ -3734,37 +3794,104 @@ function MyConnectionsCard({ clientId, viewing = false }) {
           {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
         </>);
 
-        if (tab === "meet") return comingSoon("Google Meet", "Meeting links made in your own Google account.");
-        if (tab === "teams") return comingSoon("Teams", "Meeting links made in your own Microsoft 365 account.");
+        // ── Google and Outlook (341): one connection each serves the calendar AND the Meet /
+        // Teams links, because those links come from the event on that calendar.
+        const calReady = data.calendarReady || {};
+        const calRow = (prov) => {
+          const c = conns.find((x) => x.provider === prov) || null;
+          const ok = c && c.status === "connected";
+          const nm = prov === "google" ? "Google" : "Outlook";
+          const title = prov === "google" ? "Google Calendar" : "Outlook / Microsoft 365";
+          const isReady = !!calReady[prov];
+          const connect = () => run(async () => {
+            const d = await call("video_connect", { provider: prov, hostId: host.id, returnTo: window.location.hostname });
+            if (d && d.url) window.location.assign(d.url);
+          });
+          const disconnect = () => run(async () => {
+            if (!window.confirm(`Disconnect ${title}?\n\nIts busy times stop blocking your booking times, and new bookings stop going on it. Meetings already on it stay there.`)) return;
+            await call("video_disconnect", { provider: prov, hostId: host.id });
+            await load();
+            setMsg({ ok: `${title} disconnected.` });
+          });
+          return (
+            <div key={prov} style={{ marginBottom: 10 }}>
+              {row(title,
+                ok
+                  ? `Connected${c.accountEmail ? ` as ${c.accountEmail}` : ""}${c.lastSyncedAt ? ` · checked ${new Date(c.lastSyncedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}`
+                  : c ? "Stopped working — connect again to keep your calendar in step"
+                    : !isReady ? "Not available yet — Structure Studio is still setting this up" : "Not connected",
+                (<>
+                  {isReady && !viewing && host && host.id && (
+                    <button style={ok ? { ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" } : S.btn(ACCENT, "#FFF")}
+                      disabled={busy} onClick={ok ? disconnect : connect}>
+                      {ok ? "Disconnect" : c ? `Reconnect ${nm}` : `Connect ${nm}`}
+                    </button>
+                  )}
+                  {c && !ok && !viewing && (
+                    <button style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1" }} disabled={busy} onClick={disconnect}>Remove</button>
+                  )}
+                </>),
+                ok ? "#10B981" : c ? "#F59E0B" : "#CBD5E1")}
+              {ok && <MyCalendarChoices provider={prov} conn={c} call={call} viewing={viewing} onSaved={(t) => { setMsg({ ok: t }); load(); }} />}
+            </div>
+          );
+        };
+        const landingBox = (<>
+          {landing && landing.ok && (
+            <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", borderRadius: 8, padding: "8px 12px", color: "#065F46", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>{landing.ok}</div>
+          )}
+          {landing && landing.err && <div style={{ ...S.err, marginBottom: 10 }}>{landing.err}</div>}
+        </>);
+        const msgLine = msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>;
+        const noHost = !(host && host.id);
+
+        if (tab === "meet") return (<>
+          {calRow("google")}
+          <div style={sub}>
+            {noHost ? "Set up your booking link first, in My meetings below." : "A Google Meet link comes with your Google connection — there is nothing separate to connect. Any video meeting type set to “a new Google Meet for every booking” makes one on the booking's event in your Google Calendar, and the customer's invite carries it."}
+          </div>
+          {msgLine}
+        </>);
+        if (tab === "teams") return (<>
+          {calRow("microsoft")}
+          <div style={sub}>
+            {noHost ? "Set up your booking link first, in My meetings below." : "A Teams link comes with your Outlook connection. Any video meeting type set to “a new Teams meeting for every booking” makes one on the booking's event in your Outlook calendar. Teams needs a work or school Microsoft 365 account — a personal Outlook.com account syncs the calendar but gets no Teams link."}
+          </div>
+          {msgLine}
+        </>);
 
         // ── Calendars ───────────────────────────────────────────────────────────────────
-        // `connections` is already read here, so the day the connectors land this tab shows
-        // real status without being rewritten.
-        const cals = conns.filter((c) => c.provider !== "zoom");
+        const okCals = conns.filter((c) => (c.provider === "google" || c.provider === "microsoft") && c.status === "connected");
+        const setBookingsTo = (to) => run(async () => {
+          await call("save_calendar_prefs", { bookingsTo: to });
+          await load();
+          setMsg({ ok: `New bookings now go on your ${to === "google" ? "Google" : "Outlook"} calendar.` });
+        });
         return (<>
-          {cals.length > 0
-            ? cals.map((c) => (
-              <div key={c.provider} style={{ marginBottom: 8 }}>
-                {row(c.provider === "google" ? "Google Calendar" : "Outlook / Microsoft 365",
-                  `${c.status === "connected" ? "Connected" : c.status === "needs_reauth" ? "Needs reconnecting" : "Disconnected"}${c.lastSyncedAt ? ` · last checked ${new Date(c.lastSyncedAt).toLocaleString()}` : ""}`,
-                  null,
-                  c.status === "connected" ? "#10B981" : c.status === "needs_reauth" ? "#F59E0B" : "#CBD5E1")}
-              </div>
-            ))
-            : (
-              <div style={sub}>
-                <p style={{ margin: "0 0 8px" }}>
-                  <strong style={{ color: "#0F172A" }}>Not connected to anything yet, and that's fine.</strong> Your
-                  hours and the meetings already booked in Structure Studio decide what customers
-                  are offered, so your link works today.
-                </p>
-                <p style={{ margin: 0 }}>
-                  Linking Google Calendar or Outlook — so anything already on your own calendar blocks a
-                  slot too, and new meetings appear there — is still being built. It needs setup on our
-                  side before anyone can connect, so there's nothing to press here yet.
-                </p>
-              </div>
-            )}
+          {landingBox}
+          {calRow("google")}
+          {calRow("microsoft")}
+          {okCals.length === 2 && !viewing && (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5, color: "#334155", margin: "4px 0 6px" }}>
+              <strong>New bookings go on</strong>
+              {["google", "microsoft"].map((pv) => (
+                <label key={pv} style={{ display: "flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
+                  <input type="radio" name="ss-bookings-to" disabled={busy}
+                    checked={(host.calendarProvider || "google") === pv} onChange={() => setBookingsTo(pv)} />
+                  {pv === "google" ? "Google" : "Outlook"}
+                </label>
+              ))}
+              <span style={{ color: "#94A3B8" }}>(a Meet booking always goes to Google, a Teams booking to Outlook)</span>
+            </div>
+          )}
+          <div style={sub}>
+            {noHost
+              ? "Set up your booking link first, in My meetings below — your calendar connects to it."
+              : okCals.length
+                ? "Every booking goes on your calendar with the customer as a guest, so they get the calendar invite from you and you see whether they accepted. Anything already on the calendars you've ticked blocks those times on your booking page."
+                : "Connect Google or Outlook and anything already on your calendar blocks those times on your booking page, and every booking appears there with the customer invited. Nothing connected is fine too: your hours and the meetings already booked in Structure Studio decide what customers are offered."}
+          </div>
+          {msgLine}
         </>);
       })()}
     </div>
@@ -6282,7 +6409,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
                   {` · ${(MEETING_PLACES.find((x) => x[0] === t.locationKind) || ["", "In person"])[1]}`}
                   {t.locationDetail ? ` · ${t.locationDetail}` : ""}
                   {t.conferenceMode === "generate"
-                    ? " · new Zoom link per booking"
+                    ? ` · new ${t.conferenceProvider === "google_meet" ? "Meet" : t.conferenceProvider === "teams" ? "Teams" : "Zoom"} link per booking`
                     : t.conferenceUrl ? ` · ${(MEETING_VIDEO.find((x) => x[0] === t.conferenceProvider) || ["", "Video"])[1]} link` : ""}
                   {` · ${t.minNoticeHours}h notice`}
                   {(t.bufferBeforeMinutes || t.bufferAfterMinutes) ? ` · ${t.bufferBeforeMinutes}/${t.bufferAfterMinutes} min buffer` : ""}
@@ -6462,35 +6589,41 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
           above, and offering a meeting link on a lot walkthrough is noise. */}
       {draft.locationKind === "video" && (() => {
         const provider = draft.conferenceProvider || "none";
-        // 'generate' only means anything for Zoom today (migration 333, Carolyn 2026-10-23:
-        // Zoom first). Meet and Teams arrive with the Google / Microsoft calendar connections.
-        const generate = provider === "zoom" && draft.conferenceMode === "generate";
-        const zoomReady = !!(video && video.ready && video.ready.zoom);
+        // 'generate' = a new link per booking. Zoom (333) makes its own meeting; Meet and Teams
+        // (341) come from the event the booking puts on the host's Google / Outlook calendar.
+        const GEN = { zoom: ["Zoom", "zoom", "Zoom"], google_meet: ["Google Meet", "google", "Google"], teams: ["Teams", "microsoft", "Outlook"] };
+        const gen = GEN[provider] || null;
+        const generate = !!gen && draft.conferenceMode === "generate";
+        const genReady = !!(gen && video && video.ready && video.ready[provider]);
         // Who offers this type but would fall back to the room link because they haven't
-        // connected Zoom. Only someone managing the team gets the list (the server sends an
-        // empty team to an own-only caller).
+        // connected the matching account. Only someone managing the team gets the list (the
+        // server sends an empty team to an own-only caller).
         const offering = ((video && video.team) || []).filter((h) => draft.id && (h.typeIds || []).indexOf(draft.id) !== -1);
-        const unconnected = offering.filter((h) => h.zoom !== "connected");
+        const unconnected = gen ? offering.filter((h) => h[gen[1]] !== "connected") : [];
         return (
           <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 13px", marginBottom: 10, background: "#F8FAFC" }}>
             <div style={{ flex: "0 0 200px", maxWidth: 260, marginBottom: 10 }}>
               <span style={lbl}>Video provider</span>
               <select value={provider}
-                onChange={(e) => onChange({ ...draft, conferenceProvider: e.target.value, conferenceMode: e.target.value === "zoom" ? (draft.conferenceMode || "room") : "room" })}
+                onChange={(e) => onChange({ ...draft, conferenceProvider: e.target.value, conferenceMode: ["zoom", "google_meet", "teams"].includes(e.target.value) ? (draft.conferenceMode || "room") : "room" })}
                 style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
                 {MEETING_VIDEO.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
               </select>
             </div>
 
-            {provider === "zoom" && (
-              <div style={{ marginBottom: 10 }} role="radiogroup" aria-label="How the Zoom link is made">
+            {gen && (
+              <div style={{ marginBottom: 10 }} role="radiogroup" aria-label={`How the ${gen[0]} link is made`}>
                 <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 6, cursor: "pointer" }}>
                   <input type="radio" name="ss-conf-mode" checked={generate} onChange={() => set("conferenceMode", "generate")} style={{ marginTop: 2 }} />
-                  <span><strong>A new Zoom meeting for every booking</strong><span style={{ color: "#64748B" }}> — made in the host's own Zoom account the moment someone books, and moved or deleted with the booking</span></span>
+                  <span><strong>A new {gen[0]} {provider === "zoom" ? "meeting" : "link"} for every booking</strong><span style={{ color: "#64748B" }}>
+                    {provider === "zoom"
+                      ? " — made in the host's own Zoom account the moment someone books, and moved or deleted with the booking"
+                      : ` — made on the booking's event in the host's own ${gen[2]} calendar, which also invites the customer`}
+                  </span></span>
                 </label>
                 <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", cursor: "pointer" }}>
                   <input type="radio" name="ss-conf-mode" checked={!generate} onChange={() => set("conferenceMode", "room")} style={{ marginTop: 2 }} />
-                  <span><strong>My standing room link</strong><span style={{ color: "#64748B" }}> — the same Zoom room for every booking</span></span>
+                  <span><strong>My standing room link</strong><span style={{ color: "#64748B" }}> — the same {gen[0]} room for every booking</span></span>
                 </label>
               </div>
             )}
@@ -6518,22 +6651,22 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
               {provider === "none"
                 ? "Pick a provider and every booking of this type carries its link — in the confirmation, the reminder, and the calendar invite."
                 : generate
-                  ? "Each person who offers this type connects their own Zoom in My Profile → My connections. If someone hasn't, or Zoom can't be reached, the booking still goes through: it uses the room link above, or tells the customer a link will follow and gives you a Make the link button on the meeting."
+                  ? `Each person who offers this type connects their own ${gen[2]} in My Profile → My connections. If someone hasn't, or ${gen[2]} can't be reached, the booking still goes through: it uses the room link above, or tells the customer a link will follow and gives you a Make the link button on the meeting.`
                   : "This is your standing room link, so every booking of this type uses the same one. It goes in the confirmation, the reminder, and the calendar invite — where their calendar turns it into a Join button."}
             </div>
-            {generate && !zoomReady && (
+            {generate && !genReady && (
               <div style={{ fontSize: 12, color: "#92400E", marginTop: 6, lineHeight: 1.55 }}>
-                Zoom isn't switched on for Structure Studio yet, so until it is, bookings of this type use the room link above.
+                {gen[2]} isn't switched on for Structure Studio yet, so until it is, bookings of this type use the room link above.
               </div>
             )}
-            {generate && zoomReady && unconnected.length > 0 && (
+            {generate && genReady && unconnected.length > 0 && (
               <div style={{ fontSize: 12, color: "#92400E", marginTop: 6, lineHeight: 1.55 }}>
-                Not connected to Zoom yet: {unconnected.map((h) => h.publicName).join(", ")}. Their bookings use the room link until they connect.
+                Not connected to {gen[2]} yet: {unconnected.map((h) => h.publicName).join(", ")}. Their bookings use the room link until they connect.
               </div>
             )}
-            {(provider === "google_meet" || provider === "teams") && (
+            {generate && provider === "teams" && (
               <div style={{ fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.55 }}>
-                A new {provider === "teams" ? "Teams" : "Meet"} link for every booking comes with the {provider === "teams" ? "Microsoft" : "Google"} calendar connection, which isn't built yet. Your room link works today.
+                Teams links need a work or school Microsoft 365 account. A host on a personal Outlook.com account still gets the booking on their calendar, with the room link instead.
               </div>
             )}
           </div>

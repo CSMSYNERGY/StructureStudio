@@ -21,6 +21,10 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError } from "../_shared/logError.ts";
 import { zoomCredsFromEnv, zoomExchangeCode, zoomMe } from "../_shared/zoomApi.ts";
+import { googleCredsFromEnv, googleExchangeCode, googleMe } from "../_shared/googleCalendarApi.ts";
+import { msCredsFromEnv, msExchangeCode, msMe } from "../_shared/microsoftGraphApi.ts";
+import { syncConnectionBusy, type CalConn } from "../_shared/meetingCalendar.ts";
+import { denoVideoEnv } from "../_shared/meetingVideo.ts";
 import { MEETINGS_OAUTH_HOSTS, meetingsOauthRedirectUri } from "../_shared/meetingOauth.ts";
 
 const DEFAULT_HOST = "app.structurestudiosuite.com";
@@ -60,9 +64,15 @@ Deno.serve(async (req) => {
   const code = url.searchParams.get("code") ?? "";
   if (!code) return land(host, { video: "0", reason: "denied" });
 
-  if (st.provider !== "zoom") return land(host, { video: "0", reason: "provider" });
-  const creds = zoomCredsFromEnv((k) => Deno.env.get(k));
-  if (!creds) return land(host, { video: "0", reason: "not_set_up" });
+  // Zoom (333), Google and Microsoft (341) share this one return leg; the state row says which.
+  const provider = String(st.provider);
+  const get = (k: string) => Deno.env.get(k);
+  const zoomCreds = provider === "zoom" ? zoomCredsFromEnv(get) : null;
+  const googleCreds = provider === "google" ? googleCredsFromEnv(get) : null;
+  const msCreds = provider === "microsoft" ? msCredsFromEnv(get) : null;
+  if (!zoomCreds && !googleCreds && !msCreds) {
+    return land(host, { video: "0", reason: ["zoom", "google", "microsoft"].includes(provider) ? "not_set_up" : "provider", provider });
+  }
 
   // The host row must still be this person's, on this tenant. A host deleted in the ten
   // minutes since cascades the state away, so this is belt and braces.
@@ -72,29 +82,39 @@ Deno.serve(async (req) => {
     return land(host, { video: "0", reason: "state" });
   }
 
-  let tokens;
+  const redirect = meetingsOauthRedirectUri();
+  let tokens: { accessToken: string; refreshToken: string | null; expiresAt: string };
   try {
-    tokens = await zoomExchangeCode(creds, code, meetingsOauthRedirectUri());
+    tokens = zoomCreds ? await zoomExchangeCode(zoomCreds, code, redirect)
+      : googleCreds ? await googleExchangeCode(googleCreds, code, redirect)
+      : await msExchangeCode(msCreds!, code, redirect);
   } catch (e) {
     await logEdgeError({
-      fn: "meetings-oauth-callback", req, clientId: st.client_id, code: "zoom_exchange",
-      message: `Zoom did not accept the connection: ${(e as Error)?.message}`,
+      fn: "meetings-oauth-callback", req, clientId: st.client_id, code: `${provider}_exchange`,
+      message: `${provider} did not accept the connection: ${(e as Error)?.message}`,
     });
-    return land(host, { video: "0", reason: "exchange" });
+    return land(host, { video: "0", reason: "exchange", provider });
+  }
+  // Without a refresh token the connection dies when the hour-long access token does. Google
+  // only sends one with access_type=offline&prompt=consent, which the connect URL asks for.
+  if (!tokens.refreshToken) {
+    await logEdgeError({ fn: "meetings-oauth-callback", req, clientId: st.client_id, code: `${provider}_no_refresh`, message: `${provider} returned no refresh token.` });
+    return land(host, { video: "0", reason: "exchange", provider });
   }
 
-  // Who they connected, so the page can say "Connected as …". Best effort: without the
-  // user:read scope it fails and the connection is still good for making meetings.
+  // Who they connected, so the page can say "Connected as …". Best effort.
   let me: { id: string; email: string | null; name: string | null } | null = null;
   try {
-    me = await zoomMe(tokens.accessToken);
+    me = zoomCreds ? await zoomMe(tokens.accessToken)
+      : googleCreds ? await googleMe(tokens.accessToken)
+      : await msMe(tokens.accessToken);
   } catch { /* shown as "Connected" without a name */ }
 
   const { error: ue } = await admin.from("meeting_connections").upsert({
     client_id: st.client_id,
     host_id: st.host_id,
     user_id: st.user_id,
-    provider: "zoom",
+    provider,
     access_token: tokens.accessToken,
     refresh_token: tokens.refreshToken,
     token_expires: tokens.expiresAt,
@@ -108,12 +128,25 @@ Deno.serve(async (req) => {
   if (ue) {
     await logEdgeError({
       fn: "meetings-oauth-callback", req, clientId: st.client_id, code: "save",
-      message: `Could not save the Zoom connection: ${ue.message}`,
+      message: `Could not save the ${provider} connection: ${ue.message}`,
     });
     return land(host, { video: "0", reason: "save" });
   }
 
   // The audit row is written when the connect STARTS (portal-meetings `video_connect`, which
   // has the signed-in person); this leg has only the state row's word for who it is.
-  return land(host, { video: "connected", provider: "zoom" });
+  // A calendar: read its busy times NOW, so the booking page reflects them before the next
+  // 5-minute tick. Best effort and bounded: a slow provider never holds up the landing.
+  if (provider === "google" || provider === "microsoft") {
+    const { data: row } = await admin.from("meeting_connections")
+      .select("id, client_id, host_id, user_id, provider, status, access_token, refresh_token, token_expires, busy_calendar_ids, write_calendar_id")
+      .eq("host_id", st.host_id).eq("provider", provider).maybeSingle();
+    if (row) {
+      await Promise.race([
+        syncConnectionBusy(admin, row as CalConn, denoVideoEnv()),
+        new Promise((r) => setTimeout(r, 8_000)),
+      ]).catch(() => {});
+    }
+  }
+  return land(host, { video: "connected", provider });
 });

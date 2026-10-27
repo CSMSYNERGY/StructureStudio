@@ -57,6 +57,9 @@ export type MeetingMailFacts = {
    *  fall back on. Say plainly that one is coming, rather than leaving a video meeting with no
    *  way in and no word about it. Ignored when conferenceUrl is set. */
   conferencePending?: boolean;
+  /** The host's own Google / Outlook calendar sent the customer the invite (341), so this email
+   *  carries NO .ics and must not say it does — it points at the host's invite instead. */
+  inviteFromHost?: boolean;
 };
 
 const PENDING_LINK = "Your video link will follow by email.";
@@ -198,7 +201,9 @@ export function meetingBookedEmail(f: MeetingMailFacts): MeetingMailBody {
   const notes = (f.customerNotes ?? "").trim();
   const body = [
     para(`Hi ${esc(f.customerName.split(/\s+/)[0] || f.customerName)},`),
-    para(`You're booked in with <strong>${esc(f.hostName)}</strong>. We've attached a calendar invite so it lands in whatever calendar you use.`),
+    para(f.inviteFromHost
+      ? `You're booked in with <strong>${esc(f.hostName)}</strong>. ${esc(f.hostName)} has sent you a calendar invite &mdash; accept it and it lands in your calendar.`
+      : `You're booked in with <strong>${esc(f.hostName)}</strong>. We've attached a calendar invite so it lands in whatever calendar you use.`),
     summary(f),
     notes
       ? para(`<span style="color:#64748B;font-size:13px;">You told us: &ldquo;${esc(notes)}&rdquo;</span>`)
@@ -230,7 +235,9 @@ export function meetingRescheduledEmail(f: MeetingMailFacts): MeetingMailBody {
       ? `Your ${esc(f.typeName.toLowerCase())} has moved. It was ${esc(was)}; it's now <strong>${esc(when)}</strong>.`
       : `Your ${esc(f.typeName.toLowerCase())} has moved. It's now <strong>${esc(when)}</strong>.`),
     summary(f),
-    para(`<span style="color:#64748B;font-size:13px;">The attached invite updates the one already in your calendar &mdash; you shouldn't end up with two.</span>`),
+    para(f.inviteFromHost
+      ? `<span style="color:#64748B;font-size:13px;">${esc(f.hostName)}'s calendar invite has been updated to the new time too.</span>`
+      : `<span style="color:#64748B;font-size:13px;">The attached invite updates the one already in your calendar &mdash; you shouldn't end up with two.</span>`),
     f.manageUrl ? ctaButton(f.manageUrl, "View or change this meeting") : "",
     manageLine(f),
   ].filter(Boolean).join("\n");

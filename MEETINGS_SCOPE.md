@@ -2,8 +2,9 @@
 
 **Status: PHASES 1, 2 AND 2b ARE LIVE ON BETA** (migrations 326–329, 2026-10-22), verified
 end to end against real sends. **Phase 4b (Zoom, a fresh link per booking) is BUILT
-(migration 333, 2026-10-23) and dark until Carolyn's Zoom app secrets are added.** Phases 3,
-4 and 5 are not built; 3 and 4 are blocked on an OAuth app Carolyn owns. Read it before touching anything named `meeting_*`.
+(migration 333, 2026-10-23). **Phases 3 and 4 (Google + Outlook calendars, Meet + Teams links)
+are BUILT (migration 341, 2026-10-26) and dark until Carolyn's Google and Microsoft apps exist.**
+Phase 5 is not built. Read it before touching anything named `meeting_*`.
 
 ## Why, and what was already decided
 
@@ -269,6 +270,50 @@ meeting on the host's calendar, with busy-time blocking after that.
 6. Until Zoom reviews and publishes the app, only accounts in Carolyn's own Zoom account can
    connect; other builders' Zoom accounts need the published app.
 
+### Phases 3 and 4 — Google and Outlook calendars, Meet and Teams (migration 341, 2026-10-26)
+
+Carolyn's decisions, 2026-10-26: each host connects their own Google and/or Outlook; **every**
+booking goes on the host's calendar; **the customer is a guest on that event**, so Google /
+Microsoft send the one calendar invite ("We want to send it only once... we want to be able to
+see in google or microsoft whether the customer accepted"); our branded confirmation still goes,
+**without a .ics**; a host with nothing connected keeps today's email-with-.ics; the primary
+calendar always blocks booking times and the host may tick others.
+
+- **Code:** `_shared/googleCalendarApi.ts`, `_shared/microsoftGraphApi.ts` (offline-testable,
+  shared plumbing in `providerHttp.ts`), `_shared/providerTokens.ts` (refresh + rotation, the
+  Zoom rules written once for both), `_shared/meetingCalendar.ts` (orchestration). The booking
+  paths call `onBooked` / `onMoved` / `onCancelled`, which run Zoom first and then the calendar.
+- **Meet / Teams links are the calendar event's**: `ensureConference` answers `via_calendar` for
+  those types and `ensureCalendarEvent` writes `conference_*` from the event. A Meet booking
+  always goes to Google and a Teams booking to Microsoft; everything else goes to
+  `meeting_hosts.calendar_provider` (or the one connected). A personal Outlook.com account makes
+  the event but no Teams link (`conference_error = 'no_link'`).
+- **`meetings.calendar_invited`** is the switch the emails read: true → no .ics, and the copy
+  says the invite comes from the host.
+- **Busy times:** `meeting-reminders` runs `syncAllBusy` after the reminders on the existing
+  5-minute tick (no Worker change); availability still reads only `meeting_busy`. Our own
+  bookings are filtered out (by Microsoft event id, or exact start/end for Google's freeBusy). A
+  live check at book / reschedule (`liveBusyCheck`) closes the 5-minute gap and FAILS OPEN.
+- **Connect / disconnect / calendar choices** live in My Profile → My connections
+  (`video_connect` for any provider, `list_calendars`, `save_calendar_prefs`; self only).
+- Tests: `_shared/calendarProviders.test.ts`, `_shared/meetingCalendar.test.ts`, and one case in
+  `meetingEmails.test.ts`.
+
+### What Carolyn does to switch Google and Outlook on (no agent handles these values)
+
+1. **Google Cloud** (console.cloud.google.com): a project → APIs: enable **Google Calendar API**
+   → OAuth consent screen "External", scopes `openid`, `email`, `calendar.events`,
+   `calendar.calendarlist.readonly`, `calendar.freebusy` → add the team as **test users** →
+   Credentials → OAuth client "Web application", redirect URI
+   `https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/meetings-oauth-callback`. Opening it to
+   every builder needs Google's verification of the calendar scopes (days to weeks).
+2. **Microsoft Entra** (entra.microsoft.com → App registrations → New): "Accounts in any
+   organizational directory and personal Microsoft accounts", Web redirect URI as above →
+   Certificates & secrets → new client secret → API permissions: Microsoft Graph delegated
+   `offline_access`, `User.Read`, `Calendars.ReadWrite`.
+3. Supabase function secrets: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+   `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`.
+
 ## Phases
 
 | # | What | Ships without |
@@ -276,8 +321,8 @@ meeting on the host's calendar, with busy-time blocking after that.
 | 1 | Schema, availability engine, `book.html`, Meeting scheduler tab, Settings → Meetings | any external calendar |
 | 2 | Confirmation + reminder email, `.ics`, cancel/reschedule links | — |
 | 2b | Video **room links** (route A), Meetings inside Settings → Customer Hub | anything connected |
-| 3 | Google Calendar connector: busy read, event write, **and Meet links** | Carolyn's Google Cloud app |
-| 4 | Microsoft connector: busy read, event write, **and Teams links** | Carolyn's Entra registration |
+| 3 | Google Calendar connector: busy read, event write, **and Meet links** — **BUILT (341), dark until the secrets** | Carolyn's Google Cloud app |
+| 4 | Microsoft connector: busy read, event write, **and Teams links** — **BUILT (341), dark until the secrets** | Carolyn's Entra registration |
 | 4b | Zoom connector: a fresh meeting per booking — **BUILT (333), dark until the secrets** | Carolyn's Zoom app |
 | 5 | Team pools / round-robin, `book-embed.js`, Sales → Meetings page | — |
 
