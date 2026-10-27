@@ -164,8 +164,10 @@ const pageErrors = [];
 page.on("pageerror", (e) => pageErrors.push(e.message));
 const H = { "access-control-allow-origin": "*", "access-control-expose-headers": "*" };
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
-// Nothing leaves the machine but the 3D's own three.js module GETs (lib.mjs's PASS_THROUGH_GET).
-await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href),
+// Nothing leaves the machine but the 3D's own three.js module GETs (lib.mjs's PASS_THROUGH_GET), and the
+// pages themselves when SS_BASE is a deployed host (beta): Supabase stays stubbed either way.
+const BASE_ORIGIN = new URL(BASE).origin;
+await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href) && u.origin !== BASE_ORIGIN,
   (route) => (route.request().method() === "GET" && PASS_THROUGH_GET.test(route.request().url()) ? route.continue() : route.abort()));
 const handler = async (route) => {
   const req = route.request();
