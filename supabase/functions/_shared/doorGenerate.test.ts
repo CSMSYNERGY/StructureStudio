@@ -17,6 +17,7 @@ import {
   doorCallWorstCents,
   doorCostCents,
   doorDraftFromReads,
+  doorGapPhrases,
   type DoorDraftInput,
   doorInputTokensEst,
   doorJsonSafe,
@@ -614,4 +615,24 @@ Deno.test("imageHeadOf: PNG, JPEG and WebP sizes from their headers; anything el
   assertEquals(imageHeadOf(webp), { type: "webp", width: 700, height: 1572 });
   assertEquals(imageHeadOf(new TextEncoder().encode("<svg xmlns=...>")), null);
   assertEquals(imageHeadOf(new Uint8Array([0xff, 0xd8])), null);
+});
+
+Deno.test("one vocabulary gap per thing: three reads naming one thing three ways file it once", () => {
+  // The American reference door's press 1-3, as its three reads worded it: a latch, a logo, a plain joint.
+  assertEquals(doorGapPhrases([
+    "small black slide latch on each leaf's mid rail", "maker logo sticker on left upper panel",
+    "no visible astragal strip, leaves butt at the meeting line", "small black keeper latch on each mid rail",
+    "dealer logo sticker on left upper panel", "small black lock escutcheon on each mid rail",
+    "logo sticker on upper left panel", "plain joint between leaves, no strip visible",
+  ]), ["small black slide latch on each leaf's mid rail", "maker logo sticker on left upper panel", "no visible astragal strip, leaves butt at the meeting line"]);
+  // The Classic's press 4-6 (round hardware three ways, a badge two ways) and the Dutch's vent said twice.
+  assertEquals(doorGapPhrases(["small round fittings on each mid rail", "maker's logo sticker on left leaf", "round bolt hardware on each mid rail", "small maker badge top left", "small round knobs on each mid rail"]),
+    ["small round fittings on each mid rail", "maker's logo sticker on left leaf"]);
+  assertEquals(doorGapPhrases(["small logo plate near top of left leaf", "vent is a plain dark square block, louvres not clearly visible", "vent is a solid dark square block, not louvred"]),
+    ["small logo plate near top of left leaf", "vent is a plain dark square block, louvres not clearly visible"]);
+  // Different things stay apart, even when they share a place, a colour or a generic word ("plate").
+  assertEquals(doorGapPhrases(["an arched top", "small black lock plate on each mid rail", "maker's logo plate top left", "a round window", "a kick plate"]),
+    ["an arched top", "small black lock plate on each mid rail", "maker's logo plate top left", "a round window", "a kick plate"]);
+  // A phrase naming two groups' things joins the first, and the second stays its own.
+  assertEquals(doorGapPhrases(["a small knob", "a logo badge", "knob with a logo on it"]), ["a small knob", "a logo badge"]);
 });

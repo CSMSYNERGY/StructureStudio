@@ -280,15 +280,52 @@ export function doorLookFeatures(spec: DoorLook): Set<Feature> {
 // TEXT: it reaches the builder's warnings, the Stage B prompt and app_errors, and a photo can carry printed
 // words the model copies (a sign on a door). So only plain words survive: letters, digits, spaces and
 // , . ' - / ( ), everything else becomes a space.
-export function doorPhrases(v: unknown): string[] {
+export function doorPhrases(v: unknown, most = DOOR_MAX_GAPS): string[] {
   const out: string[] = [];
   for (const s of Array.isArray(v) ? v.slice(0, 40) : []) {
     if (typeof s !== "string") continue;
     const t = s.replace(/[^A-Za-z0-9 ,.'()/-]/g, " ").trim().replace(/\s+/g, " ").slice(0, 80).trim();
     if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
-    if (out.length >= DOOR_MAX_GAPS) break;
+    if (out.length >= most) break;
   }
   return out;
+}
+
+// One gap per thing. Three reads name one thing three ways ("small black slide latch on each leaf's mid
+// rail", "small black keeper latch on each mid rail", "lock escutcheon on each mid rail"), so phrases are
+// grouped by the things they name and each group files its first wording. A phrase's things are its words
+// less the ones that only place, size or colour it, with a door's usual synonyms made one word; a phrase
+// sharing a thing with a group joins the first such group (and never merges two groups, which could lose a
+// real gap). MODEL-WRITTEN TEXT, already through doorPhrases.
+const GAP_SYNONYMS: Record<string, string> = Object.fromEntries([
+  ...["latch", "catch", "keeper", "lock", "escutcheon", "bolt", "hasp", "fitting", "knob", "hardware"].map((w) => [w, "latch"]),
+  ...["logo", "sticker", "decal", "label", "badge", "plaque", "brand", "maker", "dealer"].map((w) => [w, "logo"]),
+  ...["astragal", "joint", "meeting", "meet"].map((w) => [w, "meet"]),
+  ...["vent", "louvre", "louver", "louvred", "louvered"].map((w) => [w, "vent"]),
+]);
+const GAP_NOT_A_THING = new Set((
+  "a an the of on in at to with and or near by each both one two three four its it is are be not no nor rather than from for as " +
+  "that this which like looks look appear appears show shows just only also between instead seems " +
+  "left right top bottom upper lower middle mid centre center side edge leaf leave door panel rail stile corner front back " +
+  "black white grey gray dark light brown silver bronze red green blue tan cream beige " +
+  "small large little big tiny short long tall wide narrow plain solid flat visible clearly clear faint thin thick inset round square " +
+  "plate strip line piece part shape block type kind style"
+).split(" "));
+function gapThings(phrase: string): string[] {
+  return phrase.toLowerCase().replace(/'s\b/g, "").split(/[^a-z]+/).flatMap((w) => {
+    const s = w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w;
+    return !s || GAP_NOT_A_THING.has(w) || GAP_NOT_A_THING.has(s) ? [] : [GAP_SYNONYMS[s] ?? s];
+  });
+}
+export function doorGapPhrases(phrases: readonly string[]): string[] {
+  const groups: { first: string; things: Set<string> }[] = [];
+  for (const p of phrases) {
+    const things = gapThings(p);
+    const same = groups.find((g) => things.some((t) => g.things.has(t)));
+    if (!same) groups.push({ first: p, things: new Set(things) });
+    else for (const t of things) same.things.add(t);
+  }
+  return groups.slice(0, DOOR_MAX_GAPS).map((g) => g.first);
 }
 
 export function doorObservedMismatches(observed: readonly string[], spec: DoorLook): string[] {
@@ -324,7 +361,7 @@ export function doorStageBWanted(c: Pick<DoorConsensus, "observed" | "unexplaine
   const said = [...c.observed, ...c.unexplained];
   const knownGaps = said.some((s) => DOOR_SIX_PANEL.test(s)) ? [DOOR_SIX_PANEL_GAP] : [];
   const missing = doorObservedMismatches(c.observed, spec);
-  const unexplained = openGaps(doorPhrases(c.unexplained), spec);
+  const unexplained = doorGapPhrases(openGaps(doorPhrases(c.unexplained, 40), spec));
   return { needed: missing.length > 0 || unexplained.length > 0, missing, unexplained, knownGaps };
 }
 
@@ -352,7 +389,7 @@ export function finishDoorDraft(c: DoorConsensus, spec: DoorLook, warnings: read
     for (const w of kept.warnings) pushWarning(ws, w);
     // Stage B's own list is the latest word on what our vocabulary cannot say.
     if (isRec(stageB.answer) && Array.isArray(stageB.answer.unexplained)) {
-      unexplained = openGaps(doorPhrases(stageB.answer.unexplained), out);
+      unexplained = doorGapPhrases(openGaps(doorPhrases(stageB.answer.unexplained, 40), out));
     }
   } else if (wanted.needed) pushWarning(ws, pressWarning("stageb_skipped"));
   const mismatches = doorObservedMismatches(c.observed, out);
