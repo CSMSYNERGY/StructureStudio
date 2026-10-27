@@ -27,6 +27,7 @@ import {
   doorPhrases,
   doorPressSpentCents,
   doorPressStartOf,
+  doorStageBWanted,
   doorWorkDeadline,
   imageHeadOf,
   recoverDoorAnswer,
@@ -331,6 +332,32 @@ Deno.test("the observed check: corner gussets are drawn by short corner boards o
   assertEquals(doorObservedMismatches(seen, { ...plank, base: "xbrace" } as DoorLook), seen, "an X is not a gusset");
   assertEquals(doorObservedMismatches(["an octagon of short corner braces"], { ...plank, base: "classic" } as DoorLook), []);
   assertEquals(doorObservedMismatches(["black corner brackets"], plank), [], "brackets are hardware, not gussets");
+});
+
+Deno.test("the gusset words: corner-to-corner is a whole brace, every brace a phrase names is checked, large gussets count, tilted bars do not", () => {
+  const plank = { v: 1, base: "plank", src: { leaves: 1, hinge: "left" } } as DoorLook;
+  const board = (u0: number, v0: number, u1: number, v1: number) => ({ t: "board", u0, v0, u1, v1, wIn: 2, role: "members" });
+  const small = { ...plank, base: "basic", parts: [board(0.042, 0.094, 0.208, 0.019)] } as DoorLook;
+  const large = { ...plank, base: "basic", parts: [board(0.042, 0.169, 0.375, 0.019)] } as DoorLook; // 12 in on 36 x 80
+  const xbrace = { ...plank, base: "xbrace" } as DoorLook, zbrace = { ...plank, base: "zbrace" } as DoorLook;
+  const gussets = ["four short corner gussets", "gusseted corners", "braced corners", "cross braced corners", "corner-braced frame"];
+  assertEquals(doorObservedMismatches(gussets, small), []);
+  assertEquals(doorObservedMismatches(gussets, large), [], "a large gusset is still a gusset");
+  assertEquals(doorStageBWanted({ observed: gussets, unexplained: ["gusseted corners", "short corner braces"] }, large).needed, false);
+  // Corner to corner is how a whole X or Z runs.
+  assertEquals(doorObservedMismatches(["a corner-to-corner cross brace", "corner to corner cross bracing"], xbrace), []);
+  assertEquals(doorObservedMismatches(["a diagonal corner-to-corner brace between the rails"], zbrace), []);
+  assertEquals(doorObservedMismatches(["a corner-to-corner cross brace"], small), ["a corner-to-corner cross brace"]);
+  // A phrase naming a brace and gussets needs both, and a lost X under a diamond still shows.
+  const both = ["a Z brace with corner gussets", "an X brace with four corner braces"];
+  assertEquals(doorObservedMismatches(both, small), both);
+  assertEquals(doorObservedMismatches([both[0]], { ...zbrace, parts: small.parts } as DoorLook), []);
+  const lostX = { ...plank, base: "classic", panels: [{ fill: "none" }, { fill: "diamond" }] } as DoorLook;
+  assertEquals(doorObservedMismatches(["corner-to-corner cross brace in each lower panel"], lostX), ["corner-to-corner cross brace in each lower panel"]);
+  // A level crossbar read 2 in out of level, or a plumb batten with a tilt, is no gusset.
+  for (const bar of [board(0.1, 0.5, 0.9, 0.525), board(0.5, 0.2, 0.528, 0.45)]) {
+    assertEquals(doorObservedMismatches(["four short corner gussets"], { ...plank, base: "basic", parts: [bar] } as DoorLook), ["four short corner gussets"]);
+  }
 });
 
 Deno.test("the observed check reads the draft as drawn: the base's own fills count, a negation never does", () => {

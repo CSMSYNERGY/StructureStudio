@@ -210,8 +210,11 @@ function pushWarning(list: DoorWarning[], w: DoorWarning) {
 // alone. Only the construction is checked; the hardware is the close-ups' to decide and they warn.
 type Feature = "brace_z" | "brace_x" | "fill_z" | "fill_x" | "pickets" | "lite" | "vent" | "raised" | "diamond" | "split" | "board_diag" | "board_gusset";
 // Short corner gussets: doorLook.ts drafts a short diagonal as a board part, and a diamond's octagon is
-// four of them. Checked before the X rule, so "corner cross braces" asks for gussets, not an X.
-export const DOOR_GUSSET = /\b(gussets?|corner (cross[- ]?)?brac(e|es|ed|ing))\b/i;
+// four of them. Checked first, and its words are taken out before the other rules read the phrase, so
+// "corner cross braces" asks for gussets alone and "a Z brace with corner gussets" for both.
+// "Corner-to-corner" is how a whole Z or X runs, never a gusset.
+export const DOOR_GUSSET = /\b(gussets?|gusseted|(?<!\bto[- ])corner[- ](cross[- ]?)?brac(e|es|ed|ing)|(cross[- ]?)?braced corners?)\b/i;
+const DOOR_GUSSET_ALL = new RegExp(DOOR_GUSSET.source, "gi");
 const OBSERVED_RULES: { re: RegExp; any: Feature[] }[] = [
   { re: DOOR_GUSSET, any: ["board_gusset", "diamond"] },
   { re: /\bz[- ]?brac/i, any: ["brace_z", "fill_z", "board_diag"] },
@@ -254,10 +257,11 @@ export function doorLookFeatures(spec: DoorLook): Set<Feature> {
   for (const part of Array.isArray(spec.parts) ? spec.parts : []) {
     if (!isRec(part)) continue;
     if (part.t === "board") {
-      // A long diagonal board, or a short one across a corner (it rises well under a third of the door).
+      // A long diagonal board, and one across a corner: it rises 0.3 of the door or less, at a real slope
+      // (a level or plumb board read a little off is neither). A large gusset is both.
       const du = Math.abs(Number(part.u1) - Number(part.u0)), dv = Math.abs(Number(part.v1) - Number(part.v0));
       if (du > 0.1 && dv > 0.1) out.add("board_diag");
-      else if (du > 0.02 && dv > 0.02 && dv <= 0.3) out.add("board_gusset");
+      if (du > 0.02 && dv > 0.02 && dv <= 0.3 && du / dv >= 0.4 && du / dv <= 6) out.add("board_gusset");
     }
     if (part.t === "lite" || part.t === "vent" || part.t === "raised" || part.t === "split") out.add(part.t as Feature);
   }
@@ -284,8 +288,12 @@ export function doorObservedMismatches(observed: readonly string[], spec: DoorLo
   const out: string[] = [];
   for (const phrase of doorPhrases(observed)) {
     if (NEGATED.test(phrase) || DOOR_SIX_PANEL.test(phrase)) continue;
-    const rule = OBSERVED_RULES.find((r) => r.re.test(phrase));
-    if (rule && !rule.any.some((f) => have.has(f))) out.push(phrase);
+    // Gussets first (OBSERVED_RULES[0]); the other rules read what is left, so every brace a phrase names
+    // is checked.
+    const gusset = DOOR_GUSSET.test(phrase) ? OBSERVED_RULES[0] : undefined;
+    const rest = gusset ? phrase.replace(DOOR_GUSSET_ALL, " ") : phrase;
+    const rule = OBSERVED_RULES.slice(1).find((r) => r.re.test(rest));
+    if ([gusset, rule].some((r) => r && !r.any.some((f) => have.has(f)))) out.push(phrase);
   }
   return out;
 }
