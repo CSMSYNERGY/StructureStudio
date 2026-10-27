@@ -918,7 +918,21 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const handleV = handle ? (effRails.some((r) => Math.abs(1 - handle[1] - r) <= DOOR_RAIL_TOL) ? "rail" : 1 - handle[1]) : null;
 
   // Parts, in the latch leaf. On a double the other leaf's copy of a part is the same part mirrored, so
-  // it is kept only when the latch leaf has nothing there.
+  // it is kept only when the latch leaf has nothing there. Where the rails were measured, a part a panel's
+  // fill already draws is that fill: a board standing upright in a pickets panel is one of its pickets,
+  // and in Stage A a vent near the middle of a plain panel is the panel's vent (dutch's), drawn as its fill.
+  // (Stage B, measured in ctx.frame, may only add parts, so its vent stays a part and keepStageBParts
+  // judges it.)
+  const panelOf = (v: number) => (panels && rails ? panels[panelAt(v)] ?? null : null);
+  const picketOf = (p: DraftPart & { leaf: 0 | 1 }) =>
+    panelOf(((p.v0 ?? 0) + (p.v1 ?? 0)) / 2)?.fill === "pickets" &&
+    Math.abs((p.u1 ?? 0) - (p.u0 ?? 0)) * leafWIn(p.leaf) <= 0.25 * Math.abs((p.v1 ?? 0) - (p.v0 ?? 0)) * ctx.heightIn;
+  const ventFillOf = (p: DraftPart) => {
+    const cv = ((p.v0 ?? 0) + (p.v1 ?? 0)) / 2, cu = ((p.u0 ?? 0) + (p.u1 ?? 0)) / 2, panel = panelOf(cv);
+    if (!panel || (panel.fill !== null && panel.fill !== "none" && panel.fill !== "vent")) return null;
+    const i = panelAt(cv), lo = effRails[i - 1] ?? 0, hi = effRails[i] ?? 1, q = (hi - lo) / 4;
+    return cu >= 0.25 && cu <= 0.75 && cv >= lo + q && cv <= hi - q ? panel : null;
+  };
   const placed: (DraftPart & { leaf: 0 | 1 })[] = [];
   for (const raw of Array.isArray(m.parts) ? m.parts.slice(0, 48) : []) {
     if (!isRec(raw)) continue;
@@ -934,6 +948,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
       const w = acrossIn(raw.across), role = enumIn(raw.role, ["frame", "members"]);
       if (w !== null) part.wIn = w;
       if (role) part.role = role;
+      if (picketOf(part)) continue;
       placed.push(part);
     } else if (t && isLine(raw.box)) {
       const [a, b] = raw.box.map(fr), leaf = leafOfX((a[0] + b[0]) / 2);
@@ -943,6 +958,11 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
         const rows = numOf(raw.rows), cols = numOf(raw.cols);
         if (rows !== undefined) part.rows = Math.round(rows);
         if (cols !== undefined) part.cols = Math.round(cols);
+      }
+      const ventPanel = t === "vent" && !ctx.frame ? ventFillOf(part) : null;
+      if (ventPanel) {
+        ventPanel.fill = "vent";
+        continue;
       }
       placed.push(part);
     }
