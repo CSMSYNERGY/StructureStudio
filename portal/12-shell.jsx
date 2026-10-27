@@ -3171,7 +3171,7 @@ function Dashboard({ session }) {
                   applies unchanged; `.neutral` opts out of Sign Out's red hover. */}
               {!viewing && (
                 <button type="button" className="neutral" role="menuitem"
-                  title="Email CSM Synergy about your account — for bugs, use the Feedback button"
+                  title="Email CSM Synergy about your account — for bugs, use the Support button at the top"
                   onClick={() => {
                     const subj = `Structure Studio — ${shownBusiness || "support request"}`;
                     window.location.href = "mailto:support@csmsynergy.com?subject=" + encodeURIComponent(subj);
@@ -3256,6 +3256,13 @@ function Dashboard({ session }) {
               rail and on a tablet, where `.ss-switch-wrap` used to be display:none and the
               Accounts page was the only way through — see the media queries in portal.html,
               where that rule had to be SCOPED TO THE RAIL or it would have hidden this. */}
+          {/* THE SUPPORT BUTTON (Carolyn, 10-26 call; SupportMenu in 04-orders.jsx). It replaced the
+              floating Feedback pill. Hidden while viewing another account, as the pill was: a
+              ticket or a chat would be filed under the operator's own business. */}
+          {!viewing && (
+            <SupportMenu clientId={tenant.clientId} onNavigate={navigate}
+              onSubmitted={() => setFeedbackKey((k) => k + 1)} />
+          )}
           {isOperator ? (
             <div className="ss-switch-wrap" ref={pickerRef}>
               <button type="button" className="ss-switch" onMouseEnter={() => ssWarmThrottled("operator-portal")} onClick={() => setPickerOpen((o) => !o)}
@@ -4067,16 +4074,7 @@ function Dashboard({ session }) {
         </div>
       </section>
 
-      {/* Bug / feature intake. Hidden while an operator is viewing someone else's
-          account: portal-feedback attributes a submission to the JWT's own tenant,
-          which would NOT be the client on screen — filing from here would land the
-          ticket under the operator's own business and read as that client's report. */}
-      {!viewing && (
-        <FeedbackWidget
-          clientId={tenant.clientId}
-          onSubmitted={() => setFeedbackKey((k) => k + 1)}
-        />
-      )}
+      {/* Bug / feature / ticket intake moved into the top bar's Support button (2026-10-27). */}
 
       {/* Operator filling in someone else's details from the Accounts tab. Contact fields
           only — role and tenant are not editable here, since either would move access. */}

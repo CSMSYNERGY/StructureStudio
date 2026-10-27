@@ -275,7 +275,10 @@ let ssTargetUserId = null;
 // ⚠️ An operator has no client_users row on the viewed tenant and therefore no host row of
 // their own there: portal-meetings answers `myHost: null` for them, deliberately. A CSM
 // Synergy operator does not have a booking page on a builder's account.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings"];
+// support-agent joined on 2026-10-27 (migration 340) for the OPPOSITE reason: so a view-as call
+// reaches the server AS one, which then refuses it. The assistant answers for the signed-in builder
+// only; without the injection a stray call would quietly answer for the operator's own account.
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings", "support-agent"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //

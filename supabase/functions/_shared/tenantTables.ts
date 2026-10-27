@@ -94,6 +94,9 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   billing_subscriptions: { fate: "wipe", why: "Mirror of the payment gateway, cancelled there first." },
   billing_customers: { fate: "wipe", why: "Mirror of the gateway's saved card, removed there first." },
   feedback_submissions: { fate: "wipe", why: "Bug reports filed from the portal (feedback_comments cascades)." },
+  // Migration 340. The support assistant's chats with this builder's team, and their turns.
+  support_conversations: { fate: "wipe", why: "Support assistant chats (support_messages cascades)." },
+  support_messages: { fate: "cascade", parent: "support_conversations", why: "The turns of a support chat." },
   fixture_items: { fate: "wipe", why: "Door and window catalog." },
   qbo_item_map: { fate: "wipe", why: "QuickBooks item ids from their company. Tenant-default rows have no style, so they do not cascade." },
   phone_number_requests: { fate: "wipe", why: "Bring-your-number requests." },

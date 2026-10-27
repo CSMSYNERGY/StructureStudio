@@ -110,6 +110,11 @@ verify_jwt = true
 [functions.portal-feedback]
 verify_jwt = true
 
+# The support assistant behind the top-bar Support button (migration 340). Called from the portal
+# with the builder's own session; resolveTenant is the real gate (the bare anon key has no user).
+[functions.support-agent]
+verify_jwt = true
+
 [functions.portal-commissions]
 # JWT-authenticated: the function resolves the real user via auth.getUser() and maps them
 # through client_users to their tenant + role. The confidential commission_members table is

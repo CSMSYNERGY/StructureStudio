@@ -209,6 +209,41 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    width: left:0;right:0 made sense against a fixed-width rail and would make this as
    narrow as the business name here. */
 .ss-topbar .ss-switch-menu{top:calc(100% + 8px);bottom:auto;left:auto;right:0;width:300px;color:#0F172A}
+/* THE SUPPORT BUTTON (2026-10-27, SupportMenu in portal/04-orders.jsx), replacing the floating
+   Feedback pill. It sits just before the switcher / tenant badge and takes the auto margin they
+   used to take, so the pair stays at the right. The chat panel and the ticket dialog render into
+   <body> (createPortal): a fixed child of this sticky bar would stack under page content above 40. */
+.ss-topbar .ss-support{position:relative;margin-left:auto;flex-shrink:0}
+.ss-topbar .ss-support ~ .ss-switch-wrap,.ss-topbar .ss-support ~ .tenant{margin-left:0}
+.ss-sup-btn{display:flex;align-items:center;gap:7px;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.28);color:#FFF;border-radius:9px;padding:8px 12px;font-size:13.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap}
+.ss-sup-btn:hover{background:rgba(255,255,255,0.22)}
+.ss-sup-btn svg{width:17px;height:17px;flex-shrink:0}
+.ss-sup-menu{position:absolute;top:calc(100% + 8px);right:0;width:280px;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:6px;z-index:90;color:#0F172A}
+.ss-sup-menu button{display:flex;align-items:center;gap:10px;width:100%;background:none;border:none;padding:8px 9px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-sup-menu button:hover,.ss-sup-menu button:focus-visible{background:#F1F5F9}
+.ss-sup-menu .ic{font-size:17px;width:22px;text-align:center;flex-shrink:0}
+.ss-sup-menu .tx{display:flex;flex-direction:column;min-width:0}
+.ss-sup-menu .lb{font-size:13px;font-weight:700;color:#1E293B}
+.ss-sup-menu .sb{font-size:11.5px;color:#64748B}
+.ss-sup-chat{position:fixed;top:70px;right:16px;width:400px;height:min(620px,calc(100vh - 86px));background:#FFF;border:1px solid #E2E8F0;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,0.3);display:flex;flex-direction:column;z-index:950;color:#0F172A;overflow:hidden;font-family:inherit}
+.ss-sup-head{display:flex;align-items:center;gap:8px;padding:12px 14px;background:linear-gradient(100deg,#3D3672 0%,#1B7895 100%);color:#FFF}
+.ss-sup-title{flex:1;min-width:0;display:flex;flex-direction:column}
+.ss-sup-title>span:first-child{font-size:14.5px;font-weight:800}
+.ss-sup-sub{font-size:11px;opacity:.85}
+.ss-sup-ghost{background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.3);color:#FFF;border-radius:7px;padding:4px 9px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit}
+.ss-sup-x{background:none;border:none;color:#FFF;font-size:22px;line-height:1;cursor:pointer;padding:0 2px}
+.ss-sup-note{font-size:11.5px;color:#64748B;background:#F8FAFC;border-bottom:1px solid #E2E8F0;padding:7px 14px;line-height:1.4}
+.ss-sup-list{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.ss-sup-me,.ss-sup-bot{max-width:88%;padding:8px 11px;border-radius:10px;font-size:13.5px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.ss-sup-me{align-self:flex-end;background:#3D3672;color:#FFF;border-bottom-right-radius:3px}
+.ss-sup-bot{align-self:flex-start;background:#F1F5F9;color:#1E293B;border-bottom-left-radius:3px}
+.ss-sup-muted{align-self:flex-start;font-size:12.5px;color:#94A3B8;font-style:italic;padding:2px 4px}
+.ss-sup-link{color:#1B7895;font-weight:700;text-decoration:underline}
+.ss-sup-card{align-self:stretch;border:1px solid #C7D2FE;background:#EEF2FF;border-radius:10px;padding:10px 12px}
+.ss-sup-card-t{font-size:11.5px;font-weight:800;color:#3D3672;text-transform:uppercase;letter-spacing:.3px}
+.ss-sup-card-b{font-size:13px;color:#1E293B;margin-top:3px}
+.ss-sup-form{display:flex;gap:8px;align-items:flex-end;padding:10px 12px;border-top:1px solid #E2E8F0}
+.ss-sup-form textarea{flex:1;min-width:0;resize:none;border:1px solid #CBD5E1;border-radius:8px;padding:8px 10px;font-size:13.5px;font-family:inherit;line-height:1.4}
 .ss-clogo{width:34px;height:34px;border-radius:8px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.32);display:flex;align-items:center;justify-content:center;color:#FFF;flex-shrink:0;font-size:12px;font-weight:800}
 .ss-tname{font-size:15.5px;font-weight:800;color:#FFF;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .ss-body{flex:1;padding:20px 24px}
@@ -311,6 +346,13 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
     border-radius:0;margin:4px 0 4px 10px;padding:2px 0 2px 6px;max-height:none}
   .ss-body{padding:14px 12px}
 }
+/* Support on a phone: the button is its icon, and the chat is a full-screen sheet. */
+@media (max-width:640px){
+  .ss-sup-btn{padding:7px 9px}
+  .ss-sup-btn-t{display:none}
+  .ss-sup-menu{width:min(280px,calc(100vw - 28px))}
+  .ss-sup-chat{top:0;right:0;bottom:0;left:0;width:auto;height:auto;border-radius:0;border:none}
+}
 /* Options-tab catalog tables: tighter gutters so the wide fixture tables (Doors/Windows/Ramps,
    now carrying the Internal-only column) fit without a horizontal scroll bar. Scoped to the
    .tight wrapper so the shared S.td padding is untouched for every other table. */
@@ -369,7 +411,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=19c4f54c"></script>
-<script defer src="/portal.app.compiled.js?v=a9c92e12" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=aa3149ab" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline
