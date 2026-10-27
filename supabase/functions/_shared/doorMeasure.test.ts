@@ -265,25 +265,23 @@ Deno.test("the gusset line: a diagonal must rise half its panel AND run 0.4 of i
   assertEquals(latch(56), ["none", 1], "9 in across");
 });
 
-Deno.test("a panel Z on a narrow leaf with wide stiles is still the panel's Z: the run is judged against the opening", () => {
-  // A 48 in double (24 in leaves) with 5.5 in stiles leaves a 13 in opening. A 3.5 in Z laid into its
-  // corners has its centre line 1.9 in in from each stile, so it runs 9.2 in: 0.38 of the leaf, 0.71 of
-  // the opening.
-  const d = inches(48, 80);
-  const brace = (x0: number, y0: number, x1: number, y1: number) => {
-    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-    return { a: d.p(x0, y0), b: d.p(x1, y1), across: d.line(cx - 1.75, cy, cx + 1.75, cy) };
-  };
-  const zs = [brace(7.4, 7.4, 16.6, 40.35), brace(40.6, 7.4, 31.4, 40.35)]; // each low at its own hinge
-  const xs = [...zs, brace(16.6, 7.4, 7.4, 40.35), brace(31.4, 7.4, 40.6, 40.35)];
-  const read = (braces: Rec[]): Rec => ({
+// A 48 x 80 in double of 24 in leaves, each hinged on its outer jamb, the handle on the RIGHT leaf just
+// past the meeting line: `stileIn` stiles, sill and head rails, and a mid rail at 55% unless `noMid`.
+// Braces are [x0, y0, x1, y1] in inches, each 3.5 in wide.
+function narrowPair(braces: number[][], o: { stileIn: number; noMid?: boolean; panels: string[] }) {
+  const d = inches(48, 80), s = o.stileIn;
+  const rail = (y0: number, y1: number) => [d.rail(s, 24 - s, y0, y1), d.rail(24 + s, 48 - s, y0, y1)];
+  const read: Rec = {
     measure: {
       size: d.size,
       leaves: [[d.p(0, 0), d.p(24, 0), d.p(24, 80), d.p(0, 80)], [d.p(24, 0), d.p(48, 0), d.p(48, 80), d.p(24, 80)]],
       meet: d.line(24, 2, 24, 78),
-      rails: [d.rail(5.5, 18.5, 0, 5.5), d.rail(29.5, 42.5, 0, 5.5), d.rail(5.5, 18.5, 42.25, 45.75), d.rail(29.5, 42.5, 42.25, 45.75)],
-      stiles: [5.5, 18.5, 29.5, 42.5].map((x) => ({ inner: d.line(x, 5, x, 75) })),
-      braces,
+      rails: [...rail(0, s), ...(o.noMid ? [] : rail(42.25, 45.75)), ...rail(80 - s, 80)],
+      stiles: [s, 24 - s, 24 + s, 48 - s].map((x) => ({ inner: d.line(x, 5, x, 75) })),
+      braces: braces.map(([x0, y0, x1, y1]) => {
+        const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+        return { a: d.p(x0, y0), b: d.p(x1, y1), across: d.line(cx - 1.75, cy, cx + 1.75, cy) };
+      }),
       hinges: [10.4, 44, 69.6].flatMap((y) => [{ pivot: d.p(0.5, y) }, { pivot: d.p(47.5, y) }]),
       handle: d.p(26, 44),
     },
@@ -292,13 +290,67 @@ Deno.test("a panel Z on a narrow leaf with wide stiles is still the panel's Z: t
     leaves: 2,
     field: "v",
     brace: "none",
-    panels: ["z", "none"],
-  });
-  const ctx = { widthIn: 48, heightIn: 80, leaves: 2 as const, photo: d.size };
-  const z = draftOf(doorLookFromMeasure(read(zs), ctx));
+    panels: o.panels,
+  };
+  return draftOf(doorLookFromMeasure(read, { widthIn: 48, heightIn: 80, leaves: 2, photo: d.size }));
+}
+const mirror48 = (b: number[]) => [48 - b[0], b[1], 48 - b[2], b[3]];
+
+// An X's second board butted against the first: the cut leg in two pieces that stop at the whole board's
+// edges (w wide), each `short` in further back. In inches; returns [whole, piece, piece].
+function buttedX(whole: number[], cut: number[], w: number, short = 0): number[][] {
+  const [a0, b0, a1, b1] = whole, [c0, d0, c1, d1] = cut;
+  const ux = c1 - c0, uy = d1 - d0, vx = a1 - a0, vy = b1 - b0, len = Math.hypot(ux, uy);
+  const t = ((a0 - c0) * vy - (b0 - d0) * vx) / (ux * vy - uy * vx); // where the cut leg meets the whole one
+  const sin = Math.abs(ux * vy - uy * vx) / (len * Math.hypot(vx, vy));
+  const k = (w / 2 / sin + short) / len, mx = c0 + ux * t, my = d0 + uy * t;
+  return [whole, [c0, d0, mx - ux * k, my - uy * k], [mx + ux * k, my + uy * k, c1, d1]];
+}
+
+Deno.test("a panel Z on a narrow leaf with wide stiles is still the panel's Z: the run is judged against the opening", () => {
+  // 24 in leaves with 5.5 in stiles leave a 13 in opening. A 3.5 in Z laid into its corners has its
+  // centre line 1.9 in in from each stile, so it runs 9.2 in: 0.38 of the leaf, 0.71 of the opening.
+  const zs = [[7.4, 7.4, 16.6, 40.35], [40.6, 7.4, 31.4, 40.35]]; // each low at its own hinge
+  const xs = [...zs, [16.6, 7.4, 7.4, 40.35], [31.4, 7.4, 40.6, 40.35]];
+  const z = narrowPair(zs, { stileIn: 5.5, panels: ["z", "none"] });
   assertEquals([rnd(z.panels), z.parts], [[{ fill: "z", zFrom: "hinge", braceWIn: 3.5 }, { fill: "none" }], []]);
-  const x = draftOf(doorLookFromMeasure(read(xs), ctx));
+  const x = narrowPair(xs, { stileIn: 5.5, panels: ["z", "none"] });
   assertEquals([rnd(x.panels), x.parts], [[{ fill: "x", braceWIn: 3.5 }, { fill: "none" }], []]);
+});
+
+Deno.test("a full-height X on a narrow leaf, its second board butted in two, is still the panel's X: the butt gap grows as the legs close", () => {
+  // No mid rail and 3.5 in stiles: each leaf's legs cross at about 23 degrees, so the butted board's
+  // pieces stop 9.1 in apart along it, more than two board widths.
+  for (const short of [0, 0.5]) {
+    const left = buttedX([5, 5, 19, 75], [19, 5, 5, 75], 3.5, short);
+    const r = narrowPair([...left, ...left.map(mirror48)], { stileIn: 3.5, noMid: true, panels: ["x"] });
+    assertEquals([fills(r), r.parts], [["x"], []], `pieces ${short} in short`);
+  }
+});
+
+Deno.test("a butted X joins whatever order its pieces are listed in, with one end read 1.8 in off the board's line or the pieces overlapping", () => {
+  const door = singleDoor({ brace: "none", base: "xbrace" }), d = inches(36, 80);
+  const board = ([x0, y0, x1, y1]: number[]) => ({ a: d.p(x0, y0), b: d.p(x1, y1), across: d.line(0, 20, 4, 20) });
+  const lower = (braces: number[][]) => {
+    const r = draftOf(doorLookFromMeasure({ ...withMeasure(door.read, { braces: braces.map(board) }), panels: ["x", "none"] }, door.ctx));
+    return [fills(r), r.parts.length];
+  };
+  const whole = [7, 7, 29, 40], low = [29, 7, 21.2, 21.9], high = [16.3, 26.1, 7, 40]; // low's inner end 1.8 in off
+  for (const order of [[whole, low, high], [whole, high, low], [high, low, whole]]) assertEquals(lower(order), [["x", "none"], 0], JSON.stringify(order));
+  assertEquals(lower([whole, [29, 7, 15.8, 26.8], [19.1, 21.85, 7, 40]]), [["x", "none"], 0], "pieces overlapping 6 in");
+});
+
+Deno.test("an X across the whole leaf whose second board is butted at the crossing is still brace x; a Z in each panel stays two Zs", () => {
+  const door = singleDoor({ brace: "x" }), d = inches(36, 80);
+  const leaf = (braces: number[][]) => {
+    const r = draftOf(doorLookFromMeasure(withMeasure(door.read, {
+      braces: braces.map(([x0, y0, x1, y1]) => ({ a: d.p(x0, y0), b: d.p(x1, y1), across: d.line(15, 40, 20.5, 40) })),
+    }), door.ctx));
+    return [r.brace?.t, fills(r), r.parts.length];
+  };
+  assertEquals(leaf(buttedX([7, 7, 29, 73], [29, 7, 7, 73], 5.5)), ["x", ["none", "none"], 0]);
+  assertEquals(leaf([[7, 7, 29, 73], [29, 7, 18, 40], [18, 40, 7, 73]]), ["x", ["none", "none"], 0], "cut at the crossing");
+  assertEquals(leaf([[7, 7, 29, 40], [7, 48, 29, 73]]), ["none", ["z", "z"], 0], "a Z in each panel");
 });
 
 Deno.test("an X whose second board is butted in two is the panel's X, not a Z and two boards", () => {
@@ -345,6 +397,20 @@ Deno.test("an unequal double: the latch leaf's own four gussets, the other leaf'
   const braces = ((door.read.measure as Rec).braces as Rec[]).filter((b) => (b.a as number[])[0] !== p[0] || (b.a as number[])[1] !== p[1]);
   const missed = boards(draftOf(doorLookFromMeasure(withMeasure(door.read, { braces }), door.ctx)));
   assertEquals(missed, [LATCH[1], [0.05, 0.09, 0.26, 0.02, 2, "members"], LATCH[2], LATCH[3]]);
+  // No mid rail read (one panel a leaf) and both of the latch leaf's top gussets missed: the narrow leaf's
+  // two top ones stand for them, matched by corner (side AND top or bottom), not by side alone.
+  const m = door.read.measure as Rec, top = [inches(72, 80).p(30.5, 72.5), inches(72, 80).p(64.5, 78.5)];
+  const oneRail = withMeasure(door.read, {
+    rails: (m.rails as Rec[]).filter((_, i) => i % 3 !== 1),
+    braces: (m.braces as Rec[]).filter((b) => !top.some((q) => (b.a as number[])[0] === q[0] && (b.a as number[])[1] === q[1])),
+  });
+  const r = draftOf(doorLookFromMeasure(oneRail, door.ctx));
+  assertEquals([fills(r), boards(r)], [["none"], [
+    LATCH[0],
+    [0.05, 0.91, 0.26, 0.98, 2, "members"],
+    [0.74, 0.98, 0.95, 0.91, 2, "members"],
+    LATCH[2],
+  ]]);
 });
 
 Deno.test("a gusset given both ways, as a diagonal and as a board, is one part: the read's own board", () => {
