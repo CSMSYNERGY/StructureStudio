@@ -6,7 +6,7 @@
 // than clamped.
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { colorRolesOf, type DoorReadDraft, type DoorReadResult, doorLookFromMeasure, samplePatch, snapFinish } from "./doorLook.ts";
-import { doubleDoor, gussetDoor, inches, nudge, paintAt, PX_PER_IN, singleDoor } from "./_test_stubs/doorReads.ts";
+import { doubleDoor, gussetDoor, inches, nudge, paintAt, PX_PER_IN, singleDoor, withStrips } from "./_test_stubs/doorReads.ts";
 
 type Rec = Record<string, unknown>;
 const r2 = (x: number | null) => (x === null ? null : Math.round(x * 100) / 100);
@@ -62,16 +62,8 @@ Deno.test("points to numbers: a single Z door hinged left, read to the inch", ()
   assertEquals(codes(r), [], "hinges seen: nothing guessed, nothing to warn about");
 });
 
-// The same read on a photo with an edge strip of `padIn` past each side (DOOR_LOOK_V2): every x moved
-// over by the strip, the image that much wider.
-function strips(door: { read: Rec; ctx: Parameters<typeof doorLookFromMeasure>[1] }, padIn: number) {
-  const px = padIn * PX_PER_IN, photo: [number, number] = [door.ctx.photo[0] + 2 * px, door.ctx.photo[1]];
-  const read = withMeasure(nudge(door.read, (p) => [p[0] + px, p[1]]), { size: photo });
-  return { read, ctx: { ...door.ctx, photo, padIn } };
-}
-
 Deno.test("edge strips: a photo with 2 in past each side edge measures the same door, and its pixels map back onto it", () => {
-  const door = strips(singleDoor({ lite: true }), 2);
+  const door = withStrips(singleDoor({ lite: true }), 2);
   const r = doorLookFromMeasure(door.read, { ...door.ctx, colorAt: paintAt(door.read, door.ctx.photo) });
   const d = draftOf(r);
   assertEquals(numbers(d), SINGLE);
@@ -82,7 +74,7 @@ Deno.test("edge strips: a photo with 2 in past each side edge measures the same 
   const k = draftOf(doorLookFromMeasure({ ...knuckles, hinges: { type: "butt" } }, door.ctx));
   assertEquals([k.side, k.sideFrom, k.hingeCount, rnd(k.hingeAt)], ["left", "hinges", 3, [0.13, 0.55, 0.87]]);
   // A double: the meeting line and the latch leaf's hinges through the strips.
-  const pair = strips(doubleDoor({ lite: true }), 2);
+  const pair = withStrips(doubleDoor({ lite: true }), 2);
   const p = draftOf(doorLookFromMeasure(pair.read, pair.ctx));
   assertEquals([numbers(p), p.side, p.meetX, rnd(p.px.hinges)], [SINGLE, "right", 0.5, [[1837.5, 1740], [1837.5, 900], [1837.5, 260]]]);
 });
