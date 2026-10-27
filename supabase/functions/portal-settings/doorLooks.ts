@@ -1,4 +1,4 @@
-// Settings → Options → Doors → Door looks (migrations 337 and 338; plan "Door looks from a photo",
+// Settings → Options → Doors → Door looks (migrations 343 and 344; plan "Door looks from a photo",
 // 2026-10-24, phase P3): a builder's own 3D door looks, saved, listed and archived here, and the rule
 // that puts one on a door row (save_fixture and import_fixtures in index.ts call doorLookForFixture /
 // resolveDoorLookWrite).
@@ -8,7 +8,7 @@
 // here is free and calls no model, so only the tenant flag gates it.
 //
 // THE TENANT FLAG. client_settings.door_looks_beta gates every action in this file and a doorLookId on
-// a door row. It fails closed: a read that errors refuses, and a database without 337 (42703 / 42P01)
+// a door row. It fails closed: a read that errors refuses, and a database without 343 (42703 / 42P01)
 // reads as "not available yet". Only structure-studio gets it before promotion.
 //
 // THE CLEANER. Every spec that is stored goes through _shared/doorLook.ts's sanitizeDoorLook (P1), the
@@ -32,11 +32,11 @@ export type DoorLookCtx = {
 };
 export type Refusal = { status: number; code: string; error: string };
 
-/** The seven bases, the same list as 337's door_looks_base_chk. The cleaner decides; this only lets a
+/** The seven bases, the same list as 343's door_looks_base_chk. The cleaner decides; this only lets a
  *  bad answer from it be refused in words instead of as a constraint error. */
 export const DOOR_LOOK_BASES: readonly string[] = ["plank", "zbrace", "xbrace", "american", "basic", "classic", "dutch"];
 export const DOOR_LOOK_NAME_MAX = 60;
-/** 337's door_looks_spec_chk: octet_length(spec::text) <= 4096. */
+/** 343's door_looks_spec_chk: octet_length(spec::text) <= 4096. */
 export const DOOR_LOOK_SPEC_MAX_BYTES = 4096;
 export const DOOR_REF_MAX_PHOTOS = 4;
 const LOOK_COLS = "id, name, base, spec, spec_version, status, thumb_url, ai_call_id, version, created_at, updated_at";
@@ -51,11 +51,11 @@ const LOOK_NOT_FOUND: Refusal = { status: 404, code: "door_look_not_found", erro
 const LOOK_ARCHIVED: Refusal = { status: 409, code: "door_look_archived", error: "That 3D look was archived. Reload the page and pick another." };
 const LOOK_NOT_READY: Refusal = { status: 409, code: "door_look_not_ready", error: "Save that 3D look first, then put it on your doors." };
 
-/** A database without 337 (or a PostgREST that has not reloaded): the column or table is unknown. */
+/** A database without 343 (or a PostgREST that has not reloaded): the column or table is unknown. */
 export const lookSchemaMissing = (err: unknown): boolean =>
   ["42703", "42P01", "PGRST204", "PGRST205"].includes(String((err as { code?: string } | null)?.code ?? ""));
 
-/** client_settings.door_looks_beta. `ready` false = a database without 337, which reads as off. */
+/** client_settings.door_looks_beta. `ready` false = a database without 343, which reads as off. */
 export async function readDoorLooksFlag(admin: Db, clientId: string): Promise<{ on: boolean; ready: boolean; error?: unknown }> {
   try {
     const { data, error } = await admin.from("client_settings").select("door_looks_beta").eq("client_id", clientId).maybeSingle();
@@ -78,7 +78,7 @@ export const doorThumbPathOk = (clientId: string, path: unknown): path is string
 const REF_EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 
 // ── The spec ───────────────────────────────────────────────────────────────────────────────
-/** The spec's size AS STORED, which is what 337's check measures: Postgres prints jsonb with a space
+/** The spec's size AS STORED, which is what 343's check measures: Postgres prints jsonb with a space
  *  after every ':' and ',' between members ({"a": 1, "b": [1, 2]}), so the compact JSON plus one byte
  *  per separator outside strings. The cleaner rounds its numbers, so their text matches too. */
 export function doorLookStoredBytes(v: unknown): number {
@@ -169,7 +169,7 @@ async function looksById(admin: Db, clientId: string, ids: string[]): Promise<{ 
 /**
  * save_fixture's half: reads what the rule needs for ONE row and merges the answer into `rec`. Reads
  * nothing for a non-door, or for a door save that sends neither key that matters. On a database without
- * 337 a row save that never named a look goes through untouched; one that sets a look is refused.
+ * 343 a row save that never named a look goes through untouched; one that sets a look is refused.
  */
 export async function doorLookForFixture(admin: Db, clientId: string, x: {
   category: string; rec: Record<string, unknown>; sent: { id: string | null } | undefined; rowId: string | null;
@@ -409,7 +409,7 @@ export async function handleDoorLookAction(x: DoorLookCtx): Promise<Response> {
     if (cleaned) { next.spec = cleaned.spec; next.base = cleaned.base; next.spec_version = cleaned.v; }
     if (thumbUrl !== undefined) next.thumb_url = thumbUrl;
     // Compare-and-swap on the version: a save that raced this one past the read above writes nothing.
-    // A new base reaches every door row on the look in the same statement (337's trigger).
+    // A new base reaches every door row on the look in the same statement (343's trigger).
     const up = await admin.from("door_looks").update(next).eq("client_id", clientId).eq("id", id).eq("version", version).select(LOOK_COLS).maybeSingle();
     if (up.error) return dbFail(req, clientId, "save that door look", up.error);
     if (!up.data) {
@@ -435,7 +435,7 @@ export async function handleDoorLookAction(x: DoorLookCtx): Promise<Response> {
 
   // ── archive_door_look ────────────────────────────────────────────────────────────────────
   // The look leaves the lists and the shopper's designer, and its door rows go back to its base look
-  // (337's trigger, in the same statement). Saved designs keep their doors: they draw the base look.
+  // (343's trigger, in the same statement). Saved designs keep their doors: they draw the base look.
   // Archiving an archived look answers as done.
   if (action === "archive_door_look") {
     if (!isUuid(p.id)) return json({ error: "Which look?", code: "door_look_id" }, 400);

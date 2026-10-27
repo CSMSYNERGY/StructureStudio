@@ -241,7 +241,7 @@ import { handleCrmFieldAction, readBuiltinOverrides, readCustomFields } from "./
 // The library of claddings, doors and windows (migration 339): its actions, the catalog's share, and
 // the rule for a library entry named on a cladding or door/window save, in ./library.ts.
 import { catalogLibrary, claddingLinkFor, fixtureLinkFor, handleLibraryAction } from "./library.ts";
-// Door looks from a photo (migrations 337/338): the look actions, and the rule that puts a look on a
+// Door looks from a photo (migrations 343/344): the look actions, and the rule that puts a look on a
 // door row (save_fixture, import_fixtures), in ./doorLooks.ts.
 import {
   doorLookForFixture, doorLookImportRow, doorLookImportState, handleDoorLookAction, isUuid as isDoorLookId, lookSchemaMissing, readDoorLooksFlag,
@@ -390,7 +390,7 @@ const GATES: GateTable = {
   library_request_upload_url:     { area: "settings_options", level: "edit" },
   library_request:                { area: "settings_options", level: "edit" },
   library_request_cancel:         { area: "settings_options", level: "edit" },
-  // Door looks from a photo (337/338), beside the door rows they go on. Each branch ALSO refuses
+  // Door looks from a photo (343/344), beside the door rows they go on. Each branch ALSO refuses
   // unless client_settings.door_looks_beta is on for the tenant (./doorLooks.ts). None of these calls
   // the model: generating a look (generate_door_look, P4) adds its own lines with the kill switch.
   list_door_looks:                { area: "settings_options", level: "view" },
@@ -2779,7 +2779,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // needs only the price, the meter and the exemption. If a balance is ever wanted beside the
     // button, gate it the way portal-billing's `mine` does.
     //
-    // TWO METERS SINCE 337. `wallet` is the building meter (video_3d_generation), as before;
+    // TWO METERS SINCE 343. `wallet` is the building meter (video_3d_generation), as before;
     // `doorWallet` is the door-look meter (door_look_generation), read the same way for the Door
     // looks section's Generate button. Each is null on its own failure or missing row (the rule
     // above), and a failed exemption read makes both null.
@@ -2807,11 +2807,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return { wallet: line(price), doorWallet: line(doorPrice) };
       } catch (_) { return { wallet: null, doorWallet: null }; }
     })();
-    // The Door looks section shows only for a builder with client_settings.door_looks_beta on (337).
-    // Read on its own, never in the error loop, and false on any failure: a database without 337
+    // The Door looks section shows only for a builder with client_settings.door_looks_beta on (343).
+    // Read on its own, never in the error loop, and false on any failure: a database without 343
     // (42703) must not fail the whole catalog, and a flag we could not read hides the section.
     const doorLooksFlagRead = readDoorLooksFlag(admin, clientId).then((f) => f.on).catch(() => false);
-    // The door rows' own 3D look (fixture_items.door_look_id, 337). On a database before 337 PostgREST
+    // The door rows' own 3D look (fixture_items.door_look_id, 343). On a database before 343 PostgREST
     // answers 42703 for the whole select, so it is read again without the column (the cladding rule
     // above): every catalog keeps loading, and no row has a look.
     // lite_rows / lite_cols (335): a window's grid of lites in 3D, null = automatic. Same rule: 335 is
@@ -2866,7 +2866,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // in_partition (313): "Allowed in interior walls". Same rule: 313 is applied first.
       // door_window_at (the transom in a door, 2026-10-21): where an in-door window sits. Same rule:
       // its migration is applied first.
-      // lite_rows / lite_cols (335) and door_look_id (337): read above (fixturesRead), the look with
+      // lite_rows / lite_cols (335) and door_look_id (343): read above (fixturesRead), the look with
       // its fallback.
       fixturesRead,
       // Ramp mode + simple-ramp config (client_settings, service-role only).
@@ -2951,7 +2951,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       claddingCourses: claddingRes.courses === true,
       insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet,
       // libraryBeta + library (339). Started with the reads above, so it costs no extra round trip.
-      // Door looks from a photo (337): whether this builder sees the Door looks section, and the door
+      // Door looks from a photo (343): whether this builder sees the Door looks section, and the door
       // meter's money line (null = say nothing about money, as for `wallet`).
       ...(await libraryRead), doorLooksBeta, doorWallet });
   }
@@ -7396,13 +7396,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // dutch) -- the CHECK, D3_DOOR_STYLES in the portal and both designer twins carry the same eight.
       rec.door_style = ["plank", "zbrace", "xbrace", "rollup", "american", "basic", "classic", "dutch"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
     }
-    // The builder's own 3D look (337): doors only, presence-guarded, and only PARSED here, because the
+    // The builder's own 3D look (343): doors only, presence-guarded, and only PARSED here, because the
     // rule needs the database (this validator has none): the caller hands `doorLook` to
     // doorLookForFixture / doorLookImportRow (./doorLooks.ts), which check the tenant flag and the look,
     // force door_style to its base, and clear a look only on an explicit null or a different doorStyle.
     // An ABSENT key never clears one: today's production portal sends doorStyle on every door save and
-    // no doorLookId at all. A non-door never carries one (337's fixture_items_door_look_door_chk), so
-    // nothing is written for it, and no write here ever names the column on a database without 337.
+    // no doorLookId at all. A non-door never carries one (343's fixture_items_door_look_door_chk), so
+    // nothing is written for it, and no write here ever names the column on a database without 343.
     if (isDoor && has("doorLookId")) {
       const raw = row.doorLookId;
       if (raw === null || String(raw).trim() === "") return { rec, doorLook: { id: null } };
@@ -7437,8 +7437,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
     if (!("door_style" in rec)) rec.door_style = "auto";
-    // door_look_id (337) is NOT defaulted here: its column default is NULL already, and naming it on
-    // every insert would fail every catalog insert on a database without 337.
+    // door_look_id (343) is NOT defaulted here: its column default is NULL already, and naming it on
+    // every insert would fail every catalog insert on a database without 343.
     return rec;
   };
 
@@ -7506,7 +7506,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if ("dbError" in ln) return dbFail(req, clientId, ln.where, ln.dbError);
       Object.assign(v.rec!, ln.write);
     }
-    // The door's own 3D look (337): set, cleared or left alone by the rule in ./doorLooks.ts. Refused
+    // The door's own 3D look (343): set, cleared or left alone by the rule in ./doorLooks.ts. Refused
     // here, before anything is written.
     {
       const dl = await doorLookForFixture(admin, clientId, { category, rec: v.rec!, sent: v.doorLook, rowId: id || null });
@@ -7611,7 +7611,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (t.error) return dbFail(req, clientId, "read your building styles", t.error);
       styleIds = t.ids!;
     }
-    // Door looks (337): what save_fixture's rule needs, read once for the whole sheet. null when no
+    // Door looks (343): what save_fixture's rule needs, read once for the whole sheet. null when no
     // row carries doorStyle or doorLookId (a window sheet, or one without the column).
     const lookRead = await doorLookImportState(admin, clientId, category, payload.rows);
     if ("dbError" in lookRead) return dbFail(req, clientId, lookRead.where, lookRead.dbError);
@@ -7667,7 +7667,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, saved, added, skipped });
   }
 
-  // Door looks from a photo (337/338): the builder's own looks, saved, listed and archived, and the
+  // Door looks from a photo (343/344): the builder's own looks, saved, listed and archived, and the
   // photo and tile uploads. Every action is NAMED here, not looked up in a set, so preflight's GATES ⇄
   // branch cross-check (which reads this file) sees them. ./doorLooks.ts refuses them all unless the
   // tenant's door_looks_beta flag is on.

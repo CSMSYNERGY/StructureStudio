@@ -1,4 +1,4 @@
-// A door row's own 3D look (fixture_items.door_look_id, migration 337), driven through the SHIPPED
+// A door row's own 3D look (fixture_items.door_look_id, migration 343), driven through the SHIPPED
 // portal-settings handler: save_fixture, import_fixtures and the catalog read.
 //
 // WHAT IS PINNED (plan "Door looks from a photo" §6). Today's production portal sends doorStyle on
@@ -11,7 +11,7 @@
 //   4. A non-door never carries one; a malformed id is refused in words.
 //   5. import_fixtures follows the same rules from one read per sheet, and a refusal is a note that
 //      leaves that row's look alone while the rest of the row goes in.
-//   6. On a database without 337: the catalog still loads (42703 fallback, flag reads off), and a door
+//   6. On a database without 343: the catalog still loads (42703 fallback, flag reads off), and a door
 //      save that never named a look goes through untouched; setting one is refused.
 //   7. The catalog returns door_looks_beta and the door meter's money line beside the building one.
 // Tenants and users are made up; the repo is public.
@@ -165,7 +165,7 @@ Deno.test("a look we could not read refuses the save (fails closed)", async () =
   assertEquals(db.writesTo("fixture_items").length, 0);
 });
 
-Deno.test("a database without 337: door saves go through untouched; setting a look is refused", async () => {
+Deno.test("a database without 343: door saves go through untouched; setting a look is refused", async () => {
   const db = seed();
   db.missingColumns.add("fixture_items.door_look_id").add("client_settings.door_looks_beta");
   db.missingTables.add("door_looks");
@@ -233,7 +233,7 @@ Deno.test("catalog: selects door_look_id, returns the flag and the door meter's 
   assertEquals(none.body.doorLooksBeta, false, "no settings row: off");
 });
 
-Deno.test("catalog on a database without 337: still loads, no look on any row, flag off, no door money line", async () => {
+Deno.test("catalog on a database without 343: still loads, no look on any row, flag off, no door money line", async () => {
   const db = seed();
   db.missingColumns.add("fixture_items.door_look_id").add("client_settings.door_looks_beta");
   db.tables.usage_prices = db.rows("usage_prices").filter((p) => p.kind !== "door_look_generation");

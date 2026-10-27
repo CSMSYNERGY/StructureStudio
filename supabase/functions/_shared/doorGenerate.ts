@@ -825,7 +825,7 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
   return done({ outcome: "draft", spec: clean.spec, warnings: f.warnings, vocabGaps: f.vocabGaps, mismatches: f.mismatches, unexplained: f.unexplained });
 }
 
-// ─── THE LEDGER ROW A PRESS LEAVES (ai_door_calls, 337) ───────────────────────────────────────────
+// ─── THE LEDGER ROW A PRESS LEAVES (ai_door_calls, 343) ───────────────────────────────────────────
 // The columns the server writes when a press's work ends, from its result. The spec, the warnings and
 // the money are what recover and the P7 scorer read back (tests/doorlooks/doorSim.mjs's
 // runFromDoorLedgerRow); the points, the reads and the notes stay here and never reach a shopper.

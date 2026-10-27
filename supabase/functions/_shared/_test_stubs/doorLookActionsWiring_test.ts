@@ -1,9 +1,9 @@
-// The door-look actions (migration 337; plan "Door looks from a photo" phase P3), driven through the
+// The door-look actions (migration 343; plan "Door looks from a photo" phase P3), driven through the
 // SHIPPED portal-settings handler, plus the pure rules in portal-settings/doorLooks.ts.
 //
 // WHAT IS PINNED:
 //   1. Every action refuses unless client_settings.door_looks_beta is on: off, no settings row, a flag
-//      we could not read, and a database without 337 all refuse, and nothing is written or signed.
+//      we could not read, and a database without 343 all refuse, and nothing is written or signed.
 //   2. GATES: list_door_looks at view, the four writes at edit, all under settings_options.
 //   3. list_door_looks: this builder's looks only, archived ones only when asked, each with how many
 //      door rows (and distinct doors) use it, and never the ledger row (only fromPhoto).
@@ -14,7 +14,7 @@
 //      compare-and-swap on the version; an archived or another builder's look is refused.
 //   6. The tile: only a path door_look_thumb_upload_url could have handed out, as its public URL.
 //   7. "Replace <old look>": the old look's door rows move across, then the old look is archived.
-//   8. archive_door_look: archived with its version bumped (the trigger in 337 releases the rows).
+//   8. archive_door_look: archived with its version bumped (the trigger in 343 releases the rows).
 //   9. door_ref_upload_url: 1-4 private uploads at paths of the exact shape, never a public URL.
 // Tenants and users are made up; the repo is public.
 
@@ -75,7 +75,7 @@ Deno.test("every action refuses unless the tenant flag is on, and does nothing",
     const old = seed();
     old.missingColumns.add("client_settings.door_looks_beta");
     const o = await call(old, { action: a, name: "X", base: "zbrace" });
-    assertEquals([o.status, o.body.code], [503, "door_looks_unavailable"], `${a} before 337`);
+    assertEquals([o.status, o.body.code], [503, "door_looks_unavailable"], `${a} before 343`);
     assert(nothingHappened(old));
   }
 });
@@ -289,14 +289,14 @@ Deno.test("cleanSpec: the cleaner's answer is checked again, and one too big to 
   assertEquals((cleanSpec(big, (r) => r) as any).refuse.code, "door_look_too_big");
   const near = { ...SPEC, note: "x".repeat(4096 - doorLookStoredBytes({ ...SPEC, note: "" })) };
   assertEquals(doorLookStoredBytes(near), 4096);
-  assertEquals((cleanSpec(near, (r) => r) as any).base, "zbrace", "exactly 4096 bytes as stored is allowed (337's <= 4096)");
+  assertEquals((cleanSpec(near, (r) => r) as any).base, "zbrace", "exactly 4096 bytes as stored is allowed (343's <= 4096)");
   for (const answer of [null, "zbrace", [SPEC], { ...SPEC, base: "slab" }, { ...SPEC, v: 2 }, { v: 1 }]) {
     assertEquals((cleanSpec(SPEC, () => answer) as any).refuse.code, "door_look_invalid", JSON.stringify(answer));
   }
   assertEquals((cleanSpec(SPEC, () => { throw new Error("boom"); }) as any).refuse.code, "door_look_invalid", "a cleaner that throws is a refusal, not a 500");
 });
 
-Deno.test("doorLookStoredBytes measures jsonb's own text, the size 337's check reads", () => {
+Deno.test("doorLookStoredBytes measures jsonb's own text, the size 343's check reads", () => {
   // What Postgres prints for these values (jsonb::text), written out by hand.
   const cases: [unknown, string][] = [
     [{ a: 1 }, '{"a": 1}'],

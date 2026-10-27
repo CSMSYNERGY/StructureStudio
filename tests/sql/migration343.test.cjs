@@ -1,4 +1,4 @@
-// Execute migration 337 (door looks: door_looks, the ai_door_calls ledger, fixture_items.door_look_id,
+// Execute migration 343 (door looks: door_looks, the ai_door_calls ledger, fixture_items.door_look_id,
 // the tenant flag, the door meter and the door-refs bucket) for real in PGlite (Postgres compiled to
 // WASM, in memory) on top of the tables it touches, cut to their live columns. Then check what the
 // file promises:
@@ -25,14 +25,14 @@
 //
 // Run (from the repo root):
 //   npm install --prefix tests/sql        once (@electric-sql/pglite only)
-//   node tests/sql/migration337.test.cjs  exit 0 = ALL CHECKS PASSED
+//   node tests/sql/migration343.test.cjs  exit 0 = ALL CHECKS PASSED
 // MIG_FILE=<path> applies another copy of the migration (e.g. a deliberately broken one).
 const fs = require("fs");
 const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/337_door_looks.sql"), "utf8").replace(/\r/g, "");
+const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/343_door_looks.sql"), "utf8").replace(/\r/g, "");
 const NAMES = ["P0", "R0", "P1", "R1", "P2", "R2", "P3", "R3", "P4", "R4", "P5", "R5", "P6", "R6", "P7", "R7"];
 // The header's piece(): the lines strictly between `-- >>> n` and `-- <<< n`, minus every line that
 // starts with `--`.
@@ -142,7 +142,7 @@ const ROLLBACK = () => {
   const t = MIG();
   const i = t.indexOf("--   do $rb$ begin");
   const j = t.indexOf("--   end $rb$;", i);
-  if (i < 0 || j < 0) throw new Error("the ROLLBACK block in 337's header moved; re-point the test");
+  if (i < 0 || j < 0) throw new Error("the ROLLBACK block in 343's header moved; re-point the test");
   return t.slice(i, j + "--   end $rb$;".length).split("\n").map((l) => l.replace(/^--   ?/, "")).join("\n");
 };
 
@@ -167,14 +167,14 @@ const ROLLBACK = () => {
     }
   }
 
-  console.log("migration 337: applied piece by piece, as live");
+  console.log("migration 343: applied piece by piece, as live");
   {
     const db = await fresh();
     let reads;
     try { reads = await applyPieces(db); ok(true, "every piece ran"); }
     catch (e) { ok(false, "every piece ran", e.message); return; }
-    ok(reads.P0.length === 1 && reads.P0[0].version === "337", "P0 claims 337 and prints its row", JSON.stringify(reads.P0));
-    ok(reads.R0.length === 1 && reads.R0[0].name === "337_door_looks", "R0 reads the ledger row back");
+    ok(reads.P0.length === 1 && reads.P0[0].version === "343", "P0 claims 343 and prints its row", JSON.stringify(reads.P0));
+    ok(reads.R0.length === 1 && reads.R0[0].name === "343_door_looks", "R0 reads the ledger row back");
     const r1 = reads.R1[0];
     ok(r1.ledger_ready === true && r1.rls_on === true && Number(r1.policies) === 0 && r1.anon_reads === false && r1.idem_key_unique === false,
       "R1 reads true, true, 0, false, false", JSON.stringify(r1));
@@ -291,12 +291,12 @@ const ROLLBACK = () => {
     ok((await one(db, "select count(*)::int n from public.usage_prices where kind = 'door_look_generation'")).n === 0, "...the meter row is gone");
     ok((await one(db, "select count(*)::int n from storage.buckets where id = 'door-refs'")).n === 1, "...and the bucket is left for the dashboard (never a direct storage delete)");
     ok(!/delete from storage\./.test(ROLLBACK()), "the rollback never deletes from a storage table");
-    await db.exec("delete from supabase_migrations.schema_migrations where version = '337'");
+    await db.exec("delete from supabase_migrations.schema_migrations where version = '343'");
     const re = await applyPieces(db);
-    ok(re.P0.length === 1 && re.R7[0].tables_ready === true, "337 applies again after a rollback");
+    ok(re.P0.length === 1 && re.R7[0].tables_ready === true, "343 applies again after a rollback");
   }
 
-  console.log("migration 337: the whole file as one script");
+  console.log("migration 343: the whole file as one script");
   {
     const db = await fresh();
     try {
@@ -306,14 +306,14 @@ const ROLLBACK = () => {
     } catch (e) { ok(false, "it runs top to bottom", e.message); }
   }
 
-  console.log("migration 337: a bucket someone already made public is made private");
+  console.log("migration 343: a bucket someone already made public is made private");
   {
     const db = await fresh("insert into storage.buckets (id, name, public) values ('door-refs', 'door-refs', true);");
     await applyPieces(db);
     ok((await one(db, "select public from storage.buckets where id = 'door-refs'")).public === false, "door-refs is private after the apply");
   }
 
-  console.log("migration 337: what P7 refuses (mutants)");
+  console.log("migration 343: what P7 refuses (mutants)");
   {
     const mutants = [
       ["a policy on door_looks", (t) => t.replace("  alter table public.door_looks enable row level security;", "  alter table public.door_looks enable row level security;\n  create policy door_looks_anon on public.door_looks for select to anon using (true);"), /has a policy/],

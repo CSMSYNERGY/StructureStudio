@@ -6,7 +6,7 @@
 // WHAT RUNS WHERE. The press's model work (Stage A, the close-ups, the agreement check, Stage B, the
 // $3.00 ceiling) is _shared/doorGenerate.ts's runDoorDraft; the prompt is _shared/doorLookPrompt.ts; the
 // maths on the reads is _shared/doorLook.ts (P1). This file is the press around them: the gates, the
-// ledger (ai_door_calls, 337), the money (wallet_hold on the door_look_generation meter), the photos,
+// ledger (ai_door_calls, 343), the money (wallet_hold on the door_look_generation meter), the photos,
 // the Draft look row, and the answers in the builder's words.
 //
 // THE ORDER OF CHECKS IN generate_door_look (section 4), every refusal before step 9 costing nothing:
@@ -21,7 +21,7 @@
 //      CLOSED (buildings fail open; doors do not). A key owns at most two rows (the try and its lean
 //      retry); a key that already drafted is refused; a retry with under 150 s of the press clock left is
 //      refused as the timeout it is. Then the photos are read and their headers checked.
-//   7. the ledger row (idem_key is NOT unique: 337). A failed insert refuses.
+//   7. the ledger row (idem_key is NOT unique: 343). A failed insert refuses.
 //   8. the recount with the row in: the cap again, and more than one running row is a 409. On either
 //      refusal this press's own row is deleted first.
 //   9. wallet_hold on every press, as buildings do: meter_inactive goes ahead free, hold_replayed is a 409

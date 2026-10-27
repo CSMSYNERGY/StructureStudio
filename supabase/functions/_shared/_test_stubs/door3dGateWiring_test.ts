@@ -84,7 +84,7 @@ Deno.test("the kill switch: unset, empty or anything but 1 / true is OFF, and re
   }
 });
 
-Deno.test("the tenant flag: off, no settings row, unreadable, or a database without 337 all refuse with nothing done", async () => {
+Deno.test("the tenant flag: off, no settings row, unreadable, or a database without 343 all refuse with nothing done", async () => {
   const off = seed({ internal_account: true, door_looks_beta: false });
   const none = new FakeDb({});
   const unread = seed({ internal_account: true });

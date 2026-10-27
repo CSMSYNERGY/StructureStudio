@@ -1,7 +1,7 @@
--- 337_door_looks.sql — a builder's own 3D door looks (door looks from a photo, plan 2026-10-24 §6).
+-- 343_door_looks.sql — a builder's own 3D door looks (door looks from a photo, plan 2026-10-24 §6).
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT, AND NOT BEFORE CAROLYN HAS APPROVED P0 (the plan's
---    deploy order, step 3). Apply it BEFORE 338_get_fixtures_door_look.sql and BEFORE the
+--    deploy order, step 3). Apply it BEFORE 344_get_fixtures_door_look.sql and BEFORE the
 --    portal-settings deploy that reads it. NEVER `supabase db push`, never `--file` (403s since
 --    2026-10-24), and never wrapped in begin;/commit; (`db query --linked` has silently applied
 --    nothing from such a block, 2026-10-21).
@@ -14,18 +14,19 @@
 -- no comment line at column 0 once cut (a leading `--` makes the CLI run NOTHING), and can be run
 -- again safely. From the repo root, in Git Bash:
 --
---   F=supabase/migrations/337_door_looks.sql
+--   F=supabase/migrations/343_door_looks.sql
 --   SB=<the supabase.exe of the CLI, called directly, not through npx.cmd (8 KB line limit)>
 --   piece() { awk -v n="$1" '{sub(/\r$/,"")} $0=="-- >>> "n{on=1;next} $0=="-- <<< "n{on=0} on' "$F" | grep -v '^--'; }
 --   (The `sub` drops a Windows checkout's carriage returns; without it no marker matches, the piece
 --   comes out empty and the CLI refuses it. An empty piece is a stop, never a skip.)
---   "$SB" db query --linked "$(piece P0)"      # must print ONE row: 337, 337_door_looks
+--   "$SB" db query --linked "$(piece P0)"      # must print ONE row: 343, 343_door_looks
 --   "$SB" db query --linked "$(piece R0)"      # ...and so on through R7
 --
--- P0 CLAIMS THE NUMBER FIRST. No row back from P0 means another session already took 337: stop,
--- rename this file, its test (tests/sql/migration337.test.cjs) and every '337' below, and start
+-- P0 CLAIMS THE NUMBER FIRST. No row back from P0 means another session already took 343: stop,
+-- rename this file, its test (tests/sql/migration343.test.cjs) and every '343' below, and start
 -- again. Numbering on 2026-10-26: origin/beta already holds 336_brand_colors.sql, so this one is
--- 337 (the plan's "336" moved up by one; its get_fixtures splice is 338, not 337).
+-- 337 then; renumbered to 343 on 2026-10-27, because the live ledger reached 342 first (the plan's "336";
+-- its get_fixtures splice is 344).
 --
 -- ── WHAT THIS FILE DOES ──────────────────────────────────────────────────────────────────
 --   P0  the ledger row, claimed with `returning`.
@@ -56,14 +57,14 @@
 --
 -- ── SAFE WITH WHAT IS LIVE ───────────────────────────────────────────────────────────────
 -- New tables nothing reads yet, one nullable column every row reads NULL in, a flag that is off for
--- every builder, and an inactive meter. get_fixtures does not change here (338 does that). The live
+-- every builder, and an inactive meter. get_fixtures does not change here (344 does that). The live
 -- portal-settings never names any of it. The old production portal keeps sending doorStyle on
 -- every door save, and the new portal-settings never clears a look on that alone (§6).
 --
--- ── ROLLBACK (338's ROLLBACK FIRST: its get_fixtures reads door_looks) ───────────────────
+-- ── ROLLBACK (344's ROLLBACK FIRST: its get_fixtures reads door_looks) ───────────────────
 --   1. portal-settings back to a build without the door-look actions and the door_look_id select
 --      (it falls back without the column on 42703, so this is a cleanliness step, not a must).
---   2. 338's rollback, so no get_fixtures body names door_looks.
+--   2. 344's rollback, so no get_fixtures body names door_looks.
 --   3. These, each as its own inline call:
 --   do $rb$ begin
 --     drop trigger if exists door_looks_sync_fixtures on public.door_looks;
@@ -80,7 +81,7 @@
 --     delete from public.usage_prices where kind = 'door_look_generation';
 --     notify pgrst, 'reload schema';
 --   end $rb$;
---   delete from supabase_migrations.schema_migrations where version = '337' returning version;
+--   delete from supabase_migrations.schema_migrations where version = '343' returning version;
 -- Then check: to_regclass('public.door_looks') is null. The door-refs bucket is NOT dropped here:
 -- Supabase refuses direct deletes from its storage tables (and a bucket that holds photos), and one
 -- refusal inside the block would undo the whole rollback. Empty and delete it from the dashboard
@@ -90,20 +91,20 @@
 
 -- >>> P0
 insert into supabase_migrations.schema_migrations (version, name)
-values ('337', '337_door_looks')
+values ('343', '343_door_looks')
 on conflict (version) do nothing
 returning version, name;
 -- <<< P0
 
 -- >>> R0
-select version, name from supabase_migrations.schema_migrations where version = '337';
+select version, name from supabase_migrations.schema_migrations where version = '343';
 -- <<< R0
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- P1 — ai_door_calls, the generation ledger (server only)
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- >>> P1
-do $m337_p1$
+do $m343_p1$
 begin
   perform set_config('lock_timeout', '5s', true);
   create table if not exists public.ai_door_calls (
@@ -147,12 +148,12 @@ begin
   revoke all on table public.ai_door_calls from public, anon, authenticated;
   grant select, insert, update, delete on table public.ai_door_calls to service_role;
   comment on table public.ai_door_calls is
-    'Door looks from a photo (337): one row per generation try, written by portal-settings only. '
+    'Door looks from a photo (343): one row per generation try, written by portal-settings only. '
     'idem_key is NOT unique: a press owns its first try and one lean retry, and recover reads the '
     'newest. Holds the private reference photo paths, the pixel points and the model''s notes, none '
     'of which ever reaches a shopper. RLS on, no policies, revoked from public, anon, authenticated.';
 end
-$m337_p1$;
+$m343_p1$;
 -- <<< P1
 
 -- Expect: true, true, 0, false, false
@@ -169,7 +170,7 @@ select to_regclass('public.ai_door_calls') is not null as ledger_ready,
 -- P2 — door_looks
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- >>> P2
-do $m337_p2$
+do $m343_p2$
 begin
   perform set_config('lock_timeout', '5s', true);
   create table if not exists public.door_looks (
@@ -203,13 +204,13 @@ begin
   revoke all on table public.door_looks from public, anon, authenticated;
   grant select, insert, update, delete on table public.door_looks to service_role;
   comment on table public.door_looks is
-    'Door looks from a photo (337): one builder''s own 3D door look, a cleaned spec over one of the '
+    'Door looks from a photo (343): one builder''s own 3D door look, a cleaned spec over one of the '
     'seven built looks (base). Draft until the builder saves it; only ready looks reach shoppers, '
-    'through get_fixtures (338) on the door rows that use them. Never holds the reference photos, '
+    'through get_fixtures (344) on the door rows that use them. Never holds the reference photos, '
     'pixel points or notes (those stay in ai_door_calls). version is the late-save guard. RLS on, '
     'no policies, revoked from public, anon, authenticated.';
 end
-$m337_p2$;
+$m343_p2$;
 -- <<< P2
 
 -- Expect: true, true, 0, false, true
@@ -225,7 +226,7 @@ select to_regclass('public.door_looks') is not null as looks_ready,
 -- P3 — fixture_items.door_look_id
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- >>> P3
-do $m337_p3$
+do $m343_p3$
 begin
   perform set_config('lock_timeout', '5s', true);
   alter table public.fixture_items add column if not exists door_look_id uuid;
@@ -245,11 +246,11 @@ begin
   create index if not exists fixture_items_door_look_idx
     on public.fixture_items (client_id, door_look_id) where door_look_id is not null;
   comment on column public.fixture_items.door_look_id is
-    'The builder''s own 3D door look this door row draws (337), or NULL for the standard look in '
+    'The builder''s own 3D door look this door row draws (343), or NULL for the standard look in '
     'door_style. Doors only, the same builder''s look only (composite FK). door_style always holds '
     'the look''s base, which a designer that does not know looks draws instead.';
 end
-$m337_p3$;
+$m343_p3$;
 -- <<< P3
 
 -- Expect: true, true, true, 0
@@ -266,7 +267,7 @@ select exists (select 1 from information_schema.columns where table_schema = 'pu
 -- P4 — a look's base and archive reach its door rows in the same statement
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- >>> P4
-do $m337_p4$
+do $m343_p4$
 begin
   perform set_config('lock_timeout', '5s', true);
   create or replace function public.door_looks_sync_fixtures()
@@ -289,7 +290,7 @@ begin
     after update of base, status on public.door_looks
     for each row execute function public.door_looks_sync_fixtures();
 end
-$m337_p4$;
+$m343_p4$;
 -- <<< P4
 
 -- Expect: true, false, false
@@ -303,7 +304,7 @@ select exists (select 1 from pg_trigger where tgname = 'door_looks_sync_fixtures
 -- P5 — the tenant flag and the daily cap
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- >>> P5
-do $m337_p5$
+do $m343_p5$
 begin
   perform set_config('lock_timeout', '5s', true);
   alter table public.client_settings add column if not exists door_looks_beta boolean not null default false;
@@ -314,13 +315,13 @@ begin
       add constraint client_settings_ai_door_daily_cap_chk check (ai_door_daily_cap is null or ai_door_daily_cap between 0 and 1000);
   end if;
   comment on column public.client_settings.door_looks_beta is
-    'Door looks from a photo (337): the Door looks section, its actions and doorLookId on a door row '
+    'Door looks from a photo (343): the Door looks section, its actions and doorLookId on a door row '
     'are this builder''s only when true. Off for everyone at apply; structure-studio first.';
   comment on column public.client_settings.ai_door_daily_cap is
-    'Door looks from a photo (337): Generate presses per rolling 24 hours, counted as distinct keys. '
+    'Door looks from a photo (343): Generate presses per rolling 24 hours, counted as distinct keys. '
     'NULL = 10, 0 = unlimited.';
 end
-$m337_p5$;
+$m343_p5$;
 -- <<< P5
 
 -- Expect: true, true, 0
@@ -336,14 +337,14 @@ select exists (select 1 from information_schema.columns where table_schema = 'pu
 -- P6 — the door meter (inactive) and the private reference-photo bucket
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- >>> P6
-do $m337_p6$
+do $m343_p6$
 begin
   -- Its own meter, because the wallet allows one open hold per (client, meter kind): sharing the
   -- building meter would make a door generation block a building one. Inactive, so generating is
-  -- free while we pilot. $5 is the plan's suggestion only; Carolyn sets the price when she arms it.
+  -- free while we pilot. $5 (Ahsan, 2026-10-27), stored switched off; arming it is one update.
   insert into public.usage_prices (kind, label, unit_label, price_cents, active, visible, sort_order, note)
   values ('door_look_generation', '3D door look from a photo', 'generation', 500, false, true, 11,
-          'Door looks from a photo (337). One Generate press: one key, one hold, at most one charge. Inactive while we pilot; Carolyn sets the price (the plan suggests $5) in the same statement that arms it.')
+          'Door looks from a photo (343). One Generate press: one key, one hold, at most one charge. Inactive while we pilot; Carolyn sets the price (the plan suggests $5) in the same statement that arms it.')
   on conflict (kind) do nothing;
   -- Private: the server signs every upload and read; no policy for anon or authenticated.
   insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
@@ -351,7 +352,7 @@ begin
   on conflict (id) do update
     set public = false, file_size_limit = 5242880, allowed_mime_types = array['image/jpeg', 'image/png', 'image/webp'];
 end
-$m337_p6$;
+$m343_p6$;
 -- <<< P6
 
 -- Expect: true, false, true
@@ -365,73 +366,73 @@ select exists (select 1 from public.usage_prices where kind = 'door_look_generat
 -- P7 — apply-time assertions (they RAISE; a pass prints nothing, R7 is the proof)
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- >>> P7
-do $m337_check$
+do $m343_check$
 declare
   v_def text;
   v_t   text;
 begin
   foreach v_t in array array['ai_door_calls', 'door_looks'] loop
     if to_regclass('public.' || v_t) is null then
-      raise exception '337: public.% is missing', v_t;
+      raise exception '343: public.% is missing', v_t;
     end if;
     if not (select relrowsecurity from pg_class where oid = ('public.' || v_t)::regclass) then
-      raise exception '337: RLS is off on public.%', v_t;
+      raise exception '343: RLS is off on public.%', v_t;
     end if;
     if exists (select 1 from pg_policies where schemaname = 'public' and tablename = v_t) then
-      raise exception '337: public.% has a policy; it must have none (the server reads it, nothing else)', v_t;
+      raise exception '343: public.% has a policy; it must have none (the server reads it, nothing else)', v_t;
     end if;
     if has_table_privilege('anon', 'public.' || v_t, 'select') or has_table_privilege('authenticated', 'public.' || v_t, 'select')
        or has_table_privilege('anon', 'public.' || v_t, 'insert') or has_table_privilege('authenticated', 'public.' || v_t, 'insert')
        or has_table_privilege('anon', 'public.' || v_t, 'update') or has_table_privilege('authenticated', 'public.' || v_t, 'update') then
-      raise exception '337: a browser role can still read or write public.% (revoke from public, anon, authenticated)', v_t;
+      raise exception '343: a browser role can still read or write public.% (revoke from public, anon, authenticated)', v_t;
     end if;
   end loop;
 
   if exists (select 1 from pg_index i where i.indrelid = 'public.ai_door_calls'::regclass and i.indisunique
                and exists (select 1 from pg_attribute a where a.attrelid = i.indrelid and a.attnum = any(i.indkey) and a.attname = 'idem_key')) then
-    raise exception '337: ai_door_calls.idem_key is unique; a key must be able to own a first try and its lean retry';
+    raise exception '343: ai_door_calls.idem_key is unique; a key must be able to own a first try and its lean retry';
   end if;
 
   select pg_get_constraintdef(c.oid) into v_def from pg_constraint c
    where c.conname = 'fixture_items_door_look_fk' and c.conrelid = 'public.fixture_items'::regclass;
   if v_def is null or position('client_id, door_look_id' in v_def) = 0 or position('SET NULL (door_look_id)' in v_def) = 0 then
-    raise exception '337: fixture_items_door_look_fk is missing or wrong: %', coalesce(v_def, 'missing');
+    raise exception '343: fixture_items_door_look_fk is missing or wrong: %', coalesce(v_def, 'missing');
   end if;
   select pg_get_constraintdef(c.oid) into v_def from pg_constraint c
    where c.conname = 'fixture_items_door_look_door_chk' and c.conrelid = 'public.fixture_items'::regclass;
   if v_def is null or position('door' in v_def) = 0 then
-    raise exception '337: fixture_items_door_look_door_chk is missing or wrong: %', coalesce(v_def, 'missing');
+    raise exception '343: fixture_items_door_look_door_chk is missing or wrong: %', coalesce(v_def, 'missing');
   end if;
 
   if (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'client_settings'
         and column_name in ('door_looks_beta', 'ai_door_daily_cap')) <> 2 then
-    raise exception '337: client_settings.door_looks_beta or ai_door_daily_cap is missing';
+    raise exception '343: client_settings.door_looks_beta or ai_door_daily_cap is missing';
   end if;
   if exists (select 1 from public.usage_prices where kind = 'door_look_generation' and active) then
-    raise notice '337: the door meter is already armed (someone set its price); left as it is';
+    raise notice '343: the door meter is already armed (someone set its price); left as it is';
   end if;
   if not exists (select 1 from public.usage_prices where kind = 'door_look_generation') then
-    raise exception '337: usage_prices has no door_look_generation row';
+    raise exception '343: usage_prices has no door_look_generation row';
   end if;
   if not exists (select 1 from storage.buckets where id = 'door-refs' and not public) then
-    raise exception '337: the door-refs bucket is missing or public';
+    raise exception '343: the door-refs bucket is missing or public';
   end if;
   if has_function_privilege('anon', 'public.door_looks_sync_fixtures()', 'execute')
      or has_function_privilege('authenticated', 'public.door_looks_sync_fixtures()', 'execute') then
-    raise exception '337: door_looks_sync_fixtures is executable by a browser role';
+    raise exception '343: door_looks_sync_fixtures is executable by a browser role';
   end if;
   if not exists (select 1 from pg_trigger where tgname = 'door_looks_sync_fixtures' and tgrelid = 'public.door_looks'::regclass and not tgisinternal) then
-    raise exception '337: the door_looks_sync_fixtures trigger is missing';
+    raise exception '343: the door_looks_sync_fixtures trigger is missing';
   end if;
   -- A look on a non-door, or a look of another builder, would already have failed its constraint;
   -- this is the shape of the data, read once.
   if exists (select 1 from public.fixture_items fi where fi.door_look_id is not null
                and not exists (select 1 from public.door_looks dl where dl.client_id = fi.client_id and dl.id = fi.door_look_id)) then
-    raise exception '337: a door row points at a look that is not its own builder''s';
+    raise exception '343: a door row points at a look that is not its own builder''s';
   end if;
   perform pg_notify('pgrst', 'reload schema');
 end
-$m337_check$;
+$m343_check$;
 -- <<< P7
 
 -- THE RECORD. Expect on a first apply: true, true, 0, false, true, true, false, true, 0.

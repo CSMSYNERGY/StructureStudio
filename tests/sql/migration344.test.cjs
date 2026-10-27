@@ -1,9 +1,9 @@
-// Execute migration 338 (get_fixtures sends a door row's own 3D look as `doorLook`) for real in PGlite
+// Execute migration 344 (get_fixtures sends a door row's own 3D look as `doorLook`) for real in PGlite
 // (Postgres compiled to WASM, in memory), on get_fixtures rebuilt exactly as it is live: 289's own
 // statement saved with CRLF line endings (the live body has them), 313's PART 6 and 320's PART 2
 // splices, the whole of 324 and the whole of 335. The rebuilt body's md5 is checked against the one 335
-// recorded live on 2026-10-24, so this test fails the moment it stops being the body 338 will meet.
-// 337 is applied first, piece by piece, as live. Then check what the file promises:
+// recorded live on 2026-10-24, so this test fails the moment it stops being the body 344 will meet.
+// 343 is applied first, piece by piece, as live. Then check what the file promises:
 //   * every tenant's get_fixtures is byte-for-byte unchanged at apply (no look exists yet);
 //   * `doorLook` is sent only for a READY look, only on the listed door rows that use it, with exactly
 //     id, v, spec and thumbUrl, and never the look's name, creator, save version, ledger row or photo
@@ -12,7 +12,7 @@
 //   * the body is still security definer with an empty search_path;
 //   * P0 claims the number once; a re-apply changes nothing; the header's ROLLBACK leaves exactly
 //     335's body, and the file applies again after it;
-//   * 338 before 337, a drifted live body, and a splice that moves anything else all abort the whole
+//   * 344 before 343, a drifted live body, and a splice that moves anything else all abort the whole
 //     apply (mutants).
 // Nothing here touches the live project: no network, no Supabase.
 //
@@ -20,19 +20,19 @@
 //
 // Run (from the repo root):
 //   npm install --prefix tests/sql        once (@electric-sql/pglite only)
-//   node tests/sql/migration338.test.cjs  exit 0 = ALL CHECKS PASSED
+//   node tests/sql/migration344.test.cjs  exit 0 = ALL CHECKS PASSED
 // MIG_FILE=<path> applies another copy of the migration (e.g. a deliberately broken one).
 const fs = require("fs");
 const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/338_get_fixtures_door_look.sql"), "utf8").replace(/\r/g, "");
+const MIG = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/344_get_fixtures_door_look.sql"), "utf8").replace(/\r/g, "");
 const read = (f) => fs.readFileSync(path.join(WT, "supabase/migrations", f), "utf8").replace(/\r/g, "");
 // get_fixtures' prosrc md5 (carriage returns removed) as 335 wrote it and recorded it live, 2026-10-24.
 const LIVE_MD5 = "050771662b98682be0aaa97da8d87d5f";
 
-// The header's piece(), as in migration337.test.cjs.
+// The header's piece(), as in migration343.test.cjs.
 const piece = (n, text) => {
   const out = [];
   let on = false;
@@ -43,8 +43,8 @@ const piece = (n, text) => {
   }
   return out.join("\n");
 };
-const MIG_337 = read("337_door_looks.sql");
-const PIECES_337 = ["P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7"].map((n) => piece(n, MIG_337));
+const MIG_343 = read("343_door_looks.sql");
+const PIECES_343 = ["P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7"].map((n) => piece(n, MIG_343));
 
 // 289's create statement, stored WITH CRLF, as live.
 const GET_FIXTURES_289 = (() => {
@@ -169,7 +169,7 @@ insert into public.fixture_items (id, client_id, category, name, width_in, heigh
   ('${FREE}',    '${A}', 'door',   'Free door',   72, 78, null, 5, 'zbrace');
 `;
 const SPEC = { v: 1, base: "zbrace", src: { leaves: 2, hinge: "right" }, brace: { t: "z", from: "hinge" }, hinges: { type: "tstrap", count: 3, lenIn: 16 } };
-// Looks and rows that use them, once 337 is in.
+// Looks and rows that use them, once 343 is in.
 const LOOKS = `
 insert into public.ai_door_calls (id, client_id, photo_paths) values ('00000000-0000-4000-8000-0000000c0001', '${A}', array['${A}/door-ref-00000000-0000-4000-8000-000000000001.jpg']);
 insert into public.door_looks (id, client_id, name, base, spec, status, thumb_url, ai_call_id, created_by, version) values
@@ -189,14 +189,14 @@ const ok = (cond, msg, detail) => {
 };
 const one = async (db, sql, params) => (await db.query(sql, params)).rows[0];
 const opened = [];
-async function fresh({ with337 = true } = {}) {
+async function fresh({ with343 = true } = {}) {
   const db = new PGlite();
   opened.push(db);
   await db.exec(STUBS);
   await db.exec(SEED);
   await db.exec(MIG_324);
   await db.exec(MIG_335);
-  if (with337) for (const p of PIECES_337) await db.query(p);
+  if (with343) for (const p of PIECES_343) await db.query(p);
   return db;
 }
 /** P0, P1, R1 as three calls (the live apply). */
@@ -216,10 +216,10 @@ const ROLLBACK = () => {
   const t = MIG();
   const i = t.indexOf("--   do $rb$");
   const j = t.indexOf("--   end $rb$;", i);
-  if (i < 0 || j < 0) throw new Error("the ROLLBACK block in 338's header moved; re-point the test");
+  if (i < 0 || j < 0) throw new Error("the ROLLBACK block in 344's header moved; re-point the test");
   return t.slice(i, j + "--   end $rb$;".length).split("\n").map((l) => l.replace(/^--   ?/, "")).join("\n");
 };
-const writtenMd5 = () => /if md5\(v_src\) <> '([0-9a-f]{32})' then\n    raise exception '338: get_fixtures is not the body this splice writes/.exec(MIG())?.[1];
+const writtenMd5 = () => /if md5\(v_src\) <> '([0-9a-f]{32})' then\n    raise exception '344: get_fixtures is not the body this splice writes/.exec(MIG())?.[1];
 
 (async () => {
   console.log("the stand-in for the live get_fixtures");
@@ -233,16 +233,16 @@ const writtenMd5 = () => /if md5\(v_src\) <> '([0-9a-f]{32})' then\n    raise ex
     }
   }
 
-  console.log("migration 338: applies on the live shape");
+  console.log("migration 344: applies on the live shape");
   {
     const db = await fresh();
     const before = {};
     for (const c of TENANTS) before[c] = JSON.stringify(await fixOf(db, c));
     const bodyBefore = await defOf(db);
     const { err, p0, rec } = await apply(db);
-    ok(err === null, "338 applied cleanly, its checks included", err);
+    ok(err === null, "344 applied cleanly, its checks included", err);
     if (err) { console.log("    (written body md5 " + (await lfMd5(db)) + ")"); }
-    ok(p0 && p0.length === 1 && p0[0].version === "338", "P0 claims 338");
+    ok(p0 && p0.length === 1 && p0[0].version === "344", "P0 claims 344");
     ok(rec && rec.fixtures_send_it === true && Number(rec.tenants) === 3 && Number(rec.ready_looks) === 0 && Number(rec.doors_with_a_look) === 0
       && rec.body_md5 === writtenMd5(), "THE RECORD reads true, 3, 0, 0, <the md5 P1 checks>", JSON.stringify(rec));
     for (const c of TENANTS) ok(JSON.stringify(await fixOf(db, c)) === before[c], `${c}: get_fixtures is byte-for-byte unchanged`);
@@ -292,20 +292,20 @@ const writtenMd5 = () => /if md5\(v_src\) <> '([0-9a-f]{32})' then\n    raise ex
     ok(!(await defOf(db)).includes("doorLook"), "...takes the merge back out");
     ok(await lfMd5(db) === LIVE_MD5, "...leaving exactly the body it found (335's)");
     ok(await defOf(db) === bodyBefore, "...byte for byte, carriage returns included");
-    await db.exec("delete from supabase_migrations.schema_migrations where version = '338'");
+    await db.exec("delete from supabase_migrations.schema_migrations where version = '344'");
     const again = await apply(db);
-    ok(again.err === null && again.p0.length === 1, "338 applies again after a rollback, with looks on file", again.err);
+    ok(again.err === null && again.p0.length === 1, "344 applies again after a rollback, with looks on file", again.err);
   }
 
-  console.log("migration 338: refused before 337");
+  console.log("migration 344: refused before 343");
   {
-    const db = await fresh({ with337: false });
+    const db = await fresh({ with343: false });
     const { err } = await apply(db);
-    ok(err && /apply 337_door_looks first/.test(err), "the splice refuses to run without door_looks", err);
+    ok(err && /apply 343_door_looks first/.test(err), "the splice refuses to run without door_looks", err);
     ok(await lfMd5(db) === LIVE_MD5, "...and get_fixtures is untouched");
   }
 
-  console.log("migration 338: a drifted body or a wider splice aborts the whole apply (mutants)");
+  console.log("migration 344: a drifted body or a wider splice aborts the whole apply (mutants)");
   {
     const db = await fresh();
     await db.exec(`do $d$ declare s text := pg_get_functiondef('public.get_fixtures(text)'::regprocedure);
@@ -325,7 +325,7 @@ const writtenMd5 = () => /if md5\(v_src\) <> '([0-9a-f]{32})' then\n    raise ex
     ok(r.err && /is not the body this splice writes/.test(r.err), "a splice that moves anything else aborts the apply", r.err);
     ok(!(await defOf(db)).includes("doorLook"), "...and nothing of it survives (one do block)");
     // With looks on file before the splice, and the body check off, check 4 refuses it on its own.
-    const noBody = wide.replace(/if md5\(v_src\) <> '[0-9a-f]{32}' then\n    raise exception '338: get_fixtures is not the body this splice writes/, "if false then\n    raise exception '338: get_fixtures is not the body this splice writes");
+    const noBody = wide.replace(/if md5\(v_src\) <> '[0-9a-f]{32}' then\n    raise exception '344: get_fixtures is not the body this splice writes/, "if false then\n    raise exception '344: get_fixtures is not the body this splice writes");
     ok(/if false then/.test(noBody), "(the mutant formed: the wider splice, body check off)");
     db = await fresh();
     await db.exec(LOOKS);

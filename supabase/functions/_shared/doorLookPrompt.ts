@@ -24,7 +24,7 @@ export const DOOR_LOOK_PROMPT_ID = "DOOR_LOOK_V2";
 // threshold (1.15 x 1024 x 1024: a 1092 x 1092 square fits, as its table says), and 1568 px its long side.
 export const DOOR_PHOTO_MAX_LONG = 1568;
 export const DOOR_PHOTO_MAX_PIXELS = Math.floor(1.15 * 1024 * 1024);
-export const DOOR_PHOTO_MAX_BYTES = 5 * 1024 * 1024; // the door-refs bucket's own limit (337)
+export const DOOR_PHOTO_MAX_BYTES = 5 * 1024 * 1024; // the door-refs bucket's own limit (343)
 
 // ─── THE EDGE STRIPS (DOOR_LOOK_V2, 2026-10-27) ───────────────────────────────────────────────────
 // A butt hinge's knuckle sits ON the leaf's edge, the line the builder drags the straightening corners

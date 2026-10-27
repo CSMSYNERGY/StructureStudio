@@ -7,7 +7,7 @@
 //
 // Unlike that test's fake, this one FILTERS (eq, neq, in, not is null) and keeps state across the calls
 // of one test, because the door-look rules are about which builder's row a read finds. Tables a test
-// does not seed read as empty. A "database without 337" is modelled by naming its columns and tables
+// does not seed read as empty. A "database without 343" is modelled by naming its columns and tables
 // as missing: a select or write that names one answers 42703 / 42P01 / PGRST204, as PostgREST does.
 
 // deno-lint-ignore-file no-explicit-any
