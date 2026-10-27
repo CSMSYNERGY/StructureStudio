@@ -210,7 +210,8 @@ Deno.test("hinges: none only when hidden, one position per hinge, positions alon
   assertEquals(clean(withMin({ hinges: { count: 3, at: [0.2, 0.8] } })).spec.hinges, { count: 3 });
   assertEquals(clean(withMin({ hinges: { at: [0.8, 0.2] } })).spec.hinges, { count: 2, at: [0.2, 0.8] });
   assertEquals(clean(withMin({ hinges: { at: "rails", count: 2 } })).spec.hinges, { count: 2, at: "rails" });
-  assertEquals(clean(withMin({ hinges: { at: [0.01, 0.99] } })).spec.hinges, { count: 2, at: [0.05, 0.95] });
+  assertEquals(clean(withMin({ hinges: { at: [0, 1] } })).spec.hinges, { count: 2, at: [0.01, 0.99] });
+  assertEquals(clean(withMin({ hinges: { at: [0.024, 0.976] } })).spec.hinges, { count: 2, at: [0.024, 0.976] }, "the head and sill rails' hinges");
   assertEquals(clean(withMin({ handle: { v: 0.2 } })).spec.handle, { v: 0.3 });
   assertEquals(clean(withMin({ handle: { v: "Rail" } })).spec.handle, { v: "rail" });
 });
