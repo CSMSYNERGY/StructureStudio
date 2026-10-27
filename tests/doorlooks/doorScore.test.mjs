@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  checkTruthCase, DOOR_RENDER_RULES, DOOR_SCORE_BARS, doorLeafFt, drawnDoorLook, formatReport, scoreCorpus,
+  checkTruthCase, DOOR_RENDER_RULES, DOOR_SCORE_BARS, doorLeafFt, drawnDoorLook, formatReport, scoreCorpus, scoreRun,
 } from "./doorScore.mjs";
 import { insideRepo, liveGate, liveGenerate, main, recordedRuns, REPO_ROOT, truthRuns } from "./doorSim.mjs";
 
@@ -80,6 +80,8 @@ test("drawnDoorLook resolves an absent key through today's rule, at the row's re
   const plank = drawnDoorLook({ v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" } }, { sizeIn: [36, 80], leaves: 1 });
   close(plank.fIn, 3.6); // 0.3 ft
   assert.deepEqual(plank.hinges.at, [0.13, 0.55, 0.87]);
+  // P2 hangs a board door's middle hinge on its own mid rail, wherever the spec puts it.
+  assert.deepEqual(drawnDoorLook({ v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" }, frame: { rails: [0.48] } }, { sizeIn: [36, 80], leaves: 1 }).hinges.at, [0.13, 0.48, 0.87]);
   close(plank.hinges.lenIn, (0.11 + 1.15) * 12);
   assert.deepEqual(plank.brace, { t: "z", from: "hinge" });
   assert.equal(plank.meet, null);
@@ -269,10 +271,10 @@ test("see-through rays and vocabulary gaps: zero", () => {
   assert.equal(bar(scoreCorpus([c], [draft("z", ZDOOR, 1, { vocabGaps: ["arched top"] })]), "vocabGaps").ok, false);
 });
 
-test("the bar table is section 9's, one row a bar", () => {
+test("the bar table is section 9's (plus the hardware finish, 10-27), one row a bar", () => {
   assert.deepEqual(DOOR_SCORE_BARS.map((b) => b.key), [
     "leaves", "base", "hingeSide", "sideGuessNoWarn", "hingeCount", "hingeType", "hingeNoWarn", "hingeAt", "hingeLen",
-    "rails", "frame", "braceDir", "panelFills", "parts", "handleMeet", "colorRoles", "refusals", "goodRefused", "edgeF1",
+    "rails", "frame", "braceDir", "panelFills", "parts", "handleMeet", "hardwareFinish", "colorRoles", "refusals", "goodRefused", "edgeF1",
     "timeP50", "timeMax", "costMax", "rayMisses", "vocabGaps",
   ]);
 });
@@ -440,4 +442,18 @@ test("sim, live mode: refused without a named batch, Ahsan's yes for it, and a b
   await assert.rejects(liveGenerate(), /not built yet/);
   await assert.rejects(main(["--corpus", dir, "--mode", "live", "--out", join(dir, "lv")], {}), /needs --batch/);
   await assert.rejects(main(["--corpus", dir, "--mode", "live", "--batch", "b1", "--max-dollars", "100", "--out", join(dir, "lv")], { DOOR_SIM_LIVE_BATCH: "b1" }), /not built yet/);
+});
+
+// ─── the hardware's finish ────────────────────────────────────────────────────────────────────────
+test("the hinge and handle finish is barred: black iron drafted as bronze fails it, and a finish warning covers it", () => {
+  const c = tcase("z", ZDOOR);
+  assert.equal(bar(score(c, edit(ZDOOR, "hinges.finish", "bronze"), 1), "hardwareFinish").ok, true, "1 of 20 is within 0.9");
+  assert.equal(bar(score(c, edit(edit(ZDOOR, "hinges.finish", "bronze"), "handle.finish", "bronze"), 10), "hardwareFinish").ok, false);
+  const run = draft("z", edit(ZDOOR, "handle.finish", "bronze"), 1, { warnings: [{ code: "handle_finish_unsure" }] });
+  const row = scoreRun(c, run).rows.find((r) => r.path === "handle.finish");
+  assert.deepEqual([row.status, row.warned], ["fail", true]);
+  // Hidden hinges have no finish to score.
+  const hidden = edit(edit(ZDOOR, "hinges.type", "hidden"), "hinges.count", 0);
+  const rows = scoreRun(tcase("h", hidden), draft("h", hidden)).rows;
+  assert.equal(rows.some((r) => r.path === "hinges.finish"), false);
 });
