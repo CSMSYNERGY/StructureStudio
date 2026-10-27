@@ -5260,6 +5260,7 @@ function ssLibLookWords(category, look) {
     const base = SS_LIB_CLADDING_NAMES[l.profile] || l.profile || "Cladding";
     return l.profile === "lap" && l.exposureIn != null ? `${base}, ${l.exposureIn} in boards` : base;
   }
+  if (category === "door" && l.doorLookId) return `Made from your photo, drawn over ${(SS_LIB_DOOR_LOOKS.find(([k]) => k === l.doorStyle) || [null, "a built look"])[1].replace(/ \(built in 3D\)$/, "")}`;
   if (category === "door") return (SS_LIB_DOOR_LOOKS.find(([k]) => k === l.doorStyle) || [null, "Door"])[1];
   if (l.liteRows == null) return "Standard grid (sized to the window)";
   const n = Number(l.liteRows) * Number(l.liteCols);
@@ -5267,9 +5268,11 @@ function ssLibLookWords(category, look) {
 }
 // A small drawing of a look: courses or grooves for cladding, the panel for a door, the grid for a
 // window. Not the 3D (that is the designer's job), just enough to tell entries apart at a glance.
-function SsLibPic({ category, look, size = 44 }) {
+function SsLibPic({ category, look, size = 44, thumbUrl = null }) {
   const l = look || {};
   const w = size, h = Math.round(size * 0.82), stroke = "#334155";
+  // A door made from a photo shows our own render of it (its tile), when it has one.
+  if (category === "door" && thumbUrl) return <img src={thumbUrl} alt="" width={w} height={h} style={{ objectFit: "contain", background: "#F1F5F9", borderRadius: 4, flexShrink: 0 }} />;
   const lines = [];
   if (category === "cladding") {
     const p = l.profile;
@@ -5350,6 +5353,582 @@ function SsLibLookEdit({ category, look, onChange }) {
   );
 }
 
+// ─── "Don't see your door? Make it from a photo" (door looks from a photo, P6; Ahsan 2026-10-27) ───
+// The right side of the Doors page's Library card. A builder whose door is not in the StructureStudio
+// library uploads ONE straight-on photo of it, closed (plus optional close-ups of a hinge, the handle and
+// the middle of a double: Ahsan 2026-10-27), drags four dots onto the door's corners, and presses
+// Generate. The server drafts the door from the photo (generate_door_look, P4); the builder sees it
+// drawn in 3D beside their photo, names it and saves it, and it goes into THEIR library, so it shows in
+// every door's "How it looks in 3D" like any other library door (345).
+//
+// WHAT THE SERVER NEEDS, AND WHY THE STRAIGHTENER IS HERE. The model is told the photo is straightened:
+// the door's leaves fill the picture from the top of the threshold to the top of the leaves, with
+// DOOR_EDGE_PAD_IN (2 in) of what is past each side edge left showing, because a butt hinge's knuckle
+// sits ON that edge (DOOR_LOOK_V2). So the four dragged corners are warped onto the box doorEdgePadPx
+// leaves inside the picture, sized with doorFitSize (the 1568 px / 1.15 MP limits), exactly as
+// scripts/doorLookLocal.mjs prepares a photo. The server refuses any other shape (door_photo_shape).
+// The copies below (ssDoorFitSize, ssDoorPreparedSize, ssDoorEdgePadPx) are _shared/doorLookPrompt.ts's
+// and doorLookLocal.mjs's, line for line; doorStudio_test pins them to each other.
+//
+// Every photo is re-encoded on a canvas (which drops EXIF and GPS) before it is uploaded, the front photo
+// by the warp itself. Nothing is uploaded or charged until the three checks pass. One press is one key:
+// a retryable failure is retried ONCE with `lean: true` while 150 s of the 8-minute press clock remain,
+// and a dropped stream is picked up by the same key (generate_door_look_recover).
+//
+// Shown only with client_settings.door_looks_beta on (and the library's own flag, since it lives in the
+// library card). Names are prefixed ssDoor / SsDoor: portal/01..12 are ONE lexical scope.
+const SS_DOOR_PAD_IN = 2;
+const SS_DOOR_MAX_LONG = 1568;
+const SS_DOOR_MAX_PIXELS = Math.floor(1.15 * 1024 * 1024);
+const SS_DOOR_PRESS_MS = 8 * 60 * 1000;
+const SS_DOOR_LEAN_MIN_LEFT_MS = 150 * 1000;
+const SS_DOOR_MIN_PX = 600;
+const SS_DOOR_GOOD_PX = 1000;
+const SS_DOOR_SHAPE_TOL = 0.35;
+// The progress line moves on a timer: the stream carries only a space every 10 s, then the answer.
+const SS_DOOR_STAGES = [[0, "Reading your door"], [75, "Looking closely at the hinges and the handle"], [170, "Putting your 3D door together"], [300, "Almost there, still working"]];
+
+// _shared/doorLookPrompt.ts's doorFitSize: the largest size inside both limits with this aspect, never
+// larger than the source.
+function ssDoorFitSize(src, aspect) {
+  const a = aspect && Number.isFinite(aspect) && aspect > 0 ? aspect : src[0] / src[1];
+  let w = a >= 1 ? Math.min(src[0], SS_DOOR_MAX_LONG) : Math.min(src[1], SS_DOOR_MAX_LONG) * a;
+  let h = w / a;
+  if (Math.max(w, h) > SS_DOOR_MAX_LONG) [w, h] = a >= 1 ? [SS_DOOR_MAX_LONG, SS_DOOR_MAX_LONG / a] : [SS_DOOR_MAX_LONG * a, SS_DOOR_MAX_LONG];
+  if (w * h > SS_DOOR_MAX_PIXELS) {
+    const k = Math.sqrt(SS_DOOR_MAX_PIXELS / (w * h));
+    [w, h] = [w * k, h * k];
+  }
+  return [Math.max(1, Math.floor(w)), Math.max(1, Math.floor(h))];
+}
+// doorEdgePadPx: the strip, in output pixels, that DOOR_EDGE_PAD_IN takes at this photo's width.
+function ssDoorEdgePadPx(photoW, widthIn, padIn = SS_DOOR_PAD_IN) {
+  return padIn > 0 ? (photoW * padIn) / (widthIn + 2 * padIn) : 0;
+}
+// doorLookLocal.mjs's preparedSize: the typed shape plus the strips, at the largest size the quad's own
+// pixels can fill (never enlarged).
+function ssDoorPreparedSize(quad, widthIn, heightIn, padIn = SS_DOOR_PAD_IN) {
+  const len = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const w = Math.max(len(quad[0], quad[1]), len(quad[3], quad[2])), h = Math.max(len(quad[0], quad[3]), len(quad[1], quad[2]));
+  const aspect = widthIn / heightIn, span = (widthIn + 2 * padIn) / widthIn;
+  const natural = h * aspect <= w ? [h * aspect, h] : [w, w / aspect];
+  return ssDoorFitSize([Math.round(natural[0] * span), Math.round(natural[1])], aspect * span);
+}
+// The three checks before anything is uploaded or charged (plan §2, screen 2). `quad` is in the
+// original photo's pixels: top-left, top-right, bottom-right, bottom-left.
+function ssDoorQuadCheck(quad, widthIn, heightIn, hasHingeCloseUp) {
+  const len = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const tall = Math.max(len(quad[0], quad[3]), len(quad[1], quad[2]));
+  const wide = (len(quad[0], quad[1]) + len(quad[3], quad[2])) / 2;
+  const high = (len(quad[0], quad[3]) + len(quad[1], quad[2])) / 2;
+  if (tall < SS_DOOR_MIN_PX) return { ok: false, tall, error: "This photo is too small. Use one where the door fills most of the picture." };
+  if (tall < SS_DOOR_GOOD_PX && !hasHingeCloseUp) return { ok: false, tall, error: "This photo is too small to read the hinges. Add a close-up of a hinge, or use a photo where the door fills more of the picture." };
+  const want = widthIn / heightIn, got = high > 0 ? wide / high : 0;
+  if (!(got > 0) || Math.abs(got / want - 1) > SS_DOOR_SHAPE_TOL) return { ok: false, tall, error: "This photo doesn't match the door's size. Check the width and height you typed, or stand straight in front of the door and try again." };
+  return { ok: true, tall };
+}
+// The warp: the output's door box (padPx in from each side, full height) onto the dragged quad, the
+// strips carried on past the corners, and plain grey where they run off the photo (never the edge
+// pixels smeared). doorLookLocal.mjs's render, on this page's canvas. Null when the quad is not a sane
+// convex shape or the photo would not decode.
+function ssDoorWarp(img, quad, out, padPx) {
+  const [W, H] = out;
+  const natW = img.naturalWidth || img.width, natH = img.naturalHeight || img.height;
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const signs = [0, 1, 2, 3].map((i) => Math.sign(cross(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4])));
+  if (!(signs.every((s) => s > 0) || signs.every((s) => s < 0))) return null;
+  const edge = Math.max(...quad.map((p, i) => Math.hypot(p[0] - quad[(i + 1) % 4][0], p[1] - quad[(i + 1) % 4][1])));
+  if (!(edge > 8)) return null;
+  // Shrink the source first so the warp samples about 2 source pixels per output pixel (and a 48 MP
+  // phone photo never meets Safari's canvas cap).
+  const k = Math.min(1, (2 * Math.max(W, H)) / edge, 4096 / Math.max(natW, natH));
+  const sw = Math.max(1, Math.round(natW * k)), sh = Math.max(1, Math.round(natH * k));
+  const s = document.createElement("canvas");
+  s.width = sw; s.height = sh;
+  const sctx = s.getContext("2d");
+  sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(img, 0, 0, sw, sh);
+  const src = sctx.getImageData(0, 0, sw, sh).data;
+  const q = quad.map(([x, y]) => [x * k, y * k]);
+  const Hm = ssSolveHomography([[padPx, 0], [W - padPx, 0], [W - padPx, H], [padPx, H]], q);
+  if (!Hm) return null;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  const outImg = ctx.createImageData(W, H);
+  const o = outImg.data;
+  let sampled = 0;
+  for (let Y = 0; Y < H; Y++) {
+    for (let X = 0; X < W; X++) {
+      const x = X + 0.5, y = Y + 0.5, d = Hm[6] * x + Hm[7] * y + Hm[8];
+      const sx = (Hm[0] * x + Hm[1] * y + Hm[2]) / d - 0.5, sy = (Hm[3] * x + Hm[4] * y + Hm[5]) / d - 0.5;
+      const at = (Y * W + X) * 4;
+      if (sx < -0.5 || sy < -0.5 || sx > sw - 0.5 || sy > sh - 0.5) {
+        o[at] = o[at + 1] = o[at + 2] = 128;
+        o[at + 3] = 255;
+        continue;
+      }
+      const x0 = Math.max(0, Math.min(sw - 1, Math.floor(sx))), y0 = Math.max(0, Math.min(sh - 1, Math.floor(sy)));
+      const x1 = Math.min(sw - 1, x0 + 1), y1 = Math.min(sh - 1, y0 + 1);
+      const fx = Math.max(0, Math.min(1, sx - x0)), fy = Math.max(0, Math.min(1, sy - y0));
+      for (let ch = 0; ch < 3; ch++) {
+        const v00 = src[(y0 * sw + x0) * 4 + ch], v10 = src[(y0 * sw + x1) * 4 + ch];
+        const v01 = src[(y1 * sw + x0) * 4 + ch], v11 = src[(y1 * sw + x1) * 4 + ch];
+        o[at + ch] = (v00 * (1 - fx) + v10 * fx) * (1 - fy) + (v01 * (1 - fx) + v11 * fx) * fy;
+      }
+      o[at + 3] = 255;
+      if (src[(y0 * sw + x0) * 4 + 3] > 0) sampled++;
+    }
+  }
+  // A photo the browser could not decode reads as fully transparent: report it, never upload grey.
+  if (sampled < W * H * 0.2) return null;
+  ctx.putImageData(outImg, 0, 0);
+  return c;
+}
+const ssDoorBlob = (canvas, type = "image/jpeg", q = 0.92) => new Promise((res) => canvas.toBlob((b) => res(b), type, q));
+const ssDoorLoadImage = (file) => new Promise((res, rej) => {
+  const url = URL.createObjectURL(file);
+  const im = new Image();
+  im.onload = () => res(im);
+  im.onerror = () => { URL.revokeObjectURL(url); rej(new Error("That photo could not be opened. Try a JPG or PNG straight from the camera.")); };
+  im.src = url;
+});
+// A close-up: re-encoded on a canvas (no EXIF, no GPS), inside the same size limits as the front photo.
+async function ssDoorReencode(file) {
+  const img = await ssDoorLoadImage(file);
+  const [w, h] = ssDoorFitSize([img.naturalWidth, img.naturalHeight]);
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const g = c.getContext("2d");
+  g.fillStyle = "#FFFFFF"; g.fillRect(0, 0, w, h);
+  g.imageSmoothingQuality = "high";
+  g.drawImage(img, 0, 0, w, h);
+  const b = await ssDoorBlob(c);
+  if (!b) throw new Error("That close-up could not be read. Try another photo.");
+  return b;
+}
+// A refusal's own words and code, from either way supabase-js hands an answer back (a 2xx body, or a
+// non-2xx whose body sits unread on error.context).
+async function ssDoorAnswerOf(res) {
+  if (res && res.data && typeof res.data === "object") return { status: res.error ? (res.error.ssStatus || 500) : 200, body: res.data };
+  const e = res && res.error;
+  if (e && e.context && typeof e.context.clone === "function") {
+    try { return { status: e.context.status || 500, body: await e.context.clone().json() }; } catch (_) { /* not JSON */ }
+  }
+  return { status: e && e.ssStatus ? e.ssStatus : null, body: null, error: e || null };
+}
+
+// Drag four dots onto the corners of the door itself (inside the trim; the bottom ones on top of the
+// threshold). The small drawing beside it shows where they go: dots on a 3.5 in casing instead would
+// shift every measurement on a 36 in door by about 10 %.
+function SsDoorCorners({ img, quad, setQuad }) {
+  const [drag, setDrag] = useState(null);
+  const boxRef = useRef(null);
+  useEffect(() => {
+    if (drag == null) return undefined;
+    const end = () => setDrag(null);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("blur", end);
+    return () => { window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); };
+  }, [drag]);
+  const view = Math.max(220, Math.min(420, (typeof window !== "undefined" ? window.innerWidth : 420) - 120));
+  const scale = view / Math.max(img.naturalWidth, img.naturalHeight);
+  const dispW = img.naturalWidth * scale, dispH = img.naturalHeight * scale;
+  const moveTo = (e) => {
+    if (drag == null || !boxRef.current) return;
+    if (e.cancelable) e.preventDefault();
+    const r = boxRef.current.getBoundingClientRect();
+    const px = Math.max(0, Math.min(img.naturalWidth, (e.clientX - r.left) / scale));
+    const py = Math.max(0, Math.min(img.naturalHeight, (e.clientY - r.top) / scale));
+    setQuad((q) => q.map((pt, i) => (i === drag ? [px, py] : pt)));
+  };
+  const labels = ["Top left", "Top right", "Bottom right", "Bottom left"];
+  return (
+    <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }} onPointerMove={moveTo}>
+      <div ref={boxRef} data-ss-door-corners="1" style={{ position: "relative", width: dispW, height: dispH, userSelect: "none", touchAction: "none", flexShrink: 0 }}>
+        <img src={img.src} alt="Your door photo" draggable={false} style={{ width: dispW, height: dispH, display: "block", borderRadius: 6 }} />
+        <svg viewBox={`0 0 ${dispW} ${dispH}`} style={{ position: "absolute", inset: 0, width: dispW, height: dispH, pointerEvents: "none" }}>
+          <polygon points={quad.map(([x, y]) => `${x * scale},${y * scale}`).join(" ")} fill="rgba(27,120,149,0.16)" stroke="#1B7895" strokeWidth="2" />
+        </svg>
+        {quad.map(([x, y], i) => (
+          <div key={i} role="slider" aria-label={labels[i] + " corner"} data-ss-door-corner={i}
+            onPointerDown={(e) => { if (e.currentTarget.setPointerCapture && e.pointerId != null) { try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_e) { /* old browser */ } } setDrag(i); }}
+            style={{ position: "absolute", left: x * scale - 10, top: y * scale - 10, width: 20, height: 20, borderRadius: "50%", background: "#1B7895", border: "2px solid #FFF", boxShadow: "0 1px 4px rgba(0,0,0,0.4)", cursor: "grab" }} />
+        ))}
+      </div>
+      <div style={{ flex: "1 1 160px", minWidth: 150, fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+        <svg width="120" height="150" viewBox="0 0 120 150" aria-hidden="true" style={{ display: "block", marginBottom: 6 }}>
+          <rect x="18" y="10" width="84" height="130" fill="#E2E8F0" stroke="#94A3B8" strokeWidth="6" />
+          <rect x="24" y="16" width="72" height="118" fill="#FEF3C7" stroke="#334155" strokeWidth="1.5" />
+          <rect x="12" y="136" width="96" height="6" fill="#94A3B8" />
+          {[[24, 16], [96, 16], [96, 134], [24, 134]].map(([x, y], i) => <circle key={i} cx={x} cy={y} r="5" fill="#1B7895" stroke="#FFF" strokeWidth="1.5" />)}
+        </svg>
+        Put each dot on a corner of the <b>door itself</b>: inside the trim, with the bottom dots on top of the threshold. On a double door, use the outer corners of both doors.
+      </div>
+    </div>
+  );
+}
+
+// The flow itself, in a dialog: the photo, the corners, the press, the review, saved.
+function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
+  // Hooks first, every one of them, above every early return (React #310 otherwise).
+  const [step, setStep] = useState(resume ? "review" : "photo");   // photo | corners | press | review | saved
+  const [name, setName] = useState(resume ? resume.name : "");
+  const [leaves, setLeaves] = useState(resume && resume.spec && resume.spec.src && resume.spec.src.leaves === 2 ? 2 : 1);
+  const [widthIn, setWidthIn] = useState(resume && resume.widthIn ? String(resume.widthIn) : "");
+  const [heightIn, setHeightIn] = useState(resume && resume.heightIn ? String(resume.heightIn) : "");
+  const [front, setFront] = useState(null);     // the chosen file
+  const [img, setImg] = useState(null);
+  const [quad, setQuad] = useState(null);
+  const [closeUps, setCloseUps] = useState({}); // { hinge, handle, meet }: files
+  const [straight, setStraight] = useState(null); // { blob, url, size }
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState(SS_DOOR_STAGES[0][1]);
+  const [draft, setDraft] = useState(resume ? { lookId: resume.lookId, look: resume.look || null, spec: resume.spec, warnings: resume.warnings || [] } : null);
+  const [shots, setShots] = useState(null);     // [{ view, url }] or "failed"
+  const [saved, setSaved] = useState(null);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => {
+    if (!front) { setImg(null); return undefined; }
+    let gone = false;
+    ssDoorLoadImage(front).then((im) => {
+      if (gone) return;
+      setImg(im);
+      const w = im.naturalWidth, h = im.naturalHeight, ix = w * 0.18, iy = h * 0.1;
+      setQuad([[ix, iy], [w - ix, iy], [w - ix, h - iy], [ix, h - iy]]);
+    }).catch((e) => { if (!gone) setErr(e.message); });
+    return () => { gone = true; };
+  }, [front]);
+  // The drawn door, once there is a draft: front, 35° left and right, from the designer's own renderer.
+  useEffect(() => {
+    if (!draft || !draft.spec) return undefined;
+    let gone = false;
+    setShots(null);
+    const w = Number(widthIn) || (resume && resume.widthIn) || 36, h = Number(heightIn) || (resume && resume.heightIn) || 80;
+    window.ssLoadDesigner()
+      .then(() => (typeof window.ssRenderDoorLookShots === "function" ? window.ssRenderDoorLookShots({ spec: draft.spec, widthIn: w, heightIn: h }) : null))
+      .then((s) => { if (!gone) setShots(s && s.length ? s : "failed"); })
+      .catch(() => { if (!gone) setShots("failed"); });
+    return () => { gone = true; };
+  }, [draft]);
+
+  const W = Number(widthIn), H = Number(heightIn);
+  const sizeOk = W >= 12 && W <= 240 && H >= 24 && H <= 192;
+  const priceLine = !money ? null
+    : money.exempt ? "Free on your account."
+    : !money.meterActive ? "Free right now."
+    : money.priceCents != null ? `${(money.priceCents / 100).toFixed(2)} a door, taken from your wallet only when we draw one.`
+    : null;
+
+  const toCorners = () => {
+    setErr(null);
+    if (!sizeOk) { setErr("Type the door's width (12 to 240 in) and height (24 to 192 in)."); return; }
+    if (!front) { setErr("Add a photo of the door first."); return; }
+    setStep("corners");
+  };
+  const straighten = async () => {
+    setErr(null);
+    const chk = ssDoorQuadCheck(quad, W, H, !!closeUps.hinge);
+    if (!chk.ok) { setErr(chk.error); return; }
+    setBusy(true);
+    try {
+      const size = ssDoorPreparedSize(quad, W, H);
+      const c = ssDoorWarp(img, quad, size, ssDoorEdgePadPx(size[0], W));
+      const blob = c ? await ssDoorBlob(c) : null;
+      if (!blob) { setErr("We couldn't straighten this photo. Try another one."); return; }
+      setStraight({ blob, url: URL.createObjectURL(blob), size });
+    } finally { setBusy(false); }
+  };
+
+  // ── The press ─────────────────────────────────────────────────────────────────────────────
+  const generate = async () => {
+    setErr(null); setBusy(true); setStep("press");
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      const s = (Date.now() - startedAt) / 1000;
+      const hit = SS_DOOR_STAGES.filter(([t]) => s >= t).pop();
+      if (hit && alive.current) setStage(hit[1]);
+    }, 1000);
+    const left = () => SS_DOOR_PRESS_MS - (Date.now() - startedAt);
+    const fail = (message) => { if (!alive.current) return; setErr(message); setStep("corners"); };
+    try {
+      // 1. The photos, at paths the server picks, into the private bucket.
+      const kinds = ["front", ...["hinge", "handle", "meet"].filter((k) => closeUps[k] && (k !== "meet" || leaves === 2))];
+      const blobs = [straight.blob];
+      for (const k of kinds.slice(1)) blobs.push(await ssDoorReencode(closeUps[k]));
+      const up = await call({ action: "door_ref_upload_url", contentTypes: blobs.map(() => "image/jpeg") });
+      const photos = {};
+      for (let i = 0; i < kinds.length; i++) {
+        const u = up.uploads[i];
+        const { error } = await sb.storage.from("door-refs").uploadToSignedUrl(u.path, u.token, blobs[i], { contentType: "image/jpeg" });
+        if (error) throw new Error("A photo didn't upload: " + error.message);
+        photos[kinds[i]] = u.path;
+      }
+      // 2. One press: one key, a lean retry at most, and a pickup by the key when the stream drops.
+      const key = "dl" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+      const body = { action: "generate_door_look", stream: true, idempotencyKey: key, name: name.trim(), widthIn: W, heightIn: H, leaves, photos };
+      let lean = false;
+      for (;;) {
+        const res = await sb.functions.invoke("portal-settings", { body: scoped(lean ? { ...body, lean: true } : body) });
+        const brokeOff = Boolean(res.error && (res.error.name === "SyntaxError" || res.error.name === "TypeError") && !res.error.ssStatus);
+        const a = brokeOff ? { status: null, body: null } : await ssDoorAnswerOf(res);
+        let got = a.body && a.body.ok && a.body.spec ? a.body : null;
+        let refusal = !got && a.body && a.body.error ? a.body : null;
+        if (!got && (brokeOff || (a.body && a.body.code === "stream_deadline"))) {
+          // The server may still be working, or done: ask by this press's key until the clock runs out.
+          setStage("Your door is still being drawn. Picking it up…");
+          const firstAsk = Date.now();
+          for (;;) {
+            if (!alive.current) return;
+            const r = await ssDoorAnswerOf(await sb.functions.invoke("portal-settings", { body: scoped({ action: "generate_door_look_recover", idempotencyKey: key }) }));
+            if (r.body && r.body.ok && r.body.spec) { got = r.body; break; }
+            if (r.body && r.body.ok && r.body.pending === false) {
+              if (r.body.reason === "no_row" && Date.now() - startedAt < 90_000) { /* its row may not be written yet */ }
+              else { refusal = { error: r.body.message, code: r.body.code, retryable: r.body.retryable === true }; break; }
+            }
+            if (left() < 10_000 && Date.now() - firstAsk > 60_000) { refusal = { error: "This took too long. Reload the page to see if your door is in your list before you press Generate again." }; break; }
+            await new Promise((ok) => setTimeout(ok, 10_000));
+          }
+        }
+        if (got) {
+          if (!alive.current) return;
+          setDraft({ lookId: got.lookId || null, look: got.look || null, spec: got.spec, warnings: got.warnings || [] });
+          if (!name.trim() && got.look && got.look.name) setName(got.look.name);
+          setStep("review");
+          return;
+        }
+        if (refusal && refusal.retryable === true && !lean && left() >= SS_DOOR_LEAN_MIN_LEFT_MS) { lean = true; setStage("Trying once more, a quicker way"); continue; }
+        fail((refusal && refusal.error) || (res.error && res.error.message) || "We couldn't draw this door. Try again.");
+        return;
+      }
+    } catch (e) {
+      fail(e.message || "Something went wrong. Try again.");
+    } finally {
+      clearInterval(timer);
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  // ── Save: the look Ready with our front render as its tile, then into the library ─────────────
+  const save = async () => {
+    setErr(null);
+    const nm = name.trim().replace(/\s+/g, " ");
+    if (!nm || nm.length > 60) { setErr("Give the door a name of 1 to 60 characters."); return; }
+    setBusy(true);
+    try {
+      let thumbPath;
+      const frontShot = Array.isArray(shots) ? shots.find((s) => s.view === "front") : null;
+      if (frontShot) {
+        const blob = await (await fetch(frontShot.url)).blob();
+        const t = await call({ action: "door_look_thumb_upload_url" });
+        const { error } = await sb.storage.from("fixtures").uploadToSignedUrl(t.path, t.token, blob, { contentType: "image/png" });
+        if (!error) thumbPath = t.path;
+      }
+      let look = draft.look;
+      if (draft.lookId && !(look && look.version)) {
+        const l = await call({ action: "list_door_looks" });
+        look = (l.looks || []).find((x) => x.id === draft.lookId) || null;
+      }
+      const saveBody = draft.lookId && look
+        ? { action: "save_door_look", id: draft.lookId, version: look.version, name: nm, ...(thumbPath ? { thumbPath } : {}) }
+        : { action: "save_door_look", name: nm, spec: draft.spec, ...(thumbPath ? { thumbPath } : {}) };
+      const s = await call(saveBody);
+      const add = await call({ action: "library_add", doorLookId: s.look.id, name: nm });
+      if (!alive.current) return;
+      setSaved(add.entry);
+      setStep("saved");
+      if (onSaved) onSaved(add.entry);
+    } catch (e) { if (alive.current) setErr(e.message); }
+    finally { if (alive.current) setBusy(false); }
+  };
+
+  const btn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "8px 14px", fontSize: 13 };
+  const go = { ...S.btn(DOOR_MINT, "#0F4C46"), padding: "8px 16px", fontSize: 13 };
+  const title = { photo: "Make your door from a photo", corners: "Mark the door's corners", press: "Drawing your door", review: "Check your 3D door", saved: "Saved to your library" }[step];
+  return (
+    <div role="dialog" aria-modal="true" aria-label={title} data-ss-door-studio={step}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.72)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#FFF", borderRadius: 14, padding: 20, maxWidth: step === "review" ? 980 : 640, width: "100%", maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={{ fontWeight: 800, fontSize: 17, color: "#0F172A", flex: 1 }}>{title}</div>
+          {step !== "press" && <button type="button" onClick={onClose} aria-label="Close" style={{ ...btn, padding: "4px 10px" }}>✕</button>}
+        </div>
+        {err && <div style={S.err} data-ss-door-error="1">{err}</div>}
+
+        {step === "photo" && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+              Stand straight in front of the door. Close it. Get the whole door in, and show both doors on a double. Move anything that's in front of it.
+            </p>
+            <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Name
+              <input type="text" value={name} maxLength={60} placeholder="e.g. Ranch barn door" onChange={(e) => setName(e.target.value)} style={{ ...S.input, marginTop: 4 }} />
+            </label>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Door
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  {[[1, "Single"], [2, "Double"]].map(([n, t]) => (
+                    <button key={n} type="button" aria-pressed={leaves === n} onClick={() => setLeaves(n)}
+                      style={{ ...btn, background: leaves === n ? "#DBEAFE" : "#F1F5F9", border: leaves === n ? "1px solid #1D4ED8" : "1px solid transparent" }}>{t}</button>
+                  ))}
+                </div>
+              </div>
+              <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Width (in)
+                <input type="number" min="12" max="240" value={widthIn} onChange={(e) => setWidthIn(e.target.value)} style={{ ...S.input, width: 110, marginTop: 4 }} aria-label="Width in inches" />
+              </label>
+              <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Height (in)
+                <input type="number" min="24" max="192" value={heightIn} onChange={(e) => setHeightIn(e.target.value)} style={{ ...S.input, width: 110, marginTop: 4 }} aria-label="Height in inches" />
+              </label>
+            </div>
+            <div style={{ border: "1px dashed #94A3B8", borderRadius: 10, padding: 12, background: "#F8FAFC" }}>
+              <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 6 }}>Photo of the closed door</div>
+              <label style={{ ...btn, display: "inline-block" }}>
+                {front ? "Use a different photo" : "Choose a photo"}
+                <input type="file" accept="image/jpeg,image/png,image/webp" data-ss-door-front="1" style={{ display: "none" }}
+                  onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { setFront(f); setStraight(null); setErr(null); } e.target.value = ""; }} />
+              </label>
+              {front && <span style={{ marginLeft: 10, fontSize: 12.5, color: "#15803D", fontWeight: 700 }}>✓ {front.name}</span>}
+              <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Close-ups help, but you can skip them:</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                {[["hinge", "A hinge"], ["handle", "The handle"], ...(leaves === 2 ? [["meet", "Where the doors meet"]] : [])].map(([k, t]) => (
+                  <label key={k} style={{ ...btn, padding: "5px 10px", fontSize: 12, display: "inline-block" }}>
+                    {closeUps[k] ? "✓ " : "+ "}{t}
+                    <input type="file" accept="image/jpeg,image/png,image/webp" data-ss-door-closeup={k} style={{ display: "none" }}
+                      onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) setCloseUps((c) => ({ ...c, [k]: f })); e.target.value = ""; }} />
+                  </label>
+                ))}
+              </div>
+            </div>
+            {priceLine && <div style={{ fontSize: 12.5, color: "#475569" }} data-ss-door-price="1">{priceLine}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button type="button" style={btn} onClick={onClose}>Cancel</button>
+              <button type="button" style={go} onClick={toCorners}>Next: mark the corners</button>
+            </div>
+          </div>
+        )}
+
+        {step === "corners" && img && quad && (
+          <div style={{ display: "grid", gap: 12 }}>
+            {!straight ? <SsDoorCorners img={img} quad={quad} setQuad={setQuad} /> : (
+              <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <img src={straight.url} alt="Your door, straightened" data-ss-door-straight="1" style={{ maxHeight: 360, maxWidth: "100%", borderRadius: 6, border: "1px solid #CBD5E1" }} />
+                <div style={{ flex: "1 1 200px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+                  This is the photo we'll read: your door, squared up, with a little of what's beside it showing on each side.
+                  If the door's edges aren't at the sides of the picture, move the dots again.
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button type="button" style={btn} onClick={() => { setStraight(null); setStep("photo"); }}>Back</button>
+              {!straight && <button type="button" style={go} disabled={busy} onClick={straighten}>{busy ? "Straightening…" : "Straighten"}</button>}
+              {straight && <button type="button" style={btn} onClick={() => setStraight(null)}>Move the dots again</button>}
+              {straight && <button type="button" style={go} disabled={busy || !ai} onClick={generate} data-ss-door-generate="1">Generate my 3D door</button>}
+            </div>
+            {straight && !ai && <div style={{ fontSize: 12.5, color: "#92400E" }}>Making doors from photos is turned off right now. Try again later.</div>}
+          </div>
+        )}
+
+        {step === "press" && (
+          <div style={{ display: "grid", gap: 12, justifyItems: "center", padding: "18px 0" }} aria-live="polite">
+            <SkelBar />
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }} data-ss-door-stage="1">{stage}…</div>
+            <div style={{ fontSize: 12.5, color: "#64748B", textAlign: "center", maxWidth: 420 }}>
+              This usually takes 3 to 6 minutes, and never more than 8. Keep this page open.
+            </div>
+          </div>
+        )}
+
+        {step === "review" && draft && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-start" }}>
+              {straight && (
+                <figure style={{ margin: 0, textAlign: "center" }}>
+                  <img src={straight.url} alt="Your photo" style={{ height: 340, maxWidth: "100%", borderRadius: 6, border: "1px solid #CBD5E1" }} />
+                  <figcaption style={{ fontSize: 12, color: "#64748B" }}>Your photo</figcaption>
+                </figure>
+              )}
+              {shots === null && <div style={{ width: 240, height: 340, display: "flex", alignItems: "center", justifyContent: "center", background: "#F1F5F9", borderRadius: 6, fontSize: 12.5, color: "#64748B" }}>Drawing it in 3D…</div>}
+              {shots === "failed" && <div style={{ width: 240, height: 340, display: "flex", alignItems: "center", justifyContent: "center", background: "#FEF2F2", borderRadius: 6, fontSize: 12.5, color: "#B91C1C", padding: 10, textAlign: "center" }}>We couldn't draw the 3D preview on this device. You can still save it and see it in the designer.</div>}
+              {Array.isArray(shots) && shots.map((s) => (
+                <figure key={s.view} style={{ margin: 0, textAlign: "center" }}>
+                  <img src={s.url} alt={`Our 3D door, ${s.view === "front" ? "straight on" : s.view === "left35" ? "from the left" : "from the right"}`} data-ss-door-shot={s.view}
+                    style={{ height: s.view === "front" ? 340 : 250, maxWidth: "100%", borderRadius: 6, border: "1px solid #CBD5E1" }} />
+                  <figcaption style={{ fontSize: 12, color: "#64748B" }}>{s.view === "front" ? "Our 3D door" : s.view === "left35" ? "From the left" : "From the right"}</figcaption>
+                </figure>
+              ))}
+            </div>
+            {(draft.warnings || []).length > 0 && (
+              <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#92400E" }} data-ss-door-warnings="1">
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>Check these before you save</div>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>{draft.warnings.map((w, i) => <li key={i}>{typeof w === "string" ? w : (w && (w.text || w.message)) || ""}</li>)}</ul>
+              </div>
+            )}
+            <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700, maxWidth: 360 }}>Name it
+              <input type="text" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} style={{ ...S.input, marginTop: 4 }} data-ss-door-name="1" />
+            </label>
+            <div style={{ fontSize: 12.5, color: "#64748B" }}>Saving puts it in your library. Then pick it in any door&rsquo;s <b>How it looks in 3D</b>; it follows that door&rsquo;s colours.</div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button type="button" style={btn} onClick={onClose}>Not now</button>
+              {front && <button type="button" style={btn} onClick={() => { setDraft(null); setShots(null); setStraight(null); setStep("corners"); }}>Try another photo</button>}
+              <button type="button" style={go} disabled={busy || shots === null} onClick={save} data-ss-door-save="1">{busy ? "Saving…" : "Save to my library"}</button>
+            </div>
+          </div>
+        )}
+
+        {step === "saved" && saved && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={S.okMsg} data-ss-door-saved="1">&ldquo;{saved.name}&rdquo; is in your library. Pick it in any door&rsquo;s <b>How it looks in 3D</b> below.</div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}><button type="button" style={go} onClick={onClose}>Done</button></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The box on the Library card's right: the way in, and any door drafted from a photo that is not in the
+// library yet (a press whose page was closed, or a draft not saved), so a paid draft is never lost.
+function SsDoorFromPhoto({ call, scoped, money, ai, entries, openKey = 0, onSaved }) {
+  const [open, setOpen] = useState(null);       // null | { resume? }
+  const [looks, setLooks] = useState(null);
+  const loadLooks = async () => {
+    try { const d = await call({ action: "list_door_looks" }); setLooks(d.looks || []); } catch (_) { setLooks([]); }
+  };
+  useEffect(() => { loadLooks(); }, []);
+  useEffect(() => { if (openKey) setOpen({}); }, [openKey]);
+  const inLibrary = new Set((entries || []).filter((e) => e.category === "door" && e.look && e.look.doorLookId).map((e) => e.look.doorLookId));
+  const waiting = (looks || []).filter((l) => l.fromPhoto && !inLibrary.has(l.id)).slice(0, 3);
+  return (
+    <div data-ss-door-from-photo="1" style={{ flex: "0 1 320px", minWidth: 240, border: "1px solid #BFE3EA", background: "#F0FAFC", borderRadius: 12, padding: "12px 14px" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, color: "#0F4C5C" }}>Don&rsquo;t see your door?</div>
+      <div style={{ fontSize: 12.5, color: "#335B66", lineHeight: 1.5, margin: "4px 0 10px" }}>
+        Upload a photo of it and we&rsquo;ll draw it in 3D, with its boards, braces, hinges and handle. It goes into your library.
+      </div>
+      <button type="button" onClick={() => setOpen({})} data-ss-door-open="1" style={{ ...S.btn("#1B7895", "#FFF"), padding: "8px 14px", fontSize: 13 }}>Make it from a photo</button>
+      {!ai && <div style={{ fontSize: 12, color: "#92400E", marginTop: 8 }}>Making doors from photos is turned off right now.</div>}
+      {waiting.length > 0 && (
+        <div style={{ marginTop: 10, borderTop: "1px solid #CFE8EE", paddingTop: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: "#0F4C5C" }}>Not in your library yet</div>
+          {waiting.map((l) => (
+            <div key={l.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, marginTop: 6 }} data-ss-door-waiting={l.name}>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name}</span>
+              <button type="button" style={{ ...S.btn("#FFF", "#0F4C5C"), padding: "3px 10px", fontSize: 12, border: "1px solid #9FD3DE" }}
+                onClick={() => setOpen({ resume: { lookId: l.id, look: l, spec: l.spec, name: l.name, warnings: [] } })}>Review</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {open && (
+        <SsDoorStudio call={call} scoped={scoped} money={money} ai={ai} resume={open.resume || null}
+          onClose={() => { setOpen(null); loadLooks(); }}
+          onSaved={(entry) => { loadLooks(); if (onSaved) onSaved(entry); }} />
+      )}
+    </div>
+  );
+}
+
 function SsLibrarySection({ category, viewingLabel = null, clientId = null, onChanged = null }) {
   // Hooks first, every one of them, above every early return (React #310 otherwise).
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -5363,6 +5942,10 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
   const [editing, setEditing] = useState(null); // { id, name, look }
   const [reqOpen, setReqOpen] = useState(false);
   const [reqDraft, setReqDraft] = useState(null);
+  // Doors only: "make it from a photo" (door looks, P6), when client_settings.door_looks_beta is on.
+  // null = off; { ai, money } = on (ai: the kill switch; money: the door meter's line).
+  const [doorGen, setDoorGen] = useState(null);
+  const [photoOpenKey, setPhotoOpenKey] = useState(0);
   const seeded = useRef(false);
   const rootRef = useRef(null);
   const noun = SS_LIB_NOUN[category];
@@ -5379,6 +5962,7 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (!cat || cat.error || !cat.data || cat.data.libraryBeta !== true) { setOn(false); return; }
     setOn(true);
+    setDoorGen(category === "door" && cat.data.doorLooksBeta === true ? { ai: cat.data.doorLookAiOn === true, money: cat.data.doorWallet || null } : null);
     try {
       let d = await call({ action: "library" });
       // First open: copy in what the builder uses today, so their rows keep working (Ahsan
@@ -5396,7 +5980,8 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
   useEffect(() => {
     const open = (ev) => {
       if (!ev || !ev.detail || ev.detail.category !== category) return;
-      setBrowse(true);
+      if (ev.detail.photo) setPhotoOpenKey((n) => n + 1);
+      else setBrowse(true);
       if (rootRef.current) rootRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     };
     window.addEventListener("ss:library-open", open);
@@ -5494,7 +6079,7 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
   const entryLine = (e, label) => (editing && editing.id === e.id ? (
     <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
       <input type="text" value={editing.name} maxLength={60} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })} style={{ ...S.input, width: 240 }} aria-label="Name" />
-      <SsLibLookEdit category={category} look={editing.look} onChange={(look) => setEditing({ ...editing, look })} />
+      {!(editing.look && editing.look.doorLookId) && <SsLibLookEdit category={category} look={editing.look} onChange={(look) => setEditing({ ...editing, look })} />}
       <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "edit:" + e.id} onClick={saveEdit}>{busy === "edit:" + e.id ? "Saving…" : "Save"}</button>
       <button style={smallBtn} onClick={() => setEditing(null)}>Cancel</button>
     </div>
@@ -5510,6 +6095,8 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
   return (
     <div style={S.card} ref={rootRef} data-ss-library={category}>
       <div style={{ ...S.h2, display: "flex", alignItems: "center", gap: 8 }}>Library <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 999, padding: "2px 8px" }}>Beta</span></div>
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+      <div style={{ flex: "1 1 420px", minWidth: 0 }}>
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px", maxWidth: 720, lineHeight: 1.5 }}>
         Import {noun === "cladding" ? "claddings" : noun + "s"} from the StructureStudio library under your own names. Everything you import shows up
         {category === "door" && <> in each door&rsquo;s <b>How it looks in 3D</b> below.</>}
@@ -5525,6 +6112,12 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
         <button style={smallBtn} onClick={() => { setBrowse((b) => !(b || !!needle)); if (needle) setQ(""); }} aria-expanded={open}>
           {open ? "Hide the StructureStudio library" : `Browse the StructureStudio library (${total})`}
         </button>
+      </div>
+      </div>
+      {doorGen && (
+        <SsDoorFromPhoto call={call} scoped={scoped} money={doorGen.money} ai={doorGen.ai} entries={lib.entries || []} openKey={photoOpenKey}
+          onSaved={() => { load(); if (onChanged) onChanged(); }} />
+      )}
       </div>
 
       {open && (
@@ -5564,14 +6157,18 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
               <div style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B" }}>Yours, not from a template</div>
               {ownHits.map((e) => (
                 <div key={e.id} style={rowStyle}>
-                  <SsLibPic category={category} look={editing && editing.id === e.id ? editing.look : e.look} />
+                  <SsLibPic category={category} look={editing && editing.id === e.id ? editing.look : e.look} thumbUrl={e.doorLook ? e.doorLook.thumbUrl : null} />
                   <div style={{ flex: "1 1 320px", minWidth: 0 }}>{entryLine(e, null)}</div>
                 </div>
               ))}
             </div>
           )}
           {category === "door" ? (
-            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Don&rsquo;t see your door? Making a 3D door from your supplier&rsquo;s photo is coming next.</div>
+            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>
+              {doorGen
+                ? <>Don&rsquo;t see your door? <button type="button" style={{ ...tinyBtn, color: "#0F4C5C" }} onClick={() => setPhotoOpenKey((n) => n + 1)}>Make it from a photo</button></>
+                : <>Don&rsquo;t see your door? Making a 3D door from your supplier&rsquo;s photo is coming next.</>}
+            </div>
           ) : (
             <div style={{ marginTop: 12 }}>
               {!reqOpen && <button style={smallBtn} onClick={openRequest}>Can&rsquo;t find yours? Request it</button>}
@@ -6690,6 +7287,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // The builder's library (339) when client_settings.library_beta is on: a door's "How it looks in
   // 3D" and a window's grid then pick from the builder's own entries. null = the editor as before.
   const [lib, setLib] = useState(null);
+  // Door looks from a photo (P6): the dropdown's "Make one from a photo…" when door_looks_beta is on.
+  const [doorLooksOn, setDoorLooksOn] = useState(false);
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -6736,6 +7335,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     const libOn = data.libraryBeta === true && data.library ? data.library : null;
     setLib(libOn);
+    setDoorLooksOn(isDoorCat && !!libOn && data.doorLooksBeta === true);
     const links = (libOn && libOn.fixtureLinks) || {};
     const list = (data.fixtures || []).filter((f) => (f.category || "door") === category)
       .map((d) => ({ ...mapRow(d), client_library_id: links[d.id] || null }));
@@ -7437,6 +8037,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
                 onChange={(e) => {
                   const v = e.target.value;
                   if (v === "__more") { window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "door" } })); return; }
+                  if (v === "__photo") { window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "door", photo: true } })); return; }
                   if (v.startsWith("lib:")) {
                     const x = doorEntries.find((y) => y.id === v.slice(4));
                     if (x) setDraft({ client_library_id: x.id, door_style: (x.look && x.look.doorStyle) || "auto" });
@@ -7447,6 +8048,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
                 {doorEntries.map((x) => <option key={x.id} value={"lib:" + x.id}>{x.name}</option>)}
                 {val.startsWith("style:") && <option value={val}>{ssLibLookWords("door", { doorStyle: curStyle })} (not in your library)</option>}
                 <option value="__more">Find more in the library…</option>
+                {doorLooksOn && <option value="__photo">Make one from a photo…</option>}
               </select>
             );
           })() : (
@@ -7465,7 +8067,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           </select>
           )}
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto}
+            {(() => {
+              // A door made from a photo (345) draws its own look, not its base's description.
+              const e = lib && edit.draft.client_library_id ? (lib.entries || []).find((x) => x.id === edit.draft.client_library_id) : null;
+              return e && e.look && e.look.doorLookId
+                ? "Your door, drawn in 3D from your photo. It follows this door's colours."
+                : D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto;
+            })()}
           </div>
         </div>
       )}

@@ -63,7 +63,9 @@ export function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> 
 export const loadImageLibrary = () => import("https://deno.land/x/imagescript@1.3.0/mod.ts");
 let libraryFailureLogged = false;
 const libraryLoads = new WeakMap<typeof loadImageLibrary, ReturnType<typeof loadImageLibrary>>();
-function imageLibrary(load: typeof loadImageLibrary): ReturnType<typeof loadImageLibrary> {
+// Exported for the door press (portal-settings/doorGenerate.ts), which decodes its photo with the same
+// once-per-worker load.
+export function imageLibrary(load: typeof loadImageLibrary): ReturnType<typeof loadImageLibrary> {
   let loading = libraryLoads.get(load);
   if (!loading) {
     loading = load();
