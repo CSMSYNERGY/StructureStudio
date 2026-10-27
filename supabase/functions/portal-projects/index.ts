@@ -7,7 +7,7 @@ import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/a
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
-import { buildOverlayItems, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
+import { buildOverlayItems, choiceIdMap, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
 import { boardsForAction, loadBoardPrivacy, projectsAudience } from "../_shared/pmBoardPrivacy.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
@@ -381,7 +381,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   // `board_access` reads: a view-only operator must be able to see who is on a board without
   // being able to change it. The write half (set_board_visibility, add/remove_board_member)
   // is not here and so falls under the writer check below, then the owner check at the action.
-  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "board_access", "setup_template", "setup_overview", "setup_client_items"]);
+  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "board_access", "move_plan", "setup_template", "setup_overview", "setup_client_items"]);
 
   // ── THREE CLASSES OF ACTION, AND THE SPLIT IS THE SECURITY DESIGN ───────────────────────
   //
@@ -532,6 +532,33 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     if (error) throw error;
     if (!data) throw new Error("Item not found.");
     return data;
+  };
+
+  // THE CARDS A MOVE IS ABOUT, and the one board they must all live on.
+  //
+  // ⚠️ ONE SOURCE BOARD, ALWAYS. On an overlay board the table shows cards belonging to two
+  // or three other boards at once, so a selection made there can legitimately span boards —
+  // and a "move these to Features" built on the first row's columns would re-key the rest
+  // through the wrong map and store values under ids their cells never had. Refused by name
+  // instead, because the fix is obvious once you are told: move them from their own board.
+  const moveSource = async (ids: string[]): Promise<
+    // deno-lint-ignore no-explicit-any
+    { board: { id: string; name: string }; items: any[] } | { error: string; status: number }
+  > => {
+    if (!ids.length) return { error: "No cards given.", status: 400 };
+    const { data: items, error } = await admin.from("pm_items").select("*")
+      .in("id", ids).is("archived_at", null);
+    if (error) throw error;
+    if (!items || !items.length) return { error: "Item not found.", status: 404 };
+    const boards = new Set(items.map((i: { board_id: string }) => String(i.board_id)));
+    if (boards.size > 1) {
+      return { error: "Those cards live on different boards. Move them from the board each one belongs to.", status: 400 };
+    }
+    const boardId = [...boards][0];
+    const { data: board } = await admin.from("pm_boards")
+      .select("id, name").eq("id", boardId).maybeSingle();
+    if (!board) return { error: "Board not found.", status: 404 };
+    return { board, items };
   };
 
   // ── The roadmap, mirrored into Projects ────────────────────────────────────
@@ -1409,6 +1436,179 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         }
         await act(dest.board_id, ids.length === 1 ? ids[0] : null, "move_items", { count: ids.length, to: dest.name });
         return json({ ok: true });
+      }
+
+      // ── MOVING A CARD TO ANOTHER BOARD (Carolyn 2026-10-26) ───────────────
+      //
+      // move_items above deliberately refuses this: it exists for dragging a card between
+      // GROUPS, and its `.eq("board_id", dest.board_id)` is load-bearing for the overlay,
+      // where somebody else's card is on your table and must not be rewritten onto your
+      // board. A real move is a different operation and gets its own two actions, because
+      // it cannot be done blind — see below.
+      //
+      // WHY A PLAN FIRST. Every board seeds its own column UUIDs, so "Priority" on Bugs and
+      // "Priority" on Feature Requests are different ids for the same idea; pmOverlay's
+      // columnIdMap already matches them on name+type for the overlay's read path, and the
+      // same map is what a move needs. What it cannot decide is the LEFTOVERS: a filled cell
+      // whose column has no counterpart on the destination. Dropping it silently is data
+      // loss nobody saw; refusing the move outright blocks a move people actually want.
+      //
+      // Carolyn's answer (2026-10-26) was neither: "Give the option of matching the field to
+      // an existing or the option to create new, or disregard and delete." So move_plan says
+      // exactly what matched, what did not, and what the alternatives are, and the browser
+      // sends one decision per leftover back to move_to_board.
+      case "move_plan": {
+        const ids = (Array.isArray(payload.ids) ? payload.ids : []).map((x: unknown) => str(x, 40)).filter(Boolean);
+        const toBoardId = str(payload.toBoardId, 40);
+        const src = await moveSource(ids);
+        if ("error" in src) return json({ error: src.error }, src.status);
+        if (src.board.id === toBoardId) return json({ error: "Those cards are already on that board." }, 400);
+
+        const { data: toBoard } = await admin.from("pm_boards")
+          .select("id, name").eq("id", toBoardId).is("archived_at", null).maybeSingle();
+        if (!toBoard) return json({ error: "Board not found." }, 404);
+
+        const [srcCols, destCols, groupsRes] = await Promise.all([
+          boardColumns(src.board.id),
+          boardColumns(toBoardId),
+          admin.from("pm_groups").select("id, name, position").eq("board_id", toBoardId).order("position"),
+        ]);
+        if (groupsRes.error) throw groupsRes.error;
+
+        const auto = columnIdMap(srcCols, destCols);
+        const destById = new Map(destCols.map((c) => [c.id, c]));
+        // Only columns that actually HOLD something on the selected cards are worth asking
+        // about. An empty cell has nothing to lose, and listing every blank column would
+        // bury the two decisions that matter under twelve that do not.
+        const filled = new Map<string, number>();
+        for (const it of src.items) {
+          for (const [k, v] of Object.entries((it.values || {}) as Record<string, unknown>)) {
+            if (v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length)) continue;
+            filled.set(k, (filled.get(k) || 0) + 1);
+          }
+        }
+
+        const matched = [];
+        const unmatched = [];
+        for (const c of srcCols) {
+          const n = filled.get(c.id) || 0;
+          if (!n) continue;
+          const destId = auto.get(c.id);
+          if (destId) {
+            const dc = destById.get(destId);
+            // A matched CHOICE column can still lose individual cells: the columns line up
+            // by name and type, but a label this card is actually using may not exist over
+            // there. Said up front, because it is invisible afterwards.
+            const lost: string[] = [];
+            if (dc && (c.type === "status" || c.type === "dropdown")) {
+              const cm = choiceIdMap(c, dc);
+              const destIds = new Set(((dc.settings?.labels || dc.settings?.options || []) as Array<{ id?: string }>).map((o) => String(o?.id)));
+              const srcChoices = (c.settings?.labels || c.settings?.options || []) as Array<{ id?: string; label?: string }>;
+              for (const it of src.items) {
+                const raw = (it.values || {})[c.id];
+                for (const one of (Array.isArray(raw) ? raw : [raw])) {
+                  const id = String(one ?? "");
+                  if (!id) continue;
+                  if (cm.has(id) || destIds.has(id)) continue;
+                  const label = (srcChoices.find((o) => String(o?.id) === id) || {}).label;
+                  if (label && !lost.includes(String(label))) lost.push(String(label));
+                }
+              }
+            }
+            matched.push({ id: c.id, name: c.name, type: c.type, destId, destName: dc ? dc.name : "", filled: n, lostChoices: lost });
+          } else {
+            unmatched.push({
+              id: c.id, name: c.name, type: c.type, filled: n,
+              // Only columns of the SAME TYPE are offered: putting a date into a status
+              // column would store a value the destination can never render.
+              candidates: destCols.filter((d) => d.type === c.type).map((d) => ({ id: d.id, name: d.name })),
+            });
+          }
+        }
+        return json({
+          from: { id: src.board.id, name: src.board.name },
+          to: { id: toBoard.id, name: toBoard.name },
+          groups: groupsRes.data || [],
+          items: src.items.map((i: { id: string; name: string }) => ({ id: i.id, name: i.name })),
+          matched, unmatched,
+        });
+      }
+
+      case "move_to_board": {
+        const ids = (Array.isArray(payload.ids) ? payload.ids : []).map((x: unknown) => str(x, 40)).filter(Boolean);
+        const toBoardId = str(payload.toBoardId, 40);
+        const src = await moveSource(ids);
+        if ("error" in src) return json({ error: src.error }, src.status);
+        if (src.board.id === toBoardId) return json({ error: "Those cards are already on that board." }, 400);
+
+        const { data: group } = await admin.from("pm_groups")
+          .select("id, name, board_id").eq("id", str(payload.groupId, 40)).maybeSingle();
+        if (!group || group.board_id !== toBoardId) {
+          return json({ error: "Pick a group on the board you are moving to." }, 400);
+        }
+
+        const srcCols = await boardColumns(src.board.id);
+        let destCols = await boardColumns(toBoardId);
+        const map = columnIdMap(srcCols, destCols);
+
+        // The leftovers, one decision each. Anything not named here keeps the default the
+        // plan showed: unmatched and undecided means the cell is dropped.
+        const decisions = (payload.decisions || {}) as Record<string, { action?: string; destColId?: string }>;
+        const created: string[] = [];
+        for (const c of srcCols) {
+          if (map.has(c.id)) continue;
+          const d = decisions[c.id];
+          if (!d || d.action === "drop") continue;
+          if (d.action === "map") {
+            const target = destCols.find((x) => x.id === str(d.destColId, 40));
+            if (!target) return json({ error: `Pick a column for "${c.name}" on the board you are moving to, or choose to leave it behind.` }, 400);
+            if (target.type !== c.type) return json({ error: `"${c.name}" is a ${c.type} column and "${target.name}" is a ${target.type} one — they can't hold the same value.` }, 400);
+            map.set(c.id, target.id);
+            continue;
+          }
+          if (d.action === "create") {
+            // Copied WHOLE, settings included, which is the point: the new column keeps the
+            // source's own label/option ids, so every value walks across unchanged and no
+            // choice has to be matched by text. sanitizeSettings still rebuilds it, so
+            // nothing unvetted reaches the column.
+            const { data: maxRow } = await admin.from("pm_columns").select("position")
+              .eq("board_id", toBoardId).order("position", { ascending: false }).limit(1).maybeSingle();
+            const { data: col, error: cErr } = await admin.from("pm_columns").insert({
+              board_id: toBoardId, type: c.type, name: c.name,
+              settings: sanitizeSettings(c.type, c.settings),
+              position: (maxRow?.position || 0) + 1024,
+              width: c.width ?? null,
+            }).select().single();
+            if (cErr) throw cErr;
+            destCols = destCols.concat(col);
+            map.set(c.id, col.id);
+            created.push(c.name);
+            await act(toBoardId, null, "create_column", { name: c.name, type: c.type, via: "move" });
+            continue;
+          }
+          return json({ error: `Don't know what to do with "${c.name}".` }, 400);
+        }
+
+        const { data: maxRow } = await admin.from("pm_items").select("position")
+          .eq("group_id", group.id).order("position", { ascending: false }).limit(1).maybeSingle();
+        let pos = (maxRow?.position || 0) + 1024;
+        for (const it of src.items) {
+          const values = remapValues(it.values as Record<string, unknown>, map, srcCols, destCols);
+          const { error } = await admin.from("pm_items").update({
+            board_id: toBoardId, group_id: group.id, position: pos, values,
+            updated_at: new Date().toISOString(),
+          }).eq("id", it.id).eq("board_id", src.board.id);   // nobody else moved it meanwhile
+          if (error) throw error;
+          pos += 1024;
+          // Logged on BOTH boards. The card leaves one table and appears on another, and
+          // whoever watches the board it left needs the row that says where it went —
+          // pm_activity is keyed by board, so one insert would only tell half the story.
+          await act(src.board.id, it.id, "move_to_board", { name: it.name, to: toBoardId });
+          await act(toBoardId, it.id, "move_to_board", { name: it.name, from: src.board.id });
+        }
+        // Notes, attachments, the client's own submission link and the item's whole history
+        // are keyed by ITEM id, so they travel with the card and nothing here touches them.
+        return json({ ok: true, moved: src.items.length, created });
       }
 
       case "reorder_item": {

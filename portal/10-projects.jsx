@@ -273,7 +273,7 @@ function PMDrawer({ onClose, labelledBy, children }) {
 // The one thing that cannot live in a row — a conversation — lives here, and the
 // client's original words sit at the bottom of it as the first entry in the thread.
 // Header and footer are pinned; only the thread scrolls.
-function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
+function PMItemPanel({ item, canWrite, onClose, onRename, onArchive, onMove }) {
   const [detail, setDetail] = useState(null);      // { updates, submission }
   const [err, setErr] = useState("");
   const [name, setName] = useState(item.name);
@@ -515,8 +515,17 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
 
       {/* Footer — pinned, so Remove never hides below a long thread */}
       {canWrite && (
-        <div style={{ padding: "10px 18px", borderTop: "1px solid #E2E8F0", textAlign: "right", flexShrink: 0 }}>
-          <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
+        <div style={{ padding: "10px 18px", borderTop: "1px solid #E2E8F0", display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
+          {/* Moving is not removing, so it does not wear the red. An overlay row is
+              somebody else's card sitting on this table — it is moved from the board it
+              lives on, the same rule archiving already follows. */}
+          {onMove && !item.overlay && (
+            <button type="button" style={{ background: "none", border: "none", color: ACCENT, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 0 }}
+              onClick={() => { onMove(item); onClose(); }}>
+              Move to another board
+            </button>
+          )}
+          <button type="button" style={{ marginLeft: "auto", background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
             onClick={() => { if (window.confirm("Remove this item from the board? (It is archived, not destroyed.)")) { onArchive(item); onClose(); } }}>
             Remove from board
           </button>
@@ -536,6 +545,140 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
         image={pmIsImage(viewing)} onClose={() => setViewing(null)} />
     )}
     </>
+  );
+}
+
+// ── Move cards to another board (Carolyn 2026-10-26) ──────────────────────────────────────
+//
+// Two round trips on purpose. Pick a board and the server answers a PLAN — what lines up,
+// what does not, and what the alternatives are for each leftover — and only then is there
+// anything to confirm. The alternative was to move first and report the damage, which is the
+// one shape Carolyn ruled out: "Give the option of matching the field to an existing or the
+// option to create new, or disregard and delete."
+//
+// Nothing here decides anything. Every rule — same-type candidates only, what a leftover
+// defaults to, whether these cards may leave this board at all — is the server's, and this
+// renders the answer. A dialog that computed its own matches would be a second copy of
+// columnIdMap, drifting quietly from the one that does the writing.
+function PMMoveDialog({ items, fromBoard, boards, onClose, onDone }) {
+  const [toBoardId, setToBoardId] = useState("");
+  const [plan, setPlan] = useState(null);
+  const [groupId, setGroupId] = useState("");
+  const [decisions, setDecisions] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const ids = items.map((i) => i.id);
+  // A locked board is one you cannot see into (migration 334), and the ＋ board you are on
+  // is not a destination. Both are left out rather than offered and refused.
+  const targets = (boards || []).filter((b) => !b.locked && b.id !== fromBoard.id);
+
+  useEffect(() => {
+    if (!toBoardId) { setPlan(null); return; }
+    let alive = true;
+    setErr(""); setPlan(null);
+    pmCall({ action: "move_plan", ids, toBoardId })
+      .then((p) => {
+        if (!alive) return;
+        setPlan(p);
+        setGroupId((p.groups && p.groups[0] && p.groups[0].id) || "");
+        // Every leftover starts at "leave it behind" — the same thing that happens if the
+        // dialog is never touched, so the default and the do-nothing path agree.
+        setDecisions(Object.fromEntries((p.unmatched || []).map((u) => [u.id, { action: "drop" }])));
+      })
+      .catch((e) => { if (alive) setErr(e.message); });
+    return () => { alive = false; };
+  }, [toBoardId]);
+
+  const go = async () => {
+    if (busy || !plan || !groupId) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await pmCall({ action: "move_to_board", ids, toBoardId, groupId, decisions });
+      onDone(plan.to.name, r.created || []);
+      onClose();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  const flabel = { fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "14px 0 5px", display: "block" };
+  const rowStyle = { display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.8 };
+
+  return (
+    <AdmOverlay onClose={onClose} maxWidth={620} labelledBy="pm-mv-title">
+      <div style={{ padding: "16px 20px", maxHeight: "82vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <b id="pm-mv-title" style={{ fontSize: 15 }}>Move {items.length === 1 ? "this card" : `${items.length} cards`} to another board</b>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ marginLeft: "auto", background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer" }}>✕</button>
+        </div>
+        {err && <div style={{ ...S.err, marginTop: 8 }}>{err}</div>}
+
+        <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 6 }}>
+          {items.length === 1 ? <b style={{ color: "#334155" }}>{items[0].name}</b> : `${items.length} cards`} · now on {fromBoard.name}
+        </div>
+
+        <span style={flabel}>Move to</span>
+        <select style={{ ...S.input, maxWidth: 320 }} value={toBoardId} onChange={(e) => setToBoardId(e.target.value)}>
+          <option value="">Pick a board…</option>
+          {targets.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+        {!targets.length && <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>There is no other board you can move these to.</div>}
+
+        {toBoardId && !plan && !err && <div style={{ fontSize: 12.5, color: "#94A3B8", marginTop: 10 }}>Checking what lines up…</div>}
+
+        {plan && (
+          <>
+            <span style={flabel}>Land them in</span>
+            <select style={{ ...S.input, maxWidth: 320 }} value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+              {(plan.groups || []).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+
+            <span style={flabel}>Fields</span>
+            {!plan.matched.length && !plan.unmatched.length && (
+              <div style={{ fontSize: 12.5, color: "#64748B" }}>Nothing is filled in on {items.length === 1 ? "this card" : "these cards"}, so there is nothing to carry over.</div>
+            )}
+            {plan.matched.map((m) => (
+              <div key={m.id} style={rowStyle}>
+                <span style={{ fontWeight: 700, color: "#334155" }}>{m.name}</span>
+                <span style={{ color: "#94A3B8" }}>→ {m.destName}</span>
+                <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 700, color: "#0E9F6E", background: "#ECFDF5", borderRadius: 4, padding: "2px 6px" }}>CARRIES OVER</span>
+                {/* The columns line up and a cell can still be lost: the label this card
+                    uses may not exist on the other board. Said here, because afterwards
+                    the cell is simply empty and nothing explains why. */}
+                {!!(m.lostChoices || []).length && (
+                  <span style={{ flexBasis: "100%", fontSize: 11.5, color: "#B45309" }}>
+                    ⚠ {plan.to.name} has no “{m.lostChoices.join("”, “")}” — {m.lostChoices.length === 1 ? "that cell" : "those cells"} will be empty.
+                  </span>
+                )}
+              </div>
+            ))}
+            {plan.unmatched.map((u) => (
+              <div key={u.id} style={rowStyle}>
+                <span style={{ fontWeight: 700, color: "#334155" }}>{u.name}</span>
+                <span style={{ color: "#94A3B8", fontSize: 11.5 }}>{u.type} · filled on {u.filled} of {items.length}</span>
+                <select style={{ ...S.input, marginLeft: "auto", maxWidth: 230, padding: "4px 8px", fontSize: 12.3 }}
+                  value={decisions[u.id] && decisions[u.id].action === "map" ? "map:" + decisions[u.id].destColId : (decisions[u.id] || {}).action || "drop"}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setDecisions((d) => ({ ...d, [u.id]: v.startsWith("map:") ? { action: "map", destColId: v.slice(4) } : { action: v } }));
+                  }}>
+                  <option value="drop">Leave it behind</option>
+                  <option value="create">Add “{u.name}” to {plan.to.name}</option>
+                  {u.candidates.map((c) => <option key={c.id} value={"map:" + c.id}>Put it in “{c.name}”</option>)}
+                </select>
+              </div>
+            ))}
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 16 }}>
+              <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={busy || !groupId} onClick={go}>
+                {busy ? "Moving…" : `Move to ${plan.to.name}`}
+              </button>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={onClose}>Cancel</button>
+              <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Notes, attachments and history go with {items.length === 1 ? "the card" : "the cards"}.</span>
+            </div>
+          </>
+        )}
+      </div>
+    </AdmOverlay>
   );
 }
 
@@ -1391,6 +1534,11 @@ function ProjectsTab({ sub, onSub }) {
   const [newBoardOpen, setNewBoardOpen] = useState(false);
   const [newBoardName, setNewBoardName] = useState("");
   const [newBoardPrivate, setNewBoardPrivate] = useState(false);
+  // Ticked rows, and the cards a move dialog is open for. Selection lives HERE rather than
+  // in PMTable because a re-sort, a re-group or a reload rebuilds that table, and all three
+  // happen while somebody is still deciding what to move.
+  const [selIds, setSelIds] = useState(() => new Set());
+  const [moving, setMoving] = useState(null);     // [{id, name}, …]
 
   const loadBoards = useCallback(() => {
     return pmCall({ action: "list_boards" }).then((d) => {
@@ -1454,6 +1602,9 @@ function ProjectsTab({ sub, onSub }) {
     }).catch((e) => { if (latest()) setErr(e.message); }).finally(() => { if (latest()) setLoading(false); });
   }, []);
   useEffect(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard && activeBoard.id]);
+  // Ticks belong to the board you ticked them on. Carried across a board switch they would
+  // sit invisible under another table and ride along into the next move.
+  useEffect(() => { setSelIds(new Set()); }, [activeBoard && activeBoard.id]);
   // An empty list also lets go of the board that was on screen. Kept, the archived board came
   // back the moment a new one was made: its table and ⚙ Board settings sat under the new tab
   // until the new get_board answered (for good if that failed), and "＋ Add item" filed into the
@@ -2079,6 +2230,28 @@ function ProjectsTab({ sub, onSub }) {
               );
             })()}
 
+            {/* The selection bar exists ONLY while something is ticked — a permanently
+                visible "0 selected" strip costs a row of table on every board forever. It
+                counts what is ticked AND still on screen: a filter can hide a ticked row,
+                and offering to move cards you cannot see is how the wrong card moves. */}
+            {canWrite && (() => {
+              const shown = filtered.filter((r) => selIds.has(r.id));
+              if (!shown.length) return null;
+              const hidden = selIds.size - shown.length;
+              return (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8, padding: "7px 12px", background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, fontSize: 12.5 }}>
+                  <b style={{ color: ACCENT }}>{shown.length} selected</b>
+                  {!!hidden && <span style={{ color: "#64748B" }}>({hidden} more ticked but filtered out — only the {shown.length} shown will move)</span>}
+                  <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), padding: "4px 12px", fontSize: 12.3 }}
+                    onClick={() => setMoving(shown.map((r) => ({ id: r.id, name: r.name })))}>
+                    Move to another board
+                  </button>
+                  <button type="button" onClick={() => setSelIds(new Set())}
+                    style={{ background: "none", border: "none", color: "#64748B", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Clear</button>
+                </div>
+              );
+            })()}
+
             <PMTable
               columns={data.columns} rows={filtered} boardGroups={data.groups} ctx={ctx}
               groupBy={view.groupBy} hiddenCols={new Set(view.hiddenCols)}
@@ -2091,7 +2264,14 @@ function ProjectsTab({ sub, onSub }) {
                 { action: "reorder_columns", boardId: data.board.id, orderedIds: ids },
                 () => setData((d) => d && ({ ...d, columns: ids.map((id) => d.columns.find((c) => c.id === id)).filter(Boolean) })),
               )}
-              activeItemId={openItemId} />
+              activeItemId={openItemId}
+              selectedIds={canWrite ? selIds : undefined}
+              onToggleSelect={(id) => setSelIds((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; })}
+              onSelectMany={(ids, on) => setSelIds((s) => {
+                const n = new Set(s);
+                for (const id of ids) on ? n.add(id) : n.delete(id);
+                return n;
+              })} />
           </>
         )}
       </div>
@@ -2103,7 +2283,20 @@ function ProjectsTab({ sub, onSub }) {
         <PMItemPanel key={openItem.id}
           item={openItem} canWrite={canWrite}
           onClose={() => setOpenItemId(null)}
-          onRename={onRename} onArchive={onArchive} />
+          onRename={onRename} onArchive={onArchive}
+          onMove={canWrite ? ((it) => setMoving([{ id: it.id, name: it.name }])) : null} />
+      )}
+      {moving && data && (
+        <PMMoveDialog items={moving} fromBoard={data.board} boards={boards || []}
+          onClose={() => setMoving(null)}
+          onDone={(toName, created) => {
+            setSelIds(new Set()); setOpenItemId(null);
+            flashOk(`Moved ${moving.length === 1 ? `“${moving[0].name}”` : `${moving.length} cards`} to ${toName}.`
+              + (created.length ? ` Added ${created.join(", ")} there.` : ""));
+            // Both ends changed: this board lost rows and the other gained them, so the
+            // counts in the tab strip are stale as well as this table.
+            reload(); loadBoards();
+          }} />
       )}
       {settingsOpen && data && (
         <PMBoardSettings board={data.board} columns={data.columns} groups={data.groups}
