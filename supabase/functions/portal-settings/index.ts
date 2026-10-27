@@ -247,7 +247,7 @@ import {
   doorLookForFixture, doorLookImportRow, doorLookImportState, handleDoorLookAction, isUuid as isDoorLookId, lookSchemaMissing, readDoorLooksFlag,
 } from "./doorLooks.ts";
 // ...and generating one from a photo (P4): the press, its money and its ledger, in ./doorGenerate.ts.
-import { handleDoorLookRecover, handleGenerateDoorLook, wantsStreamedDoorDraft } from "./doorGenerate.ts";
+import { doorAiEnabled, handleDoorLookRecover, handleGenerateDoorLook, wantsStreamedDoorDraft } from "./doorGenerate.ts";
 import { coerceFieldValue } from "../_shared/crmFields.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
@@ -2953,7 +2953,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // libraryBeta + library (339). Started with the reads above, so it costs no extra round trip.
       // Door looks from a photo (343): whether this builder sees the Door looks section, and the door
       // meter's money line (null = say nothing about money, as for `wallet`).
-      ...(await libraryRead), doorLooksBeta, doorWallet });
+      // doorLookAiOn: the DOOR_LOOK_AI_ENABLED kill switch, so the Library card's "make it from a photo"
+      // box can say it is off before the builder uploads anything (generate_door_look refuses either way).
+      ...(await libraryRead), doorLooksBeta, doorWallet, doorLookAiOn: doorLooksBeta === true && doorAiEnabled() });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -7497,6 +7499,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       v.rec!.style_ids = kept;
     }
     const id = String(payload?.id ?? "").trim();
+    // One look per door row (345): a library entry OR the row's own 3D look, never both in one save.
+    const namesEntry = payload?.clientLibraryId != null && String(payload.clientLibraryId).trim() !== "";
+    if (category === "door" && namesEntry && v.doorLook && v.doorLook.id !== null) {
+      return json({ error: `${v.rec!.name}: pick one 3D look for this door, not two.`, code: "door_one_look" }, 400);
+    }
     // The builder's library entry this door or window draws (339): absent = leave the link alone (the
     // old portal sends doorStyle on every save and no clientLibraryId), null = take it off, an id = this
     // entry, whose look then wins over the doorStyle / grid in the same save (./library.ts).
@@ -7509,7 +7516,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // The door's own 3D look (343): set, cleared or left alone by the rule in ./doorLooks.ts. Refused
     // here, before anything is written.
     {
-      const dl = await doorLookForFixture(admin, clientId, { category, rec: v.rec!, sent: v.doorLook, rowId: id || null });
+      const dl = await doorLookForFixture(admin, clientId, { category, rec: v.rec!, sent: v.doorLook, rowId: id || null, linking: typeof v.rec!.client_library_id === "string" });
       if ("refuse" in dl) return json({ error: `${v.rec!.name}: ${dl.refuse.error}`, code: dl.refuse.code }, dl.refuse.status);
       if ("dbError" in dl) return dbFail(req, clientId, dl.where, dl.dbError);
     }

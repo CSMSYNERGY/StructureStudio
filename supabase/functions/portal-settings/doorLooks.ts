@@ -132,6 +132,8 @@ export type DoorLookWrite = { door_look_id?: string | null; door_style?: string 
  *     look's stored base (the builder picked another standard look). A price edit from the old
  *     portal, which sends the base as doorStyle, keeps the look.
  * `sent` undefined = the key was absent; `styleSent` = the door_style this save writes, if it sent one.
+ * `linking` = this save puts a library entry on the row (339). A row draws ONE look (345), so the
+ * entry replaces the row's own look.
  */
 export function resolveDoorLookWrite(x: {
   sent: { id: string | null } | undefined;
@@ -139,6 +141,7 @@ export function resolveDoorLookWrite(x: {
   currentLookId: string | null;
   looks: ReadonlyMap<string, LookRef>;
   flagOn: boolean;
+  linking?: boolean;
 }): { write: DoorLookWrite } | { refuse: Refusal } {
   if (x.sent && x.sent.id !== null) {
     if (!x.flagOn) return { refuse: DOOR_LOOKS_OFF };
@@ -149,6 +152,7 @@ export function resolveDoorLookWrite(x: {
     return { write: { door_look_id: x.sent.id, door_style: l.base } };
   }
   if (x.sent) return { write: x.currentLookId ? { door_look_id: null } : {} };
+  if (x.linking && x.currentLookId) return { write: { door_look_id: null } };
   if (x.styleSent !== undefined && x.currentLookId) {
     const l = x.looks.get(x.currentLookId);
     // An unknown look keeps the row as it is: never clear on what we could not read.
@@ -172,7 +176,7 @@ async function looksById(admin: Db, clientId: string, ids: string[]): Promise<{ 
  * 343 a row save that never named a look goes through untouched; one that sets a look is refused.
  */
 export async function doorLookForFixture(admin: Db, clientId: string, x: {
-  category: string; rec: Record<string, unknown>; sent: { id: string | null } | undefined; rowId: string | null;
+  category: string; rec: Record<string, unknown>; sent: { id: string | null } | undefined; rowId: string | null; linking?: boolean;
 }): Promise<{ ok: true } | { refuse: Refusal } | { dbError: unknown; where: string }> {
   if (x.category !== "door") return { ok: true };
   const styleSent = "door_style" in x.rec ? String(x.rec.door_style) : undefined;
@@ -202,7 +206,7 @@ export async function doorLookForFixture(admin: Db, clientId: string, x: {
     if (!f.ready) return { refuse: DOOR_LOOKS_UNAVAILABLE };
     flagOn = f.on;
   }
-  const res = resolveDoorLookWrite({ sent: x.sent, styleSent, currentLookId, looks: l.looks, flagOn });
+  const res = resolveDoorLookWrite({ sent: x.sent, styleSent, currentLookId, looks: l.looks, flagOn, linking: x.linking === true });
   if ("refuse" in res) return { refuse: res.refuse };
   Object.assign(x.rec, res.write);
   return { ok: true };
@@ -447,7 +451,13 @@ export async function handleDoorLookAction(x: DoorLookCtx): Promise<Response> {
     if (used.error) return dbFail(req, clientId, "count the doors using that look", used.error);
     const up = await admin.from("door_looks").update({ status: "archived", version: Number(cur.data.version) + 1, updated_at: new Date().toISOString() })
       .eq("client_id", clientId).eq("id", p.id).eq("version", cur.data.version).select("id").maybeSingle();
-    if (up.error) return dbFail(req, clientId, "archive that door look", up.error);
+    if (up.error) {
+      // 345: a look a library entry names stays ready until the entry is removed.
+      if (String(up.error.code ?? "") === "23514" && /in your library/.test(String(up.error.message ?? ""))) {
+        return json({ error: "That 3D door is in your library. Remove it from the library first, then archive it.", code: "door_look_in_library" }, 409);
+      }
+      return dbFail(req, clientId, "archive that door look", up.error);
+    }
     if (!up.data) return json({ error: "That look was changed somewhere else just now. Reload the page and try again.", code: "door_look_conflict" }, 409);
     return json({ ok: true, id: p.id, rowsReset: (used.data ?? []).length });
   }
