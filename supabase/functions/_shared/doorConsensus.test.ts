@@ -21,7 +21,7 @@ import { doubleDoor, gussetDoor, inches, nudge, paintAt, singleDoor, withStrips 
 type Rec = Record<string, unknown>;
 const ok = (...votes: unknown[]) => ({ status: "ok" as const, votes });
 const thrice = (v: unknown) => ok(v, v, v);
-const ASKED: DoorCloseUps = { hinges: thrice({ type: "tstrap", finish: "black" }), handle: thrice({ type: "barn" }) };
+const ASKED: DoorCloseUps = { hinges: thrice({ type: "tstrap", finish: "black" }), handle: thrice({ type: "barn", finish: "black" }) };
 function cons(r: DoorConsensusResult): DoorConsensus {
   if (!r.ok) throw new Error(`no consensus: ${JSON.stringify(r)}`);
   return r;
@@ -124,7 +124,7 @@ Deno.test("parts: kept when two of the three reads have one, at the median corne
 Deno.test("corner gussets, two reads giving them as diagonals and one as boards: plain panels and the four boards", () => {
   const door = gussetDoor(), diag = door.read, boards = gussetDoor({ asParts: true }).read;
   const c = cons(stageADoorLook([diag, nudge(boards, (p) => [p[0] + 3, p[1]]), nudge(diag, (p) => [p[0] - 3, p[1]])], door.ctx));
-  const s = settled(c, { hinges: thrice({ type: "butt", finish: "black" }), handle: thrice({ type: "lever" }) });
+  const s = settled(c, { hinges: thrice({ type: "butt", finish: "black" }), handle: thrice({ type: "lever", finish: "black" }) });
   assertEquals([s.spec.brace, s.spec.panels], [{ t: "none" }, [{ fill: "none" }, { fill: "none" }]]);
   const board = (u0: number, v0: number, u1: number, v1: number) => ({ t: "board", u0, v0, u1, v1, wIn: 2, role: "members" });
   assertEquals(s.spec.parts, [
@@ -225,10 +225,10 @@ const singleC = () => cons(stageADoorLook(three(singleDoor().read), painted(sing
 const hardware = (s: Rec) => [(s.hinges as Rec).type, (s.hinges as Rec).finish, (s.handle as Rec).type, (s.handle as Rec).finish];
 
 Deno.test("close-ups decide the hardware when more than half their asks agree", () => {
-  const s = settled(singleC(), { hinges: thrice({ type: "Strap", finish: "galv" }), handle: thrice({ type: "ring" }) });
+  const s = settled(singleC(), { hinges: thrice({ type: "Strap", finish: "galv" }), handle: thrice({ type: "ring", finish: "black" }) });
   assertEquals(hardware(s.spec), ["strap", "galv", "ring", "black"]);
   assertEquals(s.codes, []);
-  const twoOne = settled(singleC(), { hinges: ok({ type: "scroll" }, { type: "scroll" }, { type: "strap" }), handle: thrice({ type: "barn" }) });
+  const twoOne = settled(singleC(), { hinges: ok({ type: "scroll", finish: "black" }, { type: "scroll", finish: "black" }, { type: "strap", finish: "black" }), handle: thrice({ type: "barn", finish: "black" }) });
   assertEquals([hardware(twoOne.spec)[0], twoOne.codes], ["scroll", ["hinge_type_split"]]);
 });
 
@@ -244,7 +244,7 @@ Deno.test("a skipped, failed or split close-up falls back to Stage A's vote, the
   // The reads split too: the table's default.
   const door = singleDoor(), [a, b, c] = three(door.read);
   const mixed = cons(stageADoorLook([{ ...a, hinges: { type: "strap" } }, { ...b, hinges: { type: "scroll" } }, { ...c, hinges: { type: "butt" } }], door.ctx));
-  const fallback = settled(mixed, { hinges: { status: "skipped" }, handle: thrice({ type: "lever" }) });
+  const fallback = settled(mixed, { hinges: { status: "skipped" }, handle: thrice({ type: "lever", finish: "black" }) });
   assertEquals(hardware(fallback.spec), ["tstrap", "black", "lever", "black"], "no colour sampler: black");
   assertEquals(fallback.codes, ["closeup_hinges"]);
 });
@@ -323,4 +323,64 @@ Deno.test("Stage B marking what Stage A folded into a fill (dutch's vents, Ameri
   // A diagonal board in the pickets panel is no picket: still a warning.
   const diag = { t: "board", a: d.p(8, 8), b: d.p(28, 30), across: d.line(16, 20, 19.5, 20), role: "members" };
   assertEquals(codes(keepStageBParts(cp, sp.spec, withMeasure(door.read, { parts: [diag] }), door.ctx)), ["stageb_part"]);
+});
+
+Deno.test("a close-up that settles the type but not the finish warns about the finish", () => {
+  const split = settled(singleC(), {
+    hinges: ok({ type: "strap", finish: "black" }, { type: "strap", finish: "galv" }, { type: "strap", finish: "bronze" }),
+    handle: thrice({ type: "ring" }),
+  });
+  assertEquals(split.codes, ["hinge_finish_unsure", "handle_finish_unsure"]);
+  assertEquals(split.warnings[0].text, "We couldn't tell the hinges' colour from the close look. Check their finish before you save.");
+  // The finish falls back as before: the colour snap, then black.
+  assertEquals(hardware(split.spec), ["strap", "black", "ring", "black"]);
+  // A close-up that did not settle the type already warns (closeup_hinges): no second warning.
+  assertEquals(settled(singleC(), {}).codes, ["closeup_hinges", "closeup_handle"]);
+});
+
+// ─── Hinges ──────────────────────────────────────────────────────────────────────────────────────
+Deno.test("hinges on the frame and mid rails are written as \"rails\"; anywhere else, as numbers", () => {
+  // A trim double with its T-straps centred on the sill rail, the mid rail and the head rail (5.5 in boards):
+  // as numbers the table would hold the end ones at 0.05 and 0.95, off their rails.
+  const door = doubleDoor({ brace: "none", base: "dutch" }), d = inches(72, 80);
+  const strap = (y: number) => [{ pivot: d.p(0.5, y), tip: d.p(7, y) }, { pivot: d.p(71.5, y), tip: d.p(65, y) }];
+  const onRails = withMeasure(door.read, { hinges: [2.75, 44, 77.25].flatMap(strap) });
+  const s = settled(cons(stageADoorLook(three(onRails), door.ctx)));
+  assertEquals([(s.spec.hinges as Rec).count, (s.spec.hinges as Rec).at], [3, "rails"]);
+  // The stub's own hinges, at 13%, 55% and 87%: the ends are off the frame rails, so numbers.
+  assertEquals((settled(cons(stageADoorLook(three(door.read), door.ctx))).spec.hinges as Rec).at, [0.13, 0.55, 0.87]);
+  // Two hinges on the head and sill rails only; and one off its rail stays numbers.
+  const two = withMeasure(door.read, { hinges: [2.75, 77.25].flatMap(strap) });
+  assertEquals((settled(cons(stageADoorLook(three(two), door.ctx))).spec.hinges as Rec).at, "rails");
+  const high = withMeasure(door.read, { hinges: [2.75, 52, 77.25].flatMap(strap) });
+  assertEquals((settled(cons(stageADoorLook(three(high), door.ctx))).spec.hinges as Rec).at, [0.05, 0.65, 0.95]);
+});
+
+Deno.test("a strap's length runs from its pivot as read, in the edge strip too, and the longer half of the straps decides", () => {
+  // T-straps whose pivots sit 1 in into each edge strip (on the jamb), 7 in to the tip; the top pair is cut
+  // off at 3 in by the photo's edge. Clamped to the leaf, the pivots lost an inch: 6 in.
+  const door = withStrips(doubleDoor({ brace: "none", base: "dutch" }), 2), d = inches(76, 80);
+  const strap = (y: number, len: number) => [{ pivot: d.p(1, y), tip: d.p(1 + len, y) }, { pivot: d.p(75, y), tip: d.p(75 - len, y) }];
+  const read = withMeasure(door.read, { hinges: [...strap(10.4, 7), ...strap(44, 7), ...strap(69.6, 3)] });
+  assertEquals((settled(cons(stageADoorLook(three(read), door.ctx))).spec.hinges as Rec).lenIn, 7);
+});
+
+Deno.test("a trim look's field is one sheet: reads that call its grooves boards count as grooved", () => {
+  const door = doubleDoor({ brace: "none", base: "dutch" }), [a, b, c] = three(door.read);
+  const s = settled(cons(stageADoorLook([{ ...a, field: "grooved" }, { ...b, field: "v" }, { ...c, field: "v" }], door.ctx)));
+  assertEquals((s.spec.field as Rec).dir, "grooved");
+  // The plank family's boards stay boards (SINGLE_SPEC, a zbrace, keeps "v").
+});
+
+Deno.test("Stage B's added count is what the cleaned spec keeps", () => {
+  // A board too short for the cleaner (under DOOR_BOARD_MIN of the leaf both ways), in every Stage A read and
+  // in Stage B: confirmed, but the cleaner drops it, so nothing was added.
+  const door = singleDoor({ brace: "none" }), d = inches(36, 80);
+  const read = withMeasure(door.read, { parts: [{ t: "board", a: d.p(17, 40), b: d.p(18, 41), role: "members" }] });
+  const c = cons(stageADoorLook(three(read), door.ctx));
+  const s = settleCloseUps(c, ASKED);
+  if (!s.ok) throw new Error("did not clean");
+  assertEquals(s.spec.parts, undefined);
+  const k = keepStageBParts(c, s.spec, read, door.ctx);
+  assertEquals([k.added, k.spec], [0, s.spec]);
 });
