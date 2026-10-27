@@ -173,7 +173,8 @@ export function doorStageAPrompt(x: DoorStageAInput): string {
 
     "8. HINGES and HANDLE. measure.hinges: each hinge you can see, as pivot (where it turns, at the leaf's hinge edge; on a butt hinge, the middle of its knuckle), tip (the far end of its strap; the pivot again when it has no strap) and across (its width where it is widest, one point on each edge). " +
       "hinges.type: tstrap (a strap that widens to a plate at the hinge edge: a T-strap), strap (a plain strap), scroll (a strap whose end curls), butt (small leaves on the door's edge, no strap on the face), hidden (no hinge shows) or pintle (a strap hung on a pin set in the jamb). " +
-      "measure.handle: the centre of the handle or latch. handle.type: barn (a barn-door latch), lever, pull (a fixed pull), ring, thumb (a thumb latch) or none. " +
+      "measure.handle: the centre of the handle or latch. handle.type: barn (the standard shed and barn-door latch: a lever or bar on a back plate, mounted on a rail or stile, or a bar that drops into a catch), " +
+      "lever (a lever handle on its own, with no back plate, as on a house or steel door), pull (a fixed pull), ring, thumb (a thumb latch) or none. " +
       "On a double door, meet.type: astragal (a narrow strip covering the joint) or overlap (one leaf's edge board runs past the joint over the other leaf).",
 
     "9. OBSERVED and UNEXPLAINED. `observed`: short phrases of a few words for what you see (\"two leaves\", \"one Z brace on each leaf\", \"three black T-strap hinges\"). " +
@@ -211,7 +212,8 @@ export function doorCloseUpPrompt(ask: DoorCloseUpAsk, x: { crops: number; build
   }
   if (ask === "handle") {
     return `These images are ${imgs}. The crop is centred on the door's handle or latch. Say what kind it is and its finish.\n` +
-      "type: barn (a barn-door latch: a bar that drops into a catch, with a handle), lever (a lever handle), pull (a fixed pull handle), ring (a ring pull), thumb (a thumb latch) or none (no handle shows).\n" +
+      "type: barn (the standard shed and barn-door latch: a lever or bar on a back plate, mounted on a rail or stile, or a bar that drops into a catch), lever (a lever handle on its own, with no back plate, as on a house or steel door), " +
+      "pull (a fixed pull handle), ring (a ring pull), thumb (a thumb latch) or none (no handle shows).\n" +
       `${finish}.\nAnswer with this JSON object only, with no prose and no code fence: {"type": "barn", "finish": "black"}`;
   }
   const strip = x.widthIn ? ` Each crop is ${inchText(x.widthIn / 8)} in wide on the door.` : "";

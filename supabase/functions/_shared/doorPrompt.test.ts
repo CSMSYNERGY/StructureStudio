@@ -55,6 +55,11 @@ Deno.test("V2's edge strips: where the door is in the photo, a butt hinge's knuc
   assert(PROMPT.includes(strips));
   assert(PROMPT.includes("give a point in them only for a hinge"));
   assert(PROMPT.includes("on a butt hinge, the middle of its knuckle"));
+  // "barn" is what the built trim and plank looks draw: a lever on a back plate on the mid rail. Described
+  // as a bare "barn-door latch", 12 of 12 reads of the American and Classic reference doors said lever.
+  const barn = "barn (the standard shed and barn-door latch: a lever or bar on a back plate, mounted on a rail or stile, or a bar that drops into a catch)";
+  assert(PROMPT.includes(barn) && doorCloseUpPrompt("handle", { crops: 1, builderPhoto: false }).includes(barn));
+  assert(PROMPT.includes("lever (a lever handle on its own, with no back plate, as on a house or steel door)"));
   // The wider photo shows the dark jamb down both sides, and reads of a steel door's ribbed sheet drifted
   // to plank (4 of 6, against 1 of 3 before the strips); the truth files call a framed sheet a trim look:
   // basic, or american, classic or dutch by what is laid over it.
