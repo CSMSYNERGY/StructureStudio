@@ -6672,8 +6672,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} crmUnlocked={crmUnlocked} crmPending={crmPending}
         aiCard={phoneOffered} viewing={!!viewingLabel}
         onOpenPhone={hubs.pipelines.some((t) => t[0] === "phone") ? () => setSub("phone") : null}
-        clientId={clientId} hubReach={hubReach}
-        meetingsOn={!!crmUnlocked && (isAdmin || !access || ssCanRead(access, "meetings"))} />}
+        meetingsOn={!!crmUnlocked && !crmPending && (isAdmin || !access || ssCanRead(access, "meetings"))}
+        clientId={clientId} hubReach={hubReach} />}
     </div>
   );
 }
