@@ -480,6 +480,8 @@ export const DOOR_WARNINGS = {
   closeup_hinges: "We didn't get a close look at the hinges. Check the hinge type before you save.",
   closeup_handle: "We didn't get a close look at the handle. Check the handle before you save.",
   closeup_meet: "We didn't get a close look at where the two doors meet. Check how they meet before you save.",
+  hinge_finish_unsure: "We couldn't tell the hinges' colour from the close look. Check their finish before you save.",
+  handle_finish_unsure: "We couldn't tell the handle's colour from the close look. Check its finish before you save.",
 } as const;
 const warn = (code: keyof typeof DOOR_WARNINGS): DoorWarning => ({ code, text: DOOR_WARNINGS[code] });
 const BASE_NAMES: Record<DoorLookBase, string> = {
@@ -592,6 +594,7 @@ export const DOOR_SIZE_ASPECT_TOL = 0.02;
 export const DOOR_UNEQUAL_TOL = 0.1; // a meeting line further off centre than this, of the door's width
 const DOOR_RAIL_TOL = 0.04; // one rail; a handle "on the rail"; one split line (the section 9 bar)
 const DOOR_HINGE_TOL = 0.05; // one hinge
+const DOOR_RAIL_BOARD_IN = 3.5; // a frame rail's height when no read measured the frame
 const DOOR_FRAME_BAND = 0.12; // a rail centred this close to the head or sill is the frame's own rail
 const DOOR_MATCH = 0.08; // two boards' ends this close are one board
 // A diagonal in a panel is that panel's Z or X only when it rises at least DOOR_PANEL_DIAG_RISE of the
@@ -800,7 +803,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     }
   }
   const hingeList = Array.isArray(m.hinges) ? m.hinges.filter((h): h is Rec => isRec(h) && isXY(h.pivot)) : [];
-  const pivots = hingeList.map((h) => ({ p: fr(h.pivot as XY), tip: isXY(h.tip) ? fr(h.tip) : null, leaf: 0 as 0 | 1 }));
+  const pivots = hingeList.map((h) => ({ p: fr(h.pivot as XY), tip: isXY(h.tip) ? fr(h.tip) : null, raw: h.pivot as XY, rawTip: isXY(h.tip) ? h.tip : null, leaf: 0 as 0 | 1 }));
   for (const h of pivots) h.leaf = leafOfX(h.p[0]);
   const handle = isXY(m.handle) ? fr(m.handle) : null;
 
@@ -905,7 +908,10 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   }
 
   // Hinges: positions up the latch leaf, one per hinge (both leaves of a double show the same ones);
-  // the strap's length from pivot to tip on every hinge that shows one.
+  // the strap's length from pivot to tip on every hinge that shows one. The length is taken from the
+  // points as read, since a T-strap's pivot sits on the jamb, in the edge strip, and clamped to the leaf
+  // it would lose that much. A strap only ever reads short (cut off by the photo's edge, hidden,
+  // foreshortened), never long, so the longer half of the straps decides.
   const hingeType = enumIn(isRec(read.hinges) ? read.hinges.type : null, DOOR_HINGE_TYPES);
   let hingeCount: number | null = null, hingeAt: number[] | null = null;
   const ownHinges = latchFirst(pivots);
@@ -913,7 +919,10 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     hingeAt = groups(ownHinges.map((h) => 1 - h.p[1]), (v) => v, DOOR_HINGE_TOL).map(median);
     hingeCount = hingeAt.length;
   } else if (hingeType === "hidden") [hingeCount, hingeAt] = [0, []];
-  const hingeLenIn = medianOf(pivots.map((h) => (h.tip ? Math.hypot((h.tip[0] - h.p[0]) * ctx.widthIn, (h.tip[1] - h.p[1]) * ctx.heightIn) : null)));
+  const strapIn = pivots.flatMap((h) =>
+    h.rawTip ? [Math.hypot((rawX(h.rawTip[0]) - rawX(h.raw[0])) * ctx.widthIn, ((h.rawTip[1] - h.raw[1]) / size[1]) * ctx.heightIn)] : []
+  ).sort((a, b) => a - b);
+  const hingeLenIn = medianOf(strapIn.slice(Math.floor(strapIn.length / 2)));
 
   const handleV = handle ? (effRails.some((r) => Math.abs(1 - handle[1] - r) <= DOOR_RAIL_TOL) ? "rail" : 1 - handle[1]) : null;
 
@@ -1187,7 +1196,8 @@ export type DoorConsensusResult =
   | { ok: false; fail: "unparseable"; dropped: { read: number; why: string }[] };
 // `edge`: the photo's edge strips (DoorMeasureCtx.padIn) and the door's width, for the meeting edge's
 // close-up points in photo pixels; absent, the photo's own side edges are the leaves'.
-export type DoorConsensusOpts = { typedLeaves: 1 | 2; photo: XY; quorum?: number; edge?: { padIn: number; widthIn: number } };
+// `heightIn`: the door's height, for telling hinges on the frame rails ("rails") from numbered ones.
+export type DoorConsensusOpts = { typedLeaves: 1 | 2; photo: XY; quorum?: number; edge?: { padIn: number; widthIn: number }; heightIn?: number };
 
 const swapFrom = <T extends string | null | undefined>(f: T) => (f === "hinge" ? "strike" : f === "strike" ? "hinge" : f) as T;
 // The same read with the hinge on the other side of a single: u becomes 1 - u.
@@ -1355,15 +1365,30 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
   if (rails) frame.rails = rails;
   if (Object.keys(frame).length) spec.frame = frame;
   const field: Rec = {};
-  const dir = vote(ds.map((d) => d.fieldDir)).value;
+  // A trim look's field is one sheet (the prompt says so): a read that called its grooves vertical boards
+  // read the sheet's grooves, so its "v" counts as grooved.
+  const dir = vote(ds.map((d) => (d.fieldDir === "v" && !DOOR_PLANK_FAMILY.includes(base) ? "grooved" : d.fieldDir))).value;
   if (dir) field.dir = dir;
   if (pitchIn !== null) field.pitchIn = pitchIn;
   if (Object.keys(field).length) spec.field = field;
   if (brace) spec.brace = brace;
   if (panels) spec.panels = panels;
   if (parts.length) spec.parts = parts;
+  // Hinges on the rails: the bottom one on the bottom frame rail, the top one on the top rail and the
+  // rest on the mid rails nearest half way, where P2 draws "rails". Such positions are written as
+  // "rails": as numbers the table holds them inside 0.05-0.95, which draws the end hinges off their rails.
+  const onRails = (at: number[] | null) => {
+    const H = opts.heightIn;
+    if (!H || !at || at.length < 2) return false;
+    const f = (fIn ?? DOOR_RAIL_BOARD_IN) / H, rh = (railHIn ?? fIn ?? DOOR_RAIL_BOARD_IN) / H, slack = DOOR_HINGE_TOL / 2;
+    const s = [...at].sort((a, b) => a - b), inner = s.slice(1, -1);
+    const mids = [...(rails ?? DOOR_LOOK_BASE_DEFAULTS[base].rails)].sort((p, q) => Math.abs(p - 0.5) - Math.abs(q - 0.5));
+    const byMid = mids.slice(0, inner.length).sort((a, b) => a - b);
+    return byMid.length === inner.length && s[0] <= f + slack && s[s.length - 1] >= 1 - f - slack &&
+      inner.every((v, k) => Math.abs(v - byMid[k]) <= rh / 2 + slack);
+  };
   const hinges: Rec = {};
-  if (hingeCount !== null) [hinges.count, hinges.at] = [hingeCount, hingeAt];
+  if (hingeCount !== null) [hinges.count, hinges.at] = [hingeCount, onRails(hingeAt) ? "rails" : hingeAt];
   if (lenIn !== null) hinges.lenIn = lenIn;
   spec.hinges = hinges;
   spec.handle = handleV === null ? {} : { v: handleV };
@@ -1411,6 +1436,7 @@ export function stageADoorLook(raws: unknown[], ctx: DoorMeasureCtx, quorum = 2)
     photo: ctx.photo,
     quorum,
     edge: { padIn: ctx.padIn ?? 0, widthIn: ctx.widthIn },
+    heightIn: ctx.heightIn,
   });
 }
 
@@ -1444,7 +1470,11 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
   if (ht && !ht.unanimous) pushWarning(warnings, warn("hinge_type_split"));
   if (!ht) pushWarning(warnings, warn("closeup_hinges"));
   hinges.type = ht?.value ?? stageAPick(c.stageA.hingeType) ?? doorLookDefault("hinges.type");
-  hinges.finish = decided(ups.hinges, "finish", DOOR_FINISHES.slice(0, 3))?.value ?? snap ?? doorLookDefault("hinges.finish");
+  // A close-up that settled the type but not the finish (split, or left out) also warns: the finish then
+  // falls back to the colour snap, which closeup_hinges would have flagged had the close-up not run.
+  const hf = decided(ups.hinges, "finish", DOOR_FINISHES.slice(0, 3));
+  if (ht && !hf) pushWarning(warnings, warn("hinge_finish_unsure"));
+  hinges.finish = hf?.value ?? snap ?? doorLookDefault("hinges.finish");
   spec.hinges = hinges;
 
   const handle: Rec = isRec(spec.handle) ? spec.handle : {};
@@ -1453,7 +1483,9 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
   handle.type = hd?.value ?? stageAPick(c.stageA.handleType) ?? doorLookDefault("handle.type");
   // The handle's own snap before the hinge's: with DOOR_LOOK_V2's strips the hardware point is often a
   // silver butt-hinge knuckle, beside a black handle.
-  handle.finish = decided(ups.handle, "finish", DOOR_FINISHES.slice(0, 3))?.value ?? stageAPick(c.stageA.handleFinish) ?? snap ?? doorLookDefault("handle.finish");
+  const hdf = decided(ups.handle, "finish", DOOR_FINISHES.slice(0, 3));
+  if (hd && !hdf) pushWarning(warnings, warn("handle_finish_unsure"));
+  handle.finish = hdf?.value ?? stageAPick(c.stageA.handleFinish) ?? snap ?? doorLookDefault("handle.finish");
   spec.handle = handle;
 
   if (c.leaves === 2) {
@@ -1499,8 +1531,10 @@ export function keepStageBParts(c: DoorConsensus, spec: DoorLook, stageB: unknow
     else pushWarning(warnings, stageBWarning(p.t));
   }
   if (next.length === have.length) return { spec, added: 0, warnings };
+  // Counted after cleaning: a part the cleaner drops (too small, say) was not added.
   const clean = cleanDoorLook({ ...spec, parts: next });
-  return clean.ok ? { spec: clean.spec, added: next.length - have.length, warnings } : { spec, added: 0, warnings };
+  const kept = clean.ok && Array.isArray(clean.spec.parts) ? clean.spec.parts.length : 0;
+  return clean.ok && kept > have.length ? { spec: clean.spec, added: kept - have.length, warnings } : { spec, added: 0, warnings };
 }
 
 // ─── THE SELF-CHECK'S RULES ───────────────────────────────────────────────────────────────────────
@@ -1600,6 +1634,7 @@ export function applyDoorCheck(spec: DoorLook, answer: unknown, ctx: DoorCheckCt
     } else if (path === "field.dir") {
       const v = enumIn(to, DOOR_FIELD_DIRS);
       if (!v) reject("bad_value");
+      else if (v === "v" && !family) reject("sheet_field"); // a trim look's field is one sheet, never boards
       else set(sub("field"), "dir", v);
     } else if (path === "frame.rails") {
       if (!ctx.railsSplit) {
