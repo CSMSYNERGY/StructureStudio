@@ -13075,9 +13075,12 @@ function buildShed3DModel(THREE, p) {
         rows = count === 3 ? [y0 + h * 0.13, byMid.length ? byMid[0] : L.railAt, y1 - h * 0.13]
           : count === 2 ? [y0 + h * 0.18, y1 - h * 0.18] : spread(y0 + h * 0.13, y1 - h * 0.13, count);
       }
-      // Every piece stays on the leaf, whatever height a look gives (0.01-0.99): a butt hinge's plates and a
-      // pintle's pin reach further than a strap's plate.
-      const reachH = type === "butt" ? Math.max(plateH, Math.min(0.16, h * 0.05)) : type === "pintle" ? plateH * 1.2 : plateH;
+      // Every piece stays on the leaf, whatever height a look gives (0.01-0.99): each row keeps the reach of
+      // the tallest piece its type draws above and below it (the plate; a T-strap's wide half; a strap's end
+      // disc; a scroll's curl; a butt's plates and knuckle; a pintle's pin).
+      const sw0 = s1 * 0.8;
+      const reachH = Math.max(plateH, type === "butt" ? Math.min(0.16, h * 0.05) : type === "pintle" ? Math.max(plateH * 1.2, sw0)
+        : type === "tstrap" ? s1 : type === "strap" ? sw0 : type === "scroll" ? sw0 * 1.65 : 0);
       const cap = top ? tr0 + F / 2 : y1 - reachH;
       rows = rows.map((cy) => Math.max(y0 + reachH, Math.min(cy, cap))).sort((p, q) => p - q);
     }
