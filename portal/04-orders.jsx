@@ -443,10 +443,126 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack, prefill = null, sup
   );
 }
 
-// The report / request / ticket form in a modal. CONTROLLED since 2026-10-27: the floating
-// "💬 Feedback" pill that used to own it is gone (Carolyn, 10-26: "I would take this feedback button
-// down at the below. We'll have a support button up here"), and the top bar's SupportMenu opens it
-// on a chosen kind. Rendered only while an operator is NOT viewing someone else's account: the
+// ── Support button, or the old Feedback pill? (migration 346, 2026-10-27) ─────────────────────
+// The Support button SHIPS DARK: client_settings.support_ai_beta, per builder, off by default, turned
+// on by an operator in SQL. support-agent's `enabled` answers it (and fails closed), so until it
+// says yes the shell draws FeedbackWidget below, the pill every builder had before, unchanged.
+// The answer is remembered per builder, so a switched-on builder sees the Support button from the
+// first paint instead of the pill and then a swap. Asked once per page load, behind the boot waves
+// (1.5 s / 3 s), and not at all while an operator views another account (both are hidden then).
+const SS_SUPPORT_ON_KEY = "ss:supportOn:";
+
+function useSupportOn(clientId, active) {
+  const [answer, setAnswer] = useState(null);   // { clientId, on } once support-agent answers
+  useEffect(() => {
+    if (!active || !clientId) return undefined;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const { data } = await sb.functions.invoke("support-agent", { body: { action: "enabled" } });
+        // An error, a 403 or an old server that knows no `enabled` leaves what we had.
+        if (cancelled || !data || typeof data.on !== "boolean") return;
+        setAnswer({ clientId, on: data.on });
+        try { localStorage.setItem(SS_SUPPORT_ON_KEY + clientId, data.on ? "1" : "0"); } catch (_e) {}
+      } catch (_e) { /* the pill stays: it is the safe default */ }
+    }, 3500);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [clientId, active]);
+  if (!clientId) return false;
+  if (answer && answer.clientId === clientId) return answer.on;
+  try { return localStorage.getItem(SS_SUPPORT_ON_KEY + clientId) === "1"; } catch (_e) { return false; }
+}
+
+// KEPT (346): the pill for every builder whose Support switch is off (useSupportOn above). Below
+// this note it is beta's FeedbackWidget as it was, so their bug and feature reports are unchanged.
+// Floating launcher + modal. Mounted once by PortalApp; hidden while an operator is
+// viewing someone else's account (the submission would be attributed to the operator's
+// own tenant, not the one on screen, which would be misleading in both places).
+function FeedbackWidget({ clientId, onSubmitted }) {
+  const [view, setView] = useState(null);   // null | "menu" | "bug" | "feature" | "done"
+  const [pushed, setPushed] = useState(true);
+
+  useEffect(() => {
+    if (!view) return;
+    const onKey = (e) => { if (e.key === "Escape") setView(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view]);
+
+  if (!view) {
+    return (
+      <button onClick={() => setView("menu")} aria-label="Send feedback"
+        style={{
+          position: "fixed", right: 20, bottom: 20, zIndex: 900,
+          background: ACCENT, color: "#FFF", border: "none", borderRadius: 999,
+          padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+          boxShadow: "0 4px 14px rgba(0,0,0,0.25)", fontFamily: "inherit",
+        }}>
+        💬 Feedback
+      </button>
+    );
+  }
+
+  const cfg = FB_KINDS[view] || null;
+  const heading = view === "done" ? "✅ Thanks — we've got it"
+    : cfg ? cfg.icon + " " + cfg.label : "💬 Send us feedback";
+
+  return (
+    <div onClick={() => setView(null)} role="dialog" aria-modal="true" aria-label="Send feedback"
+      style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, overflow: "hidden", width: cfg ? "min(560px, 100%)" : "min(420px, 100%)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.35)" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 8 }}>
+          {cfg && <button onClick={() => setView("menu")} aria-label="Back" style={{ background: "none", border: "none", color: "#FFF", cursor: "pointer", fontSize: 16, padding: 0, lineHeight: 1 }}>←</button>}
+          <div style={{ fontSize: 14, fontWeight: 700, flex: 1 }}>{heading}</div>
+          <button onClick={() => setView(null)} aria-label="Close" style={{ background: "none", border: "none", color: "#FFF", cursor: "pointer", fontSize: 18, padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+
+        {view === "menu" && (
+          <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+            {["bug", "feature"].map((k) => (
+              <button key={k} onClick={() => setView(k)}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
+                <span style={{ fontSize: 22 }}>{FB_KINDS[k].icon}</span>
+                <span>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 700, color: "#0F172A" }}>{FB_KINDS[k].label}</span>
+                  <span style={{ display: "block", fontSize: 12, color: "#64748B", marginTop: 2 }}>{FB_KINDS[k].blurb}</span>
+                </span>
+              </button>
+            ))}
+            <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.5, marginTop: 2 }}>
+              Everything you send shows up under <b>Support → My Requests</b>, so you can track where it got to.
+            </div>
+          </div>
+        )}
+
+        {cfg && (
+          <FeedbackForm kind={view} clientId={clientId} onBack={() => setView("menu")}
+            onSubmitted={(row, wasPushed) => { setPushed(wasPushed !== false); setView("done"); if (onSubmitted) onSubmitted(row); }} />
+        )}
+
+        {view === "done" && (
+          <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
+            Your request is logged and on our board. You can follow it under{" "}
+            <b>Support → My Requests</b> — the status updates there as we work on it,
+            and any reply we post shows up alongside it.
+            {!pushed && (
+              <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
+                Saved — but syncing it to our tracker didn't go through. It's recorded and we'll pick it up; nothing is lost.
+              </div>
+            )}
+            <button onClick={() => setView(null)} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 16, width: "100%" }}>Done</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The report / request / ticket form in a modal, for a builder with the Support button (346). Their
+// floating "💬 Feedback" pill is gone (Carolyn, 10-26: "I would take this feedback button down at
+// the below. We'll have a support button up here"), and the top bar's SupportMenu opens this on a
+// chosen kind. Rendered only while an operator is NOT viewing someone else's account: the
 // submission would be attributed to the operator's own tenant, not the one on screen.
 function FeedbackDialog({ kind, clientId, onClose, onSubmitted, prefill = null, supportConversationId = null }) {
   const [done, setDone] = useState(false);

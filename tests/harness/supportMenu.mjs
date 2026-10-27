@@ -1,8 +1,10 @@
-// THE SUPPORT BUTTON (Carolyn, 10-26 call; migration 340): the floating Feedback pill is gone, a
-// Support button sits in the top bar, and its menu opens the AI assistant, the three forms, My
-// Requests and What's New. Driven for real on the COMPILED portal at 1440 px and at 375 px.
+// THE SUPPORT BUTTON (Carolyn, 10-26 call; migrations 340 and 346): for a builder with the switch on
+// the floating Feedback pill is gone, a Support button sits in the top bar, and its menu opens the AI
+// assistant, the three forms, My Requests and What's New. Driven for real on the COMPILED portal at
+// 1440 px and at 375 px.
 //
-//   A  NO PILL: nothing fixed in a bottom corner says "Feedback" any more.
+//   A  NO PILL: once support-agent's `enabled` answers on, nothing fixed in a bottom corner says
+//      "Feedback", and the answer is remembered for the next load.
 //   B  THE BUTTON: in .ss-topbar, before the tenant badge; "Support" with its icon at 1440, the icon
 //      alone at 375, inside the viewport either way.
 //   C  THE MENU: exactly Ask the assistant, Report a problem, Request a feature, Submit a ticket, My
@@ -18,6 +20,12 @@
 //   G  MY REQUESTS and WHAT'S NEW land on /support/mine and /support/features; My Requests has a
 //      Tickets filter and shows a ticket with its 🎫.
 //   H  AT 375 the chat is a full-screen sheet.
+//   I  SWITCH OFF (346, every builder by default): the old pill, exactly as before, and no Support
+//      button; its menu is Report an Issue and Request a Feature only, and a bug posts the same
+//      fields it always did. An `enabled` that errors (the live 340.2 knows no such action) leaves
+//      the pill too.
+//   J  SWITCHED OFF AFTER ON: a remembered "on" paints the button first; the server's "off" puts the
+//      pill back and is remembered.
 //
 // Supabase is stubbed at the network layer: no login, nothing leaves the machine. support-agent's
 // answers are canned here; the real agent is proved separately (agent_test.ts, the 20-question run).
@@ -48,11 +56,17 @@ const json = (route, body, status = 200) => route.fulfill({ status, contentType:
 
 const browser = await chromium.launch({ channel: process.env.PW_CHANNEL === "bundled" ? undefined : "chrome", headless: !process.env.HEADED });
 
-async function openPortal(width, height) {
+// `on`: what support-agent's `enabled` answers (true, false, or "error" for a 400 like the live
+// 340.2's). `remembered`: a "1"/"0" already in localStorage from an earlier load, or null.
+async function openPortal(width, height, { on = true, remembered = null } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, serviceWorkers: "block" });
-  await ctx.addInitScript(([ref, s]) => {
-    try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
-  }, [REF, SESSION]);
+  await ctx.addInitScript(([ref, s, client, rem]) => {
+    try {
+      localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s));
+      // Once per context: a reload must see what the page itself stored.
+      if (rem !== null && !sessionStorage.getItem("seeded")) { localStorage.setItem(`ss:supportOn:${client}`, rem); sessionStorage.setItem("seeded", "1"); }
+    } catch (_e) { /* storage blocked */ }
+  }, [REF, SESSION, CLIENT, remembered]);
   const page = await ctx.newPage();
   const state = { errors: [], feedback: [], agent: [] };
   page.on("pageerror", (e) => state.errors.push(e.message));
@@ -79,6 +93,7 @@ async function openPortal(width, height) {
     if (url.includes("/portal-billing")) return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], features: { crm: true }, status: "active" }, wallet: null });
     if (url.includes("/support-agent")) {
       state.agent.push(body);
+      if (body.action === "enabled") return on === "error" ? json(route, { error: "Unknown action." }, 400) : json(route, { ok: true, on });
       if (body.action === "status") return json(route, { ok: true, name: "Studio Assistant", replyPromise: "A person on our team replies within 24 hours.", available: true, unavailable: null, liveSupport: { available: false }, conversation: null });
       if (body.action === "send") {
         await new Promise((r) => setTimeout(r, 900));   // long enough to see "Thinking…"
@@ -114,9 +129,12 @@ const menuLabels = (page) => page.locator(".ss-sup-menu button .lb").allTextCont
 for (const [width, height, tag] of [[1440, 900, "1440"], [375, 812, "375"]]) {
   const { ctx, page, state } = await openPortal(width, height);
 
-  // A — no floating pill.
+  // A — no floating pill, once the switch answers on (a first visit: nothing remembered yet).
+  await page.waitForSelector(".ss-topbar .ss-sup-btn", { timeout: 10000 }).catch(() => {});
   const pill = await page.evaluate(() => [...document.querySelectorAll("button")].some((b) => /Feedback/.test(b.textContent || "") && getComputedStyle(b).position === "fixed"));
   ok(`${tag} A: the floating Feedback pill is gone`, !pill);
+  ok(`${tag} A: the portal asked support-agent's switch once`, state.agent.filter((b) => b.action === "enabled").length === 1, JSON.stringify(state.agent));
+  ok(`${tag} A: the answer is remembered for the next load`, await page.evaluate((c) => localStorage.getItem(`ss:supportOn:${c}`), CLIENT) === "1");
 
   // B — the button.
   const btn = page.locator(".ss-topbar .ss-sup-btn");
@@ -247,6 +265,53 @@ for (const [width, height, tag] of [[1440, 900, "1440"], [375, 812, "375"]]) {
   ok(`${tag} G: What's new lands on /support/features`, new URL(page.url()).pathname === "/support/features", page.url());
 
   ok(`${tag}: no page errors`, state.errors.length === 0, state.errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
+// I and J — the switch off.
+const pillState = (page) => page.evaluate(() => {
+  const p = [...document.querySelectorAll("button")].find((b) => /Feedback/.test(b.textContent || "") && getComputedStyle(b).position === "fixed");
+  return { pill: p ? p.textContent.trim() : null, support: document.querySelectorAll(".ss-topbar .ss-sup-btn").length };
+});
+for (const [width, height, tag] of [[1440, 900, "1440"], [375, 812, "375"]]) {
+  const { ctx, page, state } = await openPortal(width, height, { on: false });
+  await page.waitForTimeout(4500);   // past the 3.5 s ask and its answer
+  const s = await pillState(page);
+  ok(`${tag} I: switched off, the old pill shows and no Support button`, s.pill === "💬 Feedback" && s.support === 0, JSON.stringify(s));
+  ok(`${tag} I: the switch was asked once`, state.agent.filter((b) => b.action === "enabled").length === 1 && state.agent.length === 1, JSON.stringify(state.agent));
+  await page.screenshot({ path: join(shots, `${tag}-11-switch-off-pill.png`) });
+  await page.getByRole("button", { name: "Send feedback" }).click();
+  const kinds = await page.locator("[role=dialog] button span span:first-child").allTextContents();
+  ok(`${tag} I: the pill's menu is Report an Issue and Request a Feature, as before`, JSON.stringify(kinds) === JSON.stringify(["Report an Issue", "Request a Feature"]), kinds.join(" | "));
+  await page.screenshot({ path: join(shots, `${tag}-12-switch-off-pill-menu.png`) });
+  await page.locator("[role=dialog] button", { hasText: "Report an Issue" }).click();
+  await page.locator("[role=dialog] input").first().fill("Door looks wrong");
+  await page.locator("[role=dialog] button[type=submit]").click();
+  await page.waitForSelector("text=we've got it");
+  const bug = state.feedback.at(-1);
+  ok(`${tag} I: a bug from the pill posts the fields it always did`,
+    bug && JSON.stringify(Object.keys(bug).sort()) === JSON.stringify(["action", "attachmentPath", "detail", "kind", "severity", "title"]) && bug.kind === "bug" && bug.severity === "Medium",
+    JSON.stringify(bug));
+  ok(`${tag} I: the pill's thank-you is the old one`, await page.locator("[role=dialog]", { hasText: "Your request is logged and on our board. You can follow it under" }).count() === 1);
+  ok(`${tag} I: no page errors`, state.errors.length === 0, state.errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+{
+  const { ctx, page, state } = await openPortal(1440, 900, { on: "error" });
+  await page.waitForTimeout(4500);
+  const s = await pillState(page);
+  ok("1440 I: an `enabled` that errors (the live 340.2) leaves the pill", s.pill === "💬 Feedback" && s.support === 0 && state.errors.length === 0, JSON.stringify(s));
+  await ctx.close();
+}
+{
+  const { ctx, page, state } = await openPortal(1440, 900, { on: false, remembered: "1" });
+  const first = await pillState(page);
+  ok("1440 J: a remembered on paints the Support button first", first.support === 1 && first.pill === null, JSON.stringify(first));
+  await page.waitForTimeout(4500);
+  const after = await pillState(page);
+  ok("1440 J: the server's off puts the pill back", after.pill === "💬 Feedback" && after.support === 0, JSON.stringify(after));
+  ok("1440 J: …and remembers it", await page.evaluate((c) => localStorage.getItem(`ss:supportOn:${c}`), CLIENT) === "0");
+  ok("1440 J: no page errors", state.errors.length === 0, state.errors.slice(0, 3).join(" | "));
   await ctx.close();
 }
 

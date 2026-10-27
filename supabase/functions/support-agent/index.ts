@@ -4,7 +4,7 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { usableFeatureSet } from "../_shared/featureCheck.ts";
 import { TITLES, type GateTable } from "../_shared/access.ts";
-import { type AgentDeps, type AgentStore, handleNew, handleSend, handleStatus, MAX_STORED_CHARS, type Totals } from "./agent.ts";
+import { type AgentDeps, type AgentStore, handleEnabled, handleNew, handleSend, handleStatus, MAX_STORED_CHARS, type Totals } from "./agent.ts";
 
 // The support assistant behind the portal's top-bar Support button (migration 340). Everything that
 // decides anything is in agent.ts (agent_test.ts) and tools.ts (tools_test.ts); this file only wires
@@ -21,13 +21,15 @@ import { type AgentDeps, type AgentStore, handleNew, handleSend, handleStatus, M
 //     somebody else, and a chat filed under the operator. The button is hidden in view-as too.
 //
 // ══ ACTIONS ══
+//   { action: "enabled" }                          { on }: client_settings.support_ai_beta (346)
 //   { action: "status" }                           name, availability, the open chat
 //   { action: "send", text, conversationId? }      one question, one answer
 //   { action: "new" }                              close the open chat; the next send starts fresh
 //
-// Secrets: ANTHROPIC_API_KEY (shared with phone-call-summary), SUPPORT_AI_MODEL (optional, default
-// claude-sonnet-5-5), SUPPORT_AI_MONTHLY_CAP_USD (optional, default 150). Changing either optional
-// one needs no redeploy beyond the secret itself.
+// Secrets: SUPPORT_ANTHROPIC_API_KEY (its own key, in a console workspace with a monthly spend
+// limit; unset, ANTHROPIC_API_KEY, the one shared with phone-call-summary, answers instead),
+// SUPPORT_AI_MODEL (optional, default claude-sonnet-5-5), SUPPORT_AI_MONTHLY_CAP_USD (optional,
+// default 200). Changing any of them needs no redeploy beyond the secret itself.
 
 const FN = "support-agent";
 
@@ -43,6 +45,7 @@ const json = (body: unknown, status = 200) =>
 // Every person on a team may ask for help. `send` and `new` write only the caller's own chat rows,
 // keyed on the resolved user, never on a body-supplied id.
 const GATES: GateTable = {
+  enabled: "open",
   status: "open",
   send: "self",
   new: "self",
@@ -55,6 +58,12 @@ function makeStore(admin: any): AgentStore {
   const row = (r: { id: string; role: "user" | "assistant"; body: string; created_at: string }) =>
     ({ id: r.id, role: r.role, body: r.body, created_at: r.created_at });
   return {
+    async enabled(clientId) {
+      // A database without 346, or any read fault, is OFF (agent.ts: the switch fails closed).
+      const { data, error } = await admin.from("client_settings").select("support_ai_beta").eq("client_id", clientId).maybeSingle();
+      if (error) throw new Error("switch read failed");
+      return data?.support_ai_beta === true;
+    },
     async usage(who) {
       const { data, error } = await admin.rpc("support_usage", { p_client_id: who.clientId, p_user_id: who.userId });
       if (error || !data) return null;
@@ -168,6 +177,10 @@ Deno.serve(withErrorLog(FN, async (req: Request) => {
 
   // deno-lint-ignore no-explicit-any
   const p: any = payload || {};
+  if (action === "enabled") {
+    const out = await handleEnabled(deps, who);
+    return json(out.body, out.status);
+  }
   if (action === "status") {
     const out = await handleStatus(deps, who);
     return json(out.body, out.status);

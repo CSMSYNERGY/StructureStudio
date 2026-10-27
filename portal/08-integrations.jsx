@@ -5254,7 +5254,7 @@ function PaymentsCard() {
 
       <div data-payments-request="" style={{ marginTop: 14, padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, fontSize: 12.5, color: "#334155", lineHeight: 1.55 }}>
         <b>Need a change?</b> To switch payments on or off, move from test to live, or use a different merchant
-        account, send us a ticket with the <b>Support</b> button at the top (choose <b>Submit a ticket</b>), or ask your
+        account, send us a request with the <b>Feedback</b> button (choose <b>Request a Feature</b>), or ask your
         Structure Studio contact. You can follow it under <b>Support → My Requests</b>.
       </div>
     </div>

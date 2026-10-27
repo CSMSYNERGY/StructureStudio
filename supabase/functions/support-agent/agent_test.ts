@@ -8,7 +8,7 @@
 // Every value here is an obviously fake fixture: this repo is public.
 
 import {
-  addUsage, type AgentDeps, type AgentStore, clip, DEFAULT_DAILY_CAP, DEFAULT_MODEL, effectiveDailyCap, handleNew, handleSend,
+  addUsage, type AgentDeps, type AgentStore, apiKeyFrom, clip, DEFAULT_DAILY_CAP, DEFAULT_MODEL, effectiveDailyCap, handleEnabled, handleNew, handleSend,
   handleStatus, MAX_TOOL_ROUNDS, MAX_USER_CHARS, modelFrom, monthlyCapMicros, SENTENCES, type StoredMessage, toMessages,
   USER_10M_CAP, type Usage, zeroTotals,
 } from "./agent.ts";
@@ -26,6 +26,8 @@ const WHO = { clientId: "demo-builder", userId: "00000000-0000-4000-8000-0000000
 const SECRET = "the customer's gate code is 4321";
 
 interface World {
+  /** client_settings.support_ai_beta; "throw" = an unreadable switch. Default on. */
+  enabled?: boolean | "throw";
   usage?: Usage | null;
   dailyCap?: number | null;
   key?: string | null;
@@ -46,6 +48,7 @@ function world(w: World = {}) {
   const history: StoredMessage[] = [];
 
   const store: AgentStore = {
+    enabled: () => w.enabled === "throw" ? Promise.reject(new Error("read failed")) : Promise.resolve(w.enabled ?? true),
     usage: () => Promise.resolve(w.usage === undefined ? { monthCostMicros: 0, tenant24h: 0, user10m: 0 } : w.usage),
     dailyCap: () => Promise.resolve(w.dailyCap === undefined ? null : w.dailyCap),
     openConversation: () => Promise.resolve(convs ? { id: "00000000-0000-4000-8000-00000000c0c1" } : null),
@@ -123,9 +126,17 @@ Deno.test("model and monthly ceiling come from the environment, with safe defaul
   assertEquals(DEFAULT_MODEL, "claude-sonnet-5-5", "Ahsan 10-27: Sonnet 5.5");
   assertEquals(modelFrom(() => "claude-opus-5-5"), "claude-opus-5-5");
   assertEquals(modelFrom(() => "gpt-4; drop table"), DEFAULT_MODEL, "a malformed value is ignored");
-  assertEquals(monthlyCapMicros(() => undefined), 150_000_000);
+  assertEquals(monthlyCapMicros(() => undefined), 200_000_000, "Carolyn 10-27: the key's console limit, $200");
   assertEquals(monthlyCapMicros(() => "40"), 40_000_000);
-  assertEquals(monthlyCapMicros(() => "-1"), 150_000_000);
+  assertEquals(monthlyCapMicros(() => "-1"), 200_000_000);
+});
+
+Deno.test("the support key comes first, the shared key answers without it, and neither value is reported", () => {
+  const env = (e: Record<string, string>) => (k: string) => e[k];
+  assertEquals(apiKeyFrom(env({ SUPPORT_ANTHROPIC_API_KEY: "own-key", ANTHROPIC_API_KEY: "shared-key" })), { key: "own-key", source: "own" });
+  assertEquals(apiKeyFrom(env({ ANTHROPIC_API_KEY: "shared-key" })), { key: "shared-key", source: "shared" });
+  assertEquals(apiKeyFrom(env({ SUPPORT_ANTHROPIC_API_KEY: "  ", ANTHROPIC_API_KEY: "shared-key" })).source, "shared", "a blank support key is no key");
+  assertEquals(apiKeyFrom(env({})), { key: null, source: "none" });
 });
 
 Deno.test("cost: Sonnet 5.5 list prices, cache reads and writes priced apart, unknown models priced high", () => {
@@ -185,7 +196,7 @@ Deno.test("the tenant's daily cap: default 60, 0 unlimited, a lowered cap bites"
 });
 
 Deno.test("the monthly ceiling switches the assistant to 'please submit a ticket'", async () => {
-  const w = world({ usage: { monthCostMicros: 150_000_000, tenant24h: 0, user10m: 0 } });
+  const w = world({ usage: { monthCostMicros: 200_000_000, tenant24h: 0, user10m: 0 } });
   const r = await handleSend(w.deps, WHO, { text: "hi" });
   assertEquals(r.body.capped, "month");
   assert(String((r.body.reply as { body: string }).body).includes("ticket"), "offers a ticket");
@@ -208,6 +219,53 @@ Deno.test("empty and over-long questions are refused before anything else", asyn
   assertEquals((await handleSend(w.deps, WHO, { text: "x".repeat(MAX_USER_CHARS + 1) })).status, 400);
   assertEquals((await handleSend(w.deps, WHO, { text: 42 })).status, 400);
   assertEquals(w.asked.length + w.stored.length, 0);
+});
+
+// ── the switch (346) and the key ─────────────────────────────────────────────────────────────
+
+Deno.test("switched off, or unreadable: nothing is stored, Claude is not asked, status says so", async () => {
+  for (const enabled of [false, "throw"] as const) {
+    const w = world({ enabled });
+    assertEquals((await handleEnabled(w.deps, WHO)).body, { ok: true, on: false }, `enabled answers off (${enabled})`);
+    const r = await handleSend(w.deps, WHO, { text: "hi" });
+    assertEquals(r.body.capped, "off");
+    assertEquals((r.body.reply as { body: string }).body, SENTENCES.off);
+    assertEquals(w.asked.length + w.stored.length, 0, "no call to Claude, nothing stored");
+    const s = await handleStatus(w.deps, WHO);
+    assertEquals([s.body.enabled, s.body.available, s.body.unavailable, s.body.conversation], [false, false, SENTENCES.off, null]);
+    assertEquals(w.counts().swept, 0, "an off builder's status does no other work");
+  }
+  const on = world();
+  assertEquals((await handleEnabled(on.deps, WHO)).body, { ok: true, on: true });
+  assertEquals((await handleStatus(on.deps, WHO)).body.enabled, true);
+});
+
+Deno.test("the support key is the one sent to Claude, and status names its source, never its value", async () => {
+  const w = world({ env: { SUPPORT_ANTHROPIC_API_KEY: "support-only-key" } });
+  assertEquals((await handleSend(w.deps, WHO, { text: "hi" })).body.ok, true);
+  assertEquals(w.asked[0].headers["x-api-key"], "support-only-key");
+  const s = await handleStatus(w.deps, WHO);
+  assertEquals(s.body.key, "own");
+  assert(!JSON.stringify(s.body).includes("support-only-key") && !JSON.stringify(s.body).includes("test-key"), "no key value in status");
+  const shared = world();
+  await handleSend(shared.deps, WHO, { text: "hi" });
+  assertEquals(shared.asked[0].headers["x-api-key"], "test-key", "unset, the shared key answers");
+  assertEquals((await handleStatus(shared.deps, WHO)).body.key, "shared");
+});
+
+Deno.test("the key's console spend limit (HTTP 400 '...API usage limits') answers the month's sentence", async () => {
+  const limit = () => new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "You have reached your specified workspace API usage limits. You will regain access on 2026-11-01 at 00:00 UTC." } }), { status: 400 });
+  const w = world({ claude: limit });
+  const r = await handleSend(w.deps, WHO, { text: SECRET });
+  assertEquals(r.body.ok, true);
+  assertEquals((r.body.messages as { body: string }[])[1].body, SENTENCES.monthCap);
+  assertEquals(w.stored[1].stopReason, "spend_limit");
+  assertEquals(w.logs.map((l) => [l.code, l.severity]), [["support_ai_spend_limit", "warn"]]);
+  assert(!JSON.stringify(w.logs).includes("4321") && !JSON.stringify(w.logs).includes("regain"), "neither the question nor Anthropic's text is logged");
+  // Any other 400 is still a fault, logged as one.
+  const other = world({ claude: () => new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "bad field" } }), { status: 400 }) });
+  await handleSend(other.deps, WHO, { text: "hi" });
+  assertEquals(other.logs.map((l) => [l.code, l.severity]), [["support_ai_failed", "error"]]);
 });
 
 // ── the request ──────────────────────────────────────────────────────────────────────────────

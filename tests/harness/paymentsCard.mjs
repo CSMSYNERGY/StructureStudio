@@ -182,7 +182,7 @@ try {
 
   // ── H ──
   const req = await page.locator("[data-payments-request]").innerText();
-  ok("H: how to ask for a change", /Need a change\?/.test(req) && /Support/.test(req) && /Submit a ticket/.test(req) && /Support → My Requests/.test(req), req);
+  ok("H: how to ask for a change", /Need a change\?/.test(req) && /Feedback/.test(req) && /Request a Feature/.test(req) && /Support → My Requests/.test(req), req);
 
   // ── B ──
   await boot({ row: { payments_online_enabled: false, cardpointe_merchid: MID, cardpointe_env: "uat" } });

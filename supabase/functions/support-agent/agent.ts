@@ -9,12 +9,26 @@
 // and reads the signed-in builder's OWN account through read-only tools (tools.ts) when asked.
 // Nothing is trained on anyone's data, and no builder's data can reach another (tools.ts header).
 //
+// ══ THE SWITCH (migration 346) ══
+// client_settings.support_ai_beta, per builder, off by default; an operator turns it on by SQL. It
+// FAILS CLOSED: off, or unreadable, `enabled` answers false, `status` says unavailable and `send`
+// refuses before anything is stored or Claude is asked. The portal asks `enabled` after boot and
+// shows the old Feedback pill until it hears true (useSupportOn, portal/04-orders.jsx).
+//
+// ══ THE KEY ══
+// SUPPORT_ANTHROPIC_API_KEY, its own key so its spend shows apart from everything else (Carolyn,
+// 10-27 call). It sits in a console workspace with its own monthly spend limit; when that limit is
+// reached the API answers 400 "...API usage limits" and the person gets the month's-ceiling sentence.
+// Unset, the shared ANTHROPIC_API_KEY answers instead. `status` names which one is in use, never
+// its value.
+//
 // ══ ONE TURN ══
 //   1. the caps, checked BEFORE Claude is asked: 12 messages per person per 10 minutes, the tenant's
 //      daily cap (client_settings.support_ai_daily_cap: NULL = 60, 0 = unlimited) and the month's
-//      ceiling across every tenant (SUPPORT_AI_MONTHLY_CAP_USD, default 150). Each answers with a
-//      fixed sentence and the ticket route. The usage read fails OPEN: the per-turn bounds below are
-//      what stop one bad request, and a blip must not shut support off;
+//      ceiling across every tenant (SUPPORT_AI_MONTHLY_CAP_USD, default 200, the key's console limit:
+//      Carolyn 10-27, "set the limit at 200"). Each answers with a fixed sentence and the ticket
+//      route. The usage read fails OPEN: the per-turn bounds below are what stop one bad request,
+//      and a blip must not shut support off;
 //   2. the builder's words are stored, then Claude (SUPPORT_AI_MODEL, default claude-sonnet-5-5,
 //      Ahsan 10-27) is asked with the last 20 messages, at low effort (chat), strict tools, and the
 //      server-side fallback on;
@@ -38,7 +52,7 @@ import { runTool, TOOL_DEFS, type ToolCtx } from "./tools.ts";
 export const ASSISTANT_NAME = "Studio Assistant";
 /** Returned by `status`, so a deploy can be proved by asking the live function (its bundle cannot
  *  be downloaded). Bump it with every change to this function. */
-export const BUILD = "340.2";
+export const BUILD = "346.1";
 export const DEFAULT_MODEL = "claude-sonnet-5-5";
 export const REPLY_PROMISE = "A person on our team replies within 24 hours.";
 /** Room for low-effort thinking plus a chat-length answer. A longer one is cut and said so. */
@@ -52,7 +66,8 @@ export const MAX_USER_CHARS = 2000;
 export const MAX_STORED_CHARS = 8000;
 export const USER_10M_CAP = 12;
 export const DEFAULT_DAILY_CAP = 60;
-export const DEFAULT_MONTHLY_CAP_USD = 150;
+/** The support key's console spend limit (Carolyn 10-27). Raise both together. */
+export const DEFAULT_MONTHLY_CAP_USD = 200;
 export const RETENTION_DAYS = 180;
 /** Stage 2 (live Zoom in business hours) is not built. The menu item renders only when this is true. */
 export const LIVE_SUPPORT_AVAILABLE = false;
@@ -77,6 +92,7 @@ export const SENTENCES = {
   tenantCap: `Your team has reached today's limit for the assistant. You can still send this to our team as a ticket. ${REPLY_PROMISE}`,
   monthCap: `The assistant is taking a break for the rest of the month. Please send this to our team as a ticket. ${REPLY_PROMISE}`,
   noKey: `The assistant isn't available right now. Please send this to our team as a ticket. ${REPLY_PROMISE}`,
+  off: `The assistant isn't switched on for your account yet. Please send this to our team as a ticket. ${REPLY_PROMISE}`,
   refusal: "I can't help with that one here. If it's about your account, you can send it to our team as a ticket.",
   cutOff: "That answer ran long and got cut off. Try asking a narrower question, or send this to our team as a ticket.",
   timeout: "That took too long to answer. Please try again, or send this to our team as a ticket.",
@@ -140,6 +156,8 @@ export interface Totals {
 }
 
 export interface AgentStore {
+  /** client_settings.support_ai_beta (346). Callers treat a throw as off: the switch fails CLOSED. */
+  enabled(clientId: string): Promise<boolean>;
   /** support_usage(); null when it could not be read (callers fail OPEN). */
   usage(who: Who): Promise<Usage | null>;
   /** client_settings.support_ai_daily_cap as stored (null = default). Throws on a read fault. */
@@ -181,6 +199,14 @@ export interface Reply {
 export function modelFrom(env: (n: string) => string | undefined): string {
   const m = String(env("SUPPORT_AI_MODEL") ?? "").trim();
   return /^claude-[a-z0-9-]{3,60}$/.test(m) ? m : DEFAULT_MODEL;
+}
+
+/** The support key, else the shared one. `source` is what `status` reports; the value never leaves. */
+export function apiKeyFrom(env: (n: string) => string | undefined): { key: string | null; source: "own" | "shared" | "none" } {
+  const own = String(env("SUPPORT_ANTHROPIC_API_KEY") ?? "").trim();
+  if (own) return { key: own, source: "own" };
+  const shared = String(env("ANTHROPIC_API_KEY") ?? "").trim();
+  return shared ? { key: shared, source: "shared" } : { key: null, source: "none" };
 }
 
 export function monthlyCapMicros(env: (n: string) => string | undefined): number {
@@ -267,7 +293,7 @@ export interface TurnResult {
 
 async function askClaude(
   deps: AgentDeps, apiKey: string, body: Record<string, unknown>, deadline: number,
-): Promise<{ ok: true; body: ClaudeBody } | { ok: false; why: "timeout" | "unreachable" | "http" | "parse"; status?: number }> {
+): Promise<{ ok: true; body: ClaudeBody } | { ok: false; why: "timeout" | "unreachable" | "http" | "limit" | "parse"; status?: number }> {
   const left = Math.min(CALL_TIMEOUT_MS, deadline - deps.now());
   if (left <= 1000) return { ok: false, why: "timeout" };
   const ac = new AbortController();
@@ -294,7 +320,11 @@ async function askClaude(
     clearTimeout(timer);
   }
   if (!res.ok) {
-    await res.arrayBuffer().catch(() => undefined);
+    // A console spend limit (the org's or the key's workspace) answers 400 invalid_request_error,
+    // "You have reached your specified [workspace] API usage limits". Read only to tell that apart;
+    // the text is never logged or shown.
+    const text = await res.text().catch(() => "");
+    if (res.status === 400 && /API usage limits/i.test(text)) return { ok: false, why: "limit", status: 400 };
     return { ok: false, why: "http", status: res.status };
   }
   try {
@@ -337,6 +367,12 @@ export async function runTurn(
       messages,
     }, deadline);
 
+    if (!res.ok && res.why === "limit") {
+      // Not a fault: the spend limit doing its job. Raise it in the console (and
+      // SUPPORT_AI_MONTHLY_CAP_USD with it) to bring the assistant back before the month turns.
+      await deps.log({ code: "support_ai_spend_limit", severity: "warn", clientId: who.clientId, message: "The support key's console spend limit is reached.", context: { round } });
+      return done(SENTENCES.monthCap, "spend_limit");
+    }
     if (!res.ok) {
       const retryable = res.why !== "http" || res.status === 408 || res.status === 429 || res.status === 529 || (res.status ?? 0) >= 500;
       await deps.log({
@@ -385,26 +421,36 @@ export async function runTurn(
 
 // ── Actions ───────────────────────────────────────────────────────────────────────────────
 
+/** The switch (346). A read fault is OFF: fails closed. */
+const isOn =(deps: AgentDeps, who: Who) => deps.store.enabled(who.clientId).catch(() => false);
+
+/** The portal's boot question: Support button, or the old Feedback pill? Nothing else is read. */
+export async function handleEnabled(deps: AgentDeps, who: Who): Promise<Reply> {
+  return { status: 200, body: { ok: true, on: await isOn(deps, who) } };
+}
+
 /** The chat panel's opening read: who it is, whether it can answer, and the person's open chat. */
 export async function handleStatus(deps: AgentDeps, who: Who): Promise<Reply> {
+  const base = { ok: true, build: BUILD, name: ASSISTANT_NAME, replyPromise: REPLY_PROMISE, liveSupport: { available: LIVE_SUPPORT_AVAILABLE } };
+  if (!(await isOn(deps, who))) {
+    return { status: 200, body: { ...base, enabled: false, available: false, unavailable: SENTENCES.off, conversation: null } };
+  }
   // Retention runs here because there is no scheduler on this project; best-effort.
   await deps.store.sweep(RETENTION_DAYS).catch(() => undefined);
 
   const usage = await deps.store.usage(who).catch(() => null);
-  const hasKey = !!deps.env("ANTHROPIC_API_KEY");
+  const { key, source } = apiKeyFrom(deps.env);
   const overMonth = !!usage && usage.monthCostMicros >= monthlyCapMicros(deps.env);
   const conv = await deps.store.openConversation(who, null).catch(() => null);
   const messages = conv ? await deps.store.history(conv.id, 50).catch(() => []) : [];
   return {
     status: 200,
     body: {
-      ok: true,
-      build: BUILD,
-      name: ASSISTANT_NAME,
-      replyPromise: REPLY_PROMISE,
-      available: hasKey && !overMonth,
-      unavailable: !hasKey ? SENTENCES.noKey : overMonth ? SENTENCES.monthCap : null,
-      liveSupport: { available: LIVE_SUPPORT_AVAILABLE },
+      ...base,
+      enabled: true,
+      key: source,
+      available: !!key && !overMonth,
+      unavailable: !key ? SENTENCES.noKey : overMonth ? SENTENCES.monthCap : null,
       conversation: conv ? { id: conv.id, messages } : null,
     },
   };
@@ -425,7 +471,8 @@ export async function handleSend(deps: AgentDeps, who: Who, payload: { text?: un
   // 1. Caps, before anything is stored or asked. A refused message is not stored, so it does not
   //    count toward the window it was refused in.
   const capped = (sentence: string, cap: string): Reply => ({ status: 200, body: { ok: false, capped: cap, reply: { role: "assistant", body: sentence } } });
-  const apiKey = deps.env("ANTHROPIC_API_KEY");
+  if (!(await isOn(deps, who))) return capped(SENTENCES.off, "off");
+  const apiKey = apiKeyFrom(deps.env).key;
   if (!apiKey) return capped(SENTENCES.noKey, "unavailable");
   const usage = await deps.store.usage(who).catch(() => null);
   if (usage) {
