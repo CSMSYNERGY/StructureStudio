@@ -5403,8 +5403,10 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
     return () => window.removeEventListener("ss:library-open", open);
   }, [category]);
 
-  if (on === false) return null;
-  if (on === null || !lib) {
+  // Nothing until the catalog has said the flag is on, so a builder without the library never sees a
+  // card appear and then go (it did, with a loading bar, until 2026-10-27).
+  if (on !== true) return null;
+  if (!lib) {
     return <div style={S.card} ref={rootRef}><div style={S.h2}>Library</div>{msg && msg.err ? <div style={S.err}>{msg.err}</div> : <SkelBar />}</div>;
   }
 

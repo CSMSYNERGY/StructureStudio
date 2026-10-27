@@ -41182,6 +41182,31 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
   // progress (cfgChanged shows the line that offers it).
   const cfgSigRef = useRef(null);
   const [cfgChanged, setCfgChanged] = useState(false);
+  // The newest changed config a refresh read. "Not now" takes it as seen, so the same change is not
+  // offered again on the next refresh (it was, every 30 s, until 2026-10-27).
+  const cfgSeenRef = useRef(null);
+  // A save THIS designer made through setup3d (Save 3D look, a new style, a rename, the media) also
+  // changes get_config, and the portal announces it like any other Settings write. That is not news
+  // here: this designer holds what it saved, so the refresh takes the new config quietly. `open` counts
+  // the saves in flight; `at` is when the last one started or ended.
+  const ownSaveRef = useRef({ open: 0, at: 0 });
+  const setup3dOwn = useMemo(() => {
+    if (!setup3d) return setup3d;
+    const own = ownSaveRef.current;
+    const out = {};
+    Object.keys(setup3d).forEach((k) => {
+      const f = setup3d[k];
+      out[k] = typeof f !== "function" || !/^on(Save|Create|Set|Rename)/.test(k) ? f : (...args) => {
+        own.open += 1; own.at = Date.now();
+        const done = () => { own.open -= 1; own.at = Date.now(); };
+        let r;
+        try { r = f(...args); } catch (e) { done(); throw e; }
+        Promise.resolve(r).then(done, done);
+        return r;
+      };
+    });
+    return out;
+  }, [setup3d]);
 
   // White-label the browser tab: show the tenant's business name once config loads.
   // Skipped when embedded — the host page (the portal) owns its own tab title.
@@ -41381,7 +41406,15 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
           });
         }
         const cfg = both[1] && !both[1].error ? both[1].data : null;
-        if (cfg && cfgSigRef.current != null && JSON.stringify(cfg) !== cfgSigRef.current) setCfgChanged(true);
+        const sig = cfg ? JSON.stringify(cfg) : null;
+        if (sig && cfgSigRef.current != null && sig !== cfgSigRef.current) {
+          // Taken quietly: on the Settings pages that ARE editors (3D calibration, Advanced), whose own
+          // saves are the change and where a reload would drop their unsaved sections; and right after
+          // a save this designer made itself. Offered otherwise.
+          const own = ownSaveRef.current;
+          if (calibrationOnly || advancedOnly || own.open > 0 || Date.now() - own.at < 15000) cfgSigRef.current = sig;
+          else { cfgSeenRef.current = sig; setCfgChanged(true); }
+        }
       } catch (_e) { /* best-effort: the designer keeps what it has */ }
     };
     // One save sends on both channels (and a multi-row save several times): coalesce them.
@@ -41426,15 +41459,15 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
   }
   // Reloading remounts StructureStudioInner, which is the only way a changed config is applied whole.
   // It clears an unsaved plan, so it is offered, never done: "Not now" keeps the designer as it is
-  // until the next change.
+  // and takes this change as seen; only a later change offers the line again.
   const cfgLine = cfgChanged ? (
     <div role="status" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "0 0 8px", padding: "8px 12px", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8, fontFamily: "system-ui, -apple-system, sans-serif", fontSize: 13, color: "#78350F" }}>
       <span style={{ flex: "1 1 260px" }}>Your settings changed after this designer opened. Reload it to use them. A plan you haven't saved will be cleared.</span>
       <button type="button" onClick={() => { setCfgChanged(false); setState({ status: "loading" }); }} style={{ padding: "5px 12px", background: "#92400E", color: "#FFF", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Reload designer</button>
-      <button type="button" onClick={() => setCfgChanged(false)} style={{ padding: "5px 10px", background: "transparent", color: "#92400E", border: "1px solid #FCD34D", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Not now</button>
+      <button type="button" onClick={() => { if (cfgSeenRef.current) cfgSigRef.current = cfgSeenRef.current; setCfgChanged(false); }} style={{ padding: "5px 10px", background: "transparent", color: "#92400E", border: "1px solid #FCD34D", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>Not now</button>
     </div>
   ) : null;
-  return <>{cfgLine}<DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} canOverridePrice={canOverridePrice} /></DesignerErrorBoundary></>;
+  return <>{cfgLine}<DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3dOwn} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} canOverridePrice={canOverridePrice} /></DesignerErrorBoundary></>;
 }
 
 // Publish for the host pages' thin mount blocks (cross-block const sharing does not

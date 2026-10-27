@@ -62,6 +62,7 @@ const TEMPLATES = [
 ].map((t) => ({ ...t, id: U(t.id) }));
 const W = {
   flag: false,
+  catalogDelayMs: 0,   // A: the catalog answers late, so a card shown while it is asked would be seen
   styles: [
     { id: STYLE_U, key: "utility", label: "Utility", active: true },
     { id: STYLE_D, key: "deluxe", label: "Deluxe", active: true },
@@ -215,6 +216,7 @@ const handler = async (route) => {
   if (url.includes("/portal-billing")) return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], features: {}, status: "active" }, wallet: null });
   if (url.includes("/portal-settings")) {
     sent.push({ fn: "portal-settings", ...body });
+    if (body.action === "catalog" && W.catalogDelayMs) await new Promise((r) => setTimeout(r, W.catalogDelayMs));
     const out = settings(body);
     return Array.isArray(out) ? json(route, out[0], out[1]) : json(route, out);
   }
@@ -236,6 +238,15 @@ try {
   await page.waitForTimeout(800);
 
   // ── A: library off ──
+  // Any "Library" heading that appears at all, even for the moment the catalog is being asked (the
+  // release review, 2026-10-27: a loading card showed for every builder, then went).
+  W.catalogDelayMs = 1500;
+  await page.evaluate(() => {
+    window.__libFlash = 0;
+    const look = () => { for (const el of document.querySelectorAll("div")) if (el.childElementCount === 0 && el.textContent === "Library") { window.__libFlash++; return; } };
+    window.__libObs = new MutationObserver(look);
+    window.__libObs.observe(document.body, { childList: true, subtree: true });
+  });
   await go("/settings/cladding");
   await page.waitForFunction(() => /Cladding/.test(document.body.innerText) && document.querySelectorAll("table").length > 0, null, { timeout: 20000 }).catch(() => {});
   const offRows = await page.locator("table tbody tr").count();
@@ -246,6 +257,10 @@ try {
   await go("/settings/windows");
   await page.waitForTimeout(600);
   ok("A windows with the library off: no Library card", (await page.locator("[data-ss-library]").count()) === 0);
+  await page.waitForTimeout(1600);
+  const flash = await page.evaluate(() => { window.__libObs.disconnect(); return window.__libFlash; });
+  W.catalogDelayMs = 0;
+  ok("A ...not even while the catalog is still being asked", flash === 0, `${flash} sightings`);
   ok("A `library` is never asked with the flag off", actions("library").length === 0 && actions("library_seed_mine").length === 0, JSON.stringify(sent.filter((x) => String(x.action || "").startsWith("library")).map((x) => x.action)));
   await page.screenshot({ path: join(shots, "a-windows-library-off.png"), fullPage: true });
 
