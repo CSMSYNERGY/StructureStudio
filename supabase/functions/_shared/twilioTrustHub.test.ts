@@ -60,14 +60,107 @@ Deno.test("Inc. and Corp. are caught the same way as LLC", () => {
   }
 });
 
-Deno.test("a genuine sole proprietor is refused too — the chain is not built", () => {
-  // This test asserted the OPPOSITE until 2026-08-31, and the change is the point: sole
-  // proprietor needs a Starter profile, no EIN fields and the mobile on the brand, none of
-  // which we send. Letting a clean-looking intake through only meant charging for a
-  // rejection. When the second chain IS built, this test flips back — deliberately.
-  const problems = validateIntake({ ...GOOD, legalBusinessName: "Pat Miller Sheds", ein: "" }, false);
-  assert(problems.some((p) => /EIN/i.test(p)),
-    `expected an EIN-only refusal, got: ${JSON.stringify(problems)}`);
+// ── No EIN: the Sole Proprietor rules ──────────────────────────────────────────────────────
+// From 2026-08-31 to 2026-10-27 every no-EIN intake was refused here, because the chain it needs
+// (a Starter profile, the sole-prop Trust Product carrying the mobile) did not exist and letting a
+// clean-looking intake through only meant charging for a rejection. The chain is built now
+// (twilioTrustHubSoleProp.test.ts pins it against a stubbed Twilio), so this flipped back,
+// deliberately, as the old test said it would. Whether a builder may USE it is portal-sms's
+// per-builder switch, not this function.
+
+// A sole proprietor as the portal posts one: the person's own name (the legal name is "First
+// Last"), a personal email, their own mobile, a P.O. box, no website, and NO EIN, business type or
+// job fields at all.
+const SOLE: Record<string, string> = {
+  legalBusinessName: "Pat Example",
+  businessIndustry: "CONSTRUCTION",
+  websiteUrl: "",
+  street: "PO Box 100",
+  city: "Testville",
+  region: "MO",
+  postalCode: "64101",
+  isoCountry: "US",
+  repFirstName: "Pat",
+  repLastName: "Example",
+  repEmail: "pat@gmail.com",
+  repPhone: "+15555550123",
+};
+
+Deno.test("a genuine sole proprietor passes now that the chain is built", () => {
+  assertEquals(validateIntake(SOLE, false), []);
+});
+
+Deno.test("sole proprietor: a free email, no website, a P.O. box and Canada are all fine", () => {
+  // Each of these is refused for the EIN tier, and each is normal for a person registering under
+  // their own name. The guide says P.O. boxes are allowed "in as many words".
+  for (const email of ["pat@gmail.com", "pat@yahoo.com", "pat@outlook.com", "pat@example.test"]) {
+    assertEquals(validateIntake({ ...SOLE, repEmail: email }, false), [], email);
+  }
+  assertEquals(validateIntake({ ...SOLE, websiteUrl: "" }, false), []);
+  assertEquals(validateIntake({ ...SOLE, websiteUrl: "https://pat-example.example.test" }, false), []);
+  assertEquals(validateIntake({ ...SOLE, isoCountry: "CA", region: "ON", postalCode: "K1A 0B1" }, false), []);
+  assertEquals(validateIntake({ ...SOLE, isoCountry: "" }, false), [], "a blank country is the US");
+  // Fields a sole proprietor does not have are not asked for, whatever the form left in them.
+  assertEquals(validateIntake({ ...SOLE, ein: "", businessType: "", repJobPosition: "", repBusinessTitle: "" }, false), []);
+});
+
+Deno.test("sole proprietor: a company word in the person's name is refused (30915)", () => {
+  for (const [first, last] of [["Pat", "Example LLC"], ["Pat Example Inc.", "Sheds"], ["Pat", "Example Ltd"], ["Pat", "Example L.L.C."]]) {
+    const problems = validateIntake({ ...SOLE, repFirstName: first, repLastName: last }, false);
+    assert(problems.some((p) => /sole proprietor/i.test(p) && /EIN/i.test(p)), `${first} ${last} should be refused: ${JSON.stringify(problems)}`);
+  }
+});
+
+Deno.test("sole proprietor: Ltd. and Co. in a business name are caught like LLC, a bare surname Co is not", () => {
+  for (const name of ["Pat Example Sheds Co.", "Example Barns Ltd.", "Example Barns Limited", "Example Sheds L.L.C."]) {
+    const problems = validateIntake({ ...SOLE, legalBusinessName: name }, false);
+    assert(problems.some((p) => /sole proprietor/i.test(p)), `${name} should be refused`);
+  }
+  // "Co" with no period is a real surname. Refusing someone's own name is worse than the
+  // rejection the rule prevents. Words that merely CONTAIN a suffix (Vincent, Lincoln) pass too.
+  assertEquals(validateIntake({ ...SOLE, repLastName: "Co", legalBusinessName: "Pat Co" }, false), []);
+  assertEquals(validateIntake({ ...SOLE, repFirstName: "Vincent", repLastName: "Lincoln", legalBusinessName: "Vincent Lincoln" }, false), []);
+});
+
+Deno.test("sole proprietor: the first and last name are both required", () => {
+  assert(validateIntake({ ...SOLE, repFirstName: "" }, false).some((p) => /first name/i.test(p)));
+  assert(validateIntake({ ...SOLE, repLastName: "  " }, false).some((p) => /last name/i.test(p)));
+});
+
+Deno.test("sole proprietor: a bad mobile is refused, and the message says it must be their own", () => {
+  for (const bad of ["5555550123", "+445551234567", "555-555-0123", ""]) {
+    const problems = validateIntake({ ...SOLE, repPhone: bad }, false);
+    assert(problems.some((p) => /mobile number/i.test(p) && /own/i.test(p) && /Google Voice/i.test(p)),
+      `${bad} should be refused with the own-mobile wording: ${JSON.stringify(problems)}`);
+  }
+});
+
+Deno.test("sole proprietor: a missing address part is named, and only the US and Canada are accepted", () => {
+  for (const [field, word] of [["street", /street/i], ["city", /city/i], ["region", /state/i], ["postalCode", /ZIP/i]] as const) {
+    const problems = validateIntake({ ...SOLE, [field]: "" }, false);
+    assert(problems.some((p) => word.test(p)), `${field}: ${JSON.stringify(problems)}`);
+  }
+  assert(validateIntake({ ...SOLE, isoCountry: "GB" }, false).some((p) => /US or Canada/i.test(p)), "GB is refused");
+});
+
+Deno.test("sole proprietor: a malformed email or website is still refused", () => {
+  assert(validateIntake({ ...SOLE, repEmail: "pat" }, false).some((p) => /email/i.test(p)));
+  assert(validateIntake({ ...SOLE, repEmail: "" }, false).some((p) => /email/i.test(p)));
+  assert(validateIntake({ ...SOLE, websiteUrl: "pat-example" }, false).some((p) => /website/i.test(p)), "given, it must be a real address");
+});
+
+Deno.test("the EIN tier's rules did not move: a no-EIN-looking intake WITH hasEin is judged as before", () => {
+  // The sole-prop allowances must not leak into the EIN path: there, a free email, a missing
+  // website and a missing EIN are each still refused, word for word.
+  const problems = validateIntake({ ...GOOD, ein: "", websiteUrl: "", repEmail: "pat@gmail.com" }, true);
+  assertEquals(problems, [
+    "The EIN must be nine digits, like 12-3456789.",
+    "A public website address is required. A Facebook page or a coming-soon splash page will not pass.",
+    "Use an email address on the company's own domain. A free address (gmail, yahoo, outlook) " +
+      "is a documented rejection reason for carrier registration.",
+  ]);
+  assertEquals(validateIntake({ ...GOOD, legalBusinessName: "" }, true),
+    ["The legal business name is required, exactly as it appears on the IRS letter."]);
 });
 
 Deno.test("a free email address is refused — it is a documented rejection cause", () => {

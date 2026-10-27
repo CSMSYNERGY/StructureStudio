@@ -53,6 +53,21 @@ import { ensureRefusalSentence, ensureTwilioAccount, SUB_WHILE_OFF_SENTENCE, sub
 import { registrationUnreachable, smsSignupRefusal, type RegistrationLike } from "./registrationGate.ts";
 // My Synergy Phone plan phase 6: buy_number ADOPTS a calling-only number instead of buying a second.
 import { adoptBranch, buyPlanFromRead, numberRowWritten, type LiveNumber } from "./adoptNumber.ts";
+// No-EIN texting (Twilio's Sole Proprietor tier, 2026-10-27): the Starter profile + Sole Proprietor
+// trust product chain, the owner's "reply YES" before the campaign, and its resend. SHIPS DARK behind
+// client_settings.sms_sole_prop (migration 342), read tolerantly; off, nothing an EIN builder or a
+// no-EIN one sees changes. The route's own pieces are ./soleProp.ts.
+import {
+  brandReadyForCampaign, createSoleProprietorTrustProduct, createStarterCustomerProfile, fetchTrustProduct,
+  POLICY_STARTER_CUSTOMER_PROFILE, resendBrandOtp, soleProprietorBrandName,
+} from "../_shared/twilioTrustHub.ts";
+import {
+  brandRegisteredAt, clearSoleProprietorStepNote, lastOtpResend, NO_EIN_REFUSAL, OTP_RESEND_FAILED_EVENT, OTP_RESENT_EVENT, otpResendAvailableAt,
+  otpResendKey, otpWaiting, readCustomerProfile, readySoleProprietor, SOLE_PROP_EXPIRED_NOTE, SOLE_PROP_LATE_NOTE,
+  SOLE_PROP_NO_USE_CASE_NOTE, SOLE_PROP_OFF_NOTE, soleProprietorBrandNote, soleProprietorCampaignNote, soleProprietorEcho,
+  soleProprietorOn, soleProprietorView, tierSwitchRefusal, yesWait, type SoleReadyDeps,
+} from "./soleProp.ts";
+import { SMS_PAUSED_SENTENCE } from "./registrationGate.ts";
 
 // Self-serve SMS onboarding: the builder's own A2P 10DLC registration and their own number.
 //
@@ -167,6 +182,10 @@ const GATES: GateTable = {
   retry_campaign:  { area: "settings_billing", level: "edit" },
   // ⚠️ SPENDS MONEY.
   advance:         { area: "settings_billing", level: "edit" },
+  // No-EIN texting: ask Twilio to text the sole proprietor the "reply YES" message again. Free at
+  // Twilio, but it texts a person's own mobile in the business's name, so it is held to advance's
+  // bar (and its can_bill check below), and to a ten-minute cooldown in the database.
+  resend_otp:      { area: "settings_billing", level: "edit" },
   search_numbers:  { area: "settings_billing", level: "edit" },
   // ⚠️ SPENDS MONEY (a number is billed monthly from purchase).
   buy_number:      { area: "settings_billing", level: "edit" },
@@ -326,9 +345,15 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
    *  ⚠️ A FAILED READ MEANS NO SUGGESTION, the opposite of the designer and the disclosure page,
    *  which treat it as "on". They decide whether to SHOW a box; this decides whether to tell the
    *  carriers there is one, and a sentence we cannot stand behind is worse than an empty field. */
-  const [{ data: csRow }, { data: ccRow }] = await Promise.all([
+  //
+  // The no-EIN switch (client_settings.sms_sole_prop, migration 342) rides alongside as a THIRD read
+  // of its own, never a column in the first: a database without 342 would fail that whole select and
+  // take the website and the consent-box switch with it. soleProprietorOn reads anything but a clean
+  // true as off.
+  const [{ data: csRow }, { data: ccRow }, soleOn] = await Promise.all([
     admin.from("client_settings").select("business_website, lead_sms_consent_box").eq("client_id", clientId).maybeSingle(),
     admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
+    soleProprietorOn(admin, clientId),
   ]);
   const settingsWebsite = String(csRow?.business_website ?? "");
   const consentCompanyName = String(ccRow?.company_name ?? "");
@@ -342,6 +367,12 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       .insert({ client_id: clientId, status: "none" }).select("*").single();
     return made;
   };
+
+  /** When the sole proprietor last asked Twilio to send the "reply YES" text again: read by the
+   *  status answer and set by resend_otp, only for a registration waiting on that YES (soleProp.ts
+   *  otpWaiting). view() turns it into otpResendAvailableAt; any other answer reads null ("now"),
+   *  and a press inside the cooldown is refused with the time anyway. */
+  let lastOtpResentAt: string | null = null;
 
   /** What the portal renders. Deliberately a PROJECTION: Twilio's vocabulary stays in the
    *  row, and the builder sees a sentence about their own business. */
@@ -429,9 +460,24 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           messageSamples: Array.isArray(reg?.campaign_message_samples)
             ? reg.campaign_message_samples.map((s: unknown) => String(s ?? "")) : [],
           hasEmbeddedLinks: false,
+          // A sole proprietor's registered name is their own (no business-name match to ask for).
+          brandTier: String(reg?.brand_tier ?? ""),
         }),
       ],
     },
+    // ── No-EIN texting (soleProp.ts soleProprietorView) ──────────────────────────────────────
+    // soleProprietorAvailable (the operator's switch), identityStatus (the YES), the resend's
+    // otpResendAvailableAt and the static soleProprietorLimits, for every builder. LAST, because for
+    // a sole proprietor only it also re-states the suggested wording so it names the person (error
+    // 30914); for every other tier that key is left exactly as above.
+    ...soleProprietorView(reg, {
+      on: soleOn,
+      lastOtpResentAt,
+      companyName: consentCompanyName,
+      consentBoxOn,
+      designerUrl: designerUrl(clientId),
+      disclosureUrl: optInDisclosureUrl(clientId),
+    }),
   });
 
   // The tenant's live numbers, oldest first, with whose number each is (migration 266; read again
@@ -623,12 +669,25 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           }
         }
 
+        // No-EIN texting: while the sole proprietor's YES is awaited, when the "text me again"
+        // button opens (otpResendAvailableAt). One indexed read, only for that registration; a
+        // failed one leaves the button open, and resend_otp's own read still holds the cooldown.
+        if (otpWaiting(reg)) {
+          const last = await lastOtpResend(admin, clientId);
+          if (!last.error) lastOtpResentAt = last.createdAt;
+        }
+
         return json({ ok: true, ...view(reg, await numbersOf()) });
       }
 
       case "save_intake": {
         const hasEin = !!p.hasEin;
         const intake = (p.intake ?? {}) as Partial<BuilderIntake>;
+        // ⚠️ NO EIN, AND THE OPERATOR HAS NOT SWITCHED THE ROUTE ON (soleProp.ts, migration 342): the
+        // refusal every builder got before 2026-10-27, the same 400 and the same sentence. It used to
+        // come out of validateIntake itself; that function now knows the sole-proprietor rules, so
+        // the switch is asked HERE, before them, and a builder it is off for never learns them.
+        if (!hasEin && !soleOn) return json({ error: NO_EIN_REFUSAL, problems: [NO_EIN_REFUSAL] }, 400);
         const problems = validateIntake(intake, hasEin);
         if (problems.length) return json({ error: problems[0], problems }, 400);
 
@@ -648,6 +707,19 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (!["none", "intake", "aup_pending", "ready", "brand_failed"].includes(reg.status)) {
           return json({ error: "This registration has already been submitted, so its details cannot be edited here. Ask support to change them." }, 409);
         }
+        // ⚠️ WITH AN EIN AND WITHOUT ONE ARE TWO DIFFERENT CHAINS AT TWILIO (no-EIN texting). Once the
+        // row records anything at Twilio (a profile, a trust product or a brand), the answer cannot
+        // change here, either way round: the row would send the new tier down the old one's objects,
+        // or become a sole proprietor holding an EIN business's profile with no way back (soleProp.ts
+        // tierSwitchRefusal has why). Between the two EIN tiers nothing is refused, as before.
+        // Nothing else about the saved details is frozen.
+        const switchRefused = tierSwitchRefusal(reg, suggestBrandTier(hasEin));
+        if (switchRefused) return json({ error: switchRefused, code: "sms_tier_switch" }, 409);
+        // A tier that DID change takes a sole-prop step note with it ("not switched on", "not a
+        // Starter profile", ...): it described the other route. Only those notes (soleProp.ts
+        // clearSoleProprietorStepNote), and only on a change, so an EIN builder's save writes what it
+        // always wrote.
+        const tierChanged = String(reg?.brand_tier ?? "low_volume_standard") !== suggestBrandTier(hasEin);
 
         const ein = String(intake.ein ?? "").replace(/\D/g, "");
         await admin.from("sms_registrations").update({
@@ -663,6 +735,10 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           brand_tier: suggestBrandTier(hasEin),
           status: reg.aup_accepted_at ? "ready" : "aup_pending",
           updated_at: new Date().toISOString(),
+          // A sole proprietor (only reachable with the switch on, see the top of this branch): the
+          // legal name is the PERSON's, as Twilio will be sent it; no EIN; the website may be blank.
+          ...(hasEin ? {} : soleProprietorEcho(soleProprietorBrandName(intake), intake.websiteUrl)),
+          ...(tierChanged ? clearSoleProprietorStepNote(reg?.attention_note) : {}),
         }).eq("client_id", clientId);
 
         // The full intake is held in memory only for the duration of `advance`, which the
@@ -923,6 +999,78 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
             : "Could not change that just now." }, 400);
         }
         await note(want ? "mock_enabled" : "mock_disabled", {});
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
+      // ── No-EIN texting: "Text me again" ─────────────────────────────────────────────────
+      //
+      // Twilio texts a sole proprietor's own mobile once, when their brand is approved, asking them
+      // to reply YES (from +1 915-278-2000, valid 24 hours). Only that first text is automatic; a
+      // lost or expired one is sent again by POST BrandRegistrations/{BN}/SmsOtp (sole-prop guide
+      // §3.2), which is this. It is free at Twilio and registers nothing, but it texts a person in
+      // the business's name, so: advance's gate and can_bill check, only while that YES is actually
+      // awaited, and ten minutes apart, counted in the DATABASE (an in-process limiter does not limit
+      // two tabs: see compliance_check).
+      //
+      // ⚠️ CLAIM, THEN SEND. The claim is an sms_registration_events row whose unique event_id is the
+      // tenant plus the resend it follows (soleProp.ts otpResendKey), so two presses at once cannot
+      // both text: the second insert is a 23505 and it answers with the cooldown. A send Twilio
+      // refuses renames its claim otp_resend_failed and frees the key, so it holds neither the
+      // cooldown nor the next press, and the refusal goes to the handler's catch (logged, codes only).
+      case "resend_otp": {
+        if (r.ctx.operator && !r.ctx.operator.canBill) {
+          return json({ error: "This operator account cannot change billing." }, 403);
+        }
+        if (!trustHubConfigured()) {
+          return json({ error: "Text messaging is not switched on for this deployment yet." }, 503);
+        }
+        const reg = await load();
+        if (!otpWaiting(reg)) {
+          return json({ error: "There is no text from Twilio waiting for your reply on this registration." }, 409);
+        }
+        // Off, and the brand lives in a sub-account the parent cannot reach (registrationGate.ts).
+        if (registrationUnreachable(switchMode(), reg)) return json({ error: SMS_PAUSED_SENTENCE }, 409);
+
+        const last = await lastOtpResend(admin, clientId);
+        if (last.error) return json({ error: "Couldn't check when the last text went out. Try again in a minute." }, 503);
+        const opensAt = otpResendAvailableAt(last.createdAt);
+        if (opensAt) {
+          return json({
+            error: "Twilio's text was sent again less than ten minutes ago. Give it a few minutes to arrive before asking again.",
+            code: "otp_resend_cooldown", otpResendAvailableAt: opensAt,
+          }, 429);
+        }
+        // The account the brand lives in, resolved BEFORE the claim: one that cannot be used must
+        // not leave a claim behind holding the cooldown.
+        const creds = await tenantCreds();
+        const { data: claim, error: claimErr } = await admin.from("sms_registration_events")
+          .insert({
+            client_id: clientId,
+            event_id: otpResendKey(clientId, last.id),
+            event_type: OTP_RESENT_EVENT,
+            // A prefix, enough to find it in the console, never a copy.
+            detail: { brand: String(reg.brand_sid).slice(0, 8) },
+          })
+          .select("id, created_at").single();
+        if (claimErr && String((claimErr as { code?: string }).code ?? "") === "23505") {
+          return json({
+            error: "Twilio's text is already being sent again. Give it a few minutes to arrive.",
+            code: "otp_resend_cooldown", otpResendAvailableAt: otpResendAvailableAt(new Date().toISOString()),
+          }, 429);
+        }
+        if (claimErr || !claim) {
+          return json({ error: "Couldn't record the request just now, so nothing was sent. Try again in a minute." }, 503);
+        }
+        try {
+          await resendBrandOtp(reg.brand_sid, creds);
+        } catch (e) {
+          await admin.from("sms_registration_events")
+            .update({ event_type: OTP_RESEND_FAILED_EVENT, event_id: null })
+            .eq("id", (claim as { id: string }).id)
+            .then(() => {}, () => {});
+          throw e;
+        }
+        lastOtpResentAt = String((claim as { created_at?: string }).created_at ?? new Date().toISOString());
         return json({ ok: true, ...view(await load(), await numbersOf()) });
       }
 
@@ -1425,10 +1573,15 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     }).catch(() => {});
 
     if (err instanceof TrustHubError && err.code === 30915) {
-      // The single most likely rejection for a shed builder, and it has a real fix.
+      // Only a sole-proprietor registration can earn 30915. It used to say "go back, answer yes to
+      // the EIN question and submit again", which never worked: the row reuses its Starter profile
+      // and trust product, and since no-EIN texting (2026-10-27) save_intake refuses that switch
+      // outright once they exist (soleProp.ts tierSwitchRefusal). Twilio's own fix is a new
+      // registration with the EIN, which support starts.
       return json({
-        error: "The carriers rejected this as a sole proprietor because the business has a tax ID. " +
-               "Go back, answer yes to the EIN question, and enter it — then submit again.",
+        error: "The carriers rejected this as a sole proprietor because the business has a tax ID (an EIN). " +
+               "A business with an EIN registers through a different process, which needs a new registration. " +
+               "Contact support and we will set it up with you.",
       }, 400);
     }
     if (err instanceof TrustHubError && err.code === 21717) {
@@ -1512,6 +1665,13 @@ async function advanceOne(
 
     case "ready": {
       if (!reg.aup_accepted_at) return reg;
+      // No-EIN texting SHIPS DARK: a sole-proprietor row whose operator switch reads off (never set,
+      // turned off since, or a database without migration 342) stops here, before the intake is
+      // even read: no Twilio call, nothing made, nothing charged. The note says so on the screen.
+      if (reg.brand_tier === "sole_proprietor" && !(await soleProprietorOn(admin, clientId))) {
+        await note("sole_prop_switched_off", { stage: "ready" });
+        return await set({ needs_attention: true, attention_note: SOLE_PROP_OFF_NOTE });
+      }
       const intake = (p.intake ?? {}) as BuilderIntake;
       const problems = validateIntake(intake, reg.brand_tier !== "sole_proprietor");
       if (problems.length) throw new TrustHubError({ message: problems[0], status: 400, code: 0, permanent: true });
@@ -1533,6 +1693,15 @@ async function advanceOne(
         campaign_message_samples: readyCopy.messageSamples,
         campaign_copy_updated_at: new Date().toISOString(),
       });
+
+      // ── No-EIN texting: a DIFFERENT CHAIN, not this one with a flag ───────────────────────
+      // A Starter customer profile and a Sole Proprietor trust product (twilioTrustHub.ts), with a
+      // recorded profile's POLICY read before anything is built on it (soleProp.ts
+      // readySoleProprietor has the order and why). Everything below this branch is the EIN tier,
+      // exactly as it was.
+      if (reg.brand_tier === "sole_proprietor") {
+        return await readySoleProprietor(reg, soleReadyDeps({ admin, clientId, intake, primaryProfileSid, note, set, creds }), soon);
+      }
 
       // Stages 1 and 2. Twilio's ISV guide is explicit that the trust product does NOT have
       // to reach `approved` before the brand, so both are created in one pass and the first
@@ -1602,6 +1771,12 @@ async function advanceOne(
       if (reg.brand_sid) {
         return await set({ status: "brand_pending", next_poll_at: soon(30) });
       }
+      // No-EIN texting: the brand is the PAID step, so a sole-proprietor row whose operator switch
+      // reads off by now (turned off after its profiles were made) stops here too, before the hold.
+      if (reg.brand_tier === "sole_proprietor" && !(await soleProprietorOn(admin, clientId))) {
+        await note("sole_prop_switched_off", { stage: "profile_pending" });
+        return await set({ needs_attention: true, attention_note: SOLE_PROP_OFF_NOTE });
+      }
 
       // ⚠️ HOLD BEFORE SPENDING, CAPTURE AFTER IT SUCCEEDS. A charge taken before the thing
       // is bought is a refund waiting to happen; a charge taken after, with no hold, is a
@@ -1661,26 +1836,54 @@ async function advanceOne(
         mock_brand: b.mock,
         status: "brand_pending",
         next_poll_at: soon(30),
+        // A sole proprietor's "switched off" note from an earlier press is no longer true.
+        ...(reg.brand_tier === "sole_proprietor" ? { needs_attention: false, attention_note: null } : {}),
       });
     }
 
     case "brand_pending": {
       const b = await fetchBrand(reg.brand_sid, creds);
       const status = normalizeBrandStatus(b.status);
-      if (status === "APPROVED") {
+      // ⚠️ READY, NOT JUST APPROVED (no-EIN texting, 2026-10-27). A sole proprietor's brand is
+      // approved and THEN Twilio texts the owner to reply YES; the campaign waits for identity
+      // VERIFIED (sole-prop guide §3). brandReadyForCampaign is that rule, shared with
+      // twilio-events; for every other tier it is APPROVED, exactly the test this line used to be.
+      const soleProp = reg.brand_tier === "sole_proprietor";
+      const identity = b.identityStatus ? String(b.identityStatus).toUpperCase() : null;
+      if (brandReadyForCampaign(reg.brand_tier, status, identity)) {
         await note("brand_approved", { tcrId: b.tcrId });
         return await set({
           brand_status: status, brand_identity_status: b.identityStatus,
           last_errors: b.errors, status: "brand_approved", next_poll_at: soon(1),
+          // A sole proprietor's "still waiting for your YES" (the 30-day note below) is false from
+          // here on; only that family of notes goes (soleProp.ts clearSoleProprietorStepNote), and
+          // twilio-events' promotion clears the same ones. Every other tier: nothing added.
+          ...(soleProp ? clearSoleProprietorStepNote(reg.attention_note) : {}),
         });
       }
-      if (status === "FAILED" || status === "SUSPENDED") {
+      // EXPIRED only for a sole proprietor: TCR expires a brand whose YES never came within 30 days.
+      if (status === "FAILED" || status === "SUSPENDED" || (soleProp && status === "EXPIRED")) {
+        const failedNote = "The carriers rejected this registration. Check the details and resubmit.";
         return await set({
           brand_status: status, last_errors: b.errors, status: "brand_failed",
           next_poll_at: null, needs_attention: true,
           attention_note: status === "SUSPENDED"
             ? "The carriers suspended this brand. Only Twilio support can lift it."
-            : "The carriers rejected this registration. Check the details and resubmit.",
+            : !soleProp ? failedNote
+            : status === "EXPIRED" ? SOLE_PROP_EXPIRED_NOTE
+            // The sole-prop brand codes (30701 / 30793 / 30791) in plain words; any other, as above.
+            : soleProprietorBrandNote(b.errors, failedNote),
+        });
+      }
+      // ── A sole proprietor, approved, no YES yet ───────────────────────────────────────────
+      // Stays brand_pending (the portal's "Reply YES" card) with the identity recorded, and is
+      // looked at again in ten minutes rather than sixty. Past 30 days since the brand was sent it
+      // says so once (Twilio may expire it; only support can remove and resend it) and slows down.
+      if (soleProp && status === "APPROVED") {
+        const wait = yesWait(await brandRegisteredAt(admin, clientId));
+        return await set({
+          brand_status: status, brand_identity_status: identity, next_poll_at: soon(wait.pollMins),
+          ...(wait.late && !reg.needs_attention ? { needs_attention: true, attention_note: SOLE_PROP_LATE_NOTE } : {}),
         });
       }
       return await set({ brand_status: status, next_poll_at: soon(60) });
@@ -1719,7 +1922,19 @@ async function advanceOne(
       // catch. Nothing is written, so the row stays brand_approved and a retry reuses the
       // Messaging Service persisted above.
       const eligible = await fetchEligibleUseCases(svc.serviceSid, reg.brand_sid, creds);
-      const wanted = String(p.useCase ?? "");
+      // ⚠️ A SOLE PROPRIETOR HAS EXACTLY ONE USE CASE, SOLE_PROPRIETOR (UsAppToPerson schema; one
+      // campaign per brand), so it is asked for by name, never left to the MIXED / CUSTOMER_CARE /
+      // first-offered fallback below. Not offered means something is wrong with the brand: no
+      // campaign (the vetting fee is per campaign), a note, and support looks.
+      if (reg.brand_tier === "sole_proprietor" && !eligible.some((u) => u.code === "SOLE_PROPRIETOR")) {
+        await note("sole_prop_use_case_missing", { offered: eligible.map((u) => u.code).slice(0, 10) });
+        return await set({
+          messaging_service_sid: svc.serviceSid, status: "brand_approved",
+          next_poll_at: soon(60), needs_attention: true,
+          attention_note: SOLE_PROP_NO_USE_CASE_NOTE,
+        });
+      }
+      const wanted = reg.brand_tier === "sole_proprietor" ? "SOLE_PROPRIETOR" : String(p.useCase ?? "");
       const pick = eligible.find((u) => u.code === wanted)
         ?? eligible.find((u) => u.code === "MIXED")
         ?? eligible.find((u) => u.code === "CUSTOMER_CARE")
@@ -1742,8 +1957,10 @@ async function advanceOne(
         throw new TrustHubError({ message: copyProblems[0], status: 400, code: 0, permanent: true });
       }
       const samples: string[] = copy.messageSamples.filter(Boolean);
-      // Keep whatever the caller improved: a campaign rejection can only be re-authored from our
-      // own record, because the Usa2p resource has no update operation.
+      // Keep whatever the caller improved: the row is the copy the form pre-fills after a reload
+      // and the one every rejection is re-authored from. (This comment used to add "because the
+      // Usa2p resource has no update operation". It has one, UpdateUsAppToPerson, and the
+      // campaign_failed stage below edits in place with it, free: see the header there.)
       await set({
         campaign_description: copy.description,
         campaign_message_flow: copy.messageFlow,
@@ -1790,6 +2007,10 @@ async function advanceOne(
         campaign_status: normalizeCampaignStatus(c.status),
         status: "campaign_pending",
         next_poll_at: soon(60),
+        // A sole proprietor's "no campaign was sent" (an earlier press found no SOLE_PROPRIETOR use
+        // case) or a late-YES note the brand step missed is untrue now that one was. Only those
+        // notes, only for that tier (soleProp.ts clearSoleProprietorStepNote).
+        ...(reg.brand_tier === "sole_proprietor" ? clearSoleProprietorStepNote(reg.attention_note) : {}),
       });
     }
 
@@ -1805,10 +2026,13 @@ async function advanceOne(
       if (status === "FAILED") {
         // A rejection is a LOOP now, not an operator escalation: `campaign_failed` below edits
         // this same campaign in place, for free, as many times as it takes.
+        const turnedDown = "The carriers turned down the way this campaign describes its texting. Fix the wording and send it again — resending costs nothing.";
         return await set({
           campaign_status: status, status: "campaign_failed", next_poll_at: null,
           needs_attention: true,
-          attention_note: "The carriers turned down the way this campaign describes its texting. Fix the wording and send it again — resending costs nothing.",
+          // A sole proprietor's own verdicts (30903 / 30914 / 30915) in plain words; any other
+          // code, and every other tier, the sentence above.
+          attention_note: reg.brand_tier === "sole_proprietor" ? soleProprietorCampaignNote(c.errors, turnedDown) : turnedDown,
         });
       }
       return await set({ campaign_status: status, next_poll_at: soon(120) });
@@ -1891,10 +2115,70 @@ async function advanceOne(
         brand_update_count: Number(reg.brand_update_count ?? 0) + 1,
         status: "brand_pending", needs_attention: false, attention_note: null,
         next_poll_at: soon(30),
+        // A sole proprietor's refusal reasons belong to the attempt just replaced: since
+        // 2026-10-27 the event path stores them too, and the status card lists errors in every
+        // status, so they stayed up under "Reply YES" and the campaign form. Every other tier
+        // writes exactly what it did before.
+        ...(reg.brand_tier === "sole_proprietor" ? { last_errors: [] } : {}),
       });
     }
 
     default:
       return reg;
   }
+}
+
+/**
+ * The ready stage's Twilio and database steps for a SOLE PROPRIETOR (soleProp.ts readySoleProprietor
+ * decides the order), bound to this tenant's account. Each mirrors its EIN-tier twin in advanceOne:
+ *   * the recorded profile's policy is one GET (readCustomerProfile), a recorded trust product's one
+ *     more (fetchTrustProduct);
+ *   * a recorded Starter profile is FINISHED against the Starter policy, in a sub-account and on the
+ *     parent alike (every step read first, so a finished one costs two reads and sends nothing);
+ *   * createStarterCustomerProfile's refused (or unanswered) link to the parent's primary profile is
+ *     written down in a SUB-account only, before it is rethrown, so the next press finishes that
+ *     profile instead of making a second set of objects. On the parent nothing is written, as the
+ *     EIN tier does (review 2026-10-09);
+ *   * a profile Twilio rejected is ProfileRejectedError: the handler's 409, before anything is paid.
+ */
+function soleReadyDeps(o: {
+  // deno-lint-ignore no-explicit-any
+  admin: any;
+  clientId: string;
+  intake: BuilderIntake;
+  primaryProfileSid: string;
+  note: (t: string, d: unknown) => Promise<void>;
+  // deno-lint-ignore no-explicit-any
+  set: (patch: Record<string, unknown>) => Promise<any>;
+  creds: (TrustHubCreds & { source?: "parent" | "sub" }) | null;
+}): SoleReadyDeps {
+  const onSub = o.creds?.source === "sub";
+  const http = trustHubHttp(o.creds);
+  return {
+    set: o.set,
+    note: o.note,
+    readProfile: (sid) => readCustomerProfile(sid, http),
+    readTrustProduct: (sid) => fetchTrustProduct(sid, http),
+    finishStarter: (sid) => finishSecondaryCustomerProfile(sid, o.primaryProfileSid, http, {
+      crossAccount: onSub, policySid: POLICY_STARTER_CUSTOMER_PROFILE,
+    }),
+    createStarter: async () => {
+      try {
+        return await createStarterCustomerProfile({
+          intake: o.intake, primaryProfileSid: o.primaryProfileSid,
+          friendlyName: `${o.clientId} — ${soleProprietorBrandName(o.intake)}`,
+        }, o.creds);
+      } catch (e) {
+        if (onSub && e instanceof PrimaryProfileLinkError && /^BU[0-9a-f]{32}$/i.test(e.profileSid)) {
+          await o.set({ customer_profile_sid: e.profileSid });
+          await o.note(e.refused ? "primary_link_refused" : "primary_link_unanswered", { code: e.code, status: e.status, tier: "sole_proprietor" });
+        }
+        throw e;
+      }
+    },
+    // FriendlyName left to the shared default, the brand name (the guide's 2.2 asks for the
+    // customer's name there, where the profile's is an internal label).
+    createTrustProduct: (profileSid) => createSoleProprietorTrustProduct({ intake: o.intake, customerProfileSid: profileSid }, o.creds),
+    rejected: () => Promise.reject(new ProfileRejectedError()),
+  };
 }
