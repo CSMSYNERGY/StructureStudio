@@ -8,6 +8,10 @@
 //     builder's own requests folder, moves a request to done with a result template and a copy in the
 //     builder's library (named as they asked, made unique), and refuses a template of another kind;
 //   * a refund credits the builder's wallet once per amount, never more than was charged, with a reason.
+//   * doors builders made from photos (346): operators list every builder's READY look with its company;
+//     promoting one copies its spec and tile into a template under a NEW name, with no builder id or name
+//     on the row (the audit row says where it came from), a free slug, read-only operators refused; the
+//     list then says it is in the library; a promoted template keeps its look but renames and archives.
 //
 // HOW. deleteClientHarness's loader (Deno.serve stubbed while admin-catalog/index.ts is imported, the
 // import map swapping supabase-js for supabase_stub.ts) and an in-memory fake for every table, rpc and
@@ -23,11 +27,12 @@ const A = "acme-sheds", B = "bravo-barns";
 const OP_ID = "00000000-0000-4000-8000-0000000000c1";
 const U = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const T_LAP = U(901), T_WIN = U(902), T_DOOR = U(903);
+const L_READY = U(801), L_DRAFT = U(802);
 
 type Row = Record<string, any>;
 type Op = { can_write: boolean; can_bill: boolean; support_only: boolean } | null;
 type World = { op: Op; tables: Record<string, Row[]> };
-type Trace = { writes: Array<{ table: string; verb: string; row: any }>; rpc: Array<{ fn: string; args: any }>; signed: string[] };
+type Trace = { writes: Array<{ table: string; verb: string; row: any }>; rpc: Array<{ fn: string; args: any }>; signed: string[]; copied: Array<[string, string]> };
 
 function world(op: Op): World {
   return {
@@ -47,6 +52,11 @@ function world(op: Op): World {
         { id: U(602), client_id: B, category: "cladding", status: "in_progress", name: "Stone veneer", photos: [], charged_cents: 0, refunded_cents: 0, created_at: "2026-10-27T11:00:00Z", updated_at: "2026-10-27T11:00:00Z" },
       ],
       client_configs: [{ client_id: A, company_name: "Acme Sheds" }, { client_id: B, company_name: "Bravo Barns" }],
+      door_looks: [
+        { id: L_READY, client_id: B, name: "Bravo ranch door", base: "zbrace", spec: { v: 1, base: "zbrace", src: { leaves: 1, hinge: "left" }, brace: { t: "z", from: "hinge" } }, spec_version: 1, status: "ready", thumb_url: `https://stub.supabase.co/storage/v1/object/public/fixtures/${B}/door-look-${U(3)}.png`, ai_call_id: U(4), updated_at: "2026-10-27T12:00:00Z" },
+        { id: L_DRAFT, client_id: A, name: "Acme draft", base: "plank", spec: { v: 1, base: "plank", src: { leaves: 1, hinge: "left" } }, spec_version: 1, status: "draft", thumb_url: null, ai_call_id: U(5), updated_at: "2026-10-27T12:30:00Z" },
+      ],
+      admin_audit: [],
     },
   };
 }
@@ -57,6 +67,8 @@ function matches(r: Row, ops: any[][]): boolean {
   for (const o of ops) {
     if (o[0] === "eq" && r[o[1]] !== o[2]) return false;
     if (o[0] === "in" && !(o[2] as unknown[]).includes(r[o[1]])) return false;
+    if (o[0] === "is" && o[2] === null && r[o[1]] != null) return false;
+    if (o[0] === "not" && o[2] === "is" && o[3] === null && r[o[1]] == null) return false;
   }
   return true;
 }
@@ -66,12 +78,17 @@ function answer(w: World, t: Trace, table: string, ops: any[][]): any {
   const single = has(ops, "single") || has(ops, "maybeSingle");
   const out = (rows: Row[]) => (single ? { data: rows[0] ?? null, error: null } : { data: rows, error: null });
   if (table === "app_operators") return { data: w.op ? { user_id: OP_ID, email: "ops@example.test", ...w.op } : null, error: null };
-  if (table === "admin_audit" || table === "app_errors" || table === "admin_auth_attempts") return { data: null, error: null };
+  if (table === "app_errors" || table === "admin_auth_attempts") return { data: null, error: null };
+  // admin_audit keeps its rows: the promoted doors list reads them back (346).
+  if (table === "admin_audit" && !has(ops, "insert") && !has(ops, "select")) return { data: null, error: null };
   if (verb) t.writes.push({ table, verb, row: argOf(ops, verb)[0] });
   const rows = (w.tables[table] ??= []);
   if (verb === "insert") {
     const raw = argOf(ops, "insert")[0];
     const list: Row[] = (Array.isArray(raw) ? raw : [raw]).map((r: Row) => ({ id: U(seq++), version: 1, status: "active", ...r }));
+    if (table === "library_items") {
+      for (const r of list) if (rows.some((x) => x.category === r.category && x.slug === r.slug)) return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint \"library_items_slug_key\"" } };
+    }
     rows.push(...list);
     return out(list);
   }
@@ -90,7 +107,7 @@ function chain(w: World, t: Trace, table: string, ops: any[][]): any {
 
 const ENV: Record<string, string> = { SUPABASE_URL: "https://stub.supabase.co", SUPABASE_ANON_KEY: "stub-anon", SUPABASE_SERVICE_ROLE_KEY: "stub-service" };
 async function call(body: Record<string, unknown>, w: World) {
-  const t: Trace = { writes: [], rpc: [], signed: [] };
+  const t: Trace = { writes: [], rpc: [], signed: [], copied: [] };
   const saved = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
   stubAuth.user = { id: OP_ID, email: "ops@example.test" };
@@ -99,6 +116,8 @@ async function call(body: Record<string, unknown>, w: World) {
   stubRpc.rpc = (fn: string, args?: any) => { t.rpc.push({ fn, args }); return Promise.resolve({ data: 1234, error: null }); };
   stubStorage.from = (bucket: string) => ({
     createSignedUrl: (path: string) => { t.signed.push(`${bucket}:${path}`); return Promise.resolve({ data: { signedUrl: `https://signed.example.test/${path}` }, error: null }); },
+    copy: (from: string, to: string) => { t.copied.push([`${bucket}:${from}`, `${bucket}:${to}`]); return Promise.resolve({ data: { path: to }, error: null }); },
+    getPublicUrl: (p: string) => ({ data: { publicUrl: `https://stub.supabase.co/storage/v1/object/public/${bucket}/${p}` } }),
   });
   try {
     const res = await ADMIN(new Request("https://stub.supabase.co/functions/v1/admin-catalog", {
@@ -192,4 +211,49 @@ Deno.test("a refund: credited to that builder, never more than charged, once per
   assertEquals(again.status, 400, "nothing left to refund");
   const free = await call({ action: "library_request_refund", id: U(602), reason: "x" }, w);
   assertEquals(free.status, 400, "nothing was charged");
+});
+
+Deno.test("doors builders made from photos: operators see every builder's ready look; promoting copies it with no builder on the template", async () => {
+  const w = world(FULL);
+  const list = await call({ action: "library_door_looks_list" }, w);
+  assertEquals(list.status, 200, JSON.stringify(list.body));
+  assertEquals(list.body.looks.map((l: any) => [l.name, l.companyName, l.base, l.fromPhoto, l.promotedItemId]), [["Bravo ranch door", "Bravo Barns", "zbrace", true, null]], "ready looks only, with their builder");
+  const ro = world({ can_write: false, can_bill: false, support_only: false });
+  assertEquals((await call({ action: "library_door_looks_list" }, ro)).status, 200, "a read-only operator may look");
+  const roP = await call({ action: "library_door_look_promote", doorLookId: L_READY, name: "Ranch Z door" }, ro);
+  assertEquals(roP.status, 403, "...but not promote");
+  assertEquals(roP.t.writes.filter((x) => x.table === "library_items").length, 0);
+  const noName = await call({ action: "library_door_look_promote", doorLookId: L_READY, name: "  " }, w);
+  assertEquals(noName.status, 400, "a StructureStudio name is required");
+  const draft = await call({ action: "library_door_look_promote", doorLookId: L_DRAFT, name: "Draft door" }, w);
+  assertEquals(draft.status, 404, "a draft is not promoted");
+
+  const p = await call({ action: "library_door_look_promote", doorLookId: L_READY, name: "Ranch Z door", description: "Boards with a Z brace and T-straps.", searchTerms: "barn, ranch, z brace" }, w);
+  assertEquals(p.status, 200, JSON.stringify(p.body));
+  const made = w.tables.library_items.find((x) => x.name === "Ranch Z door")!;
+  assertEquals([made.category, made.source, made.slug, made.look, made.leaves], ["door", "csm", "ranch-z-door", { doorStyle: "zbrace" }, 1]);
+  assertEquals(made.door_spec, w.tables.door_looks[0].spec, "the builder's spec, as saved");
+  assert(!JSON.stringify(made).includes(B) && !JSON.stringify(made).includes("Bravo"), "no builder id or name on the template: " + JSON.stringify(made));
+  assertEquals(p.t.copied.length, 1, "the tile is copied");
+  assert(p.t.copied[0][0] === `fixtures:${B}/door-look-${U(3)}.png` && /^fixtures:library\/door-[0-9a-f-]{36}\.png$/.test(p.t.copied[0][1]), JSON.stringify(p.t.copied));
+  assert(/\/public\/fixtures\/library\/door-/.test(made.thumb_url), "the template shows the StructureStudio copy: " + made.thumb_url);
+  assertEquals(p.body.tileCopied, true);
+  const audit = w.tables.admin_audit.find((x) => x.action === "library_door_look_promote")!;
+  assert(audit && audit.target_client_id === B && audit.note.includes(`look=${L_READY}`) && audit.note.includes(`item=${made.id}`), "where it came from is in the audit row only");
+
+  const again = await call({ action: "library_door_looks_list" }, w);
+  assertEquals(again.body.looks[0].promotedItemId, made.id, "the list says it is in the library");
+  const twice = await call({ action: "library_door_look_promote", doorLookId: L_READY, name: "Ranch Z door" }, w);
+  assertEquals(twice.status, 200, "a second copy under the same name takes a free slug");
+  assertEquals(w.tables.library_items.filter((x) => x.name === "Ranch Z door").map((x) => x.slug), ["ranch-z-door", "ranch-z-door-2"]);
+
+  const items = await call({ action: "library_items_list" }, w);
+  const byName = Object.fromEntries(items.body.items.map((x: any) => [x.slug, x]));
+  assertEquals([byName["ranch-z-door"].fromPhoto, byName["american"].fromPhoto], [true, false]);
+  const move = await call({ action: "library_item_save", id: made.id, look: { doorStyle: "classic" } }, w);
+  assertEquals([move.status, move.body.code], [400, "library_promoted_look_fixed"], "a promoted door keeps its look");
+  const rename = await call({ action: "library_item_save", id: made.id, name: "Ranch Z barn door", look: { doorStyle: "zbrace" } }, w);
+  assertEquals(rename.status, 200, "...but renames (the editor's own look sent back is fine)");
+  const plain = await call({ action: "library_item_save", id: T_DOOR, look: { doorStyle: "classic" } }, w);
+  assertEquals(plain.status, 200, "a built-in door template still changes its look");
 });

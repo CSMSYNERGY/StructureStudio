@@ -6014,7 +6014,8 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
     setBusy(null);
   };
   const addEntry = () => run("add", async () => {
-    await call({ action: "library_add", templateId: adding.template.id, name: adding.name, look: adding.look });
+    // A promoted door (346) is copied with its own look; the server takes no look for it.
+    await call({ action: "library_add", templateId: adding.template.id, name: adding.name, ...(adding.template.fromPhoto ? {} : { look: adding.look }) });
     setAdding(null);
   }, `Imported. Pick it on your ${noun === "cladding" ? "styles" : noun + "s"} below.`);
   const saveEdit = () => run("edit:" + editing.id, async () => {
@@ -6087,7 +6088,7 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
     <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 12.5, color: "#334155" }}>
       {label && <span style={{ fontWeight: 800, color: "#15803D" }}>✓ {label}</span>}
       <b>{e.name}</b>
-      <span style={{ color: "#64748B" }}>· {ssLibLookWords(category, e.look)} · {usedWords(e)}</span>
+      <span style={{ color: "#64748B" }}>· {e.look && e.look.doorLookId && e.templateId ? "From the StructureStudio library, drawn in 3D" : ssLibLookWords(category, e.look)} · {usedWords(e)}</span>
       <button style={tinyBtn} onClick={() => { setEditing({ id: e.id, name: e.name, look: e.look || {} }); setMsg(null); }}>Rename</button>
       <button style={{ ...tinyBtn, color: "#B91C1C" }} disabled={busy === "rm:" + e.id} onClick={() => remove(e)}>{busy === "rm:" + e.id ? "Removing…" : "Remove"}</button>
     </div>
@@ -6130,15 +6131,15 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
             const addingThis = adding && adding.template.id === t.id;
             return (
               <div key={t.id} style={rowStyle} data-ss-library-template={t.name}>
-                <SsLibPic category={category} look={addingThis ? adding.look : t.look} />
+                <SsLibPic category={category} look={addingThis ? adding.look : t.look} thumbUrl={t.fromPhoto ? t.thumbUrl : null} />
                 <div style={{ flex: "1 1 320px", minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: 13.5, color: "#1E293B" }}>{t.name}</div>
-                  <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.45 }}>{t.description || ssLibLookWords(category, t.look)}</div>
+                  <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.45 }}>{t.description || (t.fromPhoto ? "A door drawn in 3D from a photo" : ssLibLookWords(category, t.look))}</div>
                   {imp.map((e) => entryLine(e, "Imported as"))}
                   {addingThis && (
                     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
                       <input type="text" value={adding.name} maxLength={60} placeholder="Your name for it" onChange={(e) => setAdding({ ...adding, name: e.target.value })} style={{ ...S.input, width: 240 }} aria-label="Your name for it" />
-                      <SsLibLookEdit category={category} look={adding.look} onChange={(look) => setAdding({ ...adding, look })} />
+                      {!t.fromPhoto && <SsLibLookEdit category={category} look={adding.look} onChange={(look) => setAdding({ ...adding, look })} />}
                       <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "add"} onClick={addEntry}>{busy === "add" ? "Importing…" : "Import"}</button>
                       <button style={smallBtn} onClick={() => setAdding(null)}>Cancel</button>
                     </div>

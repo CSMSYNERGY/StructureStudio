@@ -2222,6 +2222,77 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
 // SsLibLookEdit are the builder side's (portal/03-catalog.jsx), so both sides describe a look alike.
 const ADM_LIB_CATS = [["cladding", "Claddings"], ["door", "Doors"], ["window", "Windows"]];
 const ADM_LIB_BLANK_LOOK = { cladding: { profile: "lap" }, door: { doorStyle: "plank" }, window: { liteRows: 2, liteCols: 2 } };
+// Doors builders made from photos (346; Carolyn's 10-27 call): every builder's saved 3D door, for an
+// operator to copy into the StructureStudio library under a NEW name. The template carries no builder
+// name or id (Ahsan 10-27: promote freely, strip the name); the builder keeps their own copy.
+function AdmLibraryDoorLooks({ items, onPromoted }) {
+  const [looks, setLooks] = useState(null);
+  const [installed, setInstalled] = useState(true);
+  const [form, setForm] = useState(null);       // { look, name, description, searchTerms }
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await adminApi("library_door_looks_list", {});
+      setInstalled(r.installed !== false);
+      setLooks(r.looks || []);
+    } catch (e) { setMsg({ err: e.message || "Couldn't load builders' doors." }); setLooks([]); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const itemName = (id) => ((items || []).find((t) => t.id === id) || {}).name || "a template";
+  const promote = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await adminApi("library_door_look_promote", { doorLookId: form.look.id, name: form.name, description: form.description, searchTerms: form.searchTerms });
+      setMsg({ ok: `Added "${r.item.name}" to the StructureStudio library. Builders with door looks on can use it now.${r.tileCopied ? "" : " (Its picture couldn't be copied.)"}` });
+      setForm(null);
+      await load();
+      if (onPromoted) onPromoted();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  if (!installed) return null;
+  return (
+    <div style={{ marginTop: 14, borderTop: "1px solid #E2E8F0", paddingTop: 10 }} data-adm-door-looks="1">
+      <div style={{ fontWeight: 800, fontSize: 13.5, color: "#1E293B" }}>Doors builders made from photos</div>
+      <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px", maxWidth: 680 }}>
+        Add one to the StructureStudio library under a StructureStudio name. The template keeps no builder name or details; the builder keeps their own copy.
+      </div>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {!looks && <SkelBar />}
+      {looks && !looks.length && <div style={{ fontSize: 12.5, color: "#64748B" }}>No builder has saved a 3D door yet.</div>}
+      {(looks || []).map((l) => (
+        <div key={l.id}>
+          <div style={{ ...ADM_ROW, flexWrap: "wrap" }} data-adm-door-look={l.name}>
+            <SsLibPic category="door" look={{ doorStyle: l.base }} size={38} thumbUrl={l.thumbUrl} />
+            <div style={{ flex: "1 1 300px", minWidth: 0, fontSize: 12.5 }}>
+              <div style={{ fontWeight: 800, color: "#1E293B" }}>{l.name}</div>
+              <div style={{ color: "#64748B" }}>{l.companyName || l.clientId} · drawn over {ssLibLookWords("door", { doorStyle: l.base }).replace(/ \(built in 3D\)$/, "")}{l.leaves === 2 ? " · double" : ""}{l.fromPhoto ? " · from a photo" : ""}</div>
+            </div>
+            {l.promotedItemId
+              ? <AdmChip tone="on">In the library as {itemName(l.promotedItemId)}</AdmChip>
+              : <button type="button" onClick={() => { setForm({ look: l, name: "", description: "", searchTerms: "" }); setMsg(null); }}
+                  style={{ ...S.btn("#ECFDF5", "#047857"), padding: "4px 10px", fontSize: 12 }}>Add to the StructureStudio library</button>}
+          </div>
+          {form && form.look.id === l.id && (
+            <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, margin: "6px 0 10px", background: "#F8FAFC", display: "grid", gap: 8, maxWidth: 640 }} data-adm-door-look-promote="1">
+              <input type="text" value={form.name} maxLength={80} placeholder="A StructureStudio name (not the builder's)" onChange={(e) => setForm({ ...form, name: e.target.value })} style={S.input} aria-label="StructureStudio name" />
+              <textarea rows={2} maxLength={600} value={form.description} placeholder="What it looks like, in a sentence" onChange={(e) => setForm({ ...form, description: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Description" />
+              <input type="text" value={form.searchTerms} placeholder="Search words, comma separated (e.g. barn, z brace, ranch)" onChange={(e) => setForm({ ...form, searchTerms: e.target.value })} style={S.input} aria-label="Search words" />
+              <div style={{ fontSize: 11.5, color: "#64748B" }}>No builder or supplier names here: every builder with door looks on sees it.</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" disabled={busy} onClick={promote} style={S.btn(ACCENT, "#FFF")}>{busy ? "Adding…" : "Add to the library"}</button>
+                <button type="button" onClick={() => setForm(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AdmLibrary() {
   const [items, setItems] = useState(null);
   const [installed, setInstalled] = useState(true);
@@ -2247,7 +2318,7 @@ function AdmLibrary() {
   const save = async () => {
     setBusy("save"); setMsg(null);
     try {
-      const body = { name: edit.name, description: edit.description, searchTerms: edit.searchTerms, look: edit.look };
+      const body = { name: edit.name, description: edit.description, searchTerms: edit.searchTerms, ...(edit.fromPhoto ? {} : { look: edit.look }) };
       if (edit.id) await adminApi("library_item_save", { id: edit.id, ...body });
       else await adminApi("library_item_save", { category: edit.category, ...body, sortOrder: (list.length + 1) * 10 });
       setMsg({ ok: edit.id ? `Saved "${edit.name}". Builders' copies are unchanged.` : `Added "${edit.name}". Builders can use it now.` });
@@ -2284,7 +2355,7 @@ function AdmLibrary() {
             {Object.keys(SS_LIB_CLADDING_NAMES).map((k) => <option key={k} value={k}>Drawn as {SS_LIB_CLADDING_NAMES[k]}</option>)}
           </select>
         )}
-        <SsLibLookEdit category={edit.category} look={edit.look} onChange={(look) => setEdit({ ...edit, look })} />
+        {!edit.fromPhoto && <SsLibLookEdit category={edit.category} look={edit.look} onChange={(look) => setEdit({ ...edit, look })} />}
       </div>
       <textarea rows={2} maxLength={600} value={edit.description} placeholder="What it looks like, in a sentence" onChange={(e) => setEdit({ ...edit, description: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Description" />
       <input type="text" value={edit.searchTerms} placeholder="Search words, comma separated (e.g. lap, clapboard, engineered wood)" onChange={(e) => setEdit({ ...edit, searchTerms: e.target.value })} style={S.input} aria-label="Search words" />
@@ -2315,22 +2386,24 @@ function AdmLibrary() {
       {list.map((t, i) => (
         <div key={t.id}>
           <div style={{ ...ADM_ROW, opacity: t.status === "archived" ? 0.55 : 1, flexWrap: "wrap" }} data-adm-library-item={t.name}>
-            <SsLibPic category={t.category} look={t.look} size={38} />
+            <SsLibPic category={t.category} look={t.look} size={38} thumbUrl={t.fromPhoto ? t.thumbUrl : null} />
             <div style={{ flex: "1 1 300px", minWidth: 0, fontSize: 12.5 }}>
               <div style={{ fontWeight: 800, color: "#1E293B" }}>{t.name} <span style={{ fontWeight: 500, color: "#94A3B8" }}>v{t.version}</span></div>
-              <div style={{ color: "#64748B" }}>{ssLibLookWords(t.category, t.look)}{t.searchTerms && t.searchTerms.length ? ` · ${t.searchTerms.join(", ")}` : ""}</div>
+              <div style={{ color: "#64748B" }}>{t.fromPhoto ? "Drawn in 3D from a builder's photo" : ssLibLookWords(t.category, t.look)}{t.searchTerms && t.searchTerms.length ? ` · ${t.searchTerms.join(", ")}` : ""}</div>
             </div>
+            {t.fromPhoto && <AdmChip tone="neutral">From a photo</AdmChip>}
             <AdmChip tone={t.copies ? "on" : "neutral"}>{t.copies} {t.copies === 1 ? "copy" : "copies"}</AdmChip>
             {t.status === "archived" && <AdmChip tone="warn">Archived</AdmChip>}
             <button type="button" disabled={!!busy || i === 0} onClick={() => move(i, -1)} title="Move up" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↑</button>
             <button type="button" disabled={!!busy || i === list.length - 1} onClick={() => move(i, 1)} title="Move down" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↓</button>
-            <button type="button" onClick={() => setEdit({ id: t.id, category: t.category, name: t.name, description: t.description || "", searchTerms: (t.searchTerms || []).join(", "), look: t.look || {} })}
+            <button type="button" onClick={() => setEdit({ id: t.id, category: t.category, name: t.name, description: t.description || "", searchTerms: (t.searchTerms || []).join(", "), look: t.look || {}, fromPhoto: t.fromPhoto === true })}
               style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>Edit</button>
             <button type="button" disabled={busy === t.id} onClick={() => archive(t)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>{t.status === "archived" ? "Restore" : "Archive"}</button>
           </div>
           {edit && edit.id === t.id && editor}
         </div>
       ))}
+      {cat === "door" && <AdmLibraryDoorLooks items={items} onPromoted={load} />}
     </div>
   );
 }

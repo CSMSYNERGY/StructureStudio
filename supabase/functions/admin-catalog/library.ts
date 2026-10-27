@@ -9,7 +9,12 @@
 // entries are copies (client_library). `version` is bumped on every edit so a builder's copy can later
 // say it was made from an older one. Archiving hides a template from new picks; copies stay.
 //
-// PROMOTING a builder's entry into this library is NOT here (Ahsan 2026-10-27: not in v1).
+// PROMOTING A DOOR A BUILDER MADE FROM A PHOTO (346; Carolyn's 10-27 call, Ahsan 10-27: "promote
+// freely, strip name"). library_door_looks_list shows every builder's READY 3D door look to operators;
+// library_door_look_promote copies one into this library under a NEW name: its cleaned spec
+// (door_spec), drawn over its base, and its tile copied to a StructureStudio path. The template carries
+// no builder id and no builder name; where it came from is in admin_audit only. A builder who imports it
+// gets their own ready copy (portal-settings library_add).
 
 import { type Category, cleanLook, cleanName, isLibraryId, type Look, templateOut } from "../_shared/libraryLook.ts";
 
@@ -24,6 +29,20 @@ const TEMPLATE_COLS = "id, category, slug, name, description, search_terms, look
 const REQUEST_COLS = "id, client_id, category, status, name, width_in, height_in, leaves, photos, supplier_url, notes, charged_cents, refunded_cents, refund_reason, result_library_item_id, result_client_library_id, result_note, requested_by, decided_at, created_at, updated_at";
 const missing = (err: unknown) => ["42703", "42P01", "PGRST204", "PGRST205"].includes(String((err as { code?: string } | null)?.code ?? ""));
 const NOT_APPLIED = { error: "Migration 339 isn't applied on this database yet.", code: "library_unavailable" };
+const DOORS_NOT_APPLIED = { error: "Migrations 343 and 346 aren't applied on this database yet.", code: "library_door_looks_unavailable" };
+const DOOR_BASES = ["plank", "zbrace", "xbrace", "american", "basic", "classic", "dutch"];
+const UUID_IN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+/** Which templates are promoted doors (346): their ids. A database without 346 has none. */
+async function promotedIds(sb: Db): Promise<Set<string>> {
+  const r = await sb.from("library_items").select("id, door_spec").not("door_spec", "is", null);
+  if (r.error) { if (missing(r.error)) return new Set(); throw r.error; }
+  return new Set(((r.data ?? []) as { id: string }[]).map((x) => String(x.id)));
+}
+/** The public fixtures path a tile URL points at, or null for anything else. */
+const fixturesPathOf = (url: unknown): string | null => {
+  const m = /\/storage\/v1\/object\/public\/fixtures\/([^?#]+)$/.exec(String(url ?? ""));
+  return m && !m[1].includes("..") ? decodeURIComponent(m[1]) : null;
+};
 
 async function auditRow(sb: Db, identity: Identity, action: string, clientId: string | null, note: string) {
   try {
@@ -63,8 +82,9 @@ export async function handleAdminLibraryAction(sb: Db, action: string, p: Record
     if (copies.error) throw copies.error;
     const n = new Map<string, number>();
     for (const r of (copies.data ?? []) as { library_item_id: string | null }[]) if (r.library_item_id) n.set(r.library_item_id, (n.get(r.library_item_id) ?? 0) + 1);
+    const promoted = await promotedIds(sb);
     // deno-lint-ignore no-explicit-any
-    return json({ ok: true, installed: true, items: ((items.data ?? []) as any[]).map((r) => ({ ...templateOut(r), source: r.source, updatedAt: r.updated_at, copies: n.get(r.id) ?? 0 })) });
+    return json({ ok: true, installed: true, items: ((items.data ?? []) as any[]).map((r) => ({ ...templateOut(r), source: r.source, updatedAt: r.updated_at, copies: n.get(r.id) ?? 0, fromPhoto: promoted.has(String(r.id)) })) });
   }
 
   if (action === "library_item_save") {
@@ -91,6 +111,10 @@ export async function handleAdminLibraryAction(sb: Db, action: string, p: Record
     if (!cur.data || p.look !== undefined) {
       const look: Look | null = cleanLook(category, p.look ?? {});
       if (!look) return json({ error: "That look isn't valid for this kind of template." }, 400);
+      // A promoted door (346) is drawn over its spec's base: its look stays that base.
+      if (cur.data && category === "door" && look.doorStyle !== (cur.data.look as Look).doorStyle && (await promotedIds(sb)).has(String(id))) {
+        return json({ error: "A door promoted from a builder's photo keeps its look. Rename or archive it instead.", code: "library_promoted_look_fixed" }, 400);
+      }
       if (cur.data && category === "cladding" && look.profile !== (cur.data.look as Look).profile) {
         return json({ error: "A cladding template keeps its profile: builders' style rows are drawn by it. Add a new template instead." }, 400);
       }
@@ -137,6 +161,78 @@ export async function handleAdminLibraryAction(sb: Db, action: string, p: Record
     if (res.error) throw res.error;
     await auditRow(sb, identity, "library_item_save", null, `item=${res.data.id} ${cur.data ? "edit" : "add"} fields=${Object.keys(row).join(",")}`);
     return json({ ok: true, item: templateOut(res.data) });
+  }
+
+  // ── Doors builders made from photos, and promoting one (346) ────────────────────────────────
+  if (action === "library_door_looks_list") {
+    const [looks, names, audits] = await Promise.all([
+      sb.from("door_looks").select("id, client_id, name, base, spec, thumb_url, ai_call_id, updated_at").eq("status", "ready").order("updated_at", { ascending: false }).limit(200),
+      sb.from("client_configs").select("client_id, company_name"),
+      sb.from("admin_audit").select("note, created_at").eq("action", "library_door_look_promote").order("created_at", { ascending: false }).limit(500),
+    ]);
+    if (looks.error && missing(looks.error)) return json({ ok: true, installed: false, looks: [] });
+    if (looks.error) throw looks.error;
+    const nameOf = new Map(((names.data ?? []) as { client_id: string; company_name: string | null }[]).map((c) => [String(c.client_id), c.company_name ?? null]));
+    // Which looks were already promoted, and as which template: the audit note names both ids.
+    const promotedAs = new Map<string, string>();
+    for (const a of (audits.data ?? []) as { note: string | null }[]) {
+      const [look, item] = String(a.note ?? "").match(UUID_IN) ?? [];
+      if (look && item && !promotedAs.has(look)) promotedAs.set(look, item);
+    }
+    return json({
+      ok: true, installed: true,
+      // deno-lint-ignore no-explicit-any
+      looks: ((looks.data ?? []) as any[]).map((r) => ({
+        id: r.id, clientId: r.client_id, companyName: nameOf.get(String(r.client_id)) ?? null, name: r.name, base: r.base,
+        leaves: r.spec?.src?.leaves === 2 ? 2 : 1, thumbUrl: r.thumb_url ?? null, fromPhoto: r.ai_call_id != null, updatedAt: r.updated_at,
+        promotedItemId: promotedAs.get(String(r.id)) ?? null,
+      })),
+    });
+  }
+
+  if (action === "library_door_look_promote") {
+    const lookId = String(p.doorLookId ?? "").toLowerCase();
+    if (!isLibraryId(lookId)) return json({ error: "Which door?" }, 400);
+    const name = cleanName(p.name, 80);
+    if (!name) return json({ error: "Give it a StructureStudio name (1 to 80 characters), not the builder's." }, 400);
+    const l = await sb.from("door_looks").select("id, client_id, base, spec, spec_version, status, thumb_url").eq("id", lookId).maybeSingle();
+    if (l.error && missing(l.error)) return json(DOORS_NOT_APPLIED, 503);
+    if (l.error) throw l.error;
+    if (!l.data || l.data.status !== "ready") return json({ error: "That door isn't saved in a builder's catalog any more. Reload the list." }, 404);
+    const spec = l.data.spec;
+    if (!spec || typeof spec !== "object" || Array.isArray(spec) || !DOOR_BASES.includes(String(l.data.base)) || spec.base !== l.data.base || Number(l.data.spec_version) !== 1) {
+      return json({ error: "That door's look can't be copied. Ask the builder to save it again." }, 400);
+    }
+    // The tile: copied to a StructureStudio path, so the template keeps it if the builder's look goes.
+    let thumbUrl: string | null = null;
+    const from = fixturesPathOf(l.data.thumb_url);
+    if (from) {
+      const to = `library/door-${crypto.randomUUID()}.png`;
+      const c = await sb.storage.from("fixtures").copy(from, to).catch((e: unknown) => ({ error: e }));
+      if (!c?.error) thumbUrl = sb.storage.from("fixtures").getPublicUrl(to)?.data?.publicUrl ?? null;
+    }
+    const slugBase = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "door";
+    const max = await sb.from("library_items").select("sort_order").eq("category", "door").order("sort_order", { ascending: false }).limit(1).maybeSingle();
+    const row: Record<string, unknown> = {
+      category: "door", source: "csm", name, look: { doorStyle: l.data.base }, door_spec: spec, leaves: spec.src?.leaves === 2 ? 2 : 1,
+      thumb_url: thumbUrl, sort_order: Number(max.data?.sort_order ?? 0) + 10, updated_at: new Date().toISOString(),
+    };
+    if (p.description !== undefined) {
+      const d = String(p.description ?? "").trim();
+      if (d.length > 600) return json({ error: "The description is 600 characters at most." }, 400);
+      row.description = d || null;
+    }
+    if (p.searchTerms !== undefined) row.search_terms = cleanTerms(p.searchTerms);
+    // A slug that is free: the name's, then -2, -3 ...
+    let res;
+    for (let k = 1; k <= 20; k++) {
+      res = await sb.from("library_items").insert({ ...row, slug: k === 1 ? slugBase : `${slugBase}-${k}` }).select(TEMPLATE_COLS).single();
+      if (!res.error || String(res.error.code ?? "") !== "23505") break;
+    }
+    if (res.error && missing(res.error)) return json(DOORS_NOT_APPLIED, 503);
+    if (res.error) throw res.error;
+    await auditRow(sb, identity, "library_door_look_promote", String(l.data.client_id), `look=${lookId} item=${res.data.id}`);
+    return json({ ok: true, item: { ...templateOut(res.data), fromPhoto: true }, tileCopied: thumbUrl !== null });
   }
 
   if (action === "library_items_reorder") {

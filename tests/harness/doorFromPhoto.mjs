@@ -21,6 +21,9 @@
 //   H  the library shows it ("Made from your photo, drawn over ...", with its tile), and a door's "How it
 //      looks in 3D" lists it beside "Make one from a photo…"; picking it saves its clientLibraryId and
 //      the look's base as doorStyle.
+//   J  an operator promotes it (346): Admin → Master Catalog → Doors lists the builder's saved door;
+//      "Add to the StructureStudio library" sends its look id and a NEW name; the list then says it is in
+//      the library; back on Doors the template shows its tile, and importing it sends no look of its own.
 //   I  no page errors.
 //
 // The tenant, doors and the photo are made up (public repo).
@@ -100,6 +103,16 @@ function settings(body) {
       return { ok: true, look: l };
     }
     case "library_add": {
+      if (body.templateId) {
+        // A promoted door (346): the builder's own ready copy of its spec, and an entry naming it.
+        const tp = W.templates.find((x) => x.id === body.templateId);
+        if (!tp || !tp.fromPhoto) return [{ error: "Not in this harness." }, 400];
+        const copy = { ...W.looks.find((x) => x.id === tp.fromLook), id: U(seq++), name: body.name, status: "ready", version: 1, fromPhoto: false };
+        W.looks.unshift(copy);
+        const e = { id: U(seq++), category: "door", name: body.name, look: { doorStyle: tp.look.doorStyle, doorLookId: copy.id }, templateId: tp.id, templateVersion: 1, active: true, sortOrder: 0, usedOn: [] };
+        W.entries.push(e);
+        return { ok: true, entry: entryOut(e) };
+      }
       if (!body.doorLookId) return [{ error: "Not in this harness." }, 400];
       const l = W.looks.find((x) => x.id === body.doorLookId);
       if (!l || l.status !== "ready") return [{ error: "Save that 3D door first, then add it to your library.", code: "library_door_look_not_ready" }, 409];
@@ -119,6 +132,29 @@ function settings(body) {
       return { ok: true };
   }
 }
+// Admin → Master Catalog (admin-catalog): just what the library card and the promote need.
+function adminCatalog(body) {
+  switch (body.action) {
+    case "list_clients": return { ok: true, clients: [{ client_id: CLIENT, company_name: "Harness Sheds" }], tenants: [] };
+    case "get_master": return { ok: true, layoutItemTypes: [] };
+    case "number_requests_list": return { ok: true, installed: true, requests: [] };
+    case "avalara_tax_codes_status": return { ok: true, count: 0, activeCount: 0, syncedAt: null };
+    case "library_requests_list": return { ok: true, installed: true, requests: [] };
+    case "library_items_list": return { ok: true, installed: true, items: W.templates.map((x) => ({ ...x, copies: W.entries.filter((e) => e.templateId === x.id).length })) };
+    case "library_door_looks_list":
+      return { ok: true, installed: true, looks: W.looks.filter((l) => l.status === "ready").map((l) => ({ id: l.id, clientId: CLIENT, companyName: "Harness Sheds", name: l.name, base: l.base, leaves: 1, thumbUrl: l.thumbUrl, fromPhoto: l.fromPhoto, updatedAt: l.updatedAt, promotedItemId: (W.templates.find((x) => x.fromLook === l.id) || {}).id || null })) };
+    case "library_door_look_promote": {
+      const l = W.looks.find((x) => x.id === body.doorLookId);
+      if (!l || l.status !== "ready" || !String(body.name || "").trim()) return [{ error: "Give it a StructureStudio name." }, 400];
+      const tp = { ...T(seq++, "ranch-z", body.name.trim(), { doorStyle: l.base }), description: body.description || null, thumbUrl: l.thumbUrl, fromPhoto: true, fromLook: l.id };
+      tp.id = U(seq++);
+      W.templates.push(tp);
+      return { ok: true, item: tp, tileCopied: true };
+    }
+    default: return { ok: true };
+  }
+}
+
 // The press: the first one's stream breaks off mid-answer (a cut connection); the lean retry draws.
 function generate(route, body, json) {
   if (body.lean !== true) return route.fulfill({ status: 200, contentType: "application/json", headers: H, body: "          {\"ok\": tr" });
@@ -194,6 +230,11 @@ const handler = async (route) => {
     return json(route, { Key: m ? `${m[1]}/${m[2]}` : "x" });
   }
   if (url.includes("/portal-billing")) return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], features: {}, status: "active" }, wallet: null });
+  if (url.includes("/admin-catalog")) {
+    sent.push({ fn: "admin-catalog", ...body });
+    const out = adminCatalog(body);
+    return Array.isArray(out) ? json(route, out[0], out[1]) : json(route, out);
+  }
   if (url.includes("/portal-settings")) {
     sent.push({ fn: "portal-settings", ...body });
     if (body.action === "generate_door_look") return generate(route, body, json);
@@ -405,6 +446,42 @@ try {
   const sf = actions("save_fixture").pop();
   const entry = W.entries.find((e) => e.name === "Ranch barn door");
   ok("H picking it saves its clientLibraryId, drawn over the look's base", !!sf && !!entry && sf.clientLibraryId === entry.id && sf.doorStyle === "zbrace" && sf.doorLookId === undefined, JSON.stringify(sf && { clientLibraryId: sf.clientLibraryId, doorStyle: sf.doorStyle, doorLookId: sf.doorLookId }));
+
+  // ── J: an operator promotes it into the StructureStudio library; a builder imports it ──
+  await go("/console/master");
+  await page.waitForSelector("[data-adm-library]", { timeout: 20000 }).catch(() => {});
+  await page.locator("[data-adm-library]").getByRole("button", { name: "Doors", exact: true }).click();
+  await page.waitForSelector("[data-adm-door-look='Ranch barn door']", { timeout: 20000 }).catch(() => {});
+  const row = page.locator("[data-adm-door-look='Ranch barn door']");
+  ok("J Master Catalog → Doors lists the builder's saved door, with its builder", (await row.count()) === 1 && /Harness Sheds/.test(await row.innerText()));
+  await row.getByRole("button", { name: "Add to the StructureStudio library" }).click();
+  await page.getByRole("textbox", { name: "StructureStudio name" }).fill("Ranch Z door");
+  await page.getByRole("textbox", { name: "Description" }).last().fill("Board door with a Z in each half and T-strap hinges.");
+  await page.locator("[data-adm-door-look-promote]").screenshot({ path: join(shots, "10-admin-promote-form.png") }).catch(() => {});
+  await page.getByRole("button", { name: "Add to the library" }).click();
+  await page.waitForTimeout(1200);
+  const pr = sent.filter((x) => x.action === "library_door_look_promote").pop();
+  ok("J promoting sends the look and a NEW name", !!pr && pr.doorLookId === LOOK_NEW && pr.name === "Ranch Z door", JSON.stringify(pr));
+  ok("J ...and the list then says it is in the library", /In the library as Ranch Z door/.test(await page.locator("[data-adm-door-look='Ranch barn door']").innerText()));
+  ok("J the door templates list it, from a photo, with its tile", (await page.locator("[data-adm-library-item='Ranch Z door']").count()) === 1
+    && /From a photo/.test(await page.locator("[data-adm-library-item='Ranch Z door']").innerText()));
+  await page.locator("[data-adm-library]").screenshot({ path: join(shots, "11-admin-promoted.png") });
+  await go("/settings/doors");
+  await page.waitForSelector("[data-ss-library='door']", { timeout: 20000 }).catch(() => {});
+  await page.locator("[data-ss-library='door']").getByRole("button", { name: /Browse the StructureStudio library/ }).click();
+  const tplRow = page.locator("[data-ss-library-template='Ranch Z door']");
+  await tplRow.waitFor({ timeout: 10000 }).catch(() => {});
+  const tplTile = await tplRow.locator("img[src*='door-look-']").first().evaluate((el) => el.complete && el.naturalWidth > 0).catch(() => false);
+  ok("J a builder's library shows the promoted door with its tile and words", (await tplRow.count()) === 1 && tplTile && /Z in each half/.test(await tplRow.innerText()));
+  await tplRow.getByRole("button", { name: /^Import/ }).click();
+  ok("J importing it offers a name, and no look picker", (await tplRow.locator("select").count()) === 0);
+  await tplRow.getByRole("textbox", { name: "Your name for it" }).fill("Ranch Z (library)");
+  await tplRow.getByRole("button", { name: "Import" }).click();
+  await page.waitForTimeout(1200);
+  const imp = sent.filter((x) => x.action === "library_add" && x.templateId).pop();
+  ok("J the import sends the template and a name, and no look of its own", !!imp && imp.name === "Ranch Z (library)" && imp.look === undefined, JSON.stringify(imp));
+  ok("J ...and it is listed under its template, from the StructureStudio library", /From the StructureStudio library, drawn in 3D/.test(await page.locator("[data-ss-library-entry='Ranch Z (library)']").innerText().catch(() => "")));
+  await page.locator("[data-ss-library='door']").screenshot({ path: join(shots, "12-builder-imports-promoted.png") });
 
   ok("I no page errors", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
 } catch (e) {
