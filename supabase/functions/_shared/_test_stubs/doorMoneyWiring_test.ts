@@ -27,7 +27,7 @@ import { assert, assertEquals, assertFalse, assertRejects } from "jsr:@std/asser
 import { call, FakeDb, OTHER, OWN, USER_ID, type Row } from "./doorLookFake.ts";
 import { fakeImageLibrary, fakeModel, pngHead, type Script } from "./doorModel.ts";
 import { singleDoor, withStrips } from "./doorReads.ts";
-import { DOOR_EDGE_PAD_IN } from "../doorLookPrompt.ts";
+import { DOOR_EDGE_PAD_IN, DOOR_LOOK_PROMPT_ID } from "../doorLookPrompt.ts";
 import { doorGenHooks, doorWalletKey } from "../../portal-settings/doorGenerate.ts";
 
 const { lib } = fakeImageLibrary();
@@ -88,7 +88,7 @@ Deno.test("meter inactive: wallet_hold still asked (door meter, the press's key)
   assertEquals([row.dims.widthIn, row.dims.heightIn, row.dims.leaves, row.dims.photo, row.dims.padIn], [36, 80, 1, [770, 1540], 2]);
   // The press clock runs from the request, which came before the row.
   assert(Date.parse(row.dims.pressStartedAt) <= Date.parse(row.created_at) && r.body.pressStartedAt === row.dims.pressStartedAt);
-  assert(row.tokens.costCents > 0 && row.tokens.prompt === "DOOR_LOOK_V2");
+  assert(row.tokens.costCents > 0 && row.tokens.prompt === DOOR_LOOK_PROMPT_ID);
   assertEquals([row.charged_cents, row.wallet_tx_id], [undefined, undefined], "nothing charged");
   const look = db.rows("door_looks")[0];
   assertEquals([look.client_id, look.status, look.base, look.ai_call_id, look.created_by, look.spec.base], [OWN, "draft", "zbrace", row.id, USER_ID, "zbrace"]);
