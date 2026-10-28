@@ -26,6 +26,10 @@
 //      the library; back on Doors the template shows its tile, and importing it sends no look of its own.
 //   K  AVIF (Ahsan 2026-10-28): the door photo and close-up pickers offer it, an AVIF front photo opens
 //      on the corners step and straightens, and a request photo in AVIF goes up as a JPEG.
+//   L  the press in the background (Ahsan 2026-10-28): "Keep working" or a click outside the dialog
+//      leaves it running; a pill shows on every page; when it is done a pop-up says so, and "See my
+//      door" opens its review; a reload mid-press brings the pill back and the draft is picked up by
+//      the press's own key; a refusal pops up in plain words; each answer shows once.
 //   I  no page errors.
 //
 // The tenant, doors and the photos are made up (public repo). fixtures/made-up-door.avif is this
@@ -93,6 +97,12 @@ function settings(body) {
     case "door_ref_upload_url":
       return { ok: true, bucket: "door-refs", uploads: (body.contentTypes || []).map(() => ({ path: `${CLIENT}/door-ref-${U(seq++)}.jpg`, token: "tok-" + seq })) };
     case "generate_door_look_recover":
+      if (W.recoverMode === "draft") {
+        W.bgAsks = (W.bgAsks || 0) + 1;
+        if (W.bgAsks === 1) return { ok: true, pending: true };
+        draftOf(LOOK_BG2, "Reloaded door");
+        return { ok: true, recovered: true, lookId: LOOK_BG2, spec: SPEC, warnings: [WARNING], checkId: U(904), pressStartedAt: null };
+      }
       W.recoverAsks++;
       return W.recoverAsks === 1 ? { ok: true, pending: true }
         : { ok: true, pending: false, reason: "failed", message: "This took too long. Please try again. You haven't been charged.", code: "ai_door_timeout", retryable: true };
@@ -160,8 +170,22 @@ function adminCatalog(body) {
   }
 }
 
+// L (the press in the background): W.press "slow" draws after W.pressMs; "hang" never answers in
+// time (the page is reloaded under it); "refuse" refuses after W.pressMs. W.recoverMode "draft":
+// still working once, then the draft by its key.
+const LOOK_BG = U(803), LOOK_BG2 = U(804);
+const REFUSAL = "We couldn't find a closed door in this photo. Try one taken straight on.";
+const draftOf = (id, name) => {
+  const look = { id, name, base: SPEC.base, spec: SPEC, v: 1, status: "draft", thumbUrl: null, version: 1, fromPhoto: true, createdAt: "2026-10-28T12:00:00Z", updatedAt: "2026-10-28T12:00:00Z" };
+  if (!W.looks.some((l) => l.id === id)) W.looks.unshift({ ...look, usedOn: { rows: 0, doors: 0 } });
+  return look;
+};
+const later = (ms) => new Promise((ok) => setTimeout(ok, ms));
 // The press: the first one's stream breaks off mid-answer (a cut connection); the lean retry draws.
 function generate(route, body, json) {
+  if (W.press === "slow") return later(W.pressMs).then(() => json(route, { ok: true, lookId: LOOK_BG, look: draftOf(LOOK_BG, body.name), spec: SPEC, warnings: [], checkId: U(903), pressStartedAt: "2026-10-28T12:00:00Z", lean: false, balanceCents: null })).catch(() => {});
+  if (W.press === "hang") return later(120000).then(() => route.abort()).catch(() => {});
+  if (W.press === "refuse") return later(W.pressMs).then(() => json(route, { error: REFUSAL, code: "ai_door_not_a_door" }, 422)).catch(() => {});
   if (body.lean !== true) return route.fulfill({ status: 200, contentType: "application/json", headers: H, body: "          {\"ok\": tr" });
   const look = { id: LOOK_NEW, name: body.name, base: SPEC.base, spec: SPEC, v: 1, status: "draft", thumbUrl: null, version: 1, fromPhoto: true, createdAt: "2026-10-27T12:00:00Z", updatedAt: "2026-10-27T12:00:00Z" };
   W.looks.unshift({ ...look, usedOn: { rows: 0, doors: 0 } });
@@ -535,6 +559,88 @@ try {
     JSON.stringify({ type: reqUp && reqUp.type, reqSize, ask: reqAsk && reqAsk.contentType }));
   ok("K ...and it shows as a thumbnail in the form", (await page.locator("[data-ss-library-request-form] img").count()) === 1);
   await page.locator("[data-ss-library-request-form]").screenshot({ path: join(shots, "14-avif-request-photo.png") }).catch(() => {});
+
+  // ── L: the press in the background (Ahsan 2026-10-28) ──
+  const count = (sel) => page.locator(sel).count();
+  const pressDoor = async (nm) => {
+    await page.waitForSelector("[data-ss-door-open]", { timeout: 20000 });
+    await page.locator("[data-ss-door-open]").click();
+    await page.waitForSelector("[data-ss-door-studio='photo']");
+    await page.getByPlaceholder("e.g. Ranch barn door").fill(nm);
+    await page.getByRole("spinbutton", { name: "Width in inches" }).fill("36");
+    await page.getByRole("spinbutton", { name: "Height in inches" }).fill("80");
+    await page.locator("[data-ss-door-front]").setInputFiles({ name: "barn-door.jpg", mimeType: "image/jpeg", buffer: photo });
+    await page.waitForTimeout(300);
+    await page.getByRole("button", { name: "Next: mark the corners" }).click();
+    await page.waitForSelector("[data-ss-door-corners]");
+    await page.waitForTimeout(300);
+    for (let i = 0; i < 4; i++) await dragDot(i, PHOTO.quad[i]);
+    await page.locator("[data-ss-door-studio]").getByRole("button", { name: "Straighten", exact: true }).click();
+    await page.waitForSelector("[data-ss-door-straight]", { timeout: 20000 });
+    await page.locator("[data-ss-door-generate]").click();
+    await page.waitForSelector("[data-ss-door-studio='press']");
+    await page.waitForTimeout(400);
+  };
+  await go("/settings/doors");
+  W.press = "slow"; W.pressMs = 7000;
+  await pressDoor("Background door");
+  ok("L the press says you can keep working, with a button for it", /You can keep working/.test(await page.locator("[data-ss-door-studio='press']").innerText()) && (await count("[data-ss-door-background]")) === 1);
+  await page.screenshot({ path: join(shots, "15-press-with-background-button.png") });
+  await page.locator("[data-ss-door-background]").click();
+  await page.waitForTimeout(400);
+  ok("L “Keep working” closes the dialog, and the pill shows", (await count("[data-ss-door-studio]")) === 0 && (await count("[data-ss-door-job-pill]")) === 1
+    && /Drawing “Background door”…\s*0:\d\d/.test(await page.locator("[data-ss-door-job-pill]").innerText()), await page.locator("[data-ss-door-job-pill]").innerText().catch(() => ""));
+  ok("L the Doors box says it is being drawn", (await count("[data-ss-door-job-line]")) === 1);
+  await go("/settings/colors");
+  await page.waitForTimeout(600);
+  ok("L the pill stays on another page", (await count("[data-ss-door-job-pill]")) === 1 && !/\/settings\/doors/.test(page.url()));
+  await page.screenshot({ path: join(shots, "16-background-pill-other-page.png") });
+  await page.waitForSelector("[data-ss-door-job-ready]", { timeout: 30000 }).catch(() => {});
+  ok("L when it is done, a pop-up says the door is ready (and the pill is gone)", (await count("[data-ss-door-job-ready]")) === 1 && (await count("[data-ss-door-job-pill]")) === 0
+    && /“Background door” is drawn from your photo/.test(await page.locator("[data-ss-door-job-ready]").innerText().catch(() => "")));
+  await page.screenshot({ path: join(shots, "17-ready-popup.png") });
+  await page.getByRole("button", { name: "See my door" }).click();
+  await page.waitForSelector("[data-ss-door-studio='review']", { timeout: 20000 }).catch(() => {});
+  ok("L “See my door” opens the Doors page on its review, under its name", /\/settings\/doors/.test(page.url()) && (await count("[data-ss-door-studio='review']")) === 1
+    && (await page.locator("[data-ss-door-name]").inputValue()) === "Background door");
+  await page.waitForSelector("[data-ss-door-shot='front']", { timeout: 60000 }).catch(() => {});
+  await page.waitForTimeout(400);
+  ok("L ...drawn in 3D beside the straightened photo", (await count("[data-ss-door-shot]")) === 3 && (await count("[data-ss-door-studio='review'] img[alt='Your photo']")) === 1);
+  await page.screenshot({ path: join(shots, "18-see-my-door-review.png") });
+  await page.locator("[data-ss-door-studio]").getByRole("button", { name: "Not now" }).click();
+  await page.waitForTimeout(600);
+  ok("L the answer shows once, and the draft waits under “Not in your library yet”", (await count("[data-ss-door-job-ready]")) === 0 && (await count("[data-ss-door-waiting='Background door']")) === 1);
+
+  // A reload while it runs: the pill comes back, and the draft is picked up by the press's own key.
+  W.press = "hang"; W.recoverMode = "draft";
+  await pressDoor("Reloaded door");
+  await page.mouse.click(8, 8);   // the dark backdrop, outside the dialog
+  await page.waitForTimeout(400);
+  ok("L clicking outside the dialog moves it to the background too", (await count("[data-ss-door-studio]")) === 0 && (await count("[data-ss-door-job-pill]")) === 1);
+  const keyBg = actions("generate_door_look").pop().idempotencyKey;
+  await boot();
+  await page.waitForSelector("[data-ss-door-job-pill]", { timeout: 15000 }).catch(() => {});
+  ok("L after a reload the pill comes back", (await count("[data-ss-door-job-pill]")) === 1 && /Reloaded door/.test(await page.locator("[data-ss-door-job-pill]").innerText().catch(() => "")));
+  await page.waitForSelector("[data-ss-door-job-ready]", { timeout: 40000 }).catch(() => {});
+  const asksBg = actions("generate_door_look_recover").filter((r) => r.idempotencyKey === keyBg).length;
+  ok("L ...and when the server is done, the pop-up shows, picked up by its key (no second press)", (await count("[data-ss-door-job-ready]")) === 1 && asksBg >= 2
+    && actions("generate_door_look").filter((g) => g.idempotencyKey === keyBg).length === 1, JSON.stringify({ asksBg }));
+  await page.getByRole("button", { name: "Later" }).click();
+  await boot();
+  await page.waitForTimeout(1500);
+  ok("L “Later”, then a reload: it does not pop up again", (await count("[data-ss-door-job-ready]")) === 0 && (await count("[data-ss-door-job-pill]")) === 0);
+
+  // A refusal while out of sight: a plain pop-up says so and what to do.
+  W.press = "refuse"; W.pressMs = 3000; W.recoverMode = null;
+  await go("/settings/doors");
+  await pressDoor("Refused door");
+  await page.locator("[data-ss-door-background]").click();
+  await page.waitForSelector("[data-ss-door-job-failed]", { timeout: 20000 }).catch(() => {});
+  ok("L a failure out of sight pops up with the server's own words", (await count("[data-ss-door-job-failed]")) === 1 && (await page.locator("[data-ss-door-job-failed]").innerText()).includes(REFUSAL));
+  await page.screenshot({ path: join(shots, "19-failed-popup.png") });
+  await page.locator("[data-ss-door-job-failed]").getByRole("button", { name: "Close" }).click();
+  await page.waitForTimeout(300);
+  ok("L ...and Close puts it away", (await count("[data-ss-door-job-failed]")) === 0);
 
   ok("I no page errors", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
 } catch (e) {
