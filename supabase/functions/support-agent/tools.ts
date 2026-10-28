@@ -71,7 +71,8 @@ export const TOOL_DEFS = [
       "This builder's own account: business name; the signed-in person's first name, job title and which areas they can view; " +
       "the setup checklist steps still open (and which are padlocked add-ons); which add-ons are active; whether GoHighLevel, " +
       "QuickBooks, their own email domain, texting and the phone are set up; testing (beta) mode; whether customers see prices; " +
-      "and how quotes and invoices go out. Use it for any question about what is set, missing or switched on in THEIR account.",
+      "how quotes and invoices go out; and which per-account betas they have (the Library, making a door from a photo). " +
+      "Use it for any question about what is set, missing or switched on in THEIR account, and before telling them about a beta.",
     strict: true,
     input_schema: empty,
   },
@@ -160,7 +161,7 @@ async function accountOverview(ctx: ToolCtx): Promise<ToolOutcome> {
   const { db, clientId, userId } = ctx;
   const [settingsRes, meRes, stepsRes] = await Promise.all([
     db.from("client_settings")
-      .select("business_name, ghl_location_id, ghl_api_key, qbo_realm_id, qbo_connected_at, email_domain_status, sms_status, phone_status, beta_mode, show_pricing, invoice_in_ghl, rtp_enabled, payments_online_enabled")
+      .select("business_name, ghl_location_id, ghl_api_key, qbo_realm_id, qbo_connected_at, email_domain_status, email_provider, sms_status, phone_status, beta_mode, show_pricing, invoice_in_ghl, rtp_enabled, payments_online_enabled, library_beta, door_looks_beta")
       .eq("client_id", clientId).maybeSingle(),
     db.from("client_users").select("full_name, title, role")
       .eq("client_id", clientId).eq("user_id", userId).maybeSingle(),
@@ -201,7 +202,13 @@ async function accountOverview(ctx: ToolCtx): Promise<ToolOutcome> {
 
   const areas = AREAS.filter((a) => !a.internalOnly && canRead(ctx.access, a.key)).map((a) => a.label);
   const firstName = String(me.full_name || "").trim().split(/\s+/)[0] || null;
-  const domain = s.email_domain_status === "verified" ? "verified" : s.email_domain_status ? "set up, not verified yet" : "not set up";
+  // email_domain_status is NOT NULL DEFAULT 'not_configured'; sending from the domain is a separate
+  // tick after verifying (portal-settings email_activate sets email_provider to "resend").
+  const domain = s.email_domain_status === "verified"
+    ? (s.email_provider === "resend" ? "verified, and estimates send from it" : "verified, but \"Send estimate & invoice emails from my domain\" is not ticked yet")
+    : s.email_domain_status === "pending" ? "set up, not verified yet"
+    : s.email_domain_status === "failed" ? "set up, but verification failed"
+    : "not set up";
 
   return ok({
     businessName: cap(s.business_name),
@@ -225,6 +232,9 @@ async function accountOverview(ctx: ToolCtx): Promise<ToolOutcome> {
     customersSeePrices: !!s.show_pricing,
     quotesAndInvoicesGoOutThrough: s.invoice_in_ghl === false ? "Structure Studio" : "their CRM (GoHighLevel)",
     realTimePricingLive: !!s.rtp_enabled,
+    // Per-account betas (339 library_beta, 343 door_looks_beta), off by default. Making a door from a
+    // photo also needs the Library: its card sits inside the Library card (03-catalog.jsx).
+    betaFeatures: { library: s.library_beta === true, doorFromPhoto: s.library_beta === true && s.door_looks_beta === true },
   });
 }
 

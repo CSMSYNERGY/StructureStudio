@@ -304,11 +304,19 @@ calendar always blocks booking times and the host may tick others.
 1. **Google Cloud** (console.cloud.google.com): a project → APIs: enable **Google Calendar API**
    → OAuth consent screen "External", scopes `openid`, `email`, `calendar.events`,
    `calendar.calendarlist.readonly`, `calendar.freebusy` → add the team as **test users** →
-   Credentials → OAuth client "Web application", redirect URI
-   `https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/meetings-oauth-callback`. Opening it to
-   every builder needs Google's verification of the calendar scopes (days to weeks).
+   Credentials → OAuth client "Web application", **both** redirect URIs
+   `https://beta.structurestudiosuite.com/oauth-callback.html` and
+   `https://app.structurestudiosuite.com/oauth-callback.html` (one per host: the page must be
+   served by the host the person started on, and the app host only serves it once main is
+   promoted). Google shows the redirect's domain on its sign-in screen until **Branding** is
+   verified, and verifies only domains we own, so it is never the Supabase address (it said
+   "jzeamjbhdrsbygdnphbm.supabase.co" until 2026-10-28). `oauth-callback.html` only hands the
+   query to `meetings-oauth-callback`. Branding: app name Structure Studio, logo, home page,
+   privacy and terms on structurestudiosuite.com, authorized domain `structurestudiosuite.com`
+   (verified in Search Console), then Verify branding. Opening it to every builder needs
+   Google's verification of the calendar scopes (days to weeks).
 2. **Microsoft Entra** (entra.microsoft.com → App registrations → New): "Accounts in any
-   organizational directory and personal Microsoft accounts", Web redirect URI as above →
+   organizational directory and personal Microsoft accounts", the same two Web redirect URIs →
    Certificates & secrets → new client secret → API permissions: Microsoft Graph delegated
    `offline_access`, `User.Read`, `Calendars.ReadWrite`.
 3. Supabase function secrets: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,

@@ -44,6 +44,39 @@ const CHARS_PER_TOKEN = 3.6;
 /** Pages builders never see (our consoles), and Advanced mode, limited to the internal account. */
 const HIDDEN_PAGES = new Set(["accounts", "admin", "projects", "advanced"]);
 
+/** Routes that still exist for old links but have no sidebar entry any more (12-shell.jsx says so
+ *  beside each), with where the thing lives now. Listed apart, so "find it in the sidebar" is never
+ *  the answer. Knowledge audit 2026-10-28. */
+const NOT_IN_NAV = new Map([
+  ["quickbooks", "set up in Settings > QuickBooks"],
+  ["on-demand-pricing", "a section inside Settings > Sheds"],
+  ["view-3d", "3D shows inside the Shed Designer, and each style's 3D look is set in Settings > Designer; an old /view-3d link still opens a list of which styles have their own look"],
+]);
+/** Sidebar pages that appear only with a paid add-on; without it they are hidden, not padlocked. */
+const NAV_NEEDS = new Map([
+  ["conversations", "only appears on accounts with the built-in CRM; without it the item is hidden"],
+]);
+
+/** THE CHECKLIST'S STALE TEXT, corrected here (knowledge audit 2026-10-28). The live checklist is
+ *  setup_template_items, seeded by migration 160, and its words for these steps no longer match the
+ *  app: business details and branding are two tabs, serial numbers moved to Business Details, Structure
+ *  Studio issues paperwork by default (217/280), starting numbers are optional (283), tax is never looked
+ *  up on a submit, and a verified domain needs its "send from my domain" box ticked. Keyed by the step's
+ *  title; the build fails if a title stops matching, so a later migration that fixes the live text is
+ *  noticed and this map can go. */
+const CHECKLIST_FIXES = {
+  "Add your business details and logo":
+    "Two tabs on Settings > Company. Business Details holds what prints on every estimate: business name, phone, website, the estimate logo, address, estimate terms and how many days an estimate is good for. Branding holds your customer link's look: company name, tagline, colors and logo.",
+  "Connect your CRM (if you use GoHighLevel)":
+    "Optional, and separate from who issues paperwork. If you use GoHighLevel, paste your Location ID and API key in Settings > GHL Connection and pick the pipelines and stages where new contacts and opportunities should land. Structure Studio still issues your estimates and invoices; without a connection, contacts stay in Structure Studio.",
+  "Choose how quotes & invoices go out":
+    "Structure Studio issues your estimates and invoices (sending them through GoHighLevel is only for accounts the team has switched on). The one thing you must set is your company sales tax rate in Settings > Company > Tax (0 if you don't collect tax). Starting estimate and invoice numbers are optional: blank starts at 1000, or carries on after your last number. Estimates use the sales location's own rate if it has one, otherwise your company rate; address-verified tax lookups are off unless the team switches them on.",
+  "Send email from your own domain":
+    "Add a few DNS records so estimates and invoices come from your business address instead of ours (there's a button to email the records straight to your webmaster), then press Check verification. Once it is verified, tick \"Send estimate & invoice emails from my domain\"; verifying alone doesn't switch it on.",
+  "Add sales locations & your serial number start":
+    "Add your sales lots in Settings > Company > Locations: where inventory buildings sit and the delivery pickup point (each lot can have its own tax rate). Set your building serial number start (\"Next building #\") on Settings > Company > Business Details, in the Building Serial Numbers card; new sales get no serial number until it is set.",
+};
+
 function fail(msg) {
   console.error(`support-kb: ${msg}`);
   process.exit(1);
@@ -125,7 +158,10 @@ function setupSteps(sql) {
     out.push({ section: un(m[1]), title: un(m[2]), detail: un(m[3]) });
   }
   if (out.length < 10) fail(`160_setup_v2.sql parsed only ${out.length} setup steps`);
-  return out;
+  for (const title of Object.keys(CHECKLIST_FIXES)) {
+    if (!out.some((s) => s.title === title)) fail(`CHECKLIST_FIXES names "${title}", which is no longer a checklist step; drop or re-key it`);
+  }
+  return out.map((s) => (CHECKLIST_FIXES[s.title] ? { ...s, detail: CHECKLIST_FIXES[s.title] } : s));
 }
 
 function build() {
@@ -157,10 +193,18 @@ function build() {
   L.push("(My Requests), /support/features, /support/fixes and /support/roadmap.");
   L.push("");
   L.push("## Pages in the left sidebar");
-  L.push("Some pages are paid add-ons and show a padlock until bought (Settings > Billing). Pages marked");
-  L.push("\"coming soon\" are not available yet.");
+  L.push("Add-ons are bought under Settings > Billing. A page for an add-on the account doesn't have is hidden");
+  L.push("or explains the add-on; it doesn't get its own padlock. A padlock in the sidebar only appears when the");
+  L.push("account's subscription itself isn't active. Pages marked \"coming soon\" are not available yet.");
   L.push("");
-  for (const p of pages) L.push(`- **${p.label}** (/${p.key}): ${p.desc}`);
+  for (const k of NOT_IN_NAV.keys()) if (!pages.some((p) => p.key === k)) fail(`NOT_IN_NAV names "${k}", which TAB_META no longer has`);
+  for (const p of pages) {
+    if (NOT_IN_NAV.has(p.key)) continue;
+    L.push(`- **${p.label}** (/${p.key}): ${p.desc}${NAV_NEEDS.has(p.key) ? ` (${NAV_NEEDS.get(p.key)})` : ""}`);
+  }
+  L.push("");
+  L.push("Not in the sidebar any more (old links still open them):");
+  for (const p of pages) if (NOT_IN_NAV.has(p.key)) L.push(`- **${p.label}**: ${NOT_IN_NAV.get(p.key)}`);
   L.push("");
   L.push("## Settings");
   L.push("The Settings page has a rail of sections. Some sections are hubs with their own tabs, listed under them.");
@@ -187,8 +231,11 @@ function build() {
   L.push("");
   L.push("## Team access");
   L.push("Owners and admins add people in Settings > Company > Team. Each person has a job title, which sets");
-  L.push("their starting access; an owner or admin can then change any area to None, View or Edit (some areas");
-  L.push("also offer \"Own\": only that person's own customers or payouts). Owners always have everything.");
+  L.push("their starting access. An owner or admin then sets most areas to No access, View or Edit, with");
+  L.push("exceptions: Team access comes only with the Admin or Owner title; Billing can only be given to an");
+  L.push("admin, and only by an owner; only an owner can change another admin; nobody can change their own");
+  L.push("access; and some areas have their own choices (\"Own\" means only that person's own customers, calls");
+  L.push("or payouts). Owners always have everything.");
   L.push("");
   L.push("Job titles:");
   for (const t of jobTitles) L.push(`- **${t.label}**: ${t.blurb}`);

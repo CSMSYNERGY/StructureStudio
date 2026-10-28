@@ -1978,7 +1978,9 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
 // gate — they were behind `schedUnlocked` in Team and they are behind it here.
 function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
   return [
-    ["company", "Business Details", "Your legal business details, address, and the terms printed on estimates"],
+    // Serial numbers live on this tab since 2026-09-11 (08-integrations.jsx CompanyShell), not on
+    // Locations. support-kb.mjs lifts these descriptions into the support assistant's knowledge.
+    ["company", "Business Details", "Your legal business details, address, the terms printed on estimates, and your building serial numbers"],
     ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
     ["team", "Team", "People, access, and commission rates"],
     // COMMISSIONS joined Company on 2026-09-11 (Carolyn: "commissions also needs to go to
@@ -1987,7 +1989,7 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     // Still owner-only, the gate it carried as a rail item: portal-commissions refuses an
     // operator outright and grants are owner-only, so this is not merely a UI courtesy.
     ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
-    ["locations", "Locations", "Your sales lots, and the serial numbers your buildings are given"],
+    ["locations", "Locations", "Your sales lots: where inventory buildings sit, the delivery pickup point, and each lot's own tax rate"],
     ...(schedUnlocked ? [["crews", "Crews", "Who builds — each crew gets its own Build Schedule calendar"]] : []),
     ...(schedUnlocked ? [["drivers", "Drivers", "Who delivers, what they can haul, and the territories they cover"]] : []),
     // TAX (Ahsan 2026-09-17, from the owner's 2026-09-14 ask that every product, installation
@@ -2037,8 +2039,8 @@ function ssColorTabs() {
 // never what those links were pointing at.
 function ssBillingTabs() {
   return [
-    ["billing", "Subscription", "Your plan, payment method, and invoices"],
-    ["wallet", "Wallet", "Prepaid credit for usage — top-ups, auto top-up, and what has been charged"],
+    ["billing", "Subscription", "Your plan: what you pay, your features, and the next renewal"],
+    ["wallet", "Wallet", "Your card on file, and prepaid credit for usage — top-ups, auto top-up, and what has been charged"],
   ];
 }
 

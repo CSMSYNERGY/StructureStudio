@@ -297,7 +297,7 @@ export const AREAS: Area[] = [
   //
   // Texts are NOT gated here. Who may read or send a text keeps following `contacts` and the
   // CONTACT_ROW_SCOPE rules, so adding the phone did not move anyone's access to a thread.
-  { key: "phone",             label: "Phone",              group: "workspace", hint: "My Synergy Phone calls and voicemail — 'Own calls' is just their own; 'Team calls' adds the whole team's and the Calls report; Edit also changes phone settings",
+  { key: "phone",             label: "Phone",              group: "workspace", hint: "My Synergy Phone calls and voicemail — 'Own calls' is just their own, and the Calls page shows only My calls; 'Team calls' adds the whole team's calls and the Team view; Edit also changes phone settings",
     levels: ["none", "own", "view", "edit"] },
   // CSM SYNERGY'S OWN BOARDS — bugs, feature requests, roadmap, client setup. Internal only.
   //

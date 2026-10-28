@@ -10,27 +10,30 @@ brackets, e.g. (/settings/branding). Support's tabs are /support/setup (Getting 
 (My Requests), /support/features, /support/fixes and /support/roadmap.
 
 ## Pages in the left sidebar
-Some pages are paid add-ons and show a padlock until bought (Settings > Billing). Pages marked
-"coming soon" are not available yet.
+Add-ons are bought under Settings > Billing. A page for an add-on the account doesn't have is hidden
+or explains the add-on; it doesn't get its own padlock. A padlock in the sidebar only appears when the
+account's subscription itself isn't active. Pages marked "coming soon" are not available yet.
 
 - **Shed Designer** (/designer): Design a building and build an estimate
 - **Contacts** (/contacts): Everyone who has enquired, their designs, and your pipelines
-- **Conversations** (/conversations): Every email, text and call with your customers, newest first
+- **Conversations** (/conversations): Every email, text and call with your customers, newest first (only appears on accounts with the built-in CRM; without it the item is hidden)
 - **Orders** (/orders): Track accepted estimates from sale to payment and delivery
 - **Support** (/support): Get set up, report a problem, request a feature, and see what's new
 - **Settings** (/settings): Sheds, options, colors, branding & estimates, connection, QuickBooks, and billing
-- **QuickBooks** (/quickbooks): QuickBooks Online connection and invoice item mappings
-- **RealTime Pricing** (/on-demand-pricing): Live building costs from your lumber prices
 - **Build Schedule** (/build-schedule): Track buildings from order to done
 - **Delivery Schedule** (/delivery-schedule): Plan truck loads and manage deliveries
 - **Inventory** (/inventory): Buildings on your lots, ready to sell
 - **Repairs** (/repairs): Manage repair jobs from request to done
-- **3D Design** (/view-3d): Give each building style its own 3D look
 - **Rent to Own** (/rent-to-own-contracts): Generate and manage RTO agreements — coming soon
 - **Self Serve Displays** (/self-serve-display-units): In-unit kiosk to design, estimate, and get live help — coming soon
 - **Commissions** (/commissions): Track and calculate sales commissions — coming soon
 - **Reports** (/reports): Sales, leads, revenue, and delivery reporting — coming soon
 - **Calls** (/calls): Calls and texts, person by person — yours, or the whole team's
+
+Not in the sidebar any more (old links still open them):
+- **QuickBooks**: set up in Settings > QuickBooks
+- **RealTime Pricing**: a section inside Settings > Sheds
+- **3D Design**: 3D shows inside the Shed Designer, and each style's 3D look is set in Settings > Designer; an old /view-3d link still opens a list of which styles have their own look
 
 ## Settings
 The Settings page has a rail of sections. Some sections are hubs with their own tabs, listed under them.
@@ -60,18 +63,18 @@ The Settings page has a rail of sections. Some sections are hubs with their own 
 - **Designer** (/settings/designer): How your styles look in the designer — including their 3D shape
 - **Online Inventory** (/settings/online-inventory): Your public page of lot buildings: switch it on, prices, deposit, tracking and the code for your website
 - **Company** (/settings/company): Your business details, branding, team, locations, crews, drivers and sales tax
-  - **Business Details** (/settings/company): Your legal business details, address, and the terms printed on estimates
+  - **Business Details** (/settings/company): Your legal business details, address, the terms printed on estimates, and your building serial numbers
   - **Branding** (/settings/branding): Your customer link's look & feel, and what customers see priced
   - **Team** (/settings/team): People, access, and commission rates
   - **Commissions** (/settings/commissions): How reps earn — structure, earned-on date, and payout schedule
-  - **Locations** (/settings/locations): Your sales lots, and the serial numbers your buildings are given
+  - **Locations** (/settings/locations): Your sales lots: where inventory buildings sit, the delivery pickup point, and each lot's own tax rate
   - **Crews** (/settings/crews): Who builds — each crew gets its own Build Schedule calendar
   - **Drivers** (/settings/drivers): Who delivers, what they can haul, and the territories they cover
   - **Tax** (/settings/tax): Your sales tax rate, and optional tax codes for each building, option and service
   - **Payments** (/settings/payments): Taking card and bank payments, set up and managed for you by the Structure Studio team
 - **Billing** (/settings/billing): Your subscription, and the wallet that pays for usage
-  - **Subscription** (/settings/billing): Your plan, payment method, and invoices
-  - **Wallet** (/settings/wallet): Prepaid credit for usage — top-ups, auto top-up, and what has been charged
+  - **Subscription** (/settings/billing): Your plan: what you pay, your features, and the next renewal
+  - **Wallet** (/settings/wallet): Your card on file, and prepaid credit for usage — top-ups, auto top-up, and what has been charged
 - **Customer Hub** (/settings/pipelines): Your pipelines, forms, customer emails and texts, your phone, and your meetings
   (Customer Hub is being reworked; this list is as of the last knowledge build and may have moved.)
   - **Pipelines & Statuses** (/settings/pipelines): Card statuses, when each is set automatically, and each pipeline's stages
@@ -89,8 +92,11 @@ The Settings page has a rail of sections. Some sections are hubs with their own 
 
 ## Team access
 Owners and admins add people in Settings > Company > Team. Each person has a job title, which sets
-their starting access; an owner or admin can then change any area to None, View or Edit (some areas
-also offer "Own": only that person's own customers or payouts). Owners always have everything.
+their starting access. An owner or admin then sets most areas to No access, View or Edit, with
+exceptions: Team access comes only with the Admin or Owner title; Billing can only be given to an
+admin, and only by an owner; only an owner can change another admin; nobody can change their own
+access; and some areas have their own choices ("Own" means only that person's own customers, calls
+or payouts). Owners always have everything.
 
 Job titles:
 - **Owner**: Everything, always — cannot be reduced
@@ -119,7 +125,7 @@ Access areas (what each switch on the Team page covers):
 - **Commissions** (workspace): Payouts — 'Own only' hides everyone else's
 - **Reports** (workspace): Sales, leads, revenue
 - **Meetings** (workspace): Booking pages and meetings — 'Own' is just this person's own calendar; 'View' also sees the whole team and books with anyone; 'Edit' also changes the meeting types, the booking pages and other people's hours
-- **Phone** (workspace): My Synergy Phone calls and voicemail — 'Own calls' is just their own; 'Team calls' adds the whole team's and the Calls report; Edit also changes phone settings
+- **Phone** (workspace): My Synergy Phone calls and voicemail — 'Own calls' is just their own, and the Calls page shows only My calls; 'Team calls' adds the whole team's calls and the Team view; Edit also changes phone settings
 - **Sheds** (Settings): Styles, sizes, base prices
 - **Options & Colors** (Settings): Doors, windows, ramps, palettes
 - **Branding & Estimates** (Settings): Your look, business details, lots
@@ -135,21 +141,21 @@ The account tool get_account_overview says which steps THIS builder still has op
 
 ### The basics
 - **Set your password and sign in**: Use the link we sent you, then set a password you will remember. When the portal asks for your name and phone, fill those in too — they identify you on quotes and inside your team.
-- **Add your business details and logo**: Two halves on one page: your customer link's look (logo, colors, company name) and the business details block — name, phone, address, logo and quote terms — that prints on every estimate your customers receive.
+- **Add your business details and logo**: Two tabs on Settings > Company. Business Details holds what prints on every estimate: business name, phone, website, the estimate logo, address, estimate terms and how many days an estimate is good for. Branding holds your customer link's look: company name, tagline, colors and logo.
 - **Check your building styles and sizes**: Your catalog may already have starter styles and sizes — keep what you sell, remove what you don't, and add anything missing. Every quote starts from this list.
 - **Set up doors, windows, ramps and add-ons**: Prices, sizes and photos for everything customers place on a building. Ramps have a choice: one simple auto-sized ramp, or a full catalog. Window colors live under Windows. Do this BEFORE pricing — the pricing spreadsheet builds its columns from this catalog.
 - **Set your colors**: Paint, shingle and metal palettes, with the names your customers know them by. Mark your defaults and set any upcharges.
 - **Set your prices**: Download the pricing spreadsheet, fill in a base price per size, and upload it back. A size without a price is not offered to customers — so this step is what turns your designer on.
 - **Decide if customers see prices**: One switch on the Branding page: show live pricing to customers as they design, or keep numbers private until you send the quote.
 ### Quotes, invoices & email
-- **Connect your CRM (if you use GoHighLevel)**: Paste your Location ID and API key, then pick the pipelines and stages where new quotes, accepted quotes, invoices and deliveries should land. Skip this if you'll issue paperwork through Structure Studio instead.
-- **Choose how quotes & invoices go out**: Through your CRM, or issued by Structure Studio. Switching to Structure Studio paperwork needs three things first: a starting quote number, a starting invoice number, and your sales tax rate (tax is looked up from each delivery address — your rate is the backup when that lookup can't resolve; enter 0 if you don't collect tax).
-- **Send email from your own domain**: Add a few DNS records so estimates and invoices come from your business address instead of ours. There's a button to email the records straight to your webmaster.
+- **Connect your CRM (if you use GoHighLevel)**: Optional, and separate from who issues paperwork. If you use GoHighLevel, paste your Location ID and API key in Settings > GHL Connection and pick the pipelines and stages where new contacts and opportunities should land. Structure Studio still issues your estimates and invoices; without a connection, contacts stay in Structure Studio.
+- **Choose how quotes & invoices go out**: Structure Studio issues your estimates and invoices (sending them through GoHighLevel is only for accounts the team has switched on). The one thing you must set is your company sales tax rate in Settings > Company > Tax (0 if you don't collect tax). Starting estimate and invoice numbers are optional: blank starts at 1000, or carries on after your last number. Estimates use the sales location's own rate if it has one, otherwise your company rate; address-verified tax lookups are off unless the team switches them on.
+- **Send email from your own domain**: Add a few DNS records so estimates and invoices come from your business address instead of ours (there's a button to email the records straight to your webmaster), then press Check verification. Once it is verified, tick "Send estimate & invoice emails from my domain"; verifying alone doesn't switch it on.
 - **Send yourself a test quote**: First turn on Testing (Branding page: beta mode + your test inbox) so nothing reaches a real customer. Then build one design end to end and submit it. Check the email and the PDF look the way you want, and turn Testing back off when you're happy.
 - **Share your customer design link**: Your link is at the top of the Branding page. Copy it, put it on your website and social pages, and send it to walk-in customers — every design made there lands in your portal.
 ### Your team
 - **Add your team & set access**: Add each person with their email and job title — they get a sign-in link. The access grid decides what each person can see and change.
-- **Add sales locations & your serial number start**: Your lots and where your building serial numbers should start counting. Needed before you track buildings in Inventory.
+- **Add sales locations & your serial number start**: Add your sales lots in Settings > Company > Locations: where inventory buildings sit and the delivery pickup point (each lot can have its own tax rate). Set your building serial number start ("Next building #") on Settings > Company > Business Details, in the Building Serial Numbers card; new sales get no serial number until it is set.
 - **Set up commissions (optional)**: If reps earn commission: choose the structure here, then set each person's rate on the Team page.
 ### If you've added…
 - **Scheduling: create crews, territories & drivers**: With the Scheduling add-on: build crews are how the calendar schedules work, and deliveries need territories plus drivers (each driver needs a login, deck length and max building width).
