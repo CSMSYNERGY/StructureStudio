@@ -63,7 +63,7 @@ const FIXTURES: Record<string, unknown> = {
   client_settings: [{
     business_name: "Demo Sheds", ghl_location_id: "loc-fake", ghl_api_key: "sk-fake-secret-ghl-key", qbo_realm_id: null, qbo_connected_at: null,
     email_domain_status: "pending", sms_status: null, phone_status: "active", beta_mode: true, show_pricing: false, invoice_in_ghl: true,
-    rtp_enabled: false, payments_online_enabled: false,
+    rtp_enabled: false, payments_online_enabled: false, email_provider: "ghl", library_beta: true, door_looks_beta: false,
   }],
   client_users: [{ full_name: "Pat Example", title: "office_staff", role: "user" }],
   tenant_setup_items: [
@@ -144,6 +144,34 @@ Deno.test("account overview: the setup list as Getting set up shows it, connecti
   assertEquals(o.connections.goHighLevel, true);
   assertEquals(o.connections.ownEmailDomain, "set up, not verified yet");
   assertEquals(o.testingBetaModeOn, true);
+  assertEquals(o.betaFeatures, { library: true, doorFromPhoto: false }, "the betas the assistant must check before mentioning them");
+  assert(!out.content.includes("sk-fake-secret") && !out.content.includes("loc-fake"), "the GHL key and location id never leave");
+});
+
+Deno.test("account overview: the email domain's four states, and the tick that turns sending on", async () => {
+  const domainFor = async (status: string, provider: string | null) => {
+    const f = { ...FIXTURES, client_settings: [{ ...(FIXTURES.client_settings as Record<string, unknown>[])[0], email_domain_status: status, email_provider: provider }] };
+    const { db } = recordingDb(f);
+    return JSON.parse((await runTool("get_account_overview", {}, ctx(db))).content).connections.ownEmailDomain;
+  };
+  assertEquals(await domainFor("not_configured", "ghl"), "not set up", "the column's default is a string, not null");
+  assertEquals(await domainFor("pending", "ghl"), "set up, not verified yet");
+  assertEquals(await domainFor("failed", "ghl"), "set up, but verification failed");
+  assert((await domainFor("verified", "ghl")).includes("not ticked yet"), "verified alone doesn't send from it");
+  assertEquals(await domainFor("verified", "resend"), "verified, and estimates send from it");
+});
+
+Deno.test("account overview: door from a photo needs the Library too", async () => {
+  const f = { ...FIXTURES, client_settings: [{ ...(FIXTURES.client_settings as Record<string, unknown>[])[0], library_beta: false, door_looks_beta: true }] };
+  const { db } = recordingDb(f);
+  const o = JSON.parse((await runTool("get_account_overview", {}, ctx(db))).content);
+  assertEquals(o.betaFeatures, { library: false, doorFromPhoto: false });
+});
+
+Deno.test("account overview: (continued) internal areas and secrets", async () => {
+  const { db } = recordingDb(FIXTURES);
+  const out = await runTool("get_account_overview", {}, ctx(db, { settings_structures: "view", designs: "view" }, new Set(["view_3d"])));
+  const o = JSON.parse(out.content);
   assert(o.you.canView.includes("Sheds") && o.you.canView.includes("Designs") && !o.you.canView.includes("Projects"), "areas the person can view, internal ones never");
   assert(!out.content.includes("sk-fake-secret") && !out.content.includes("loc-fake"), "the GHL key and location id never leave");
 });
