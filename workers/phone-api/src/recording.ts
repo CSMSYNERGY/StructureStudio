@@ -33,8 +33,9 @@
 // ── THE LIFE OF ONE RECORDING (phone_call_recordings, migration 263) ───────────────────────
 //   answer      startCallRecording claims the row (insert ... on conflict do nothing: two answer
 //               callbacks, or a cold-transfer teammate answering, never start a second one) and
-//               asks Twilio to record. A refusal (4xx) marks the row failed and is logged; the call
-//               goes on unrecorded, and the next answer on it (a transfer) tries again. An answer
+//               asks Twilio to record. A refusal (4xx) marks the row failed and is logged (at info
+//               when Twilio shows the customer already hung up: 21220 on a leg that is over); the
+//               call goes on unrecorded, and the next answer on it (a transfer) tries again. An answer
 //               that was lost or broken (unreachable, 5xx, no SID) may mean Twilio IS recording,
 //               so the row stays starting: Twilio's own callbacks bind the SID, or the backstop
 //               settles it from Twilio's list, and no second recording is ever started.
@@ -58,7 +59,7 @@ import { UUID_RE } from "./http";
 import { logFault } from "./log";
 import type { TwilioParams } from "./twilioSignature";
 import {
-  fetchRecording, listCallRecordings, startRecording, TwilioError, twilioConfigured, updateRecording,
+  fetchCall, fetchRecording, listCallRecordings, startRecording, TwilioError, twilioConfigured, updateRecording,
   type StartedRecording, type TwilioRecording,
 } from "./twilioRest";
 import { response, say } from "./twiml";
@@ -171,6 +172,19 @@ export function startMayHaveLanded(e: unknown): boolean {
   return e.status === 0 || e.status >= 500 || (e.status >= 200 && e.status < 300);
 }
 
+/** Twilio's final call statuses: the leg is over, however it ended. */
+const LEG_OVER: ReadonlySet<string> = new Set(["completed", "busy", "no-answer", "canceled", "failed"]);
+
+/**
+ * Is the leg over, by Twilio's own record of it? A start refused with 21220 ("not in-progress")
+ * may come after the hang-up or before the answer, and only the leg's status says which. False
+ * for a leg still live and for a read that fails or finds nothing (404), so a doubt stays an error.
+ */
+async function legEnded(env: Env, callSid: string): Promise<boolean> {
+  const leg = await fetchCall(env, callSid).catch(() => null);
+  return !!leg && LEG_OVER.has(leg.status);
+}
+
 /** A fault's summary: the Twilio code and status, or the first line of anything else. Never a transcript. */
 function faultText(e: unknown): string {
   if (e instanceof TwilioError) return e.message;
@@ -272,10 +286,26 @@ export async function startCallRecording(env: Env, admin: Admin, call: RecCall):
       });
       return "failed";
     }
-    await admin.from("phone_call_recordings").update({ status: "failed", last_error: why.slice(0, 500) })
+    // A customer who hangs up during the announcement ends the leg about a second before the start
+    // reaches Twilio, which refuses it with 400 / 21220. That is the call working as it should, so
+    // it is logged at info. 21220 alone is not proof, though: Twilio sends it for a leg that is
+    // still queued or ringing too, which is what a start sent before the answer (or on a wrong leg
+    // that is still ringing) would get on every call. So only Twilio's record of the leg, over,
+    // makes it info; a leg still live, or a read that fails, stays an error. A start sent on a
+    // stale leg that is already over would also read as info: the constant message is what the
+    // info repetition check (CLAUDE.md, app_errors severity) counts, so a flood still surfaces
+    // there. The extra read happens on 21220 only.
+    // Either way the row, the log and the call's mark keep Twilio's code (`why`).
+    const ended = e instanceof TwilioError && e.status === 400 && e.code === 21220 && await legEnded(env, call.twilio_call_sid);
+    await admin.from("phone_call_recordings")
+      .update({ status: "failed", last_error: (ended ? `The call ended before the recording started: ${why}` : why).slice(0, 500) })
       .eq("id", id).eq("status", "starting");
-    await logFault({ code: "recording_start_failed", clientId: call.client_id, message: `Twilio refused to record: ${why}`, context: { callId: call.id, recording: id } });
-    await addCallEvent(admin, call.id, "recording_failed", null);
+    await logFault({
+      code: "recording_start_failed", clientId: call.client_id, severity: ended ? "info" : "error",
+      message: ended ? `The call ended before the recording started: ${why}` : `Twilio refused to record: ${why}`,
+      context: { callId: call.id, recording: id, ...(ended ? { reason: "call_ended" } : {}) },
+    });
+    await addCallEvent(admin, call.id, "recording_failed", ended ? { reason: "call_ended" } : null);
     return "failed";
   }
 
