@@ -198,6 +198,25 @@ Deno.test("three times that sheet (624 rows, 416 of them new sizes) still lands 
   assertEquals(st0.slice(16, 19).map((z) => [z.label, z.sort_order]), [["20x30", 16], ["22x30", 17], ["24x30", 18]]);
 });
 
+Deno.test("a ~2,000-row sheet (portal-settings' per-request cap) x 38 columns: tens of statements, not ~78,000", async () => {
+  const t = bigTenant();
+  const rows = bigSheet(t, 137);
+  assertEquals(rows.length, 1989);
+  const { sb, tables, calls } = fakeDb(clone(t.seed), { maxRows: 1000 });
+  const out = await importPricingRows(sb, CLIENT, rows);
+  assertEquals([out.created, out.updated, out.skipped], [1781, 208, []]);
+  assertEquals(tables.building_sizes.length, 1989);
+  // The row-at-a-time importer issued one statement per size plus one per option cell.
+  const oldWay = 3 + rows.length * (1 + t.keys.length);
+  const writes = calls.filter((c) => c.verb !== "select");
+  const included = tables.building_size_inclusions.length;
+  // Reads (paged), size batches of 500, option batches of 500, one DELETE per option cleared.
+  assert(calls.length <= 3 * 2 + Math.ceil(rows.length / 500) + 1 + Math.ceil(included / 500) + t.keys.length,
+    `took ${calls.length} statements for ${included} included options`);
+  assert(calls.length * 1000 < oldWay, `${calls.length} statements vs ${oldWay} the old way`);
+  assertEquals(writes.filter((c) => !c.bulk), []);
+});
+
 // ── 4. a failed batch is replayed row by row ─────────────────────────────────────────────────
 Deno.test("a size whose new label is taken fails alone, with the old line; the rest lands", async () => {
   const seed = {

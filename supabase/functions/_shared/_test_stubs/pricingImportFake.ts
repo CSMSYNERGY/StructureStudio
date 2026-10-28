@@ -130,9 +130,11 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
       next.push(...written);
     } else {
       const target = String(find("upsert")![2]?.onConflict ?? "id").split(",").map((s) => s.trim());
+      const keyOf = (r: any) => target.map((c) => NUMERIC.has(c) ? Number(r[c]) : String(r[c])).join("|");
+      const at = new Map(next.map((r, i) => [keyOf(r), i]));   // conflict key -> row index
       const hit = new Set<any>();
       for (const p of payload) {
-        const i = next.findIndex((r) => target.every((c) => same(c, r[c], p[c])));
+        const i = at.get(keyOf(p)) ?? -1;
         if (i >= 0) {
           if (hit.has(next[i])) return { data: null, error: { message: "ON CONFLICT DO UPDATE command cannot affect row a second time" } };
           next[i] = trigger(table, { ...next[i], ...p });
@@ -140,6 +142,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
           written.push(next[i]);
         } else {
           const r = trigger(table, withId(table, { ...DEFAULTS[table], ...p }));
+          at.set(keyOf(r), next.length);
           next.push(r); hit.add(r); written.push(r);
         }
       }
