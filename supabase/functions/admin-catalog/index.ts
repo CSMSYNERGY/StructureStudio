@@ -521,6 +521,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // The StructureStudio library's templates and the request queue (339): reads; the queue's photo
     // links are one-hour signed URLs made per request.
     "library_items_list", "library_requests_list",
+    // Doors builders made from photos (347): a read of their saved looks; promoting one needs can_write.
+    "library_door_looks_list",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -2300,6 +2302,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "library_requests_list":
       case "library_request_set":
       case "library_request_refund":
+      case "library_door_looks_list":
+      case "library_door_look_promote":
         return await handleAdminLibraryAction(sb, String(action), p as Record<string, unknown>, identity as { via: string; userId?: string; email?: string }, json);
 
       case "number_requests_list": {
