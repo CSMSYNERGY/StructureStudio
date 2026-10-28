@@ -175,8 +175,9 @@ Deno.test("a pricing sheet's Partition Wall column writes no inclusion; the othe
   ] });
   assertEquals(r.status, 200, JSON.stringify(r.body));
   assertEquals(r.body.skipped, []);
+  // The importer writes a sheet's options in bulk (2026-10-28): a write's row may be an array.
   const inc = r.trace.writes.filter((w) => w.table === "building_size_inclusions");
-  assertEquals(inc.map((w) => [w.verb, w.row?.item_key]), [["upsert", "workbench"]]);
+  assertEquals(inc.flatMap((w) => (Array.isArray(w.row) ? w.row : [w.row]).map((row: any) => [w.verb, row?.item_key])), [["upsert", "workbench"]]);
 });
 
 // ── save_interior_walls (313) ─────────────────────────────────────────────────────────────
