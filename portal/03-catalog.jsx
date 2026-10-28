@@ -5832,7 +5832,7 @@ function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
               <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 6 }}>Photo of the closed door</div>
               <label style={{ ...btn, display: "inline-block" }}>
                 {front ? "Use a different photo" : "Choose a photo"}
-                <input type="file" accept="image/jpeg,image/png,image/webp" data-ss-door-front="1" style={{ display: "none" }}
+                <input type="file" accept="image/jpeg,image/png,image/webp,image/avif,.avif" data-ss-door-front="1" style={{ display: "none" }}
                   onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { setFront(f); setStraight(null); setErr(null); } e.target.value = ""; }} />
               </label>
               {front && <span style={{ marginLeft: 10, fontSize: 12.5, color: "#15803D", fontWeight: 700 }}>✓ {front.name}</span>}
@@ -5841,7 +5841,7 @@ function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
                 {[["hinge", "A hinge"], ["handle", "The handle"], ...(leaves === 2 ? [["meet", "Where the doors meet"]] : [])].map(([k, t]) => (
                   <label key={k} style={{ ...btn, padding: "5px 10px", fontSize: 12, display: "inline-block" }}>
                     {closeUps[k] ? "✓ " : "+ "}{t}
-                    <input type="file" accept="image/jpeg,image/png,image/webp" data-ss-door-closeup={k} style={{ display: "none" }}
+                    <input type="file" accept="image/jpeg,image/png,image/webp,image/avif,.avif" data-ss-door-closeup={k} style={{ display: "none" }}
                       onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) setCloseUps((c) => ({ ...c, [k]: f })); e.target.value = ""; }} />
                   </label>
                 ))}
@@ -6082,7 +6082,11 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
     try {
       const added = [];
       for (const f of list) {
-        const fit = await ssFitImageForUpload(f).catch(() => f);
+        // An AVIF (or anything else the browser opens that isn't JPEG, PNG or WebP) goes up as a
+        // JPEG: a small one would otherwise go up untouched, labelled image/jpeg.
+        const plain = ["image/jpeg", "image/png", "image/webp"].includes(f.type);
+        const fit = plain ? await ssFitImageForUpload(f).catch(() => f)
+          : new File([await ssDoorReencode(f).catch(() => { throw new Error((f.name || "That photo") + " could not be opened. Try a JPG or PNG."); })], "photo.jpg", { type: "image/jpeg" });
         const file = fit && fit.size ? fit : f;
         const ct = ["image/jpeg", "image/png", "image/webp"].includes(file.type) ? file.type : "image/jpeg";
         const up = await call({ action: "library_request_upload_url", contentType: ct });
@@ -6238,7 +6242,7 @@ function SsLibrarySection({ category, viewingLabel = null, clientId = null, onCh
                       {reqDraft.photos.length < 4 && (
                         <label style={{ ...smallBtn, display: "inline-block" }}>
                           {reqDraft.uploading ? "Uploading…" : "Add photos"}
-                          <input type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }} disabled={reqDraft.uploading} onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
+                          <input type="file" accept="image/jpeg,image/png,image/webp,image/avif,.avif" multiple style={{ display: "none" }} disabled={reqDraft.uploading} onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
                         </label>
                       )}
                       <span style={{ fontSize: 12, color: "#64748B" }}>A clear, straight-on photo from the supplier&rsquo;s website works best.</span>
