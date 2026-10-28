@@ -5616,6 +5616,243 @@ function SsDoorCorners({ img, quad, setQuad }) {
   );
 }
 
+// ── The press, above every page (Ahsan 2026-10-28) ───────────────────────────────────────────
+// "Once I start the generation, I should see a button for generating in background, or if I click
+// outside the pop-up, it should automatically move the generation in the background. And once it is
+// generated, I should see a pop-up on my screen that it is generated."
+// So one press (the server refuses a second while one runs) lives here, not in the Doors page's
+// dialog: the dialog only watches it, and SsDoorJobDock (mounted by the Dashboard on every page) shows
+// a pill while nobody is watching, then a pop-up when it is done. It is kept in localStorage under
+// its key, without the photos, so a reload or a closed tab picks it up again by
+// generate_door_look_recover: the server keeps drawing after a dropped connection (heartbeatJson
+// hands the work to EdgeRuntime.waitUntil) and answers by the key with the draft, still-working, or
+// a failure. After a reload the one lean retry can still go out: the body (the photos' server paths,
+// never the photos) is kept too.
+const SS_DOOR_JOB_STORE = "ss.doorJob.v1";
+const ssDoorJob = (() => {
+  let job = null;      // { id, clientId, target, key, name, widthIn, heightIn, leaves, startedAt, sent, body, lean, status, note, result, error, seen }
+  let watching = 0;    // the dialog is showing this press: no pill, and it takes the answer itself
+  let review = null;   // a finished press the Doors page should open in its review
+  let booted = null;   // the client whose saved press was looked at
+  // A reload or a closed tab cancels the request under a running press: that is not an answer, and
+  // the next page asks the server by the key, so nothing may be recorded once the page is going.
+  let leaving = false;
+  try { window.addEventListener("pagehide", () => { leaving = true; }); } catch (_e) { /* no window */ }
+  const subs = new Set();
+  const emit = () => subs.forEach((f) => { try { f(); } catch (_e) { /* a gone view */ } });
+  const save = () => {
+    try {
+      if (!job || (job.seen && job.status !== "running")) localStorage.removeItem(SS_DOOR_JOB_STORE);
+      else {
+        const { straightUrl, ...kept } = job;
+        localStorage.setItem(SS_DOOR_JOB_STORE, JSON.stringify(kept));
+      }
+    } catch (_e) { /* storage blocked: the press still runs, it just cannot outlive the tab */ }
+  };
+  const set = (patch) => { if (!job || leaving) return; job = { ...job, ...patch }; save(); emit(); };
+  const notify = (title, body) => {
+    try {
+      if (document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") new Notification(title, { body });
+    } catch (_e) { /* not offered here */ }
+  };
+  const finish = (patch) => {
+    // A dialog watching it takes the answer (and marks it seen); otherwise the dock pops up.
+    set({ ...patch, seen: false });
+    if (!watching) {
+      if (patch.status === "ready") notify("Your 3D door is ready", `${job.name ? `“${job.name}”` : "Your door"} is drawn. Check it, then save it to your library.`);
+      else notify("We couldn't draw your door", patch.error || "Try again.");
+    }
+  };
+  async function run(blobs) {
+    const j0 = job;
+    const invoke = (body) => sb.functions.invoke("portal-settings", { body: j0.target ? { ...body, targetClientId: j0.target } : body });
+    const call = async (body) => {
+      const { data, error } = await invoke(body);
+      if (error || (data && data.error)) throw new Error((data && data.error) || (error && error.message) || "Something went wrong.");
+      return data;
+    };
+    const mine = () => job && job.id === j0.id;
+    const left = () => SS_DOOR_PRESS_MS - (Date.now() - j0.startedAt);
+    try {
+      // 1. The photos, at paths the server picks, into the private bucket (only on the first run:
+      //    after a reload the press is already out, and the photos are gone from this page anyway).
+      if (!job.sent) {
+        const up = await call({ action: "door_ref_upload_url", contentTypes: blobs.map(() => "image/jpeg") });
+        const photos = {};
+        for (let i = 0; i < blobs.length; i++) {
+          const u = up.uploads[i];
+          const { error } = await sb.storage.from("door-refs").uploadToSignedUrl(u.path, u.token, blobs[i].blob, { contentType: "image/jpeg" });
+          if (error) throw new Error("A photo didn't upload: " + error.message);
+          photos[blobs[i].kind] = u.path;
+        }
+        if (!mine()) return;
+        set({ sent: true, fresh: true, body: { action: "generate_door_look", stream: true, idempotencyKey: job.key, name: job.name, widthIn: job.widthIn, heightIn: job.heightIn, leaves: job.leaves, photos } });
+      }
+      // 2. One press: one key, a lean retry at most, and a pickup by the key when the stream drops.
+      for (;;) {
+        let got = null, refusal = null, brokeOff = true;
+        if (job.fresh) {
+          const res = await invoke(job.lean ? { ...job.body, lean: true } : job.body);
+          if (!mine()) return;
+          set({ fresh: false });
+          // No HTTP answer at all (a body that broke off, the network gone, the page reloading) is a
+          // dropped stream: the server keeps drawing, so ask by the key. Only a real status refuses.
+          const e = res.error;
+          brokeOff = Boolean(e && !e.ssStatus && !(e.context && typeof e.context.status === "number"));
+          const a = brokeOff ? { status: null, body: null } : await ssDoorAnswerOf(res);
+          got = a.body && a.body.ok && a.body.spec ? a.body : null;
+          refusal = !got && a.body && a.body.error ? a.body : null;
+          if (!got && !brokeOff && !(a.body && a.body.code === "stream_deadline")) {
+            if (!refusal) refusal = { error: (res.error && res.error.message) || "We couldn't draw this door. Try again." };
+          } else if (!got) brokeOff = true;
+        }
+        if (!got && brokeOff) {
+          // The server may still be working, or done: ask by this press's key until the clock runs out.
+          set({ note: "Your door is still being drawn. Picking it up…" });
+          const firstAsk = Date.now();
+          for (;;) {
+            const r = await ssDoorAnswerOf(await invoke({ action: "generate_door_look_recover", idempotencyKey: job.key }));
+            if (!mine()) return;
+            if (r.body && r.body.ok && r.body.spec) { got = r.body; break; }
+            if (r.body && r.body.ok && r.body.pending === false) {
+              if (r.body.reason === "no_row" && Date.now() - j0.startedAt < 90_000) { /* its row may not be written yet */ }
+              else { refusal = { error: r.body.message, code: r.body.code, retryable: r.body.retryable === true }; break; }
+            }
+            if (left() < 10_000 && Date.now() - firstAsk > 60_000) { refusal = { error: "This took too long. Look for your door under “Not in your library yet” on the Doors page before you press Generate again." }; break; }
+            await new Promise((ok) => setTimeout(ok, 10_000));
+          }
+        }
+        if (got) {
+          finish({ status: "ready", note: null, name: job.name || (got.look && got.look.name) || "", result: { lookId: got.lookId || null, look: got.look || null, spec: got.spec, warnings: got.warnings || [] } });
+          return;
+        }
+        if (refusal && refusal.retryable === true && !job.lean && left() >= SS_DOOR_LEAN_MIN_LEFT_MS) { set({ lean: true, fresh: true, note: "Trying once more, a quicker way" }); continue; }
+        finish({ status: "failed", note: null, error: (refusal && refusal.error) || "We couldn't draw this door. Try again." });
+        return;
+      }
+    } catch (e) {
+      if (mine() && !leaving) finish({ status: "failed", note: null, error: e.message || "Something went wrong. Try again." });
+    }
+  }
+  return {
+    get: () => job,
+    review: () => review,
+    subscribe: (f) => { subs.add(f); return () => subs.delete(f); },
+    // false when a press is already running (one at a time).
+    start(o) {
+      if (job && job.status === "running") return false;
+      job = {
+        id: "j" + Date.now().toString(36), clientId: o.clientId || null, target: o.target || null,
+        key: "dl" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12),
+        name: o.name, widthIn: o.widthIn, heightIn: o.heightIn, leaves: o.leaves, startedAt: Date.now(),
+        sent: false, body: null, lean: false, fresh: false, status: "running", note: null, result: null, error: null, seen: false,
+        straightUrl: o.straightUrl || null,
+      };
+      save(); emit();
+      run(o.blobs);
+      return true;
+    },
+    watch(on) { watching = Math.max(0, watching + (on ? 1 : -1)); emit(); },
+    watched: () => watching > 0,
+    // The answer has been shown (the dialog took it, or the pop-up was closed): forget the press.
+    seen() { if (job && job.status !== "running") { job = { ...job, seen: true }; save(); job = null; emit(); } },
+    // "See my door": the Doors page opens it in its review.
+    openReview() {
+      if (!job || job.status !== "ready") return;
+      review = { ...job.result, name: job.name, widthIn: job.widthIn, heightIn: job.heightIn, straightUrl: job.straightUrl || null };
+      this.seen();
+      emit();
+    },
+    takeReview() { const r = review; review = null; return r; },
+    // The Dashboard, once per client: a press saved by an earlier page of THIS client comes back.
+    boot(clientId) {
+      if (!clientId || booted === clientId || (job && job.status === "running")) return;
+      booted = clientId;
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(SS_DOOR_JOB_STORE) || "null"); } catch (_e) { saved = null; }
+      if (!saved || saved.clientId !== clientId || typeof saved.key !== "string") return;
+      job = saved;
+      if (job.status === "running") {
+        if (!job.sent) {
+          // Closed before the photos went up: nothing is being drawn.
+          finish({ status: "failed", error: "The page closed before your door started drawing. Make it from your photo again." });
+        } else if (Date.now() - job.startedAt > SS_DOOR_PRESS_MS + 5 * 60_000) {
+          finish({ status: "failed", error: "This took too long. Look for your door under “Not in your library yet” on the Doors page before you press Generate again." });
+        } else {
+          job = { ...job, fresh: false };
+          emit();
+          run([]);
+        }
+      } else emit();
+    },
+  };
+})();
+// Re-render on every change to the press, and once a second while it runs (the clock).
+function useSsDoorJob() {
+  const [, bump] = useState(0);
+  useEffect(() => ssDoorJob.subscribe(() => bump((n) => n + 1)), []);
+  const job = ssDoorJob.get();
+  const running = !!(job && job.status === "running");
+  useEffect(() => {
+    if (!running) return undefined;
+    const t = setInterval(() => bump((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  return job;
+}
+const ssDoorJobClock = (job) => {
+  const s = Math.max(0, Math.floor((Date.now() - job.startedAt) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+const ssDoorJobStage = (job) => {
+  if (job.note) return job.note;
+  if (!job.sent) return "Sending your photo";
+  const s = (Date.now() - job.startedAt) / 1000;
+  return (SS_DOOR_STAGES.filter(([t]) => s >= t).pop() || SS_DOOR_STAGES[0])[1];
+};
+
+// The pill while a press runs out of sight, and the pop-up when it is done. On every page: the
+// Dashboard mounts it beside its other app-wide pieces.
+function SsDoorJobDock({ clientId, onOpenDoors }) {
+  const job = useSsDoorJob();
+  useEffect(() => { ssDoorJob.boot(clientId); }, [clientId]);
+  if (!job || job.clientId !== (clientId || null) || ssDoorJob.watched()) return null;
+  const btn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "8px 14px", fontSize: 13 };
+  const go = { ...S.btn(DOOR_MINT, "#0F4C46"), padding: "8px 16px", fontSize: 13 };
+  if (job.status === "running") {
+    return (
+      <button type="button" data-ss-door-job-pill="1" onClick={onOpenDoors} title="Open the Doors page"
+        style={{ position: "fixed", left: "50%", bottom: 20, transform: "translateX(-50%)", zIndex: 1150, display: "flex", alignItems: "center", gap: 10,
+          background: "#0F4C5C", color: "#FFF", border: "none", borderRadius: 999, padding: "9px 16px", boxShadow: "0 6px 20px rgba(15,23,42,0.28)", cursor: "pointer", fontSize: 13, maxWidth: "calc(100vw - 32px)" }}>
+        <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: "50%", background: DOOR_MINT, boxShadow: "0 0 0 3px rgba(117,230,218,0.3)", flexShrink: 0 }} />
+        <span style={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{job.name ? <>Drawing &ldquo;{job.name}&rdquo;…</> : "Drawing your door…"}</span>
+        <span style={{ fontVariantNumeric: "tabular-nums", opacity: 0.85 }}>{ssDoorJobClock(job)}</span>
+      </button>
+    );
+  }
+  const ready = job.status === "ready";
+  return (
+    <div role="dialog" aria-modal="true" aria-label={ready ? "Your 3D door is ready" : "We couldn't draw your door"}
+      data-ss-door-job-ready={ready ? "1" : undefined} data-ss-door-job-failed={ready ? undefined : "1"}
+      onClick={(e) => { if (e.target === e.currentTarget) ssDoorJob.seen(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 1250, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#FFF", borderRadius: 14, padding: 20, maxWidth: 420, width: "100%", boxShadow: "0 12px 40px rgba(15,23,42,0.3)" }}>
+        <div style={{ fontWeight: 800, fontSize: 17, color: "#0F172A", marginBottom: 6 }}>{ready ? "Your 3D door is ready" : "We couldn't draw your door"}</div>
+        <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55 }}>
+          {ready ? <>{job.name ? <>&ldquo;{job.name}&rdquo;</> : "Your door"} is drawn from your photo. Check it, then save it to your library.</> : (job.error || "Try again.")}
+        </div>
+        {!ready && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 6 }}>You can make it from the photo again on the Doors page.</div>}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+          <button type="button" style={btn} onClick={() => ssDoorJob.seen()}>{ready ? "Later" : "Close"}</button>
+          <button type="button" style={go} onClick={() => { if (ready) ssDoorJob.openReview(); else ssDoorJob.seen(); onOpenDoors(); }}>
+            {ready ? "See my door" : "Go to Doors"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // The flow itself, in a dialog: the photo, the corners, the press, the review, saved.
 function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
   // Hooks first, every one of them, above every early return (React #310 otherwise).
@@ -5628,15 +5865,39 @@ function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
   const [img, setImg] = useState(null);
   const [quad, setQuad] = useState(null);
   const [closeUps, setCloseUps] = useState({}); // { hinge, handle, meet }: files
-  const [straight, setStraight] = useState(null); // { blob, url, size }
+  // { blob, url, size }; a press picked up from the background brings its photo's url only.
+  const [straight, setStraight] = useState(resume && resume.straightUrl ? { blob: null, url: resume.straightUrl, size: null } : null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [stage, setStage] = useState(SS_DOOR_STAGES[0][1]);
   const [draft, setDraft] = useState(resume ? { lookId: resume.lookId, look: resume.look || null, spec: resume.spec, warnings: resume.warnings || [] } : null);
   const [shots, setShots] = useState(null);     // [{ view, url }] or "failed"
   const [saved, setSaved] = useState(null);
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
+  // The press is ssDoorJob's (above every page); this dialog only watches the one it started.
+  const job = useSsDoorJob();
+  const myJob = useRef(null);
+  useEffect(() => {
+    if (step !== "press") return undefined;
+    ssDoorJob.watch(true);
+    return () => ssDoorJob.watch(false);
+  }, [step]);
+  useEffect(() => {
+    if (step !== "press" || !job || job.id !== myJob.current || job.status === "running") return;
+    if (job.status === "ready") {
+      const r = job.result;
+      setDraft({ lookId: r.lookId, look: r.look, spec: r.spec, warnings: r.warnings || [] });
+      if (!name.trim() && r.look && r.look.name) setName(r.look.name);
+      setStep("review");
+    } else {
+      setErr(job.error);
+      setStep("corners");
+    }
+    ssDoorJob.seen();
+  }, [job, step]);
+  const otherRunning = !!(job && job.status === "running" && job.id !== myJob.current);
+  // "Keep working": the press carries on above the page; the pill and the pop-up take it from here.
+  const toBackground = () => { if (onClose) onClose(); };
   useEffect(() => {
     if (!front) { setImg(null); return undefined; }
     let gone = false;
@@ -5689,71 +5950,23 @@ function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
     } finally { setBusy(false); }
   };
 
-  // ── The press ─────────────────────────────────────────────────────────────────────────────
+  // ── The press: handed to ssDoorJob, which outlives this dialog ──────────────────────────────
   const generate = async () => {
-    setErr(null); setBusy(true); setStep("press");
-    const startedAt = Date.now();
-    const timer = setInterval(() => {
-      const s = (Date.now() - startedAt) / 1000;
-      const hit = SS_DOOR_STAGES.filter(([t]) => s >= t).pop();
-      if (hit && alive.current) setStage(hit[1]);
-    }, 1000);
-    const left = () => SS_DOOR_PRESS_MS - (Date.now() - startedAt);
-    const fail = (message) => { if (!alive.current) return; setErr(message); setStep("corners"); };
+    setErr(null);
+    if (otherRunning) { setErr("Another door is being drawn. Wait for it to finish, then press Generate again."); return; }
+    setBusy(true);
     try {
-      // 1. The photos, at paths the server picks, into the private bucket.
       const kinds = ["front", ...["hinge", "handle", "meet"].filter((k) => closeUps[k] && (k !== "meet" || leaves === 2))];
-      const blobs = [straight.blob];
-      for (const k of kinds.slice(1)) blobs.push(await ssDoorReencode(closeUps[k]));
-      const up = await call({ action: "door_ref_upload_url", contentTypes: blobs.map(() => "image/jpeg") });
-      const photos = {};
-      for (let i = 0; i < kinds.length; i++) {
-        const u = up.uploads[i];
-        const { error } = await sb.storage.from("door-refs").uploadToSignedUrl(u.path, u.token, blobs[i], { contentType: "image/jpeg" });
-        if (error) throw new Error("A photo didn't upload: " + error.message);
-        photos[kinds[i]] = u.path;
-      }
-      // 2. One press: one key, a lean retry at most, and a pickup by the key when the stream drops.
-      const key = "dl" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
-      const body = { action: "generate_door_look", stream: true, idempotencyKey: key, name: name.trim(), widthIn: W, heightIn: H, leaves, photos };
-      let lean = false;
-      for (;;) {
-        const res = await sb.functions.invoke("portal-settings", { body: scoped(lean ? { ...body, lean: true } : body) });
-        const brokeOff = Boolean(res.error && (res.error.name === "SyntaxError" || res.error.name === "TypeError") && !res.error.ssStatus);
-        const a = brokeOff ? { status: null, body: null } : await ssDoorAnswerOf(res);
-        let got = a.body && a.body.ok && a.body.spec ? a.body : null;
-        let refusal = !got && a.body && a.body.error ? a.body : null;
-        if (!got && (brokeOff || (a.body && a.body.code === "stream_deadline"))) {
-          // The server may still be working, or done: ask by this press's key until the clock runs out.
-          setStage("Your door is still being drawn. Picking it up…");
-          const firstAsk = Date.now();
-          for (;;) {
-            if (!alive.current) return;
-            const r = await ssDoorAnswerOf(await sb.functions.invoke("portal-settings", { body: scoped({ action: "generate_door_look_recover", idempotencyKey: key }) }));
-            if (r.body && r.body.ok && r.body.spec) { got = r.body; break; }
-            if (r.body && r.body.ok && r.body.pending === false) {
-              if (r.body.reason === "no_row" && Date.now() - startedAt < 90_000) { /* its row may not be written yet */ }
-              else { refusal = { error: r.body.message, code: r.body.code, retryable: r.body.retryable === true }; break; }
-            }
-            if (left() < 10_000 && Date.now() - firstAsk > 60_000) { refusal = { error: "This took too long. Reload the page to see if your door is in your list before you press Generate again." }; break; }
-            await new Promise((ok) => setTimeout(ok, 10_000));
-          }
-        }
-        if (got) {
-          if (!alive.current) return;
-          setDraft({ lookId: got.lookId || null, look: got.look || null, spec: got.spec, warnings: got.warnings || [] });
-          if (!name.trim() && got.look && got.look.name) setName(got.look.name);
-          setStep("review");
-          return;
-        }
-        if (refusal && refusal.retryable === true && !lean && left() >= SS_DOOR_LEAN_MIN_LEFT_MS) { lean = true; setStage("Trying once more, a quicker way"); continue; }
-        fail((refusal && refusal.error) || (res.error && res.error.message) || "We couldn't draw this door. Try again.");
-        return;
-      }
+      const blobs = [{ kind: "front", blob: straight.blob }];
+      for (const k of kinds.slice(1)) blobs.push({ kind: k, blob: await ssDoorReencode(closeUps[k]) });
+      const t = scoped({});
+      const started = ssDoorJob.start({ clientId: ssResolvedClientId, target: t.targetClientId || null, name: name.trim(), widthIn: W, heightIn: H, leaves, blobs, straightUrl: straight.url });
+      if (!started) { setErr("Another door is being drawn. Wait for it to finish, then press Generate again."); return; }
+      myJob.current = ssDoorJob.get().id;
+      setStep("press");
     } catch (e) {
-      fail(e.message || "Something went wrong. Try again.");
+      setErr(e.message || "Something went wrong. Try again.");
     } finally {
-      clearInterval(timer);
       if (alive.current) setBusy(false);
     }
   };
@@ -5796,6 +6009,7 @@ function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
   const title = { photo: "Make your door from a photo", corners: "Mark the door's corners", press: "Drawing your door", review: "Check your 3D door", saved: "Saved to your library" }[step];
   return (
     <div role="dialog" aria-modal="true" aria-label={title} data-ss-door-studio={step}
+      onClick={(e) => { if (step === "press" && e.target === e.currentTarget) toBackground(); }}
       style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.72)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div style={{ background: "#FFF", borderRadius: 14, padding: 20, maxWidth: step === "review" ? 980 : 640, width: "100%", maxHeight: "92vh", overflowY: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
@@ -5870,19 +6084,25 @@ function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
               <button type="button" style={btn} onClick={() => { setStraight(null); setStep("photo"); }}>Back</button>
               {!straight && <button type="button" style={go} disabled={busy} onClick={straighten}>{busy ? "Straightening…" : "Straighten"}</button>}
               {straight && <button type="button" style={btn} onClick={() => setStraight(null)}>Move the dots again</button>}
-              {straight && <button type="button" style={go} disabled={busy || !ai} onClick={generate} data-ss-door-generate="1">Generate my 3D door</button>}
+              {straight && <button type="button" style={go} disabled={busy || !ai || otherRunning} onClick={generate} data-ss-door-generate="1">Generate my 3D door</button>}
             </div>
             {straight && !ai && <div style={{ fontSize: 12.5, color: "#92400E" }}>Making doors from photos is turned off right now. Try again later.</div>}
+            {straight && ai && otherRunning && <div style={{ fontSize: 12.5, color: "#92400E" }}>We&rsquo;re still drawing &ldquo;{job.name || "your other door"}&rdquo;. You can press Generate once it&rsquo;s ready.</div>}
           </div>
         )}
 
         {step === "press" && (
           <div style={{ display: "grid", gap: 12, justifyItems: "center", padding: "18px 0" }} aria-live="polite">
             <SkelBar />
-            <div style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }} data-ss-door-stage="1">{stage}…</div>
-            <div style={{ fontSize: 12.5, color: "#64748B", textAlign: "center", maxWidth: 420 }}>
-              This usually takes 3 to 6 minutes, and never more than 8. Keep this page open.
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }} data-ss-door-stage="1">
+              {job && job.id === myJob.current ? ssDoorJobStage(job) : SS_DOOR_STAGES[0][1]}…
+              {job && job.id === myJob.current && <span style={{ fontWeight: 600, color: "#64748B", marginLeft: 8, fontVariantNumeric: "tabular-nums" }}>{ssDoorJobClock(job)}</span>}
             </div>
+            <div style={{ fontSize: 12.5, color: "#64748B", textAlign: "center", maxWidth: 420 }}>
+              This usually takes 1 to 6 minutes, and never more than 8. You can keep working: we&rsquo;ll tell you when it&rsquo;s ready.
+            </div>
+            <button type="button" onClick={toBackground} data-ss-door-background="1"
+              style={{ ...S.btn("#F1F5F9", "#1E293B"), padding: "8px 14px", fontSize: 13 }}>Keep working, run it in the background</button>
           </div>
         )}
 
@@ -5944,6 +6164,15 @@ function SsDoorFromPhoto({ call, scoped, money, ai, entries, openKey = 0, onSave
   };
   useEffect(() => { loadLooks(); }, []);
   useEffect(() => { if (openKey) setOpen({}); }, [openKey]);
+  // A press running above the page: its line here, a fresh list once it is done, and the review the
+  // pop-up's "See my door" asked for.
+  const job = useSsDoorJob();
+  const jobStatus = job ? job.status : null;
+  useEffect(() => { if (jobStatus && jobStatus !== "running") loadLooks(); }, [jobStatus]);
+  useEffect(() => {
+    const r = ssDoorJob.takeReview();
+    if (r) { loadLooks(); setOpen({ resume: { lookId: r.lookId, look: r.look, spec: r.spec, name: r.name, warnings: r.warnings || [], widthIn: r.widthIn, heightIn: r.heightIn, straightUrl: r.straightUrl } }); }
+  }, [job]);
   const inLibrary = new Set((entries || []).filter((e) => e.category === "door" && e.look && e.look.doorLookId).map((e) => e.look.doorLookId));
   const waiting = (looks || []).filter((l) => l.fromPhoto && !inLibrary.has(l.id)).slice(0, 3);
   return (
@@ -5954,6 +6183,11 @@ function SsDoorFromPhoto({ call, scoped, money, ai, entries, openKey = 0, onSave
       </div>
       <button type="button" onClick={() => setOpen({})} data-ss-door-open="1" style={{ ...S.btn("#1B7895", "#FFF"), padding: "8px 14px", fontSize: 13 }}>Make it from a photo</button>
       {!ai && <div style={{ fontSize: 12, color: "#92400E", marginTop: 8 }}>Making doors from photos is turned off right now.</div>}
+      {job && job.status === "running" && !open && (
+        <div data-ss-door-job-line="1" style={{ fontSize: 12.5, color: "#0F4C5C", marginTop: 8, lineHeight: 1.45 }}>
+          Drawing &ldquo;{job.name || "your door"}&rdquo;… <span style={{ fontVariantNumeric: "tabular-nums" }}>{ssDoorJobClock(job)}</span>. We&rsquo;ll tell you when it&rsquo;s ready.
+        </div>
+      )}
       {waiting.length > 0 && (
         <div style={{ marginTop: 10, borderTop: "1px solid #CFE8EE", paddingTop: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 800, color: "#0F4C5C" }}>Not in your library yet</div>

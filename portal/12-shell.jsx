@@ -4098,6 +4098,11 @@ function Dashboard({ session }) {
         />
       )}
 
+      {/* A door being drawn from a photo (03-catalog's ssDoorJob): its pill on every page while it
+          runs out of sight, and the pop-up when it is done (Ahsan 2026-10-28). */}
+      <SsDoorJobDock clientId={effClientId} onOpenDoors={() => navigate("settings", "doors")} />
+
+
       {/* Operator filling in someone else's details from the Accounts tab. Contact fields
           only — role and tenant are not editable here, since either would move access. */}
       {editUser && (
