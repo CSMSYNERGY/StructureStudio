@@ -13429,7 +13429,8 @@ function buildShed3DModel(THREE, p) {
       return hex && hex.toUpperCase() !== SS_DOOR_FINISH_HEX.black ? mat(hex, { metalness: 0.55, roughness: 0.42 }) : ironMat;
     };
     return {
-      slab: src === wood ? (dir === "v" || dir === "h" ? mat(new THREE.Color(woodHex).multiplyScalar(0.62)) : wood) : !!src.map === grooved ? src : doorLiveCopy(src, grooved),
+      slab: src === wood ? (dir === "v" || dir === "h" ? mat(new THREE.Color(woodHex).multiplyScalar(0.8)) : wood) : !!src.map === grooved ? src : doorLiveCopy(src, grooved),
+      wood: !!wood,
       plain: role(c.infill || "door"),
       frame, members: c.members ? role(c.members) : frame, hinge: finish(spec.hinges), handle: finish(spec.handle), dir,
     };
@@ -13470,8 +13471,10 @@ function buildShed3DModel(THREE, p) {
     put(wallBox(fm, wf, hole.x0, hole.x1, hole.y1, hole.y1 + c, 0.11, 0.06), part, ix);
     put(wallBox(fm, wf, hole.x0, hole.x1, hole.y0 - c, hole.y0, 0.11, 0.06), part, ix);
     if (ring < SS_DOOR_WIN_CASE_FT) {
-      put(wallBox(mat("#BFE0E8", { transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0.4, side: THREE.DoubleSide, depthWrite: false }), wf, hole.x0, hole.x1, hole.y0, hole.y1, 0, 0.05), part, ix);
-      if (room) put(glassRoom(wf, hole.x0, hole.x1, hole.y0, hole.y1, 0.08), part + "Room", ix);
+      // A slot reads as light coming through it (a modern door's glass strips, Ahsan 2026-10-28): pale glass
+      // that glows a little, no dark room behind it, set forward near the board face so the ring round it
+      // does not hide it from the side.
+      put(wallBox(mat("#EEF3F2", { emissive: "#E6E1D2", emissiveIntensity: 0.55, roughness: 0.15, metalness: 0.05 }), wf, hole.x0, hole.x1, hole.y0, hole.y1, 0.09, 0.03), part, ix);
       return;
     }
     const n0 = og.children.length;
@@ -13574,13 +13577,14 @@ function buildShed3DModel(THREE, p) {
         .concat(panels.filter((p, i) => fillOn(p, i) && p.fill === "raised").map(raisedFill))
         .concat(panels.filter((p, i) => fillOn(p, i) && p.fill === "vent").map((p) => { const v = ventFill(p); return { x0: v.cx - v.vs / 2, x1: v.cx + v.vs / 2, y0: v.cy - v.vs / 2, y1: v.cy + v.vs / 2 }; }));
       const n = Math.max(2, Math.round(span / pitchFt));
-      const pitch = span / n, gap = Math.min(0.05, pitch * 0.15);
+      const woodLook = !!(spec && m.wood);
+      const pitch = span / n, gap = woodLook ? Math.min(0.012, pitch * 0.03) : Math.min(0.05, pitch * 0.15);
       for (let k = 0; k < n; k++) {
         const b0 = s0 + k * pitch + (k === 0 ? 0 : gap / 2);
         const b1 = s0 + (k + 1) * pitch - (k === n - 1 ? 0 : gap / 2);
         let bits = [across ? { x0: b0, x1: b1, y0: fy0, y1: fy1 } : { x0: f0, x1: f1, y0: b0, y1: b1 }];
         stops.forEach((k2) => { bits = doorRectsMinus(bits, k2); });
-        bits.forEach((r) => put(wallBox(spec ? m.plain : doorMat, wf, r.x0, r.x1, r.y0, r.y1, 0.105, 0.06), tag("board")));
+        bits.forEach((r) => put(wallBox(spec ? m.plain : doorMat, wf, r.x0, r.x1, r.y0, r.y1, woodLook ? 0.13 : 0.105, 0.06), tag("board")));
       }
     }
     // Frame: two full-height stiles, then head/sill/mid rails spanning only BETWEEN them.
