@@ -114,6 +114,16 @@ Deno.test("every row-shaped action reaches the board its row lives on", async ()
   }
 });
 
+Deno.test("a cross-board move is checked on BOTH ends", async () => {
+  // The whole point: a card moved INTO a board you cannot see would be a way to write into
+  // it, and a card moved OUT of one a way to read it.
+  for (const action of ["move_plan", "move_to_board"]) {
+    const a = await boardsForAction(world(), action, { ids: [ITEM], toBoardId: B_PUB });
+    assert(a.ok);
+    assertEquals(new Set(a.boardIds), new Set([B_PRIV, B_PUB]), `${action} missed an end`);
+  }
+});
+
 Deno.test("an overlay write is checked on BOTH boards", async () => {
   const r = await boardsForAction(world(), "update_item", { id: ITEM, fromBoardId: B_PUB });
   assert(r.ok);

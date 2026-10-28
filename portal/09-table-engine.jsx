@@ -301,7 +301,12 @@ function pmComputeGroups(mode, rows, boardGroups, columns, ctx) {
 //   canEdit + onCellCommit(item, col, value) + onDropToGroup(item, group) +
 //   onDropOnRow(item, beforeItem) + onRowOpen(item) + onAddItem(group, name)
 //   activeItemId — the row whose modal is open (ACCENT outline, decision 25's marking)
-function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey, sortDir, onSort, canEdit, onCellCommit, onDropToGroup, onDropOnRow, onRowOpen, onAddItem, onReorderCols, activeItemId }) {
+// `selectedIds` is OPT-IN: pass a Set and the table grows a tick column, leave it out and
+// every caller renders exactly as before. The table owns no selection state of its own —
+// which rows are ticked outlives a re-sort, a re-group and a reload, and all three happen
+// while somebody is still choosing what to move.
+function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey, sortDir, onSort, canEdit, onCellCommit, onDropToGroup, onDropOnRow, onRowOpen, onAddItem, onReorderCols, activeItemId, selectedIds, onToggleSelect, onSelectMany }) {
+  const selectable = !!selectedIds;
   const [dragId, setDragId] = useState(null);
   const [dragColId, setDragColId] = useState(null);       // a header being dragged
   const [colDropTarget, setColDropTarget] = useState(null);
@@ -326,7 +331,7 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
   }, []);
 
   const visCols = columns.filter((c) => !hiddenCols.has(c.id));
-  const colCount = visCols.length + 2; // grip + name
+  const colCount = visCols.length + 2 + (selectable ? 1 : 0); // [tick] + grip + name
 
   const sorted = useMemo(() => {
     const valOf = (r) => {
@@ -408,6 +413,16 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
       <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "100%", background: "#FFF" }}>
         <thead ref={theadRef}>
           <tr>
+            {selectable && (
+              <th style={{ ...S.th, ...PM_STICKY_TH, width: 30, textAlign: "center" }}>
+                {/* Ticks everything the table is SHOWING, which is what the person can see —
+                    never the unfiltered board, or a tick would quietly pick up rows a facet
+                    is hiding and move them too. */}
+                <input type="checkbox" aria-label="Select every row shown"
+                  checked={!!rows.length && rows.every((r) => selectedIds.has(r.id))}
+                  onChange={(e) => onSelectMany && onSelectMany(rows.map((r) => r.id), e.target.checked)} />
+              </th>
+            )}
             <th style={{ ...S.th, ...PM_STICKY_TH, width: 28 }}></th>
             <SortTh label="Item" col="name" sortKey={sortKey} sortDir={sortDir} onSort={onSort} style={PM_STICKY_TH} />
             {/* Column headers DRAG to reorder (Carolyn 2026-08-29) — the Monday gesture,
@@ -466,6 +481,13 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
                     background: r.id === activeItemId ? "#F5F3FF" : (dropTarget === "row:" + r.id ? "#EEF2FF" : "#FFF"),
                     outline: r.id === activeItemId ? `2px solid ${ACCENT}` : "none", outlineOffset: -2,
                   }}>
+                  {selectable && (
+                    <td style={{ ...S.td, textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" aria-label={"Select " + r.name}
+                        checked={selectedIds.has(r.id)}
+                        onChange={() => onToggleSelect && onToggleSelect(r.id)} />
+                    </td>
+                  )}
                   <td style={{ ...S.td, color: "#CBD5E1", cursor: canEdit ? "grab" : "default", fontSize: 13 }} onClick={(e) => e.stopPropagation()}>⠿</td>
                   <td style={{ ...S.td, fontWeight: 700, cursor: "pointer" }} onClick={() => onRowOpen(r)}
                     title="Open notes and updates">
@@ -487,8 +509,9 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
               ))}
               {canEdit && pmBucketAddable(g) && (
                 <tr>
+                  {selectable && <td></td>}
                   <td></td>
-                  <td colSpan={colCount - 1} style={{ ...S.td, borderBottom: "1px solid #E2E8F0" }}>
+                  <td colSpan={colCount - (selectable ? 2 : 1)} style={{ ...S.td, borderBottom: "1px solid #E2E8F0" }}>
                     {newItemGroup === g.key ? (
                       <input autoFocus placeholder="Item name — Enter to add, Esc to cancel"
                         style={{ ...S.input, maxWidth: 420, padding: "5px 8px", fontSize: 12.5 }}
