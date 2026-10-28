@@ -36,6 +36,15 @@ SCHEDULING_SCOPE.md
 # vendor/README.md is the one internal doc inside a directory that must upload.
 INTERIOR_SCOPE.md
 STRUCTURESTUDIO_3D_PLAN.md
+# And a third, the same way, caught 2026-10-28: a *_SCOPE.md added later is the
+# shape this list keeps missing, because nothing derives these entries from the
+# repo — every root doc has to be added by hand the day it is written. It was
+# serving 200 on beta (production had not been promoted since, so it never
+# leaked there) and it names people and builders. If you add a root-level doc,
+# add it here in the SAME commit, and check with
+#   curl -s -o /dev/null -w '%{http_code}' https://beta.structurestudiosuite.com/<file>
+# after the deploy — 404 is the pass.
+MEETINGS_SCOPE.md
 vendor/README.md
 # The OFFLINE compiler, and the only file in vendor/ that must NOT be served.
 # `npm run compile` (scripts/compile.mjs) loads it from DISK in Node, so it stays
