@@ -5336,7 +5336,7 @@ function SsGridPicker({ look, onChange, entries = null, linkedId = null, onPickE
     <span key={key} data-ss-lites-step={key} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: ink, fontWeight: 600 }}>
       <button type="button" onClick={onDown} disabled={n <= 1} aria-label={`Fewer ${key === "rows" ? "rows" : "across"}`}
         style={{ width: 26, height: 26, borderRadius: 6, border: `1px solid ${line}`, background: "#FFF", color: ink, cursor: n <= 1 ? "default" : "pointer", padding: 0, fontWeight: 800, opacity: n <= 1 ? 0.45 : 1 }}>−</button>
-      <span style={{ minWidth: 14, textAlign: "center", fontWeight: 800 }}>{n}</span>
+      <span style={{ minWidth: 14, textAlign: "center", fontWeight: 800 }}>{cur ? n : "–"}</span>
       <button type="button" onClick={onUp} disabled={n >= 8} aria-label={`More ${key === "rows" ? "rows" : "across"}`}
         style={{ width: 26, height: 26, borderRadius: 6, border: `1px solid ${line}`, background: "#FFF", color: ink, cursor: n >= 8 ? "default" : "pointer", padding: 0, fontWeight: 800, opacity: n >= 8 ? 0.45 : 1 }}>+</button>
       <span>{unit}</span>
