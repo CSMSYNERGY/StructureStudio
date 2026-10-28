@@ -825,12 +825,15 @@ function SupportMenu({ clientId, onSubmitted, onNavigate }) {
 
   // The menu hangs from the button's right edge. On a phone with a wide business badge the button
   // sits far enough left that the 280 px menu ran 8 px off the screen (beta, 375 px, 10-28), so it
-  // is nudged back inside an 8 px margin before it paints.
+  // is nudged back inside an 8 px margin before it paints. The margin is measured from the VISIBLE
+  // edge: on a page wider than the phone (Orders is 14 px wider at 375) the visible area can be
+  // zoomed and panned, and the page's own left edge is then off screen.
   React.useLayoutEffect(() => {
     const m = menuRef.current;
     if (!open || !m) return;
     m.style.right = "";
-    const over = 8 - m.getBoundingClientRect().left;
+    const vv = window.visualViewport;
+    const over = (vv ? vv.offsetLeft : 0) + 8 - m.getBoundingClientRect().left;
     if (over > 0) m.style.right = `${-over}px`;
   }, [open]);
 

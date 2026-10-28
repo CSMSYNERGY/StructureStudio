@@ -52,7 +52,7 @@ import { runTool, TOOL_DEFS, type ToolCtx } from "./tools.ts";
 export const ASSISTANT_NAME = "Studio Assistant";
 /** Returned by `status`, so a deploy can be proved by asking the live function (its bundle cannot
  *  be downloaded). Bump it with every change to this function. */
-export const BUILD = "346.1";
+export const BUILD = "346.2";
 export const DEFAULT_MODEL = "claude-sonnet-5-5";
 export const REPLY_PROMISE = "A person on our team replies within 24 hours.";
 /** Room for low-effort thinking plus a chat-length answer. A longer one is cut and said so. */
