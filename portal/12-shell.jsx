@@ -61,7 +61,16 @@ const ICONS = {
 // design around, and a shared reference cannot drift. Same module-scope, built-once
 // reasoning as ICONS — see its comment.
 const SETTINGS_ICONS = {
-  structures: ICONS.pricing,                 // the house — building styles and sizes
+  // A SHED, not a house: a gable building with the double doors a shed actually has, rather than
+  // the dwelling-with-windows this used to borrow from ICONS.pricing. The item it belongs to is
+  // the first on the rail and the one builders open most.
+  //
+  // ⚠️ KEYED ON `sheds`, and that rename is why the rail item had NO icon at all. These keys are
+  // rail IDS; when Structures became Sheds the id moved and this map kept the old spelling, so
+  // `SETTINGS_ICONS.structures` matched nothing and `{SETTINGS_ICONS[id]}` rendered undefined —
+  // silently, because a missing icon is not an error, just a gap where a glyph should be. Nothing
+  // reads `structures` any more, so the old key is gone rather than left to rot beside this one.
+  sheds: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V10l7-6 7 6v11"/><path d="M9 21v-7h6v7"/><path d="M12 14v7"/></svg>,
   options: ICONS["layout-pricing"],          // the slider rows — add-ons and rates
   colors: ICONS.colors,
   designer: ICONS.designer,
