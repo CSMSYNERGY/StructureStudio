@@ -820,7 +820,19 @@ function SupportMenu({ clientId, onSubmitted, onNavigate }) {
   const [form, setForm] = useState(null);          // { kind, prefill, conversationId }
   const [live, setLive] = useState(false);
   const wrapRef = useRef(null);
+  const menuRef = useRef(null);
   const asked = useRef(false);
+
+  // The menu hangs from the button's right edge. On a phone with a wide business badge the button
+  // sits far enough left that the 280 px menu ran 8 px off the screen (beta, 375 px, 10-28), so it
+  // is nudged back inside an 8 px margin before it paints.
+  React.useLayoutEffect(() => {
+    const m = menuRef.current;
+    if (!open || !m) return;
+    m.style.right = "";
+    const over = 8 - m.getBoundingClientRect().left;
+    if (over > 0) m.style.right = `${-over}px`;
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -861,7 +873,7 @@ function SupportMenu({ clientId, onSubmitted, onNavigate }) {
         <span className="ss-sup-btn-t">Support</span>
       </button>
       {open && (
-        <div className="ss-sup-menu" role="menu" aria-label="Support">
+        <div className="ss-sup-menu" role="menu" aria-label="Support" ref={menuRef}>
           {items.map(([k, icon, label, sub, act]) => (
             <button key={k} type="button" role="menuitem" onClick={act}>
               <span className="ic" aria-hidden="true">{icon}</span>

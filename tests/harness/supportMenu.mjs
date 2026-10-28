@@ -112,7 +112,9 @@ async function openPortal(width, height, { on = true, remembered = null } = {}) 
       state.feedback.push(body);
       return json(route, { ok: true, submission: { id: "new1", kind: body.kind, title: body.title, status: "submitted" }, pushed: true });
     }
-    if (url.includes("/portal-settings")) return json(route, { ok: true, clientId: CLIENT, role: "owner", access: null, prefs: null, configured: false, branding: {}, businessAddress: {} });
+    // A business name as long as a real one: a short badge left the button far enough right that the
+    // menu fitted at 375 here while it ran 8 px off the screen on beta (10-28).
+    if (url.includes("/portal-settings")) return json(route, { ok: true, clientId: CLIENT, role: "owner", access: null, prefs: null, configured: false, branding: { companyName: "Example Sheds and Barns" }, businessAddress: {} });
     return json(route, { ok: true });
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
@@ -157,8 +159,21 @@ for (const [width, height, tag] of [[1440, 900, "1440"], [375, 812, "375"]]) {
   ok(`${tag} C: the six entries in order`, JSON.stringify(labels) === JSON.stringify(["Ask the assistant", "Report a problem", "Request a feature", "Submit a ticket", "My requests", "What's new"]), labels.join(" | "));
   ok(`${tag} C: no Live support entry (stage 2 hidden)`, !labels.includes("Live support"));
   const mbox = await page.locator(".ss-sup-menu").boundingBox();
-  ok(`${tag} C: the menu fits the viewport`, mbox && mbox.x >= 0 && mbox.x + mbox.width <= width + 0.5, JSON.stringify(mbox));
+  ok(`${tag} C: the menu fits the viewport, 8 px clear of the left edge`, mbox && mbox.x >= 7.5 && mbox.x + mbox.width <= width + 0.5, JSON.stringify(mbox));
   await page.screenshot({ path: join(shots, `${tag}-2-menu.png`) });
+  if (tag === "375") {
+    // An operator's account switcher is wider than any badge here, which put the button at 236-272 on
+    // beta and ran the menu 8 px off the screen. Push the button that far left and reopen.
+    await btn.click();
+    await page.addStyleTag({ content: ".ss-support{margin-right:104px !important}" });
+    const shifted = await btn.boundingBox();
+    await btn.click();
+    await page.waitForSelector(".ss-sup-menu");
+    const nb = await page.locator(".ss-sup-menu").boundingBox();
+    ok("375 C: with the button pushed left, the menu is nudged back inside 8 px", shifted && shifted.x + shifted.width < 280 && nb && nb.x >= 7.5 && nb.x + nb.width <= width + 0.5, JSON.stringify({ btn: shifted, menu: nb }));
+    await page.evaluate(() => { const s = [...document.querySelectorAll("style")].find((t) => t.textContent.includes("margin-right:104px")); if (s) s.remove(); });
+    await btn.click();
+  }
 
   // D — the forms.
   const openForm = async (label) => {
