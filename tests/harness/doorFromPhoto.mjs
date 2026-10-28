@@ -24,16 +24,19 @@
 //   J  an operator promotes it (347): Admin → Master Catalog → Doors lists the builder's saved door;
 //      "Add to the StructureStudio library" sends its look id and a NEW name; the list then says it is in
 //      the library; back on Doors the template shows its tile, and importing it sends no look of its own.
+//   K  AVIF (Ahsan 2026-10-28): the door photo and close-up pickers offer it, an AVIF front photo opens
+//      on the corners step and straightens, and a request photo in AVIF goes up as a JPEG.
 //   I  no page errors.
 //
-// The tenant, doors and the photo are made up (public repo).
+// The tenant, doors and the photos are made up (public repo). fixtures/made-up-door.avif is this
+// harness's own made-up door photo, encoded as AVIF (no canvas can write AVIF).
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/doorFromPhoto.mjs          (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/door-from-photo (SS_SHOTS overrides).
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { launch, reporter, BASE, REF, shotsDir, PASS_THROUGH_GET } from "./lib.mjs";
 
 const CLIENT = "harness-door-photo";
@@ -93,6 +96,8 @@ function settings(body) {
       W.recoverAsks++;
       return W.recoverAsks === 1 ? { ok: true, pending: true }
         : { ok: true, pending: false, reason: "failed", message: "This took too long. Please try again. You haven't been charged.", code: "ai_door_timeout", retryable: true };
+    case "library_request_upload_url":
+      return { ok: true, bucket: "library-refs", path: `${CLIENT}/req-${U(seq++)}.jpg`, token: "tok-req" };
     case "door_look_thumb_upload_url":
       return { ok: true, bucket: "fixtures", path: `${CLIENT}/door-look-${U(seq++)}.png`, token: "tok-thumb", url: null };
     case "save_door_look": {
@@ -482,6 +487,54 @@ try {
   ok("J the import sends the template and a name, and no look of its own", !!imp && imp.name === "Ranch Z (library)" && imp.look === undefined, JSON.stringify(imp));
   ok("J ...and it is listed under its template, from the StructureStudio library", /From the StructureStudio library, drawn in 3D/.test(await page.locator("[data-ss-library-entry='Ranch Z (library)']").innerText().catch(() => "")));
   await page.locator("[data-ss-library='door']").screenshot({ path: join(shots, "12-builder-imports-promoted.png") });
+
+  // ── K: AVIF ──
+  const avif = readFileSync(new URL("./fixtures/made-up-door.avif", import.meta.url));
+  // The door studio: an AVIF front photo opens on the corners step and straightens.
+  await page.locator("[data-ss-door-open]").click();
+  await page.waitForSelector("[data-ss-door-studio='photo']");
+  const accepts = await page.locator("[data-ss-door-front], [data-ss-door-closeup]").evaluateAll((els) => els.map((e) => e.getAttribute("accept")));
+  ok("K the door photo and every close-up picker offer AVIF", accepts.length >= 3 && accepts.every((a) => /image\/avif/.test(a)), JSON.stringify(accepts));
+  await page.getByPlaceholder("e.g. Ranch barn door").fill("AVIF door");
+  await page.getByRole("spinbutton", { name: "Width in inches" }).fill("36");
+  await page.getByRole("spinbutton", { name: "Height in inches" }).fill("80");
+  await page.locator("[data-ss-door-front]").setInputFiles({ name: "barn-door.avif", mimeType: "image/avif", buffer: avif });
+  await page.waitForTimeout(300);
+  await page.getByRole("button", { name: "Next: mark the corners" }).click();
+  await page.waitForSelector("[data-ss-door-corners]");
+  await page.waitForTimeout(300);
+  const avifDims = await page.locator("[data-ss-door-corners] img").evaluate((el) => [el.naturalWidth, el.naturalHeight]);
+  ok("K an AVIF door photo opens on the corners step", avifDims[0] === PHOTO.w && avifDims[1] === PHOTO.h, JSON.stringify(avifDims));
+  for (let i = 0; i < 4; i++) await dragDot(i, PHOTO.quad[i]);
+  await page.locator("[data-ss-door-studio]").getByRole("button", { name: "Straighten", exact: true }).click();
+  await page.waitForSelector("[data-ss-door-straight]", { timeout: 10000 }).catch(() => {});
+  const straightOk = await page.locator("[data-ss-door-straight]").evaluate((el) => el.complete && el.naturalWidth > 0).catch(() => false);
+  ok("K ...and straightens, ready to generate", straightOk && (await page.locator("[data-ss-door-generate]").count()) === 1);
+  await page.screenshot({ path: join(shots, "13-avif-straightened.png") });
+  await page.locator("[data-ss-door-studio]").getByRole("button", { name: "Close" }).click();
+  // A request photo in AVIF (windows and cladding have the request form; doors have the photo box):
+  // re-encoded to a JPEG before it goes up, since a small one would otherwise go up untouched,
+  // labelled image/jpeg.
+  await go("/settings/windows");
+  await page.waitForSelector("[data-ss-library='window']", { timeout: 20000 }).catch(() => {});
+  await page.locator("[data-ss-library='window']").getByRole("button", { name: /Browse the StructureStudio library/ }).click();
+  await page.locator("[data-ss-library='window']").getByRole("button", { name: /Request it/ }).click();
+  await page.waitForSelector("[data-ss-library-request-form]");
+  const reqInput = page.locator("[data-ss-library-request-form] input[type='file']");
+  ok("K the request form's photo picker offers AVIF", /image\/avif/.test(await reqInput.getAttribute("accept")));
+  const reqUploadsBefore = uploads.filter((u) => u.bucket === "library-refs").length;
+  await reqInput.setInputFiles({ name: "supplier-window.avif", mimeType: "image/avif", buffer: avif });
+  await page.waitForFunction(() => !/Uploading/.test(document.querySelector("[data-ss-library-request-form]").innerText), null, { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  const reqUp = uploads.filter((u) => u.bucket === "library-refs").slice(reqUploadsBefore)[0];
+  const reqAsk = actions("library_request_upload_url").pop();
+  const reqSize = reqUp ? jpegSize(reqUp.bytes) : null;
+  ok("K ...and an AVIF request photo goes up as a real JPEG, the photo's shape inside the door photo limits", !!reqUp && reqUp.type === "image/jpeg" && !!reqSize
+    && Math.abs(reqSize.w / reqSize.h - PHOTO.w / PHOTO.h) < 0.01 && Math.max(reqSize.w, reqSize.h) <= 1568 && reqSize.w * reqSize.h <= 1.15 * 1024 * 1024
+    && !!reqAsk && reqAsk.contentType === "image/jpeg",
+    JSON.stringify({ type: reqUp && reqUp.type, reqSize, ask: reqAsk && reqAsk.contentType }));
+  ok("K ...and it shows as a thumbnail in the form", (await page.locator("[data-ss-library-request-form] img").count()) === 1);
+  await page.locator("[data-ss-library-request-form]").screenshot({ path: join(shots, "14-avif-request-photo.png") }).catch(() => {});
 
   ok("I no page errors", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
 } catch (e) {
