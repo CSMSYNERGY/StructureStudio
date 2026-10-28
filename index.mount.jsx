@@ -50,8 +50,47 @@ function ssLogError(source, message, code, context, severity) {
   } catch (_) { /* logging must never break the app */ }
 }
 window.ssLogError = ssLogError;
-window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
-  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+// An uncaught error that is NOT OUR CODE lands as info, marked context._demoted =
+// "foreign_script", instead of error. On 2026-10-15/16, 54 designer error rows came from one
+// iPhone running Brave, and not one of them was ours. Two shapes, both checked against those rows:
+//  (1) A MUTED error: "Script error.", no filename, line 0, no error object. That is the
+//      browser's redaction for a script from another origin loaded without CORS (the Google
+//      Maps loader on this page) or one the browser injected itself. It carries nothing we
+//      could act on.
+//  (2) An error at line 0 or 1 of an HTML document on our own host. Line 1 of every page is
+//      <!DOCTYPE html> and our inline scripts start far below it (line 23 or later on all three
+//      pages), so this is a script the browser or an extension injected: reader mode
+//      (__firefox__.reader on Brave/Firefox iOS), a wallet's window.ethereum, Dark Reader.
+//      Compared by host plus a non-.js path, NOT by href: the designer rewrites its URL with
+//      history.*, and an injected script keeps the URL it was injected at. Our bundles are
+//      always .js URLs, so a line-1 error in a minified bundle still stays error.
+// ⚠️ An empty filename WITH a line or an error object stays error: that is eval'd code, not a
+// muted error. The muted rule holds only while nothing we ship runs through eval, new Function or
+// in-browser Babel (on 2026-08-05 our own "ReactDOM is not defined" arrived from Babel with file
+// ""). nativeImport's new Function only returns import()'s promise, so its failures arrive as
+// rejections, not here. Revisit this if any of those come back.
+// The marker makes the info repetition check (CLAUDE.md, app_errors severity) skip these rows ON
+// PURPOSE, because one injected-script burst would trip it; CLAUDE.md has a foreign_script count
+// to run instead.
+function ssForeignError(e) {
+  if (!e) return false;
+  const f = String(e.filename || "");
+  // A sandboxed frame without allow-same-origin has origin "null": every script of ours is
+  // cross-origin there, so a muted error may be ours. Keep those error.
+  if (!f) return !e.lineno && !e.error && self.origin !== "null";
+  let u;
+  try { u = new URL(f, location.href); } catch (_) { return false; }
+  return u.host === location.host && !/\.js$/i.test(u.pathname) && (e.lineno || 0) <= 1;
+}
+// context.file drops the #fragment: an injected script on a /login#access_token=... landing
+// would otherwise write the token into the row (p_url is already stripped).
+window.addEventListener("error", (e) => {
+  const foreign = ssForeignError(e);
+  ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+    { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename ? String(e.filename).split("#")[0] : e && e.filename, line: e && e.lineno,
+      ...(foreign ? { _demoted: "foreign_script" } : {}) },
+    foreign ? "info" : undefined);
+});
 window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
   { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
 
