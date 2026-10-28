@@ -2454,6 +2454,10 @@ function Dashboard({ session }) {
     // practice, but leaning on that would make a stale upload handler a one-line edit away.
   }), [canAdmin, view3dUnlocked, effClientId, viewing]);
 
+  // The top bar's Support button, or the old floating Feedback pill: client_settings.support_ai_beta
+  // per builder (346; useSupportOn in 04-orders.jsx). A hook, so above the early returns (React #310).
+  const supportOn = useSupportOn(tenant && tenant !== "none" ? tenant.clientId : null, !viewing);
+
   if (tenant === null) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
   }
@@ -3173,7 +3177,8 @@ function Dashboard({ session }) {
                   applies unchanged; `.neutral` opts out of Sign Out's red hover. */}
               {!viewing && (
                 <button type="button" className="neutral" role="menuitem"
-                  title="Email CSM Synergy about your account — for bugs, use the Feedback button"
+                  title={supportOn ? "Email CSM Synergy about your account — for bugs, use the Support button at the top"
+                    : "Email CSM Synergy about your account — for bugs, use the Feedback button"}
                   onClick={() => {
                     const subj = `Structure Studio — ${shownBusiness || "support request"}`;
                     window.location.href = "mailto:support@csmsynergy.com?subject=" + encodeURIComponent(subj);
@@ -3258,6 +3263,14 @@ function Dashboard({ session }) {
               rail and on a tablet, where `.ss-switch-wrap` used to be display:none and the
               Accounts page was the only way through — see the media queries in portal.html,
               where that rule had to be SCOPED TO THE RAIL or it would have hidden this. */}
+          {/* THE SUPPORT BUTTON (Carolyn, 10-26 call; SupportMenu in 04-orders.jsx). For a builder
+              with the switch on (346) it replaces the floating Feedback pill. Hidden while viewing
+              another account, as the pill is: a ticket or a chat would be filed under the
+              operator's own business. */}
+          {!viewing && supportOn && (
+            <SupportMenu clientId={tenant.clientId} onNavigate={navigate}
+              onSubmitted={() => setFeedbackKey((k) => k + 1)} />
+          )}
           {isOperator ? (
             <div className="ss-switch-wrap" ref={pickerRef}>
               <button type="button" className="ss-switch" onMouseEnter={() => ssWarmThrottled("operator-portal")} onClick={() => setPickerOpen((o) => !o)}
@@ -4073,11 +4086,12 @@ function Dashboard({ session }) {
         </div>
       </section>
 
-      {/* Bug / feature intake. Hidden while an operator is viewing someone else's
-          account: portal-feedback attributes a submission to the JWT's own tenant,
-          which would NOT be the client on screen — filing from here would land the
-          ticket under the operator's own business and read as that client's report. */}
-      {!viewing && (
+      {/* Bug / feature intake for a builder whose Support switch is off (346): beta's pill as it was.
+          Hidden while an operator is viewing someone else's account: portal-feedback attributes a
+          submission to the JWT's own tenant, which would NOT be the client on screen — filing from
+          here would land the ticket under the operator's own business and read as that client's
+          report. */}
+      {!viewing && !supportOn && (
         <FeedbackWidget
           clientId={tenant.clientId}
           onSubmitted={() => setFeedbackKey((k) => k + 1)}

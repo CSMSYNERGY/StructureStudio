@@ -94,6 +94,9 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   billing_subscriptions: { fate: "wipe", why: "Mirror of the payment gateway, cancelled there first." },
   billing_customers: { fate: "wipe", why: "Mirror of the gateway's saved card, removed there first." },
   feedback_submissions: { fate: "wipe", why: "Bug reports filed from the portal (feedback_comments cascades)." },
+  // Migration 340. The support assistant's chats with this builder's team, and their turns.
+  support_conversations: { fate: "wipe", why: "Support assistant chats (support_messages cascades)." },
+  support_messages: { fate: "cascade", parent: "support_conversations", why: "The turns of a support chat." },
   fixture_items: { fate: "wipe", why: "Door and window catalog." },
   client_library: { fate: "wipe", why: "The builder's own library of claddings, doors and windows (migration 339): named copies of StructureStudio templates. Style and fixture rows point at it with SET NULL." },
   library_requests: { fate: "wipe", why: "Requests for a cladding, door or window not in the library (migration 339). The money is in wallet_transactions, which is kept." },

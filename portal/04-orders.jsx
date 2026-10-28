@@ -318,14 +318,28 @@ const FB_KINDS = {
     sevLabel: "How important is this to you?",
     severities: ["Nice to have", "Would really help", "Critical for me"], sevDefault: "Would really help",
   },
+  // A question, a request, anything a person should pick up (migration 340, 2026-10-27). Lands on
+  // the Projects board and never goes to Monday; portal-feedback refuses nothing else about it.
+  ticket: {
+    icon: "🎫", label: "Submit a Ticket", blurb: "A question, or anything you need a person for",
+    titleHint: "What do you need help with?", detailHint: "Tell us what you were doing and what you need.",
+    sevLabel: null, severities: null, sevDefault: null,
+  },
 };
+
+// Ahsan 10-27, from Carolyn's 10-26 call ("like 24 hour turnaround time"). The support assistant
+// says the same words (support-agent's REPLY_PROMISE); change both together.
+const SS_REPLY_PROMISE = "A person on our team replies within 24 hours.";
 
 const MAX_ATTACH_BYTES = 25 * 1024 * 1024;   // matches the bucket's file_size_limit
 
-function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
+// `prefill` and `supportConversationId` come from the support assistant's "Send this to our team"
+// card: the ticket opens already written, and the server attaches the chat to it (portal-feedback
+// checks the chat is this person's own).
+function FeedbackForm({ kind, clientId, onSubmitted, onBack, prefill = null, supportConversationId = null }) {
   const cfg = FB_KINDS[kind];
-  const [title, setTitle] = useState("");
-  const [detail, setDetail] = useState("");
+  const [title, setTitle] = useState((prefill && prefill.title) || "");
+  const [detail, setDetail] = useState((prefill && prefill.summary) || "");
   const [severity, setSeverity] = useState(cfg.sevDefault);
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -358,7 +372,11 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
         attachmentPath = path;
       }
       const { data, error } = await sb.functions.invoke("portal-feedback", {
-        body: { action: "submit", kind, title: title.trim(), detail: detail.trim(), severity, attachmentPath },
+        body: {
+          action: "submit", kind, title: title.trim(), detail: detail.trim(), attachmentPath,
+          ...(cfg.severities ? { severity } : {}),
+          ...(supportConversationId ? { supportConversationId } : {}),
+        },
       });
       if (error) throw error;
       if (data && data.error) throw new Error(data.error);
@@ -381,12 +399,19 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
         <textarea style={{ ...S.input, minHeight: 110, fontWeight: 500, resize: "vertical" }}
           value={detail} onChange={(e) => setDetail(e.target.value)} placeholder={cfg.detailHint} />
       </div>
-      <div>
-        <label style={S.lbl}>{cfg.sevLabel}</label>
-        <select style={S.input} value={severity} onChange={(e) => setSeverity(e.target.value)}>
-          {cfg.severities.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-      </div>
+      {cfg.severities && (
+        <div>
+          <label style={S.lbl}>{cfg.sevLabel}</label>
+          <select style={S.input} value={severity} onChange={(e) => setSeverity(e.target.value)}>
+            {cfg.severities.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      )}
+      {kind === "ticket" && (
+        <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.5 }}>
+          {SS_REPLY_PROMISE}{supportConversationId ? " Your chat with the assistant is attached, so you don't need to repeat it." : ""}
+        </div>
+      )}
       <div>
         <label style={S.lbl}>Screenshot or video (optional)</label>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -418,6 +443,38 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
   );
 }
 
+// ── Support button, or the old Feedback pill? (migration 346, 2026-10-27) ─────────────────────
+// The Support button SHIPS DARK: client_settings.support_ai_beta, per builder, off by default, turned
+// on by an operator in SQL. support-agent's `enabled` answers it (and fails closed), so until it
+// says yes the shell draws FeedbackWidget below, the pill every builder had before, unchanged.
+// The answer is remembered per builder, so a switched-on builder sees the Support button from the
+// first paint instead of the pill and then a swap. Asked once per page load, behind the boot waves
+// (1.5 s / 3 s), and not at all while an operator views another account (both are hidden then).
+const SS_SUPPORT_ON_KEY = "ss:supportOn:";
+
+function useSupportOn(clientId, active) {
+  const [answer, setAnswer] = useState(null);   // { clientId, on } once support-agent answers
+  useEffect(() => {
+    if (!active || !clientId) return undefined;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const { data } = await sb.functions.invoke("support-agent", { body: { action: "enabled" } });
+        // An error, a 403 or an old server that knows no `enabled` leaves what we had.
+        if (cancelled || !data || typeof data.on !== "boolean") return;
+        setAnswer({ clientId, on: data.on });
+        try { localStorage.setItem(SS_SUPPORT_ON_KEY + clientId, data.on ? "1" : "0"); } catch (_e) {}
+      } catch (_e) { /* the pill stays: it is the safe default */ }
+    }, 3500);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [clientId, active]);
+  if (!clientId) return false;
+  if (answer && answer.clientId === clientId) return answer.on;
+  try { return localStorage.getItem(SS_SUPPORT_ON_KEY + clientId) === "1"; } catch (_e) { return false; }
+}
+
+// KEPT (346): the pill for every builder whose Support switch is off (useSupportOn above). Below
+// this note it is beta's FeedbackWidget as it was, so their bug and feature reports are unchanged.
 // Floating launcher + modal. Mounted once by PortalApp; hidden while an operator is
 // viewing someone else's account (the submission would be attributed to the operator's
 // own tenant, not the one on screen, which would be misleading in both places).
@@ -498,6 +555,341 @@ function FeedbackWidget({ clientId, onSubmitted }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// The report / request / ticket form in a modal, for a builder with the Support button (346). Their
+// floating "💬 Feedback" pill is gone (Carolyn, 10-26: "I would take this feedback button down at
+// the below. We'll have a support button up here"), and the top bar's SupportMenu opens this on a
+// chosen kind. Rendered only while an operator is NOT viewing someone else's account: the
+// submission would be attributed to the operator's own tenant, not the one on screen.
+function FeedbackDialog({ kind, clientId, onClose, onSubmitted, prefill = null, supportConversationId = null }) {
+  const [done, setDone] = useState(false);
+  const [pushed, setPushed] = useState(true);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const cfg = FB_KINDS[kind] || FB_KINDS.ticket;
+  const heading = done ? "✅ Thanks — we've got it" : cfg.icon + " " + cfg.label;
+
+  return (
+    <div onClick={onClose} role="dialog" aria-modal="true" aria-label={cfg.label}
+      style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, overflow: "hidden", width: "min(560px, 100%)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.35)" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, flex: 1 }}>{heading}</div>
+          <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", color: "#FFF", cursor: "pointer", fontSize: 18, padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+
+        {!done && (
+          <FeedbackForm kind={kind} clientId={clientId} onBack={onClose} prefill={prefill} supportConversationId={supportConversationId}
+            onSubmitted={(row, wasPushed) => { setPushed(wasPushed !== false); setDone(true); if (onSubmitted) onSubmitted(row); }} />
+        )}
+
+        {done && (
+          <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
+            Your {kind === "ticket" ? "ticket" : "request"} is logged and on our board. {SS_REPLY_PROMISE} You can follow it under{" "}
+            <b>Support → My Requests</b> — the status updates there as we work on it,
+            and any reply we post shows up alongside it.
+            {!pushed && (
+              <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
+                Saved — but syncing it to our tracker didn't go through. It's recorded and we'll pick it up; nothing is lost.
+              </div>
+            )}
+            <button onClick={onClose} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 16, width: "100%" }}>Done</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Portal addresses the assistant may hand out, e.g. "/settings/branding" or "/support/mine". Only a
+// first segment the portal itself routes is turned into a link, and it navigates IN the portal:
+// the assistant can never send anyone off-site (support-agent's rules forbid other links, and this
+// is the half that holds even if it wrote one anyway).
+const SS_SUPPORT_LINK_PAGES = ["settings", "support", "designer", "contacts", "conversations", "orders", "inventory",
+  "build-schedule", "delivery-schedule", "repairs", "calls", "view-3d", "on-demand-pricing"];
+const SS_SUPPORT_LINK_RE = /(^|[\s(])(\/([a-z][a-z0-9-]*)(?:\/([a-z0-9-]+))?)(?=$|[\s.,;:!?)])/g;
+
+function ssSupportText(text, onLink) {
+  const out = [];
+  let last = 0;
+  let m;
+  SS_SUPPORT_LINK_RE.lastIndex = 0;
+  while ((m = SS_SUPPORT_LINK_RE.exec(text))) {
+    const page = m[3];
+    if (SS_SUPPORT_LINK_PAGES.indexOf(page) === -1) continue;
+    const start = m.index + m[1].length;
+    if (start > last) out.push(text.slice(last, start));
+    const sub = m[4] || null;
+    out.push(
+      <a key={start} href={ssPagePath(page, sub)} className="ss-sup-link"
+        onClick={(e) => { e.preventDefault(); onLink(page, sub); }}>{m[2]}</a>,
+    );
+    last = start + m[2].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+// The assistant's chat panel, under the Support button (about 400 × 620 at desktop, a full-screen
+// sheet on a phone). Plain text in and out; a "Thinking…" line while support-agent answers; the
+// hand-off card opens the ticket form already written. Chats are saved (migration 340) and the
+// panel says so, every time.
+function SupportChat({ onClose, onTicket, onNavigate }) {
+  const [status, setStatus] = useState(null);     // null = loading; support-agent's status answer
+  const [loadErr, setLoadErr] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [convId, setConvId] = useState(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [handoff, setHandoff] = useState(null);   // { title, summary } from offer_handoff
+  const listRef = useRef(null);
+  const inputRef = useRef(null);
+  const panelRef = useRef(null);
+
+  // On a phone the sheet is pinned to the VISIBLE viewport, not the layout one. A page wider than
+  // the phone (the design list's table) grows the layout viewport past the screen, and focusing the
+  // text box then scrolls the visible part down inside it: found 10-27 with the header cut off by
+  // 29 px at 375 px. The on-screen keyboard shrinks the visible part the same way. Above 640 px the
+  // CSS position stands and these inline values are cleared.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const fit = () => {
+      const el = panelRef.current;
+      if (!el) return;
+      const phone = window.matchMedia && window.matchMedia("(max-width:640px)").matches;
+      el.style.top = phone ? vv.offsetTop + "px" : "";
+      el.style.left = phone ? vv.offsetLeft + "px" : "";
+      el.style.width = phone ? vv.width + "px" : "";
+      el.style.height = phone ? vv.height + "px" : "";
+      el.style.right = phone ? "auto" : "";
+      el.style.bottom = phone ? "auto" : "";
+    };
+    fit();
+    vv.addEventListener("resize", fit);
+    vv.addEventListener("scroll", fit);
+    return () => { vv.removeEventListener("resize", fit); vv.removeEventListener("scroll", fit); };
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoadErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("support-agent", { body: { action: "status" } });
+      if (error) throw new Error(error.message);
+      if (!data || data.error) throw new Error((data && data.error) || "no answer");
+      setStatus(data);
+      setMessages((data.conversation && data.conversation.messages) || []);
+      setConvId((data.conversation && data.conversation.id) || null);
+    } catch (_e) {
+      setLoadErr("The assistant couldn't be reached. You can still send us a ticket.");
+      setStatus({ available: false });
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    // Escape belongs to the ticket dialog while it is open over the chat (it is aria-modal; the
+    // chat is not): closing both at once threw away the chat the builder was handing off.
+    const onKey = (e) => { if (e.key === "Escape" && !document.querySelector('[aria-modal="true"]')) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Newest message in view, including the "Thinking…" line.
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  }, [messages, busy, handoff]);
+
+  const send = async (e) => {
+    if (e) e.preventDefault();
+    const text = draft.trim();
+    if (!text || busy) return;
+    setBusy(true); setErr(""); setHandoff(null);
+    setDraft("");
+    // Shown at once; replaced by the stored row when the answer arrives.
+    const temp = { id: "pending-" + Date.now(), role: "user", body: text, created_at: new Date().toISOString() };
+    setMessages((m) => [...m, temp]);
+    try {
+      const { data, error } = await sb.functions.invoke("support-agent", { body: { action: "send", text, conversationId: convId } });
+      if (error) throw new Error(error.message || "send failed");
+      if (data && data.error) throw new Error(data.error);
+      if (data && data.capped) {
+        // A cap: the builder's words were not sent to the assistant. Say so, and offer the ticket.
+        setMessages((m) => [...m, { id: "cap-" + Date.now(), role: "assistant", body: data.reply.body, created_at: new Date().toISOString(), cap: true }]);
+        setHandoff({ title: text.slice(0, 100), summary: text });
+      } else {
+        setConvId(data.conversationId);
+        setMessages((m) => [...m.filter((x) => x.id !== temp.id), ...(data.messages || [])]);
+        if (data.handoff) setHandoff(data.handoff);
+      }
+    } catch (e2) {
+      setMessages((m) => m.filter((x) => x.id !== temp.id));
+      setDraft(text);
+      setErr(e2.message && !/non-2xx|Failed to fetch/i.test(e2.message) ? e2.message : "That didn't go through. Please try again.");
+    }
+    setBusy(false);
+    if (inputRef.current) inputRef.current.focus();
+  };
+
+  const startOver = async () => {
+    if (busy) return;
+    try { await sb.functions.invoke("support-agent", { body: { action: "new" } }); } catch (_e) { /* the next send starts fresh anyway */ }
+    setMessages([]); setConvId(null); setHandoff(null); setErr("");
+  };
+
+  const name = (status && status.name) || "Studio Assistant";
+  const available = !!(status && status.available);
+  const goTo = (page, sub) => { onNavigate(page, sub); if (window.innerWidth < 640) onClose(); };
+
+  return (
+    <div className="ss-sup-chat" role="dialog" aria-label={name} ref={panelRef}>
+      <div className="ss-sup-head">
+        <div className="ss-sup-title">
+          <span>{name}</span>
+          <span className="ss-sup-sub">AI assistant · tickets answered within 24 hours</span>
+        </div>
+        {messages.length > 0 && <button type="button" className="ss-sup-ghost" onClick={startOver} disabled={busy}>New chat</button>}
+        <button type="button" className="ss-sup-x" onClick={onClose} aria-label="Close">×</button>
+      </div>
+      <div className="ss-sup-note">You are chatting with an AI assistant. Chats are saved so our team can follow up.</div>
+
+      <div className="ss-sup-list" ref={listRef} aria-live="polite">
+        {status === null && <div className="ss-sup-muted">Loading…</div>}
+        {status !== null && messages.length === 0 && available && (
+          <div className="ss-sup-bot">
+            Hi! Ask me anything about Structure Studio — how to set something up, where a setting lives, or what's on
+            your account. If I can't sort it out, I'll pass it to a person on our team.
+          </div>
+        )}
+        {status !== null && !available && (
+          <div className="ss-sup-bot">{loadErr || status.unavailable || "The assistant isn't available right now."} {SS_REPLY_PROMISE}</div>
+        )}
+        {messages.map((m) => (
+          <div key={m.id} className={m.role === "user" ? "ss-sup-me" : "ss-sup-bot"}>
+            {m.role === "user" ? m.body : ssSupportText(m.body, goTo)}
+          </div>
+        ))}
+        {busy && <div className="ss-sup-muted">Thinking…</div>}
+        {handoff && !busy && (
+          <div className="ss-sup-card">
+            <div className="ss-sup-card-t">Send this to our team?</div>
+            <div className="ss-sup-card-b">{handoff.title}</div>
+            <button type="button" onClick={() => onTicket(handoff, convId)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", marginTop: 8 }}>
+              Send this to our team
+            </button>
+          </div>
+        )}
+      </div>
+
+      {err && <div style={{ ...S.err, margin: "0 12px 8px" }}>{err}</div>}
+      {available ? (
+        <form className="ss-sup-form" onSubmit={send}>
+          <textarea ref={inputRef} rows={2} value={draft} maxLength={2000} autoFocus
+            placeholder="Ask a question…" aria-label="Your question"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+          <button type="submit" disabled={busy || !draft.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !draft.trim() ? 0.6 : 1 }}>Send</button>
+        </form>
+      ) : status !== null && (
+        <div className="ss-sup-form">
+          <button type="button" onClick={() => onTicket(null, null)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%" }}>Submit a ticket</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// THE SUPPORT BUTTON, in the top bar (Carolyn, 10-26 call, modelled on the Support menu in her GHL
+// dashboard). Chat icon + "Support" (icon only on a phone). The menu: Ask the assistant, Report a
+// problem, Request a feature, Submit a ticket, My requests, What's new — Ahsan 10-27. A "Live
+// support" entry exists for stage 2 and renders only when support-agent says liveSupport is
+// available, which it never does yet. Mounted by the shell only while NOT viewing another account.
+function SupportMenu({ clientId, onSubmitted, onNavigate }) {
+  const [open, setOpen] = useState(false);
+  const [chat, setChat] = useState(false);
+  const [form, setForm] = useState(null);          // { kind, prefill, conversationId }
+  const [live, setLive] = useState(false);
+  const wrapRef = useRef(null);
+  const asked = useRef(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); window.removeEventListener("keydown", onKey); };
+  }, [open]);
+
+  // The stage-2 flag rides on the assistant's status read, asked once, the first time the menu opens.
+  // It also boots the function, so the first question does not pay the cold start.
+  useEffect(() => {
+    if (!open || asked.current) return;
+    asked.current = true;
+    sb.functions.invoke("support-agent", { body: { action: "status" } })
+      .then(({ data }) => { if (data && data.liveSupport && data.liveSupport.available) setLive(true); })
+      .catch(() => {});
+  }, [open]);
+
+  const pick = (fn) => () => { setOpen(false); fn(); };
+  const items = [
+    ["chat", "💬", "Ask the assistant", "Get an answer right away", pick(() => setChat(true))],
+    ["bug", "🐛", "Report a problem", "Something broken or not working", pick(() => setForm({ kind: "bug" }))],
+    ["feature", "✨", "Request a feature", "An idea or improvement", pick(() => setForm({ kind: "feature" }))],
+    ["ticket", "🎫", "Submit a ticket", "Anything you need a person for", pick(() => setForm({ kind: "ticket" }))],
+    ["mine", "📋", "My requests", "Track what you've sent us", pick(() => onNavigate("support", "mine"))],
+    ["news", "🆕", "What's new", "New features and fixes", pick(() => onNavigate("support", "features"))],
+  ];
+
+  return (
+    <div className="ss-support" ref={wrapRef}>
+      <button type="button" className="ss-sup-btn" aria-haspopup="menu" aria-expanded={open}
+        onClick={() => setOpen((o) => !o)} title="Support">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <span className="ss-sup-btn-t">Support</span>
+      </button>
+      {open && (
+        <div className="ss-sup-menu" role="menu" aria-label="Support">
+          {items.map(([k, icon, label, sub, act]) => (
+            <button key={k} type="button" role="menuitem" onClick={act}>
+              <span className="ic" aria-hidden="true">{icon}</span>
+              <span className="tx"><span className="lb">{label}</span><span className="sb">{sub}</span></span>
+            </button>
+          ))}
+          {live && (
+            <button type="button" role="menuitem" onClick={pick(() => setForm({ kind: "ticket" }))}>
+              <span className="ic" aria-hidden="true">🎧</span>
+              <span className="tx"><span className="lb">Live support</span><span className="sb">Talk to a person now</span></span>
+            </button>
+          )}
+        </div>
+      )}
+      {/* Both render into <body>: the top bar is sticky with its own z-index, so anything drawn
+          inside it sits UNDER every page element above 40 (sticky table headers are 70). */}
+      {chat && ReactDOM.createPortal(
+        <SupportChat onClose={() => setChat(false)} onNavigate={onNavigate}
+          onTicket={(prefill, conversationId) => { setForm({ kind: "ticket", prefill, conversationId }); }} />,
+        document.body,
+      )}
+      {form && ReactDOM.createPortal(
+        <FeedbackDialog kind={form.kind} clientId={clientId} prefill={form.prefill || null}
+          supportConversationId={form.conversationId || null}
+          onClose={() => setForm(null)}
+          onSubmitted={(row) => { if (form.conversationId) setChat(false); if (onSubmitted) onSubmitted(row); }} />,
+        document.body,
+      )}
     </div>
   );
 }
@@ -614,7 +1006,7 @@ function MySubmissions({ refreshKey }) {
         <span style={{ ...S.h2, marginBottom: 0 }}>My Requests</span>
         <span style={{ fontSize: 12, color: "#94A3B8" }}>({rows.length})</span>
         <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
-          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"]].map(([k, lbl]) => (
+          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"], ["ticket", "🎫 Tickets"]].map(([k, lbl]) => (
             <button key={k} type="button" onClick={() => setFilter(k)}
               style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999, cursor: "pointer",
                 border: filter === k ? "1px solid " + ACCENT : "1px solid #E2E8F0",
@@ -629,8 +1021,8 @@ function MySubmissions({ refreshKey }) {
 
       {rows.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0", lineHeight: 1.6 }}>
-          You haven't sent us anything yet. Use the <b>💬 Feedback</b> button in the bottom-right corner
-          to report an issue or request a feature — it'll show up here so you can follow what happens to it.
+          You haven't sent us anything yet. Use the <b>Support</b> button at the top of the page to report
+          a problem, request a feature or send us a ticket — it'll show up here so you can follow what happens to it.
         </div>
       ) : shown.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>Nothing here under this filter.</div>
@@ -655,7 +1047,7 @@ function MySubmissions({ refreshKey }) {
                     style={{ cursor: "pointer", background: isOpen ? "#F8FAFC" : undefined }}>
                     <td style={{ ...S.td, fontWeight: 700 }}>
                       <span style={{ color: ACCENT, fontSize: 11, marginRight: 6 }}>{isOpen ? "▾" : "▸"}</span>
-                      <span style={{ marginRight: 6 }}>{r.kind === "bug" ? "🐛" : "✨"}</span>
+                      <span style={{ marginRight: 6 }}>{(FB_KINDS[r.kind] || FB_KINDS.ticket).icon}</span>
                       {r.title}
                       {/* Tooltip names the sender rather than saying "from us": the reader
                           IS the client, so "us" scans as their own team — especially next
