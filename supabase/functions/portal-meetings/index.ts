@@ -1183,7 +1183,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       });
       if (error) throw error;
       await r.ctx.audit("meetings_video_connect", 1, provider);
-      const redirect = meetingsOauthRedirectUri();
+      const redirect = meetingsOauthRedirectUri(provider, returnHost);
       return json({
         ok: true,
         url: zc ? zoomAuthorizeUrl(zc, redirect, state) : gc ? googleAuthorizeUrl(gc, redirect, state) : msAuthorizeUrl(mc!, redirect, state),
