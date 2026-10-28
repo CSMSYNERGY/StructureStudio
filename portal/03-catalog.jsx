@@ -3453,7 +3453,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
         )}
         {result && result.skipped && result.skipped.length > 0 && (
           <div style={{ marginTop: 12, fontSize: 13 }}>
-            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) not imported in full:</div>
             <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
               {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
             </ul>

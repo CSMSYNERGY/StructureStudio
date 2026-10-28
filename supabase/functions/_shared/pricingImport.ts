@@ -35,6 +35,10 @@
 // inclusions on (size_id, item_key), so a sheet sent twice, or re-sent after a timeout the server
 // had in fact finished, updates the same rows and never makes a second copy of anything.
 //
+// IF THE DATABASE NEVER ANSWERS (a 502 from the gateway in front of PostgREST, a dropped
+// connection), that one call is retried twice more before it counts as failed, and a failure's
+// text is only shown to the builder when Postgres itself wrote it. See attempt() and reason().
+//
 // Dependency-free (the client is passed in). Two importers: deploy portal-settings AND
 // admin-catalog when this file changes.
 
@@ -73,6 +77,30 @@ const num = (v: unknown) => {
 const fmt = (n: number) => String(n);
 const dimKeyOf = (styleId: unknown, w: unknown, l: unknown) => `${styleId}|${Number(w)}|${Number(l)}`;
 
+/** A Postgres error carries a five-character SQLSTATE. Anything else did not come from the
+ *  database: a gateway, a proxy or a dropped connection answered instead, and supabase-js puts
+ *  that answer's body (an HTML error page, for one) into error.message with no code at all. */
+const isSqlstate = (c: unknown) => /^[0-9A-Z]{5}$/.test(String(c ?? ""));
+
+/** Run a write, and retry it only when the database never answered. A sheet import is a few
+ *  hundred calls over a minute or more, so a one-off 502 between the function and PostgREST is
+ *  likely enough that a builder met one on 2026-10-27; every call here is keyed on its own
+ *  identity (dimensions, or (size_id, item_key)), so sending it again is safe. A real Postgres
+ *  error is NOT retried — it will say the same thing three times and only cost the CPU limit. */
+const attempt = async (run: () => any): Promise<{ data?: any; error: any }> => {
+  let error: any = null;
+  for (let i = 0; i < 3; i++) {
+    if (i) await new Promise((r) => setTimeout(r, i * 400));
+    try {
+      const res = await run();
+      if (!res?.error) return { data: res?.data, error: null };
+      error = res.error;
+    } catch (e) { error = e; }   // a dropped connection throws instead of answering
+    if (isSqlstate(error?.code)) return { error };
+  }
+  return { error };
+};
+
 function chunks<T>(list: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
@@ -85,7 +113,7 @@ async function readAll(sb: any, table: string, cols: string, order: string[], cl
   for (let from = 0; ; from += READ_PAGE) {
     let q = sb.from(table).select(cols).eq("client_id", clientId);
     for (const col of order) q = q.order(col);
-    const { data, error } = await q.range(from, from + READ_PAGE - 1);
+    const { data, error } = await attempt(() => q.range(from, from + READ_PAGE - 1));
     if (error) throw error;
     const page = data ?? [];
     out.push(...page);
@@ -110,7 +138,21 @@ type SizePlan = {
 type RowRef = { plan: SizePlan; styleName: string; label: string; creates: boolean };
 type InclusionOp = { qty: number; styleName: string; label: string };
 
-export async function importPricingRows(sb: any, clientId: string, rows: any[]) {
+export async function importPricingRows(sb: any, clientId: string, rows: any[],
+  // Called with a ref and the raw text of anything the database did not say, so a body kept off
+  // the builder's screen is still somewhere a human can read it.
+  onFault?: (code: string, message: string) => void) {
+  // What a failed write is allowed to tell the builder. A Postgres error says something true
+  // about their sheet ("value too long", a constraint) so it goes through as written. Anything
+  // else is a gateway's own page — HTML, a stack, hundreds of characters of someone else's
+  // plumbing — and printing it as a skip reason tells them nothing they can act on, which is
+  // exactly what happened on 2026-10-27. It is logged and replaced with what to do next.
+  const reason = (e: any, ref: string): string => {
+    const msg = String(e?.message ?? "").trim();
+    if (isSqlstate(e?.code) && msg && msg.length <= 200 && !msg.includes("<")) return msg;
+    onFault?.("pricing_import_write_failed", `${ref}: ${msg.slice(0, 1000)}`);
+    return "the database could not be reached just then. Upload the same sheet again \u2014 it is safe to re-run, and nothing else on it was affected.";
+  };
   const [styles, sizes, inclusions] = await Promise.all([
     readAll(sb, "building_styles", "id, key, label", ["id"], clientId),
     readAll(sb, "building_sizes", "id, style_id, width_ft, length_ft, sort_order", ["id"], clientId),
@@ -210,13 +252,13 @@ export async function importPricingRows(sb: any, clientId: string, rows: any[]) 
   const writeSizesOneByOne = async (batch: SizePlan[]) => {
     for (const p of batch) {
       if (p.existingId) {
-        const up = await sb.from("building_sizes").update({ label: p.label, base_price: p.price, active: p.active }).eq("id", p.existingId);
-        if (up.error) p.failed = up.error.message;
+        const up = await attempt(() => sb.from("building_sizes").update({ label: p.label, base_price: p.price, active: p.active }).eq("id", p.existingId));
+        if (up.error) p.failed = reason(up.error, `size ${p.label}`);
       } else {
-        const ins = await sb.from("building_sizes").insert(
+        const ins = await attempt(() => sb.from("building_sizes").insert(
           { client_id: clientId, style_id: p.styleId, label: p.label, width_ft: p.w, length_ft: p.l,
-            base_price: p.price, active: p.active, sort_order: p.sortOrder }).select("id").maybeSingle();
-        if (ins.error) p.failed = ins.error.message;
+            base_price: p.price, active: p.active, sort_order: p.sortOrder }).select("id").maybeSingle());
+        if (ins.error) p.failed = reason(ins.error, `size ${p.label}`);
         else if (!ins.data?.id) p.failed = "the new size could not be read back";
         else p.sizeId = ins.data.id;
       }
@@ -228,8 +270,8 @@ export async function importPricingRows(sb: any, clientId: string, rows: any[]) 
         client_id: clientId, style_id: p.styleId, label: p.label, width_ft: p.w, length_ft: p.l,
         base_price: p.price, active: p.active, ...(existing ? {} : { sort_order: p.sortOrder }),
       }));
-      const res = await sb.from("building_sizes").upsert(payload, { onConflict: SIZE_CONFLICT })
-        .select("id, style_id, width_ft, length_ft");
+      const res = await attempt(() => sb.from("building_sizes").upsert(payload, { onConflict: SIZE_CONFLICT })
+        .select("id, style_id, width_ft, length_ft"));
       if (res.error) { await writeSizesOneByOne(batch); continue; }
       const back = new Map<string, string>();
       for (const z of (Array.isArray(res.data) ? res.data : [])) back.set(dimKeyOf(z.style_id, z.width_ft, z.length_ft), z.id);
@@ -266,23 +308,23 @@ export async function importPricingRows(sb: any, clientId: string, rows: any[]) 
   const failInclusion = (op: InclusionOp, itemKey: string, message: string) =>
     skipped.push(`${op.styleName} ${op.label} / ${itemKey}: ${message}`);
   for (const batch of chunks(upserts, PRICING_IMPORT_BATCH)) {
-    const res = await sb.from("building_size_inclusions").upsert(batch.map((u) => u.row), { onConflict: INCLUSION_CONFLICT });
+    const res = await attempt(() => sb.from("building_size_inclusions").upsert(batch.map((u) => u.row), { onConflict: INCLUSION_CONFLICT }));
     if (!res.error) continue;
     for (const u of batch) {
-      const one = await sb.from("building_size_inclusions").upsert(u.row, { onConflict: INCLUSION_CONFLICT });
-      if (one.error) failInclusion(u.op, u.itemKey, one.error.message);
+      const one = await attempt(() => sb.from("building_size_inclusions").upsert(u.row, { onConflict: INCLUSION_CONFLICT }));
+      if (one.error) failInclusion(u.op, u.itemKey, reason(one.error, `${u.op.styleName} ${u.op.label} / ${u.itemKey}`));
     }
   }
   // One call per option cleared, per 100 sizes. The table's key is (size_id, item_key) and it has
   // no id column of its own, so grouping by option is how a DELETE names many rows at once.
   for (const [itemKey, list] of deletes) {
     for (const batch of chunks(list, DELETE_IDS_PER_CALL)) {
-      const res = await sb.from("building_size_inclusions").delete()
-        .eq("client_id", clientId).eq("item_key", itemKey).in("size_id", batch.map((d) => d.sizeId));
+      const res = await attempt(() => sb.from("building_size_inclusions").delete()
+        .eq("client_id", clientId).eq("item_key", itemKey).in("size_id", batch.map((d) => d.sizeId)));
       if (!res.error) continue;
       for (const d of batch) {
-        const one = await sb.from("building_size_inclusions").delete().eq("size_id", d.sizeId).eq("item_key", itemKey);
-        if (one.error) failInclusion(d.op, itemKey, one.error.message);
+        const one = await attempt(() => sb.from("building_size_inclusions").delete().eq("size_id", d.sizeId).eq("item_key", itemKey));
+        if (one.error) failInclusion(d.op, itemKey, reason(one.error, `${d.op.styleName} ${d.op.label} / ${itemKey}`));
       }
     }
   }

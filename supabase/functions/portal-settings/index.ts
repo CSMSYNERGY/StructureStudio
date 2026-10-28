@@ -2851,7 +2851,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
     { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     try {
-      const r = await importPricingRows(admin, clientId, payload.rows);
+      const r = await importPricingRows(admin, clientId, payload.rows, (code, message) =>
+        void logEdgeError({ fn: "portal-settings", req, clientId, code, message }).catch(() => {}));
       return json({ ok: true, ...r });
     } catch (e) { return dbFail(req, clientId, "import that pricing sheet", e); }
   }

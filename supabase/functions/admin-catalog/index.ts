@@ -775,7 +775,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "import_pricing_csv": {
         const clientId = reqStr(p.clientId, "clientId");
         if (!Array.isArray(p.rows)) throw new Error("rows[] required");
-        const r = await importPricingRows(sb, clientId, p.rows);
+        const r = await importPricingRows(sb, clientId, p.rows, (code, message) =>
+        void logEdgeError({ fn: "admin-catalog", req, clientId, code, message }).catch(() => {}));
         return json({ ok: true, ...r });
       }
 

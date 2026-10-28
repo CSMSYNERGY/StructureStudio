@@ -9,7 +9,10 @@
 // Every awaited statement is one entry in `calls`, so a test can count round trips.
 //
 // `maxRows` mimics PostgREST's db-max-rows: a read answers at most that many rows.
-// `failOn` lets a test make a chosen statement fail with a chosen message.
+// `failOn` lets a test make a chosen statement fail. A string means POSTGRES refused it (the
+// statement comes back with a SQLSTATE, as a real refusal does); return { message } with no code
+// to mimic a gateway answering instead of the database — a 502 page, a dropped connection — which
+// is what the importer retries and never shows the builder.
 
 // deno-lint-ignore-file no-explicit-any
 
@@ -21,7 +24,7 @@ export type Tables = {
 export type Call = { table: string; verb: string; rows: number; bulk: boolean };
 type Opts = {
   maxRows?: number;
-  failOn?: (c: { table: string; verb: string; payload: any[]; bulk: boolean }) => string | null;
+  failOn?: (c: { table: string; verb: string; payload: any[]; bulk: boolean }) => string | { code?: string; message: string } | null;
 };
 
 // The live columns (information_schema, 2026-10-28; building_styles trimmed to what matters here).
@@ -67,18 +70,18 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     if (table === "building_sizes" && row.base_price == null) row.active = false;   // enforce_size_pricing
     return row;
   };
-  const check = (table: keyof Tables, rows: any[]): string | null => {
+  const check = (table: keyof Tables, rows: any[]): { code: string; message: string } | null => {
     for (const cols of UNIQUE[table]) {
       const seen = new Set<string>();
       for (const r of rows) {
         const k = cols.map((c) => NUMERIC.has(c) ? Number(r[c]) : String(r[c])).join("|");
-        if (seen.has(k)) return `duplicate key value violates unique constraint "${table}_${cols.join("_")}"`;
+        if (seen.has(k)) return { code: "23505", message: `duplicate key value violates unique constraint "${table}_${cols.join("_")}"` };
         seen.add(k);
       }
     }
     if (table === "building_size_inclusions") {
       const ids = new Set(tables.building_sizes.map((z) => z.id));
-      if (rows.some((r) => !ids.has(r.size_id))) return 'insert or update on table "building_size_inclusions" violates foreign key constraint';
+      if (rows.some((r) => !ids.has(r.size_id))) return { code: "23503", message: 'insert or update on table "building_size_inclusions" violates foreign key constraint' };
     }
     return null;
   };
@@ -105,7 +108,9 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     const unknown = named.find((c) => c && c !== "*" && !SCHEMA[table].has(c));
     if (unknown) return { data: null, error: { code: "42703", message: `column ${table}.${unknown} does not exist` } };
     const injected = verb === "select" ? null : opts.failOn?.({ table, verb, payload, bulk }) ?? null;
-    if (injected) return { data: null, error: { message: injected } };
+    // A bare string is Postgres refusing the statement, so it carries a SQLSTATE (P0001,
+    // raise_exception) the way a real refusal does; an object may leave the code out on purpose.
+    if (injected) return { data: null, error: typeof injected === "string" ? { code: "P0001", message: injected } : injected };
 
     const cur = tables[table];
     if (verb === "select") {
@@ -136,7 +141,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
       for (const p of payload) {
         const i = at.get(keyOf(p)) ?? -1;
         if (i >= 0) {
-          if (hit.has(next[i])) return { data: null, error: { message: "ON CONFLICT DO UPDATE command cannot affect row a second time" } };
+          if (hit.has(next[i])) return { data: null, error: { code: "21000", message: "ON CONFLICT DO UPDATE command cannot affect row a second time" } };
           next[i] = trigger(table, { ...next[i], ...p });
           hit.add(next[i]);
           written.push(next[i]);
@@ -148,7 +153,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
       }
     }
     const bad = check(table, next);
-    if (bad) return { data: null, error: { message: bad } };
+    if (bad) return { data: null, error: bad };
     tables[table] = next as any;
     if (!returning) return { data: null, error: null };
     const back = written.map((r) => ({ ...r }));
