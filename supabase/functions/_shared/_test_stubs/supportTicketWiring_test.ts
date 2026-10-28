@@ -3,9 +3,10 @@
 //   1. portal-feedback: a ticket never reaches Monday (it returns before the Monday leg, and
 //      retry_push refuses to push one); bug and feature still go to the same boards they always did.
 //   2. portal-feedback: a ticket's chat must be the CALLER's own, tenant AND person.
-//   3. The portal: the floating Feedback pill is gone, the Support button is in the top bar and only
-//      while NOT viewing another account, and support-agent is in SS_TENANT_SCOPED_FNS so a view-as
-//      call reaches the server as one (and is refused there).
+//   3. The portal: the per-builder switch (migration 346, useSupportOn) picks the top bar's Support
+//      button or the old floating Feedback pill, never both; neither shows while viewing another
+//      account; and support-agent is in SS_TENANT_SCOPED_FNS so a view-as call reaches the server
+//      as one (and is refused there).
 //   4. _shared/supportNotify.ts: who gets the alert comes only from the secret, and the alert names
 //      the kind, the business and the title.
 //
@@ -40,14 +41,17 @@ Deno.test("portal-feedback: a ticket's chat must be the caller's own (tenant and
   assert(src.includes('"That chat does not belong to this account." }, 403'), "anything else is a 403");
 });
 
-Deno.test("portal: no Feedback pill; Support in the top bar, never in view-as; support-agent is tenant-scoped", async () => {
+Deno.test("portal: the switch picks Support or the old pill, never both, never in view-as; support-agent is tenant-scoped", async () => {
   const shell = await read("../../../../portal/12-shell.jsx");
   const orders = await read("../../../../portal/04-orders.jsx");
   const core = await read("../../../../portal/01-core.jsx");
-  assert(!shell.includes("<FeedbackWidget"), "the floating pill is no longer mounted");
-  assert(!/function FeedbackWidget\(/.test(orders), "and no longer exists");
+  const hook = shell.indexOf("const supportOn = useSupportOn(");
+  assert(hook > 0 && hook < shell.indexOf("if (tenant === null) {"), "the shell asks the switch above its early returns (React #310)");
+  assert(/sb\.functions\.invoke\("support-agent", \{ body: \{ action: "enabled" \} \}\)/.test(orders), "useSupportOn asks support-agent's enabled");
+  assert((shell.match(/<FeedbackWidget/g) || []).length === 1 && /\{!viewing && !supportOn && \(\s*<FeedbackWidget/.test(shell), "the old pill renders only with the switch off, never in view-as");
+  assert(/function FeedbackWidget\(/.test(orders), "and still exists for those builders");
   const top = shell.slice(shell.indexOf('<div className="ss-topbar">'), shell.indexOf('<div className="ss-body">'));
-  assert(/\{!viewing && \(\s*<SupportMenu /.test(top), "SupportMenu is in the top bar, behind !viewing");
+  assert(/\{!viewing && supportOn && \(\s*<SupportMenu /.test(top), "SupportMenu is in the top bar, only with the switch on, behind !viewing");
   assert(/const SS_TENANT_SCOPED_FNS = \[[^\]]*"support-agent"/.test(core), "support-agent is in SS_TENANT_SCOPED_FNS");
   for (const label of ["Ask the assistant", "Report a problem", "Request a feature", "Submit a ticket", "My requests", "What's new"]) {
     assert(orders.includes(`"${label}"`), `the menu has ${label}`);
