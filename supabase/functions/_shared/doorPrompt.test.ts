@@ -49,7 +49,7 @@ Deno.test("Stage A: the known size, the straightened frame and the size to echo"
 
 Deno.test("V2's edge strips: where the door is in the photo, a butt hinge's knuckle as its pivot, Stage B told the same", () => {
   // 2 in past each side of a 72 in door on a 1092 px photo: 1092 x 2 / 76 = 28.7 px a strip.
-  assertEquals([DOOR_LOOK_PROMPT_ID, DOOR_EDGE_PAD_IN, Math.round(doorEdgePadPx(1092, 72) * 10) / 10, doorEdgePadPx(1092, 72, 0)], ["DOOR_LOOK_V2", 2, 28.7, 0]);
+  assertEquals([DOOR_LOOK_PROMPT_ID, DOOR_EDGE_PAD_IN, Math.round(doorEdgePadPx(1092, 72) * 10) / 10, doorEdgePadPx(1092, 72, 0)], ["DOOR_LOOK_V4", 2, 28.7, 0]);
   const strips = "The door's leaves fill it across from x = 29 to x = 1063, and down from the top of the leaves (the top edge) to the top of the threshold (the bottom edge). " +
     "The strip 29 pixels wide down each side is just past the leaves' outer edges: the jamb or casing, and the knuckles of butt hinges, which sit on the edge.";
   assert(PROMPT.includes(strips));

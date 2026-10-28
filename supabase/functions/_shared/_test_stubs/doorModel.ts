@@ -4,6 +4,8 @@
 // It answers each request by what it asks (Stage A, the hinge / handle / meeting-edge close-ups, Stage
 // B), from a script, and records every request it was sent. Nothing here reaches the network.
 
+import { DOOR_LOOK_PROMPT_ID } from "../doorLookPrompt.ts";
+
 type Rec = Record<string, unknown>;
 // One scripted reply: the answer's JSON (sent as the reply's text), raw text, an HTTP failure, a reply
 // cut off at max_tokens, a call that never answers (until its signal aborts), or a send that throws.
@@ -26,8 +28,8 @@ export type Kind = "stageA" | "hinges" | "handle" | "meet" | "stageB" | "other";
 export type Sent = { kind: Kind; body: Rec; text: string; images: number };
 
 export function kindOf(text: string): Kind {
-  if (text.startsWith("DOOR_LOOK_V2. You are measuring")) return "stageA";
-  if (text.startsWith("DOOR_LOOK_V2, second look")) return "stageB";
+  if (text.startsWith(`${DOOR_LOOK_PROMPT_ID}. You are measuring`)) return "stageA";
+  if (text.startsWith(`${DOOR_LOOK_PROMPT_ID}, second look`)) return "stageB";
   if (text.includes("Each crop is centred on one of the door's hinges")) return "hinges";
   if (text.includes("The crop is centred on the door's handle")) return "handle";
   if (text.includes("where the two leaves of a double door meet")) return "meet";

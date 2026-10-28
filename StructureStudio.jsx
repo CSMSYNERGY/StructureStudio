@@ -4055,7 +4055,7 @@ function ssSafeUrl(u) {
 // The server's field table, verbatim (doorLook.ts's DOOR_LOOK_FIELDS as JSON; its doorLook.test.ts
 // holds this copy, the other twin's and its own equal). The browser cleans every spec with the same
 // walker before drawing it, and a spec that does not clean is ignored: the base look is drawn.
-const SS_DOOR_LOOK_FIELDS = {"k":"obj","rule":"door","keys":{"v":{"k":"int","min":1,"max":1,"req":true,"strict":"version"},"base":{"k":"enum","of":["plank","zbrace","xbrace","american","basic","classic","dutch"],"req":true},"src":{"k":"obj","req":true,"keys":{"leaves":{"k":"int","min":1,"max":2,"req":true,"strict":"unsupported"},"hinge":{"k":"enum","of":["left","right"],"req":true}}},"frame":{"k":"obj","keys":{"fIn":{"k":"num","min":1.5,"max":8,"dp":1},"railHIn":{"k":"num","min":1.5,"max":8,"dp":1},"rails":{"k":"nums","min":0.15,"max":0.85,"dp":3,"most":3,"gap":0.08}}},"field":{"k":"obj","keys":{"dir":{"k":"enum","of":["v","h","smooth","grooved"]},"pitchIn":{"k":"num","min":3,"max":12,"dp":1}}},"brace":{"k":"obj","keys":{"t":{"k":"enum","of":["none","z","x"]},"from":{"k":"enum","of":["hinge","strike"],"def":"hinge"},"wIn":{"k":"num","min":2,"max":8,"dp":1}}},"panels":{"k":"list","most":4,"pos":true,"of":{"k":"obj","keys":{"fill":{"k":"enum","of":["none","z","x","pickets","vent","raised","diamond","lite"],"req":true},"zFrom":{"k":"enum","of":["hinge","strike"],"def":"hinge","when":{"key":"fill","in":["z"]}},"count":{"k":"int","min":2,"max":12,"when":{"key":"fill","in":["pickets"]}},"rows":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"cols":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"braceWIn":{"k":"num","min":2,"max":8,"dp":1,"when":{"key":"fill","in":["z","x","diamond"]}}}}},"parts":{"k":"list","most":12,"of":{"k":"union","by":"t","of":{"board":{"k":"obj","rule":"line","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"wIn":{"k":"num","min":2,"max":8,"dp":1},"role":{"k":"enum","of":["frame","members"]}}},"lite":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"rows":{"k":"int","min":1,"max":6,"def":1},"cols":{"k":"int","min":1,"max":6,"def":1}}},"vent":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"raised":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"split":{"k":"obj","keys":{"v":{"k":"num","min":0.2,"max":0.8,"dp":3,"req":true}}}}}},"hinges":{"k":"obj","rule":"hinges","keys":{"type":{"k":"enum","of":["tstrap","strap","scroll","butt","hidden","pintle"],"def":"tstrap"},"count":{"k":"int","min":0,"max":4},"at":{"k":"or","of":[{"k":"enum","of":["rails"]},{"k":"nums","min":0.01,"max":0.99,"dp":3,"most":4}]},"lenIn":{"k":"num","min":3,"max":30,"dp":1},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"handle":{"k":"obj","rule":"finish","keys":{"type":{"k":"enum","of":["barn","lever","pull","ring","thumb","none"],"def":"barn"},"v":{"k":"or","def":"rail","of":[{"k":"enum","of":["rail"]},{"k":"num","min":0.3,"max":0.7,"dp":3}]},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"meet":{"k":"obj","keys":{"type":{"k":"enum","of":["astragal","overlap"],"def":"astragal"},"wIn":{"k":"num","min":1,"max":3.5,"dp":2,"def":1.5}}},"colors":{"k":"obj","keys":{"infill":{"k":"role"},"frame":{"k":"role"},"members":{"k":"role"}}}}};
+const SS_DOOR_LOOK_FIELDS = {"k":"obj","rule":"door","keys":{"v":{"k":"int","min":1,"max":1,"req":true,"strict":"version"},"base":{"k":"enum","of":["plank","zbrace","xbrace","american","basic","classic","dutch"],"req":true},"src":{"k":"obj","req":true,"keys":{"leaves":{"k":"int","min":1,"max":2,"req":true,"strict":"unsupported"},"hinge":{"k":"enum","of":["left","right"],"req":true}}},"frame":{"k":"obj","keys":{"fIn":{"k":"num","min":1.5,"max":8,"dp":1},"railHIn":{"k":"num","min":1.5,"max":8,"dp":1},"rails":{"k":"nums","min":0.15,"max":0.85,"dp":3,"most":3,"gap":0.08}}},"field":{"k":"obj","keys":{"dir":{"k":"enum","of":["v","h","smooth","grooved"]},"pitchIn":{"k":"num","min":3,"max":12,"dp":1}}},"brace":{"k":"obj","keys":{"t":{"k":"enum","of":["none","z","x"]},"from":{"k":"enum","of":["hinge","strike"],"def":"hinge"},"wIn":{"k":"num","min":2,"max":8,"dp":1}}},"panels":{"k":"list","most":4,"pos":true,"of":{"k":"obj","keys":{"fill":{"k":"enum","of":["none","z","x","pickets","vent","raised","diamond","lite"],"req":true},"zFrom":{"k":"enum","of":["hinge","strike"],"def":"hinge","when":{"key":"fill","in":["z"]}},"count":{"k":"int","min":2,"max":12,"when":{"key":"fill","in":["pickets"]}},"rows":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"cols":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"braceWIn":{"k":"num","min":2,"max":8,"dp":1,"when":{"key":"fill","in":["z","x","diamond"]}}}}},"parts":{"k":"list","most":12,"of":{"k":"union","by":"t","of":{"board":{"k":"obj","rule":"line","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"wIn":{"k":"num","min":2,"max":8,"dp":1},"role":{"k":"enum","of":["frame","members"]}}},"lite":{"k":"obj","rule":"lite","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"rows":{"k":"int","min":1,"max":6,"def":1},"cols":{"k":"int","min":1,"max":6,"def":1}}},"vent":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"raised":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"split":{"k":"obj","keys":{"v":{"k":"num","min":0.2,"max":0.8,"dp":3,"req":true}}}}}},"hinges":{"k":"obj","rule":"hinges","keys":{"type":{"k":"enum","of":["tstrap","strap","scroll","butt","hidden","pintle","pivot"],"def":"tstrap"},"count":{"k":"int","min":0,"max":4},"at":{"k":"or","of":[{"k":"enum","of":["rails"]},{"k":"nums","min":0.01,"max":0.99,"dp":3,"most":4}]},"lenIn":{"k":"num","min":3,"max":30,"dp":1},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"handle":{"k":"obj","rule":"finish","keys":{"type":{"k":"enum","of":["barn","lever","pull","ring","thumb","none"],"def":"barn"},"v":{"k":"or","def":"rail","of":[{"k":"enum","of":["rail"]},{"k":"num","min":0.3,"max":0.7,"dp":3}]},"u":{"k":"num","min":0.5,"max":1,"dp":3},"lenIn":{"k":"num","min":2,"max":72,"dp":1},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"lock":{"k":"obj","rule":"finish","keys":{"type":{"k":"enum","of":["thumbturn","keyed"],"req":true},"u":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v":{"k":"num","min":0,"max":1,"dp":3,"req":true},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"meet":{"k":"obj","keys":{"type":{"k":"enum","of":["astragal","overlap"],"def":"astragal"},"wIn":{"k":"num","min":1,"max":3.5,"dp":2,"def":1.5}}},"colors":{"k":"obj","keys":{"infill":{"k":"role"},"frame":{"k":"role"},"members":{"k":"role"}}},"wood":{"k":"obj","keys":{"hex":{"k":"hex","req":true}}}}};
 // What each base draws today, as the spec says it (doorLook.ts's DOOR_LOOK_BASE_DEFAULTS, held equal
 // by scripts/doorLookTwins.test.mjs): the mid-rail centres, each panel's fill from the bottom, and the
 // brace across the whole leaf. A spec key that is absent falls back to these.
@@ -4204,19 +4204,29 @@ const SS_DOOR_LOOK_RULES = {
   hinges(o) {
     SS_DOOR_LOOK_RULES.finish(o);
     if (Array.isArray(o.at) && o.count === undefined) o.count = o.at.length;
-    if (o.count === 0 && o.type !== "hidden") {
+    if (o.count === 0 && o.type !== "hidden" && o.type !== "pivot") {
       delete o.count;
       if (Array.isArray(o.at)) delete o.at;
     }
     if (Array.isArray(o.at) && o.at.length !== o.count) delete o.at;
     return o;
   },
-  // A lite, vent or raised panel: corners in either order, at least 0.08 of the leaf each way.
+  // A vent or raised panel: corners in either order, at least 0.08 of the leaf each way.
   box(o) {
     const [u0, u1, v0, v1] = [o.u0, o.u1, o.v0, o.v1];
     if (typeof u0 !== "number" || typeof u1 !== "number" || typeof v0 !== "number" || typeof v1 !== "number") return o;
     const b = { u0: Math.min(u0, u1), v0: Math.min(v0, v1), u1: Math.max(u0, u1), v1: Math.max(v0, v1) };
     if (b.u1 - b.u0 < 0.08 - 1e-9 || b.v1 - b.v0 < 0.08 - 1e-9) return undefined;
+    return { ...o, ...b };
+  },
+  // A lite: the same, except its narrow side may be a slot down to 0.025 of the leaf (the server's
+  // DOOR_SLOT_MIN: a modern door's glass strips). Its long side keeps 0.08.
+  lite(o) {
+    const [u0, u1, v0, v1] = [o.u0, o.u1, o.v0, o.v1];
+    if (typeof u0 !== "number" || typeof u1 !== "number" || typeof v0 !== "number" || typeof v1 !== "number") return o;
+    const b = { u0: Math.min(u0, u1), v0: Math.min(v0, v1), u1: Math.max(u0, u1), v1: Math.max(v0, v1) };
+    const du = b.u1 - b.u0, dv = b.v1 - b.v0;
+    if (Math.min(du, dv) < 0.025 - 1e-9 || Math.max(du, dv) < 0.08 - 1e-9) return undefined;
     return { ...o, ...b };
   },
   // A board runs between its two ends, which must be apart: 0.05 of the leaf one way or the other (the
@@ -10888,7 +10898,8 @@ function d3CssColor(v, fallback) {
 // captured today must match one captured tomorrow.
 // "lumber" and "osb" (2026-10-27) are the Framing view's (buildFraming3D): a stud's long grain and a
 // sheet's pressed flakes. Nothing else asks for them, so no building's look moves.
-const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "agroof", "bnb", "lumber", "osb"]);
+// "doorwood" (2026-10-28) is a wood door look's (spec.wood): fine grain running up the board, no knots.
+const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "agroof", "bnb", "lumber", "osb", "doorwood"]);
 const _d3TexCanvases = {};
 function _d3Rng(seed) {
   let a = seed >>> 0;
@@ -11091,6 +11102,24 @@ function _d3RasterKind(kind) {
       g.fillStyle = "rgba(110,70,30,0.45)";
       g.beginPath(); g.ellipse(x, y, r * 1.6, r, 0, 0, 6.283); g.fill();
       b.fillStyle = "#606060"; b.beginPath(); b.ellipse(x, y, r * 1.6, r, 0, 0, 6.283); b.fill();
+    }
+  } else if (kind === "doorwood") {
+    // A stained door's boards (Ahsan 2026-10-28, a cedar pivot door): grain lines running up the board (v,
+    // the box's height), gently wavering, in soft tone bands, and no knots. White-based, so the look's own
+    // wood tone sets the colour.
+    for (let x = 0; x < N; x += 32) {
+      const v = 0.92 + rng() * 0.08;
+      const gray = Math.round(250 * v);
+      g.fillStyle = `rgb(${gray},${gray},${gray})`;
+      g.fillRect(x, 0, 32, N);
+    }
+    for (let i = 0; i < 120; i++) {
+      const x = rng() * N, a = 0.04 + rng() * 0.09, amp = 1.5 + rng() * 4, ph = rng() * 6.28;
+      g.strokeStyle = `rgba(95,55,20,${a})`;
+      g.lineWidth = 0.8 + rng() * 1.4;
+      g.beginPath();
+      for (let y = 0; y <= N; y += 16) { const xx = x + Math.sin(y / 90 + ph) * amp; if (y) g.lineTo(xx, y); else g.moveTo(xx, y); }
+      g.stroke();
     }
   } else if (kind === "osb") {
     // Oriented strand board: long pressed flakes in a hundred tones, mostly lying one way.
@@ -13378,19 +13407,31 @@ function buildShed3DModel(THREE, p) {
   // `grooved` (a built look's own, else its base's rule), none otherwise -- so a frame or a brace in the
   // door's colour is plain paint, never siding; `plain` is the infill's colour with no grooves (a look's
   // boards and raised panels). The hardware takes its finish: black is today's iron.
-  const doorLookMats = (spec, trim, doorMat, frameMat, ironMat) => {
+  // A WOOD look (spec.wood, V4's surface "wood": its boards' own tone from the photo) paints every role
+  // that says "door" in that tone with doorwood's grain, until the door has a colour picked of its own
+  // (`own`: a builder's or a shopper's), which wins as it does on every look. Its slab shows only in the
+  // board gaps, a shade darker.
+  const doorLookMats = (spec, trim, doorMat, frameMat, ironMat, own = false) => {
     const c = spec.colors || {};
-    const doorPlain = doorMat.map ? doorLiveCopy(doorMat, false) : doorMat;
+    const woodHex = spec.wood && typeof spec.wood.hex === "string" && !own ? spec.wood.hex : null;
+    const wood = woodHex ? mat(woodHex, { roughness: 0.78 }) : null;
+    if (wood) {
+      const tx = d3MakeTexture(THREE, "doorwood");
+      if (tx) { tx.repeat.set(1, 1); wood.map = tx; }
+    }
+    const doorPlain = wood || (doorMat.map ? doorLiveCopy(doorMat, false) : doorMat);
     const role = (r) => (r === "trim" ? frameMat : typeof r === "string" && r[0] === "#" ? mat(r) : doorPlain);
     const dir = (spec.field && spec.field.dir) || (trim ? "grooved" : "v");
-    const src = (c.infill || "door") === "door" ? doorMat : role(c.infill), grooved = dir === "grooved";
+    const src = (c.infill || "door") === "door" ? (wood || doorMat) : role(c.infill), grooved = dir === "grooved";
     const frame = role(c.frame || "trim");
     const finish = (f) => {
       const hex = f ? (f.finish === "custom" ? f.hex : SS_DOOR_FINISH_HEX[f.finish || "black"]) : null;
       return hex && hex.toUpperCase() !== SS_DOOR_FINISH_HEX.black ? mat(hex, { metalness: 0.55, roughness: 0.42 }) : ironMat;
     };
     return {
-      slab: !!src.map === grooved ? src : doorLiveCopy(src, grooved), plain: role(c.infill || "door"),
+      slab: src === wood ? (dir === "v" || dir === "h" ? mat(new THREE.Color(woodHex).multiplyScalar(0.8)) : wood) : !!src.map === grooved ? src : doorLiveCopy(src, grooved),
+      wood: !!wood,
+      plain: role(c.infill || "door"),
       frame, members: c.members ? role(c.members) : frame, hinge: finish(spec.hinges), handle: finish(spec.handle), dir,
     };
   };
@@ -13422,12 +13463,20 @@ function buildShed3DModel(THREE, p) {
   // sash, rows x cols of equal lites (d3WindowFill's inset mode) and the room seen through it, all in the
   // look's frame colour -- the casing in its very material, the sash and bars following its live paint.
   // `room` false (a partition's door: there is a real room on each side of it) draws no room box.
-  const doorLiteIn = (put, og, wf, hole, rows, cols, fm, part, ix, room = true) => {
-    const c = SS_DOOR_WIN_CASE_FT;
+  // `ring` narrower than the casing is a slot: plain glass, no sash.
+  const doorLiteIn = (put, og, wf, hole, rows, cols, fm, part, ix, room = true, ring = SS_DOOR_WIN_CASE_FT) => {
+    const c = ring;
     put(wallBox(fm, wf, hole.x0 - c, hole.x0, hole.y0 - c, hole.y1 + c, 0.11, 0.06), part, ix);
     put(wallBox(fm, wf, hole.x1, hole.x1 + c, hole.y0 - c, hole.y1 + c, 0.11, 0.06), part, ix);
     put(wallBox(fm, wf, hole.x0, hole.x1, hole.y1, hole.y1 + c, 0.11, 0.06), part, ix);
     put(wallBox(fm, wf, hole.x0, hole.x1, hole.y0 - c, hole.y0, 0.11, 0.06), part, ix);
+    if (ring < SS_DOOR_WIN_CASE_FT) {
+      // A slot reads as light coming through it (a modern door's glass strips, Ahsan 2026-10-28): pale glass
+      // that glows a little, no dark room behind it, set forward near the board face so the ring round it
+      // does not hide it from the side.
+      put(wallBox(mat("#EEF3F2", { emissive: "#E6E1D2", emissiveIntensity: 0.55, roughness: 0.15, metalness: 0.05 }), wf, hole.x0, hole.x1, hole.y0, hole.y1, 0.09, 0.03), part, ix);
+      return;
+    }
     const n0 = og.children.length;
     d3WindowFill(og, wf, { it: { type: "window", fixtureItemId: null, colorHex: "#" + fm.color.getHexString(), liteRows: rows, liteCols: cols },
       a0: hole.x0, a1: hole.x1, y0: hole.y0, y1: hole.y1 }, hole.x0, hole.x1, true);
@@ -13491,13 +13540,19 @@ function buildShed3DModel(THREE, p) {
     const inField = (q) => {
       const xa = X(q.u0), xb = X(q.u1);
       const r = { x0: Math.max(Math.min(xa, xb), f0), x1: Math.min(Math.max(xa, xb), f1), y0: Math.max(y0 + q.v0 * h, fy0), y1: Math.min(y0 + q.v1 * h, fy1) };
-      return r.x1 - r.x0 > 0.15 && r.y1 - r.y0 > 0.15 && clear(r) ? r : null;
+      // A slot lite's narrow side may be about an inch (doorLook.ts's DOOR_SLOT_MIN); the rest keep 0.15 ft.
+      const nar = q.t === "lite" ? 0.07 : 0.15;
+      return Math.min(r.x1 - r.x0, r.y1 - r.y0) > nar && Math.max(r.x1 - r.x0, r.y1 - r.y0) > 0.15 && clear(r) ? r : null;
     };
     const parts = lp.parts.map((q, j) => ({ q, j, r: q.t === "board" || q.t === "split" ? null : inField(q) })).filter((p) => p.r || p.q.t === "board" || p.q.t === "split");
     const glassOk = (r) => r.x1 - r.x0 > 2 * c + 0.2 && r.y1 - r.y0 > 2 * c + 0.2;
     const inset = (r, d) => ({ x0: r.x0 + d, x1: r.x1 - d, y0: r.y0 + d, y1: r.y1 - d });
-    const lites = !spec ? [] : panels.filter((p, i) => p.fill === "lite" && fillOn(p, i) && glassOk(p)).map((p) => ({ hole: inset(p, c), rows: p.rows || 1, cols: p.cols || 1, part: "lite", ix: null }))
-      .concat(parts.filter((p) => p.q.t === "lite" && glassOk(p.r)).map((p) => ({ hole: inset(p.r, c), rows: p.q.rows || 1, cols: p.q.cols || 1, part: "part-lite", ix: p.j })));
+    // A SLOT (a lite part too narrow for a window's casing and sash: a pivot door's glass strips, Ahsan
+    // 2026-10-28) keeps a casing ring that narrows with it, and doorLiteIn draws it as plain glass.
+    const ringOf = (r) => (glassOk(r) ? c : Math.max(0.012, Math.min(r.x1 - r.x0, r.y1 - r.y0) * 0.16));
+    const slotOk = (r) => Math.min(r.x1 - r.x0, r.y1 - r.y0) - 2 * ringOf(r) > 0.03;
+    const lites = !spec ? [] : panels.filter((p, i) => p.fill === "lite" && fillOn(p, i) && glassOk(p)).map((p) => ({ hole: inset(p, c), rows: p.rows || 1, cols: p.cols || 1, part: "lite", ix: null, ring: c }))
+      .concat(parts.filter((p) => p.q.t === "lite" && (glassOk(p.r) || slotOk(p.r))).map((p) => { const k = ringOf(p.r); return { hole: inset(p.r, k), rows: p.q.rows || 1, cols: p.q.cols || 1, part: "part-lite", ix: p.j, ring: k }; }));
     // A vent fill: a third of its panel's width, square, centred, capped to the panel's height.
     const ventFill = (p) => { const vs = Math.min((p.x1 - p.x0) * 0.3, (p.y1 - p.y0) * 0.7), cx = (p.x0 + p.x1) / 2, cy = (p.y0 + p.y1) / 2; return { vs, cx, cy }; };
     const raisedFill = (p) => inset(p, Math.min(0.15, (p.x1 - p.x0) * 0.12, (p.y1 - p.y0) * 0.12));
@@ -13517,18 +13572,19 @@ function buildShed3DModel(THREE, p) {
     if ((dir === "v" || dir === "h") && f1 - f0 > 0.12 && fy1 - fy0 > 0.2) {
       const across = dir === "v", span = across ? f1 - f0 : fy1 - fy0, s0 = across ? f0 : fy0;
       const pitchFt = spec && spec.field && spec.field.pitchIn ? spec.field.pitchIn / 12 : 0.55;
-      const stops = !spec ? [] : lites.map((l) => inset(l.hole, -c)).concat(hole && !top ? [inset(hole, -c)] : [])
+      const stops = !spec ? [] : lites.map((l) => inset(l.hole, -l.ring)).concat(hole && !top ? [inset(hole, -c)] : [])
         .concat(parts.filter((p) => p.q.t === "vent" || p.q.t === "raised").map((p) => p.r))
         .concat(panels.filter((p, i) => fillOn(p, i) && p.fill === "raised").map(raisedFill))
         .concat(panels.filter((p, i) => fillOn(p, i) && p.fill === "vent").map((p) => { const v = ventFill(p); return { x0: v.cx - v.vs / 2, x1: v.cx + v.vs / 2, y0: v.cy - v.vs / 2, y1: v.cy + v.vs / 2 }; }));
       const n = Math.max(2, Math.round(span / pitchFt));
-      const pitch = span / n, gap = Math.min(0.05, pitch * 0.15);
+      const woodLook = !!(spec && m.wood);
+      const pitch = span / n, gap = woodLook ? Math.min(0.012, pitch * 0.03) : Math.min(0.05, pitch * 0.15);
       for (let k = 0; k < n; k++) {
         const b0 = s0 + k * pitch + (k === 0 ? 0 : gap / 2);
         const b1 = s0 + (k + 1) * pitch - (k === n - 1 ? 0 : gap / 2);
         let bits = [across ? { x0: b0, x1: b1, y0: fy0, y1: fy1 } : { x0: f0, x1: f1, y0: b0, y1: b1 }];
         stops.forEach((k2) => { bits = doorRectsMinus(bits, k2); });
-        bits.forEach((r) => put(wallBox(spec ? m.plain : doorMat, wf, r.x0, r.x1, r.y0, r.y1, 0.105, 0.06), tag("board")));
+        bits.forEach((r) => put(wallBox(spec ? m.plain : doorMat, wf, r.x0, r.x1, r.y0, r.y1, woodLook ? 0.13 : 0.105, 0.06), tag("board")));
       }
     }
     // Frame: two full-height stiles, then head/sill/mid rails spanning only BETWEEN them.
@@ -13684,7 +13740,7 @@ function buildShed3DModel(THREE, p) {
     // The window's own casing, in the window's colour, then the window itself (doorWindowIn); then the
     // look's own glass (doorLiteIn).
     if (hole) doorWindowIn(put, og, wf, hole, win);
-    lites.forEach((l) => doorLiteIn(put, og, wf, l.hole, l.rows, l.cols, frM, l.part, l.ix, !lk.partition));
+    lites.forEach((l) => doorLiteIn(put, og, wf, l.hole, l.rows, l.cols, frM, l.part, l.ix, !lk.partition, l.ring));
     doorHardware(put, wf, { a0, a1, y0, y1, w, h, hinge, latch, trim, F, top, tr0, mids, spec, tag, railAt: y0 + h * lp.def.rails[0],
       win: spec && hole && !top ? inset(hole, -c) : null },
       spec ? m.hinge : ironMat, spec ? m.handle : ironMat);
@@ -13709,6 +13765,7 @@ function buildShed3DModel(THREE, p) {
   //   tstrap  today's stepped taper          strap   a straight strap with a rounded end
   //   scroll  a strap with a curled end      butt    two plates and a knuckle on the hinge edge
   //   hidden  nothing (count 0)              pintle  a strap and a pin plate on the jamb
+  //   pivot   nothing (count 0): the door turns on pins in its head and the floor
   //   barn (today's), lever, pull, ring, thumb (a thumb latch), none.
   // The handle is the one part allowed past the casing face, because a handle you could not get a hand
   // behind is not a handle; every hinge stops on it (0.18).
@@ -13741,7 +13798,7 @@ function buildShed3DModel(THREE, p) {
       const count = hs.count != null ? hs.count : h >= 5 ? 3 : 2;
       const spread = (lo, hi, n) => Array.from({ length: n }, (_, i) => (n === 1 ? (lo + hi) / 2 : lo + ((hi - lo) * i) / (n - 1)));
       const byMid = mids.slice().sort((p, q) => Math.abs(p - (y0 + h / 2)) - Math.abs(q - (y0 + h / 2)));
-      if (type === "hidden" || !count) rows = [];
+      if (type === "hidden" || type === "pivot" || !count) rows = [];
       else if (Array.isArray(hs.at)) rows = hs.at.map((v) => y0 + h * v);
       else if (hs.at === "rails" || trim) {
         // On the rails: the bottom rail's middle, the mid rails nearest half way, the top rail's.
@@ -13802,11 +13859,16 @@ function buildShed3DModel(THREE, p) {
       plate(0.06, 0.22, 0.1, 0.163, 0.034);
       plate(0.1, Math.min(0.5, w * 0.4), 0.032, 0.2, 0.034);
     } else if (ht === "pull") {
-      // A D-pull: two posts and the grip standing off them.
-      plate(0.14, 0.22, 0.04, 0.168, 0.024, hy + 0.3);
-      plate(0.14, 0.22, 0.04, 0.168, 0.024, hy - 0.3);
-      const gx = se + sd * 0.18;
-      put(wallBox(handleMat, wf, gx - 0.03, gx + 0.03, hy - 0.34, hy + 0.34, 0.2, 0.04), tagL);
+      // A D-pull: two posts and the grip standing off them. A look that measured its pull (a long bar
+      // pull's two ends: Ahsan 2026-10-28) draws it that long, kept on the leaf.
+      // Where it was measured (handle.u, from the hinge edge), else 0.18 ft in from the strike edge.
+      const half = spec && typeof hd.lenIn === "number" ? Math.max(0.17, Math.min(hd.lenIn / 24, h * 0.45)) : 0.34;
+      const py = half === 0.34 ? hy : Math.max(y0 + half + 0.1, Math.min(hy, y1 - half - 0.1));
+      const off = spec && typeof hd.u === "number" ? Math.max(0.12, Math.min((1 - hd.u) * w, w / 2)) : 0.18;
+      plate(off - 0.04, off + 0.04, 0.04, 0.168, 0.024, py + half - 0.04);
+      plate(off - 0.04, off + 0.04, 0.04, 0.168, 0.024, py - half + 0.04);
+      const gx = se + sd * off;
+      put(wallBox(handleMat, wf, gx - 0.03, gx + 0.03, py - half, py + half, 0.2, 0.04), tagL);
     } else if (ht === "ring") {
       // A ring pull hanging flat against its plate.
       plate(0.08, 0.28, 0.09, 0.163, 0.034);
@@ -13816,6 +13878,16 @@ function buildShed3DModel(THREE, p) {
       plate(0.07, 0.19, 0.3, 0.163, 0.034);
       plate(0.11, 0.15, 0.2, 0.2, 0.04, hy - 0.06);
       plate(0.1, 0.17, 0.025, 0.2, 0.03, hy + 0.2);
+    }
+    // A LOCK OF ITS OWN (a pivot door's thumb-turn beside its bar pull): a small square plate where the
+    // look measured it, across the latch leaf from the hinge edge, in the handle's finish, with a turn
+    // knob or a key cylinder on it.
+    const lk = spec && spec.lock;
+    if (lk && typeof lk.u === "number" && typeof lk.v === "number") {
+      const lx = hinge === "a0" ? a0 + lk.u * w : a1 - lk.u * w, ly = Math.max(y0 + 0.15, Math.min(y0 + h * lk.v, y1 - 0.15)), s = 0.1;
+      put(wallBox(handleMat, wf, lx - s, lx + s, ly - s, ly + s, 0.163, 0.02), tagL);
+      if (lk.type === "thumbturn") put(wallBox(handleMat, wf, lx - 0.018, lx + 0.018, ly - 0.065, ly + 0.065, 0.183, 0.03), tagL);
+      else put(wallMesh(doorDisc(0.04, 0.025), handleMat, wf, lx, ly, 0.183), tagL);
     }
   };
   // The window a door's pick draws in a leaf lw x lh, by ssDoorWindowFit, the function the picker and
@@ -14653,7 +14725,7 @@ function buildShed3DModel(THREE, p) {
           const frameMat = o.it.trimColorHex ? mat(o.it.trimColorHex) : trimMat;
           const ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
           // A look's materials, from its colour roles over these (doorLookMats), once for both leaves.
-          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, true, infillMat, frameMat, ironMat) } : null;
+          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, true, infillMat, frameMat, ironMat, !!o.it.colorHex) } : null;
           // The leaves stand on the threshold, every vertical measured from o.y0 (loft doors too).
           const ty0 = o.y0 + SS_TRIM_DOOR_SILL_FT;
           // The HINGE POLARITY IS THE PLANK DOOR'S, to the letter, for the reason the note in the
@@ -14682,7 +14754,7 @@ function buildShed3DModel(THREE, p) {
           // as one piece of wood rather than a panel stuck inside a border.
           const frameMat = o.it.trimColorHex ? mat(o.it.trimColorHex) : doorMat;
           const ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
-          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, false, doorMat, frameMat, ironMat) } : null;
+          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, false, doorMat, frameMat, ironMat, !!o.it.colorHex) } : null;
           if (dStyle === "rollup") {
             // ONE curtain across the whole opening even at a "double" width: a 10 ft roll-up is
             // one door in one track, and splitting it at the centre would draw a pair of garage

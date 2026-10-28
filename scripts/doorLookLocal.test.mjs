@@ -50,7 +50,7 @@ test("prepare: the photo fitted to the limits, the exact Stage A prompt, the req
     const r = await main(["prepare", "--photo", photo, "--width", "36", "--height", "80", "--leaves", "1", "--out", out, "--hinge", hinge, "--meet", hinge], async () => ops);
     assert.deepEqual(r.photo, [950, 1267], "1.15 MP at the photo's own shape");
     const req = JSON.parse(readFileSync(join(out, "request.json"), "utf8"));
-    assert.deepEqual([req.prompt, req.model, req.maxTokens, req.effort, req.reads], ["DOOR_LOOK_V2", "claude-opus-5-5", 12000, "high", 3]);
+    assert.deepEqual([req.prompt, req.model, req.maxTokens, req.effort, req.reads], ["DOOR_LOOK_V4", "claude-opus-5-5", 12000, "high", 3]);
     assert.deepEqual(req.expectSize, [950, 1267]);
     assert.deepEqual(req.images, ["photo.jpg", "closeup-hinge.jpg"], "a single door has no meeting edge");
     const text = readFileSync(join(out, "prompt.txt"), "utf8");

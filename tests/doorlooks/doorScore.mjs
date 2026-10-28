@@ -59,7 +59,7 @@ export const DOOR_RENDER_RULES = [
   { name: "TRIM_HINGES", needle: "(h >= 5 ? [y0 + F / 2, midY, hTop] : [y0 + F / 2, hTop])" },
   { name: "PLANK_HINGES", needle: "(h >= 5 ? [y0 + h * 0.13, midY, hTop(0.13)] : [y0 + h * 0.18, hTop(0.18)])" },
   { name: "SPEC_HINGE_COUNT", needle: "const count = hs.count != null ? hs.count : h >= 5 ? 3 : 2;" },
-  { name: "SPEC_NO_HINGES", needle: 'if (type === "hidden" || !count) rows = [];' },
+  { name: "SPEC_NO_HINGES", needle: 'if (type === "hidden" || type === "pivot" || !count) rows = [];' },
   { name: "BUTT_NO_STRAP", needle: 'if (type === "butt") {' },
   { name: "MID_RAIL_NEAREST_HALF", needle: "const byMid = mids.slice().sort((p, q) => Math.abs(p - (y0 + h / 2)) - Math.abs(q - (y0 + h / 2)));" },
   { name: "SPEC_RAILS_HINGES", needle: 'else if (hs.at === "rails" || trim) {' },
@@ -125,9 +125,10 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
   const braceT = (isRec(spec.brace) && spec.brace.t) || def.brace;
   const h = isRec(spec.hinges) ? spec.hinges : {};
   const type = h.type ?? "tstrap";
-  // A hidden set draws no hinge rows whatever count Stage A left on it (SPEC_NO_HINGES); otherwise
-  // today's rule, 3 from 5 ft up (SPEC_HINGE_COUNT).
-  const count = type === "hidden" ? 0 : num(h.count) ?? (leaf ? (leaf.h >= 5 ? 3 : 2) : null);
+  // A hidden or pivot set draws no hinge rows whatever count Stage A left on it (SPEC_NO_HINGES);
+  // otherwise today's rule, 3 from 5 ft up (SPEC_HINGE_COUNT).
+  const hingeless = type === "hidden" || type === "pivot";
+  const count = hingeless ? 0 : num(h.count) ?? (leaf ? (leaf.h >= 5 ? 3 : 2) : null);
   let at = null;
   if (count === 0) at = [];
   else if (Array.isArray(h.at)) at = [...h.at].sort((a, b) => a - b);
@@ -141,7 +142,7 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
   }
   let lenIn = null;
   // A butt hinge is two plates and a knuckle: doorHardware returns before the strap (BUTT_NO_STRAP).
-  if (count !== 0 && type !== "hidden" && type !== "butt") {
+  if (count !== 0 && !hingeless && type !== "butt") {
     if (num(h.lenIn) !== null) lenIn = leaf ? Math.min(h.lenIn, leaf.w * FT * STRAP_CAP_W) : h.lenIn;
     else if (leaf) lenIn = (0.11 + (trim ? Math.min(leaf.w * 0.15, 0.5) : Math.min(leaf.w * 0.5, 1.15))) * FT;
   }
@@ -295,7 +296,7 @@ export function scoreSpec(truthCase, truthSpec, gotSpec) {
   else if (none) add(na("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, "no hinges to place"));
   else if (T.hinges.count !== G.hinges.count) add(na("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, "hinge count differs (scored there)"));
   else add(list("hinges.at", "hingeAt", T.hinges.at, G.hinges.at, BAR.hingeAt.tol));
-  const strapless = (t) => t === "hidden" || t === "butt";
+  const strapless = (t) => t === "hidden" || t === "pivot" || t === "butt";
   if (none || strapless(T.hinges.type) || strapless(G.hinges.type)) add(na("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, "no strap drawn"));
   else add(numeric("hinges.lenIn", "hingeLen", T.hinges.lenIn, G.hinges.lenIn, BAR.hingeLen.tol));
   add(list("frame.rails", "rails", T.rails, G.rails, BAR.rails.tol));
@@ -314,7 +315,7 @@ export function scoreSpec(truthCase, truthSpec, gotSpec) {
   add(exact("handle.type", "handleMeet", T.handle.type, G.handle.type, acc));
   if (T.meet) add(exact("meet.type", "handleMeet", T.meet.type, G.meet.type, acc));
   for (const k of ["infill", "frame", "members"]) add(exact(`colors.${k}`, "colorRoles", T.colors[k], G.colors[k], acc));
-  if (!none && T.hinges.type !== "hidden" && G.hinges.type !== "hidden") add(exact("hinges.finish", "hardwareFinish", T.hinges.finish, G.hinges.finish, acc));
+  if (!none && !["hidden", "pivot"].includes(T.hinges.type) && !["hidden", "pivot"].includes(G.hinges.type)) add(exact("hinges.finish", "hardwareFinish", T.hinges.finish, G.hinges.finish, acc));
   if (T.handle.type !== "none" && G.handle.type !== "none") add(exact("handle.finish", "hardwareFinish", T.handle.finish, G.handle.finish, acc));
   // Reported, with no bar of their own.
   add({ ...exact("field.dir", null, T.fieldDir, G.fieldDir, acc), bar: null });
