@@ -37,7 +37,12 @@ export const DOOR_PART_TYPES = ["board", "lite", "vent", "raised", "split"] as c
 export type DoorPartType = typeof DOOR_PART_TYPES[number];
 export const DOOR_FIELD_DIRS = ["v", "h", "smooth", "grooved"] as const;
 export const DOOR_BRACE_TYPES = ["none", "z", "x"] as const;
-export const DOOR_HINGE_TYPES = ["tstrap", "strap", "scroll", "butt", "hidden", "pintle"] as const;
+export const DOOR_HINGE_TYPES = ["tstrap", "strap", "scroll", "butt", "hidden", "pintle", "pivot"] as const;
+// Hinge types with nothing to draw on the door's face or edge: no count, no close-up to ask for, no finish.
+// A pivot door turns on pins in its head and the floor (Ahsan 2026-10-28, a modern pivot door).
+export const DOOR_HINGELESS: readonly string[] = ["hidden", "pivot"];
+// A lock of its own beside the handle: a thumb-turn, or a key cylinder.
+export const DOOR_LOCK_TYPES = ["thumbturn", "keyed"] as const;
 export const DOOR_HANDLE_TYPES = ["barn", "lever", "pull", "ring", "thumb", "none"] as const;
 export const DOOR_FINISHES = ["black", "galv", "bronze", "custom"] as const;
 export const DOOR_MEET_TYPES = ["astragal", "overlap"] as const;
@@ -163,7 +168,7 @@ export const DOOR_LOOK_FIELDS: DoorFieldNode = {
           },
           lite: {
             k: "obj",
-            rule: "box",
+            rule: "lite",
             keys: { ...BOX, rows: { k: "int", min: 1, max: 6, def: 1 }, cols: { k: "int", min: 1, max: 6, def: 1 } },
           },
           vent: { k: "obj", rule: "box", keys: BOX },
@@ -193,9 +198,19 @@ export const DOOR_LOOK_FIELDS: DoorFieldNode = {
       keys: {
         type: { k: "enum", of: DOOR_HANDLE_TYPES, def: "barn" },
         v: { k: "or", def: "rail", of: [{ k: "enum", of: ["rail"] }, { k: "num", min: 0.3, max: 0.7, dp: 3 }] },
+        // Across the latch leaf from the hinge edge, as a part's u: where a measured pull stands (P2 draws a
+        // pull there; other handles keep their place by the strike edge).
+        u: { k: "num", min: 0.5, max: 1, dp: 3 },
+        lenIn: { k: "num", min: 2, max: 72, dp: 1 }, // a pull's length, end to end (a long bar pull's)
         finish: FINISH,
         hex: CUSTOM_HEX,
       },
+    },
+    // A lock of its own: its centre across the latch leaf from the hinge edge (u) and up (v), as a part's.
+    lock: {
+      k: "obj",
+      rule: "finish",
+      keys: { type: { k: "enum", of: DOOR_LOCK_TYPES, req: true }, u: FRACTION, v: FRACTION, finish: FINISH, hex: CUSTOM_HEX },
     },
     meet: {
       k: "obj",
@@ -389,6 +404,8 @@ function cleanObj(node: Extract<DoorFieldNode, { k: "obj" }>, raw: unknown, path
 // board. It was 0.08, which on an 80 in door is 6.4 in up: a real corner gusset read a little short
 // (the first door generated from a photo: 0.06 by 0.04 of the leaf, about 2 by 3.5 in) was dropped.
 export const DOOR_BOARD_MIN = 0.05;
+// The narrow side of a slot lite, of the leaf: about 1.2 in on a 48 in leaf, 0.9 in on a 36 in one.
+export const DOOR_SLOT_MIN = 0.025;
 
 // The rules one key's limits cannot say. Each gets the cleaned object and returns it (changed), or
 // undefined when the object is not a thing that can be drawn.
@@ -420,7 +437,7 @@ const RULES: Record<string, (o: Rec, path: string, cx: CleanCx) => Rec | undefin
   hinges(o, path, cx) {
     RULES.finish(o, path, cx);
     if (Array.isArray(o.at) && o.count === undefined) o.count = o.at.length;
-    if (o.count === 0 && o.type !== "hidden") {
+    if (o.count === 0 && !DOOR_HINGELESS.includes(String(o.type))) {
       delete o.count;
       drop(cx, joinPath(path, "count"));
       if (Array.isArray(o.at)) delete o.at;
@@ -431,12 +448,23 @@ const RULES: Record<string, (o: Rec, path: string, cx: CleanCx) => Rec | undefin
     }
     return o;
   },
-  // A lite, vent or raised panel: corners in either order, at least 0.08 of the leaf each way.
+  // A vent or raised panel: corners in either order, at least 0.08 of the leaf each way.
   box(o) {
     const [u0, u1, v0, v1] = [o.u0, o.u1, o.v0, o.v1];
     if (typeof u0 !== "number" || typeof u1 !== "number" || typeof v0 !== "number" || typeof v1 !== "number") return o;
     const box = { u0: Math.min(u0, u1), v0: Math.min(v0, v1), u1: Math.max(u0, u1), v1: Math.max(v0, v1) };
     if (box.u1 - box.u0 < 0.08 - 1e-9 || box.v1 - box.v0 < 0.08 - 1e-9) return undefined;
+    return { ...o, ...box };
+  },
+  // A lite: the same, except its narrow side may be a slot down to DOOR_SLOT_MIN (a modern door's glass
+  // strips, about 1.6 in on a 48 in leaf: 0.033, which the 0.08 floor dropped; Ahsan 2026-10-28). Its
+  // long side keeps 0.08.
+  lite(o) {
+    const [u0, u1, v0, v1] = [o.u0, o.u1, o.v0, o.v1];
+    if (typeof u0 !== "number" || typeof u1 !== "number" || typeof v0 !== "number" || typeof v1 !== "number") return o;
+    const box = { u0: Math.min(u0, u1), v0: Math.min(v0, v1), u1: Math.max(u0, u1), v1: Math.max(v0, v1) };
+    const du = box.u1 - box.u0, dv = box.v1 - box.v0;
+    if (Math.min(du, dv) < DOOR_SLOT_MIN - 1e-9 || Math.max(du, dv) < 0.08 - 1e-9) return undefined;
     return { ...o, ...box };
   },
   // A board runs between its two ends, which must be apart (DOOR_BOARD_MIN one way or the other).
@@ -649,6 +677,9 @@ export type DoorReadDraft = {
   hingeAt: number[] | null;
   hingeLenIn: number | null;
   handleV: number | "rail" | null;
+  handleLenIn: number | null; // a pull's two ends, apart
+  handleU: number | null; // across the latch leaf from the hinge edge
+  lock: { type: (typeof DOOR_LOCK_TYPES)[number]; u: number; v: number } | null;
   parts: DraftPart[];
   colors: { infill?: string; frame?: string; members?: string } | null;
   finish: "black" | "galv" | "bronze" | null;
@@ -806,7 +837,11 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   const hingeList = Array.isArray(m.hinges) ? m.hinges.filter((h): h is Rec => isRec(h) && isXY(h.pivot)) : [];
   const pivots = hingeList.map((h) => ({ p: fr(h.pivot as XY), tip: isXY(h.tip) ? fr(h.tip) : null, raw: h.pivot as XY, rawTip: isXY(h.tip) ? h.tip : null, leaf: 0 as 0 | 1 }));
   for (const h of pivots) h.leaf = leafOfX(h.p[0]);
-  const handle = isXY(m.handle) ? fr(m.handle) : null;
+  // A pull answers with its two ends (the prompt asks a bar for them): its centre is the handle and its
+  // span the pull's length. Anything else is one point.
+  const handleLine = isLine(m.handle) ? (m.handle as [XY, XY]) : null;
+  const handle = handleLine ? fr([(handleLine[0][0] + handleLine[1][0]) / 2, (handleLine[0][1] + handleLine[1][1]) / 2]) : isXY(m.handle) ? fr(m.handle) : null;
+  const handleLenIn = handleLine ? acrossIn(handleLine) : null;
 
   const spans = braces.filter((b) => b.span);
   const found = ctx.frame
@@ -921,7 +956,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   if (ownHinges.length) {
     hingeAt = groups(ownHinges.map((h) => 1 - h.p[1]), (v) => v, DOOR_HINGE_TOL).map(median);
     hingeCount = hingeAt.length;
-  } else if (hingeType === "hidden") [hingeCount, hingeAt] = [0, []];
+  } else if (hingeType && DOOR_HINGELESS.includes(hingeType)) [hingeCount, hingeAt] = [0, []];
   const inPhoto = (p: XY): XY => [clampTo(rawX(p[0]), -pad / ctx.widthIn, 1 + pad / ctx.widthIn), clampTo(p[1] / size[1], 0, 1)];
   const lens = pivots.flatMap((h) => {
     if (!h.rawTip) return [];
@@ -1028,6 +1063,11 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
 
   const words = (v: unknown) =>
     Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s.trim() !== "").slice(0, 20).map((s) => s.trim().slice(0, 120)) : [];
+  // A lock of its own, with its kind: across its leaf from the hinge edge, as a part is.
+  const lockType = enumIn(isRec(read.lock) ? read.lock.type : read.lock, DOOR_LOCK_TYPES);
+  const lockAt = isXY(m.lock) ? fr(m.lock) : null;
+  const lock = lockType && lockAt ? { type: lockType, u: uOf(lockAt[0], leafOfX(lockAt[0])), v: 1 - lockAt[1] } : null;
+  const handleU = handle ? uOf(handle[0], leafOfX(handle[0])) : null;
   const draft: DoorReadDraft = {
     base,
     leaves,
@@ -1045,6 +1085,9 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     hingeAt,
     hingeLenIn,
     handleV,
+    handleLenIn,
+    handleU,
+    lock,
     parts,
     colors,
     finish,
@@ -1317,6 +1360,8 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
   if (sw) warnings.push(sw);
   if (meetX !== null && Math.abs(meetX - 0.5) > DOOR_UNEQUAL_TOL) warnings.push(warn("unequal_leaves"));
   if (leaves !== opts.typedLeaves) warnings.push(leavesWarning(opts.typedLeaves, leaves));
+  const pivotDoor = stageAPick(vote(ds.map((d) => d.stageA.hingeType))) === "pivot";
+  if (pivotDoor) for (let i = warnings.length - 1; i >= 0; i--) if (warnings[i].code === "hinge_side_handle") warnings.splice(i, 1);
 
   const bv = vote(ds.map((d) => d.base));
   let base = bv.value as DoorLookBase;
@@ -1386,7 +1431,19 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
   if (hingeCount !== null) [hinges.count, hinges.at] = [hingeCount, hingeAt];
   if (lenIn !== null) hinges.lenIn = lenIn;
   spec.hinges = hinges;
-  spec.handle = handleV === null ? {} : { v: handleV };
+  const handleOut: Rec = handleV === null ? {} : { v: handleV };
+  const lens = ds.map((d) => d.handleLenIn).filter((v): v is number => v !== null);
+  if (lens.length >= quorum) handleOut.lenIn = median(lens);
+  // Where it stands only for a pull measured by its two ends (V3 asks only a pull for them).
+  const us = ds.filter((d) => d.handleLenIn !== null).map((d) => d.handleU).filter((v): v is number => v !== null);
+  if (lens.length >= quorum && us.length >= quorum) handleOut.u = Math.max(0.5, median(us));
+  spec.handle = handleOut;
+  const locks = ds.map((d) => d.lock).filter((l): l is NonNullable<DoorReadDraft["lock"]> => l !== null);
+  const lt = locks.length >= quorum ? vote(locks.map((l) => l.type)).value : null;
+  if (lt) {
+    const same = locks.filter((l) => l.type === lt);
+    spec.lock = { type: lt, u: median(same.map((l) => l.u)), v: median(same.map((l) => l.v)) };
+  }
   const colors: Rec = {};
   for (const role of ["infill", "frame", "members"] as const) {
     const c = vote(ds.map((d) => d.colors?.[role])).value;
@@ -1462,12 +1519,13 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
   const hinges: Rec = isRec(spec.hinges) ? spec.hinges : {};
   const ht = decided(ups.hinges, "type", DOOR_HINGE_TYPES);
   if (ht && !ht.unanimous) pushWarning(warnings, warn("hinge_type_split"));
-  if (!ht) pushWarning(warnings, warn("closeup_hinges"));
+  const saHinge = stageAPick(c.stageA.hingeType);
+  if (!ht && !(saHinge && DOOR_HINGELESS.includes(saHinge))) pushWarning(warnings, warn("closeup_hinges"));
   hinges.type = ht?.value ?? stageAPick(c.stageA.hingeType) ?? doorLookDefault("hinges.type");
   // A close-up that settled the type but not the finish (split, or left out) also warns: the finish then
   // falls back to the colour snap, which closeup_hinges would have flagged had the close-up not run.
   const hf = decided(ups.hinges, "finish", DOOR_FINISHES.slice(0, 3));
-  if (ht && ht.value !== "hidden" && !hf) pushWarning(warnings, warn("hinge_finish_unsure")); // hidden: nothing to colour
+  if (ht && !DOOR_HINGELESS.includes(ht.value) && !hf) pushWarning(warnings, warn("hinge_finish_unsure")); // hidden or pivot: nothing to colour
   hinges.finish = hf?.value ?? snap ?? doorLookDefault("hinges.finish");
   spec.hinges = hinges;
 
@@ -1480,7 +1538,10 @@ export function settleCloseUps(c: DoorConsensus, ups: DoorCloseUps = {}): DoorLo
   const hdf = decided(ups.handle, "finish", DOOR_FINISHES.slice(0, 3));
   if (hd && hd.value !== "none" && !hdf) pushWarning(warnings, warn("handle_finish_unsure")); // none: nothing to colour
   handle.finish = hdf?.value ?? stageAPick(c.stageA.handleFinish) ?? snap ?? doorLookDefault("handle.finish");
+  // A pull's place and length are a pull's: any other handle keeps its place by the strike edge.
+  if (handle.type !== "pull") { delete handle.u; delete handle.lenIn; }
   spec.handle = handle;
+  if (isRec(spec.lock)) spec.lock = { ...spec.lock, finish: handle.finish };
 
   if (c.leaves === 2) {
     const mt = decided(ups.meet, "type", DOOR_MEET_TYPES);

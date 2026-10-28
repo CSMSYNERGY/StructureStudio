@@ -71,7 +71,8 @@ const MAX = {
     { t: "split", v: 0.65 },
   ],
   hinges: { type: "scroll", count: 4, at: [0.1, 0.4, 0.6, 0.9], lenIn: 18.5, finish: "custom", hex: "#112233" },
-  handle: { type: "ring", v: 0.48, finish: "custom", hex: "#445566" },
+  handle: { type: "ring", v: 0.48, u: 0.86, lenIn: 12.5, finish: "custom", hex: "#445566" },
+  lock: { type: "keyed", u: 0.82, v: 0.45, finish: "custom", hex: "#556677" },
   meet: { type: "overlap", wIn: 2.25 },
   colors: { infill: "door", frame: "trim", members: "#778899" },
 };
@@ -231,9 +232,16 @@ Deno.test("rails: sorted, at least 0.08 apart, at most 3; panels fitted to them,
 
 Deno.test("parts: at most 12, boxes put the right way up, too small or shapeless ones dropped", () => {
   const vents = Array.from({ length: 20 }, (_, i) => ({ t: "vent", u0: 0.1, v0: i * 0.04, u1: 0.3, v1: i * 0.04 + 0.1 }));
-  const r = clean(withMin({ parts: [{ t: "door" }, { t: "lite", u0: 0.1, v0: 0.1, u1: 0.15, v1: 0.5 }, ...vents] }));
+  const r = clean(withMin({ parts: [{ t: "door" }, { t: "lite", u0: 0.1, v0: 0.1, u1: 0.12, v1: 0.5 }, ...vents] }));
   assertEquals((r.spec.parts as unknown[]).length, 12);
-  assert(r.dropped.includes("parts[0]") && r.dropped.includes("parts[1]"), "the unknown type and the 0.05-wide lite");
+  assert(r.dropped.includes("parts[0]") && r.dropped.includes("parts[1]"), "the unknown type and the 0.02-wide lite");
+  // A slot lite (a pivot door's glass strip, 1.6 in on a 48 in leaf: 0.033 wide, Ahsan 2026-10-28) is kept;
+  // its long side still needs 0.08, and a vent or raised panel still needs 0.08 both ways.
+  const slot = { t: "lite", u0: 0.297, v0: 0.283, u1: 0.332, v1: 0.733, rows: 1, cols: 1 };
+  assertEquals(clean(withMin({ parts: [slot] })).spec.parts, [slot]);
+  assertEquals(clean(withMin({ parts: [{ t: "lite", u0: 0.3, v0: 0.3, u1: 0.4, v1: 0.33 }] })).spec.parts, [{ t: "lite", u0: 0.3, v0: 0.3, u1: 0.4, v1: 0.33 }], "a level slot");
+  assertEquals(clean(withMin({ parts: [{ t: "lite", u0: 0.3, v0: 0.3, u1: 0.335, v1: 0.36 }] })).spec.parts, undefined, "0.035 by 0.06: a slot too short");
+  assertEquals(clean(withMin({ parts: [{ t: "vent", u0: 0.3, v0: 0.3, u1: 0.335, v1: 0.7 }] })).spec.parts, undefined, "a vent is never a slot");
   assertEquals(clean(withMin({ parts: [{ t: "raised", u0: 0.6, v0: 0.5, u1: 0.2, v1: 0.1 }] })).spec.parts, [{ t: "raised", u0: 0.2, v0: 0.1, u1: 0.6, v1: 0.5 }]);
   assertEquals(clean(withMin({ parts: [{ t: "board", u0: 0.5, v0: 0.5, u1: 0.52, v1: 0.53 }] })).spec.parts, undefined, "a board with no length");
   // A real corner gusset read a little short (0.06 by 0.04 of the leaf, about 2 by 3.5 in on 36 x 80)

@@ -26,8 +26,8 @@ export type Kind = "stageA" | "hinges" | "handle" | "meet" | "stageB" | "other";
 export type Sent = { kind: Kind; body: Rec; text: string; images: number };
 
 export function kindOf(text: string): Kind {
-  if (text.startsWith("DOOR_LOOK_V2. You are measuring")) return "stageA";
-  if (text.startsWith("DOOR_LOOK_V2, second look")) return "stageB";
+  if (text.startsWith("DOOR_LOOK_V3. You are measuring")) return "stageA";
+  if (text.startsWith("DOOR_LOOK_V3, second look")) return "stageB";
   if (text.includes("Each crop is centred on one of the door's hinges")) return "hinges";
   if (text.includes("The crop is centred on the door's handle")) return "handle";
   if (text.includes("where the two leaves of a double door meet")) return "meet";
