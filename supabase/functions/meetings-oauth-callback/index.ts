@@ -82,7 +82,7 @@ Deno.serve(async (req) => {
     return land(host, { video: "0", reason: "state" });
   }
 
-  const redirect = meetingsOauthRedirectUri();
+  const redirect = meetingsOauthRedirectUri(provider, st.return_host);
   let tokens: { accessToken: string; refreshToken: string | null; expiresAt: string };
   try {
     tokens = zoomCreds ? await zoomExchangeCode(zoomCreds, code, redirect)

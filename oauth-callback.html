@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<!-- The provider's ?code= must not travel anywhere else in a Referer header. -->
+<meta name="referrer" content="no-referrer">
+<title>Structure Studio</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #334155; background: #F8FAFC; }
+  p { margin: 0; padding: 0 16px; text-align: center; }
+</style>
+</head>
+<body>
+<p id="m">Connecting your calendar…</p>
+<!--
+  The return leg of "Connect Google" / "Connect Outlook" (migration 341), on our OWN domain.
+
+  Google shows the redirect address's domain on its sign-in screen until the app's branding is
+  verified, and it only verifies domains we own — so the redirect URI registered with Google and
+  Microsoft is THIS page (https://<beta|app>.structurestudiosuite.com/oauth-callback.html), not
+  the Supabase function's address (Carolyn 2026-10-28: "This should say Structure Studio, not
+  Supabase").
+
+  It does nothing itself: it hands the query string, untouched, to the edge function that has
+  always done the work (meetings-oauth-callback burns the one-shot state, exchanges the code
+  against this same URI, and sends the browser back to My Profile). Plain JS, no dependencies,
+  no boot guard: a page that has to work before anything else loads.
+-->
+<script>
+(function () {
+  var q = window.location.search || "";
+  if (!/[?&]state=/.test(q)) {
+    document.getElementById("m").textContent = "This link isn't a calendar connection. Go back to Structure Studio and press Connect again.";
+    return;
+  }
+  window.location.replace("https://jzeamjbhdrsbygdnphbm.supabase.co/functions/v1/meetings-oauth-callback" + q);
+})();
+</script>
+</body>
+</html>
