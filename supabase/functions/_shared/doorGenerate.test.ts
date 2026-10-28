@@ -36,6 +36,7 @@ import {
 } from "./doorGenerate.ts";
 import { DOOR_CLOSEUP_LABELS, DOOR_EDGE_PAD_IN, doorCloseUpPrompt, doorStageAPrompt, doorStageBPrompt } from "./doorLookPrompt.ts";
 import type { DoorLook, DoorMeasureCtx } from "./doorLook.ts";
+import { isWoodTone, woodColorRoles } from "./doorLook.ts";
 import type { CloseUpWindow } from "./closeUp.ts";
 import { doubleDoor, gussetDoor, inches, PX_PER_IN, singleDoor, withStrips } from "./_test_stubs/doorReads.ts";
 import { fakeModel, pngHead, type Script } from "./_test_stubs/doorModel.ts";
@@ -669,3 +670,26 @@ Deno.test("with the 6-panel's known gap, every phrase the warning names is also 
   for (const m of text.matchAll(/"([^"]+)"/g)) assert(r.vocabGaps.includes(m[1]), `"${m[1]}" is in the warning but not filed`);
   assertEquals([r.vocabGaps.length, r.vocabGaps[0]], [9, "6-panel"]);
 });
+
+// The pivot test door (ai_door_calls 8a960327, 2026-10-28): its warning named what V4 draws.
+Deno.test("a gap the spec now draws is no gap: pivot, slots, no mid rail, a lock, a long pull, wood grain", () => {
+  const spec = {
+    v: 1, base: "plank", src: { leaves: 1, hinge: "right" }, frame: { rails: [] }, hinges: { type: "pivot", count: 0, at: [] },
+    handle: { type: "pull", u: 0.89, v: 0.43, lenIn: 39.7 }, lock: { type: "thumbturn", u: 0.96, v: 0.39 }, wood: { hex: "#D09362" },
+    parts: [{ t: "lite", u0: 0.2, v0: 0.27, u1: 0.25, v1: 0.76 }],
+  } as unknown as DoorLook;
+  const said = ["no mid rail", "pivot door, no visible hinges", "slit windows staggered at different heights", "square black thumb-turn lock beside pull",
+    "full-height bar pull", "visible wood grain", "arched top", "round window near the top"];
+  assertEquals(doorStageBWanted({ observed: [], unexplained: said }, spec).unexplained, ["arched top", "round window near the top"]);
+  // ...and on a door that draws none of them, every one is still a gap.
+  const plain = { v: 1, base: "plank", src: { leaves: 1, hinge: "right" }, frame: { rails: [0.5] }, hinges: { type: "tstrap", count: 3 }, handle: { type: "barn" } } as unknown as DoorLook;
+  const kept = doorStageBWanted({ observed: [], unexplained: said.slice(0, 6) }, plain).unexplained;
+  for (const s of ["no mid rail", "pivot door, no visible hinges", "slit windows staggered at different heights", "visible wood grain"]) assert(kept.includes(s), s);
+});
+
+Deno.test("a wood door's frame that is a wood tone follows the wood; a white or grey one stays the trim", () => {
+  assert(isWoodTone([197, 130, 83]) && isWoodTone([120, 72, 40]) && isWoodTone([214, 170, 120]), "cedar, walnut, pine");
+  assertFalse(isWoodTone([242, 239, 230]) || isWoodTone([60, 62, 66]) || isWoodTone([30, 22, 16]) || isWoodTone([70, 110, 160]), "white, grey, near black, blue");
+  assertEquals(woodColorRoles({ infill: "door", frame: "trim", members: "trim" }, { frame: [150, 92, 55], members: [240, 238, 232] }), { infill: "door", frame: "door", members: "trim" });
+});
+

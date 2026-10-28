@@ -360,10 +360,33 @@ export function doorObservedMismatches(observed: readonly string[], spec: DoorLo
 // maths drafts each as a board part), and not a remark on where a rail sits once the rails are measured
 // ("mid rail at about 49 rather than 42": a rail is drawn where its points put it, whatever the base says).
 const railSpot = (s: string) => /\brails?\b/i.test(s) && /\d|\b(height|high|higher|low|lower|half|middle|cent(er|re))\b/i.test(s);
+// What the spec now draws, so a phrase naming it is no gap (Ahsan 2026-10-28: the pivot test door's
+// warning said we could not draw "pivot door, no visible hinges" and "slit windows" while drawing both):
+// a pivot or hidden set of hinges, glass (unless the phrase names a shape we do not draw), no mid rail on a
+// door without one, a lock of its own, a pull with its own length, and a wood door's grain.
+const DOOR_GAP_HINGELESS = /\bpivot|\b(no|without)\s+(visible\s+)?hinges?\b|\bhinges?\s+(not\s+visible|hidden|concealed)\b/i;
+const DOOR_GAP_GLASS = /\b(slits?|slots?|lites?|glass|glazing|windows?|strips?)\b/i;
+const DOOR_GAP_GLASS_SHAPE = /\b(arch|arched|round|oval|circle|circular|curved|half[- ]?moon|stained|leaded|frosted|grilles?|muntins?)\b/i;
+const DOOR_GAP_NO_RAIL = /\bno\s+(mid(dle)?|cent(er|re)|cross)?\s*rails?\b/i;
+const DOOR_GAP_LOCK = /\b(lock|deadbolt|thumb[- ]?turn|key\s*(cylinder|hole))\b/i;
+const DOOR_GAP_PULL = /\b(bar|long|tall|full[- ]height|ladder|vertical)\s+(bar\s+)?pull\b/i;
+const DOOR_GAP_GRAIN = /\b(wood\s*)?grain\b/i;
 function openGaps(phrases: string[], spec: DoorLook): string[] {
   const have = doorLookFeatures(spec), gussets = have.has("board_gusset") || have.has("diamond");
   const rails = isRec(spec.frame) && Array.isArray(spec.frame.rails) && spec.frame.rails.length > 0;
-  return phrases.filter((s) => !DOOR_SIX_PANEL.test(s) && !(gussets && DOOR_GUSSET.test(s)) && !(rails && railSpot(s)));
+  const noRails = isRec(spec.frame) && Array.isArray(spec.frame.rails) && spec.frame.rails.length === 0;
+  const hinges = isRec(spec.hinges) ? spec.hinges : {}, handle = isRec(spec.handle) ? spec.handle : {};
+  const hingeless = hinges.type === "pivot" || hinges.type === "hidden";
+  const glass = (Array.isArray(spec.parts) && spec.parts.some((p) => isRec(p) && p.t === "lite"))
+    || (Array.isArray(spec.panels) && spec.panels.some((p) => isRec(p) && p.fill === "lite"));
+  const drawn = (s: string) =>
+    (hingeless && DOOR_GAP_HINGELESS.test(s)) ||
+    (glass && DOOR_GAP_GLASS.test(s) && !DOOR_GAP_GLASS_SHAPE.test(s)) ||
+    (noRails && DOOR_GAP_NO_RAIL.test(s)) ||
+    (isRec(spec.lock) && DOOR_GAP_LOCK.test(s)) ||
+    (handle.type === "pull" && typeof handle.lenIn === "number" && DOOR_GAP_PULL.test(s)) ||
+    (isRec(spec.wood) && DOOR_GAP_GRAIN.test(s));
+  return phrases.filter((s) => !DOOR_SIX_PANEL.test(s) && !(gussets && DOOR_GUSSET.test(s)) && !(rails && railSpot(s)) && !drawn(s));
 }
 
 // What Stage B would be asked about: the mismatches, and the unexplained phrases that are not a gap we

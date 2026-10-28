@@ -1057,7 +1057,10 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     const sample = (k: string) => (isXY(at[k]) ? colorAt(toPhoto(fr(at[k] as XY))) : null);
     const roles = colorRolesOf({ infill: sample("infill"), frame: sample("frame"), members: sample("members") });
     if (Object.keys(roles).length) colors = roles;
-    if (enumIn(read.surface, DOOR_SURFACES) === "wood") wood = sample("infill");
+    if (enumIn(read.surface, DOOR_SURFACES) === "wood") {
+      wood = sample("infill");
+      if (wood && colors) colors = woodColorRoles(colors, { frame: sample("frame"), members: sample("members") });
+    }
     const hw = sample("hardware");
     if (hw) finish = snapFinish(hw);
   }
@@ -1200,6 +1203,24 @@ export function colorRolesOf(s: { infill?: RGB | null; frame?: RGB | null; membe
     else if (s.infill && rgbDist(s.members, s.infill) < DOOR_SAME_PAINT) out.members = "door";
     else out.members = "trim";
   }
+  return out;
+}
+
+// A wood tone: a warm brown, from pale cedar to dark walnut (hue 12-48 degrees, some colour, neither
+// near black nor near white). Natural wood varies more than paint, so on a door the read calls wood a
+// frame or brace that is itself a wood tone is the same wood (the pivot test door's frame read "trim"
+// against its boards and drew in the door's paint: Ahsan 2026-10-28).
+export function isWoodTone(rgb: RGB | null | undefined): boolean {
+  if (!rgb) return false;
+  const [r, g, b] = rgb.map((v) => v / 255), max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  if (max < 0.18 || max > 0.97 || d / max < 0.22) return false;
+  const h = max === r ? (60 * ((g - b) / d) + 360) % 360 : max === g ? 60 * ((b - r) / d) + 120 : 60 * ((r - g) / d) + 240;
+  return h >= 12 && h <= 48;
+}
+export function woodColorRoles<T extends { frame?: string; members?: string }>(roles: T, s: { frame?: RGB | null; members?: RGB | null }): T {
+  const out = { ...roles };
+  if (out.frame === "trim" && isWoodTone(s.frame)) out.frame = "door";
+  if (out.members === "trim" && isWoodTone(s.members)) out.members = "door";
   return out;
 }
 
