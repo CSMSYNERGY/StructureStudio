@@ -177,7 +177,8 @@ Deno.test("a sheet shaped like the one that failed: same result, a few statement
   assertEquals(r.bulk.skipped, []);
   const legacyCalls = r.legacyDb.calls.length, bulkCalls = r.bulkDb.calls.length;
   assert(legacyCalls > 7000, `the old importer should take one call per cell (took ${legacyCalls})`);
-  assert(bulkCalls <= 12, `bulk import took ${bulkCalls} statements`);
+  // 3 reads, 1 size batch, 1 option upsert batch, and one DELETE per option the sheet clears.
+  assert(bulkCalls <= 20, `bulk import took ${bulkCalls} statements`);
 });
 
 Deno.test("three times that sheet (624 rows, 416 of them new sizes) still lands in a few statements", async () => {
@@ -188,9 +189,10 @@ Deno.test("three times that sheet (624 rows, 416 of them new sizes) still lands 
   const out = await importPricingRows(sb, CLIENT, rows);
   assertEquals([out.created, out.updated, out.skipped], [416, 208, []]);
   assertEquals(tables.building_sizes.length, 624);
-  assert(calls.length <= 16, `bulk import took ${calls.length} statements: ${JSON.stringify(calls)}`);
-  // Nothing was written one row at a time.
+  assert(calls.length <= 25, `bulk import took ${calls.length} statements: ${JSON.stringify(calls)}`);
+  // Nothing was written one row at a time, and DELETEs grow with the options cleared, not the cells.
   assertEquals(calls.filter((c) => c.verb !== "select" && !c.bulk), []);
+  assert(calls.filter((c) => c.verb === "delete").length <= t.keys.length, "at most one DELETE per option column per 100 sizes");
   // New sizes go after each style's last one, in sheet order.
   const st0 = tables.building_sizes.filter((z) => z.style_id === "st-0").sort((a, b) => a.sort_order - b.sort_order);
   assertEquals(st0.slice(16, 19).map((z) => [z.label, z.sort_order]), [["20x30", 16], ["22x30", 17], ["24x30", 18]]);

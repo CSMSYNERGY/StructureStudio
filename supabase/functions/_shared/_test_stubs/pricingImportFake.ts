@@ -24,6 +24,16 @@ type Opts = {
   failOn?: (c: { table: string; verb: string; payload: any[]; bulk: boolean }) => string | null;
 };
 
+// The live columns (information_schema, 2026-10-28; building_styles trimmed to what matters here).
+// A statement naming any other column fails the way PostgREST does (42703). That matters:
+// building_size_inclusions has NO id column — its key is (size_id, item_key) — and a first cut of
+// the bulk importer that read and deleted inclusions by id passed every test against a fake that
+// handed each row an id, then failed on the real table.
+const SCHEMA: Record<string, Set<string>> = {
+  building_styles: new Set(["id", "client_id", "key", "label", "image_url", "sort_order", "active", "code", "taxable"]),
+  building_sizes: new Set(["id", "client_id", "style_id", "label", "width_ft", "length_ft", "base_price", "sort_order", "active", "created_at", "updated_at", "wall_height_ft", "manual_base_price"]),
+  building_size_inclusions: new Set(["client_id", "size_id", "item_key", "included", "qty", "created_at", "updated_at"]),
+};
 const NUMERIC = new Set(["width_ft", "length_ft", "base_price", "qty", "sort_order"]);
 const same = (col: string, a: any, b: any) => NUMERIC.has(col) ? Number(a) === Number(b) : String(a) === String(b);
 const UNIQUE: Record<string, string[][]> = {
@@ -40,13 +50,17 @@ const DEFAULTS: Record<string, Record<string, any>> = {
 export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
   let seq = 0;
   const newId = () => `00000000-0000-4000-8000-${String(++seq).padStart(12, "0")}`;
-  // Every real row has an id (gen_random_uuid()); a seed may leave it out.
-  const rowsOf = (list?: any[]) => (list ?? []).map((r) => ({ ...r, id: r.id ?? newId() }));
+  // A table with an id column gives every row one (gen_random_uuid()); a seed may leave it out.
+  const withId = (table: string, r: any) => SCHEMA[table].has("id") ? { id: r.id ?? newId(), ...r } : { ...r };
+  const rowsOf = (table: keyof Tables) => (seed[table] ?? []).map((r) => withId(table, r));
   const tables: Tables = {
-    building_styles: rowsOf(seed.building_styles),
-    building_sizes: rowsOf(seed.building_sizes),
-    building_size_inclusions: rowsOf(seed.building_size_inclusions),
+    building_styles: rowsOf("building_styles"),
+    building_sizes: rowsOf("building_sizes"),
+    building_size_inclusions: rowsOf("building_size_inclusions"),
   };
+  for (const [table, rows] of Object.entries(tables)) {
+    for (const r of rows) for (const c of Object.keys(r)) if (!SCHEMA[table].has(c)) throw new Error(`pricingImportFake: seed column ${table}.${c} does not exist`);
+  }
   const calls: Call[] = [];
 
   const trigger = (table: string, row: any) => {
@@ -81,6 +95,15 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     const payload = writeArg == null ? [] : payloadOf(writeArg);
     const bulk = Array.isArray(writeArg) || (verb === "delete" && filters.some((f) => f[0] === "in"));
     calls.push({ table, verb, rows: payload.length, bulk });
+    const named = [
+      ...ops.filter((o) => o[0] === "select" && typeof o[1] === "string").flatMap((o) => String(o[1]).split(",").map((c) => c.trim())),
+      ...filters.map((f) => f[1] as string),
+      ...ops.filter((o) => o[0] === "order").map((o) => o[1] as string),
+      ...payload.flatMap((p) => Object.keys(p)),
+      ...(verb === "upsert" ? String(find("upsert")![2]?.onConflict ?? "id").split(",").map((c) => c.trim()) : []),
+    ];
+    const unknown = named.find((c) => c && c !== "*" && !SCHEMA[table].has(c));
+    if (unknown) return { data: null, error: { code: "42703", message: `column ${table}.${unknown} does not exist` } };
     const injected = verb === "select" ? null : opts.failOn?.({ table, verb, payload, bulk }) ?? null;
     if (injected) return { data: null, error: { message: injected } };
 
@@ -103,7 +126,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     } else if (verb === "update") {
       next = next.map((r) => matches(r) ? (written.push(trigger(table, { ...r, ...payload[0] })), written[written.length - 1]) : r);
     } else if (verb === "insert") {
-      written = payload.map((p) => trigger(table, { ...DEFAULTS[table], id: newId(), ...p }));
+      written = payload.map((p) => trigger(table, withId(table, { ...DEFAULTS[table], ...p })));
       next.push(...written);
     } else {
       const target = String(find("upsert")![2]?.onConflict ?? "id").split(",").map((s) => s.trim());
@@ -116,7 +139,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
           hit.add(next[i]);
           written.push(next[i]);
         } else {
-          const r = trigger(table, { ...DEFAULTS[table], id: newId(), ...p });
+          const r = trigger(table, withId(table, { ...DEFAULTS[table], ...p }));
           next.push(r); hit.add(r); written.push(r);
         }
       }

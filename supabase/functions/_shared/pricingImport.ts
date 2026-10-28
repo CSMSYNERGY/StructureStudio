@@ -114,7 +114,7 @@ export async function importPricingRows(sb: any, clientId: string, rows: any[]) 
   const [styles, sizes, inclusions] = await Promise.all([
     readAll(sb, "building_styles", "id, key, label", ["id"], clientId),
     readAll(sb, "building_sizes", "id, style_id, width_ft, length_ft, sort_order", ["id"], clientId),
-    readAll(sb, "building_size_inclusions", "id, size_id, item_key, qty", ["size_id", "item_key"], clientId),
+    readAll(sb, "building_size_inclusions", "size_id, item_key, qty", ["size_id", "item_key"], clientId),
   ]);
   // A cell resolves against every style's label OR key, hidden styles included — and nothing
   // makes a label unique (create_style only uniquifies the key). So with a hidden "Barn" and a
@@ -146,11 +146,7 @@ export async function importPricingRows(sb: any, clientId: string, rows: any[]) 
   // configured qty (e.g. loft 50 sq ft) instead of silently downgrading it to 1. Also the
   // list of what is ON FILE, so a blank cell deletes only a row that exists.
   const existingQty = new Map<string, number>();   // `${size_id}|${item_key}` -> qty
-  const existingRowId = new Map<string, string>(); // `${size_id}|${item_key}` -> the row's id
-  for (const r of inclusions) {
-    existingQty.set(`${r.size_id}|${r.item_key}`, Number(r.qty) || 1);
-    existingRowId.set(`${r.size_id}|${r.item_key}`, r.id);
-  }
+  for (const r of inclusions) existingQty.set(`${r.size_id}|${r.item_key}`, Number(r.qty) || 1);
 
   // ── 1. Plan: validate every row and work out what the tables should end up holding ──────────
   const skipped: string[] = [];
@@ -253,16 +249,17 @@ export async function importPricingRows(sb: any, clientId: string, rows: any[]) 
   // ── 3. Inclusions: upsert what is included, delete what is on file and now is not ───────────
   type Upsert = { row: any; op: InclusionOp; itemKey: string };
   const upserts: Upsert[] = [];
-  const deletes: { id: string; sizeId: string; itemKey: string; op: InclusionOp }[] = [];
+  const deletes = new Map<string, { sizeId: string; op: InclusionOp }[]>();   // item_key -> sizes
   for (const [dimKey, cells] of inclusionPlan) {
     const p = plans.get(dimKey)!;
     if (p.failed != null || !p.sizeId) continue;   // its size was not written: nor are its options
     for (const [itemKey, op] of cells) {
       if (op.qty > 0) {
         upserts.push({ itemKey, op, row: { client_id: clientId, size_id: p.sizeId, item_key: itemKey, included: true, qty: op.qty } });
-      } else {
-        const onFile = existingRowId.get(`${p.sizeId}|${itemKey}`);
-        if (onFile) deletes.push({ id: onFile, sizeId: p.sizeId, itemKey, op });
+      } else if (existingQty.has(`${p.sizeId}|${itemKey}`)) {
+        const list = deletes.get(itemKey) ?? [];
+        list.push({ sizeId: p.sizeId, op });
+        deletes.set(itemKey, list);
       }
     }
   }
@@ -276,14 +273,17 @@ export async function importPricingRows(sb: any, clientId: string, rows: any[]) 
       if (one.error) failInclusion(u.op, u.itemKey, one.error.message);
     }
   }
-  // By the row's own id: one call per 100 rows, however many different options the sheet clears.
-  for (const batch of chunks(deletes, DELETE_IDS_PER_CALL)) {
-    const res = await sb.from("building_size_inclusions").delete()
-      .eq("client_id", clientId).in("id", batch.map((d) => d.id));
-    if (!res.error) continue;
-    for (const d of batch) {
-      const one = await sb.from("building_size_inclusions").delete().eq("size_id", d.sizeId).eq("item_key", d.itemKey);
-      if (one.error) failInclusion(d.op, d.itemKey, one.error.message);
+  // One call per option cleared, per 100 sizes. The table's key is (size_id, item_key) and it has
+  // no id column of its own, so grouping by option is how a DELETE names many rows at once.
+  for (const [itemKey, list] of deletes) {
+    for (const batch of chunks(list, DELETE_IDS_PER_CALL)) {
+      const res = await sb.from("building_size_inclusions").delete()
+        .eq("client_id", clientId).eq("item_key", itemKey).in("size_id", batch.map((d) => d.sizeId));
+      if (!res.error) continue;
+      for (const d of batch) {
+        const one = await sb.from("building_size_inclusions").delete().eq("size_id", d.sizeId).eq("item_key", itemKey);
+        if (one.error) failInclusion(d.op, itemKey, one.error.message);
+      }
     }
   }
   return { imported: created + updated, created, updated, skipped };
