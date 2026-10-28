@@ -18,7 +18,8 @@ import type { DoorLook, XY } from "./doorLook.ts";
 // V2 (2026-10-27): the photo shows an edge strip past each side of the door (DOOR_EDGE_PAD_IN, below).
 // V3 (2026-10-28): V2's edge strips, plus pivot hinges, a pull's two ends and a lock of its own (a modern
 // pivot door's: Ahsan's test case, ai_door_calls 5013e3e0).
-export const DOOR_LOOK_PROMPT_ID = "DOOR_LOOK_V3";
+// V4 (2026-10-28): V3 plus `surface`, so a wood door keeps its own tone and grain.
+export const DOOR_LOOK_PROMPT_ID = "DOOR_LOOK_V4";
 
 // ─── THE PHOTO'S LIMITS ───────────────────────────────────────────────────────────────────────────
 // The browser straightens and re-encodes every door photo at these, so the API never resizes one and the
@@ -119,6 +120,7 @@ export const DOOR_STAGE_A_ANSWER = {
   leaves: 2,
   hingeSide: "right",
   field: "v",
+  surface: "painted",
   brace: "z",
   panels: ["none", "none"],
   hinges: { type: "tstrap" },
@@ -163,7 +165,8 @@ export function doorStageAPrompt(x: DoorStageAInput): string {
       "measure.stiles: the inner edge of each stile (the upright frame boards down each side of a leaf). Put the two points of an edge far apart along it.",
 
     "5. FIELD. `field` is v (vertical boards), h (horizontal boards), smooth (a flat sheet, no boards) or grooved (a flat sheet with vertical grooves cut in it). " +
-      "measure.seams: the x of each joint between neighbouring boards, on every leaf (on level boards, the y of each joint instead).",
+      "measure.seams: the x of each joint between neighbouring boards, on every leaf (on level boards, the y of each joint instead). " +
+      "`surface` is wood (natural or stained wood, its grain showing), painted (a solid paint colour, grain or none) or metal.",
 
     "6. BRACE and PANELS. `brace` is z (one diagonal brace across the whole leaf, crossing the mid rail), x (two crossing ones across the whole leaf) or none. " +
       "`panels` is the fill of each panel between the rails, bottom first, one entry per panel: none, z (one diagonal in that panel), x (an X in that panel), pickets (narrow vertical boards; give {\"fill\": \"pickets\", \"count\": n}), " +

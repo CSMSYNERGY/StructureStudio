@@ -4058,7 +4058,7 @@ function ssSafeUrl(u) {
 // The server's field table, verbatim (doorLook.ts's DOOR_LOOK_FIELDS as JSON; its doorLook.test.ts
 // holds this copy, the other twin's and its own equal). The browser cleans every spec with the same
 // walker before drawing it, and a spec that does not clean is ignored: the base look is drawn.
-const SS_DOOR_LOOK_FIELDS = {"k":"obj","rule":"door","keys":{"v":{"k":"int","min":1,"max":1,"req":true,"strict":"version"},"base":{"k":"enum","of":["plank","zbrace","xbrace","american","basic","classic","dutch"],"req":true},"src":{"k":"obj","req":true,"keys":{"leaves":{"k":"int","min":1,"max":2,"req":true,"strict":"unsupported"},"hinge":{"k":"enum","of":["left","right"],"req":true}}},"frame":{"k":"obj","keys":{"fIn":{"k":"num","min":1.5,"max":8,"dp":1},"railHIn":{"k":"num","min":1.5,"max":8,"dp":1},"rails":{"k":"nums","min":0.15,"max":0.85,"dp":3,"most":3,"gap":0.08}}},"field":{"k":"obj","keys":{"dir":{"k":"enum","of":["v","h","smooth","grooved"]},"pitchIn":{"k":"num","min":3,"max":12,"dp":1}}},"brace":{"k":"obj","keys":{"t":{"k":"enum","of":["none","z","x"]},"from":{"k":"enum","of":["hinge","strike"],"def":"hinge"},"wIn":{"k":"num","min":2,"max":8,"dp":1}}},"panels":{"k":"list","most":4,"pos":true,"of":{"k":"obj","keys":{"fill":{"k":"enum","of":["none","z","x","pickets","vent","raised","diamond","lite"],"req":true},"zFrom":{"k":"enum","of":["hinge","strike"],"def":"hinge","when":{"key":"fill","in":["z"]}},"count":{"k":"int","min":2,"max":12,"when":{"key":"fill","in":["pickets"]}},"rows":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"cols":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"braceWIn":{"k":"num","min":2,"max":8,"dp":1,"when":{"key":"fill","in":["z","x","diamond"]}}}}},"parts":{"k":"list","most":12,"of":{"k":"union","by":"t","of":{"board":{"k":"obj","rule":"line","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"wIn":{"k":"num","min":2,"max":8,"dp":1},"role":{"k":"enum","of":["frame","members"]}}},"lite":{"k":"obj","rule":"lite","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"rows":{"k":"int","min":1,"max":6,"def":1},"cols":{"k":"int","min":1,"max":6,"def":1}}},"vent":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"raised":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"split":{"k":"obj","keys":{"v":{"k":"num","min":0.2,"max":0.8,"dp":3,"req":true}}}}}},"hinges":{"k":"obj","rule":"hinges","keys":{"type":{"k":"enum","of":["tstrap","strap","scroll","butt","hidden","pintle","pivot"],"def":"tstrap"},"count":{"k":"int","min":0,"max":4},"at":{"k":"or","of":[{"k":"enum","of":["rails"]},{"k":"nums","min":0.01,"max":0.99,"dp":3,"most":4}]},"lenIn":{"k":"num","min":3,"max":30,"dp":1},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"handle":{"k":"obj","rule":"finish","keys":{"type":{"k":"enum","of":["barn","lever","pull","ring","thumb","none"],"def":"barn"},"v":{"k":"or","def":"rail","of":[{"k":"enum","of":["rail"]},{"k":"num","min":0.3,"max":0.7,"dp":3}]},"u":{"k":"num","min":0.5,"max":1,"dp":3},"lenIn":{"k":"num","min":2,"max":72,"dp":1},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"lock":{"k":"obj","rule":"finish","keys":{"type":{"k":"enum","of":["thumbturn","keyed"],"req":true},"u":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v":{"k":"num","min":0,"max":1,"dp":3,"req":true},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"meet":{"k":"obj","keys":{"type":{"k":"enum","of":["astragal","overlap"],"def":"astragal"},"wIn":{"k":"num","min":1,"max":3.5,"dp":2,"def":1.5}}},"colors":{"k":"obj","keys":{"infill":{"k":"role"},"frame":{"k":"role"},"members":{"k":"role"}}}}};
+const SS_DOOR_LOOK_FIELDS = {"k":"obj","rule":"door","keys":{"v":{"k":"int","min":1,"max":1,"req":true,"strict":"version"},"base":{"k":"enum","of":["plank","zbrace","xbrace","american","basic","classic","dutch"],"req":true},"src":{"k":"obj","req":true,"keys":{"leaves":{"k":"int","min":1,"max":2,"req":true,"strict":"unsupported"},"hinge":{"k":"enum","of":["left","right"],"req":true}}},"frame":{"k":"obj","keys":{"fIn":{"k":"num","min":1.5,"max":8,"dp":1},"railHIn":{"k":"num","min":1.5,"max":8,"dp":1},"rails":{"k":"nums","min":0.15,"max":0.85,"dp":3,"most":3,"gap":0.08}}},"field":{"k":"obj","keys":{"dir":{"k":"enum","of":["v","h","smooth","grooved"]},"pitchIn":{"k":"num","min":3,"max":12,"dp":1}}},"brace":{"k":"obj","keys":{"t":{"k":"enum","of":["none","z","x"]},"from":{"k":"enum","of":["hinge","strike"],"def":"hinge"},"wIn":{"k":"num","min":2,"max":8,"dp":1}}},"panels":{"k":"list","most":4,"pos":true,"of":{"k":"obj","keys":{"fill":{"k":"enum","of":["none","z","x","pickets","vent","raised","diamond","lite"],"req":true},"zFrom":{"k":"enum","of":["hinge","strike"],"def":"hinge","when":{"key":"fill","in":["z"]}},"count":{"k":"int","min":2,"max":12,"when":{"key":"fill","in":["pickets"]}},"rows":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"cols":{"k":"int","min":1,"max":6,"def":1,"when":{"key":"fill","in":["lite"]}},"braceWIn":{"k":"num","min":2,"max":8,"dp":1,"when":{"key":"fill","in":["z","x","diamond"]}}}}},"parts":{"k":"list","most":12,"of":{"k":"union","by":"t","of":{"board":{"k":"obj","rule":"line","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"wIn":{"k":"num","min":2,"max":8,"dp":1},"role":{"k":"enum","of":["frame","members"]}}},"lite":{"k":"obj","rule":"lite","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"rows":{"k":"int","min":1,"max":6,"def":1},"cols":{"k":"int","min":1,"max":6,"def":1}}},"vent":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"raised":{"k":"obj","rule":"box","keys":{"u0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v0":{"k":"num","min":0,"max":1,"dp":3,"req":true},"u1":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v1":{"k":"num","min":0,"max":1,"dp":3,"req":true}}},"split":{"k":"obj","keys":{"v":{"k":"num","min":0.2,"max":0.8,"dp":3,"req":true}}}}}},"hinges":{"k":"obj","rule":"hinges","keys":{"type":{"k":"enum","of":["tstrap","strap","scroll","butt","hidden","pintle","pivot"],"def":"tstrap"},"count":{"k":"int","min":0,"max":4},"at":{"k":"or","of":[{"k":"enum","of":["rails"]},{"k":"nums","min":0.01,"max":0.99,"dp":3,"most":4}]},"lenIn":{"k":"num","min":3,"max":30,"dp":1},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"handle":{"k":"obj","rule":"finish","keys":{"type":{"k":"enum","of":["barn","lever","pull","ring","thumb","none"],"def":"barn"},"v":{"k":"or","def":"rail","of":[{"k":"enum","of":["rail"]},{"k":"num","min":0.3,"max":0.7,"dp":3}]},"u":{"k":"num","min":0.5,"max":1,"dp":3},"lenIn":{"k":"num","min":2,"max":72,"dp":1},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"lock":{"k":"obj","rule":"finish","keys":{"type":{"k":"enum","of":["thumbturn","keyed"],"req":true},"u":{"k":"num","min":0,"max":1,"dp":3,"req":true},"v":{"k":"num","min":0,"max":1,"dp":3,"req":true},"finish":{"k":"enum","of":["black","galv","bronze","custom"],"def":"black"},"hex":{"k":"hex","when":{"key":"finish","in":["custom"]}}}},"meet":{"k":"obj","keys":{"type":{"k":"enum","of":["astragal","overlap"],"def":"astragal"},"wIn":{"k":"num","min":1,"max":3.5,"dp":2,"def":1.5}}},"colors":{"k":"obj","keys":{"infill":{"k":"role"},"frame":{"k":"role"},"members":{"k":"role"}}},"wood":{"k":"obj","keys":{"hex":{"k":"hex","req":true}}}}};
 // What each base draws today, as the spec says it (doorLook.ts's DOOR_LOOK_BASE_DEFAULTS, held equal
 // by scripts/doorLookTwins.test.mjs): the mid-rail centres, each panel's fill from the bottom, and the
 // brace across the whole leaf. A spec key that is absent falls back to these.
@@ -10901,7 +10901,8 @@ function d3CssColor(v, fallback) {
 // captured today must match one captured tomorrow.
 // "lumber" and "osb" (2026-10-27) are the Framing view's (buildFraming3D): a stud's long grain and a
 // sheet's pressed flakes. Nothing else asks for them, so no building's look moves.
-const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "agroof", "bnb", "lumber", "osb"]);
+// "doorwood" (2026-10-28) is a wood door look's (spec.wood): fine grain running up the board, no knots.
+const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "agroof", "bnb", "lumber", "osb", "doorwood"]);
 const _d3TexCanvases = {};
 function _d3Rng(seed) {
   let a = seed >>> 0;
@@ -11104,6 +11105,24 @@ function _d3RasterKind(kind) {
       g.fillStyle = "rgba(110,70,30,0.45)";
       g.beginPath(); g.ellipse(x, y, r * 1.6, r, 0, 0, 6.283); g.fill();
       b.fillStyle = "#606060"; b.beginPath(); b.ellipse(x, y, r * 1.6, r, 0, 0, 6.283); b.fill();
+    }
+  } else if (kind === "doorwood") {
+    // A stained door's boards (Ahsan 2026-10-28, a cedar pivot door): grain lines running up the board (v,
+    // the box's height), gently wavering, in soft tone bands, and no knots. White-based, so the look's own
+    // wood tone sets the colour.
+    for (let x = 0; x < N; x += 32) {
+      const v = 0.92 + rng() * 0.08;
+      const gray = Math.round(250 * v);
+      g.fillStyle = `rgb(${gray},${gray},${gray})`;
+      g.fillRect(x, 0, 32, N);
+    }
+    for (let i = 0; i < 120; i++) {
+      const x = rng() * N, a = 0.04 + rng() * 0.09, amp = 1.5 + rng() * 4, ph = rng() * 6.28;
+      g.strokeStyle = `rgba(95,55,20,${a})`;
+      g.lineWidth = 0.8 + rng() * 1.4;
+      g.beginPath();
+      for (let y = 0; y <= N; y += 16) { const xx = x + Math.sin(y / 90 + ph) * amp; if (y) g.lineTo(xx, y); else g.moveTo(xx, y); }
+      g.stroke();
     }
   } else if (kind === "osb") {
     // Oriented strand board: long pressed flakes in a hundred tones, mostly lying one way.
@@ -13391,19 +13410,30 @@ function buildShed3DModel(THREE, p) {
   // `grooved` (a built look's own, else its base's rule), none otherwise -- so a frame or a brace in the
   // door's colour is plain paint, never siding; `plain` is the infill's colour with no grooves (a look's
   // boards and raised panels). The hardware takes its finish: black is today's iron.
-  const doorLookMats = (spec, trim, doorMat, frameMat, ironMat) => {
+  // A WOOD look (spec.wood, V4's surface "wood": its boards' own tone from the photo) paints every role
+  // that says "door" in that tone with doorwood's grain, until the door has a colour picked of its own
+  // (`own`: a builder's or a shopper's), which wins as it does on every look. Its slab shows only in the
+  // board gaps, a shade darker.
+  const doorLookMats = (spec, trim, doorMat, frameMat, ironMat, own = false) => {
     const c = spec.colors || {};
-    const doorPlain = doorMat.map ? doorLiveCopy(doorMat, false) : doorMat;
+    const woodHex = spec.wood && typeof spec.wood.hex === "string" && !own ? spec.wood.hex : null;
+    const wood = woodHex ? mat(woodHex, { roughness: 0.78 }) : null;
+    if (wood) {
+      const tx = d3MakeTexture(THREE, "doorwood");
+      if (tx) { tx.repeat.set(1, 1); wood.map = tx; }
+    }
+    const doorPlain = wood || (doorMat.map ? doorLiveCopy(doorMat, false) : doorMat);
     const role = (r) => (r === "trim" ? frameMat : typeof r === "string" && r[0] === "#" ? mat(r) : doorPlain);
     const dir = (spec.field && spec.field.dir) || (trim ? "grooved" : "v");
-    const src = (c.infill || "door") === "door" ? doorMat : role(c.infill), grooved = dir === "grooved";
+    const src = (c.infill || "door") === "door" ? (wood || doorMat) : role(c.infill), grooved = dir === "grooved";
     const frame = role(c.frame || "trim");
     const finish = (f) => {
       const hex = f ? (f.finish === "custom" ? f.hex : SS_DOOR_FINISH_HEX[f.finish || "black"]) : null;
       return hex && hex.toUpperCase() !== SS_DOOR_FINISH_HEX.black ? mat(hex, { metalness: 0.55, roughness: 0.42 }) : ironMat;
     };
     return {
-      slab: !!src.map === grooved ? src : doorLiveCopy(src, grooved), plain: role(c.infill || "door"),
+      slab: src === wood ? (dir === "v" || dir === "h" ? mat(new THREE.Color(woodHex).multiplyScalar(0.62)) : wood) : !!src.map === grooved ? src : doorLiveCopy(src, grooved),
+      plain: role(c.infill || "door"),
       frame, members: c.members ? role(c.members) : frame, hinge: finish(spec.hinges), handle: finish(spec.handle), dir,
     };
   };
@@ -14694,7 +14724,7 @@ function buildShed3DModel(THREE, p) {
           const frameMat = o.it.trimColorHex ? mat(o.it.trimColorHex) : trimMat;
           const ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
           // A look's materials, from its colour roles over these (doorLookMats), once for both leaves.
-          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, true, infillMat, frameMat, ironMat) } : null;
+          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, true, infillMat, frameMat, ironMat, !!o.it.colorHex) } : null;
           // The leaves stand on the threshold, every vertical measured from o.y0 (loft doors too).
           const ty0 = o.y0 + SS_TRIM_DOOR_SILL_FT;
           // The HINGE POLARITY IS THE PLANK DOOR'S, to the letter, for the reason the note in the
@@ -14723,7 +14753,7 @@ function buildShed3DModel(THREE, p) {
           // as one piece of wood rather than a panel stuck inside a border.
           const frameMat = o.it.trimColorHex ? mat(o.it.trimColorHex) : doorMat;
           const ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
-          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, false, doorMat, frameMat, ironMat) } : null;
+          const lk = dLook ? { spec: dLook, mats: doorLookMats(dLook, false, doorMat, frameMat, ironMat, !!o.it.colorHex) } : null;
           if (dStyle === "rollup") {
             // ONE curtain across the whole opening even at a "double" width: a 10 ft roll-up is
             // one door in one track, and splitting it at the centre would draw a pair of garage

@@ -75,6 +75,7 @@ const MAX = {
   lock: { type: "keyed", u: 0.82, v: 0.45, finish: "custom", hex: "#556677" },
   meet: { type: "overlap", wIn: 2.25 },
   colors: { infill: "door", frame: "trim", members: "#778899" },
+  wood: { hex: "#B5774A" },
 };
 
 // The table paths a spec actually holds, in doorLookPaths' form.

@@ -474,7 +474,7 @@ Deno.test("the ledger row keeps the spec, the warnings and the money for recover
   const f = doorLedgerFields(r);
   assertEquals([f.status, (f.drafted as Rec).base], ["done", "zbrace"]);
   const t = f.tokens as Rec;
-  assertEquals([t.prompt, t.model, t.effort, t.outcome, t.sideFrom], ["DOOR_LOOK_V3", "claude-opus-5-5", "high", "draft", "hinges"]);
+  assertEquals([t.prompt, t.model, t.effort, t.outcome, t.sideFrom], ["DOOR_LOOK_V4", "claude-opus-5-5", "high", "draft", "hinges"]);
   assertEquals([t.costCents, t.ceilingCents], [r.costCents, r.ceilingCents]);
   assertEquals((f.reads as Rec[]).length, 3);
   assert(typeof f.draft_ms === "number");
