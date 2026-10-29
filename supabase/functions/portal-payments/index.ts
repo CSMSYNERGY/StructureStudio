@@ -117,8 +117,8 @@ const ACH_RETURN_WINDOW_DAYS = 60;
  *  integrations), 2026-10-14: a bank payment's fate (and its return: every UAT one comes back R03)
  *  shows in the FUNDING data, which settlestat does not carry. Like settlestat it is one call per
  *  merchant and day, and it shares the 40 TPM per-MID quota with live charges: with
- *  MAX_SETTLESTAT_DAYS and the 10 recovery inquires, one reconcile asks the gateway at most 23
- *  times. Each (merchant, day) is read ONCE: payments.funding_checked_through (migration 309)
+ *  MAX_SETTLESTAT_DAYS, the 10 recovery inquires and MAX_REFUND_INQUIRES (2, since 348), one
+ *  reconcile asks the gateway at most 25 times (ss-payments-cert RECONCILE_GATEWAY_CALLS). Each (merchant, day) is read ONCE: payments.funding_checked_through (migration 309)
  *  remembers how far each bank payment has been read, so a sweep starts where the last one stopped
  *  and a day already read is never asked for again. Spent on the days a payment still clearing
  *  needs before the days a settled one needs, and each payment's oldest unread day first. */
