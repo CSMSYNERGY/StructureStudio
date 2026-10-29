@@ -3967,6 +3967,201 @@ function QrSvg({ matrix, size = 200 }) {
   );
 }
 
+// ── Refund: all of a payment, or part of it (board card "Partial refunds", migration 348) ───────
+// One box for every payment a builder can refund. A card or bank payment taken HERE goes back
+// through the card network (portal-payments refund_payment, or void_payment to cancel the whole
+// sale before it settles). One RECORDED by hand (cash, a check, a card run elsewhere) is paid back
+// by the builder, and this records how. Either way the amount starts at what is left and cannot go
+// above it, and several partial refunds are fine until nothing is left.
+//
+// ONE KEY PER REFUND. `requestKey` is minted when the box opens and sent with every try of the same
+// refund, so a double click, or a retry after the answer was lost, gets the first refund's outcome
+// back instead of a second refund (payment_refund_open). After an answer that says nothing went back
+// (a refusal, the card network busy) the next try is a NEW refund and gets a new key.
+//
+// ⚠️ A PARTIAL AMOUNT IS ALWAYS A REFUND. A void cancels the whole sale, so before a card payment
+// settles (overnight) the only reversal is the whole of it; the server says so in plain words
+// (reason "not_settled") and this box offers the whole cancel instead.
+const refundKey = () => {
+  try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (_e) {}
+  return "rk-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+};
+
+function RefundModal({ p, refundOwedCents = null, onClose, onDone }) {
+  const left = Number(p.amount_cents) || 0;
+  const taken = left + (Number(p.refunded_cents) || 0);
+  const viaNetwork = p.gateway === "cardpointe";
+  // The same reading voidGatewayPayment always used: a card payment counted settled and over 12 hours
+  // old has been batched; anything younger may still be cancelled whole. The server decides for real.
+  const settledAlready = viaNetwork && p.funding_state === "settled" && Date.parse(p.received_at) < Date.now() - 12 * 3600 * 1000;
+  const bankClearing = viaNetwork && p.method === "ach" && p.funding_state === "pending";
+  const [amount, setAmount] = useState((left / 100).toFixed(2));
+  const [payBack, setPayBack] = useState(PAY_METHODS.some((m) => m[0] === p.method) ? p.method : "cash");
+  const [reference, setReference] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);          // { text, reason }
+  const keyRef = useRef(refundKey());
+  const cents = centsFrom(amount);
+  const amountOk = Number.isFinite(cents) && cents > 0 && cents <= left;
+  const whole = amountOk && cents === left;
+  const methodName = (PAY_METHODS.find((m) => m[0] === p.method) || [, p.method])[1];
+  const card = p.instrument_last4 ? ` ending ${p.instrument_last4}` : "";
+
+  // Reads the edge function's answer the way the rest of this tab does: a non-2xx arrives as
+  // `error`, its body on error.context. No body at all means we never heard back.
+  const ask = async (body) => {
+    const { data, error } = await sb.functions.invoke("portal-payments", { body });
+    if (!error) return data && data.error ? { fail: data } : { ok: data || {} };
+    let ctx = null;
+    try { ctx = await error.context.json(); } catch (_e) {}
+    return ctx ? { fail: ctx } : { lost: true };
+  };
+  const done = (text) => { onDone(text); };
+  const failed = (f) => {
+    const reason = (f && f.reason) || null;
+    // Nothing went back (or it was never sent): the next try is a new refund. A refund we could not
+    // confirm keeps its key, so trying again asks about the same one.
+    if (reason !== "refund_unconfirmed") keyRef.current = refundKey();
+    setErr({ text: (f && f.error) || "That refund didn't go through.", reason });
+  };
+
+  const refund = async (amountCents) => {
+    const out = await ask({ action: "refund_payment", paymentId: p.id, amountCents, requestKey: keyRef.current,
+      ...(viaNetwork ? {} : { refundMethod: payBack, reference: reference.trim() || undefined }) });
+    if (out.ok) {
+      const r = out.ok;
+      const rest = r.leftCents != null && r.leftCents > 0 ? ` ${money(r.leftCents)} of this payment is left.` : "";
+      done(viaNetwork
+        ? `Refunded ${money(r.refunded)} to the customer${card ? ` (card${card})` : ""}.${rest}`
+        : `Recorded a ${money(r.refunded)} refund by ${(PAY_METHODS.find((m) => m[0] === payBack) || [, payBack])[1].toLowerCase()}.${rest}`);
+      return;
+    }
+    if (out.lost) { setErr({ text: "We didn't hear back, so we can't tell yet whether that went through. Press it again: it won't refund twice.", reason: "lost" }); return; }
+    failed(out.fail);
+  };
+
+  // The whole sale, before it settles: a void. "Already settled" chains to a refund of all that is
+  // left, as the old Refund button did; a bank payment still clearing says why it can't.
+  const cancelWhole = async () => {
+    const out = await ask({ action: "void_payment", paymentId: p.id });
+    if (out.ok) { done(out.ok.voided || out.ok.already ? "Payment cancelled at the card network. The customer won't be charged." : "Done."); return; }
+    if (out.lost) { setErr({ text: "We didn't hear back from the card network. Check the payment again in a minute before trying again.", reason: "lost" }); return; }
+    const f = out.fail || {};
+    if (f.settled && bankClearing) { setErr({ text: "This bank payment is still clearing. It can be refunded once it clears.", reason: "ach_pending" }); return; }
+    if (f.settled) { await refund(left); return; }
+    failed(f);
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    if (!amountOk) { setErr({ text: `Enter an amount from $0.01 up to ${money(left)}.`, reason: "amount" }); return; }
+    setBusy(true); setErr(null);
+    try {
+      if (viaNetwork && whole && !settledAlready) await cancelWhole();
+      else await refund(cents);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancelInstead = async () => {
+    if (busy) return;
+    setBusy(true); setErr(null);
+    try { await cancelWhole(); } finally { setBusy(false); }
+  };
+
+  const chip = (label, c) => (
+    <button type="button" key={label} onClick={() => { setAmount((c / 100).toFixed(2)); setErr(null); }} data-ss-refund-chip={label}
+      style={{ background: cents === c ? "#EEF2FF" : "#F8FAFC", color: cents === c ? "#3730A3" : "#475569", border: `1px solid ${cents === c ? "#C7D2FE" : "#E2E8F0"}`, borderRadius: 999, padding: "4px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+  );
+  const primary = !viaNetwork
+    ? (amountOk ? `Record refund of ${money(cents)}` : "Record refund")
+    : whole && !settledAlready ? "Cancel the whole payment"
+      : amountOk ? `Refund ${money(cents)}` : "Refund";
+
+  return (
+    <div data-ss-refund-modal="1" onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+      <div role="dialog" aria-modal="true" aria-label="Refund payment"
+        style={{ background: "#FFF", borderRadius: 14, maxWidth: 420, width: "100%", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.3)" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10, borderRadius: "14px 14px 0 0" }}>
+          <div style={{ fontSize: 15.5, fontWeight: 800 }}>Refund {viaNetwork ? "this payment" : "a recorded payment"}</div>
+          <button type="button" onClick={() => { if (!busy) onClose(); }} aria-label="Dismiss"
+            style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ padding: "16px 18px" }}>
+          <div style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.5, marginBottom: 12 }}>
+            {methodName}{card} · taken {fmtDate(p.received_at)} · {money(taken)}
+            {taken !== left && <> · <b>{money(taken - left)}</b> refunded already</>}
+            <br />
+            <b style={{ color: "#1E293B" }}>{money(left)}</b> can still be refunded.
+          </div>
+
+          <label style={S.lbl} htmlFor="ss-refund-amount">Amount to refund</label>
+          <input id="ss-refund-amount" data-ss-refund-amount="1" inputMode="decimal" value={amount} disabled={busy}
+            onChange={(e) => { setAmount(e.target.value); setErr(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            style={{ ...S.input, fontSize: 16, fontVariantNumeric: "tabular-nums" }} />
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+            {chip(`All ${money(left)}`, left)}
+            {refundOwedCents != null && refundOwedCents > 0 && refundOwedCents < left && chip(`Refund owed ${money(refundOwedCents)}`, refundOwedCents)}
+          </div>
+          {Number.isFinite(cents) && cents > left && (
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 6 }}>That's more than the {money(left)} left on this payment.</div>
+          )}
+
+          {!viaNetwork && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+              <div>
+                <label style={S.lbl} htmlFor="ss-refund-method">Paid back by</label>
+                <select id="ss-refund-method" data-ss-refund-method="1" value={payBack} disabled={busy} onChange={(e) => setPayBack(e.target.value)} style={S.input}>
+                  {PAY_METHODS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={S.lbl} htmlFor="ss-refund-ref">Check # / note</label>
+                <input id="ss-refund-ref" data-ss-refund-ref="1" value={reference} maxLength={200} disabled={busy} onChange={(e) => setReference(e.target.value)} style={S.input} placeholder="Optional" />
+              </div>
+            </div>
+          )}
+
+          <div style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.5, marginTop: 12 }}>
+            {!viaNetwork
+              ? "You give the money back yourself (cash, a check…). This records it, and the order's balance updates."
+              : bankClearing
+                ? "This bank payment is still clearing. Today it can only be cancelled whole; once it clears it can be refunded in part."
+                : whole && !settledAlready
+                  ? "This payment hasn't settled yet, so the whole of it is cancelled and the customer is never charged. A part of it can be refunded after it settles (overnight)."
+                  : !settledAlready
+                    ? "Card payments settle overnight. Until then only the whole payment can be cancelled, so a partial refund may be refused until tomorrow."
+                    : "The customer gets this back on their card. It can't be undone from here."}
+          </div>
+
+          {err && (
+            <div data-ss-refund-error={err.reason || "1"} style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
+              {err.text}
+              {err.reason === "not_settled" && !whole && viaNetwork && !bankClearing && (
+                <div style={{ marginTop: 8 }}>
+                  <button type="button" onClick={cancelInstead} disabled={busy} data-ss-refund-cancel-whole="1"
+                    style={{ ...S.btn("#FFF", "#9F1239"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12 }}>Cancel the whole {money(left)} instead</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+            <button type="button" onClick={() => { if (!busy) onClose(); }} disabled={busy}
+              style={{ ...S.btn("#F1F5F9", "#334155"), flex: 1, border: "1px solid #E2E8F0" }}>Close</button>
+            <button type="button" onClick={submit} disabled={busy || !amountOk || (err && err.reason === "refund_unconfirmed")} data-ss-refund-submit="1"
+              style={{ ...S.btn("#BE123C", "#FFF"), flex: 2, opacity: busy || !amountOk || (err && err.reason === "refund_unconfirmed") ? 0.55 : 1 }}>
+              {busy ? "Working…" : primary}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // `ordersOn` = may this person WRITE money on this order (orders:edit). It defaults to true
 // for the reason spelled out on OrdersView: the shell does not pass it yet, and a false
 // default would take Record-a-payment away from owners. `moneyReady` = has the payments read
@@ -3984,6 +4179,38 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [totalDraft, setTotalDraft] = useState(o.total_cents == null ? "" : (o.total_cents / 100).toFixed(2));
   const [editTotal, setEditTotal] = useState(o.total_cents == null);
   const bal = balOf(row); const st = stateOf(row);
+
+  // ── Refunds (migration 348) ───────────────────────────────────────────────────────────
+  // `refundFor` is the payment the Refund box is open on. `refunds` are this order's refunds, for
+  // the lines under each payment. A database without the ledger, or a read that fails, shows none:
+  // each payment's own figures (what is left, what was refunded) still say it.
+  const [refundFor, setRefundFor] = useState(null);
+  const [refunds, setRefunds] = useState([]);
+  const [refundsKey, setRefundsKey] = useState(0);
+  const refundAskedRef = useRef(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const { data, error } = await sb.from("payment_refunds")
+        .select("id, payment_id, amount_cents, kind, state, method, reference, created_at, completed_at")
+        .eq("client_id", clientId).eq("order_id", o.id).order("created_at", { ascending: true });
+      if (!alive) return;
+      const list = error || !Array.isArray(data) ? [] : data;
+      setRefunds(list);
+      // A card-network refund we never heard back about, older than a refund can take: reconcile
+      // asks the card network about it by its own order id (once per visit to this order), then
+      // the money is read again if it settled.
+      const stuck = list.some((r) => r.kind === "gateway" && (r.state === "pending" || r.state === "unknown")
+        && Date.now() - Date.parse(r.created_at) > 3 * 60 * 1000);
+      if (stuck && refundAskedRef.current !== o.id) {
+        refundAskedRef.current = o.id;
+        sb.functions.invoke("portal-payments", { body: { action: "reconcile", orderId: o.id } }).then(({ data: rd }) => {
+          if (alive && rd && Array.isArray(rd.refunds) && rd.refunds.some((x) => x && x.state !== "open")) { onChanged(); setRefundsKey((k) => k + 1); }
+        }, () => {});
+      }
+    })();
+    return () => { alive = false; };
+  }, [clientId, o.id, refundsKey, row.pays]);
 
   // ── Taking the payment, rather than recording one already taken (migration 174) ──────
   // This lives INSIDE the Record-a-payment modal on purpose. The method chips already say
@@ -4792,42 +5019,14 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
   // A CardPointe payment cannot be voided from the browser — RLS refuses any update to a
   // row with a gateway, and rightly: the money is at the card network, and a local void
-  // would leave the books saying one thing and the merchant account another. So this asks
-  // the server to reverse it, and the row only changes if the gateway agrees.
-  const voidGatewayPayment = async (p) => {
-    const settledAlready = p.funding_state === "settled" && Date.parse(p.received_at) < Date.now() - 12 * 3600 * 1000;
-    if (!window.confirm(
-      `${settledAlready ? "Refund" : "Cancel"} this ${money(p.amount_cents)} payment at the card network?\n\n` +
-      "The customer gets the money back. This can't be undone from here.",
-    )) return;
-    setMsg(null);
-    const { data, error } = await sb.functions.invoke("portal-payments", {
-      body: { action: settledAlready ? "refund_payment" : "void_payment", paymentId: p.id },
-    });
-    if (error) {
-      let m = "That couldn't be reversed.";
-      let settled = false;
-      try { const ctx = await error.context.json(); if (ctx) { if (ctx.error) m = ctx.error; settled = !!ctx.settled; } } catch (_e) {}
-      // A bank payment still clearing is the exception: refunding a debit that has not funded
-      // pays the customer twice if it later returns, so portal-payments refuses refund_payment
-      // for it. Say that here rather than chaining into a refund the server will turn down.
-      if (settled && p.method === "ach" && p.funding_state === "pending") {
-        setMsg({ err: "This bank payment is still clearing. It can be refunded once it clears." });
-        return;
-      }
-      // "Already settled" is not a failure, it is the next step — a refund rather than a void.
-      if (settled) {
-        const { data: rd, error: re } = await sb.functions.invoke("portal-payments", {
-          body: { action: "refund_payment", paymentId: p.id },
-        });
-        if (!re && rd && !rd.error) { setMsg({ ok: `Refunded ${money(rd.refunded)}.` }); onChanged(); return; }
-      }
-      setMsg({ err: m });
-      return;
-    }
-    if (data && data.error) { setMsg({ err: data.error }); return; }
-    setMsg({ ok: data && data.refunded ? `Refunded ${money(data.refunded)}.` : "Payment cancelled at the card network." });
+  // would leave the books saying one thing and the merchant account another. Its Refund opens
+  // RefundModal, which asks the server to cancel or refund all or part of it; the row only
+  // changes if the gateway agrees. (voidGatewayPayment's window.confirm lived here until 348.)
+  const refundDone = (text) => {
+    setRefundFor(null);
+    setMsg({ ok: text });
     onChanged();
+    setRefundsKey((k) => k + 1);
   };
 
   const unvoidPayment = async (p) => {
@@ -4942,8 +5141,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             ) : null}
             {row.pays.map((p) => {
               const dead = !!p.voided_at;
+              // Refunds (migration 348): amount_cents is what is LEFT of the payment and refunded_cents
+              // what went back, so the payment as taken is the two together. A payment refunded in
+              // full reads amount 0 and voided; it shows the refunded figure, struck through, so the
+              // row still says what was taken.
+              const refundedC = Number(p.refunded_cents) || 0;
+              const fullyRefunded = dead && refundedC > 0 && !(Number(p.amount_cents) > 0);
+              const itsRefunds = refunds.filter((r) => r.payment_id === p.id && r.state !== "failed");
+              const linkBtn = { background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", padding: 0 };
               return (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #F1F5F9", fontSize: 12.5, opacity: dead ? 0.65 : 1 }}>
+                <div key={p.id} data-ss-payment-row={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #F1F5F9", fontSize: 12.5, opacity: dead ? 0.65 : 1 }}>
                   <div style={{ width: 26, height: 26, borderRadius: "50%", background: dead ? "#F1F5F9" : "#DCFCE7", color: dead ? "#64748B" : "#166534", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     {dead
                       ? <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -4955,15 +5162,25 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     {p.gateway === "cardpointe" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#DCFCE7", color: "#166534", borderRadius: 5, padding: "2px 6px" }}>Taken here</span>}
                     {p.funding_state === "pending" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FEF3C7", color: "#92400E", borderRadius: 5, padding: "2px 6px" }}>Clearing</span>}
                     {p.funding_state === "returned" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FFE4E6", color: "#9F1239", borderRadius: 5, padding: "2px 6px" }}>Returned</span>}
-                    {dead && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#F1F5F9", color: "#64748B", borderRadius: 5, padding: "2px 6px" }}>Voided</span>}
+                    {dead && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#F1F5F9", color: "#64748B", borderRadius: 5, padding: "2px 6px" }}>{fullyRefunded ? "Refunded" : "Voided"}</span>}
+                    {!dead && refundedC > 0 && <span data-ss-part-refunded="1" style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FFEDD5", color: "#9A3412", borderRadius: 5, padding: "2px 6px" }}>Part refunded</span>}
                     <div style={{ fontSize: 11, color: "#94A3B8" }}>
                       {fmtDate(p.received_at)}
                       {p.instrument_last4 ? ` · ••${p.instrument_last4}` : (p.reference ? ` · ${p.reference}` : "")}
                       {p.funding_state === "pending" ? " · clears in 2-3 business days" : ""}
-                      {dead ? ` · voided ${fmtDate(p.voided_at)}` : ""}
+                      {dead ? ` · ${fullyRefunded ? "refunded" : "voided"} ${fmtDate(p.voided_at)}` : ""}
+                      {!dead && refundedC > 0 ? ` · ${money(refundedC)} of ${money(Number(p.amount_cents) + refundedC)} refunded` : ""}
                     </div>
+                    {itsRefunds.map((r) => (
+                      <div key={r.id} data-ss-refund-line={r.state} style={{ fontSize: 11, color: r.state === "done" ? "#9A3412" : "#B45309" }}>
+                        ↩ {money(r.amount_cents)}
+                        {r.state === "done"
+                          ? ` refunded${r.kind === "manual" && r.method ? ` by ${((PAY_METHODS.find((m) => m[0] === r.method) || [, r.method])[1] || "").toLowerCase()}` : ""} · ${fmtDate(r.completed_at || r.created_at)}${r.reference ? ` · ${r.reference}` : ""}`
+                          : " · checking with the card network…"}
+                      </div>
+                    ))}
                   </div>
-                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead || p.funding_state === "pending" ? "#94A3B8" : "#1E293B" }}>{money(p.amount_cents)}</div>
+                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead || p.funding_state === "pending" ? "#94A3B8" : "#1E293B" }}>{money(fullyRefunded ? refundedC : p.amount_cents)}</div>
                   {/* GHL-imported payments stay read-only — GHL owns them, and a local void
                       would silently come back (or diverge) on the next sync. A CardPointe
                       payment is different: the money is at the card network, so voiding it
@@ -4973,21 +5190,36 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
                       Void/Restore is a direct payments UPDATE, so it needs orders:edit —
                       without it the click returns the RLS refusal migration 188 installs,
-                      rendered as a red banner. A viewer sees the payment and no control. */}
+                      rendered as a red banner. A viewer sees the payment and no control.
+                      Refund goes through portal-payments, gated orders:edit the same way.
+
+                      Refund (348) opens RefundModal on any live payment taken here or recorded
+                      by hand. A payment refunded in full has nothing to restore (the database
+                      refuses a zero payment back to life), so it shows no control. */}
                   {!ordersOn
                     ? <span title="You have view-only access to Orders" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
                     : p.gateway === "cardpointe"
                     ? (dead
                       ? <span title="Already reversed at the card network" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
-                      : <button type="button" onClick={() => voidGatewayPayment(p)} title="Cancel or refund this at the card network"
-                          style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>Refund</button>)
+                      : <button type="button" onClick={() => setRefundFor(p)} title="Cancel or refund all or part of this at the card network" data-ss-refund-open={p.id}
+                          style={linkBtn}>Refund</button>)
                     : p.gateway
                     ? <span title="Recorded in Synergy/GHL — manage it there" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
-                    : <button type="button" onClick={() => (dead ? unvoidPayment(p) : voidPayment(p))} title={dead ? "Restore this payment" : "Void this payment"}
-                        style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>{dead ? "Restore" : "Void"}</button>}
+                    : dead
+                    ? (fullyRefunded
+                      ? <span title="Refunded in full" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
+                      : <button type="button" onClick={() => unvoidPayment(p)} title="Restore this payment" style={linkBtn}>Restore</button>)
+                    : <span style={{ display: "inline-flex", gap: 10, flexShrink: 0 }}>
+                        <button type="button" onClick={() => setRefundFor(p)} title="Record a refund of all or part of this payment" data-ss-refund-open={p.id} style={linkBtn}>Refund</button>
+                        <button type="button" onClick={() => voidPayment(p)} title="Void this payment (it was never really taken)" style={linkBtn}>Void</button>
+                      </span>}
                 </div>
               );
             })}
+            {refundFor && (
+              <RefundModal p={refundFor} refundOwedCents={moneyReady && bal != null && bal < 0 ? -bal : null}
+                onClose={() => setRefundFor(null)} onDone={refundDone} />
+            )}
           </div>
         </div>
 
