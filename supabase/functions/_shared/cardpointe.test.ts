@@ -772,3 +772,21 @@ Deno.test("settlestat and funding ask the gateway for the day as MMDD (cpReportD
   check("two calls", seen.length === 2, String(seen.length));
   for (const s of seen) check(`${s.url} asks date=1009`, new URL(s.url).searchParams.get("date") === "1009", s.url);
 });
+
+Deno.test("cpRefund: the refund's own order id rides along when given (348), never otherwise; the gateway's code and words come back", async () => {
+  const seen: Seen[] = [];
+  recordAll({ respstat: "C", respcode: "29", resptext: "Txn not settled", retref: "rf-9" }, seen);
+  try {
+    const out = await cp.cpRefund(UAT_M, "r1", 2550, "ssr_00000000000000000001");
+    check("refused is not ok", out.ok === false);
+    check("respcode back", out.respcode === "29", String(out.respcode));
+    check("resptext back", out.resptext === "Txn not settled", String(out.resptext));
+    await cp.cpRefund(UAT_M, "r1", 2550);
+  } finally {
+    restore();
+  }
+  check("two calls", seen.length === 2, String(seen.length));
+  check("with an order id: merchid, retref, amount, orderid", JSON.stringify(seen[0].body) === JSON.stringify({ merchid: UAT_M.merchid, retref: "r1", amount: "25.50", orderid: "ssr_00000000000000000001" }), JSON.stringify(seen[0].body));
+  check("without one: no orderid key at all", JSON.stringify(seen[1].body) === JSON.stringify({ merchid: UAT_M.merchid, retref: "r1", amount: "25.50" }), JSON.stringify(seen[1].body));
+  check("a PUT to /refund", seen.every((s) => s.method === "PUT" && s.url.endsWith("/refund")));
+});

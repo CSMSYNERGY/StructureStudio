@@ -48,7 +48,8 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
-import { stubAuth, stubDb } from "./supabase_stub.ts";
+import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
+import { type RefundLedger, refundLedger } from "./refundLedgerFake.ts";
 
 const UAT = "https://uat.example.invalid/cardconnect/rest";
 const LIVE = "https://live.example.invalid/cardconnect/rest";
@@ -114,6 +115,8 @@ type World = {
   audit?: "recent" | "fail";
   /** The prior billing_exempt set_billing reads (client_settings select of billing_exempt alone). */
   wasExempt?: boolean;
+  /** Set by drive(): migration 348's refund steps over this call's copies of `payments`. */
+  ledger?: RefundLedger;
 };
 type Trace = {
   gateway: { system: "uat" | "live"; path: string; body: any; url: URL; auth: string | null }[];
@@ -193,6 +196,8 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
         error: null,
       };
     }
+    case "payment_refunds":
+      return world.ledger!.read(ops);
     case "payments": {
       const all = world.payments ?? [];
       const id = eqOf(ops, "id");
@@ -228,9 +233,11 @@ async function drive(
   handler: (req: Request) => Promise<Response>,
   fn: string,
   body: Record<string, unknown>,
-  world: World = {},
+  given: World = {},
   { live = false, uat = true, operator = false }: { live?: boolean; uat?: boolean; operator?: boolean } = {},
 ) {
+  const copies = (given.payments ?? []).map((p) => ({ ...p }));
+  const world: World = { ...given, payments: copies, ledger: refundLedger(copies) };
   const trace: Trace = { gateway: [], writes: [], faults: [], audits: [], auditReads: [], selects: [] };
   const touched = [...Object.keys(ENV), ...Object.keys(UAT_ENV), ...Object.keys(LIVE_ENV)];
   const saved = Object.fromEntries(touched.map((k) => [k, Deno.env.get(k)]));
@@ -241,6 +248,7 @@ async function drive(
   stubAuth.user = { id: USER_ID, email: "owner@example.test" };
   stubAuth.error = null;
   stubDb.from = (table: string) => chain(world, trace, table, []);
+  stubRpc.rpc = (fn: string, args: any) => world.ledger!.rpc(fn, args);
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const system = href.startsWith(UAT + "/") ? "uat" : href.startsWith(LIVE + "/") ? "live" : null;
@@ -265,6 +273,7 @@ async function drive(
   } finally {
     globalThis.fetch = realFetch;
     stubDb.from = null;
+    stubRpc.rpc = null;
     stubAuth.user = null;
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) Deno.env.delete(k);

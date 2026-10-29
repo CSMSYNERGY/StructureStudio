@@ -42,6 +42,7 @@ import {
   cpBillingFields,
   cpEnvLabel,
   cpFunding,
+  cpInquireByOrderId,
   cpRefund,
   cpSettleStat,
   cpSurchargeProbe,
@@ -152,6 +153,96 @@ function achClearing(p: { method?: unknown; funding_state?: unknown; received_at
   if (p.method !== "ach" || p.funding_state !== "pending") return false;
   const age = nowMs - Date.parse(String(p.received_at ?? ""));
   return !(age >= ACH_CLEARED_AFTER_DAYS * 86400000);
+}
+
+// ── Refunds (migration 348: payment_refunds, payments.refunded_cents) ────────────────────────
+// A refund, whole or part, goes through two locked steps in Postgres (payment_refund_open and
+// payment_refund_close): the payment keeps its NET in amount_cents, so every reader of money is
+// right with no change, and the ledger keeps each refund. The page sends one `requestKey` per refund
+// the builder means; a retry or a double click with the same key gets the first refund's outcome
+// back and never a second refund.
+
+/** How a builder may say they paid back a payment they had recorded by hand. */
+const PAY_BACK_METHODS = new Set(["cash", "check", "card", "ach", "other"]);
+
+/** A card-network refund younger than this, still `pending`, may be at the gateway right now, so an
+ *  inquire that finds nothing proves nothing yet (resolveUnknownAttempt's rule for charges). cpPost
+ *  gives up after 30 s; the edge worker's wall clock is the outer bound. */
+const REFUND_IN_FLIGHT_MS = 3 * 60 * 1000;
+
+/** Refunds whose answer we never heard that one reconcile asks about (inquireByOrderid each). Kept
+ *  small: the 40 TPM per-MID quota is shared with live charges, and a lost refund answer is rare. */
+const MAX_REFUND_INQUIRES = 2;
+
+/** Said when a card-network refund's outcome is unknown. The refund may have gone through, so the
+ *  one thing the builder must not do is send another. */
+const REFUND_UNCONFIRMED_TEXT =
+  "We couldn't confirm the last refund on this payment with the card network, so we can't tell yet whether it went through. Don't refund it again for now — we've been told and will check it.";
+
+/** The page's key for one refund, or null when it sent none (an older page, the cert runner). */
+function refundKeyFrom(raw: unknown): string | null {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  return /^[A-Za-z0-9_-]{8,100}$/.test(s) ? s : null;
+}
+
+const dollars = (cents: number) => `$${(Math.round(cents) / 100).toFixed(2)}`;
+
+/** The gateway's own words, short, with digit runs masked: a retref or an account number never
+ *  reaches a page or a log line through here. */
+const gatewayWords = (s: string | null | undefined) => String(s ?? "").replace(/\d{4,}/g, "…").trim().slice(0, 80);
+
+/** A refund the card network refused because the sale has not SETTLED yet (CardPointe: "the refund
+ *  service is used for transactions that are in a settled status"). Its exact words have not been
+ *  seen live, so this reads the words, and failing that, a sale still under a day and a half old
+ *  (sales settle overnight) is taken to be the reason. */
+function refusedAsUnsettled(resptext: string | null, takenAt: unknown, nowMs = Date.now()): boolean {
+  if (/settl|not refundable|unsettled|not captured/i.test(resptext ?? "")) return true;
+  const age = nowMs - Date.parse(String(takenAt ?? ""));
+  return Number.isFinite(age) && age < 36 * 3600000;
+}
+
+/** What a page is told about a card-network refund that was refused. */
+function refundRefusedBody(cents: number, fullLeft: boolean, resptext: string | null, takenAt: unknown) {
+  if (refusedAsUnsettled(resptext, takenAt)) {
+    return {
+      error: fullLeft
+        ? "This payment hasn't settled at the card network yet (that happens overnight), so it can't be refunded yet. You can cancel the whole payment instead, or refund it tomorrow."
+        : `This payment hasn't settled at the card network yet (that happens overnight). Until it does, only the whole payment can be cancelled, not ${dollars(cents)} of it. Try the partial refund again tomorrow.`,
+      reason: "not_settled",
+    };
+  }
+  const said = gatewayWords(resptext);
+  return { error: `The card network refused that refund${said ? ` ("${said}")` : ""}. Nothing was refunded.`, reason: "refund_declined" };
+}
+
+/** The answer to a refund that went through, from payment_refund_close's (or a replay's) payment. */
+// deno-lint-ignore no-explicit-any
+function refundDoneBody(refund: any, payment: any, replay = false) {
+  return {
+    ok: true,
+    refunded: Number(refund?.amount_cents ?? 0),
+    retref: refund?.gateway_retref ?? null,
+    leftCents: payment ? Number(payment.amount_cents) : null,
+    refundedCents: payment ? Number(payment.refunded_cents) : null,
+    fullyRefunded: !!payment?.voided_at,
+    ...(replay ? { replay: true } : {}),
+  };
+}
+
+/** A failure payment_refund_open answered with, as the page reads it. */
+// deno-lint-ignore no-explicit-any
+function refundOpenRefusal(out: any): { body: Record<string, unknown>; status: number } {
+  switch (out?.refused) {
+    case "not_found": return { body: { error: "Payment not found." }, status: 404 };
+    case "voided": return { body: { error: "This payment has already been cancelled or refunded in full.", reason: "voided" }, status: 409 };
+    case "amount": {
+      const left = Number(out?.refundable_cents ?? 0);
+      return { body: { error: `Enter a refund amount up to ${dollars(left)}, what's left of this payment.`, reason: "amount", refundableCents: left }, status: 400 };
+    }
+    case "in_flight": return { body: { error: REFUND_UNCONFIRMED_TEXT, reason: "refund_unconfirmed" }, status: 409 };
+    case "key_reused": return { body: { error: "That refund was already sent for a different amount. Close this box and start again.", reason: "key_reused" }, status: 409 };
+    default: return { body: { error: "That refund couldn't be recorded. Nothing was refunded.", reason: String(out?.refused ?? "unknown") }, status: 400 };
+  }
 }
 
 /** A failed charge as the modal reads it: the sentence, whether a human must look first, and
@@ -311,6 +402,126 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload, action, userId, audit, operator, canEdit } = r.ctx;
+
+  // The two refund steps (migration 348). Each is one transaction in Postgres that locks the payment;
+  // a database error comes back as a throw, and the caller says what it was doing.
+  const refundOpen = async (paymentId: string, cents: number, key: string, kind: "gateway" | "manual", extra: { method?: string | null; reference?: string | null; reason?: string | null } = {}) => {
+    const { data, error } = await admin.rpc("payment_refund_open", {
+      p_client: clientId, p_payment: paymentId, p_amount: cents, p_key: key, p_kind: kind,
+      p_actor: userId ?? null, p_method: extra.method ?? null, p_reference: extra.reference ?? null, p_reason: extra.reason ?? null,
+    });
+    if (error) throw error;
+    // deno-lint-ignore no-explicit-any
+    return (data ?? {}) as any;
+  };
+  const refundClose = async (refundId: number, state: "done" | "failed" | "unknown", g: { retref?: string | null; respcode?: string | null; resptext?: string | null } = {}) => {
+    const { data, error } = await admin.rpc("payment_refund_close", {
+      p_refund: refundId, p_state: state, p_retref: g.retref ?? null, p_respcode: g.respcode ?? null, p_resptext: g.resptext ?? null,
+    });
+    if (error) throw error;
+    // deno-lint-ignore no-explicit-any
+    return (data ?? {}) as any;
+  };
+
+  /**
+   * A card-network refund whose answer we never heard (a timeout, or a worker that died between the
+   * two steps), asked by the refund's OWN order id (cpRefund sends one since 348). Found approved:
+   * recorded done. Found refused: failed, and the payment is free for another refund. Not found, or
+   * the question could not be asked: it stays open, and keeps blocking refunds on that payment.
+   *
+   * ⛔ "NOT FOUND" NEVER MEANS "NOT REFUNDED" HERE. For a charge it does (resolveUnknownAttempt), but
+   * no refund looked up by its own order id has been seen live yet; reading a miss as "nothing went
+   * back" would let the builder send the money twice. A human checks the gateway and closes it
+   * (the filed row says how). A payment held up is the cheaper mistake.
+   */
+  // deno-lint-ignore no-explicit-any
+  const resolveOpenRefund = async (merchant: CpMerchant, row: any): Promise<{ state: "done" | "failed" | "open"; out?: any }> => {
+    if (row?.kind !== "gateway" || !row?.gateway_orderid) return { state: "open" };
+    if (row.state === "pending" && !(Date.now() - Date.parse(String(row.created_at)) > REFUND_IN_FLIGHT_MS)) return { state: "open" };
+    let found: Record<string, unknown> | null;
+    try {
+      found = await cpInquireByOrderId(merchant, String(row.gateway_orderid));
+    } catch {
+      return { state: "open" };
+    }
+    if (!found) return { state: "open" };
+    const stat = typeof found.respstat === "string" ? found.respstat.trim().toUpperCase() : "";
+    const g = {
+      retref: typeof found.retref === "string" ? found.retref : null,
+      respcode: found.respcode == null ? null : String(found.respcode),
+      resptext: found.resptext == null ? null : String(found.resptext),
+    };
+    try {
+      const out = await refundClose(Number(row.id), stat === "A" ? "done" : "failed", g);
+      return { state: stat === "A" ? "done" : "failed", out };
+    } catch {
+      return { state: "open" };
+    }
+  };
+
+  /** Filed once per refund (and once a day after that) when its outcome can't be read. */
+  // deno-lint-ignore no-explicit-any
+  const fileUnconfirmedRefund = async (merchant: CpMerchant, row: any, why: string) => {
+    if (await filedToday(admin, clientId, "refund_unconfirmed", "refundIds", [String(row.id)])) return;
+    await logEdgeError({
+      fn: "portal-payments",
+      req,
+      clientId,
+      code: "refund_unconfirmed",
+      message:
+        `${clientId}: refund ${row.id} of ${row.amount_cents} cents on payment ${row.payment_id} (refund order id ${row.gateway_orderid}, ` +
+        `${cpEnvLabel(merchant.env)} MID ending ${String(merchant.merchid).slice(-4)}): ${why}. Refunds on that payment are held until it is settled. ` +
+        `Look it up at the gateway by that order id, then: select public.payment_refund_close(${row.id}, 'done', '<retref>') if it went through, ` +
+        `or select public.payment_refund_close(${row.id}, 'failed', null, null, 'checked by hand: no refund at the gateway') if it did not.`,
+      context: { refundIds: [String(row.id)], paymentId: row.payment_id, orderid: row.gateway_orderid },
+    }).catch(() => {});
+  };
+
+  // ── refund_payment, by hand ───────────────────────────────────────────────────────
+  // A payment the builder RECORDED (cash, a check, a card run on someone else's terminal, a bank
+  // transfer) is refunded the way it was taken: the builder hands the money back and this records
+  // it, whole or part. Before the gateway checks below, because nothing here asks the card network.
+  // A payment synced from Synergy/GHL is GHL's to change, and a CardPointe one goes on to the
+  // card-network refund further down.
+  if (action === "refund_payment") {
+    const paymentId = String(payload?.paymentId ?? "").trim();
+    if (!paymentId) return json({ error: "paymentId is required." }, 400);
+    const { data: hp, error: hErr } = await admin.from("payments")
+      .select("id, amount_cents, method, gateway, voided_at")
+      .eq("client_id", clientId).eq("id", paymentId).maybeSingle();
+    if (hErr) return dbFail(req, clientId, "load that payment", hErr);
+    if (!hp) return json({ error: "Payment not found." }, 404);
+    if (hp.gateway === "ghl") return json({ error: "That payment is recorded in Synergy/GHL — refund it there." }, 400);
+    if (!hp.gateway) {
+      if (hp.voided_at) return json({ error: "This payment is voided, so there's nothing left to refund.", reason: "voided" }, 409);
+      const left = Number(hp.amount_cents);
+      const cents = payload?.amountCents == null ? left : Number(payload.amountCents);
+      if (!Number.isInteger(cents) || cents <= 0 || cents > left) {
+        return json({ error: `Enter a refund amount up to ${dollars(left)}, what's left of this payment.`, reason: "amount", refundableCents: left }, 400);
+      }
+      const method = PAY_BACK_METHODS.has(String(payload?.refundMethod ?? "")) ? String(payload.refundMethod) : String(hp.method);
+      const reference = typeof payload?.reference === "string" ? payload.reference.trim().slice(0, 200) : null;
+      const reason = typeof payload?.reason === "string" ? payload.reason.trim().slice(0, 500) : null;
+      const key = refundKeyFrom(payload?.requestKey) ?? `srv_${crypto.randomUUID()}`;
+      await audit("refund_payment", null, `payment=${paymentId} cents=${cents} by_hand=${method}`).catch(() => {});
+      let out;
+      try {
+        out = await refundOpen(paymentId, cents, key, "manual", { method, reference, reason });
+      } catch (e) {
+        return dbFail(req, clientId, "record that refund", e);
+      }
+      if (out.replay) {
+        return out.refund?.state === "done"
+          ? json(refundDoneBody(out.refund, out.payment, true))
+          : json({ error: "That refund couldn't be recorded. Nothing was refunded.", reason: "refund_failed" }, 409);
+      }
+      if (out.refused) {
+        const f = refundOpenRefusal(out);
+        return json(f.body, f.status);
+      }
+      return json({ ...refundDoneBody(out.refund, out.payment), byHand: true });
+    }
+  }
 
   // Neither system configured: this deployment takes no cards at all, so every action is refused
   // the way it always was. One system configured is enough to go on: which one a tenant needs is
@@ -750,7 +961,16 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       return json({ error: ACH_PENDING_REFUND_TEXT, reason: "ach_pending" }, 409);
     }
 
-    await audit(`${action}`, null, `payment=${paymentId} retref=${p.gateway_txn_id}`).catch(() => {});
+    // The amount, checked before anything is filed or asked. No amount is the whole of what is left
+    // (an older page, and the "Already settled" chain after a void). Up to what is left, never the
+    // payment as first taken: amount_cents is the net since 348.
+    const left = Number(p.amount_cents);
+    const refundCents = payload?.amountCents == null ? left : Number(payload.amountCents);
+    if (action === "refund_payment" && (!Number.isInteger(refundCents) || refundCents <= 0 || refundCents > left)) {
+      return json({ error: `Enter a refund amount up to ${dollars(left)}, what's left of this payment.`, reason: "amount", refundableCents: left }, 400);
+    }
+
+    await audit(`${action}`, null, `payment=${paymentId} retref=${p.gateway_txn_id}${action === "refund_payment" ? ` cents=${refundCents}` : ""}`).catch(() => {});
 
     // Every payment the charge path writes carries its attempt (invoicePayment.ts, both inserts).
     // One without, or whose attempt names no MID, is refused and filed: NEVER sent to the current
@@ -783,6 +1003,14 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     }
 
     if (action === "void_payment") {
+      // A refund on this payment whose outcome we never heard may have moved money; cancelling the
+      // sale on top of it is a second reversal. Held until that refund is settled. A database
+      // without 348 has no ledger: the read fails, and the void goes on as it always did.
+      const { data: inFlight } = await admin.from("payment_refunds")
+        .select("id").eq("client_id", clientId).eq("payment_id", paymentId).in("state", ["pending", "unknown"]).limit(1);
+      if (Array.isArray(inFlight) && inFlight.length) {
+        return json({ error: REFUND_UNCONFIRMED_TEXT, reason: "refund_unconfirmed" }, 409);
+      }
       let ok = false;
       try {
         ok = await cpVoid(merchant, String(p.gateway_txn_id));
@@ -817,44 +1045,104 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       return json({ ok: true, voided: true });
     }
 
-    // A refund is a NEW event, never a mutation: the original settled, and the books have to
-    // show both. So the original row is left standing and a negative-amount row is written
-    // beside it. `payments_amount_cents_check` forbids a negative amount, so the refund is
-    // recorded as a voided-out original plus an explicit note — see below.
-    const refundCents = Number(payload?.amountCents ?? p.amount_cents);
-    if (!Number.isInteger(refundCents) || refundCents <= 0 || refundCents > Number(p.amount_cents)) {
-      return json({ error: "Enter a refund amount up to the original payment." }, 400);
+    // ── refund_payment on the card network: all of what is left, or part of it ──────────────────
+    // A refund is a NEW event, never a cancellation: the sale settled, and the books show both. The
+    // payment keeps its net (amount_cents) and its refunded total, and payment_refunds keeps each one
+    // (migration 348). A PARTIAL amount is only ever a refund: a void cancels the whole sale (see
+    // cpRefund), so a sale that has not settled yet can be cancelled whole or refunded tomorrow.
+    const key = refundKeyFrom(payload?.requestKey) ?? `srv_${crypto.randomUUID()}`;
+    const fullLeft = refundCents === left;
+    let opened;
+    try {
+      opened = await refundOpen(paymentId, refundCents, key, "gateway");
+      // A refund on this payment we never heard back about: asked about first, then this one goes
+      // ahead only if that one is settled (done or failed).
+      if (opened.refused === "in_flight") {
+        const prior = await resolveOpenRefund(merchant, opened.refund);
+        if (prior.state === "open") await fileUnconfirmedRefund(merchant, opened.refund, "its outcome is still unknown and a new refund was asked for");
+        else opened = await refundOpen(paymentId, refundCents, key, "gateway");
+      }
+    } catch (e) {
+      return dbFail(req, clientId, "record that refund", e);
     }
+    if (opened.replay) {
+      // The same refund again (a retry, a double click): its outcome, and never a second refund.
+      let row = opened.refund;
+      let pay = opened.payment;
+      if (row?.state === "pending" || row?.state === "unknown") {
+        const again = await resolveOpenRefund(merchant, row);
+        if (again.out?.refund) { row = again.out.refund; pay = again.out.payment ?? pay; }
+      }
+      if (row?.state === "done") return json(refundDoneBody(row, pay, true));
+      if (row?.state === "failed") return json(refundRefusedBody(Number(row.amount_cents), fullLeft, row.gateway_resptext ?? null, p.received_at), 409);
+      return json({ error: REFUND_UNCONFIRMED_TEXT, reason: "refund_unconfirmed" }, 409);
+    }
+    if (opened.refused) {
+      const f = refundOpenRefusal(opened);
+      return json(f.body, f.status);
+    }
+
+    const row = opened.refund;
     let out;
     try {
-      out = await cpRefund(merchant, String(p.gateway_txn_id), refundCents);
+      out = await cpRefund(merchant, String(p.gateway_txn_id), refundCents, String(row.gateway_orderid));
     } catch (e) {
-      return json({
-        error: "We couldn't reach the card network to refund that payment. Nothing has changed — try again shortly.",
-        detail: String((e as Error).message ?? "").slice(0, 160),
-      }, 502);
+      const detail = String((e as Error).message ?? "").slice(0, 160);
+      if (isGatewayThrottled(e) || isGatewayConfig(e)) {
+        // Refused before the processor (the rate limiter, our own configuration): nothing went back.
+        await refundClose(Number(row.id), "failed", { resptext: detail.slice(0, 120) }).catch(() => {});
+        return json({ error: "We couldn't reach the card network to refund that payment. Nothing was refunded — try again shortly.", detail }, 502);
+      }
+      // UNKNOWN: a timeout, a reset, a 5xx, an answer we cannot read. The refund may have gone
+      // through, so it is NEVER "nothing has changed, try again" (what this said before 348). Marked
+      // unknown, asked about once by its own order id, and held if that cannot tell.
+      await refundClose(Number(row.id), "unknown", { resptext: detail.slice(0, 120) }).catch(() => {});
+      const now = await resolveOpenRefund(merchant, { ...row, state: "unknown" });
+      if (now.state === "done") return json(refundDoneBody(now.out?.refund, now.out?.payment));
+      if (now.state === "failed") return json(refundRefusedBody(refundCents, fullLeft, now.out?.refund?.gateway_resptext ?? null, p.received_at), 409);
+      await fileUnconfirmedRefund(merchant, row, `the refund call failed with "${gatewayWords(detail)}" and an inquire could not settle it`);
+      return json({ error: REFUND_UNCONFIRMED_TEXT, reason: "refund_unconfirmed" }, 409);
     }
-    if (!out.ok) return json({ error: "The card network refused that refund." }, 409);
 
-    const nowIso = new Date().toISOString();
-    const full = refundCents === Number(p.amount_cents);
-    // A partial refund leaves the row live and refundable again, so the next one used to
-    // OVERWRITE this note — and the retref it names is the only record of that refund
-    // anywhere in the database (the audit line above carries the ORIGINAL txn's retref).
-    // Append instead, newest last, capped so repeated refunds cannot grow the row forever.
-    const refundLine = `Refunded $${(refundCents / 100).toFixed(2)} on ${nowIso.slice(0, 10)} (ref ${out.retref ?? "?"})`;
-    const priorNote = typeof p.note === "string" ? p.note.trim() : "";
-    const { error: uErr } = await admin.from("payments")
-      .update({
-        voided_at: full ? nowIso : null,
-        void_reason: full ? `refunded $${(refundCents / 100).toFixed(2)}` : null,
-        note: (priorNote ? `${priorNote}\n${refundLine}` : refundLine).slice(-2000),
-        amount_cents: full ? Number(p.amount_cents) : Number(p.amount_cents) - refundCents,
-        funding_updated_at: nowIso,
-      })
-      .eq("client_id", clientId).eq("id", paymentId);
-    if (uErr) return dbFail(req, clientId, "record that refund", uErr);
-    return json({ ok: true, refunded: refundCents, retref: out.retref });
+    if (!out.ok) {
+      try {
+        await refundClose(Number(row.id), "failed", { retref: out.retref, respcode: out.respcode, resptext: out.resptext });
+      } catch (e) {
+        return dbFail(req, clientId, "record that refusal", e);
+      }
+      return json(refundRefusedBody(refundCents, fullLeft, out.resptext, p.received_at), 409);
+    }
+
+    let closed;
+    try {
+      closed = await refundClose(Number(row.id), "done", { retref: out.retref, respcode: out.respcode, resptext: out.resptext });
+    } catch (e) {
+      // THE MONEY WENT BACK and the books could not say so. The refund row stays pending, which keeps
+      // further refunds on this payment held, and the next refund click or reconcile finds it at the
+      // gateway by its order id and records it then. Filed as a fault meanwhile.
+      await logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "refund_not_recorded",
+        message:
+          `${clientId}: refund ${row.id} of ${refundCents} cents on payment ${paymentId} was APPROVED (retref ${out.retref ?? "?"}) but recording it failed: ` +
+          `${String((e as Error)?.message ?? e).slice(0, 160)}. It stays pending; reconcile or the next refund records it by order id ${row.gateway_orderid}.`,
+        context: { refundIds: [String(row.id)], paymentId, retref: out.retref ?? null },
+      }).catch(() => {});
+      return json({ ok: true, refunded: refundCents, retref: out.retref, recorded: false });
+    }
+    if (closed?.short) {
+      await logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "refund_exceeded_payment",
+        message: `${clientId}: refund ${row.id} of ${refundCents} cents went through on payment ${paymentId}, which had less than that left when it was recorded. The payment reads 0; check the order.`,
+        context: { refundIds: [String(row.id)], paymentId },
+      }).catch(() => {});
+    }
+    return json(refundDoneBody(closed?.refund ?? { amount_cents: refundCents, gateway_retref: out.retref }, closed?.payment));
   }
 
   // ── reconcile ─────────────────────────────────────────────────────────────────────
@@ -879,6 +1167,34 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     for (const a of unknowns ?? []) {
       const out = await resolveUnknownAttempt(admin, clientId, Number(a.id));
       resolved.push({ attemptId: a.id, ...out });
+    }
+
+    // Card-network refunds whose answer we never heard (migration 348): asked by their own order id,
+    // oldest first, at most MAX_REFUND_INQUIRES a sweep. Each on the merchant account its payment was
+    // taken on. One still open after this stays held and filed (fileUnconfirmedRefund), once a day.
+    // A database without 348 has no ledger: the read fails and this pass does nothing.
+    const refunds: { refundId: number; state: string }[] = [];
+    {
+      let rq = admin.from("payment_refunds")
+        .select("id, payment_id, order_id, amount_cents, kind, state, gateway_orderid, created_at")
+        .eq("client_id", clientId).eq("kind", "gateway").in("state", ["pending", "unknown"])
+        .lt("created_at", new Date(Date.now() - REFUND_IN_FLIGHT_MS).toISOString());
+      if (orderId) rq = rq.eq("order_id", orderId);
+      const { data: open } = await rq.order("created_at", { ascending: true }).limit(MAX_REFUND_INQUIRES);
+      for (const row of Array.isArray(open) ? open : []) {
+        const { data: rp } = await admin.from("payments").select("attempt_id")
+          .eq("client_id", clientId).eq("id", row.payment_id).maybeSingle();
+        let m: MerchantOfRecord | undefined;
+        try {
+          m = rp ? (await merchantOfRecord(admin, clientId, [rp.attempt_id])).get(String(rp.attempt_id ?? "")) : undefined;
+        } catch {
+          m = undefined;
+        }
+        if (!m || !cardpointeConfigured(m.env)) { refunds.push({ refundId: Number(row.id), state: "open" }); continue; }
+        const out = await resolveOpenRefund(m, row);
+        if (out.state === "open") await fileUnconfirmedRefund(m, row, "reconcile could not find it at the gateway by its order id");
+        refunds.push({ refundId: Number(row.id), state: out.state });
+      }
     }
 
     // Both payment lists below are read WITH payments.funding_checked_through (migration 309), how
@@ -1381,6 +1697,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     return json({
       ok: true,
       resolved,
+      refunds,
       updated,
       daysChecked: [...new Set([...fetchedDays].map((k) => k.split("|")[2]))],
       daysSkipped: skippedDays.size,
