@@ -685,7 +685,9 @@ const TAB_META = {
   //
   // `designs` and `pipelines` are no longer pages. Their old addresses (bookmarks, links already
   // sent, browser history) all land here through ssCanonRoute below.
-  contacts: ["Contacts", "Everyone who has enquired, their designs, and your pipelines"],
+  // "Customer Hub" since 2026-10-29 (Carolyn) — the sidebar label and this page header are the
+  // same string; the id, the address and the icon are unchanged. See the nav item in 12-shell.
+  contacts: ["Customer Hub", "Everyone who has enquired, their designs, and your pipelines"],
   // Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations
   // would be email, all of it ... I want that bar at the top that shows that I can sort and see
   // just that." One row per customer, from crm_inbox; replying happens on their record.

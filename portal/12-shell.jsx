@@ -3015,14 +3015,19 @@ function Dashboard({ session }) {
               `advancedOn` is false until the entitlement answers, so the item arrives late on a
               cold load and never flashes for anyone else. */}
           {advancedOn && navItem("advanced", "Advanced")}
-          {/* ONE item again (Carolyn 2026-10-12): "One place." Contacts holds the contact list,
+          {/* ONE item again (Carolyn 2026-10-12): "One place." This page holds the contact list,
               the Design list and every pipeline as tabs of its own (ContactsHub, 02-sales), so
-              the separate Pipeline item is gone. Its addresses still land here (ssCanonRoute). */}
-          {navItem("contacts", "Contacts")}
-          {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under
-              Contacts: the same people, seen by their latest message. Only with the CRM: unlike
-              Contacts, which stays in the rail to sell it, one locked item there is enough. A
-              typed /conversations without it still lands on the CRM card below. */}
+              the separate Pipeline item is gone. Its addresses still land here (ssCanonRoute).
+              LABEL ONLY (Carolyn 2026-10-29): "I want to change Contacts to Customer Hub", same
+              icon. The page id stays `contacts`, so ICONS[id], every /contacts address, TAB_AREA
+              and the settings area keep working untouched — and the tab INSIDE the hub is still
+              called Contacts (02-sales), because it is the contact list beside the Design list.
+              It now shares a name with the Settings rail group that configures it (01-core). */}
+          {navItem("contacts", "Customer Hub")}
+          {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under the
+              Customer Hub: the same people, seen by their latest message. Only with the CRM:
+              unlike the hub, which stays in the rail to sell it, one locked item there is enough.
+              A typed /conversations without it still lands on the CRM card below. */}
           {crmUnlocked && navItem("conversations", "Conversations")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
