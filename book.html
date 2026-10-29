@@ -726,7 +726,14 @@ textarea { resize: vertical; }
     // ⚠️ Says only what is TRUE TODAY. The confirmation email and the .ics attachment are
     // phase 2, and the server reports whether anything was sent (`confirmationSent`) rather
     // than letting this page promise an email that nobody has written yet.
-    $("donemsg").textContent = d.confirmationSent
+    // `calendarInvited`: the host's Google/Outlook sent the invite itself, so our email has
+    // no attachment and the invite to accept arrives separately.
+    var host = $("hostname").textContent || "your host";
+    $("donemsg").textContent = d.calendarInvited
+      ? ((d.confirmationSent ? "A confirmation is on its way to " + email + ". " : "")
+         + "A calendar invite from " + host + " is on its way to " + email
+         + " — accept it to add this to your calendar.")
+      : d.confirmationSent
       ? ("A confirmation is on its way to " + email + ", with a calendar invite attached.")
       : ("You’re on " + ($("hostname").textContent || "the") + "’s calendar. "
          + (page.business.name || "The business") + " will be in touch to confirm.");
@@ -761,6 +768,9 @@ textarea { resize: vertical; }
       .then(function (d) {
         if (!d || d.ok !== true || !d.meeting) { screen("missing"); return; }
         managed = d.meeting;
+        // Without this the page sits on "Loading…" forever: only the reschedule path
+        // switched screens, so every emailed manage link looked dead.
+        screen("manage");
         paintManage();
       })
       .catch(function () { screen("missing"); });
