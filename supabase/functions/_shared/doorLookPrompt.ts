@@ -19,7 +19,9 @@ import type { DoorLook, XY } from "./doorLook.ts";
 // V3 (2026-10-28): V2's edge strips, plus pivot hinges, a pull's two ends and a lock of its own (a modern
 // pivot door's: Ahsan's test case, ai_door_calls 5013e3e0).
 // V4 (2026-10-28): V3 plus `surface`, so a wood door keeps its own tone and grain.
-export const DOOR_LOOK_PROMPT_ID = "DOOR_LOOK_V4";
+// V5 (2026-10-30): any raised-panel door, not only a 6-panel one, and `unexplained` names only the door
+// itself, never the light or the photo (a white 7-panel door, ai_door_calls 000f707b).
+export const DOOR_LOOK_PROMPT_ID = "DOOR_LOOK_V5";
 
 // ─── THE PHOTO'S LIMITS ───────────────────────────────────────────────────────────────────────────
 // The browser straightens and re-encodes every door photo at these, so the API never resizes one and the
@@ -154,7 +156,7 @@ export function doorStageAPrompt(x: DoorStageAInput): string {
       "- basic: a trim frame and a mid rail at about 42% of the height, and nothing more.\n" +
       "- classic: a trim frame and a mid rail at about 42%. The upper panel has an octagon (four short braces across its corners) round a solid diamond. The lower panel has an X.\n" +
       "- dutch: a trim frame with a mid rail and a small dark louvred vent in the lower panel. A door split to open top and bottom is a split part, not dutch.\n" +
-      "A plain flat door with no frame showing is basic with field smooth. A frame filled with one sheet (ribbed or corrugated metal, or grooved siding) is a trim look with field grooved, however much its ribs look like boards: american, classic or dutch when it has their pickets, octagon and X, or vent, and basic otherwise. plank, zbrace and xbrace are framed separate boards. A door of six raised panels (a 6-panel door) is basic with field smooth, its six panels given as six raised parts, and \"6-panel\" in unexplained; never refuse a 6-panel door. " +
+      "A plain flat door with no frame showing is basic with field smooth. A frame filled with one sheet (ribbed or corrugated metal, or grooved siding) is a trim look with field grooved, however much its ribs look like boards: american, classic or dutch when it has their pickets, octagon and X, or vent, and basic otherwise. plank, zbrace and xbrace are framed separate boards. A door of raised panels (any number: a 4-panel, 6-panel or 7-panel door) is basic with field smooth, each panel given as a raised part, and its count (\"6-panel\", \"7-panel\") in unexplained; never refuse a raised-panel door. " +
       "The base only says where we start: everything you measure below is what we build, so give what is really there even where it differs from the base you named.",
 
     "3. LEAVES and MEET. `leaves` is how many leaves you see: 1 or 2 (3 for three or more). The latch leaf is the one with the handle; on a single door it is the only leaf. " +
@@ -185,7 +187,7 @@ export function doorStageAPrompt(x: DoorStageAInput): string {
       "On a double door, meet.type: astragal (a narrow strip covering the joint) or overlap (one leaf's edge board runs past the joint over the other leaf).",
 
     "9. OBSERVED and UNEXPLAINED. `observed`: short phrases of a few words for what you see (\"two leaves\", \"one Z brace on each leaf\", \"three black T-strap hinges\"). " +
-      "`unexplained`: short phrases for anything on the door that the words above cannot say (an arched top, a knob, leaves of different widths, a 6-panel door). Leave it empty when everything is said.",
+      "`unexplained`: short phrases for anything on the door that the words above cannot say (an arched top, a knob, leaves of different widths). Only the door itself: never the light, shadows or reflections, the photo, or the wall, floor or casing round it. Leave it empty when everything is said.",
 
     "10. REFUSE. `refuse` is null, or one word when we cannot build this door from this photo: not_door (there is no door), open (the door is open), blocked (more than 30% of the door is hidden behind something), " +
       "angled (taken too far to one side to measure), unsupported (a garage, roll-up, overhead or sliding track door, a bi-fold, or a door of 3 or more leaves). A 6-panel door is not unsupported. " +
@@ -248,7 +250,7 @@ export function doorStageBPrompt(x: { photo: XY; widthIn: number; heightIn: numb
     "Mark only what the draft is missing that these parts can say, with pixel points on this image: a window {\"t\": \"lite\", \"box\": [corner, opposite corner], \"rows\": r, \"cols\": c}, " +
       "a vent {\"t\": \"vent\", \"box\": [...]}, a raised panel {\"t\": \"raised\", \"box\": [...]}, a board {\"t\": \"board\", \"a\": end, \"b\": end, \"across\": [edge point, edge point], \"role\": \"frame\" or \"members\"}, " +
       "a split to open top and bottom {\"t\": \"split\", \"line\": [left end, right end]}. Do not repeat what the draft already has.",
-    `Write the image's size first, as measure.size: [${w}, ${h}]. List anything still not said in unexplained, as short phrases.`,
+    `Write the image's size first, as measure.size: [${w}, ${h}]. List anything still not said in unexplained, as short phrases. Only the door itself: never the light, shadows or reflections, the photo, or the wall, floor or casing round it.`,
     `Answer with this JSON object only, with no prose and no code fence:\n${JSON.stringify({ measure: { size: [0, 0], parts: [] }, refuse: null, unexplained: [] })}`,
   ].join("\n\n");
 }

@@ -49,7 +49,7 @@ Deno.test("Stage A: the known size, the straightened frame and the size to echo"
 
 Deno.test("V2's edge strips: where the door is in the photo, a butt hinge's knuckle as its pivot, Stage B told the same", () => {
   // 2 in past each side of a 72 in door on a 1092 px photo: 1092 x 2 / 76 = 28.7 px a strip.
-  assertEquals([DOOR_LOOK_PROMPT_ID, DOOR_EDGE_PAD_IN, Math.round(doorEdgePadPx(1092, 72) * 10) / 10, doorEdgePadPx(1092, 72, 0)], ["DOOR_LOOK_V4", 2, 28.7, 0]);
+  assertEquals([DOOR_LOOK_PROMPT_ID, DOOR_EDGE_PAD_IN, Math.round(doorEdgePadPx(1092, 72) * 10) / 10, doorEdgePadPx(1092, 72, 0)], ["DOOR_LOOK_V5", 2, 28.7, 0]);
   const strips = "The door's leaves fill it across from x = 29 to x = 1063, and down from the top of the leaves (the top edge) to the top of the threshold (the bottom edge). " +
     "The strip 29 pixels wide down each side is just past the leaves' outer edges: the jamb or casing, and the knuckles of butt hinges, which sit on the edge.";
   assert(PROMPT.includes(strips));
@@ -75,12 +75,22 @@ Deno.test("V2's edge strips: where the door is in the photo, a butt hinge's knuc
   assert(b.includes(strips));
 });
 
-Deno.test("Stage A: every base by its drawn look, the slab and the 6-panel door drafted as basic", () => {
+Deno.test("Stage A: every base by its drawn look, the slab and any raised-panel door drafted as basic", () => {
   for (const b of DOOR_LOOK_BASES) assert(PROMPT.includes(`\n- ${b}: `), b);
   assert(PROMPT.includes("zbrace: plank plus one diagonal brace across the whole leaf, laid over the mid rail, rising from the hinge side."));
   assert(PROMPT.includes("dutch: a trim frame with a mid rail and a small dark louvred vent in the lower panel. A door split to open top and bottom is a split part, not dutch."));
   assert(PROMPT.includes("A plain flat door with no frame showing is basic with field smooth."));
-  assert(PROMPT.includes('A door of six raised panels (a 6-panel door) is basic with field smooth, its six panels given as six raised parts, and "6-panel" in unexplained; never refuse a 6-panel door.'));
+  // V5: any count of raised panels, not only six (a white 7-panel door was read as "6-panel style", 10-29).
+  assert(PROMPT.includes('A door of raised panels (any number: a 4-panel, 6-panel or 7-panel door) is basic with field smooth, each panel given as a raised part, and its count ("6-panel", "7-panel") in unexplained; never refuse a raised-panel door.'));
+  assertFalse(PROMPT.includes("a 6-panel door)."), "the unexplained examples no longer name a panel door");
+});
+
+Deno.test("V5: unexplained names only the door, never the light or the photo, in Stage A and Stage B alike", () => {
+  const only = "Only the door itself: never the light, shadows or reflections, the photo, or the wall, floor or casing round it.";
+  const nine = PROMPT.slice(PROMPT.indexOf("9. OBSERVED and UNEXPLAINED."), PROMPT.indexOf("10. REFUSE."));
+  assert(nine.includes(`(an arched top, a knob, leaves of different widths). ${only} Leave it empty when everything is said.`));
+  const b = doorStageBPrompt({ photo: [700, 1556], widthIn: 36, heightIn: 80, spec: { v: 1, base: "basic", src: { leaves: 1, hinge: "left" } } as DoorLook, missing: [], unexplained: ["an arched top"] });
+  assert(b.includes(`List anything still not said in unexplained, as short phrases. ${only}`));
 });
 
 Deno.test("Stage A: REFUSE lists the plan's five words, and a 6-panel door is not unsupported", () => {

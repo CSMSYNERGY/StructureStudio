@@ -73,6 +73,8 @@ const HAND = [
   { v: 1, base: "classic", src: { leaves: 1, hinge: "left" }, panels: [{ fill: "x", braceWIn: 4 }, { fill: "diamond" }] },
   { v: 1, base: "american", src: { leaves: 2, hinge: "left" }, frame: { rails: [0.3, 0.6] }, panels: [{ fill: "pickets", count: 4 }, { fill: "raised" }, { fill: "lite", rows: 2, cols: 3 }] },
   { v: 1, base: "dutch", src: { leaves: 1, hinge: "right" }, parts: [{ t: "vent", u0: 0.3, v0: 0.1, u1: 0.7, v1: 0.3 }, { t: "split", v: 0.5 }] },
+  // A look's own tone: a painted door's paint (2026-10-30), a wood door's tone, and a bad hex, which drops.
+  { ...SIX, paint: { hex: "#F2F1EA" } }, { ...ZB, wood: { hex: "#b5774a" } }, { ...STEEL, paint: { hex: "white" } },
   // What the cleaner clamps, drops or refuses.
   { v: "1", base: " Plank ", src: { leaves: "2", hinge: "RIGHT" }, frame: { fIn: 99, railHIn: "0.2", rails: [0.9, 0.1, 0.5, 0.52, 0.7] }, junk: 1 },
   { v: 1, base: "plank", src: { leaves: 1, hinge: "left" }, panels: [{ fill: "x" }, { fill: "z", zFrom: "strike", count: 3 }, { fill: "bogus" }, { fill: "lite" }] },

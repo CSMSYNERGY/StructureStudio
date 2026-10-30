@@ -8,6 +8,7 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   type DoorCloseUps,
   type RGB,
+  type XY,
   type DoorConsensus,
   type DoorConsensusResult,
   type DoorMeasureCtx,
@@ -419,4 +420,27 @@ Deno.test("a trim look's field: boards become grooves only when the reads settle
   assertEquals(dir(["v", "v", "grooved"]), "grooved");
   // A three-way split keeps its tie-break (the first read): a smooth 6-panel door stays smooth.
   assertEquals(dir(["smooth", "v", "grooved"]), "smooth");
+});
+
+// The white 7-panel door (ai_door_calls 000f707b, 2026-10-29) was read "painted" and drew in the siding's
+// grey: a painted door's own colour was never kept (Ahsan 2026-10-30: keep it, as wood keeps its tone).
+Deno.test("a painted or metal door keeps its own paint (spec.paint), a wood door its tone (spec.wood): the median of a quorum's samples", () => {
+  const door = singleDoor(), d = inches(36, 80), at = (door.read.measure as Rec).colorAt as Rec;
+  // Each read samples the infill an inch further down the same board: three whites a little apart.
+  const whites: [XY, RGB][] = [[d.p(12, 20), [242, 241, 234]], [d.p(12, 21), [236, 233, 226]], [d.p(12, 22), [247, 246, 240]]];
+  const colorAt = (p: XY): RGB | null => whites.find(([q]) => Math.hypot(q[0] - p[0], q[1] - p[1]) < 4)?.[1] ?? null;
+  const ctx: DoorMeasureCtx = { ...door.ctx, colorAt };
+  const reads = (...surfaces: (string | null)[]) =>
+    surfaces.map((surface, i) => ({ ...withMeasure(door.read, { colorAt: { ...at, infill: whites[i][0] } }), ...(surface ? { surface } : {}) }));
+  const tone = (rs: Rec[]) => {
+    const s = settled(cons(stageADoorLook(rs, ctx))).spec;
+    return [s.paint, s.wood, s.colors];
+  };
+  const median = { hex: "#F2F1EA" }; // 242 241 234: each channel's middle value
+  assertEquals(tone(reads("painted", "painted", "painted")), [median, undefined, { infill: "door" }]);
+  assertEquals(tone(reads("metal", "painted", "metal")), [median, undefined, { infill: "door" }], "painted and metal both keep their paint");
+  assertEquals(tone(reads("wood", "wood", "wood")), [undefined, median, { infill: "door" }], "wood keeps its tone as before");
+  assertEquals(tone(reads("painted", "painted", "wood"))[0], { hex: "#EFEDE6" }, "the two painted reads' median (an even count: the mean of the middle two)");
+  assertEquals(tone(reads("painted", "wood", null)).slice(0, 2), [undefined, undefined], "no quorum either way: neither");
+  assertEquals(tone(reads(null, null, null)).slice(0, 2), [undefined, undefined], "a read that names no surface keeps none (V3)");
 });

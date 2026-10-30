@@ -387,6 +387,21 @@ const DOOR_GAP_NO_RAIL = /\bno\s+(mid(dle)?|cent(er|re)|cross)?\s*rails?\b/i;
 const DOOR_GAP_LOCK = /\b(lock|deadbolt|thumb[- ]?turn|key\s*(cylinder|hole))\b/i;
 const DOOR_GAP_PULL = /\b(bar|long|tall|full[- ]height|ladder|vertical)\s+(bar\s+)?pull\b/i;
 const DOOR_GAP_GRAIN = /\b(wood\s*)?grain\b/i;
+// The 7-panel door's press (ai_door_calls 000f707b, 2026-10-29) said we could not draw four things we drew
+// or that are no part of a door. Each rule is narrow on purpose: a slide latch, a barrel bolt, a kick plate
+// and shadow box moulding are real gaps and stay gaps.
+// The photo's light, not the door: "sunlight and shadow across the right half of the door".
+const DOOR_GAP_PHOTO = /\b(sun(light|lit)?|glare|reflections?|lighting)\b|\bshadows?\s+(across|on|over)\b/i;
+// The latch and strike plates on the edge, which come with a lever or knob latch: "brass fittings on latch
+// edge", "gold plates on the right edge near the handle".
+const DOOR_GAP_EDGE_PLATES = /\b(strike|latch)[- ]?(face)?plates?\b|\b(plates?|fittings?)\b[^,]*\b(latch\s+edge|edge\s+near\s+the\s+handle)\b/i;
+// A phrase that names nothing but raised panels, on a door drawn with them: "7-panel raised-panel door",
+// "wide horizontal middle panel" (never "arched top panels" or "flat recessed shaker panels").
+const DOOR_GAP_PANEL_ONLY = new Set(["raised", "horizontal", "vertical", "bevelled", "beveled"]);
+const panelOnly = (s: string) => /\bpanel/i.test(s) && gapThings(s).every((t) => DOOR_GAP_PANEL_ONLY.has(t));
+// Only an absence, which draws as nothing: "no handle visible" (never NEGATED, which would also take
+// "no visible astragal strip, leaves butt at the meeting line").
+const DOOR_GAP_ABSENT = /^\s*no\s+(visible\s+)?\w+(\s+visible)?\s*$/i;
 function openGaps(phrases: string[], spec: DoorLook): string[] {
   const have = doorLookFeatures(spec), gussets = have.has("board_gusset") || have.has("diamond");
   const rails = isRec(spec.frame) && Array.isArray(spec.frame.rails) && spec.frame.rails.length > 0;
@@ -401,16 +416,23 @@ function openGaps(phrases: string[], spec: DoorLook): string[] {
     (noRails && DOOR_GAP_NO_RAIL.test(s)) ||
     (isRec(spec.lock) && DOOR_GAP_LOCK.test(s)) ||
     (handle.type === "pull" && typeof handle.lenIn === "number" && DOOR_GAP_PULL.test(s)) ||
-    (isRec(spec.wood) && DOOR_GAP_GRAIN.test(s));
+    (isRec(spec.wood) && DOOR_GAP_GRAIN.test(s)) ||
+    (handle.type !== "none" && DOOR_GAP_EDGE_PLATES.test(s)) ||
+    (have.has("raised") && panelOnly(s)) ||
+    DOOR_GAP_PHOTO.test(s) || DOOR_GAP_ABSENT.test(s);
   return phrases.filter((s) => !DOOR_SIX_PANEL.test(s) && !(gussets && DOOR_GUSSET.test(s)) && !(rails && railSpot(s)) && !drawn(s));
 }
 
 // What Stage B would be asked about: the mismatches, and the unexplained phrases that are not a gap we
 // already know cannot be closed. `knownGaps` are filed whatever Stage B says.
 export type DoorStageBWanted = { needed: boolean; missing: string[]; unexplained: string[]; knownGaps: string[] };
+// A door of raised panels is a known gap: the draft's own count names it ("7-panel"), whatever the reads
+// called it (a 7-panel door's reads said "6-panel style"). With fewer than two raised parts, the reads'
+// words still decide.
 export function doorStageBWanted(c: Pick<DoorConsensus, "observed" | "unexplained">, spec: DoorLook): DoorStageBWanted {
   const said = [...c.observed, ...c.unexplained];
-  const knownGaps = said.some((s) => DOOR_SIX_PANEL.test(s)) ? [DOOR_SIX_PANEL_GAP] : [];
+  const raised = (Array.isArray(spec.parts) ? spec.parts : []).filter((p) => isRec(p) && p.t === "raised").length;
+  const knownGaps = raised >= 2 ? [`${raised}-panel`] : said.some((s) => DOOR_SIX_PANEL.test(s)) ? [DOOR_SIX_PANEL_GAP] : [];
   const missing = doorObservedMismatches(c.observed, spec);
   const unexplained = doorGapPhrases(openGaps(doorPhrases(c.unexplained, 40), spec));
   return { needed: missing.length > 0 || unexplained.length > 0, missing, unexplained, knownGaps };
@@ -438,14 +460,18 @@ export function finishDoorDraft(c: DoorConsensus, spec: DoorLook, warnings: read
     out = kept.spec;
     stageBAdded = kept.added;
     for (const w of kept.warnings) pushWarning(ws, w);
-    // Stage B's own list is the latest word on what our vocabulary cannot say.
+    // Stage B's own list is the latest word on what our vocabulary cannot say, but it may only narrow
+    // Stage A's: an unvoted answer adds no new gap (the 7-panel door's "sunlight and shadow across the
+    // right half"), so a phrase stays only when it names a thing it was asked about: one of Stage A's open
+    // gaps, or a thing the reads saw that the draft does not draw.
     if (isRec(stageB.answer) && Array.isArray(stageB.answer.unexplained)) {
-      unexplained = doorGapPhrases(openGaps(doorPhrases(stageB.answer.unexplained, 40), out));
+      const asked = new Set([...wanted.missing, ...wanted.unexplained].flatMap(gapThings));
+      unexplained = doorGapPhrases(openGaps(doorPhrases(stageB.answer.unexplained, 40), out).filter((s) => gapThings(s).some((t) => asked.has(t))));
     }
   } else if (wanted.needed) pushWarning(ws, pressWarning("stageb_skipped"));
   const mismatches = doorObservedMismatches(c.observed, out);
   if (mismatches.length) pushWarning(ws, mismatchWarning(mismatches));
-  if (wanted.knownGaps.includes(DOOR_SIX_PANEL_GAP)) pushWarning(ws, pressWarning("six_panel"));
+  if (wanted.knownGaps.length) pushWarning(ws, pressWarning("six_panel"));
   if (unexplained.length) pushWarning(ws, gapWarning(unexplained));
   // Room for the known gaps too, so every phrase the warning names is filed.
   const vocabGaps = doorPhrases([...wanted.knownGaps, ...unexplained], DOOR_MAX_GAP_ROWS + wanted.knownGaps.length);
@@ -749,7 +775,10 @@ export async function runDoorDraft(deps: DoorDeps, input: DoorDraftInput): Promi
   result.baseSplit = c.split.base;
   result.observed = c.observed;
   result.unexplained = c.unexplained;
-  result.consensus = { side: c.side, sideFrom: c.sideFrom, leaves: c.leaves, meetX: c.meetX, closeUpAt: c.closeUpAt, used: c.used, dropped: c.dropped, best: c.best, split: c.split };
+  // `tones`: each used read's infill sample on a wood or painted surface (null on none), so a door drawn in
+  // the wrong colour can be checked from the ledger without the photo.
+  result.consensus = { side: c.side, sideFrom: c.sideFrom, leaves: c.leaves, meetX: c.meetX, closeUpAt: c.closeUpAt, used: c.used, dropped: c.dropped, best: c.best, split: c.split,
+    tones: c.aligned.map((d) => d.wood ?? d.paint) };
 
   // ── CLOSE-UPS: hinges first, then the handle, then the meeting edge ──────────────────────────
   // Each needs Stage A's points, so they come after it. Each starts only with 45 s of the work left

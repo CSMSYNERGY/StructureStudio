@@ -43,7 +43,8 @@ export const DOOR_HINGE_TYPES = ["tstrap", "strap", "scroll", "butt", "hidden", 
 export const DOOR_HINGELESS: readonly string[] = ["hidden", "pivot"];
 // A lock of its own beside the handle: a thumb-turn, or a key cylinder.
 export const DOOR_LOCK_TYPES = ["thumbturn", "keyed"] as const;
-// What the door's face is (V4): wood gets its own tone and a grain (spec.wood).
+// What the door's face is (V4): wood gets its own tone and a grain (spec.wood), paint or metal its own
+// colour (spec.paint, 2026-10-30).
 export const DOOR_SURFACES = ["wood", "painted", "metal"] as const;
 export const DOOR_HANDLE_TYPES = ["barn", "lever", "pull", "ring", "thumb", "none"] as const;
 export const DOOR_FINISHES = ["black", "galv", "bronze", "custom"] as const;
@@ -226,6 +227,10 @@ export const DOOR_LOOK_FIELDS: DoorFieldNode = {
     // P2 draws it with a grain, wherever the colour roles say "door", until the door has a colour picked
     // of its own (a builder's or a shopper's): that colour wins, as it does on every look.
     wood: { k: "obj", keys: { hex: { k: "hex", req: true } } },
+    // A painted or metal door (V4's surface "painted" or "metal"): its paint, sampled from the photo the same
+    // way. P2 paints it, with no grain, wherever the roles say "door", until a colour is picked, as for wood
+    // (Ahsan 2026-10-30: a white 7-panel door had drawn in the building's siding grey).
+    paint: { k: "obj", keys: { hex: { k: "hex", req: true } } },
   },
 };
 
@@ -689,6 +694,7 @@ export type DoorReadDraft = {
   parts: DraftPart[];
   colors: { infill?: string; frame?: string; members?: string } | null;
   wood: RGB | null; // the infill's own colour, on a read that calls the surface wood
+  paint: RGB | null; // the infill's own colour, on a read that calls the surface painted or metal
   finish: "black" | "galv" | "bronze" | null;
   handleFinish: "black" | "galv" | "bronze" | null; // the snap at measure.handle
   stageA: { hingeType: string | null; handleType: string | null; meetType: string | null };
@@ -1054,16 +1060,17 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   }
 
   // Colour roles and the hardware's finish, from the photo's own patches.
-  let colors: DoorReadDraft["colors"] = null, finish: DoorReadDraft["finish"] = null, wood: RGB | null = null;
+  let colors: DoorReadDraft["colors"] = null, finish: DoorReadDraft["finish"] = null, wood: RGB | null = null, paint: RGB | null = null;
   const colorAt = ctx.colorAt, at = m.colorAt;
   if (colorAt && isRec(at)) {
     const sample = (k: string) => (isXY(at[k]) ? colorAt(toPhoto(fr(at[k] as XY))) : null);
     const roles = colorRolesOf({ infill: sample("infill"), frame: sample("frame"), members: sample("members") });
     if (Object.keys(roles).length) colors = roles;
-    if (enumIn(read.surface, DOOR_SURFACES) === "wood") {
+    const surface = enumIn(read.surface, DOOR_SURFACES);
+    if (surface === "wood") {
       wood = sample("infill");
       if (wood && colors) colors = woodColorRoles(colors, { frame: sample("frame"), members: sample("members") });
-    }
+    } else if (surface) paint = sample("infill");
     const hw = sample("hardware");
     if (hw) finish = snapFinish(hw);
   }
@@ -1105,6 +1112,7 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     parts,
     colors,
     wood,
+    paint,
     finish,
     handleFinish,
     stageA: {
@@ -1177,8 +1185,9 @@ function samePart(a: DraftPart, b: DraftPart): boolean {
 }
 
 // ─── COLOURS ──────────────────────────────────────────────────────────────────────────────────────
-// The photo decides only which pick each part follows (does the brace match the frame or the boards?)
-// and which of three finishes the hardware is. Its own hex never becomes a colour.
+// The photo decides which pick each part follows (does the brace match the frame or the boards?) and
+// which of three finishes the hardware is. Its own hex becomes a colour only as the door's own tone
+// (spec.wood or spec.paint, from the infill's patch), and a colour picked for the door still wins.
 export const DOOR_SAME_PAINT = 60; // sRGB distance under which two patches are one paint (P7 tunes it)
 const rgbDist = (a: RGB, b: RGB) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 
@@ -1483,11 +1492,16 @@ export function consensusDoorLooks(results: DoorReadResult[], opts: DoorConsensu
     if (c) colors[role] = c;
   }
   if (Object.keys(colors).length) spec.colors = colors;
+  // A wood or a painted door's own colour: the median of the reads' samples, channel by channel, once a
+  // quorum of the reads calls the surface so. Wood wins: a door is one or the other.
+  const toneOf = (xs: RGB[]) => {
+    const ch = (i: number) => Math.round(median(xs.map((w) => w[i])));
+    return { hex: "#" + [ch(0), ch(1), ch(2)].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0")).join("").toUpperCase() };
+  };
   const woods = ds.map((d) => d.wood).filter((w): w is RGB => w !== null);
-  if (woods.length >= quorum) {
-    const ch = (i: number) => Math.round(median(woods.map((w) => w[i])));
-    spec.wood = { hex: "#" + [ch(0), ch(1), ch(2)].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0")).join("").toUpperCase() };
-  }
+  const paints = ds.map((d) => d.paint).filter((w): w is RGB => w !== null);
+  if (woods.length >= quorum) spec.wood = toneOf(woods);
+  else if (paints.length >= quorum) spec.paint = toneOf(paints);
 
   const b = ds[best];
   const [W, H] = opts.photo;
