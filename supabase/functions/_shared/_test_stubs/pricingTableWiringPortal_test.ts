@@ -156,10 +156,27 @@ Deno.test("leaving asks first while anything is unsent or in flight, or the edit
   const input = between(page, "const onEditInput = (e) => {", "\n  };", "onEditInput");
   assert(input.includes("draftRef.current = e.target.value;") && input.includes("if (d !== dirtyRef.current) { dirtyRef.current = d; setDraftDirty(d); }"));
   assert(page.includes("const unsent = counts.pending + counts.creating + counts.removing + (draftDirty ? 1 : 0);"), "the badge counts an open editor's changed text");
-  const back = between(page, "const toSheds = ssNavClick(() => {", "\n  });", "Back to Sheds");
-  assert(back.includes("commitEdit();") && back.includes("setLeaving(true);") && back.includes("flushNow();"));
-  // Hiding the tab sends what is waiting at once.
+  // Back to Sheds and Go to Options leave the same way: commit, send, wait. A box the editor's commit
+  // turned red keeps the page open; a click that cannot send first says so (Leave anyway), never
+  // silently.
+  const leaveTo = between(page, "const leaveTo = (sub) => ssNavClick(() => {", "\n  });", "leaveTo");
+  assert(leaveTo.includes("if (!commitEdit()) { focusGrid(); return; }"), "the editor's red box must keep the page open");
+  assert(leaveTo.includes("setLeaving({ to: sub, was: cur.fields });") && leaveTo.includes("flushNow();"));
+  assert(leaveTo.includes("if (cur.viewOnly || cur.stopped || cur.failures) { setStuck({ to: sub }); return; }"));
+  assert(page.includes(`const toSheds = leaveTo("sheds");`));
+  assert(page.includes(`onClick={leaveTo("options")}>Go to Options →</a>`), "Go to Options must send first too");
+  assert(!/ssNavClick\(\(\) => onNav\(/.test(page), "an in-app link out of the table that skips leaveTo");
+  // Pressing the link must not blur the editor first (the blur would commit it before the click).
+  assert(page.includes(`onMouseDown={holdEditor} onClick={toSheds}>← Back to Sheds</a>`) && page.includes(`onMouseDown={holdEditor} onClick={leaveTo("options")}>`));
+  // The wait: a box gone red since the click stays on screen; a failure, a stop or a 403 says so.
+  const wait = between(page, "useEffect(() => {\n    if (!leaving || !q) return;", "}, [leaving, q, counts]);", "the leaving effect");
+  assert(wait.includes("if (red) { setLeaving(null); fnRef.current.jumpRed(isNew); return; }"), wait);
+  assert(wait.includes("if (q.viewOnly || q.stopped || q.failures) { setLeaving(null); setStuck({ to: leaving.to }); return; }"), wait);
+  // Hiding the tab sends what is waiting at once, and so does any other way out of the page.
   assert(page.includes(`const onVis = () => { if (document.visibilityState === "hidden") fnRef.current.flushNow(); };`));
+  assert(page.includes("try { fnRef.current.flushNow(); } catch (_f) { /* best effort: the page is going */ }"), "the unmount flush");
+  // The editor's commit carries what the box showed when typing began (the queue's `seen` check).
+  assert(page.includes("seen: shownOf(cell.sizeId, f) };") && page.includes("commitText(ed.sizeId, ed.col, text, { seen: ed.seen })"));
 });
 
 Deno.test("the editor and the overlay keep every hook above any return, and PgRow takes primitive marks", () => {

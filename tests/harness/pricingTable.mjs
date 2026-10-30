@@ -48,9 +48,14 @@
 //      refuse is red at once and never sent; conflict/refusal answers each log one info row, counts
 //      only. A 500 goes amber then green (Retry now too); a hung main host goes through the side door;
 //      a lost answer resends as a duplicate; five failures stop saving with one info row, then Retry
-//      and Discard; a 403 makes the page view-only. ?as= and a view-only access map refuse every edit
-//      path; Real-Time Pricing locks prices only. The leave prompt fires for an editor holding changed
-//      text and for an unsent edit, and not once saved; Back to Sheds sends first.
+//      and Discard (a Discard whose call landed anyway reads the table again and says so; when that
+//      read fails the badge says it may have saved, with Reload); a 403 makes the page view-only.
+//      ?as= and a view-only access map refuse every edit path; Real-Time Pricing locks prices only.
+//      The leave prompt fires for an editor holding changed text and for an unsent edit, and not once
+//      saved; Back to Sheds sends first, and stays on a box that goes red (text refused, or the save
+//      changed elsewhere) or says why it stayed (saving stopped) with Leave anyway; Go to Options and
+//      the browser's Back send first too. "1 box needs you" unfolds a hidden size to reach its box. An
+//      answer that moves a box under the open editor turns what is then typed red, never sent.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails only if an arrow key re-renders a row
 //      or a commit re-renders more than the one it changed.
@@ -951,7 +956,7 @@ const state = (page) => page.evaluate(() => ({
   readout: (document.querySelector(".ss-pg-readout") || {}).textContent || "",
   status: [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "),
   editor: (() => { const i = document.querySelector(".ss-pg-ed"); return i ? { value: i.value, label: i.getAttribute("aria-label"), mode: i.inputMode, focused: document.activeElement === i } : null; })(),
-  editable: document.querySelector(".ss-pg").getAttribute("data-ss-pg-editable"),
+  editable: (document.querySelector(".ss-pg") || { getAttribute: () => null }).getAttribute("data-ss-pg-editable"),   // null: the table is gone
   actions: [...document.querySelectorAll(".ss-pg-bact")].map((b) => b.textContent),
 }));
 const waitBadge = (page, re, timeout = 12000) => page.waitForFunction((src) => new RegExp(src).test((document.querySelector(".ss-pg-badge") || {}).textContent || ""), re.source, { timeout }).then(() => true, () => false);
@@ -1256,7 +1261,7 @@ if (want("P")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, tableFor(OWN, cat));
   const barn = barnOf(F.table(OWN));
-  const { ctx, page, calls, errors, logs } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgBackoffMs: [150, 150, 150, 150] } }, { width: 1280, height: 860 });
+  const { ctx, page, calls, errors, logs, S: srv } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgBackoffMs: [150, 150, 150, 150] } }, { width: 1280, height: 860 });
   await waitGrid(page).catch(() => {});
   for (let i = 0; i < 5; i++) F.script.push({ status: 500 });
   let n0 = saveCalls(calls).length;
@@ -1279,6 +1284,32 @@ if (want("P")) {
   s = await state(page);
   ok("P: Discard these changes: the box shows what the server holds again, the badge is green, nothing more goes",
     (await look(page, barn[1].id, 1)).text === was && /^All changes saved/.test(s.badge) && saveCalls(calls).length - n0 === 5 && F.size(barn[1].id).base_price !== 4321, JSON.stringify(s));
+  // The call landed although every answer was lost: Discard reads the table again, the box shows what
+  // is on file, and the status line says part of what was discarded had saved.
+  const reads = () => calls.filter((c) => c.fn === "portal-settings" && c.action === "size_table").length;
+  for (let i = 0; i < 5; i++) F.script.push({ lose: true });
+  let r0 = reads();
+  await typeIn(page, barn[2].id, 1, "6161");
+  await waitBadge(page, /^Saving stopped/, 20000);
+  await page.locator(".ss-pg-bact", { hasText: "Discard these changes" }).click();
+  await waitBadge(page, /^All changes saved/, 10000);
+  s = await state(page);
+  ok("P: Discard after a call that landed anyway: the table is read again, the box shows $6,161 (what is on file), and the status line says so",
+    (await look(page, barn[2].id, 1)).text === "$6,161" && F.size(barn[2].id).base_price === 6161 && reads() === r0 + 1
+    && s.status === "Part of what you discarded had already saved. The table shows what's on file now.", JSON.stringify({ s, reads: reads() - r0 }));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 3000 }).catch(() => {});
+  // …and when that read fails too, the badge never says saved: Reload settles it.
+  for (let i = 0; i < 5; i++) F.script.push({ lose: true });
+  await typeIn(page, barn[3].id, 1, "6262");
+  await waitBadge(page, /^Saving stopped/, 20000);
+  srv.sizeTableFailures = 1;
+  r0 = reads();
+  await page.locator(".ss-pg-bact", { hasText: "Discard these changes" }).click();
+  const unsure = await waitBadge(page, /^Discarded, but the last try may have saved$/, 8000);
+  s = await state(page);
+  ok("P: …when that read fails: 'Discarded, but the last try may have saved', with Reload", unsure && reads() === r0 + 1 && s.actions.includes("Reload"), JSON.stringify(s));
+  await page.locator(".ss-pg-bact", { hasText: "Reload" }).click({ timeout: 3000 }).catch(() => {});
+  ok("P: …and Reload shows what is on file", await waitBadge(page, /^All changes saved/) && (await look(page, barn[3].id, 1)).text === "$6,262" && F.size(barn[3].id).base_price === 6262);
   ok("P: no page errors (stopped)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
@@ -1402,6 +1433,142 @@ if (want("P")) {
   ok("P: Back to Sheds sends the unsent edit at once, waits for it, then leaves",
     new URL(page.url()).pathname === "/settings/sheds" && sc.length === 1 && sc[0].at - t0 < 500 && F.size(barn[0].id).base_price === 6060, `${page.url()} ${sc.map((x) => x.at - t0)}`);
   ok("P: no page errors (Back)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// Leaving never drops a box that didn't save unseen (review 2026-10-31): Back with text the rules
+// refuse stays on that box; Back whose save comes back changed elsewhere stays and jumps to it; Back
+// while saving is stopped says the page stayed, and Leave anyway leaves.
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const LOFT = keyCol(cat, "loft");
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgBackoffMs: [150, 150, 150, 150] } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const here = () => new URL(page.url()).pathname === "/settings/sheds-table";
+  // Each step starts on the table: a page that left wrongly is opened again, so the next step still runs.
+  const reopen = async () => { if (!here()) { await page.goto(`${BASE}/settings/sheds-table`); await waitGrid(page).catch(() => {}); } };
+  await page.locator(sel(barn[0].id, LOFT)).click();
+  await page.keyboard.type("abc");
+  await page.locator(".ss-pg-back").click();
+  await page.waitForTimeout(500);
+  let s = await state(page);
+  ok("P: Back with 'abc' in the editor stays, on that box, red, with the reason on the status line; nothing is sent",
+    here() && s.readout === `Loft (sq ft) · ${named(barn[0])}` && /ss-pg-m-r/.test((await look(page, barn[0].id, LOFT)).cls)
+    && s.status === `${named(barn[0])} · Loft (sq ft): “abc” wasn't saved. Whole numbers only, 0 or more.` && saveCalls(calls).length === 0, JSON.stringify({ url: page.url(), s }));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 3000 }).catch(() => {});
+  await reopen();
+  F.script.push({ before: (f) => f.poke(barn[1].id, { price: 4950 }) });
+  await typeIn(page, barn[1].id, 1, "4800");
+  await page.locator(".ss-pg-back").click();
+  await waitBadge(page, /^1 box needs you$/);
+  await page.waitForTimeout(300);
+  s = await state(page);
+  ok("P: Back whose save comes back changed elsewhere stays, jumps to that box, and the status line gives both numbers",
+    here() && s.readout === `Price · ${named(barn[1])}` && saveCalls(calls).length === 1
+    && s.status === `${named(barn[1])} · Price: changed elsewhere to $4,950 while you typed $4,800. Type it again if yours is right.`, JSON.stringify({ url: page.url(), s }));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 3000 }).catch(() => {});
+  await reopen();
+  for (let i = 0; i < 5; i++) F.script.push({ status: 500 });
+  await typeIn(page, barn[2].id, 1, "1234");
+  await waitBadge(page, /^Saving stopped/, 20000);
+  await page.locator(".ss-pg-back").click();
+  await page.waitForTimeout(300);
+  s = await state(page);
+  const btns = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-status button")].map((b) => b.textContent));
+  ok("P: Back while saving is stopped stays and says so, with Leave anyway (the click is never swallowed)",
+    here() && s.status === "1 change isn't saved yet, so you're still on this page." && btns.join() === "Leave anyway,Dismiss", JSON.stringify({ s, btns }));
+  await page.locator(".ss-pg-status button", { hasText: "Leave anyway" }).click({ timeout: 3000 }).catch(() => {});
+  await page.waitForURL(/\/settings\/sheds$/, { timeout: 5000 }).catch(() => {});
+  ok("P: …and Leave anyway leaves", new URL(page.url()).pathname === "/settings/sheds", page.url());
+  ok("P: no page errors (leaving stays)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// Go to Options (shown when there are no option columns, where Price and Offered still save) sends
+// first, as Back does; leaving any other way inside the app (the browser's Back) sends what waits on
+// the way out.
+for (const how of want("P") ? ["Go to Options", "the browser's Back"] : []) {
+  const cat = catalogFor(OWN, { cols: "none" });
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.locator(sel(barn[0].id, 1)).click();
+  await page.keyboard.type("7777");
+  let dest;
+  if (how === "Go to Options") {
+    await page.locator(".ss-pg-optbox a", { hasText: "Go to Options" }).click();
+    dest = "/settings/options";
+  } else {
+    await page.keyboard.press("Enter");
+    await page.evaluate(() => { window.history.pushState({}, "", "/settings/sheds"); window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state })); });
+    dest = "/settings/sheds";
+  }
+  await page.waitForURL((u) => u.pathname === dest, { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(800);
+  const sc = saveCalls(calls);
+  ok(`P: leaving by ${how} with a price just typed sends it on the way (one call), and the table is gone`,
+    new URL(page.url()).pathname === dest && sc.length === 1 && JSON.stringify(sc[0].body.sizes[0].to) === '{"price":7777}' && F.size(barn[0].id).base_price === 7777
+    && (await page.locator(".ss-pg-grid").count()) === 0, JSON.stringify({ url: page.url(), saves: sc.map((x) => x.body.sizes) }));
+  ok(`P: no page errors (${how})`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// "1 box needs you" reaches a red box that is folded away: on a hidden size with "Show hidden sizes"
+// off, it unfolds it first.
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const LOFT = keyCol(cat, "loft");
+  const hid = barn.find((z) => z.base_price == null || !z.active);
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await typeIn(page, hid.id, LOFT, "abc");
+  await page.locator(".ss-pg-tog input").uncheck();
+  await page.waitForTimeout(200);
+  const folded = (await page.locator(`tr[data-s="${hid.id}"]`).count()) === 0;
+  await page.locator(".ss-pg-badge-btn").click();
+  await page.waitForTimeout(300);
+  const s = await state(page);
+  ok("P: '1 box needs you' unfolds a hidden size to reach its red box, and the status line says why",
+    folded && (await page.locator(".ss-pg-tog input").isChecked()) && s.readout === `Loft (sq ft) · ${named(hid)}`
+    && s.status === `${named(hid)} · Loft (sq ft): “abc” wasn't saved. Whole numbers only, 0 or more.`, JSON.stringify({ folded, s }));
+  ok("P: no page errors (red box folded away)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// The editor open while an answer moves its box: Offered goes out, a colleague's price lands first,
+// and the conflict on Offered brings that price in under the editor. What is then typed was typed
+// against the old price: it goes red with both numbers and is never sent; the colleague's stands.
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const z = barnOf(F.table(OWN))[0];
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  F.script.push({ before: (f) => f.poke(z.id, { price: 4950 }) });
+  await page.locator(sel(z.id, 2)).click();
+  await page.keyboard.press("Space");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("Enter");
+  const opened = (await state(page)).editor;
+  const until = Date.now() + 10000;
+  while (Date.now() < until && !(saveCalls(calls).length >= 2 && /^All changes saved/.test((await state(page)).badge))) await sleep(60);
+  const under = (await look(page, z.id, 1)).text;
+  await page.keyboard.press("Control+a");
+  await page.keyboard.type("5000");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(1300);
+  const s = await state(page);
+  const c = await look(page, z.id, 1);
+  ok("P: the editor open while an answer brought a colleague's price: what was typed goes red with both numbers, is never sent, and the colleague's price stands",
+    !!opened && opened.value === String(z.base_price) && under === "$4,950" && saveCalls(calls).length === 2 && F.size(z.id).base_price === 4950 && F.size(z.id).active === false
+    && c.text === "$4,950" && /ss-pg-m-c/.test(c.cls) && s.readout === `Price · ${named(z)}`
+    && s.status === `${named(z)} · Price: changed elsewhere to $4,950 while you typed $5,000. Type it again if yours is right.`, JSON.stringify({ opened, under, s, c, saves: saveCalls(calls).map((x) => x.body.sizes) }));
+  ok("P: no page errors (editor open under an answer)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 

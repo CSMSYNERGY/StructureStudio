@@ -10609,7 +10609,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const [tip, setTip] = useState(null);            // a one-off line under the toolbar (undo, a locked price)
   const [retryAt, setRetryAt] = useState(null);    // when a failed call goes again (the amber badge counts down)
   const [, setTick] = useState(0);                 // redraws that count once a second
-  const [leaving, setLeaving] = useState(false);   // Back to Sheds is waiting for the queue to empty
+  const [leaving, setLeaving] = useState(null);    // { to, was }: Back to Sheds or Go to Options waits for the queue to empty
+  const [stuck, setStuck] = useState(null);        // { to }: that wait was called off (stopped, retrying, view only)
   const [savedAt, setSavedAt] = useState(null);    // when the last save was answered (the green badge)
   const boxRef = useRef(null);
   const gridRef = useRef(null);
@@ -10802,14 +10803,24 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     return () => clearInterval(t);
   }, [retryAt]);
 
-  // Back to Sheds waits for the queue to empty (plan 3.2: it flushes first). A failure or a stop
-  // calls the wait off, so the badge can say what happened; a view-only page has nothing left to send.
+  // Leaving (Back to Sheds, Go to Options) waits for the queue to empty (plan 3.2: it flushes
+  // first). A box that went red since the click calls the wait off and the cursor goes to it, so the
+  // builder reads what didn't save before going anywhere (plan 1, 3.14): `was` is the queue's boxes
+  // at the click, and a red box is new when its mark is not the one it had then. A transport
+  // failure, a stop or a 403 calls the wait off too, and the status line says the page stayed, with
+  // Leave anyway (`stuck`); the click is never swallowed and nothing unsent is dropped unseen.
   useEffect(() => {
     if (!leaving || !q) return;
-    if (q.viewOnly) { onNav("sheds"); return; }
-    if (q.stopped || q.failures) { setLeaving(false); return; }
-    if (!counts.pending && !counts.inflight && !counts.creating && !counts.removing && !q.flight) onNav("sheds");
+    const isNew = (id, f, x) => { const p = leaving.was[id] && leaving.was[id][f]; return !p || p.error !== x.error; };
+    const red = Object.keys(q.fields).some((id) => Object.keys(q.fields[id]).some((f) => q.fields[id][f].error && isNew(id, f, q.fields[id][f])));
+    if (red) { setLeaving(null); fnRef.current.jumpRed(isNew); return; }
+    if (q.viewOnly || q.stopped || q.failures) { setLeaving(null); setStuck({ to: leaving.to }); return; }
+    if (!counts.pending && !counts.inflight && !counts.creating && !counts.removing && !q.flight) onNav(leaving.to);
   }, [leaving, q, counts]);
+  // "You're still on this page" goes away once nothing is left unsent.
+  useEffect(() => {
+    if (stuck && !(counts.pending + counts.inflight + counts.creating + counts.removing)) setStuck(null);
+  }, [stuck, counts]);
 
   // A saved box flashes green for 600 ms (plan 3.13), on the <td> itself, so no row renders for it.
   React.useLayoutEffect(() => {
@@ -10832,7 +10843,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // LEAVING THE TAB (plan 4.9): the browser asks first while anything is unsent or in flight, or the
   // editor holds text that differs from its box. There is no keepalive send (the invoke wrapper has
   // none, and a request cut off by leaving is an abort); Phase 4's local backup is the safety net.
-  // Hiding the tab sends what is waiting at once (plan 4.6).
+  // Hiding the tab sends what is waiting at once (plan 4.6), and so does leaving the page inside
+  // the app by any way that skips leaveTo (the browser's Back, an account change): its answer is
+  // never read, and the server's checks make it safe.
   useEffect(() => {
     aliveRef.current = true;
     const onLeave = (e) => {
@@ -10848,6 +10861,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("mouseup", onUp);
     return () => {
+      try { fnRef.current.flushNow(); } catch (_f) { /* best effort: the page is going */ }
       aliveRef.current = false;
       clearTimeout(retryTimerRef.current);
       window.removeEventListener("beforeunload", onLeave);
@@ -11022,10 +11036,23 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const st = apply({ type: "resume" });
     if (st.flight) run(st.flight); else sendNow();
   };
+  // Discard, then read the table again when the dropped call may have landed (q.unsure): the boxes
+  // show what is on file, not what was last confirmed. If the read fails too, the badge keeps saying
+  // so, with Reload.
   const discard = () => {
     clearTimeout(retryTimerRef.current);
     setRetryAt(null);
-    apply({ type: "discard" });
+    const st = apply({ type: "discard" });
+    if (st.unsure) reread();
+  };
+  // A fresh read into the queue's refresh rule: red boxes and anything typed meanwhile are kept.
+  const reread = async () => {
+    const my = seqRef.current, okAt = qRef.current ? qRef.current.oks : 0;
+    const r = await ssPgFetch(target, clientId);
+    if (!aliveRef.current || my !== seqRef.current || !r.ok) return;
+    const m = ssPgModel(r.cat, r.table);
+    if (m.guard) return;
+    apply({ type: "refresh", okAt, sizes: ssPgServerSizes(m) });
   };
 
   // ── Editing (plan 3.5, 3.9, 3.10) ──
@@ -11035,15 +11062,17 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     return f === "price" ? (v == null ? "" : String(v)) : (Number(v) > 0 ? String(Number(v)) : "");
   };
   // Typed text into the queue: refused right here when it breaks the rules (red, never sent), else a
-  // commit. "A value equal to what is stored is always accepted" is the parsers' `stored`.
-  const commitText = (sizeId, col, text) => {
+  // commit. "A value equal to what is stored is always accepted" is the parsers' `stored`. `extra`
+  // is the editor's { seen }. False when the box is red after it (refused text, or the box moved
+  // under the open editor): the caller keeps the cursor there.
+  const commitText = (sizeId, col, text, extra = null) => {
     const f = fieldOf(col);
     const s = qRef.current && qRef.current.sizes[sizeId];
     if (!f || !s || f === "active") return true;
     const p = f === "price" ? ssPgParsePrice(text, ssPgVal(s, f)) : ssPgParseQty(text, ssPgVal(s, f));
     if (!p.ok) { apply({ type: "invalid", sizeId, f, typed: text, reason: p.error, at: Date.now() }); return false; }
-    apply({ type: "commit", sizeId, f, value: p.value, at: Date.now() });
-    return true;
+    const st = apply({ type: "commit", sizeId, f, value: p.value, at: Date.now(), ...(extra || {}) });
+    return !(st.fields[sizeId] && st.fields[sizeId][f] && st.fields[sizeId][f].error);
   };
   const startEdit = (cell, key) => {
     if (!cell || !canEditNow()) return;
@@ -11054,7 +11083,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!f || !qRef.current.sizes[cell.sizeId]) return;
     const text0 = editText(cell.sizeId, f);
     const init = key != null ? key : text0;
-    editRef.current = { sizeId: cell.sizeId, col: cell.col, text0, replace: key != null };
+    // `seen`: the value the builder is typing over, for the queue's check that nothing moved it
+    // while the editor was open.
+    editRef.current = { sizeId: cell.sizeId, col: cell.col, text0, replace: key != null, seen: shownOf(cell.sizeId, f) };
     draftRef.current = init;
     dirtyRef.current = init !== text0;
     setDraftDirty(dirtyRef.current);
@@ -11072,13 +11103,14 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     setEditing(null);
   };
   // Close it and put what it holds into the queue. Opened in place and left as it was: nothing.
-  // False when the text was refused here (the box is red, nothing was sent).
+  // False when the box is red after it (the text was refused here, or the box moved while the editor
+  // was open); nothing was sent.
   const commitEdit = () => {
     const ed = editRef.current;
     if (!ed) return true;
     const text = draftRef.current;
     closeEdit();
-    return ed.replace || text !== ed.text0 ? commitText(ed.sizeId, ed.col, text) : true;
+    return ed.replace || text !== ed.text0 ? commitText(ed.sizeId, ed.col, text, { seen: ed.seen }) : true;
   };
   const toggleOffered = (cell) => {
     if (!canEditNow() || !qRef.current.sizes[cell.sizeId]) return;
@@ -11195,23 +11227,29 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     setShowHidden(on);
     try { localStorage.setItem(SS_PG_SHOW_HIDDEN_KEY, on ? "1" : "0"); } catch (_e) { /* not remembered */ }
   };
-  // "3 boxes need you" jumps to the next red box, in reading order, after the active one.
-  const jumpRed = () => {
+  // "3 boxes need you" jumps to the next red box, in reading order, after the active one. The badge
+  // counts every red box, so this looks in every size, folded ones too: a red box on a hidden size
+  // with "Show hidden sizes" off, or in the collapsed Hidden styles section, is unfolded first.
+  // `keep(id, f, x)` narrows which red boxes count (leaving: only those gone red since the click).
+  const jumpRed = (keep = null) => {
     const cur = qRef.current;
-    if (!cur) return;
+    if (!cur || !model) return;
+    const all = ssPgRows(model, { showHidden: true, hiddenStylesOpen: true }).filter((r) => r.kind === "size");
     const reds = [];
-    order.forEach((id, i) => {
-      const fs = cur.fields[id];
+    all.forEach((r, i) => {
+      const fs = cur.fields[r.id];
       if (!fs) return;
-      Object.keys(fs).forEach((f) => { const c = colOf(f); if (fs[f].error && c != null) reds.push({ i, sizeId: id, col: c }); });
+      Object.keys(fs).forEach((f) => { const c = colOf(f); if (fs[f].error && c != null && (!keep || keep(r.id, f, fs[f]))) reds.push({ i, r, col: c }); });
     });
     if (!reds.length) return;
     reds.sort((x, y) => x.i - y.i || x.col - y.col);
     const a = activeRef.current;
-    const ai = a ? order.indexOf(a.sizeId) : -1;
-    const next = reds.find((r) => r.i > ai || (r.i === ai && r.col > a.col)) || reds[0];
+    const ai = a ? all.findIndex((r) => r.id === a.sizeId) : -1;
+    const next = reds.find((x) => x.i > ai || (x.i === ai && x.col > a.col)) || reds[0];
+    if (next.r.size.hidden && !showHidden) toggleShowHidden(true);
+    if (!next.r.style.active && !hiddenStylesOpen) setHiddenStylesOpen(true);
     focusGrid();
-    moveTo({ sizeId: next.sizeId, col: next.col });
+    moveTo({ sizeId: next.r.id, col: next.col });
   };
 
   // Places the overlay's pieces and the editor over the active cell and the range (plan 3.5): rows
@@ -11268,17 +11306,27 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       try { if (el) el.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (_s) { /* old browser */ }
     }
   };
-  fnRef.current = { place, sendNow, flushNow };
+  fnRef.current = { place, sendNow, flushNow, jumpRed };
 
-  // Back to Sheds commits the editor and sends what is waiting first, then leaves (the wait is the
-  // `leaving` effect). A middle click or a modified one is the browser's: a new tab, nothing waits.
-  const toSheds = ssNavClick(() => {
-    commitEdit();
+  // Back to Sheds and Go to Options leave the same way (plan 3.2, 4.6): the editor is committed and
+  // what waits is sent first; the page goes once the queue is empty (the `leaving` effect). It
+  // stays when the editor's text went red (the cursor is on that box, its reason on the status
+  // line), and when nothing can be sent first (saving stopped or retrying, or view-only after a
+  // 403): then the status line says the page stayed, with Leave anyway. A middle click or a
+  // modified one is the browser's: a new tab, nothing waits.
+  const leaveTo = (sub) => ssNavClick(() => {
+    setStuck(null);
+    if (!commitEdit()) { focusGrid(); return; }
     const cur = qRef.current, c = ssPgCount(cur);
-    if (!cur || cur.viewOnly || !(c.pending + c.inflight + c.creating + c.removing)) { onNav("sheds"); return; }
-    setLeaving(true);
+    if (!cur || !(c.pending + c.inflight + c.creating + c.removing)) { onNav(sub); return; }
+    if (cur.viewOnly || cur.stopped || cur.failures) { setStuck({ to: sub }); return; }
+    setLeaving({ to: sub, was: cur.fields });
     flushNow();
   });
+  const toSheds = leaveTo("sheds");
+  // Pressing a link would blur the open editor, and the blur commits it before the click, so the
+  // click would never see a box that commit turned red. Held on the editor, the click commits it.
+  const holdEditor = (e) => { if (editRef.current) e.preventDefault(); };
 
   const at = active ? byId[active.sizeId] : null;
   // The active-column readout (plan 3.2): the full name of the column pointed at or in use, which
@@ -11303,7 +11351,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       actions: retryAt ? bact("Retry now", retryNow) : null }
     : out ? { tone: "blue", text: `Saving ${n(out, "1 change", "changes")}…` }
     : unsent ? { tone: "blue", text: `${n(unsent, "1 change", "changes")} not saved yet` }
-    : counts.red ? { tone: "red", text: `${n(counts.red, "1 box needs", "boxes need")} you`, onClick: jumpRed, title: "Go to the next box that didn't save" }
+    : q && q.unsure ? { tone: "amber", text: "Discarded, but the last try may have saved", title: "Reload to see what's on file", actions: bact("Reload", fetchAll) }
+    : counts.red ? { tone: "red", text: `${n(counts.red, "1 box needs", "boxes need")} you`, onClick: () => jumpRed(), title: "Go to the next box that didn't save" }
     : { tone: "green", text: `All changes saved · ${time}` };
   const noStyles = !!model && model.styles.length === 0;
   const noCols = !!model && model.cols.length === 0;
@@ -11317,11 +11366,20 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     { name: colName(active.col), kind: active.col === 1 ? "price" : active.col === 2 ? "active" : "qty" }, aerr) : null;
   const dismissBtn = (fn) => <button type="button" onClick={fn}>Dismiss</button>;
   const tableW = SS_PG_FROZEN_W + SS_PG_COL_W * (ncols - 3);
+  // Leaving was called off (`stuck`): the badge says why (stopped, retrying, view only), this says
+  // the page stayed, and Leave anyway goes without what is unsent.
+  const unsaved = counts.pending + counts.inflight + counts.creating + counts.removing;
+  const stuckLine = stuck && unsaved > 0 ? (
+    <PgStatusLine tone="amber" action={<>
+      <button type="button" onClick={() => { const to = stuck.to; setStuck(null); onNav(to); }}>Leave anyway</button>
+      {dismissBtn(() => setStuck(null))}
+    </>}>{`${n(unsaved, "1 change isn't", "changes aren't")} saved yet, so you're still on this page.`}</PgStatusLine>
+  ) : null;
 
   return (
     <div className="ss-pg" data-ss-pg-editable={canEdit ? "1" : "0"}>
       <div className="ss-pg-bar">
-        <a className="ss-pg-back" href={shedsHref} onClick={toSheds}>← Back to Sheds</a>
+        <a className="ss-pg-back" href={shedsHref} onMouseDown={holdEditor} onClick={toSheds}>← Back to Sheds</a>
         <span className="ss-pg-title">Sizes &amp; prices</span>
         {operatorView && <span className="ss-pg-co" title={companyName}>{companyName}</span>}
         <select className="ss-pg-jump" aria-label="Jump to style" value="" disabled={!choices.length}
@@ -11348,7 +11406,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       )}
       {viewOnly && <PgStatusLine>{viewOnly.long}</PgStatusLine>}
       {tooBig && <PgStatusLine tone="amber" action={<button type="button" onClick={fetchAll}>Reload</button>}>{SS_PG_TOO_BIG}</PgStatusLine>}
-      {errLine ? <PgStatusLine tone={aerr.kind === "conflict" ? "amber" : "red"} action={dismissBtn(() => apply({ type: "dismiss", sizeId: active.sizeId, f: af }))}>{errLine}</PgStatusLine>
+      {stuckLine ? stuckLine
+        : errLine ? <PgStatusLine tone={aerr.kind === "conflict" ? "amber" : "red"} action={dismissBtn(() => apply({ type: "dismiss", sizeId: active.sizeId, f: af }))}>{errLine}</PgStatusLine>
         : q && q.note ? <PgStatusLine tone="amber" action={dismissBtn(() => apply({ type: "note-off" }))}>{q.note.text}</PgStatusLine>
         : tip ? <PgStatusLine action={dismissBtn(() => setTip(null))}>{tip}</PgStatusLine> : null}
       {legendOpen && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}
@@ -11362,12 +11421,12 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
         <div className="ss-pg-optbox">
           <b>Set up your Options first.</b> Every door, window, ramp, and add-on you offer becomes a column here — that's
           how you say what comes <b>included</b> with each size.{" "}
-          <a href={ssPgSettingsHref("options")} onClick={ssNavClick(() => onNav("options"))}>Go to Options →</a>
+          <a href={ssPgSettingsHref("options")} onMouseDown={holdEditor} onClick={leaveTo("options")}>Go to Options →</a>
         </div>
       )}
       {noStyles && (
         <div className="ss-pg-msg ss-pg-msg-inline" role="status">
-          No building styles yet. <a href={shedsHref} onClick={toSheds}>Add one on Sheds.</a>
+          No building styles yet. <a href={shedsHref} onMouseDown={holdEditor} onClick={toSheds}>Add one on Sheds.</a>
         </div>
       )}
       <div className="ss-pg-box" ref={boxRef} aria-busy={load.phase === "loading" ? "true" : undefined}
