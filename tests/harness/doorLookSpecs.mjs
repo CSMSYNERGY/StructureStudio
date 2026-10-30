@@ -23,6 +23,8 @@
 //      photo on the row
 //   NS. no see-through gap on a look's door either (block N's rays, doorShared.mjs), single and double,
 //      with its own glass, a shopper's window, an overlap meet, and in partition walls
+//   P. the white 7-panel door (door_looks 8d619c45, 2026-10-29): each raised panel one bevelled frustum, no
+//      stiles or rails on a smooth face in one colour, and the photo's paint (spec.paint) until a Door pick
 //
 // THE RENDER ENTRY (for the door-look generator, P4/P7): one spec, pictured on a plain test building --
 //   SS_DOOR_SPEC_FILE=<spec.json> SS_DOOR_SPEC_SIZE=<w>x<h> SS_SHOTS=<dir> node tests/harness/doorLookSpecs.mjs
@@ -435,7 +437,7 @@ async function runL(browser, rect) {
   // L2. Fills: a look's own counts and kinds, in the panels it names.
   {
     const ms = got.fills.meshes, n = (p) => ms.filter((m) => m.part === p).length;
-    ok("L2 fills: four pickets (its own count), a raised panel and a 2 x 3 lite, between two mid rails", n("picket") === 4 && n("raised") === 2 && n("midRail") === 2
+    ok("L2 fills: four pickets (its own count), a raised panel (one bevelled frustum) and a 2 x 3 lite, between two mid rails", n("picket") === 4 && n("raised") === 1 && n("midRail") === 2
       && ms.filter((m) => m.part === "lite" && m.transparent).length === 1, JSON.stringify(countParts(ms.map((m) => ({ part: m.part })))));
     const cz = got.classicZ.meshes;
     ok("L2 classicZ: one Z in the lower panel and the octagon and diamond in the upper", cz.filter((m) => m.part === "z").length === 1 && cz.filter((m) => m.part === "octagon").length === 4
@@ -582,11 +584,18 @@ async function runL(browser, rect) {
     ok("L6 corners: its corner boards follow the Door trim pick", uniq(co.filter((m) => m.part === "part-board")).join() === "#2d4f7c", JSON.stringify(uniq(co.filter((m) => m.part === "part-board"))));
     // A look with no pick of its own on a built base: the body paint and the building trim, and live with them.
     const st0 = got.steel.meshes;
-    ok("L6 steel (no picks): the slab and its frame (role door) wear the body colour, the frame with no grooves", uniq(st0.filter((m) => m.part === "infill" || m.part === "frame")).join() === BODY.toLowerCase()
-      && st0.filter((m) => m.part === "frame").every((m) => !m.map), JSON.stringify(uniq(st0.filter((m) => m.part === "infill" || m.part === "frame"))));
+    ok("L6 steel (no picks): the slab (role door) wears the body colour", uniq(st0.filter((m) => m.part === "infill")).join() === BODY.toLowerCase(),
+      JSON.stringify(uniq(st0.filter((m) => m.part === "infill"))));
+    // A smooth face whose frame is its infill's colour is one flat face: no stiles or rails, whose edges
+    // only ever showed as seams in the sun (2026-10-29). A frame in the trim's colour is still drawn.
+    for (const key of ["steel", "six"]) {
+      const fr = got[key].meshes.filter((m) => m.part === "frame" || m.part === "midRail");
+      ok(`L6 ${key}: smooth and one colour, so no stiles or rails`, fr.length === 0, `${fr.length} frame meshes`);
+    }
+    ok("L6 zb2 and corners: a frame in the trim's colour is still drawn", ["zb2", "corners"].every((k) => got[k].meshes.some((m) => m.part === "frame")));
     await page.evaluate(() => window.__ss3dEngine.setLiveColors("Barn Red", "White"));
     const st1 = (await page.evaluate(LOOK_MESHES, { itemId: L_DOORS.find((x) => x.key === "steel").itemId })).meshes;
-    ok("L6 steel: a body swatch moves its slab, frame and the frame of its glass with the walls", uniq(st1.filter((m) => m.part === "infill" || m.part === "frame" || (m.part === "part-lite" && !m.transparent))).join() === "#8b2e2e",
+    ok("L6 steel: a body swatch moves its slab and the frame of its glass with the walls", uniq(st1.filter((m) => m.part === "infill" || m.part === "frame" || (m.part === "part-lite" && !m.transparent))).join() === "#8b2e2e",
       JSON.stringify(uniq(st1.filter((m) => m.part === "infill" || m.part === "frame" || m.part === "part-lite"))));
     await page.evaluate(() => window.__ss3dEngine.setLiveColors(null, null));
   }
@@ -849,11 +858,52 @@ async function runS(browser, rect) {
   ok("S no page errors", a.errors.length === 0 && b.errors.length === 0, [...a.errors, ...b.errors].slice(0, 3).join(" | "));
 }
 
+// ── P. The white 7-panel door (door_looks 8d619c45, ai_door_calls 000f707b, 2026-10-29) ─────────────────
+// Read right on every count and drawn grey, flat and seamed. Its saved spec as it is; with the paint a press
+// now keeps (spec.paint, the photo's white); and that with a Door pick, which wins as on every look.
+const SEVEN = { v: 1, src: { hinge: "left", leaves: 1 }, base: "basic", brace: { t: "none" }, field: { dir: "smooth" },
+  frame: { fIn: 8, rails: [0.387, 0.497, 0.763], railHIn: 2.5 },
+  parts: [[0.213, 0.454, 0.781, 0.885], [0.548, 0.787, 0.781, 0.885], [0.213, 0.454, 0.513, 0.746], [0.548, 0.787, 0.513, 0.746], [0.213, 0.787, 0.401, 0.482],
+    [0.216, 0.458, 0.117, 0.371], [0.551, 0.793, 0.117, 0.371]].map(([u0, u1, v0, v1]) => ({ t: "raised", u0, u1, v0, v1 })),
+  colors: { frame: "door", infill: "door" }, handle: { v: 0.449, type: "lever", finish: "galv" },
+  hinges: { at: [], type: "hidden", count: 0, finish: "black" }, panels: [{ fill: "none" }, { fill: "none" }, { fill: "none" }, { fill: "none" }] };
+const WHITE = "#F2F1EA";
+async function runP(browser, rect) {
+  const doors = [
+    { key: "seven", spec: SEVEN, style: "basic", w: 48, h: 84, wall: "south", at: 3.5, op: "left" },
+    { key: "sevenPaint", spec: { ...SEVEN, paint: { hex: WHITE } }, style: "basic", w: 48, h: 84, wall: "south", at: 9.5, op: "left" },
+    { key: "sevenPick", spec: { ...SEVEN, paint: { hex: WHITE } }, style: "basic", w: 48, h: 84, wall: "south", at: 15.5, op: "left", c: paint("#7a2e2e", null) },
+  ];
+  const { rows, items } = designOf(rect, doors);
+  const { ctx, page, errors } = await loadDesign(browser, { rows, items, code: "SS-HARNLOOKP" });
+  const got = {};
+  for (const d of doors) got[d.key] = await page.evaluate(LOOK_MESHES, { itemId: d.itemId });
+  const uniq = (ms) => [...new Set(ms.map((m) => m.color))].sort().join();
+  const face = (ms) => ms.filter((m) => m.part === "infill" || m.part === "part-raised");
+  for (const d of doors) {
+    const ms = got[d.key] ? got[d.key].meshes : [], raised = ms.filter((m) => m.part === "part-raised");
+    ok(`P ${d.key}: drawn in its look (basic)`, !!got[d.key] && got[d.key].look === "basic", JSON.stringify(got[d.key] && got[d.key].look));
+    // Each raised panel is ONE mesh, a frustum 0.05 ft deep (the slab's face at 0.08 to its field at 0.13).
+    const k = along(d.wall) === 0 ? 2 : 0, deep = raised.map((m) => Math.round((m.max[k] - m.min[k]) * 1000) / 1000);
+    ok(`P ${d.key}: seven raised panels, each one bevelled frustum 0.05 ft deep`, raised.length === 7 && new Set(raised.map((m) => m.ix)).size === 7
+      && raised.every((m) => m.geom === "BufferGeometry") && deep.every((x) => near(x, 0.05, 0.002)), JSON.stringify({ n: raised.length, deep }));
+    const fr = ms.filter((m) => m.part === "frame" || m.part === "midRail");
+    ok(`P ${d.key}: a smooth face in one colour, so no stiles or rails (no seams)`, fr.length === 0, `${fr.length} frame meshes`);
+  }
+  ok("P seven (its saved spec, no paint): the slab and panels wear the body colour, as before", uniq(face(got.seven.meshes)) === BODY.toLowerCase(), uniq(face(got.seven.meshes)));
+  ok("P sevenPaint: the slab and panels wear the photo's paint, with no grain", uniq(face(got.sevenPaint.meshes)) === WHITE.toLowerCase() && face(got.sevenPaint.meshes).every((m) => !m.map),
+    uniq(face(got.sevenPaint.meshes)));
+  ok("P sevenPick: a Door pick wins over the photo's paint", uniq(face(got.sevenPick.meshes)) === "#7a2e2e", uniq(face(got.sevenPick.meshes)));
+  ok("P no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
 async function runBlocks(browser, rect) {
-  const only = (process.env.SS_LOOK_BLOCKS || "L,F,W,S").split(",").map((s) => s.trim().toUpperCase());
+  const only = (process.env.SS_LOOK_BLOCKS || "L,F,W,S,P").split(",").map((s) => s.trim().toUpperCase());
   if (only.includes("L")) await runL(browser, rect);
   if (only.includes("F")) await runF(browser, rect);
   if (only.includes("W")) await runW(browser, rect);
   if (only.includes("S")) await runS(browser, rect);
+  if (only.includes("P")) await runP(browser, rect);
 }
 main().catch((e) => { console.error(e); process.exit(2); });

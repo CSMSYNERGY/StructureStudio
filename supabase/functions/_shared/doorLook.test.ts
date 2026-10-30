@@ -76,6 +76,7 @@ const MAX = {
   meet: { type: "overlap", wIn: 2.25 },
   colors: { infill: "door", frame: "trim", members: "#778899" },
   wood: { hex: "#B5774A" },
+  paint: { hex: "#F2F1EA" },
 };
 
 // The table paths a spec actually holds, in doorLookPaths' form.

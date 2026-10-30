@@ -30,12 +30,13 @@ import {
   doorPressStartOf,
   doorStageBWanted,
   doorWorkDeadline,
+  finishDoorDraft,
   imageHeadOf,
   recoverDoorAnswer,
   runDoorDraft,
 } from "./doorGenerate.ts";
 import { DOOR_CLOSEUP_LABELS, DOOR_EDGE_PAD_IN, doorCloseUpPrompt, doorStageAPrompt, doorStageBPrompt } from "./doorLookPrompt.ts";
-import type { DoorLook, DoorMeasureCtx } from "./doorLook.ts";
+import type { DoorConsensus, DoorLook, DoorMeasureCtx } from "./doorLook.ts";
 import { isWoodTone, woodColorRoles } from "./doorLook.ts";
 import type { CloseUpWindow } from "./closeUp.ts";
 import { doubleDoor, gussetDoor, inches, PX_PER_IN, singleDoor, withStrips } from "./_test_stubs/doorReads.ts";
@@ -475,7 +476,7 @@ Deno.test("the ledger row keeps the spec, the warnings and the money for recover
   const f = doorLedgerFields(r);
   assertEquals([f.status, (f.drafted as Rec).base], ["done", "zbrace"]);
   const t = f.tokens as Rec;
-  assertEquals([t.prompt, t.model, t.effort, t.outcome, t.sideFrom], ["DOOR_LOOK_V4", "claude-opus-5-5", "high", "draft", "hinges"]);
+  assertEquals([t.prompt, t.model, t.effort, t.outcome, t.sideFrom], ["DOOR_LOOK_V5", "claude-opus-5-5", "high", "draft", "hinges"]);
   assertEquals([t.costCents, t.ceilingCents], [r.costCents, r.ceilingCents]);
   assertEquals((f.reads as Rec[]).length, 3);
   assert(typeof f.draft_ms === "number");
@@ -719,3 +720,102 @@ Deno.test("a wood door's frame that is a wood tone follows the wood; a white or 
   assertEquals(woodColorRoles({ infill: "door", frame: "trim", members: "trim" }, { frame: [150, 92, 55], members: [240, 238, 232] }), { infill: "door", frame: "door", members: "trim" });
 });
 
+// ─── THE WHITE 7-PANEL DOOR (ai_door_calls 000f707b, 2026-10-29) ────────────────────────────────────
+// Read right on every count, yet its press warned of a "6-panel", of the panels and latch plates it drew,
+// and of the sunlight, and paid for a Stage B. Its draft, as saved, and its three reads' own words.
+const SEVEN = {
+  v: 1, src: { hinge: "left", leaves: 1 }, base: "basic", brace: { t: "none" }, field: { dir: "smooth" },
+  frame: { fIn: 8, rails: [0.387, 0.497, 0.763], railHIn: 2.5 },
+  parts: [
+    { t: "raised", u0: 0.213, u1: 0.454, v0: 0.781, v1: 0.885 }, { t: "raised", u0: 0.548, u1: 0.787, v0: 0.781, v1: 0.885 },
+    { t: "raised", u0: 0.213, u1: 0.454, v0: 0.513, v1: 0.746 }, { t: "raised", u0: 0.548, u1: 0.787, v0: 0.513, v1: 0.746 },
+    { t: "raised", u0: 0.213, u1: 0.787, v0: 0.401, v1: 0.482 },
+    { t: "raised", u0: 0.216, u1: 0.458, v0: 0.117, v1: 0.371 }, { t: "raised", u0: 0.551, u1: 0.793, v0: 0.117, v1: 0.371 },
+  ],
+  colors: { frame: "door", infill: "door" }, handle: { v: 0.449, type: "lever", finish: "galv" },
+  hinges: { at: [], type: "hidden", count: 0, finish: "black" }, panels: [{ fill: "none" }, { fill: "none" }, { fill: "none" }, { fill: "none" }],
+} as unknown as DoorLook;
+const SEVEN_READS = [
+  { observed: ["one white painted leaf", "seven raised panels", "wide horizontal panel at handle height", "satin nickel lever on round rose", "brass plates at latch edge"],
+    unexplained: ["7-panel raised panel door (6-panel style plus a horizontal middle panel)", "hinges not visible"] },
+  { observed: ["one leaf", "white painted door", "seven raised panels", "brass lever handle on round rose", "handle on right edge"],
+    unexplained: ["7-panel raised-panel door", "wide horizontal middle panel", "brass fittings on latch edge"] },
+  { observed: ["one white painted leaf", "seven raised panels", "brushed lever handle on round rose", "handle on right side"],
+    unexplained: ["7-panel raised-panel door (6-panel style plus a wide lock-rail panel)", "gold plates on the right edge near the handle and lower down", "no hinges visible on the left edge"] },
+];
+const SEVEN_SAID = {
+  observed: [...new Set(SEVEN_READS.flatMap((r) => r.observed))],
+  unexplained: [...new Set(SEVEN_READS.flatMap((r) => r.unexplained))],
+};
+
+Deno.test("the 7-panel door: the draft's own count is the known gap, nothing it draws is a gap, and no Stage B", () => {
+  const w = doorStageBWanted(SEVEN_SAID, SEVEN);
+  assertEquals(w, { needed: false, missing: [], unexplained: [], knownGaps: ["7-panel"] });
+  // Read 2's words alone never said "6-panel": the gap is the draft's, not the wording's.
+  assertEquals(doorStageBWanted(SEVEN_READS[1], SEVEN).knownGaps, ["7-panel"]);
+  const f = finishDoorDraft(SEVEN_SAID as unknown as DoorConsensus, SEVEN, [], singleDoor().ctx, w, null);
+  assertEquals([codes(f.warnings), f.vocabGaps, f.unexplained], [["six_panel"], ["7-panel"], []]);
+  // A six-panel draft still files "6-panel", and a door of one raised part goes by the words as before.
+  const six = { ...SEVEN, parts: (SEVEN.parts as unknown[]).slice(0, 6) } as unknown as DoorLook;
+  assertEquals(doorStageBWanted({ observed: ["six raised panels"], unexplained: [] }, six).knownGaps, ["6-panel"]);
+  const one = { ...SEVEN, parts: (SEVEN.parts as unknown[]).slice(0, 1) } as unknown as DoorLook;
+  assertEquals(doorStageBWanted({ observed: [], unexplained: ["a 6-panel door"] }, one).knownGaps, ["6-panel"]);
+  assertEquals(doorStageBWanted({ observed: [], unexplained: [] }, one).knownGaps, []);
+});
+
+Deno.test("a press on a painted door keeps its paint in the spec and each read's sample in the ledger's consensus", async () => {
+  const { read } = singleDoor(), white = [242, 241, 234] as [number, number, number];
+  const painted = { ...read, surface: "painted" };
+  const m = fakeModel({ stageA: [painted, painted, painted], hinges: HINGES_OK, handle: HANDLE_OK });
+  const { input } = press({ stageA: [] });
+  const r = await runDoorDraft({ fetch: m.fetch, apiKey: "test-key", random: () => 0, cut: (w) => Promise.resolve(w.map((_, i) => `crop${i}`)), colorAt: () => white }, input);
+  assertEquals(r.outcome, "draft", JSON.stringify(r.failure));
+  assertEquals([(r.spec as Rec).paint, (r.spec as Rec).wood, (r.spec as Rec).colors], [{ hex: "#F2F1EA" }, undefined, { infill: "door", frame: "door", members: "door" }]);
+  assertEquals((r.consensus as Rec).tones, [white, white, white]);
+});
+
+Deno.test("the 7-panel door's Stage B may narrow the gaps, never widen them: the sunlight and the latch plates are no gap", () => {
+  // Stage A left one real gap open (a kick plate); Stage B answered with this press's two phrases, the
+  // kick plate again, and one thing no Stage A read named.
+  const said = { observed: SEVEN_SAID.observed, unexplained: [...SEVEN_SAID.unexplained, "brass kick plate along the bottom edge"] };
+  const w = doorStageBWanted(said, SEVEN);
+  assertEquals([w.needed, w.unexplained], [true, ["brass kick plate along the bottom edge"]]);
+  const answer = { measure: { size: singleDoor().ctx.photo, parts: [] }, unexplained: [
+    "brass plates on right latch edge near the handle and lower down, possibly hinges", "sunlight and shadow across the right half of the door",
+    "kick plate at the foot of the door", "a peephole at eye level",
+  ] };
+  const f = finishDoorDraft(said as unknown as DoorConsensus, SEVEN, [], singleDoor().ctx, w, { status: "ok", answer });
+  assertEquals([f.unexplained, f.vocabGaps], [["kick plate at the foot of the door"], ["7-panel", "kick plate at the foot of the door"]]);
+  assertEquals(codes(f.warnings), ["six_panel", "vocab_gap"]);
+  // Stage B answering with nothing Stage A asked about leaves no gap at all.
+  const none = finishDoorDraft(said as unknown as DoorConsensus, SEVEN, [], singleDoor().ctx, w, { status: "ok", answer: { ...answer, unexplained: ["a peephole at eye level"] } });
+  assertEquals([none.unexplained, codes(none.warnings)], [[], ["six_panel"]]);
+});
+
+Deno.test("the narrow gap rules: the light, the edge plates, panel-only words and a bare absence are drawn; real gaps stay", () => {
+  const plainShed = { v: 1, base: "plank", src: { hinge: "left", leaves: 1 }, frame: { rails: [0.55] }, hinges: { type: "tstrap", count: 3 }, handle: { type: "barn" } } as unknown as DoorLook;
+  const open = (phrases: string[], spec: DoorLook) => doorStageBWanted({ observed: [], unexplained: phrases }, spec).unexplained;
+  const drop = [
+    "7-panel raised-panel door", "wide horizontal middle panel", "seven raised panels",
+    "brass fittings on latch edge", "gold plates on the right edge near the handle and lower down",
+    "brass plates on right latch edge near the handle and lower down, possibly hinges", "brass strike plate",
+    "sunlight and shadow across the right half of the door", "glare on the lower panels", "reflections in the paint", "shadow across the top rail",
+    "no handle visible", "no visible knob",
+  ];
+  for (const s of drop) assertEquals(open([s], SEVEN), [], `dropped on the 7-panel door: ${s}`);
+  // The press after it (ai_door_calls 8c23e916, a cream 6-panel door): "no handle visible" was filed.
+  const keep = [
+    "arched top panels", "flat recessed shaker panels, not raised", "applied moulding round each panel", "shadow box moulding",
+    "brass kick plate along the bottom edge", "barrel bolt latch at the top", "small black slide latch on each mid rail",
+    "push plate near the top edge", "a peephole", "no visible astragal strip, leaves butt at the meeting line",
+  ];
+  for (const s of keep) assertEquals(open([s], SEVEN), [s], `kept on the 7-panel door: ${s}`);
+  // A door with no raised panels: panel words are no longer drawn; a door with no handle has no edge plates.
+  assertEquals(open(["wide horizontal middle panel"], plainShed), ["wide horizontal middle panel"]);
+  const noHandle = { ...SEVEN, handle: { type: "none" } } as unknown as DoorLook;
+  assertEquals(open(["brass fittings on latch edge"], noHandle), ["brass fittings on latch edge"]);
+  // The six-panel rule stays as narrow as it was: a shed door's "two panels" is no known gap, and its
+  // missing glass is still a mismatch.
+  const w = doorStageBWanted({ observed: ["one leaf", "two panels, upper and lower", "upper of two panels glazed"], unexplained: [] }, plainShed);
+  assertEquals([w.knownGaps, w.missing], [[], ["upper of two panels glazed"]]);
+});
