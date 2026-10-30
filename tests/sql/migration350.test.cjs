@@ -19,9 +19,12 @@
 //     door and another builder's door each come back in cellErrors, and the rest saves;
 //   * Real-Time Pricing on: the price is refused and the boxes save;
 //   * creates: at the end of the style in typed order; the same id twice is duplicate; existing
-//     dimensions are exists, though the label index is checked first live; a label taken with other
-//     dimensions, another builder's style and a used id are refused; a create that loses a race it
-//     cannot see again is refused with the database's sentence;
+//     dimensions are exists, though the label index is checked first live (a hand-made label too); a
+//     label taken with other dimensions, another builder's style and a used id are refused; a create
+//     that loses a race it cannot see again is refused with the database's sentence;
+//   * the unique_violation backstop alone (a copy with the three look-ups cut, so every create meets
+//     the unique keys as a lost race does): the label key trips first, and the answer is still exists
+//     or duplicate, found by dimensions, never "label taken";
 //   * removes: only a size never priced or edited, with no boxes and no BOM lines, and only this
 //     builder's; an id nobody holds is already gone;
 //   * per-size isolation: one size forced to fail is refused, its boxes untouched, the others save;
@@ -454,6 +457,10 @@ async function staleRefreshCase(db) {
       "existing dimensions: exists, naming the size and carrying its version and row", J(e0));
     ok(C(e0.cells) === C({ [FX_DOOR]: 1, loft: 50 }), "...and its boxes", J(e0.cells));
     ok(!await sizeOf(c, N4), "...and nothing is inserted");
+    // SZ_HAND is 16x21 under a hand-made label (16x20): found by its dimensions, not its label.
+    const hand = await call(c, { creates: [{ id: uid(108), styleId: ST_BARN, width: 16, length: 21, label: "16x21" }] });
+    ok(hand.created[0].status === "exists" && hand.created[0].existingId === SZ_HAND && hand.created[0].row.label === "16x20" && !await sizeOf(c, uid(108)),
+      "a size under a hand-made label is found by its dimensions: exists", J(hand));
 
     const label = await call(c, { creates: [{ id: uid(105), styleId: ST_BARN, width: 16, length: 20, label: "16x20" }] });
     ok(label.created[0].status === "refused" && /A size called 16x20 already exists in this style with other measurements/.test(label.created[0].reason)
@@ -587,6 +594,44 @@ async function staleRefreshCase(db) {
     ok(!a.err, "the mutant applies", a.err);
     const sr = await staleRefreshCase(m);
     ok(sr.stale.results[0].status === "saved" && sr.price === 480, "...and the edit made against 500 overwrites the colleague's 450", J(sr.stale));
+  }
+
+  // The race backstop on its own. PGlite has one connection, so a concurrent create cannot land
+  // between the look-up and the insert here. This copy skips the three look-ups instead, so every
+  // create goes straight to the insert and meets the unique keys the way a lost race does. Live
+  // order checks the label key before the dimensions key, so a reading of the violated constraint's
+  // NAME would answer "label taken"; the backstop looks again by dimensions and must not.
+  console.log("migration 350: the unique_violation backstop answers by dimensions, never by constraint name (look-ups removed)");
+  {
+    const cuts = [
+      ["        if v_hit is not null then\n          v_status := case when v_hit = v_id then 'duplicate' else 'exists' end;\n        elsif exists (select 1 from public.building_sizes z where z.id = v_id) then",
+        "        if false then\n          null;\n        elsif false then"],
+      ["        elsif exists (select 1 from public.building_sizes z where z.style_id = v_style and z.label = v_label) then",
+        "        elsif false then"],
+    ];
+    let sql = MIG();
+    for (const [from, to] of cuts) {
+      const next = sql.replace(from, to);
+      ok(next !== sql, `(the copy formed: ${from.trim().split("\n")[0].slice(0, 60)}… cut)`);
+      sql = next;
+    }
+    const b = await fresh();
+    const a = await apply(b, sql);
+    ok(!a.err, "the copy applies", a.err);
+    let violated = null;
+    try {
+      await b.exec(`insert into public.building_sizes (id, client_id, style_id, label, width_ft, length_ft) values ('${uid(601)}', '${T}', '${ST_BARN}', '10x12', 10, 12)`);
+    } catch (e) { violated = e.message; }
+    ok(/building_sizes_new_style_id_label_key/.test(String(violated)), "a second 10x12 trips the LABEL key first, as live does", violated);
+    const vA = await version(b, SZ_A);
+    const ex = await call(b, { creates: [{ id: uid(602), styleId: ST_BARN, width: 10, length: 12, label: "10x12" }] });
+    ok(ex.created[0].status === "exists" && ex.created[0].existingId === SZ_A && ex.created[0].version === vA && ex.created[0].reason === undefined,
+      "the backstop answers exists with existingId and its version, not \"label taken\"", J(ex));
+    const dup = await call(b, { creates: [{ id: SZ_A, styleId: ST_BARN, width: 10, length: 12, label: "10x12" }] });
+    ok(dup.created[0].status === "duplicate" && dup.created[0].version === vA, "the same id resent (its primary key trips first) answers duplicate", J(dup));
+    const hand = await call(b, { creates: [{ id: uid(603), styleId: ST_BARN, width: 16, length: 21, label: "16x21" }] });
+    ok(hand.created[0].status === "exists" && hand.created[0].existingId === SZ_HAND, "the dimensions key alone (a hand-made label) answers exists", J(hand));
+    ok((await one(b, `select count(*)::int n from public.building_sizes where style_id = '${ST_BARN}'`)).n === 4, "...and none of the three inserted anything");
   }
 
   for (const d of opened) await d.close().catch(() => {});
