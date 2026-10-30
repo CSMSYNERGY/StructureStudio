@@ -3418,6 +3418,23 @@ function ssPgQueue(q, ev) {
     });
     return out;
   };
+  // Plan 4.6's refresh rule, for one size's unsent boxes against what the server holds now (`t`):
+  // one that already says what the box wants has nothing left to send; one whose starting value is
+  // gone turns red at once (changed elsewhere, both values) and is never sent, so the grid shows
+  // the colleague's number and typing over it is the builder's own choice. In-flight boxes are left
+  // to their answer. A fresh read runs it, and so does every answer that brings a size's row back:
+  // a conflict or duplicate on one box of a size carries a colleague's price and Offered too.
+  const settle = (mine, t) => {
+    const next = { ...mine };
+    Object.keys(mine).forEach((f) => {
+      const x = mine[f];
+      if (!x.pending || x.inflight) return;
+      const now = ssPgVal(t, f);
+      if (ssPgSame(x.pending.to, now)) { const y = { ...x }; delete y.pending; if (y.error) next[f] = y; else delete next[f]; }
+      else if (!ssPgSame(x.pending.from, now)) next[f] = { error: { kind: "conflict", typed: x.pending.to, server: now, reason: null } };
+    });
+    return next;
+  };
   // The clock marks after a change: kept while anything waits, cleared when nothing does.
   const timed = (st, touched) => {
     if (!waiting(st)) return { ...st, firstAt: null, lastAt: null, flush: false };
@@ -3645,7 +3662,13 @@ function ssPgQueue(q, ev) {
             Object.keys(mine).forEach((f) => { if (mine[f].pending && !mine[f].error) mine[f] = { error: { kind: "refused", typed: mine[f].pending.to, reason: why } }; });
           }
         }
-        fields = setSize(fields, r.id, mine);
+        // The row this answer brought back is what the server holds now, for the boxes this call did
+        // not send as well: a price typed after the call went, waiting behind it, was typed against a
+        // value a colleague may have just replaced. Judged like a fresh read (settle), it turns red
+        // here with their number on screen. Left unsent, a re-type before it went would take the
+        // colleague's value as its `from` and overwrite it (plan 1, 4.6). The server sends back only
+        // the option boxes a call named, so only price and Offered can move this way.
+        fields = setSize(fields, r.id, r.row ? settle(mine, server) : mine);
       });
       // Anything the answer left out (it never should): red, with what was typed, rather than unsent
       // again, which would resend it every 800 ms for as long as the server kept leaving it out.
@@ -3775,15 +3798,7 @@ function ssPgQueue(q, ev) {
         Object.keys(cells).forEach((k) => { if (flying("c:" + k) && !(k in (was.cells || {}))) delete cells[k]; });
         sizes[id] = { ...was, price: flying("price") ? was.price : t.price, active: flying("active") ? was.active : t.active, cells };
         if (!mine) return;
-        const next = { ...mine };
-        Object.keys(mine).forEach((f) => {
-          const x = mine[f];
-          if (!x.pending || x.inflight) return;
-          const now = ssPgVal(t, f);
-          if (ssPgSame(x.pending.to, now)) { const y = { ...x }; delete y.pending; if (y.error) next[f] = y; else delete next[f]; }
-          else if (!ssPgSame(x.pending.from, now)) next[f] = { error: { kind: "conflict", typed: x.pending.to, server: now, reason: null } };
-        });
-        fields = setSize(fields, id, next);
+        fields = setSize(fields, id, settle(mine, t));
       });
       // A size the read no longer has keeps its place only while something local hangs on it.
       Object.keys(q.sizes).forEach((id) => { if (!(id in sizes) && (q.fields[id] || q.sizes[id].creating || q.removes[id])) sizes[id] = q.sizes[id]; });

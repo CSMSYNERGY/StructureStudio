@@ -749,6 +749,51 @@ Deno.test("queue: the editor's own box moving with its own flight is not a confl
   assertEquals(field(q, A, "c:101"), { error: { kind: "refused", typed: 3, reason: "That option has no column in your sizes table" } });
 });
 
+// Review fixes, round 2 (2026-10-31).
+Deno.test("queue: a box waiting behind a call goes red when the answer brings a colleague's value for it, and is never sent", () => {
+  // Loft 50 → 60 goes; then the price 400 → 480 and Test Door 0 → 2 are typed, waiting behind it. A
+  // colleague sets the price to $500 and Loft to 70 meanwhile: the answer is a conflict on Loft,
+  // carrying their row.
+  let db = DB();
+  let q = Q(start(db), commit(A, "c:loft", 60), { type: "send" }, commit(A, "price", 480), commit(A, "c:101", 2));
+  db[A].price = 500; db[A].cells.loft = 70; db[A].version = nextV();
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) });
+  assertEquals(field(q, A, "price"), { error: { kind: "conflict", typed: 480, server: 500, reason: null } }, "red at once, with both numbers");
+  assertEquals(field(q, A, "c:loft"), { error: { kind: "conflict", typed: 60, server: 70, reason: null } });
+  assertEquals(field(q, A, "c:101"), { pending: { to: 2, from: 0, seq: 3 } }, "a box whose starting value still holds still goes");
+  const v = S.ssPgRowView({ priceText: "", values: [] }, q.sizes[A], q.fields[A], [{ key: "loft" }, { key: "101" }]);
+  assertEquals([v.priceText, v.marks], ["$500", "-c-cp"], "the grid shows the colleague's $500, marked changed elsewhere");
+  let body;
+  [q, body] = roundTrip(q, db);
+  assertEquals(body.sizes.map((s: Any) => [s.from, s.to]), [[{ cells: { 101: 0 } }, { cells: { 101: 2 } }]], "only Test Door goes; the price never does");
+  // The editor was open on the price when the answer landed (it showed $480): what is typed then is
+  // red too. Before, its `from` became the colleague's $500 and the server let it overwrite them.
+  q = Q(q, { ...commit(A, "price", 490), seen: 480 });
+  assertEquals(field(q, A, "price"), { error: { kind: "conflict", typed: 490, server: 500, reason: null } });
+  assertEquals([S.ssPgBuildBatch(q), db[A].price, db[A].active], [null, 500, true]);
+  // Typed or cleared over the $500 now on screen: the builder's own edit, from $500.
+  assertEquals(field(Q(q, { ...commit(A, "price", 490), seen: 500 }), A, "price").pending, { to: 490, from: 500, seq: 4 });
+  assertEquals(field(Q(q, commit(A, "price", null)), A, "price").pending, { to: null, from: 500, seq: 4 });
+  // A resend that had already landed comes back duplicate, with the colleague's row: the same.
+  db = DB();
+  q = Q(start(db), commit(A, "c:loft", 60), { type: "send" });
+  const sent = q.flight.body;
+  serve(db, sent);                                   // it landed; the answer was lost
+  q = Q(q, { type: "fail", n: q.flight.n, kind: "transport" }, commit(A, "price", 480));
+  db[A].price = 500; db[A].version = nextV();
+  const dup = serve(db, sent);
+  assertEquals(dup.results[0].status, "duplicate");
+  q = Q(q, { type: "ok", n: q.flight.n, answer: dup });
+  assertEquals([field(q, A, "c:loft"), field(q, A, "price")], [undefined, { error: { kind: "conflict", typed: 480, server: 500, reason: null } }]);
+  assertEquals([S.ssPgBuildBatch(q), db[A].price], [null, 500]);
+  // A colleague who typed the very number waiting here: nothing left to send, nothing red.
+  db = DB();
+  q = Q(start(db), commit(A, "c:loft", 60), { type: "send" }, commit(A, "price", 480));
+  db[A].price = 480; db[A].version = nextV();
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) });
+  assertEquals([field(q, A, "price"), q.sizes[A].price], [undefined, 480]);
+});
+
 Deno.test("queue: a resend keeps a box marked not valid during the flight red; a follow-up folds into the resend from what is on file", () => {
   // 480 out, then "abc" typed over the same box; a colleague changes another box: conflict, resend.
   let db = DB();
