@@ -17,7 +17,7 @@ or explains the add-on; it doesn't get its own padlock. A padlock in the sidebar
 account's subscription itself isn't active. Pages marked "coming soon" are not available yet.
 
 - **Shed Designer** (/designer): Design a building and build an estimate
-- **Contacts** (/contacts): Everyone who has enquired, their designs, and your pipelines
+- **Customer Hub** (/contacts): Everyone who has enquired, their designs, and your pipelines
 - **Conversations** (/conversations): Every email, text and call with your customers, newest first (only appears on accounts with the built-in CRM; without it the item is hidden)
 - **Orders** (/orders): Track accepted estimates from sale to payment and delivery
 - **Support** (/support): Get set up, report a problem, request a feature, and see what's new
