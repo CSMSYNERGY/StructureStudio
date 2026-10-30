@@ -1064,7 +1064,11 @@ function Dashboard({ session }) {
       // the last one; the Advanced gate (below) reads a mismatch as "not answered yet".
       // phoneStatus: the VIEWED tenant's My Synergy Phone switch, so Call and the Calls page follow the
       // builder on screen rather than the operator's own account.
-      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null, phoneStatus: st.data.phoneStatus || null });
+      // companyName: the viewed builder's own name (status hands back their branding). A cold
+      // ?view= load seeds `viewing` with the slug and only the Designs page backfills it, so the
+      // Sizes & prices table's own tab reads it from here.
+      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null, phoneStatus: st.data.phoneStatus || null,
+        companyName: (st.data.branding && st.data.branding.companyName) || null });
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
@@ -3002,7 +3006,7 @@ function Dashboard({ session }) {
       <PricingTableGate key={"t-" + effClientId} clientId={effClientId}
         viewing={viewing} isSupportOp={isSupportOp} supportCheckGaveUp={supportCheckGaveUp} viewedCtx={viewedCtx}
         canAdmin={canAdmin} access={myAccess} gateLocked={gateLocked} billingActor={billingActor}
-        companyName={shownBusiness}
+        companyName={(viewing && viewedCtx && viewedCtx.clientId === viewing.clientId && viewedCtx.companyName) || shownBusiness}
         onNav={(s) => navigate("settings", s)} />
     );
   }

@@ -428,8 +428,12 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-grid .ss-pg-corner{position:sticky;left:0;top:0;z-index:6;border-right:2px solid #CBD5E1}
 .ss-pg-grid thead .ss-pg-f0,.ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{z-index:6}
 /* A name stands on end, top to bottom, and wraps onto a second line inside its column rather
-   than being cut. The header's height (--ss-pg-hh) is MEASURED to the longest name (PricingTablePage). */
-.ss-pg-vh{display:inline-block;vertical-align:top;writing-mode:vertical-lr;white-space:normal;line-height:15px;max-inline-size:calc(var(--ss-pg-hh,64px) - 16px);font-size:12px;font-weight:700;color:#1E293B;text-align:start}
+   than being cut. The header's height (--ss-pg-hh) is MEASURED to the longest name (PricingTablePage).
+   vertical-RL, not -lr: both turn the letters the same way, but -lr puts a name's second line to the
+   RIGHT of its first, so a reader who tilts their head to the right reads the two lines bottom one
+   first ("and Kickplate (6'x7')" above "Double Door with Transom"). -rl is the whole name turned a
+   quarter clockwise, second line to the left. Bottom-to-top instead is transform:rotate(180deg). */
+.ss-pg-vh{display:inline-block;vertical-align:top;writing-mode:vertical-rl;white-space:normal;line-height:15px;max-inline-size:calc(var(--ss-pg-hh,64px) - 16px);font-size:12px;font-weight:700;color:#1E293B;text-align:start}
 .ss-pg-grid .ss-pg-rtp{background:#F1F5F9;color:#64748B}
 .ss-pg-grid td.ss-pg-dis{background:#F8FAFC}
 /* Hidden from the designer: 55% text, not opacity, because a frozen cell must stay opaque over
@@ -506,7 +510,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=cbeebde3"></script>
-<script defer src="/portal.app.compiled.js?v=c5ef68d8" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=084ed681" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

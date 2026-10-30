@@ -3075,7 +3075,7 @@ function ssPgMove(order, ncols, at, key, shift) {
 }
 
 // How tall the option headers must be so that NO name is cut (plan 3.4). Each name stands on end
-// (writing-mode: vertical-lr) and may wrap onto a second line inside its 44 px column, so a name
+// (writing-mode: vertical-rl) and may wrap onto a second line inside its 44 px column, so a name
 // needs the length of its longer half at the best place to split it between two words; the header
 // is the longest of those plus `pad`. `measure(text)` is the text's length in px in the header font.
 // A browser filling line one as far as it fits never needs a third line at that length: its first
@@ -3532,7 +3532,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
         <div style={S.h2}>Building styles</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
-          style using the Excel template below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          style in the sizes &amp; prices table below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
           design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
           sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
           use it only when you’re sure you won’t need that style again.
@@ -9850,7 +9850,13 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       const ctx = ssPgMeasureCtx();
       let est = SS_PG_HEAD_MIN;
       if (ctx) {
-        try { ctx.font = getComputedStyle(spans[spans.length - 1]).font; } catch (_f) { /* the canvas default */ }
+        // From the longhands: the computed `font` shorthand is "" here, because the grid's
+        // tabular-nums is a font-variant the shorthand cannot say, and the canvas then measures in
+        // its own 10px default and the header grows 8 px at a time, one layout of the grid each.
+        try {
+          const cs = getComputedStyle(spans[spans.length - 1]);
+          ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        } catch (_f) { /* the canvas default */ }
         est = Math.max(est, ssPgHeaderHeight(spans.map((sp) => sp.textContent), (s) => ctx.measureText(s).width + 1, 16));
       }
       est = Math.min(SS_PG_HEAD_MAX, est);
