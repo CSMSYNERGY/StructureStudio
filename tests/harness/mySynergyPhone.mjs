@@ -699,8 +699,13 @@ try {
     await s.page.waitForSelector('[data-ss-phone-install="full"]', { timeout: 8000 }).catch(() => {});
     const card = await s.page.locator('[data-ss-phone-install="full"]').innerText().catch(() => "");
     ok("C1 Call with no extension shows the Install My Synergy Phone card", /Install My Synergy Phone to call from Structure Studio/.test(card), card.slice(0, 80));
-    ok("C2 the store link is a placeholder, so it reads 'coming soon' rather than linking nowhere", /link coming soon/.test(card)
-      && (await s.page.locator('[data-ss-phone-install="full"] a').count()) === 0);
+    // The iPhone and Android apps are published (2026-10-30); the Chrome link is still a placeholder.
+    const hrefs = await s.page.locator('[data-ss-phone-install="full"] a').evaluateAll((as) => as.map((a) => a.getAttribute("href")));
+    ok("C2 the Chrome link is a placeholder, so it reads 'coming soon' rather than linking nowhere", /Chrome extension: link coming soon/.test(card)
+      && !hrefs.some((h) => /chromewebstore|PLACEHOLDER/.test(h || "")), hrefs.join(" "));
+    ok("C2b the iPhone and Android buttons go to their store pages", hrefs.length === 2
+      && hrefs.includes("https://apps.apple.com/app/id6819597681")
+      && hrefs.includes("https://play.google.com/store/apps/details?id=com.mysynergyphone.app"), hrefs.join(" "));
     ok("C3 nothing but a ping was attempted", (await s.sent()).every((m) => m.type === "sss.ping"));
     await s.page.screenshot({ path: join(shots, "C-install-card.png") });
     await pickDeal(s);

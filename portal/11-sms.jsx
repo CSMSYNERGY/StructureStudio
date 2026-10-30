@@ -1784,6 +1784,164 @@ function SsPhoneInstallCard({ what = "call", compact = false, mobile = false, fr
   );
 }
 
+// ── My Synergy Phone's download pop-up (Ahsan 2026-10-30) ──────────────────────────────────
+// A small card in the corner of every Settings page, for a person the app will let in: the business
+// has calling (ssPhoneOffered) AND the person holds the phone area, the Calls rail item's own rule
+// (12-shell mounts it; phone-api refuses a person whose phone level is none, no_phone_access). It
+// shows the Apple and Android logos and one line. Clicking it opens
+// the full-size card, a QR code for each store, so someone at a computer points their phone's camera
+// at the screen instead of searching a store. The × hides the small card in this browser for good
+// (localStorage, a nicety: a browser that refuses storage just shows it again); the Phone tab's
+// install card stays either way.
+// The codes are fixed module paths, made offline with the qrcode package (error correction M, one
+// unit per module, no quiet zone; the drawing adds 4) from SS_PHONE_LINKS' own two addresses, so
+// nothing is fetched and no QR library ships. A code whose `url` is not the link 01-core holds now
+// is not drawn, and the pop-up stays away until both are made again.
+// The logos are Simple Icons' Apple and Android marks (CC0), drawn in a 24-unit box.
+const SS_APP_QR = {
+  ios: { url: "https://apps.apple.com/app/id6819597681", size: 29,
+    path: "M0 0h7v1h-7zM9 0h1v1h-1zM11 0h1v1h-1zM15 0h5v1h-5zM22 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM9 1h1v1h-1zM11 1h2v1h-2zM17 1h1v1h-1zM20 1h1v1h-1zM22 1h1v1h-1zM28 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM8 2h5v1h-5zM14 2h1v1h-1zM16 2h1v1h-1zM20 2h1v1h-1zM22 2h1v1h-1zM24 2h3v1h-3zM28 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM8 3h1v1h-1zM12 3h1v1h-1zM17 3h1v1h-1zM19 3h1v1h-1zM22 3h1v1h-1zM24 3h3v1h-3zM28 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM8 4h1v1h-1zM13 4h3v1h-3zM18 4h3v1h-3zM22 4h1v1h-1zM24 4h3v1h-3zM28 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h2v1h-2zM11 5h1v1h-1zM13 5h4v1h-4zM18 5h1v1h-1zM20 5h1v1h-1zM22 5h1v1h-1zM28 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h7v1h-7zM8 7h1v1h-1zM10 7h1v1h-1zM13 7h1v1h-1zM15 7h1v1h-1zM19 7h2v1h-2zM0 8h1v1h-1zM2 8h5v1h-5zM9 8h3v1h-3zM14 8h2v1h-2zM17 8h1v1h-1zM19 8h1v1h-1zM22 8h5v1h-5zM3 9h1v1h-1zM5 9h1v1h-1zM8 9h2v1h-2zM15 9h1v1h-1zM19 9h4v1h-4zM24 9h1v1h-1zM28 9h1v1h-1zM1 10h1v1h-1zM3 10h2v1h-2zM6 10h1v1h-1zM9 10h1v1h-1zM15 10h1v1h-1zM18 10h1v1h-1zM20 10h1v1h-1zM22 10h2v1h-2zM1 11h1v1h-1zM3 11h2v1h-2zM7 11h1v1h-1zM10 11h2v1h-2zM14 11h2v1h-2zM18 11h2v1h-2zM21 11h2v1h-2zM24 11h2v1h-2zM27 11h1v1h-1zM0 12h1v1h-1zM4 12h3v1h-3zM9 12h2v1h-2zM15 12h3v1h-3zM23 12h1v1h-1zM25 12h2v1h-2zM0 13h2v1h-2zM5 13h1v1h-1zM7 13h1v1h-1zM9 13h1v1h-1zM11 13h1v1h-1zM13 13h2v1h-2zM16 13h1v1h-1zM19 13h6v1h-6zM28 13h1v1h-1zM0 14h1v1h-1zM5 14h2v1h-2zM8 14h2v1h-2zM12 14h3v1h-3zM16 14h1v1h-1zM18 14h1v1h-1zM21 14h1v1h-1zM24 14h3v1h-3zM0 15h4v1h-4zM8 15h1v1h-1zM11 15h3v1h-3zM16 15h1v1h-1zM18 15h3v1h-3zM24 15h1v1h-1zM27 15h1v1h-1zM0 16h1v1h-1zM2 16h1v1h-1zM5 16h5v1h-5zM11 16h2v1h-2zM14 16h1v1h-1zM17 16h3v1h-3zM23 16h1v1h-1zM25 16h2v1h-2zM0 17h1v1h-1zM4 17h1v1h-1zM7 17h1v1h-1zM9 17h1v1h-1zM11 17h1v1h-1zM16 17h4v1h-4zM22 17h3v1h-3zM26 17h1v1h-1zM28 17h1v1h-1zM0 18h1v1h-1zM2 18h3v1h-3zM6 18h2v1h-2zM10 18h1v1h-1zM16 18h2v1h-2zM20 18h2v1h-2zM24 18h1v1h-1zM26 18h1v1h-1zM0 19h1v1h-1zM4 19h1v1h-1zM7 19h3v1h-3zM14 19h2v1h-2zM20 19h2v1h-2zM24 19h1v1h-1zM27 19h1v1h-1zM0 20h1v1h-1zM4 20h4v1h-4zM17 20h1v1h-1zM20 20h5v1h-5zM26 20h3v1h-3zM8 21h2v1h-2zM11 21h1v1h-1zM13 21h2v1h-2zM17 21h2v1h-2zM20 21h1v1h-1zM24 21h5v1h-5zM0 22h7v1h-7zM13 22h2v1h-2zM18 22h3v1h-3zM22 22h1v1h-1zM24 22h3v1h-3zM0 23h1v1h-1zM6 23h1v1h-1zM8 23h2v1h-2zM11 23h3v1h-3zM19 23h2v1h-2zM24 23h1v1h-1zM0 24h1v1h-1zM2 24h3v1h-3zM6 24h1v1h-1zM8 24h2v1h-2zM12 24h1v1h-1zM14 24h1v1h-1zM17 24h1v1h-1zM20 24h5v1h-5zM26 24h1v1h-1zM28 24h1v1h-1zM0 25h1v1h-1zM2 25h3v1h-3zM6 25h1v1h-1zM8 25h1v1h-1zM10 25h1v1h-1zM12 25h2v1h-2zM18 25h1v1h-1zM23 25h1v1h-1zM25 25h2v1h-2zM0 26h1v1h-1zM2 26h3v1h-3zM6 26h1v1h-1zM8 26h8v1h-8zM19 26h2v1h-2zM22 26h6v1h-6zM0 27h1v1h-1zM6 27h1v1h-1zM9 27h1v1h-1zM15 27h1v1h-1zM18 27h1v1h-1zM20 27h2v1h-2zM23 27h3v1h-3zM27 27h1v1h-1zM0 28h7v1h-7zM8 28h1v1h-1zM10 28h1v1h-1zM14 28h3v1h-3zM18 28h2v1h-2zM21 28h1v1h-1zM24 28h1v1h-1zM26 28h1v1h-1z" },
+  android: { url: "https://play.google.com/store/apps/details?id=com.mysynergyphone.app", size: 37,
+    path: "M0 0h7v1h-7zM10 0h3v1h-3zM14 0h2v1h-2zM21 0h3v1h-3zM25 0h2v1h-2zM28 0h1v1h-1zM30 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM9 1h1v1h-1zM11 1h1v1h-1zM13 1h3v1h-3zM17 1h2v1h-2zM20 1h1v1h-1zM24 1h5v1h-5zM30 1h1v1h-1zM36 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM8 2h3v1h-3zM12 2h2v1h-2zM16 2h1v1h-1zM21 2h2v1h-2zM24 2h1v1h-1zM26 2h1v1h-1zM28 2h1v1h-1zM30 2h1v1h-1zM32 2h3v1h-3zM36 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM8 3h2v1h-2zM12 3h2v1h-2zM17 3h2v1h-2zM20 3h1v1h-1zM22 3h1v1h-1zM25 3h3v1h-3zM30 3h1v1h-1zM32 3h3v1h-3zM36 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM8 4h3v1h-3zM12 4h3v1h-3zM16 4h8v1h-8zM25 4h1v1h-1zM28 4h1v1h-1zM30 4h1v1h-1zM32 4h3v1h-3zM36 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h2v1h-2zM11 5h1v1h-1zM14 5h2v1h-2zM17 5h1v1h-1zM21 5h1v1h-1zM27 5h2v1h-2zM30 5h1v1h-1zM36 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h1v1h-1zM24 6h1v1h-1zM26 6h1v1h-1zM28 6h1v1h-1zM30 6h7v1h-7zM8 7h3v1h-3zM12 7h1v1h-1zM17 7h2v1h-2zM21 7h1v1h-1zM23 7h1v1h-1zM26 7h1v1h-1zM28 7h1v1h-1zM0 8h1v1h-1zM2 8h5v1h-5zM9 8h1v1h-1zM11 8h2v1h-2zM16 8h1v1h-1zM21 8h1v1h-1zM23 8h1v1h-1zM25 8h2v1h-2zM30 8h5v1h-5zM0 9h1v1h-1zM2 9h1v1h-1zM4 9h1v1h-1zM7 9h3v1h-3zM13 9h3v1h-3zM17 9h2v1h-2zM20 9h2v1h-2zM23 9h1v1h-1zM26 9h1v1h-1zM28 9h2v1h-2zM31 9h1v1h-1zM35 9h1v1h-1zM1 10h1v1h-1zM3 10h1v1h-1zM5 10h3v1h-3zM9 10h3v1h-3zM15 10h3v1h-3zM19 10h1v1h-1zM21 10h2v1h-2zM25 10h3v1h-3zM30 10h2v1h-2zM33 10h1v1h-1zM35 10h2v1h-2zM1 11h2v1h-2zM9 11h1v1h-1zM11 11h1v1h-1zM13 11h1v1h-1zM15 11h1v1h-1zM19 11h3v1h-3zM24 11h1v1h-1zM26 11h1v1h-1zM30 11h4v1h-4zM36 11h1v1h-1zM6 12h2v1h-2zM9 12h2v1h-2zM13 12h1v1h-1zM15 12h3v1h-3zM19 12h2v1h-2zM22 12h1v1h-1zM24 12h4v1h-4zM29 12h4v1h-4zM34 12h3v1h-3zM4 13h2v1h-2zM8 13h1v1h-1zM12 13h1v1h-1zM16 13h1v1h-1zM18 13h3v1h-3zM23 13h2v1h-2zM28 13h1v1h-1zM31 13h1v1h-1zM1 14h1v1h-1zM3 14h1v1h-1zM6 14h2v1h-2zM9 14h1v1h-1zM13 14h1v1h-1zM15 14h1v1h-1zM18 14h1v1h-1zM22 14h1v1h-1zM27 14h2v1h-2zM31 14h3v1h-3zM35 14h2v1h-2zM0 15h1v1h-1zM2 15h4v1h-4zM10 15h1v1h-1zM13 15h4v1h-4zM28 15h5v1h-5zM35 15h2v1h-2zM0 16h2v1h-2zM4 16h6v1h-6zM11 16h2v1h-2zM14 16h1v1h-1zM18 16h1v1h-1zM20 16h11v1h-11zM32 16h1v1h-1zM34 16h1v1h-1zM4 17h2v1h-2zM7 17h6v1h-6zM14 17h3v1h-3zM23 17h1v1h-1zM25 17h1v1h-1zM28 17h2v1h-2zM31 17h1v1h-1zM34 17h2v1h-2zM0 18h1v1h-1zM3 18h2v1h-2zM6 18h3v1h-3zM11 18h1v1h-1zM14 18h1v1h-1zM20 18h1v1h-1zM22 18h1v1h-1zM24 18h1v1h-1zM26 18h4v1h-4zM32 18h1v1h-1zM35 18h2v1h-2zM9 19h3v1h-3zM14 19h1v1h-1zM16 19h1v1h-1zM18 19h1v1h-1zM21 19h3v1h-3zM27 19h2v1h-2zM30 19h3v1h-3zM36 19h1v1h-1zM0 20h7v1h-7zM8 20h4v1h-4zM13 20h2v1h-2zM17 20h1v1h-1zM20 20h1v1h-1zM22 20h6v1h-6zM29 20h2v1h-2zM32 20h3v1h-3zM0 21h1v1h-1zM3 21h1v1h-1zM5 21h1v1h-1zM7 21h5v1h-5zM16 21h8v1h-8zM25 21h1v1h-1zM28 21h1v1h-1zM33 21h1v1h-1zM0 22h1v1h-1zM3 22h2v1h-2zM6 22h3v1h-3zM10 22h1v1h-1zM13 22h1v1h-1zM15 22h3v1h-3zM20 22h2v1h-2zM27 22h1v1h-1zM30 22h4v1h-4zM35 22h2v1h-2zM0 23h1v1h-1zM8 23h1v1h-1zM11 23h1v1h-1zM13 23h3v1h-3zM17 23h2v1h-2zM21 23h3v1h-3zM28 23h2v1h-2zM31 23h2v1h-2zM35 23h1v1h-1zM2 24h1v1h-1zM4 24h3v1h-3zM8 24h1v1h-1zM11 24h2v1h-2zM16 24h1v1h-1zM21 24h1v1h-1zM23 24h4v1h-4zM29 24h2v1h-2zM32 24h1v1h-1zM34 24h2v1h-2zM0 25h2v1h-2zM3 25h1v1h-1zM10 25h1v1h-1zM12 25h2v1h-2zM15 25h1v1h-1zM18 25h1v1h-1zM20 25h5v1h-5zM28 25h2v1h-2zM33 25h1v1h-1zM0 26h1v1h-1zM3 26h2v1h-2zM6 26h6v1h-6zM13 26h1v1h-1zM15 26h2v1h-2zM19 26h1v1h-1zM26 26h2v1h-2zM30 26h2v1h-2zM34 26h3v1h-3zM0 27h1v1h-1zM2 27h1v1h-1zM4 27h2v1h-2zM7 27h1v1h-1zM9 27h4v1h-4zM15 27h1v1h-1zM19 27h3v1h-3zM26 27h1v1h-1zM28 27h5v1h-5zM36 27h1v1h-1zM0 28h1v1h-1zM2 28h1v1h-1zM4 28h1v1h-1zM6 28h2v1h-2zM9 28h4v1h-4zM14 28h2v1h-2zM17 28h1v1h-1zM19 28h1v1h-1zM22 28h1v1h-1zM24 28h2v1h-2zM28 28h9v1h-9zM8 29h3v1h-3zM13 29h1v1h-1zM16 29h1v1h-1zM19 29h2v1h-2zM23 29h1v1h-1zM25 29h1v1h-1zM27 29h2v1h-2zM32 29h2v1h-2zM35 29h1v1h-1zM0 30h7v1h-7zM11 30h2v1h-2zM14 30h3v1h-3zM18 30h1v1h-1zM20 30h1v1h-1zM22 30h1v1h-1zM25 30h2v1h-2zM28 30h1v1h-1zM30 30h1v1h-1zM32 30h1v1h-1zM34 30h1v1h-1zM36 30h1v1h-1zM0 31h1v1h-1zM6 31h1v1h-1zM8 31h2v1h-2zM12 31h1v1h-1zM15 31h1v1h-1zM19 31h2v1h-2zM23 31h2v1h-2zM26 31h3v1h-3zM32 31h2v1h-2zM35 31h1v1h-1zM0 32h1v1h-1zM2 32h3v1h-3zM6 32h1v1h-1zM8 32h4v1h-4zM13 32h1v1h-1zM15 32h1v1h-1zM18 32h5v1h-5zM24 32h9v1h-9zM34 32h1v1h-1zM36 32h1v1h-1zM0 33h1v1h-1zM2 33h3v1h-3zM6 33h1v1h-1zM8 33h3v1h-3zM12 33h2v1h-2zM15 33h2v1h-2zM21 33h1v1h-1zM23 33h1v1h-1zM25 33h1v1h-1zM29 33h2v1h-2zM32 33h1v1h-1zM34 33h1v1h-1zM36 33h1v1h-1zM0 34h1v1h-1zM2 34h3v1h-3zM6 34h1v1h-1zM8 34h1v1h-1zM10 34h1v1h-1zM12 34h2v1h-2zM20 34h3v1h-3zM24 34h6v1h-6zM34 34h3v1h-3zM0 35h1v1h-1zM6 35h1v1h-1zM11 35h2v1h-2zM16 35h1v1h-1zM18 35h1v1h-1zM21 35h3v1h-3zM27 35h2v1h-2zM32 35h1v1h-1zM36 35h1v1h-1zM0 36h7v1h-7zM8 36h1v1h-1zM11 36h2v1h-2zM17 36h1v1h-1zM23 36h4v1h-4zM29 36h2v1h-2zM32 36h5v1h-5z" },
+};
+const SS_APP_LOGO = {
+  apple: "M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701",
+  android: "M18.4395 5.5586c-.675 1.1664-1.352 2.3318-2.0274 3.498-.0366-.0155-.0742-.0286-.1113-.043-1.8249-.6957-3.484-.8-4.42-.787-1.8551.0185-3.3544.4643-4.2597.8203-.084-.1494-1.7526-3.021-2.0215-3.4864a1.1451 1.1451 0 0 0-.1406-.1914c-.3312-.364-.9054-.4859-1.379-.203-.475.282-.7136.9361-.3886 1.5019 1.9466 3.3696-.0966-.2158 1.9473 3.3593.0172.031-.4946.2642-1.3926 1.0177C2.8987 12.176.452 14.772 0 18.9902h24c-.119-1.1108-.3686-2.099-.7461-3.0683-.7438-1.9118-1.8435-3.2928-2.7402-4.1836a12.1048 12.1048 0 0 0-2.1309-1.6875c.6594-1.122 1.312-2.2559 1.9649-3.3848.2077-.3615.1886-.7956-.0079-1.1191a1.1001 1.1001 0 0 0-.8515-.5332c-.5225-.0536-.9392.3128-1.0488.5449zm-.0391 8.461c.3944.5926.324 1.3306-.1563 1.6503-.4799.3197-1.188.0985-1.582-.4941-.3944-.5927-.324-1.3307.1563-1.6504.4727-.315 1.1812-.1086 1.582.4941zM7.207 13.5273c.4803.3197.5506 1.0577.1563 1.6504-.394.5926-1.1038.8138-1.584.4941-.48-.3197-.5503-1.0577-.1563-1.6504.4008-.6021 1.1087-.8106 1.584-.4941z",
+};
+const SS_APP_PROMO_HIDDEN = "ss.phoneAppPromo.hidden";
+
+function ssAppQrReady(which) {
+  const q = SS_APP_QR[which];
+  return !!q && ssPhoneLinkReady(SS_PHONE_LINKS[which]) && q.url === SS_PHONE_LINKS[which];
+}
+
+function SsAppLogo({ os, size = 18 }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" focusable="false" style={{ display: "block", flexShrink: 0 }}>
+      <path d={SS_APP_LOGO[os]} fill={os === "apple" ? "#000000" : "#34A853"} />
+    </svg>
+  );
+}
+
+function SsAppQr({ which, label }) {
+  const q = SS_APP_QR[which];
+  return (
+    <svg viewBox={`-4 -4 ${q.size + 8} ${q.size + 8}`} role="img" aria-label={label} data-ss-app-qr={which}
+      shapeRendering="crispEdges" style={{ display: "block", width: "100%", height: "auto", background: "#FFF" }}>
+      <path d={q.path} fill="#0F172A" />
+    </svg>
+  );
+}
+
+// `raised`: the Feedback pill is in the same corner (12-shell shows it when the Support switch is off
+// and nobody is viewing as someone else), so the card sits above it.
+function SsPhoneAppPromo({ raised = false }) {
+  const [hidden, setHidden] = useState(() => {
+    try { return window.localStorage.getItem(SS_APP_PROMO_HIDDEN) === "1"; } catch (_e) { return false; }
+  });
+  const [open, setOpen] = useState(false);
+  const openerRef = useRef(null);
+  const closeRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    const unlock = ssLockBodyScroll();
+    if (closeRef.current) closeRef.current.focus();
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      unlock();
+      // Back to the card that opened it, so a keyboard user is where they were.
+      if (openerRef.current) openerRef.current.focus();
+    };
+  }, [open]);
+  if (!ssAppQrReady("ios") || !ssAppQrReady("android")) return null;
+  if (hidden && !open) return null;
+
+  const hide = () => {
+    try { window.localStorage.setItem(SS_APP_PROMO_HIDDEN, "1"); } catch (_e) { /* shown again next time */ }
+    setHidden(true);
+  };
+  // On a phone's own browser the QR code is for someone else's phone, so the store button for the
+  // phone in hand comes first.
+  const phone = ssIsPhoneBrowser();
+  const android = phone && /Android/i.test(String(navigator.userAgent || ""));
+  const stores = [
+    { key: "ios", logo: "apple", name: "iPhone", store: "the App Store", url: SS_PHONE_LINKS.ios },
+    { key: "android", logo: "android", name: "Android", store: "Google Play", url: SS_PHONE_LINKS.android },
+  ];
+  if (android) stores.reverse();
+
+  return (
+    <>
+      <div data-ss-app-promo="small"
+        style={{ position: "fixed", right: 20, bottom: raised ? 72 : 20, zIndex: 880, maxWidth: "calc(100vw - 40px)" }}>
+        {/* No aria-label: the card's own words are its name, so a voice user says what they see. */}
+        <button ref={openerRef} type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}
+          style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", background: "#FFF",
+            border: "1px solid #E2E8F0", borderRadius: 12, padding: "9px 34px 9px 10px", cursor: "pointer", fontFamily: "inherit",
+            boxShadow: "0 6px 20px rgba(15,23,42,0.16)" }}>
+          <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            {["apple", "android"].map((os) => (
+              <span key={os} style={{ width: 30, height: 30, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <SsAppLogo os={os} size={17} />
+              </span>
+            ))}
+          </span>
+          <span style={{ minWidth: 0 }}>
+            <span style={{ display: "block", fontSize: 13, fontWeight: 800, color: "#1E293B" }}>Get the phone app</span>
+            <span style={{ display: "block", fontSize: 11.5, color: "#64748B" }}>{phone ? "iPhone and Android: tap to install" : "iPhone and Android: scan to install"}</span>
+          </span>
+        </button>
+        <button type="button" onClick={hide} aria-label="Hide the phone app card" title="Hide"
+          style={{ position: "absolute", top: 4, right: 4, width: 24, height: 24, border: "none", borderRadius: 6, background: "transparent",
+            color: "#94A3B8", fontSize: 16, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+      </div>
+      {open && (
+        // The backdrop scrolls and the card centres by margin: auto, so a card taller than the screen
+        // starts at its top (title and Close in view) and scrolls. Centring with align-items, and
+        // capping the card at 100vh, cut its top off on a phone whose browser bar is showing.
+        <div onClick={() => setOpen(false)} role="presentation"
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.6)", display: "flex", padding: 16, zIndex: 1200, overflowY: "auto", overscrollBehavior: "contain" }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="ss-app-promo-title" data-ss-app-promo="full" className="ss-app-promo-pop"
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "#FFF", borderRadius: 14, width: "min(620px, 100%)", margin: "auto", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }}>
+            <div style={{ position: "relative", background: "linear-gradient(135deg, #3D3672, #1B7895)", color: "#FFF", padding: "18px 56px 18px 20px", borderRadius: "14px 14px 0 0" }}>
+              <div id="ss-app-promo-title" style={{ fontSize: 17, fontWeight: 800 }}>Get My Synergy Phone on your phone</div>
+              <div style={{ fontSize: 12.5, opacity: 0.92, marginTop: 4, lineHeight: 1.5 }}>
+                {phone ? "Tap your store below, or scan a code from another phone." : "Point your phone\u2019s camera at a code, then sign in with your Structure Studio login."}
+              </div>
+              <button ref={closeRef} type="button" onClick={() => setOpen(false)} aria-label="Close"
+                style={{ position: "absolute", top: 12, right: 12, width: 32, height: 32, border: "none", borderRadius: 8,
+                  background: "rgba(255,255,255,0.18)", color: "#FFF", fontSize: 20, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 14, padding: "18px 20px 6px" }}>
+              {stores.map((s) => (
+                <div key={s.key} data-ss-app-store={s.key}
+                  style={{ flex: "1 1 220px", border: "1px solid #E2E8F0", borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 800, color: "#1E293B" }}>
+                    <SsAppLogo os={s.logo} size={22} /> {s.name}
+                  </div>
+                  <div style={{ width: "100%", maxWidth: 190 }}>
+                    <SsAppQr which={s.key} label={`QR code: My Synergy Phone on ${s.store}`} />
+                  </div>
+                  <a href={s.url} target="_blank" rel="noopener noreferrer"
+                    style={{ ...S.btn(ACCENT, "#FFF"), textDecoration: "none", display: "inline-block", padding: "8px 14px", fontSize: 12.5 }}>
+                    Open {s.store}
+                  </a>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 12, color: "#64748B", padding: "8px 20px 18px", lineHeight: 1.5 }}>
+              Calls to your business number ring the app like a second line, even with the phone locked.
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── Settings → Phone ────────────────────────────────────────────────────────────────────
 const PHONE_DEFAULT_HOURS = {
   mon: [["08:00", "17:00"]], tue: [["08:00", "17:00"]], wed: [["08:00", "17:00"]],
