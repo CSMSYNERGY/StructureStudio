@@ -19,6 +19,11 @@
 //   G. an admin-catalog older than this page ("Unknown action") hides the card, no error banner
 //   H. at 375 px nothing scrolls sideways, list or dialog
 //   I. a non-operator never sees the Admin tab and never asks for a chat
+//   J. a chat longer than the most shown: its newest messages, past one read's 1000-row cap, and a
+//      line saying older ones aren't shown
+// B also checks focus (it moves into the dialog and back to the row, so Space or Enter cannot click
+// the row behind it) and that a text selection let go over the backdrop does not close the dialog.
+// The fake returns at most 1000 rows a read, like the project's db-max-rows.
 //
 //   python -m http.server 8131 --bind 127.0.0.1   (repo root)
 //   SS_BASE=http://127.0.0.1:8131 node tests/harness/supportChats.mjs   (exit 0 = every check held)
@@ -31,7 +36,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launch, reporter, BASE, REF, serveAppRoutes } from "./lib.mjs";
-import { CHATS_PAGE, handleSupportChatsAction } from "../../supabase/functions/admin-catalog/supportChats.ts";
+import { CHAT_MESSAGES_MAX, CHATS_PAGE, handleSupportChatsAction, MAX_ROWS } from "../../supabase/functions/admin-catalog/supportChats.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -64,14 +69,15 @@ const cmp = (a, b) => {
 };
 function fakeDb(W) {
   const q = (table) => {
-    const st = { filters: [], orders: [], lim: Infinity, cols: [], head: false, single: false, err: null };
+    const st = { filters: [], orders: [], lim: Infinity, offset: 0, cols: [], head: false, single: false, err: null };
     const col = (c) => { if (!st.err && !COLUMNS[table].includes(c)) st.err = { code: "42703", message: `column ${table}.${c} does not exist` }; };
     const run = () => {
       if (st.err) return { data: null, error: st.err, count: null };
       let rows = (W.rows[table] || []).filter((r) => st.filters.every((f) => f(r)));
       rows = [...rows].sort((a, b) => { for (const [c, asc] of st.orders) { const d = cmp(a[c], b[c]); if (d) return asc ? d : -d; } return 0; });
       const count = rows.length;
-      const out = rows.slice(0, st.lim).map((r) => Object.fromEntries(st.cols.map((c) => [c, r[c] ?? null])));
+      // At most MAX_ROWS a read, whatever limit() or range() asks: this project's db-max-rows.
+      const out = rows.slice(st.offset, st.offset + Math.min(st.lim, MAX_ROWS)).map((r) => Object.fromEntries(st.cols.map((c) => [c, r[c] ?? null])));
       if (st.head) return { data: null, error: null, count };
       if (st.single) return { data: out[0] ?? null, error: null, count: null };
       return { data: out, error: null, count };
@@ -85,6 +91,7 @@ function fakeDb(W) {
       not(c, op, v) { col(c); st.filters.push((r) => r[c] != null); return b; },
       order(c, o) { col(c); st.orders.push([c, !o || o.ascending !== false]); return b; },
       limit(n) { st.lim = n; return b; },
+      range(from, to) { st.offset = from; st.lim = to - from + 1; return b; },
       maybeSingle() { st.single = true; return b; },
       insert(row) { Object.keys(row).forEach(col); if (!st.err) W.audit.push(row); return Promise.resolve({ data: null, error: st.err }); },
       then(res, rej) { return Promise.resolve(run()).then(res, rej); },
@@ -244,16 +251,36 @@ try {
     ok("B: the dialog names the builder, person and email", head.includes("Demo Sheds") && head.includes("Pat Example <owner@demo.test>"));
     ok("B: opening the chat was audited with whose it is", S.world.audit.some((a) => a.action === "support_chat_read" && a.target_client_id === "demo-builder" && a.note === `chat=${cid(1)}`));
     await shot(page, "02-chat.png");
+    ok("B: focus moves into the dialog", await page.evaluate(() => !!(document.activeElement && document.activeElement.closest('[role="dialog"]'))));
+    const gets = of(t.calls, "support_chat_get").length;
+    await page.keyboard.press("Space");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(700);
+    ok("B: Space and Enter in the dialog don't click the row behind it", of(t.calls, "support_chat_get").length === gets && (await page.locator("[data-adm-chat-msg]").count()) === 4,
+      `${of(t.calls, "support_chat_get").length - gets} extra get(s)`);
     await page.keyboard.press("Escape");
     ok("B: Escape closes it", await waitFor(page, () => !document.querySelector('[role="dialog"]')));
+    ok("B: focus goes back to the row that opened it", await page.evaluate(() => !!(document.activeElement && document.activeElement.hasAttribute("data-adm-chat-row"))));
     await rows(page).nth(1).click();
     ok("B: a chat that became a ticket says so, with its title", await waitFor(page, () => {
       const t = document.querySelector("[data-adm-chat-ticket]"); return t && t.innerText.includes("Prices look wrong") && t.innerText.includes("(submitted)");
     }));
     const handoff = await dialogText(page);
     ok("B: an answer that offered a ticket says so, not as a lookup", handoff.includes("· offered a ticket") && !handoff.includes("looked at offered"));
+    // Select text in a message and let go over the backdrop (the left margin): the dialog stays.
+    const bubble = await page.locator("[data-adm-chat-msg]").first().boundingBox();
+    await page.mouse.move(bubble.x + bubble.width - 12, bubble.y + bubble.height - 10);
+    await page.mouse.down();
+    await page.mouse.move(24, 520, { steps: 10 });
+    await page.mouse.up();
+    await page.waitForTimeout(400);
+    ok("B: a text selection let go over the backdrop leaves the dialog open", (await page.locator('[role="dialog"]').count()) === 1);
     await page.getByRole("button", { name: "Close", exact: true }).click();
     ok("B: the × closes it", await waitFor(page, () => !document.querySelector('[role="dialog"]')));
+    await rows(page).nth(2).click();
+    await waitFor(page, () => document.querySelector("[data-adm-chat-messages]"));
+    await page.mouse.click(24, 520);
+    ok("B: a plain click on the backdrop still closes it", await waitFor(page, () => !document.querySelector('[role="dialog"]')));
 
     // ── C ──
     await page.getByLabel("Builder").selectOption("acme-barns");
@@ -328,6 +355,18 @@ try {
     const box = await t.page.locator('[role="dialog"]').boundingBox();
     ok("H: 375 px: the dialog fits the screen", box && box.x >= 0 && box.x + box.width <= 375 + 1, JSON.stringify(box));
     ok("H: no page errors", t.pageErrors.length === 0, t.pageErrors.join(" | "));
+    await t.ctx.close();
+
+    // ── J ──
+    S = { operator: true, world: baseWorld() };
+    S.world.rows.support_messages = Array.from({ length: CHAT_MESSAGES_MAX + 100 }, (_, i) => msg(1, i % 2 ? "assistant" : "user", `line ${i}`, CHAT_MESSAGES_MAX + 200 - i));
+    t = await open(S, `/console/chats?chat=${cid(1)}`);
+    ok("J: a very long chat opens", await waitFor(t.page, () => document.querySelector("[data-adm-chat-messages]"), null, 30000));
+    const shown = await t.page.locator("[data-adm-chat-msg]").count();
+    ok("J: its newest messages are shown, past one read's cap", shown === CHAT_MESSAGES_MAX, `${shown}`);
+    const firstShown = await t.page.locator("[data-adm-chat-msg]").first().innerText();
+    ok("J: the oldest are the ones left out", firstShown.includes("line 100"), firstShown.slice(-20));
+    ok("J: and it says so", (await t.page.locator("[data-adm-chat-truncated]").innerText().catch(() => "")).includes(`only its newest ${CHAT_MESSAGES_MAX.toLocaleString()} messages`));
     await t.ctx.close();
 
     // ── I ──

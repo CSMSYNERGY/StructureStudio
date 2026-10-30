@@ -7,12 +7,14 @@
 //
 // The fake database answers only with the columns these tables have live (read 2026-10-30) and
 // refuses any other with 42703, the way PostgREST does: a fake that accepts any column passes a
-// select that fails in production.
+// select that fails in production. It also returns at most MAX_ROWS (1000) rows per read whatever
+// limit() or range() asks, like this project's db-max-rows: the first version of this module read
+// "limit(10000)" and "limit(1001)" and passed against a fake without that cap (review, 10-30).
 //
 // Every value here is an obviously fake fixture: this repo is public.
 
 import {
-  CHAT_MESSAGES_MAX, CHATS_PAGE, type ChatDeps, DEFAULT_MONTHLY_CAP_USD, handleSupportChatsAction, monthlyCapMicros,
+  CHAT_MESSAGES_MAX, CHATS_PAGE, type ChatDeps, DEFAULT_MONTHLY_CAP_USD, handleSupportChatsAction, MAX_ROWS, monthlyCapMicros,
   monthStartUtc, PREVIEW_CHARS, previewOf,
 } from "./supportChats.ts";
 import { DEFAULT_MONTHLY_CAP_USD as AGENT_DEFAULT_CAP, monthlyCapMicros as agentMonthlyCapMicros } from "../support-agent/agent.ts";
@@ -40,6 +42,8 @@ interface World {
   fail?: Record<string, string>;
   /** Tables that do not exist (42P01). */
   absent?: string[];
+  /** One select that fails: "table:columns as written" → error code. */
+  failSelect?: Record<string, string>;
   users?: Record<string, { email: string; user_metadata?: Record<string, unknown> } | "error">;
   monthCostMicros?: number | "error";
   inserted: Row[];
@@ -56,6 +60,7 @@ class Query {
   private filters: ((r: Row) => boolean)[] = [];
   private orders: [string, boolean][] = [];
   private lim = Infinity;
+  private offset = 0;
   private cols: string[] = [];
   private head = false;
   private single = false;
@@ -70,6 +75,8 @@ class Query {
   select(cols: string, opts?: { count?: string; head?: boolean }) {
     this.cols = cols.split(",").map((s) => s.trim());
     for (const c of this.cols) this.col(c);
+    const injected = this.w.failSelect?.[`${this.table}:${cols}`];
+    if (injected && !this.err) this.err = { code: injected, message: `select ${cols} on ${this.table} failed` };
     if (opts?.head) this.head = true;
     return this;
   }
@@ -85,6 +92,7 @@ class Query {
   }
   order(c: string, o?: { ascending?: boolean }) { this.col(c); this.orders.push([c, o?.ascending !== false]); return this; }
   limit(n: number) { this.lim = n; return this; }
+  range(from: number, to: number) { this.offset = from; this.lim = to - from + 1; return this; }
   maybeSingle() { this.single = true; return this; }
   insert(row: Row) {
     for (const c of Object.keys(row)) this.col(c);
@@ -103,7 +111,7 @@ class Query {
       return 0;
     });
     const count = rows.length;
-    const out = rows.slice(0, this.lim).map((r) => Object.fromEntries(this.cols.map((c) => [c, r[c] ?? null])));
+    const out = rows.slice(this.offset, this.offset + Math.min(this.lim, MAX_ROWS)).map((r) => Object.fromEntries(this.cols.map((c) => [c, r[c] ?? null])));
     if (this.head) return { data: null, error: null, count };
     if (this.single) {
       if (out.length > 1) return { data: null, error: { code: "PGRST116", message: "more than one row" }, count: null };
@@ -421,12 +429,72 @@ Deno.test("one chat: a bad id, a chat that is gone, and a builder that doesn't m
   assertEquals(ok.status, 200);
 });
 
-Deno.test("one chat: a chat longer than the read says it was cut", async () => {
+Deno.test("the fake holds the row cap: one read returns at most MAX_ROWS whatever it asks", async () => {
+  const w = world();
+  w.rows.support_conversations = Array.from({ length: MAX_ROWS + 5 }, (_, i) => conv(i + 1));
+  const r = await fakeDb(w).from("support_conversations").select("id").limit(MAX_ROWS * 10);
+  assertEquals((r.data as unknown[]).length, MAX_ROWS);
+});
+
+Deno.test("one chat longer than one read: every message, across pages, oldest first", async () => {
   const w = world();
   w.rows.support_conversations = [conv(1)];
-  w.rows.support_messages = Array.from({ length: CHAT_MESSAGES_MAX + 1 }, (_, i) => msg(1, i % 2 ? "assistant" : "user", `m${i}`, i));
+  const n = MAX_ROWS + 500;
+  w.rows.support_messages = Array.from({ length: n }, (_, i) => msg(1, i % 2 ? "assistant" : "user", `m${i}`, i));
+  const r = await call(w, "support_chat_get", { chatId: cid(1) });
+  assertEquals(r.body.messages.length, n);
+  assertEquals(r.body.truncated, false);
+  assertEquals(r.body.messages[0].body, "m0", "oldest first");
+  assertEquals(r.body.messages[n - 1].body, `m${n - 1}`, "the newest is last");
+  assertEquals(new Set(r.body.messages.map((m: Row) => m.id)).size, n, "no message twice");
+});
+
+Deno.test("one chat longer than the most shown: its NEWEST messages, oldest first, and it says so", async () => {
+  const w = world();
+  w.rows.support_conversations = [conv(1)];
+  const n = CHAT_MESSAGES_MAX + 300;
+  w.rows.support_messages = Array.from({ length: n }, (_, i) => msg(1, i % 2 ? "assistant" : "user", `m${i}`, i));
   const r = await call(w, "support_chat_get", { chatId: cid(1) });
   assertEquals(r.body.messages.length, CHAT_MESSAGES_MAX);
-  assertEquals(r.body.truncated, true);
-  assertEquals(r.body.messages[0].body, "m0", "oldest first");
+  assertEquals(r.body.truncated, true, "live, a read capped at MAX_ROWS could never have said this");
+  assertEquals(r.body.messages[0].body, "m300", "the oldest 300 are the ones left out");
+  assertEquals(r.body.messages[CHAT_MESSAGES_MAX - 1].body, `m${n - 1}`, "the newest is kept");
+});
+
+Deno.test("one chat of exactly the most shown is not called cut", async () => {
+  const w = world();
+  w.rows.support_conversations = [conv(1)];
+  w.rows.support_messages = Array.from({ length: CHAT_MESSAGES_MAX }, (_, i) => msg(1, "user", `m${i}`, i));
+  const r = await call(w, "support_chat_get", { chatId: cid(1) });
+  assertEquals(r.body.messages.length, CHAT_MESSAGES_MAX);
+  assertEquals(r.body.truncated, false);
+});
+
+Deno.test("the builders filter counts every chat, past one read's cap", async () => {
+  const w = world();
+  // 2,400 chats: the last builder's 150 sit at the END of id order, beyond any single read.
+  w.rows.support_conversations = [
+    ...Array.from({ length: 1500 }, (_, i) => conv(i + 1)),
+    ...Array.from({ length: 750 }, (_, i) => conv(1501 + i, { client_id: "other-builder" })),
+    ...Array.from({ length: 150 }, (_, i) => conv(2251 + i, { client_id: "late-builder" })),
+  ];
+  w.rows.client_configs.push({ client_id: "late-builder", company_name: "Zed Lofts" });
+  const r = await call(w, "support_chats_list");
+  assertEquals(r.body.builders, [
+    { clientId: "other-builder", companyName: "Acme Barns", chats: 750 },
+    { clientId: "demo-builder", companyName: "Demo Sheds", chats: 1500 },
+    { clientId: "late-builder", companyName: "Zed Lofts", chats: 150 },
+  ]);
+  assert(!("buildersCapped" in r.body), "not capped");
+});
+
+Deno.test("a failed builders read gives no filter list, never a short one", async () => {
+  const w = world();
+  w.rows.support_conversations = [conv(1)];
+  // The list read succeeds; only the builders scan (its select is "id, client_id") fails.
+  w.failSelect = { "support_conversations:id, client_id": "57014" };
+  const r = await call(w, "support_chats_list");
+  assertEquals(r.body.chats.length, 1);
+  assertEquals(r.body.builders, null);
+  assertEquals(r.body.month.chats, 1, "the month still counts");
 });

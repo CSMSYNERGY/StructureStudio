@@ -649,8 +649,14 @@ function AdmOverlay({ onClose, maxWidth = 520, labelledBy, children }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+  // Close only on a press that STARTED on the backdrop. Selecting text inside the dialog and letting
+  // go over the backdrop fires a click on the backdrop itself (the nearest common ancestor), which
+  // closed the dialog mid-selection (Support chats review, 2026-10-30).
+  const downOnBackdrop = useRef(false);
   return (
-    <div onClick={onClose} role="presentation"
+    <div onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (e.target === e.currentTarget && downOnBackdrop.current) onClose(); downOnBackdrop.current = false; }}
+      role="presentation"
       style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
       <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} onClick={(e) => e.stopPropagation()}
         style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
@@ -2639,6 +2645,14 @@ const admChatWho = (c) => (c && c.person ? (c.person.name || c.person.email || "
 
 function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
   const [copied, setCopied] = useState(false);
+  // Focus moves into the dialog, and back to what opened it on close. Left on the row button behind
+  // the overlay, Space or Enter would click that row again: the chat reloads and is audited twice.
+  const bodyRef = useRef(null);
+  useEffect(() => {
+    const opener = document.activeElement;
+    if (bodyRef.current) bodyRef.current.focus();
+    return () => { if (opener && typeof opener.focus === "function" && document.contains(opener)) opener.focus(); };
+  }, []);
   const c = open.chat;
   const link = `${window.location.origin}/console/chats?chat=${open.id}`;
   const copy = async () => {
@@ -2648,6 +2662,7 @@ function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
   const smallBtn = (bg, fg) => ({ ...S.btn(bg, fg), padding: "6px 12px", fontSize: 12.5 });
   return (
     <AdmOverlay onClose={onClose} maxWidth={760} labelledBy="adm-chat-title">
+      <div ref={bodyRef} tabIndex={-1} data-adm-chat-dialog style={{ outline: "none" }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div id="adm-chat-title" style={{ fontSize: 16, fontWeight: 800, color: "#1E293B" }}>{c ? (c.companyName || c.clientId) : "Support chat"}</div>
@@ -2672,6 +2687,11 @@ function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
         <div data-adm-chat-messages={open.messages.length}
           style={{ maxHeight: "min(60vh, 560px)", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "4px 2px", borderTop: "1px solid #F1F5F9", borderBottom: "1px solid #F1F5F9" }}>
           {open.messages.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B", padding: "8px 0" }}>No messages in this chat.</div>}
+          {open.truncated && (
+            <div data-adm-chat-truncated style={{ fontSize: 12, color: "#92400E", fontWeight: 700 }}>
+              {`A long chat: only its newest ${open.messages.length.toLocaleString()} messages are shown.`}
+            </div>
+          )}
           {open.messages.map((m) => {
             const mine = m.role === "user";
             const used = (m.tools || []).filter((t) => t !== "offer_handoff").map((t) => ADM_CHAT_TOOLS[t] || t);
@@ -2694,12 +2714,12 @@ function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
               </div>
             );
           })}
-          {open.truncated && <div style={{ fontSize: 12, color: "#92400E", fontWeight: 700 }}>Only the first 1,000 messages are shown.</div>}
         </div>
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
         <button type="button" onClick={copy} style={smallBtn("#F1F5F9", "#334155")}>{copied ? "Link copied" : "Copy link"}</button>
         {c && <button type="button" onClick={() => { onClose(); onOpenBuilder(c.clientId); }} style={smallBtn("#F1F5F9", "#334155")}>Open builder</button>}
+      </div>
       </div>
     </AdmOverlay>
   );

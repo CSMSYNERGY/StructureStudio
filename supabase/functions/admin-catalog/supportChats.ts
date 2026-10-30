@@ -31,9 +31,15 @@ export const SUPPORT_CHAT_ACTIONS: readonly string[] = ["support_chats_list", "s
 
 /** Chats per page. One more is read to learn whether older ones exist. */
 export const CHATS_PAGE = 50;
-/** The most messages one chat's read returns. The caps (12 per person per 10 minutes, 60 per
- *  builder per day) keep a chat far below this; a longer one says so (`truncated`). */
-export const CHAT_MESSAGES_MAX = 1000;
+/** PostgREST's db-max-rows on this project: a read returns at most this many rows whatever its
+ *  limit says, with no error. Every read here that could pass it pages with range(). */
+export const MAX_ROWS = 1000;
+/** The most messages one chat's read returns, newest kept. Nothing caps a chat's length (it runs
+ *  until the builder starts a new one; the caps are per day and per 10 minutes), so a longer chat
+ *  shows its newest messages and says so (`truncated`). */
+export const CHAT_MESSAGES_MAX = 2000;
+/** Chats the builders filter counts before it stops and says so (`buildersCapped`). */
+export const BUILDERS_SCAN_MAX = 50_000;
 /** The first question's preview in the list, in characters. */
 export const PREVIEW_CHARS = 200;
 /** support-agent's own default ceiling (agent.ts DEFAULT_MONTHLY_CAP_USD). Repeated, not imported:
@@ -87,11 +93,18 @@ async function peopleOf(sb: Db, ids: string[]): Promise<Map<string, Person>> {
   return out;
 }
 
-/** Every builder's name. A failed read leaves the names out, never the chats. */
-async function namesOf(sb: Db): Promise<Map<string, string | null>> {
-  const r = await sb.from("client_configs").select("client_id, company_name");
-  return new Map(((r.error ? [] : r.data ?? []) as { client_id: string; company_name: string | null }[])
-    .map((c) => [String(c.client_id), c.company_name ?? null]));
+/** These builders' names, 200 ids a read. A failed read leaves those names out, never the chats. */
+async function namesOf(sb: Db, ids: string[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += 200) chunks.push(ids.slice(i, i + 200));
+  await Promise.all(chunks.map(async (chunk) => {
+    const r = await sb.from("client_configs").select("client_id, company_name").in("client_id", chunk);
+    for (const c of (r.error ? [] : r.data ?? []) as { client_id: string; company_name: string | null }[]) {
+      out.set(String(c.client_id), c.company_name ?? null);
+    }
+  }));
+  return out;
 }
 
 /** The tickets these chats became. A failed read shows "became a ticket" without its title. */
@@ -107,7 +120,7 @@ async function ticketsOf(sb: Db, ids: string[]): Promise<Map<string, Ticket>> {
 async function firstQuestionsOf(sb: Db, ids: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!ids.length) return out;
-  const READ = 1000;
+  const READ = MAX_ROWS;
   const r = await sb.from("support_messages").select("conversation_id, body, created_at")
     .in("conversation_id", ids).eq("role", "user").order("created_at", { ascending: true }).limit(READ);
   if (r.error) return out;
@@ -159,15 +172,25 @@ async function monthOf(sb: Db, deps: ChatDeps) {
   };
 }
 
-/** The builders that have chats, for the page's filter: each with its number of chats. */
-async function buildersOf(sb: Db, names: Map<string, string | null>) {
-  const LIMIT = 10000;
-  const r = await sb.from("support_conversations").select("client_id").limit(LIMIT);
-  if (r.error) return null;
+/** The builders that have chats, for the page's filter: each with its number of chats. Every chat
+ *  is counted, a page of MAX_ROWS at a time in id order (one unpaged read would stop at MAX_ROWS
+ *  and drop builders silently); past BUILDERS_SCAN_MAX it stops and says so. A failed read gives
+ *  no filter list (null), never a short one. */
+async function buildersOf(sb: Db) {
   const counts = new Map<string, number>();
-  for (const c of (r.data ?? []) as { client_id: string }[]) counts.set(String(c.client_id), (counts.get(String(c.client_id)) ?? 0) + 1);
-  return [...counts].map(([clientId, chats]) => ({ clientId, companyName: names.get(clientId) ?? null, chats }))
+  let capped = false;
+  for (let from = 0; ; from += MAX_ROWS) {
+    if (from >= BUILDERS_SCAN_MAX) { capped = true; break; }
+    const r = await sb.from("support_conversations").select("id, client_id").order("id", { ascending: true }).range(from, from + MAX_ROWS - 1);
+    if (r.error) return { builders: null, capped: false };
+    const page = (r.data ?? []) as { client_id: string }[];
+    for (const c of page) counts.set(String(c.client_id), (counts.get(String(c.client_id)) ?? 0) + 1);
+    if (page.length < MAX_ROWS) break;
+  }
+  const names = await namesOf(sb, [...counts.keys()]);
+  const builders = [...counts].map(([clientId, chats]) => ({ clientId, companyName: names.get(clientId) ?? null, chats }))
     .sort((a, b) => String(a.companyName || a.clientId).localeCompare(String(b.companyName || b.clientId)));
+  return { builders, capped };
 }
 
 const optional = (v: unknown) => (v == null || v === "" ? null : String(v));
@@ -193,20 +216,42 @@ async function listChats(sb: Db, p: Record<string, unknown>, json: Json, deps: C
   const more = all.length > CHATS_PAGE;
   const uniq = (xs: unknown[]) => [...new Set(xs.filter(Boolean).map(String))];
 
-  const [names, people, tickets, first] = await Promise.all([
-    namesOf(sb),
+  const firstPage = before === null;
+  const [names, people, tickets, first, month, filter] = await Promise.all([
+    namesOf(sb, uniq(rows.map((c) => c.client_id))),
     peopleOf(sb, uniq(rows.map((c) => c.user_id))),
     ticketsOf(sb, uniq(rows.map((c) => c.submission_id))),
     firstQuestionsOf(sb, rows.map((c) => String(c.id))),
+    firstPage ? monthOf(sb, deps) : Promise.resolve(undefined),
+    firstPage ? buildersOf(sb) : Promise.resolve(undefined),
   ]);
-  const firstPage = before === null;
-  const [month, builders] = firstPage ? await Promise.all([monthOf(sb, deps), buildersOf(sb, names)]) : [undefined, undefined];
   return json({
     ok: true, installed: true,
     chats: rows.map((c) => chatView(c, names, people, tickets, first)),
     more, next: more ? rows[rows.length - 1].last_message_at : null,
-    ...(firstPage ? { month, builders } : {}),
+    ...(firstPage && filter ? { month, builders: filter.builders, ...(filter.capped ? { buildersCapped: true } : {}) } : {}),
   });
+}
+
+/** A chat's newest CHAT_MESSAGES_MAX + 1 messages, newest first, a page of MAX_ROWS at a time (the
+ *  one extra row tells the caller the chat is longer than it shows). A message that lands between
+ *  two pages pushes a row onto the next page twice; ids keep it once. A failed read throws: a chat
+ *  shown with a page missing would look complete. */
+async function newestMessagesOf(sb: Db, chatId: string, clientId: string) {
+  const want = CHAT_MESSAGES_MAX + 1;
+  // deno-lint-ignore no-explicit-any
+  const out: any[] = [];
+  const seen = new Set<string>();
+  for (let from = 0; from < want; from += MAX_ROWS) {
+    const to = Math.min(from + MAX_ROWS, want) - 1;
+    const r = await sb.from("support_messages").select(MSG_COLS).eq("conversation_id", chatId).eq("client_id", clientId)
+      .order("created_at", { ascending: false }).order("id", { ascending: false }).range(from, to);
+    if (r.error) throw r.error;
+    const page = (r.data ?? []) as { id: string }[];
+    for (const m of page) if (!seen.has(String(m.id))) { seen.add(String(m.id)); out.push(m); }
+    if (page.length < to - from + 1) break;
+  }
+  return out;
 }
 
 async function getChat(sb: Db, p: Record<string, unknown>, identity: Identity, json: Json) {
@@ -232,20 +277,17 @@ async function getChat(sb: Db, p: Record<string, unknown>, identity: Identity, j
     });
   } catch { /* best-effort, like every admin_audit write in admin-catalog */ }
 
-  const [m, names, people, tickets] = await Promise.all([
-    sb.from("support_messages").select(MSG_COLS).eq("conversation_id", chatId).eq("client_id", String(conv.client_id))
-      .order("created_at", { ascending: true }).limit(CHAT_MESSAGES_MAX + 1),
-    namesOf(sb),
+  const [msgs, names, people, tickets] = await Promise.all([
+    newestMessagesOf(sb, chatId, String(conv.client_id)),
+    namesOf(sb, [String(conv.client_id)]),
     peopleOf(sb, conv.user_id ? [String(conv.user_id)] : []),
     ticketsOf(sb, conv.submission_id ? [String(conv.submission_id)] : []),
   ]);
-  if (m.error) throw m.error;
-  // deno-lint-ignore no-explicit-any
-  const msgs = (m.data ?? []) as any[];
+  const kept = msgs.slice(0, CHAT_MESSAGES_MAX).reverse();
   return json({
     ok: true,
     chat: chatView(conv, names, people, tickets),
-    messages: msgs.slice(0, CHAT_MESSAGES_MAX).map((x) => ({
+    messages: kept.map((x) => ({
       id: String(x.id), role: x.role === "assistant" ? "assistant" : "user", body: String(x.body ?? ""),
       tools: Array.isArray(x.tools) ? x.tools.map(String) : [], costMicros: Number(x.cost_micros) || 0,
       model: x.model ?? null, createdAt: x.created_at,
