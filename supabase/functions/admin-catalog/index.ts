@@ -18,6 +18,9 @@ import { parseTaxUsageRange, readTaxLookupsInRange, summarizeTaxUsage } from "..
 import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
 // The pricing-sheet importer, shared with portal-settings: deploy both when it changes.
 import { importPricingRows } from "../_shared/pricingImport.ts";
+// Whole-tenant reads in 1000-row pages (2026-10-30): the console's catalog and the clone read sizes
+// and inclusions through it. Shared with portal-settings (pricingCells.ts): deploy both when it changes.
+import { readAllPaged } from "../_shared/pagedRead.ts";
 // delete_client cancels the builder's subscriptions and removes their saved card at the gateway
 // before it wipes anything (2026-10-05). nmi.ts is the one gateway client; see its importer ledger.
 import { nmiConfigured, nmiPost } from "../_shared/nmi.ts";
@@ -645,14 +648,18 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       }
       case "get_client_catalog": {
         const clientId = reqStr(p.clientId, "clientId");
-        const [styles, sizes, items, incl] = await Promise.all([
+        // Sizes and inclusions are read WHOLE, in 1000-row pages (2026-10-30). PostgREST cuts any
+        // read at 1000 rows without saying so, and both consoles build their pricing sheet from this
+        // answer: an inclusion cut off showed as 0 in the sheet, and the importer deletes a 0 on
+        // re-upload. A readAllPaged failure throws the database's error, as these reads did.
+        const [styles, items, sizes, incl] = await Promise.all([
           sb.from("building_styles").select("id, client_id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
-          sb.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("client_layout_items").select("*").eq("client_id", clientId).order("sort_order"),
-          sb.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
+          readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, sort_order, active", ["sort_order", "id"], clientId),
+          readAllPaged(sb, "building_size_inclusions", "size_id, item_key, included, qty", ["size_id", "item_key"], clientId),
         ]);
-        if (styles.error) throw styles.error; if (sizes.error) throw sizes.error; if (items.error) throw items.error; if (incl.error) throw incl.error;
-        return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes.data, clientLayoutItems: items.data, inclusions: incl.data });
+        if (styles.error) throw styles.error; if (items.error) throw items.error;
+        return json({ ok: true, buildingStyles: styles.data, buildingSizes: sizes, clientLayoutItems: items.data, inclusions: incl });
       }
       // ── layout-item assignment ──────────────────────────────────────────
       case "toggle_item":
@@ -910,19 +917,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           counts.building_styles = styleIdMap.size;
 
           // 2. building_sizes → remap style_id; old size id → new size id (by new style_id|label)
-          const szSrc = await sb.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, sort_order, active").eq("client_id", T);
-          if (szSrc.error) throw new Error(`clone sizes read: ${szSrc.error.message}`);
-          const szRows = (szSrc.data ?? []).filter((z: any) => styleIdMap.has(z.style_id)).map((z: any) => ({
+          // Every size read here is paged (2026-10-30): PostgREST cuts a read at 1000 rows silently,
+          // and a size cut from either read would leave its inclusions behind in step 4.
+          const pagedOrThrow = async (what: string, run: () => Promise<any[]>) => {
+            try { return await run(); } catch (e) { throw new Error(`${what}: ${(e as { message?: string })?.message ?? String(e)}`); }
+          };
+          const szSrc = await pagedOrThrow("clone sizes read", () =>
+            readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, sort_order, active", ["sort_order", "id"], T));
+          const szRows = szSrc.filter((z: any) => styleIdMap.has(z.style_id)).map((z: any) => ({
             client_id: Cc, style_id: styleIdMap.get(z.style_id), label: z.label, width_ft: z.width_ft,
             length_ft: z.length_ft, base_price: z.base_price, sort_order: z.sort_order, active: z.active,
           }));
           if (szRows.length) { const r = await sb.from("building_sizes").insert(szRows); if (r.error) throw new Error(`clone sizes: ${r.error.message}`); }
-          const newSizes = await sb.from("building_sizes").select("id, style_id, label").eq("client_id", Cc);
-          if (newSizes.error) throw newSizes.error;
+          const newSizes = await pagedOrThrow("clone sizes read back", () => readAllPaged(sb, "building_sizes", "id, style_id, label", ["id"], Cc));
           const newSizeIdByKey = new Map<string, string>();
-          for (const z of newSizes.data ?? []) newSizeIdByKey.set(`${z.style_id}|${z.label}`, z.id);
+          for (const z of newSizes) newSizeIdByKey.set(`${z.style_id}|${z.label}`, z.id);
           const sizeIdMap = new Map<string, string>();   // old size id → new size id
-          for (const z of szSrc.data ?? []) { const ns = styleIdMap.get(z.style_id); if (!ns) continue; const nid = newSizeIdByKey.get(`${ns}|${z.label}`); if (nid) sizeIdMap.set(z.id, nid); }
+          for (const z of szSrc) { const ns = styleIdMap.get(z.style_id); if (!ns) continue; const nid = newSizeIdByKey.get(`${ns}|${z.label}`); if (nid) sizeIdMap.set(z.id, nid); }
           counts.building_sizes = sizeIdMap.size;
 
           // 3. fixture_items (the doors/windows/ramps catalog) → old id → new id.
@@ -969,10 +980,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           // inclusion was written) — copying it would recreate the dangling reference, so
           // the row is dropped and counted instead of silently carried over.
           const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
-          const incSrc = await sb.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", T);
-          if (incSrc.error) throw new Error(`clone inclusions read: ${incSrc.error.message}`);
+          // Paged (2026-10-30): a template past 1000 inclusion rows used to clone only the first 1000.
+          const incSrc = await pagedOrThrow("clone inclusions read", () =>
+            readAllPaged(sb, "building_size_inclusions", "size_id, item_key, included, qty", ["size_id", "item_key"], T));
           let incDropped = 0;
-          const incRows = (incSrc.data ?? [])
+          const incRows = incSrc
             .filter((x: any) => sizeIdMap.has(x.size_id))
             .map((x: any) => {
               const key = String(x.item_key ?? "");

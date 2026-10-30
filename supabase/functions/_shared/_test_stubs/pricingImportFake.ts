@@ -9,6 +9,10 @@
 // Every awaited statement is one entry in `calls`, so a test can count round trips.
 //
 // `maxRows` mimics PostgREST's db-max-rows: a read answers at most that many rows.
+// select(cols, { count: "exact" }) also answers `count`, every matching row whatever the range or
+// maxRows; with `head: true` it answers no rows at all, as PostgREST's HEAD does (the sizes table's
+// truncation guard counts this way, 2026-10-30). Every `.in(...)` an awaited statement carries is
+// kept in `ins`, so a test can prove a read never put a list of ids into a URL.
 // `failOn` lets a test make a chosen statement fail. A string means POSTGRES refused it (the
 // statement comes back with a SQLSTATE, as a real refusal does); return { message } with no code
 // to mimic a gateway answering instead of the database — a 502 page, a dropped connection — which
@@ -22,6 +26,7 @@ export type Tables = {
   building_size_inclusions: any[];
 };
 export type Call = { table: string; verb: string; rows: number; bulk: boolean };
+export type InCall = { table: string; verb: string; column: string; values: unknown[] };
 type Opts = {
   maxRows?: number;
   failOn?: (c: { table: string; verb: string; payload: any[]; bulk: boolean }) => string | { code?: string; message: string } | null;
@@ -33,7 +38,7 @@ type Opts = {
 // the bulk importer that read and deleted inclusions by id passed every test against a fake that
 // handed each row an id, then failed on the real table.
 const SCHEMA: Record<string, Set<string>> = {
-  building_styles: new Set(["id", "client_id", "key", "label", "image_url", "sort_order", "active", "code", "taxable"]),
+  building_styles: new Set(["id", "client_id", "key", "label", "image_url", "sort_order", "active", "code", "taxable", "show_image_on_estimate"]),
   building_sizes: new Set(["id", "client_id", "style_id", "label", "width_ft", "length_ft", "base_price", "sort_order", "active", "created_at", "updated_at", "wall_height_ft", "manual_base_price"]),
   building_size_inclusions: new Set(["client_id", "size_id", "item_key", "included", "qty", "created_at", "updated_at"]),
 };
@@ -65,6 +70,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     for (const r of rows) for (const c of Object.keys(r)) if (!SCHEMA[table].has(c)) throw new Error(`pricingImportFake: seed column ${table}.${c} does not exist`);
   }
   const calls: Call[] = [];
+  const ins: InCall[] = [];
 
   const trigger = (table: string, row: any) => {
     if (table === "building_sizes" && row.base_price == null) row.active = false;   // enforce_size_pricing
@@ -98,6 +104,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     const payload = writeArg == null ? [] : payloadOf(writeArg);
     const bulk = Array.isArray(writeArg) || (verb === "delete" && filters.some((f) => f[0] === "in"));
     calls.push({ table, verb, rows: payload.length, bulk });
+    for (const f of filters) if (f[0] === "in") ins.push({ table, verb, column: f[1] as string, values: [...(f[2] as unknown[])] });
     const named = [
       ...ops.filter((o) => o[0] === "select" && typeof o[1] === "string").flatMap((o) => String(o[1]).split(",").map((c) => c.trim())),
       ...filters.map((f) => f[1] as string),
@@ -115,12 +122,15 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     const cur = tables[table];
     if (verb === "select") {
       let rows = cur.filter(matches).map((r) => ({ ...r }));
+      const countOpts = find("select")?.[2] ?? {};
+      const count = countOpts.count === "exact" ? rows.length : undefined;
+      if (countOpts.head) return { data: null, count, error: null };
       const orders = ops.filter((o) => o[0] === "order").map((o) => o[1] as string);
       if (orders.length) rows.sort((a, b) => { for (const c of orders) { const x = String(a[c]), y = String(b[c]); if (x !== y) return x < y ? -1 : 1; } return 0; });
       const range = find("range");
       if (range) rows = rows.slice(range[1], range[2] + 1);
       rows = rows.slice(0, opts.maxRows ?? Infinity);
-      return { data: one ? (rows[0] ?? null) : rows, error: null };
+      return { data: one ? (rows[0] ?? null) : rows, ...(count === undefined ? {} : { count }), error: null };
     }
 
     // Writes: build the table as it would be, check it, then commit — all or nothing.
@@ -172,7 +182,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
     if (!(table in tables)) throw new Error(`pricingImportFake: no table ${table}`);
     return build([]);
   };
-  return { sb: { from }, tables, calls };
+  return { sb: { from }, tables, calls, ins };
 }
 
 /** What the tables hold, without generated ids: sizes by (style, w, l), inclusions by size + item. */
