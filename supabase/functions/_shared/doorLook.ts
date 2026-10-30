@@ -954,9 +954,11 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
   // the strap's length from pivot to tip on every hinge that shows one. The length is taken from the
   // points as read, held to the photo, since a T-strap's pivot sits on the jamb, in the edge strip, and
   // clamped to the leaf it would lose that much. A strap reads short far more often than long (cut off by
-  // the photo's edge, hidden, foreshortened), so the upper median of the straps decides; the single
-  // longest never does on its own. A strap longer than its own leaf is no strap, and a tip given at its
-  // pivot (the prompt's "no strap") counts only when no hinge shows one.
+  // the photo's edge, hidden, foreshortened), so the longer half of the straps decides, by its lower
+  // median: a double's six straps give the 5th, three give the 2nd, so a lone wild strap never decides
+  // (with two straps the longer one does, and the median across the reads guards it). A strap longer than
+  // its own leaf is no strap, and a tip given at its pivot (the prompt's "no strap") counts only when no
+  // hinge shows one.
   const hingeType = enumIn(isRec(read.hinges) ? read.hinges.type : null, DOOR_HINGE_TYPES);
   let hingeCount: number | null = null, hingeAt: number[] | null = null;
   const ownHinges = latchFirst(pivots);
@@ -972,7 +974,8 @@ export function doorLookFromMeasure(read: unknown, ctx: DoorMeasureCtx): DoorRea
     return len <= leafWIn(h.leaf) ? [len] : [];
   });
   const straps = (lens.some((v) => v >= 1) ? lens.filter((v) => v >= 1) : lens).sort((a, b) => a - b);
-  const hingeLenIn = straps.length ? straps[Math.floor(straps.length / 2)] : null;
+  const longer = straps.slice(Math.floor(straps.length / 2));
+  const hingeLenIn = longer.length ? longer[Math.floor((longer.length - 1) / 2)] : null;
 
   const handleV = handle ? (effRails.some((r) => Math.abs(1 - handle[1] - r) <= DOOR_RAIL_TOL) ? "rail" : 1 - handle[1]) : null;
 

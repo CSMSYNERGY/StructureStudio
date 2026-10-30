@@ -60,13 +60,21 @@ export const DOOR_RENDER_RULES = [
   { name: "PLANK_HINGES", needle: "(h >= 5 ? [y0 + h * 0.13, midY, hTop(0.13)] : [y0 + h * 0.18, hTop(0.18)])" },
   { name: "SPEC_HINGE_COUNT", needle: "const count = hs.count != null ? hs.count : h >= 5 ? 3 : 2;" },
   { name: "SPEC_NO_HINGES", needle: 'if (type === "hidden" || type === "pivot" || !count) rows = [];' },
-  { name: "BUTT_NO_STRAP", needle: 'if (type === "butt") {' },
+  // The butt branch's last two lines: its knuckle, then the return that keeps the strap code off it.
+  { name: "BUTT_NO_STRAP", needle: ["put(wallMesh(new THREE.CylinderGeometry(0.03, 0.03, 2 * bh, 12), hingeMat, wf, he, cy, 0.172), tagH);", "        return;"].join(String.fromCharCode(10)) },
+  // A look's hinge rows are held on the leaf by the reach of the piece drawn (drawnDoorLook's clamp).
+  { name: "SPEC_PLATE_H", needle: "const plateH = !spec ? (trim ? F / 2 : Math.min(0.17, h * 0.03)) : trim ? Math.max(0.06, Math.min(0.17, F / 2)) : Math.min(0.17, h * 0.03);" },
+  { name: "SPEC_S1", needle: "const s1 = trim ? Math.max(spec ? 0.03 : 0, Math.min(0.085, F * 0.3)) : 0.085," },
+  { name: "HINGE_REACH", needle: 'const reachH = Math.max(plateH, type === "butt" ? Math.min(0.16, h * 0.05) : type === "pintle" ? Math.max(plateH * 1.2, sw0)' },
+  { name: "HINGE_REACH_2", needle: ': type === "tstrap" ? s1 : type === "strap" ? sw0 : type === "scroll" ? sw0 * 1.65 : 0);' },
+  { name: "HINGE_CLAMP", needle: "rows = rows.map((cy) => Math.max(y0 + reachH, Math.min(cy, cap))).sort((p, q) => p - q);" },
   { name: "MID_RAIL_NEAREST_HALF", needle: "const byMid = mids.slice().sort((p, q) => Math.abs(p - (y0 + h / 2)) - Math.abs(q - (y0 + h / 2)));" },
   { name: "SPEC_RAILS_HINGES", needle: 'else if (hs.at === "rails" || trim) {' },
   { name: "SPEC_PLANK_HINGES", needle: "rows = count === 3 ? [y0 + h * 0.13, byMid.length ? byMid[0] : L.railAt, y1 - h * 0.13]" },
   { name: "SPEC_PLANK_HINGES_2", needle: ": count === 2 ? [y0 + h * 0.18, y1 - h * 0.18] : spread(y0 + h * 0.13, y1 - h * 0.13, count);" },
   { name: "RAIL_AT", needle: "railAt: y0 + h * lp.def.rails[0]" },
-  { name: "FINISH_DEFAULT", needle: 'SS_DOOR_FINISH_HEX[f.finish || "black"]' },
+  { name: "FINISH_DEFAULT", needle: 'const hex = f ? (f.finish === "custom" ? f.hex : SS_DOOR_FINISH_HEX[f.finish || "black"]) : null;' },
+  { name: "FINISH_IRON", needle: "return hex && hex.toUpperCase() !== SS_DOOR_FINISH_HEX.black ? mat(hex, { metalness: 0.55, roughness: 0.42 }) : ironMat;" },
   { name: "FINISH_OWN", needle: "hinge: finish(spec.hinges), handle: finish(spec.handle)," },
   { name: "LEAF_X", needle: '[[o.a0 + 0.05, o.a - 0.03, "a0", false], [o.a + 0.03, o.a1 - 0.05, "a1", true]]' },
   { name: "LEAF_Y", needle: "const y0d = o.y0 + 0.05, y1d = o.y1 - 0.05;" },
@@ -139,6 +147,16 @@ export function drawnDoorLook(spec, { sizeIn = null, leaves = null } = {}) {
     const mid = rails.length ? [...rails].sort((a, b) => Math.abs(a - 0.5) - Math.abs(b - 0.5))[0] : def.rails[0];
     at = count === 3 ? [PLANK_HINGES[3][0], mid, PLANK_HINGES[3][2]].sort((a, b) => a - b)
       : PLANK_HINGES[count] ?? Array.from({ length: count }, (_, i) => (count === 1 ? 0.5 : 0.13 + (0.74 * i) / (count - 1)));
+  }
+  // Every row is held on the leaf by the reach of the tallest piece its type draws (SPEC_PLATE_H, SPEC_S1,
+  // HINGE_REACH, HINGE_CLAMP): the plate, a T-strap's wide half, a strap's end disc, a scroll's curl, a
+  // butt's plates and knuckle, a pintle's pin. Needs the leaf's size.
+  if (at && at.length && leaf && fIn !== null) {
+    const F = fIn / FT, plateH = trim ? Math.max(0.06, Math.min(0.17, F / 2)) : Math.min(0.17, leaf.h * 0.03);
+    const s1 = trim ? Math.max(0.03, Math.min(0.085, F * 0.3)) : 0.085, sw0 = s1 * 0.8;
+    const reach = Math.max(plateH, type === "butt" ? Math.min(0.16, leaf.h * 0.05) : type === "pintle" ? Math.max(plateH * 1.2, sw0)
+      : type === "tstrap" ? s1 : type === "strap" ? sw0 : type === "scroll" ? sw0 * 1.65 : 0) / leaf.h;
+    at = at.map((v) => Math.max(reach, Math.min(v, 1 - reach)));
   }
   let lenIn = null;
   // A butt hinge is two plates and a knuckle: doorHardware returns before the strap (BUTT_NO_STRAP).
