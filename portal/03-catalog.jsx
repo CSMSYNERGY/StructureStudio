@@ -3154,6 +3154,701 @@ function ssPgTemplate(cat, table) {
   return { sections, headers, rows };
 }
 
+// ─── Sizes & prices table: the save path's pure half (Phase 3, 2026-10-31) ───
+// Lifted and run by pricingTableHelpers_test.ts the same way as the helpers above. The page
+// (PricingTablePage) owns the clock, the timers and the network; these decide what a box shows,
+// what goes out in the next call, and what an answer means. The plan's sections 4.6, 4.7 and 4.10.
+//
+// A FIELD is one box of one size: "price", "active" (Offered), or "c:" + an option key ("c:loft",
+// "c:101"). The prefix keeps an option keyed "price" from ever being read as the price. A price is
+// a number or null (not priced), Offered a boolean, an option box its included quantity (0: nothing
+// included, which is no row on file).
+
+// The number rules (plan 4.10), the browser's twins of _shared/pricingCells.ts parsePrice, parseQty
+// and parseDim. pricingTableHelpers_test.ts runs the one shared table (pricingParseCases.ts) through
+// both: a box the browser lets through and the server refuses is a 400 for the whole call, and the
+// other way round it is a box the builder cannot type. `stored` is what is on file: a value equal to
+// it is always accepted, so copying back what the importer stored never bounces.
+function ssPgParsePrice(text, stored) {
+  const s = String(text == null ? "" : text).replace(/[$,\s]/g, "");
+  if (s === "") return { ok: true, value: null };
+  const n = Number(s);
+  if (!isFinite(n)) return { ok: false, error: "A price is a number, 0 or more" };
+  if (n >= 0 || (stored != null && n === Number(stored))) return { ok: true, value: n };
+  return { ok: false, error: "A price is a number, 0 or more" };
+}
+
+// An option box: a whole number from 0 to 999,999, blank meaning 0. Stricter than the importer on
+// purpose (no yes-words, no rounding, no garbage read as 0, which deletes). Digits only once `$`,
+// commas and spaces are gone, so "1e3", "0x1F" and "+5" are refused too.
+function ssPgParseQty(text, stored) {
+  const s = String(text == null ? "" : text).replace(/[$,\s]/g, "");
+  if (s === "") return { ok: true, value: 0 };
+  if (!/^\d+$/.test(s)) return { ok: false, error: "Whole numbers only, 0 or more" };
+  const n = Number(s);
+  if (n <= 999999 || (stored != null && n === Number(stored))) return { ok: true, value: n };
+  return { ok: false, error: "Whole numbers from 0 to 999,999" };
+}
+
+// A new size's width or length in feet: above 0, at most 500, at most 2 decimals, plain decimals.
+function ssPgParseDim(text) {
+  const s = String(text == null ? "" : text).replace(/\s/g, "");
+  const n = /^\d+(\.\d+)?$/.test(s) ? Number(s) : NaN;
+  if (isFinite(n) && n > 0 && n <= 500 && Number(n.toFixed(2)) === n) return { ok: true, value: n };
+  return { ok: false, error: "A width or length is a number above 0, at most 500, with at most 2 decimals" };
+}
+
+// What the server holds for one field of a size. `s` is { version, price, active, cells }; an
+// option with no row on file is 0.
+function ssPgVal(s, f) {
+  if (!s) return undefined;
+  if (f === "price") return s.price == null ? null : Number(s.price);
+  if (f === "active") return !!s.active;
+  const v = s.cells ? s.cells[String(f).slice(2)] : null;
+  return v == null ? 0 : Number(v);
+}
+
+// Two field values alike. A blank price matches only a blank one ($0 is a real price).
+function ssPgSame(a, b) {
+  if (a == null || b == null) return a == null && b == null;
+  if (typeof a === "boolean" || typeof b === "boolean") return a === b;
+  return Number(a) === Number(b);
+}
+
+// What the server held when the table was read, per size, in the queue's shape: the version
+// (updated_at, verbatim) and every value the grid draws. Hidden styles' sizes too.
+function ssPgServerSizes(model) {
+  const out = {};
+  if (!model) return out;
+  [...(model.styles || []), ...(model.hiddenStyles || [])].forEach((st) => (st.sizes || []).forEach((z) => {
+    const cells = {};
+    (model.cols || []).forEach((c, i) => { const v = z.values ? z.values[i] : ""; if (v !== "" && v != null) cells[c.key] = Number(v); });
+    out[z.id] = { version: z.version == null ? null : z.version, price: z.price == null ? null : Number(z.price), active: !!z.active, cells };
+  }));
+  return out;
+}
+
+// One size row as drawn: the server's values with this page's unsent and in-flight edits on top
+// (the newest wins), and `marks`, one character per column: "-" nothing, "p" waiting to save (the
+// blue corner), "r" refused or not a valid entry (red, "!"), "c" changed elsewhere (amber, "↺"). A
+// red box shows what the SERVER holds; what was typed is in the status line (plan 3.14). `marks` is
+// "" when the size has nothing local, so PgRow compares one short string. No server entry: the
+// model's own values (before the queue exists).
+function ssPgRowView(z, s, fs, cols) {
+  if (!s) return { priceText: z.priceText, offered: z.offered, noPrice: z.price == null, hidden: z.hidden, values: z.values, marks: "" };
+  const shown = (f) => {
+    const x = fs && fs[f];
+    return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f);
+  };
+  const price = shown("price");
+  const offered = !!shown("active") && price != null;
+  const values = (cols || []).map((c) => { const n = Number(shown("c:" + c.key)) || 0; return n > 0 ? String(n) : ""; });
+  let marks = "";
+  if (fs) {
+    const mark = (f) => {
+      const x = fs[f];
+      if (!x) return "-";
+      if (x.error) return x.error.kind === "conflict" ? "c" : "r";
+      return x.pending || x.inflight ? "p" : "-";
+    };
+    marks = "-" + mark("price") + mark("active") + (cols || []).map((c) => mark("c:" + c.key)).join("");
+    if (!/[^-]/.test(marks)) marks = "";
+  }
+  // Offered cannot be ticked before the size HAS a price on file (the server ticks it with the
+  // first price), so the box stays disabled while that first price is still on its way.
+  return { priceText: ssPgFmtPrice(price), offered, noPrice: price == null || s.price == null, hidden: !offered, values, marks };
+}
+
+// How many boxes are waiting, saving and red, and sizes being added or removed. The badge and the
+// leave prompt read this.
+function ssPgCount(q) {
+  const out = { pending: 0, inflight: 0, red: 0, creating: 0, removing: 0 };
+  if (!q) return out;
+  Object.keys(q.fields || {}).forEach((id) => {
+    const fs = q.fields[id];
+    Object.keys(fs).forEach((f) => {
+      if (fs[f].pending) out.pending++;
+      if (fs[f].inflight) out.inflight++;
+      if (fs[f].error) out.red++;
+    });
+  });
+  Object.keys(q.sizes || {}).forEach((id) => { if (q.sizes[id].creating) out.creating++; });
+  Object.keys(q.removes || {}).forEach(() => { out.removing++; });
+  return out;
+}
+
+// The next call (plan 4.3, 4.6), or null when nothing can go. Creates first, then removes, then
+// each size with unsent edits, the longest-waiting first. A size whose create is unanswered has no
+// version yet, so its edits wait for the answer (they go in the next call, on the create's version).
+// `to` and `from` carry only what changed. At most 50 entries and 2,500 option boxes (caps.entries,
+// caps.cells): the rest waits for the next call. Returns { body: { creates, removes, sizes }, sent:
+// { [sizeId]: { base, fields: { [field]: { to, from, seq } } } }, creates: [ids], removes: [ids],
+// changes, cells }.
+function ssPgBuildBatch(q, caps) {
+  if (!q) return null;
+  const maxEntries = (caps && caps.entries) || 50;
+  const maxCells = (caps && caps.cells) || 2500;
+  const creates = [], removes = [], sizes = [], createIds = [], removeIds = [];
+  const sent = {};
+  let entries = 0, cells = 0, changes = 0;
+  Object.keys(q.sizes || {}).forEach((id) => {
+    const s = q.sizes[id];
+    if (s.creating !== "pending" || !s.create || entries >= maxEntries) return;
+    creates.push({ id, styleId: s.create.styleId, width: s.create.width, length: s.create.length });
+    createIds.push(id);
+    entries++; changes++;
+  });
+  Object.keys(q.removes || {}).forEach((id) => {
+    if (q.removes[id] !== "pending" || entries >= maxEntries) return;
+    removes.push(id);
+    removeIds.push(id);
+    entries++; changes++;
+  });
+  const ready = Object.keys(q.fields || {}).map((id) => {
+    const s = q.sizes[id], mine = q.fields[id];
+    if (!s || s.creating || s.version == null || (q.removes && q.removes[id])) return null;
+    const fs = Object.keys(mine).filter((f) => mine[f].pending && !mine[f].inflight);
+    if (!fs.length) return null;
+    return { id, s, fs, first: Math.min(...fs.map((f) => mine[f].pending.seq)) };
+  }).filter(Boolean).sort((a, b) => a.first - b.first);
+  for (const r of ready) {
+    if (entries >= maxEntries) break;
+    const from = {}, to = {}, fl = {};
+    r.fs.forEach((f) => {
+      const p = q.fields[r.id][f].pending;
+      if (f === "price" || f === "active") { from[f] = p.from; to[f] = p.to; }
+      else {
+        if (cells >= maxCells) return;
+        const k = f.slice(2);
+        (from.cells = from.cells || {})[k] = p.from;
+        (to.cells = to.cells || {})[k] = p.to;
+        cells++;
+      }
+      fl[f] = { to: p.to, from: p.from, seq: p.seq };
+    });
+    if (!Object.keys(fl).length) continue;
+    sizes.push({ id: r.id, base: r.s.version, from, to });
+    sent[r.id] = { base: r.s.version, fields: fl };
+    entries++;
+    changes += Object.keys(fl).length;
+  }
+  if (!entries) return null;
+  return { body: { creates, removes, sizes }, sent, creates: createIds, removes: removeIds, changes, cells };
+}
+
+// What a `conflict` means for each field a call sent (plan 4.6): the server holds its `to` → it
+// landed (an earlier copy of this very call, or someone typed the same); it still holds its `from`
+// → nobody else touched it, so it goes again on the new version; anything else → a real conflict,
+// red, never sent. Only fields that were SENT are judged, so an Offered tick never conflicts with a
+// colleague's price. `again`: this size was already resent once after a conflict, and a second
+// resend turns red instead, so two tabs can never bounce one size back and forth.
+function ssPgRebase(sent, server, again) {
+  const out = {};
+  Object.keys(sent || {}).forEach((f) => {
+    const now = ssPgVal(server, f);
+    out[f] = ssPgSame(now, sent[f].to) ? "landed" : (!again && ssPgSame(now, sent[f].from)) ? "resend" : "red";
+  });
+  return out;
+}
+
+// THE SAVE QUEUE (plan 4.6): ssPgQueue(state, event) → the next state, never touching its input.
+//
+// STATE. sizes: { [id]: { version, price, active, cells, creating?, create? } }, what the server last
+// confirmed (creating: "pending" | "inflight" while a new size's create is unanswered). fields:
+// { [id]: { [field]: { pending?, inflight?, error? } } } for boxes with something local only, where
+// pending and inflight are { to, from, seq } and error is { kind: "invalid" | "refused" | "conflict",
+// typed, reason, server? }. removes: { [id]: "pending" | "inflight" }. flight: the one call out, with
+// what it sent. Plus the clock marks for the send timing, the failure count, why saving stopped or
+// the page went view-only, the count of answers (oks, for the refresh rule) and a note for the
+// status line.
+//
+// EVENTS: init, commit, invalid, dismiss, create, remove, flush, send, ok, fail, resume, discard,
+// refresh, columns, note-off. Times come in on the event (`at`), never from a clock in here.
+//
+// THE COMMIT RULE. A field's baseline is its in-flight `to` when it has one, otherwise what the
+// server confirmed. A value equal to the baseline drops any unsent edit (nothing to send);
+// anything else is pending { to, from: baseline }. So typing 480 and then 400 again while 480 is
+// out queues { to: 400, from: 480 }, which goes after the answer: it is never thrown away.
+function ssPgQueue(q, ev) {
+  const e = ev || {};
+  const at = e.at == null ? 0 : Number(e.at);
+  if (e.type === "init") {
+    let cols = null;
+    if (Array.isArray(e.cols)) { cols = {}; e.cols.forEach((k) => { cols[k] = true; }); }
+    return { sizes: { ...(e.sizes || {}) }, fields: {}, removes: {}, cols, seq: 0, n: 0, flight: null, failures: 0,
+      stopped: null, viewOnly: null, oks: 0, firstAt: null, lastAt: null, flush: false, retried: {}, note: null,
+      flash: null, reread: false, renamed: {} };
+  }
+  if (!q) return q;
+  // One size's field map with one field set (or gone when nothing is left on it), copied.
+  const put = (fields, id, f, x) => {
+    const mine = { ...(fields[id] || {}) };
+    if (x && (x.pending || x.inflight || x.error)) mine[f] = x; else delete mine[f];
+    const out = { ...fields };
+    if (Object.keys(mine).length) out[id] = mine; else delete out[id];
+    return out;
+  };
+  const setSize = (fields, id, mine) => {
+    const out = { ...fields };
+    if (Object.keys(mine).length) out[id] = mine; else delete out[id];
+    return out;
+  };
+  const anyPending = (fields) => Object.keys(fields).some((id) => Object.keys(fields[id]).some((f) => fields[id][f].pending));
+  const waiting = (st) => anyPending(st.fields) || Object.keys(st.sizes).some((id) => st.sizes[id].creating === "pending")
+    || Object.keys(st.removes).some((id) => st.removes[id] === "pending");
+  // What the builder wants a box to be now: the newest unsent edit, else the one in flight.
+  const wish = (x) => (x.pending ? x.pending.to : x.inflight ? x.inflight.to : x.error ? x.error.typed : undefined);
+  // One size's in-flight edits, back to unsent. A follow-up typed during the flight folds into it:
+  // the newest value, from where the flight started. A box marked not valid keeps only that mark.
+  const unsendSize = (mine) => {
+    const out = {};
+    Object.keys(mine).forEach((f) => {
+      const x = mine[f];
+      if (!x.inflight) { out[f] = x; return; }
+      const y = { ...x };
+      const to = x.pending ? x.pending.to : x.inflight.to;
+      delete y.inflight;
+      delete y.pending;
+      if (!y.error && !ssPgSame(to, x.inflight.from)) y.pending = { to, from: x.inflight.from, seq: x.pending ? x.pending.seq : x.inflight.seq };
+      if (y.pending || y.error) out[f] = y;
+    });
+    return out;
+  };
+  // The clock marks after a change: kept while anything waits, cleared when nothing does.
+  const timed = (st, touched) => {
+    if (!waiting(st)) return { ...st, firstAt: null, lastAt: null, flush: false };
+    if (!touched) return st;
+    return { ...st, firstAt: st.firstAt == null ? at : st.firstAt, lastAt: at };
+  };
+
+  switch (e.type) {
+    case "commit": {
+      if (!q.sizes[e.sizeId]) return q;
+      const x = (q.fields[e.sizeId] || {})[e.f] || {};
+      const base = x.inflight ? x.inflight.to : ssPgVal(q.sizes[e.sizeId], e.f);
+      const y = { ...x };
+      delete y.error;
+      delete y.pending;
+      let seq = q.seq;
+      if (!ssPgSame(e.value, base)) y.pending = { to: e.value, from: base, seq: ++seq };
+      return timed({ ...q, seq, fields: put(q.fields, e.sizeId, e.f, y) }, !!y.pending);
+    }
+    case "invalid": {
+      // Typed, refused, not sent (plan 3.9): the box goes red with the reason, and any earlier unsent
+      // edit of it goes too, because the newest thing typed there is this.
+      if (!q.sizes[e.sizeId]) return q;
+      const y = { ...((q.fields[e.sizeId] || {})[e.f] || {}), error: { kind: "invalid", typed: String(e.typed == null ? "" : e.typed), reason: e.reason || "" } };
+      delete y.pending;
+      return timed({ ...q, fields: put(q.fields, e.sizeId, e.f, y) }, false);
+    }
+    case "dismiss": {
+      const x = (q.fields[e.sizeId] || {})[e.f];
+      if (!x || !x.error) return q;
+      const y = { ...x };
+      delete y.error;
+      return { ...q, fields: put(q.fields, e.sizeId, e.f, y) };
+    }
+    case "create": {
+      if (!e.id || q.sizes[e.id]) return q;
+      const s = { version: null, price: null, active: false, cells: {}, creating: "pending", create: { styleId: e.styleId, width: e.width, length: e.length } };
+      return timed({ ...q, sizes: { ...q.sizes, [e.id]: s }, flush: true }, true);
+    }
+    case "remove": {
+      if (!q.sizes[e.id] || q.removes[e.id]) return q;
+      return timed({ ...q, removes: { ...q.removes, [e.id]: "pending" }, flush: true }, true);
+    }
+    case "flush":
+      return q.flush ? q : { ...q, flush: true };
+    case "note-off":
+      return q.note ? { ...q, note: null } : q;
+    case "send": {
+      // ONE CALL OUT PER PAGE. Nothing goes while a call is out, while saving is stopped, or once the
+      // page is view-only.
+      if (q.flight || q.stopped || q.viewOnly) return q;
+      const b = ssPgBuildBatch(q, e.caps);
+      if (!b) return q.flush ? { ...q, flush: false } : q;
+      let fields = q.fields;
+      Object.keys(b.sent).forEach((id) => {
+        const mine = { ...fields[id] };
+        Object.keys(b.sent[id].fields).forEach((f) => {
+          const y = { ...mine[f], inflight: mine[f].pending };
+          delete y.pending;
+          mine[f] = y;
+        });
+        fields = setSize(fields, id, mine);
+      });
+      const sizes = { ...q.sizes };
+      b.creates.forEach((id) => { sizes[id] = { ...sizes[id], creating: "inflight" }; });
+      const removes = { ...q.removes };
+      b.removes.forEach((id) => { removes[id] = "inflight"; });
+      const n = q.n + 1;
+      const next = { ...q, fields, sizes, removes, n,
+        flight: { n, body: b.body, sent: b.sent, creates: b.creates, removes: b.removes, changes: b.changes, tries: 0 } };
+      // What is left (past the caps, or waiting on a create) keeps its clock and goes next.
+      return waiting(next) ? next : { ...next, firstAt: null, lastAt: null, flush: false };
+    }
+    case "ok": {
+      if (!q.flight || e.n !== q.flight.n) return q;   // an answer nobody is waiting for any more
+      const fl = q.flight;
+      const a = e.answer || {};
+      const sizes = { ...q.sizes };
+      const removes = { ...q.removes };
+      const retried = { ...q.retried };
+      const renamed = { ...q.renamed };
+      const saved = {};
+      const notes = [];
+      let fields = q.fields;
+      let flush = q.flush;
+      const cellsOf = (c) => { const o = {}; Object.keys(c || {}).forEach((k) => { o[k] = Number(c[k]) || 0; }); return o; };
+      const rowOf = (r, prev) => ({ version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price),
+        active: !!r.row.active, cells: { ...((prev && prev.cells) || {}), ...cellsOf(r.cells) } });
+      const gone = (f) => f.slice(0, 2) === "c:" && !!q.cols && !q.cols[f.slice(2)];
+      const dot = (s) => { const t = String(s || "").trim(); return !t || /[.!?]$/.test(t) ? t : t + "."; };
+
+      // Creates. A created (or duplicate: a resend that already landed) size gets its version, and
+      // its waiting edits go in the very next call. `exists`: someone else added these dimensions
+      // first; the existing size replaces the minted one, and what was typed on the minted row
+      // turns red on it. Refused: the size was never added.
+      (Array.isArray(a.created) ? a.created : []).forEach((r) => {
+        if (!r || fl.creates.indexOf(r.id) < 0) return;
+        const minted = q.sizes[r.id];
+        if ((r.status === "created" || r.status === "duplicate") && r.row) {
+          sizes[r.id] = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells) };
+          if (fields[r.id]) flush = true;
+        } else if (r.status === "exists" && r.existingId && r.row) {
+          const into = String(r.existingId);
+          const theirs = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells) };
+          const mine = fields[r.id] || {};
+          const moved = { ...(fields[into] || {}) };
+          Object.keys(mine).forEach((f) => {
+            const typed = wish(mine[f]);
+            if (typed === undefined || moved[f]) return;
+            moved[f] = { error: { kind: "conflict", typed, server: ssPgVal(theirs, f), reason: "Someone else just added this size. Check its numbers and type yours again." } };
+          });
+          delete sizes[r.id];
+          fields = setSize(setSize(fields, r.id, {}), into, moved);
+          if (!q.fields[into] || !sizes[into]) sizes[into] = theirs;
+          renamed[r.id] = into;
+        } else {
+          delete sizes[r.id];
+          fields = setSize(fields, r.id, {});
+          const what = minted && minted.create ? `${minted.create.width}x${minted.create.length}` : "a size";
+          notes.push(`Couldn't add ${what}: ${dot(r.reason || "the server refused it")}`);
+        }
+      });
+      // Removes. `removed` (gone: true too: a resend of one that already landed) takes the row away.
+      (Array.isArray(a.removed) ? a.removed : []).forEach((r) => {
+        if (!r || fl.removes.indexOf(r.id) < 0) return;
+        delete removes[r.id];
+        if (r.status === "removed") { delete sizes[r.id]; fields = setSize(fields, r.id, {}); }
+        else notes.push(dot(r.reason || "That size couldn't be removed"));
+      });
+      // Sizes.
+      const answered = {};
+      (Array.isArray(a.results) ? a.results : []).forEach((r) => {
+        const sent = r && fl.sent[r.id];
+        if (!sent) return;
+        answered[r.id] = true;
+        const server = r.row ? rowOf(r, sizes[r.id]) : sizes[r.id];
+        if (r.row) sizes[r.id] = server;
+        const mine = { ...(fields[r.id] || {}) };
+        const ours = (f) => !!mine[f] && !!mine[f].inflight && mine[f].inflight.seq === sent.fields[f].seq;
+        const fs = Object.keys(sent.fields);
+        if (r.status === "saved" || r.status === "duplicate") {
+          // Landed. In-flight boxes clear; one typed again during the flight stays unsent (its
+          // `from` is already this flight's `to`). A box the server would not take (cellErrors:
+          // an option that is no column any more, Real-Time Pricing, Offered with no price) goes
+          // red with the reason and the server's value, and a follow-up on it goes red with it,
+          // because the value it started from never landed.
+          delete retried[r.id];
+          const errs = r.cellErrors || {};
+          fs.forEach((f) => {
+            if (!ours(f)) return;
+            const x = mine[f];
+            const why = errs[f === "price" || f === "active" ? f : f.slice(2)];
+            if (r.status === "saved" && why != null) {
+              if (gone(f)) delete mine[f];
+              else mine[f] = { error: { kind: "refused", typed: wish(x), reason: String(why) } };
+              return;
+            }
+            const y = { ...x };
+            delete y.inflight;
+            if (y.pending || y.error) mine[f] = y; else delete mine[f];
+            (saved[r.id] = saved[r.id] || []).push(f);
+          });
+        } else if (r.status === "conflict" && r.row) {
+          // REBASE (ssPgRebase): landed boxes clear, untouched ones go again once on the new
+          // version from what is there now, and real conflicts turn red with both values.
+          const verdict = ssPgRebase(sent.fields, server, !!retried[r.id]);
+          let again = false;
+          fs.forEach((f) => {
+            if (!ours(f)) return;
+            const x = mine[f];
+            const now = ssPgVal(server, f);
+            const want = wish(x);
+            if (verdict[f] === "landed") {
+              const y = { ...x };
+              delete y.inflight;
+              if (y.pending || y.error) mine[f] = y; else delete mine[f];
+            } else if (verdict[f] === "resend") {
+              if (ssPgSame(want, now)) delete mine[f];
+              else { mine[f] = { pending: { to: want, from: now, seq: x.pending ? x.pending.seq : x.inflight.seq } }; again = true; }
+            } else {
+              mine[f] = { error: { kind: "conflict", typed: want, server: now, reason: null } };
+            }
+          });
+          if (again) { retried[r.id] = true; flush = true; } else delete retried[r.id];
+        } else {
+          // Refused, or missing (the size is not on the account any more): red with the reason, the
+          // server's value shown, nothing retried. A missing size's other unsent boxes go red too.
+          delete retried[r.id];
+          const why = dot(r.reason || (r.status === "missing" ? "That size isn't on this account any more" : "This change couldn't be saved"));
+          fs.forEach((f) => { if (ours(f)) mine[f] = { error: { kind: "refused", typed: wish(mine[f]), reason: why } }; });
+          if (r.status === "missing") {
+            Object.keys(mine).forEach((f) => { if (mine[f].pending && !mine[f].error) mine[f] = { error: { kind: "refused", typed: mine[f].pending.to, reason: why } }; });
+          }
+        }
+        fields = setSize(fields, r.id, mine);
+      });
+      // Anything the answer left out (it never should): red, with what was typed, rather than unsent
+      // again, which would resend it every 800 ms for as long as the server kept leaving it out.
+      Object.keys(fl.sent).forEach((id) => {
+        if (answered[id] || !fields[id]) return;
+        const mine = { ...fields[id] };
+        Object.keys(fl.sent[id].fields).forEach((f) => {
+          if (mine[f] && mine[f].inflight && mine[f].inflight.seq === fl.sent[id].fields[f].seq) {
+            mine[f] = { error: { kind: "refused", typed: wish(mine[f]), reason: "The server didn't answer for this change. Type it again" } };
+          }
+        });
+        fields = setSize(fields, id, mine);
+      });
+      fl.creates.forEach((id) => {
+        if (!sizes[id] || sizes[id].creating !== "inflight") return;
+        const c = sizes[id].create;
+        delete sizes[id];
+        fields = setSize(fields, id, {});
+        notes.push(`Couldn't add ${c ? `${c.width}x${c.length}` : "a size"}: the server didn't answer. Add it again.`);
+      });
+      fl.removes.forEach((id) => { if (removes[id] === "inflight") { delete removes[id]; notes.push("A size couldn't be removed: the server didn't answer. Remove it again."); } });
+      const next = { ...q, sizes, fields, removes, retried, renamed, flight: null, failures: 0, oks: q.oks + 1, flush,
+        note: notes.length ? { text: notes.join(" ") } : q.note, flash: { n: q.oks + 1, saved } };
+      return timed(next, false);
+    }
+    case "fail": {
+      if (!q.flight || e.n !== q.flight.n) return q;
+      const reason = e.reason ? String(e.reason) : "";
+      if (e.kind === "transport") {
+        // A timeout, a dropped connection, a 5xx: the SAME call goes again after a backoff (the
+        // page's timer). The function answers a resend that already landed `duplicate`, so it is
+        // safe. The fifth failure in a row stops saving until the builder says Retry.
+        const failures = q.failures + 1;
+        const flight = { ...q.flight, tries: q.flight.tries + 1 };
+        return { ...q, flight, failures, stopped: failures >= (e.max || 5) ? { kind: "transport", reason: reason || "couldn't reach the server" } : null };
+      }
+      if (e.kind === "refused") {
+        // The server refused the whole call (a 400): the browser let through something it should not
+        // have. Every box in it goes red; nothing is resent; new sizes in it were never added.
+        let fields = q.fields;
+        Object.keys(q.flight.sent).forEach((id) => {
+          const mine = { ...(fields[id] || {}) };
+          Object.keys(q.flight.sent[id].fields).forEach((f) => {
+            if (mine[f] && mine[f].inflight) mine[f] = { error: { kind: "refused", typed: wish(mine[f]), reason } };
+          });
+          fields = setSize(fields, id, mine);
+        });
+        const sizes = { ...q.sizes };
+        q.flight.creates.forEach((id) => { delete sizes[id]; fields = setSize(fields, id, {}); });
+        const removes = { ...q.removes };
+        q.flight.removes.forEach((id) => { delete removes[id]; });
+        return timed({ ...q, fields, sizes, removes, flight: null, failures: 0 }, false);
+      }
+      // 403 (forbidden), 401 (auth) or an answer for another account (tenant): nothing more goes
+      // from this page. What was in flight is unsent again, so the badge and the leave prompt still
+      // count it.
+      const fields = {};
+      Object.keys(q.fields).forEach((id) => { const m = unsendSize(q.fields[id]); if (Object.keys(m).length) fields[id] = m; });
+      const sizes = { ...q.sizes };
+      q.flight.creates.forEach((id) => { if (sizes[id]) sizes[id] = { ...sizes[id], creating: "pending" }; });
+      const removes = { ...q.removes };
+      q.flight.removes.forEach((id) => { removes[id] = "pending"; });
+      const back = { ...q, fields, sizes, removes, flight: null, failures: 0 };
+      if (e.kind === "forbidden") return { ...back, viewOnly: { reason: reason || "You can't change Sheds on this account" } };
+      return { ...back, stopped: { kind: e.kind === "auth" ? "auth" : "tenant", reason } };
+    }
+    case "resume": {
+      // Retry after saving stopped. An answer for another account is not retried from this page.
+      if (!q.stopped || q.stopped.kind === "tenant") return q;
+      return { ...q, stopped: null, failures: 0, flush: true };
+    }
+    case "discard": {
+      // "Discard these changes": every unsent and in-flight edit goes, and the boxes show what the
+      // server last confirmed. Red boxes stay: they say what did not save. A late answer for the
+      // call that was out is ignored (no flight is waiting for it).
+      const fields = {};
+      Object.keys(q.fields).forEach((id) => {
+        const mine = {};
+        Object.keys(q.fields[id]).forEach((f) => { if (q.fields[id][f].error) mine[f] = { error: q.fields[id][f].error }; });
+        if (Object.keys(mine).length) fields[id] = mine;
+      });
+      const sizes = {};
+      Object.keys(q.sizes).forEach((id) => { if (!q.sizes[id].creating) sizes[id] = q.sizes[id]; });
+      return { ...q, fields, sizes, removes: {}, flight: null, failures: 0, retried: {},
+        stopped: q.stopped && q.stopped.kind === "tenant" ? q.stopped : null, flush: false, firstAt: null, lastAt: null };
+    }
+    case "refresh": {
+      // A fresh read (plan 4.6, 4.8). One asked for before the latest answer landed may predate
+      // that save: dropped, and another read is wanted (reread). A size with nothing local takes
+      // the new version and values (`flash.changed` names the boxes that moved). A size with
+      // anything pending, in flight or red KEEPS ITS VERSION, so the server's checks still judge
+      // its edits; its boxes show the new values except those in flight, and an unsent edit that
+      // started from a value that is no longer there turns red at once and is never sent.
+      if (e.okAt !== q.oks) return q.reread ? q : { ...q, reread: true };
+      const fresh = e.sizes || {};
+      const sizes = {};
+      const changed = {};
+      let fields = q.fields;
+      Object.keys(fresh).forEach((id) => {
+        const was = q.sizes[id], t = fresh[id];
+        const mine = q.fields[id];
+        if (!mine && !(was && was.creating) && !q.removes[id]) {
+          sizes[id] = t;
+          if (was) {
+            const keys = ["price", "active", ...Object.keys({ ...(was.cells || {}), ...(t.cells || {}) }).map((k) => "c:" + k)];
+            const diff = keys.filter((f) => !ssPgSame(ssPgVal(was, f), ssPgVal(t, f)));
+            if (diff.length) changed[id] = diff;
+          }
+          return;
+        }
+        if (!was) { sizes[id] = t; return; }
+        const flying = (f) => !!(mine && mine[f] && mine[f].inflight);
+        const cells = { ...(t.cells || {}) };
+        Object.keys(was.cells || {}).forEach((k) => { if (flying("c:" + k)) cells[k] = was.cells[k]; });
+        Object.keys(cells).forEach((k) => { if (flying("c:" + k) && !(k in (was.cells || {}))) delete cells[k]; });
+        sizes[id] = { ...was, price: flying("price") ? was.price : t.price, active: flying("active") ? was.active : t.active, cells };
+        if (!mine) return;
+        const next = { ...mine };
+        Object.keys(mine).forEach((f) => {
+          const x = mine[f];
+          if (!x.pending || x.inflight) return;
+          const now = ssPgVal(t, f);
+          if (ssPgSame(x.pending.to, now)) { const y = { ...x }; delete y.pending; if (y.error) next[f] = y; else delete next[f]; }
+          else if (!ssPgSame(x.pending.from, now)) next[f] = { error: { kind: "conflict", typed: x.pending.to, server: now, reason: null } };
+        });
+        fields = setSize(fields, id, next);
+      });
+      // A size the read no longer has keeps its place only while something local hangs on it.
+      Object.keys(q.sizes).forEach((id) => { if (!(id in sizes) && (q.fields[id] || q.sizes[id].creating || q.removes[id])) sizes[id] = q.sizes[id]; });
+      return timed({ ...q, sizes, fields, reread: false, flash: { n: q.oks, changed } }, false);
+    }
+    case "columns": {
+      // Columns that went away (archived in Options, in another tab): an unsent or red box in one is
+      // dropped, with a note saying how many. One in flight is left to the server's answer.
+      const keep = {};
+      (e.keys || []).forEach((k) => { keep[k] = true; });
+      const names = e.names || {};
+      const dropped = {};
+      let fields = q.fields;
+      Object.keys(q.fields).forEach((id) => {
+        const mine = { ...q.fields[id] };
+        let touched = false;
+        Object.keys(mine).forEach((f) => {
+          const k = f.slice(2);
+          if (f.slice(0, 2) !== "c:" || keep[k]) return;
+          const x = mine[f];
+          if (!x.pending && !x.error) return;
+          dropped[k] = (dropped[k] || 0) + 1;
+          const y = { ...x };
+          delete y.pending;
+          delete y.error;
+          if (y.inflight) mine[f] = y; else delete mine[f];
+          touched = true;
+        });
+        if (touched) fields = setSize(fields, id, mine);
+      });
+      const text = Object.keys(dropped).map((k) => `${names[k] || "An option"} was archived in Options; ${dropped[k] === 1 ? "1 unsaved box in that column was dropped" : `${dropped[k]} unsaved boxes in that column were dropped`}.`).join(" ");
+      return timed({ ...q, fields, cols: keep, note: text ? { text } : q.note }, false);
+    }
+    default:
+      return q;
+  }
+}
+
+// How long until the next call should go (plan 4.6), or null when nothing can: 800 ms after the
+// last edit, and at most 3 s after the first one still unsent; at once after a flush (paste, fill,
+// add, remove, leaving the tab, Back to Sheds, Retry now) or a rebase.
+function ssPgDueIn(q, now) {
+  if (!q || q.flight || q.stopped || q.viewOnly) return null;
+  if (!ssPgBuildBatch(q)) return null;
+  if (q.flush) return 0;
+  const last = q.lastAt == null ? now : q.lastAt, first = q.firstAt == null ? now : q.firstAt;
+  return Math.max(0, Math.min(last + 800, first + 3000) - now);
+}
+
+// The wait before the same call goes again after its `failures`-th transport failure in a row:
+// 2, 5, 15, then 30 s (plan 4.7). `schedule` replaces those (the harness shortens them).
+function ssPgBackoff(failures, schedule) {
+  const s = Array.isArray(schedule) && schedule.length ? schedule : [2000, 5000, 15000, 30000];
+  return s[Math.min(s.length - 1, Math.max(0, (Number(failures) || 1) - 1))];
+}
+
+// What one save_pricing_cells answer is (plan 4.7), from ssStyleSaveCall's { data, error }. The
+// status is read the way ssRunStyleSave reads it (error.ssStatus, set by 01-core's wrapper on the
+// main host and by the side door itself).
+//   ok         the function answered, for `expect`'s account;
+//   transport  a timeout, a dropped connection, a 5xx, or a session still reconnecting: resend;
+//   refused    any other 4xx (a 400 is a rule the browser let through: a parity bug), or an error
+//              in a 200's body: the boxes go red;
+//   forbidden  403: view-only;   auth  401: signed out;
+//   tenant     the answer is for another account. The side door skips the wrapper's own tripwire,
+//              so this check is the page's, and a mismatch stops every save.
+function ssPgAnswerKind(r, expect) {
+  const err = r && r.error;
+  const data = r && r.data;
+  const status = err && Number(err.ssStatus) > 0 ? Number(err.ssStatus) : null;
+  if (err) {
+    const why = String(err.message || "");
+    if (status === 401) return { kind: "auth", status, reason: why };
+    if (status === 403) return { kind: "forbidden", status, reason: why };
+    if (status != null && status >= 400 && status < 500 && status !== 408 && status !== 425 && status !== 429) return { kind: "refused", status, reason: why };
+    return { kind: "transport", status, reason: why };
+  }
+  if (!data || typeof data !== "object") return { kind: "transport", status: null, reason: "No answer from the server." };
+  if (data.error) return { kind: "refused", status: null, reason: String(data.error) };
+  if (data.ok !== true) return { kind: "transport", status: null, reason: "No answer from the server." };
+  if (expect && String(data.clientId == null ? "" : data.clientId) !== String(expect)) return { kind: "tenant", status: null, reason: String(data.clientId == null ? "" : data.clientId) };
+  return { kind: "ok", status: 200, reason: "" };
+}
+
+// The status line for a red box (plan 3.14). `where` is "Test Barn 12x24", `field` { name, kind:
+// "price" | "active" | "qty" }, `err` the field's error. The grid shows what the server holds; what
+// was typed is said here.
+function ssPgErrorLine(where, field, err) {
+  if (!err) return "";
+  const kind = field && field.kind;
+  const blank = (v) => (kind === "price" ? v == null : kind === "active" ? false : !(Number(v) > 0));
+  const show = (v) => (kind === "price" ? ssPgFmtPrice(v) : kind === "active" ? (v ? "offered" : "not offered") : String(v));
+  const dot = (s) => { const t = String(s || "").trim(); return /[.!?]$/.test(t) ? t : t + "."; };
+  const head = `${where} · ${(field && field.name) || ""}: `;
+  if (err.kind === "conflict" && err.reason) return head + dot(err.reason);
+  if (err.kind === "conflict") {
+    const theirs = blank(err.server) ? "cleared elsewhere" : `changed elsewhere to ${show(err.server)}`;
+    const yours = kind === "active" ? (err.typed ? "ticked it" : "unticked it") : blank(err.typed) ? "cleared it" : `typed ${show(err.typed)}`;
+    return head + `${theirs} while you ${yours}. ${kind === "active" ? "Set it again" : "Type it again"} if yours is right.`;
+  }
+  if (err.kind === "invalid") return head + `“${err.typed}” wasn't saved. ${dot(err.reason)}`;
+  return head + dot(err.reason || "This change couldn't be saved");
+}
+
+// Where a column sits across the grid: { x, w, frozen }, x from the grid's left edge. The widths are
+// the colgroup's (Size 64, Price 76, Offered 30, each option 44). A frozen column (Size, Price and
+// Offered; Size alone below 700 px) is sticky: the selection overlay and the editor draw it in a
+// sticky lane of their own (PgSelectionOverlay), whose left edge rides along with those columns, so
+// its x is the same however far the grid has scrolled sideways.
+function ssPgColBox(col, narrow) {
+  const c = Math.max(0, Number(col) || 0);
+  return { x: c < 3 ? [0, 64, 140][c] : 170 + (c - 3) * 44, w: c < 3 ? [64, 76, 30][c] : 44, frozen: c < (narrow ? 1 : 3) };
+}
+
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
   const [busy, setBusy] = useState(false);
