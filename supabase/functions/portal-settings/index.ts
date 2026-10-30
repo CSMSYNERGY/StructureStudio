@@ -170,6 +170,8 @@ import { bindWallHeightWrites, wallHeightClash, wallHeightListedTwice, type Wall
 import { keepTenantStyleIds, NO_STYLE_TICKED, readStyleIds } from "../_shared/fixtureStyleIds.ts";
 // The pricing-sheet importer, shared with admin-catalog: deploy both when it changes.
 import { importPricingRows } from "../_shared/pricingImport.ts";
+// The sizes table (2026-10-30): its paged read and its save, through migration 350's function.
+import { readSizeTable, savePricingCells, validatePayload as validatePricingCells } from "../_shared/pricingCells.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -311,6 +313,10 @@ const GATES: GateTable = {
   // is the cleaner fix and belongs with the Team screen, not here.
   catalog: { any: [{ area: "settings_structures", level: "view" }, { area: "settings_options", level: "view" }] },
   import_pricing_csv:        { area: "settings_structures", level: "edit" },
+  // The sizes table (Settings → Sheds, 2026-10-30): the same price book as the sheet above, so the
+  // same area. size_table is its whole read; save_pricing_cells writes through migration 350.
+  size_table:                { area: "settings_structures", level: "view" },
+  save_pricing_cells:        { area: "settings_structures", level: "edit" },
 
   // ── Real-Time Pricing (migration 152) ────────────────────────────────────
   // Same area as the price book they feed: whoever may edit structures may edit the
@@ -2855,6 +2861,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         void logEdgeError({ fn: "portal-settings", req, clientId, code, message }).catch(() => {}));
       return json({ ok: true, ...r });
     } catch (e) { return dbFail(req, clientId, "import that pricing sheet", e); }
+  }
+
+  // ── The sizes table (Settings → Sheds → "Open sizes & prices table", 2026-10-30) ──────────────
+  // _shared/pricingCells.ts has the rules; migration 350 has the save. clientId is JWT-resolved
+  // and every answer carries it: the page sends both calls through the side door (a raw fetch that
+  // skips the invoke wrapper's tenant tripwire), so it checks clientId against the tenant it opened
+  // for itself and stops saving on a mismatch.
+  //
+  // The whole read, paged by client_id: styles, sizes (with created_at/updated_at, the version every
+  // edit sends back), inclusions, exact counts of sizes and inclusions (the browser's truncation
+  // guard), and whether Real-Time Pricing owns the price column. The option COLUMNS come from the
+  // catalog action, as for the Excel template.
+  if (action === "size_table") {
+    try {
+      return json({ ok: true, clientId, ...(await readSizeTable(admin, clientId)) });
+    } catch (e) { return dbFail(req, clientId, "load your sizes", e); }
+  }
+
+  // The save: creates, removes and per-size edits, at most 50 together. A malformed body is a 400
+  // with nothing called (the browser checks the same rules first, so it logs one as a parity bug).
+  // Each size's answer (saved / duplicate / conflict / refused / missing) comes back with what the
+  // server now holds for it. One best-effort audit row per call, counts only.
+  if (action === "save_pricing_cells") {
+    const v = validatePricingCells(payload);
+    if (!v.ok) return json({ error: v.error }, 400);
+    try {
+      return json({ ok: true, clientId, ...(await savePricingCells(admin, clientId, v.value, audit)) });
+    } catch (e) { return dbFail(req, clientId, "save your table changes", e); }
   }
 
   // ══ Real-Time Pricing (migration 152) ══════════════════════════════════════════════
