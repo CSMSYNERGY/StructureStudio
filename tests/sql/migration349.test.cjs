@@ -1,7 +1,7 @@
-// Execute migration 348 for real in PGlite (Postgres compiled to WASM, in memory), on orders and
+// Execute migration 349 for real in PGlite (Postgres compiled to WASM, in memory), on orders and
 // payments shaped like the live ones (the (id, client_id) unique index, payments' checks, its order
 // key), then check what it promises:
-//   * the backfill: a payment refunded in full before 348 reads amount 0 and refunded = what its note
+//   * the backfill: a payment refunded in full before 349 reads amount 0 and refunded = what its note
 //     lines say; a partly refunded one keeps its net and gains its refunded total; others are untouched;
 //   * amount_cents 0 only on a row refunded in full and voided: a new 0, a 0 without a refund, and
 //     un-voiding a fully refunded payment are all refused;
@@ -23,15 +23,15 @@
 //
 // Run (from the repo root):
 //   npm install --prefix tests/sql        once (@electric-sql/pglite only)
-//   node tests/sql/migration348.test.cjs  exit 0 = ALL CHECKS PASSED
+//   node tests/sql/migration349.test.cjs  exit 0 = ALL CHECKS PASSED
 // MIG_FILE=<path> applies another copy of the migration (e.g. a deliberately broken one).
 const fs = require("fs");
 const path = require("path");
 const { PGlite } = require("@electric-sql/pglite");
 
 const WT = path.resolve(__dirname, "../..");
-const RAW = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/348_payment_refunds.sql"), "utf8");
-const M348 = () => RAW().replace(/\r\n/g, "\n");
+const RAW = () => fs.readFileSync(process.env.MIG_FILE || path.join(WT, "supabase/migrations/349_payment_refunds.sql"), "utf8");
+const M349 = () => RAW().replace(/\r\n/g, "\n");
 
 const ROLES = `
 create role anon nologin;
@@ -76,9 +76,9 @@ insert into public.orders (id, client_id, total_cents) values
   ('00000000-0000-4000-8000-0000000000a1', 'example-builder', 100000),
   ('00000000-0000-4000-8000-0000000000a2', 'other-builder', 50000);
 insert into public.payments (id, client_id, order_id, amount_cents, method, gateway, gateway_txn_id, voided_at, void_reason, note) values
-  -- refunded in full before 348 (one note line)
+  -- refunded in full before 349 (one note line)
   ('00000000-0000-4000-8000-000000000b01', 'example-builder', '00000000-0000-4000-8000-0000000000a1', 11250, 'card', 'cardpointe', 'rt-full', '2026-10-19', 'refunded $112.50', 'Refunded $112.50 on 2026-10-19 (ref 111)'),
-  -- partly refunded before 348 twice: net 60000 left
+  -- partly refunded before 349 twice: net 60000 left
   ('00000000-0000-4000-8000-000000000b02', 'example-builder', '00000000-0000-4000-8000-0000000000a1', 60000, 'card', 'cardpointe', 'rt-part', null, null, 'Deposit\nRefunded $250.00 on 2026-10-20 (ref 222)\nRefunded $150.00 on 2026-10-21 (ref 333)'),
   -- a card payment nobody refunded
   ('00000000-0000-4000-8000-000000000b03', 'example-builder', '00000000-0000-4000-8000-0000000000a1', 40000, 'card', 'cardpointe', 'rt-plain', null, null, null),
@@ -118,7 +118,7 @@ const close = async (db, id, state, retref = null, code = null, text = null) =>
   (await rows(db, "select public.payment_refund_close($1, $2, $3, $4, $5) as r", [id, state, retref, code, text]))[0].r;
 const applyFails = async (db) => {
   let msg = "";
-  try { await db.exec(M348()); } catch (e) { msg = String(e.message); }
+  try { await db.exec(M349()); } catch (e) { msg = String(e.message); }
   await db.exec("rollback;").catch(() => {});
   return msg;
 };
@@ -128,15 +128,15 @@ const applyFails = async (db) => {
   const db = await fresh();
   let record;
   try {
-    const res = await db.exec(M348());
+    const res = await db.exec(M349());
     record = res.filter((r) => r.rows && r.rows.length).pop()?.rows?.[0];
-    ok(true, "348 applied");
-  } catch (e) { ok(false, "348 applied", e.message); await closeAll(); process.exitCode = 1; return; }
+    ok(true, "349 applied");
+  } catch (e) { ok(false, "349 applied", e.message); await closeAll(); process.exitCode = 1; return; }
   ok(record && Number(record.payments_with_refunds) === 2 && Number(record.refunded_in_full) === 1
     && Number(record.ledger_rows) === 0 && record.ledger_rls === true,
     "THE RECORD: two payments with refunds, one refunded in full, an empty ledger, RLS on", JSON.stringify(record));
   const full = await pay(db, 1);
-  ok(full.amount_cents === 0 && full.refunded_cents === 11250 && full.voided_at, "a payment refunded in full before 348 reads amount 0, refunded 11250", JSON.stringify(full));
+  ok(full.amount_cents === 0 && full.refunded_cents === 11250 && full.voided_at, "a payment refunded in full before 349 reads amount 0, refunded 11250", JSON.stringify(full));
   const part = await pay(db, 2);
   ok(part.amount_cents === 60000 && part.refunded_cents === 40000 && !part.voided_at, "a payment partly refunded twice keeps its net and gains refunded 40000", JSON.stringify(part));
   ok((await pay(db, 3)).refunded_cents === 0 && (await pay(db, 3)).amount_cents === 40000, "a payment nobody refunded is untouched");
@@ -264,12 +264,12 @@ const applyFails = async (db) => {
 
   // ── 7. Re-apply, rehearsal, CRLF ────────────────────────────────────────────────────────
   const snap = JSON.stringify(await rows(db, "select id, amount_cents, refunded_cents, voided_at from public.payments order by id"));
-  try { await db.exec(M348()); ok(true, "a re-apply runs"); } catch (e) { ok(false, "a re-apply runs", e.message); }
+  try { await db.exec(M349()); ok(true, "a re-apply runs"); } catch (e) { ok(false, "a re-apply runs", e.message); }
   ok(JSON.stringify(await rows(db, "select id, amount_cents, refunded_cents, voided_at from public.payments order by id")) === snap,
     "…and changes nothing (no second backfill)");
 
   const rehearse = await fresh();
-  try { await rehearse.exec(M348().replace(/^commit;$/m, "rollback;")); } catch (e) { ok(false, "the rehearsal runs", e.message); }
+  try { await rehearse.exec(M349().replace(/^commit;$/m, "rollback;")); } catch (e) { ok(false, "the rehearsal runs", e.message); }
   const left = (await rows(rehearse, `select to_regclass('public.payment_refunds') is null as no_table,
       (select count(*)::int from information_schema.columns where table_name = 'payments' and column_name = 'refunded_cents') as cols,
       (select amount_cents from public.payments where id = '${P(1)}') as full_amt`))[0];

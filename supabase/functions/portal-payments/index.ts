@@ -117,7 +117,7 @@ const ACH_RETURN_WINDOW_DAYS = 60;
  *  integrations), 2026-10-14: a bank payment's fate (and its return: every UAT one comes back R03)
  *  shows in the FUNDING data, which settlestat does not carry. Like settlestat it is one call per
  *  merchant and day, and it shares the 40 TPM per-MID quota with live charges: with
- *  MAX_SETTLESTAT_DAYS, the 10 recovery inquires and MAX_REFUND_INQUIRES (2, since 348), one
+ *  MAX_SETTLESTAT_DAYS, the 10 recovery inquires and MAX_REFUND_INQUIRES (2, since 349), one
  *  reconcile asks the gateway at most 25 times (ss-payments-cert RECONCILE_GATEWAY_CALLS). Each (merchant, day) is read ONCE: payments.funding_checked_through (migration 309)
  *  remembers how far each bank payment has been read, so a sweep starts where the last one stopped
  *  and a day already read is never asked for again. Spent on the days a payment still clearing
@@ -155,7 +155,7 @@ function achClearing(p: { method?: unknown; funding_state?: unknown; received_at
   return !(age >= ACH_CLEARED_AFTER_DAYS * 86400000);
 }
 
-// ── Refunds (migration 348: payment_refunds, payments.refunded_cents) ────────────────────────
+// ── Refunds (migration 349: payment_refunds, payments.refunded_cents) ────────────────────────
 // A refund, whole or part, goes through two locked steps in Postgres (payment_refund_open and
 // payment_refund_close): the payment keeps its NET in amount_cents, so every reader of money is
 // right with no change, and the ledger keeps each refund. The page sends one `requestKey` per refund
@@ -403,7 +403,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload, action, userId, audit, operator, canEdit } = r.ctx;
 
-  // The two refund steps (migration 348). Each is one transaction in Postgres that locks the payment;
+  // The two refund steps (migration 349). Each is one transaction in Postgres that locks the payment;
   // a database error comes back as a throw, and the caller says what it was doing.
   const refundOpen = async (paymentId: string, cents: number, key: string, kind: "gateway" | "manual", extra: { method?: string | null; reference?: string | null; reason?: string | null } = {}) => {
     const { data, error } = await admin.rpc("payment_refund_open", {
@@ -425,7 +425,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
   /**
    * A card-network refund whose answer we never heard (a timeout, or a worker that died between the
-   * two steps), asked by the refund's OWN order id (cpRefund sends one since 348). Found approved:
+   * two steps), asked by the refund's OWN order id (cpRefund sends one since 349). Found approved:
    * recorded done. Found refused: failed, and the payment is free for another refund. Not found, or
    * the question could not be asked: it stays open, and keeps blocking refunds on that payment.
    *
@@ -963,7 +963,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     // The amount, checked before anything is filed or asked. No amount is the whole of what is left
     // (an older page, and the "Already settled" chain after a void). Up to what is left, never the
-    // payment as first taken: amount_cents is the net since 348.
+    // payment as first taken: amount_cents is the net since 349.
     const left = Number(p.amount_cents);
     const refundCents = payload?.amountCents == null ? left : Number(payload.amountCents);
     if (action === "refund_payment" && (!Number.isInteger(refundCents) || refundCents <= 0 || refundCents > left)) {
@@ -1005,7 +1005,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     if (action === "void_payment") {
       // A refund on this payment whose outcome we never heard may have moved money; cancelling the
       // sale on top of it is a second reversal. Held until that refund is settled. A database
-      // without 348 has no ledger: the read fails, and the void goes on as it always did.
+      // without 349 has no ledger: the read fails, and the void goes on as it always did.
       const { data: inFlight } = await admin.from("payment_refunds")
         .select("id").eq("client_id", clientId).eq("payment_id", paymentId).in("state", ["pending", "unknown"]).limit(1);
       if (Array.isArray(inFlight) && inFlight.length) {
@@ -1048,7 +1048,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // ── refund_payment on the card network: all of what is left, or part of it ──────────────────
     // A refund is a NEW event, never a cancellation: the sale settled, and the books show both. The
     // payment keeps its net (amount_cents) and its refunded total, and payment_refunds keeps each one
-    // (migration 348). A PARTIAL amount is only ever a refund: a void cancels the whole sale (see
+    // (migration 349). A PARTIAL amount is only ever a refund: a void cancels the whole sale (see
     // cpRefund), so a sale that has not settled yet can be cancelled whole or refunded tomorrow.
     const key = refundKeyFrom(payload?.requestKey) ?? `srv_${crypto.randomUUID()}`;
     const fullLeft = refundCents === left;
@@ -1094,7 +1094,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         return json({ error: "We couldn't reach the card network to refund that payment. Nothing was refunded — try again shortly.", detail }, 502);
       }
       // UNKNOWN: a timeout, a reset, a 5xx, an answer we cannot read. The refund may have gone
-      // through, so it is NEVER "nothing has changed, try again" (what this said before 348). Marked
+      // through, so it is NEVER "nothing has changed, try again" (what this said before 349). Marked
       // unknown, asked about once by its own order id, and held if that cannot tell.
       await refundClose(Number(row.id), "unknown", { resptext: detail.slice(0, 120) }).catch(() => {});
       const now = await resolveOpenRefund(merchant, { ...row, state: "unknown" });
@@ -1169,10 +1169,10 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       resolved.push({ attemptId: a.id, ...out });
     }
 
-    // Card-network refunds whose answer we never heard (migration 348): asked by their own order id,
+    // Card-network refunds whose answer we never heard (migration 349): asked by their own order id,
     // oldest first, at most MAX_REFUND_INQUIRES a sweep. Each on the merchant account its payment was
     // taken on. One still open after this stays held and filed (fileUnconfirmedRefund), once a day.
-    // A database without 348 has no ledger: the read fails and this pass does nothing.
+    // A database without 349 has no ledger: the read fails and this pass does nothing.
     const refunds: { refundId: number; state: string }[] = [];
     {
       let rq = admin.from("payment_refunds")

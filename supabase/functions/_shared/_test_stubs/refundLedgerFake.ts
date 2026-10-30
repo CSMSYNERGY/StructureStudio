@@ -1,4 +1,4 @@
-// An in-memory copy of migration 348's two refund steps (payment_refund_open, payment_refund_close)
+// An in-memory copy of migration 349's two refund steps (payment_refund_open, payment_refund_close)
 // and its ledger, for the tests that drive portal-payments through supabase_stub.ts (stubRpc).
 //
 // It follows the SQL rule for rule, in the same order: the payment is found by tenant and id, a
@@ -6,7 +6,7 @@
 // per payment, voided refuses, card network vs by hand, the amount up to what is left, a by-hand
 // refund is done in one call, done moves the money once (amount down, refunded up, voided with the
 // total at zero, a note line) and `short` when less was left, failed and unknown only mark the
-// refund. tests/sql/migration348.test.cjs holds the SQL itself to those rules; this file is only
+// refund. tests/sql/migration349.test.cjs holds the SQL itself to those rules; this file is only
 // what lets a handler test see them.
 //
 // Tenants, ids and order ids are made up. The repo is public.

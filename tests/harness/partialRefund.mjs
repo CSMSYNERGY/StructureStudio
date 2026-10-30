@@ -1,9 +1,9 @@
-// Partial refunds on the Orders page (board card "Partial refunds", migration 348), driven for real
+// Partial refunds on the Orders page (board card "Partial refunds", migration 349), driven for real
 // in the COMPILED portal with Supabase answered locally. portal-payments here is a small stand-in that
 // keeps the payments and the refund ledger the way the server does (amount_cents is what is LEFT,
 // refunded_cents what went back, one refund per requestKey), so the page's reading of each answer is
 // what is checked; the server's own rules are held by paymentsMerchantOfRecord_test.ts (section 8-9)
-// and tests/sql/migration348.test.cjs.
+// and tests/sql/migration349.test.cjs.
 //
 //   R0  the payment rows: Refund on a card payment taken here, Refund AND Void on one recorded by
 //       hand, "Refunded" with no control on one refunded in full, "Part refunded" with what went back
@@ -30,7 +30,7 @@
 //   node tests/harness/partialRefund.mjs          (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to watch
-// the checks fail against the page before 348. Names, ids and card endings are made up (the repo is
+// the checks fail against the page before 349. Names, ids and card endings are made up (the repo is
 // public). NOTHING LEAVES THE MACHINE: every Supabase host is answered here, every other non-local
 // request is aborted.
 import { readFileSync } from "node:fs";

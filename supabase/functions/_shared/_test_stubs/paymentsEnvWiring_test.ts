@@ -115,7 +115,7 @@ type World = {
   audit?: "recent" | "fail";
   /** The prior billing_exempt set_billing reads (client_settings select of billing_exempt alone). */
   wasExempt?: boolean;
-  /** Set by drive(): migration 348's refund steps over this call's copies of `payments`. */
+  /** Set by drive(): migration 349's refund steps over this call's copies of `payments`. */
   ledger?: RefundLedger;
 };
 type Trace = {

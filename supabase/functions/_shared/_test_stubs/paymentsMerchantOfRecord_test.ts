@@ -116,7 +116,7 @@ type World = {
   updateFails?: string[];
   /** A database without migration 309: a payments select naming funding_checked_through is refused. */
   noCursorColumn?: boolean;
-  /** Refunds already in the ledger (migration 348). */
+  /** Refunds already in the ledger (migration 349). */
   refunds?: Partial<LedgerRefund>[];
   /** Set by call(): the ledger over this call's copies of `payments`. */
   ledger?: RefundLedger;
@@ -169,7 +169,7 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     case "invoice_sends":
       return { data: null, error: null };
     case "payment_refunds":
-      // void_payment's in-flight check and reconcile's refund pass (migration 348).
+      // void_payment's in-flight check and reconcile's refund pass (migration 349).
       return world.ledger!.read(ops);
     case "client_settings":
       return { data: world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: NEW_MID, billing_exempt: true, business_name: "Acme Sheds" } : world.settings, error: null };
@@ -236,7 +236,7 @@ const ENV: Record<string, string> = {
 };
 
 async function call(body: Record<string, unknown>, given: World) {
-  // The refund steps (migration 348) move money on the payment, so each call works on its own copies:
+  // The refund steps (migration 349) move money on the payment, so each call works on its own copies:
   // a constant like CARD is never changed by the test before it.
   const payments = (given.payments ?? []).map((p) => ({ ...p }));
   const world: World = { ...given, payments, ledger: refundLedger(payments, given.refunds ?? []) };
@@ -301,7 +301,7 @@ Deno.test("a full refund after the MID changed is sent on the ORIGINAL MID", asy
   assertEquals(r.status, 200, JSON.stringify(r.body));
   assertEquals(r.trace.gateway.map((g) => g.path), ["/refund"]);
   assertEquals(r.trace.gateway[0].body, { merchid: OLD_MID, retref: "rt-card", amount: "1000.00", orderid: r.ledger.refunds[0].gateway_orderid });
-  // Since 348 the refund carries its OWN order id (the ledger row's), so a lost answer can be looked up by it.
+  // Since 349 the refund carries its OWN order id (the ledger row's), so a lost answer can be looked up by it.
   assert(/^ssr_/.test(String(r.trace.gateway[0].body.orderid)), JSON.stringify(r.trace.gateway[0].body));
 });
 
@@ -1046,10 +1046,10 @@ Deno.test("reconcile on a database WITHOUT 309's column: the lists are read with
   assertEquals(again.trace.errors.filter((e) => e.code === "reconcile_funding_needs_migration"), []);
 });
 
-// ─── 8. Partial refunds (migration 348): the ledger, the net, one refund per key ───────────────
+// ─── 8. Partial refunds (migration 349): the ledger, the net, one refund per key ───────────────
 // What the Orders page's Refund box sends: an amount up to what is left and one requestKey per refund
 // the builder means. The ledger fake (refundLedgerFake.ts) follows payment_refund_open/close rule for
-// rule; tests/sql/migration348.test.cjs holds the SQL itself to them.
+// rule; tests/sql/migration349.test.cjs holds the SQL itself to them.
 const TAKEN = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
 const SETTLED_CARD: Pay = { ...CARD, method: "card", received_at: TAKEN(3) };
 const refundCalls = (t: Trace) => t.gateway.filter((g) => g.path === "/refund");

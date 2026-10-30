@@ -47,7 +47,7 @@
 //     P7 keyed, a charge answered 429 with no flag: it never reached the gateway, so the keyed
 //        frame is NOT loaded again and the server's sentence shows without "Key the card in
 //        again"; that same frame's next token is then charged
-//   R  a payment row's Refund (the Refund box since 348, partialRefund.mjs drives the rest of it)
+//   R  a payment row's Refund (the Refund box since 349, partialRefund.mjs drives the rest of it)
 //     R1 a bank payment still clearing whose void answers "already settled": no refund_payment is
 //        sent, and the page's OWN sentence "This bank payment is still clearing. It can be
 //        refunded once it clears." shows, not the void's "already settled" (the server's

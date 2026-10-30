@@ -1,10 +1,10 @@
--- 348_payment_refunds.sql — partial refunds on order payments: a refund ledger, the refunded total on
+-- 349_payment_refunds.sql — partial refunds on order payments: a refund ledger, the refunded total on
 -- the payment, and the two locked steps every refund goes through (board card "Partial refunds").
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT. Through the Supabase connector's execute_sql with the
 --    whole file, then the ledger row:
---      insert into supabase_migrations.schema_migrations (version, name) values ('348', '348_payment_refunds') returning version, name;
---    (or apply_migration, then renumber its timestamp row to '348'). NEVER `supabase db push`, never
+--      insert into supabase_migrations.schema_migrations (version, name) values ('349', '349_payment_refunds') returning version, name;
+--    (or apply_migration, then renumber its timestamp row to '349'). NEVER `supabase db push`, never
 --    `db query --file`. The file carries its own begin;/commit;. READ IT BACK in a separate query:
 --      select column_name, is_nullable, column_default from information_schema.columns
 --       where table_schema = 'public' and table_name = 'payments' and column_name = 'refunded_cents';
@@ -12,8 +12,10 @@
 --    To see it and change nothing, run it with the last `commit;` swapped for `rollback;`.
 --
 -- ── NUMBERING (TENTATIVE: RENUMBER AT APPLY) ─────────────────────────────────────────────
--- Live ledger 2026-10-29: 347 is the newest. Confirm 348 is free at apply time; no row back from the
--- ledger insert means the number is gone: rename this file, its test and every '348' below.
+-- Written as 348 on 2026-10-29; renumbered 349 on 10-30 because 348 went to 348_support_feedback
+-- (release session). Confirm 349 is free at apply time (`max(version) filter (where version ~
+-- '^\d{3}$')`); no row back from the ledger insert means the number is gone: rename this file, its
+-- test and every '349' below.
 --
 -- ── WHY ──────────────────────────────────────────────────────────────────────────────────
 -- Refund on an order payment could only give back the WHOLE payment. portal-payments' refund_payment
@@ -78,14 +80,14 @@ begin;
 
 do $$
 begin
-  if to_regclass('public.payments') is null then raise exception '348: public.payments is missing'; end if;
-  if to_regclass('public.orders') is null then raise exception '348: public.orders is missing'; end if;
+  if to_regclass('public.payments') is null then raise exception '349: public.payments is missing'; end if;
+  if to_regclass('public.orders') is null then raise exception '349: public.orders is missing'; end if;
   -- payments_order_client_fk points at the unique index orders_id_client_uniq; the refund's does too.
   if not exists (select 1 from pg_index i where i.indrelid = 'public.orders'::regclass and i.indisunique
                   and i.indpred is null
                   and (select array_agg(a.attname::text order by k.ord) from unnest(i.indkey) with ordinality k(attnum, ord)
                          join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum) = array['id', 'client_id']) then
-    raise exception '348: orders has no unique (id, client_id) for the refund''s order key';
+    raise exception '349: orders has no unique (id, client_id) for the refund''s order key';
   end if;
 end $$;
 
@@ -175,7 +177,7 @@ declare
   v_short boolean := false;
 begin
   if p_state not in ('done', 'failed', 'unknown') then
-    raise exception '348: payment_refund_close: no such state %', p_state;
+    raise exception '349: payment_refund_close: no such state %', p_state;
   end if;
   select * into v_row from public.payment_refunds where id = p_refund;
   if not found then return jsonb_build_object('refused', 'not_found'); end if;

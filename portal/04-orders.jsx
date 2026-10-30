@@ -3967,7 +3967,7 @@ function QrSvg({ matrix, size = 200 }) {
   );
 }
 
-// ── Refund: all of a payment, or part of it (board card "Partial refunds", migration 348) ───────
+// ── Refund: all of a payment, or part of it (board card "Partial refunds", migration 349) ───────
 // One box for every payment a builder can refund. A card or bank payment taken HERE goes back
 // through the card network (portal-payments refund_payment, or void_payment to cancel the whole
 // sale before it settles). One RECORDED by hand (cash, a check, a card run elsewhere) is paid back
@@ -4180,7 +4180,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [editTotal, setEditTotal] = useState(o.total_cents == null);
   const bal = balOf(row); const st = stateOf(row);
 
-  // ── Refunds (migration 348) ───────────────────────────────────────────────────────────
+  // ── Refunds (migration 349) ───────────────────────────────────────────────────────────
   // `refundFor` is the payment the Refund box is open on. `refunds` are this order's refunds, for
   // the lines under each payment. A database without the ledger, or a read that fails, shows none:
   // each payment's own figures (what is left, what was refunded) still say it.
@@ -5021,7 +5021,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   // row with a gateway, and rightly: the money is at the card network, and a local void
   // would leave the books saying one thing and the merchant account another. Its Refund opens
   // RefundModal, which asks the server to cancel or refund all or part of it; the row only
-  // changes if the gateway agrees. (voidGatewayPayment's window.confirm lived here until 348.)
+  // changes if the gateway agrees. (voidGatewayPayment's window.confirm lived here until 349.)
   const refundDone = (text) => {
     setRefundFor(null);
     setMsg({ ok: text });
@@ -5141,7 +5141,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             ) : null}
             {row.pays.map((p) => {
               const dead = !!p.voided_at;
-              // Refunds (migration 348): amount_cents is what is LEFT of the payment and refunded_cents
+              // Refunds (migration 349): amount_cents is what is LEFT of the payment and refunded_cents
               // what went back, so the payment as taken is the two together. A payment refunded in
               // full reads amount 0 and voided; it shows the refunded figure, struck through, so the
               // row still says what was taken.
@@ -5193,7 +5193,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       rendered as a red banner. A viewer sees the payment and no control.
                       Refund goes through portal-payments, gated orders:edit the same way.
 
-                      Refund (348) opens RefundModal on any live payment taken here or recorded
+                      Refund (349) opens RefundModal on any live payment taken here or recorded
                       by hand. A payment refunded in full has nothing to restore (the database
                       refuses a zero payment back to life), so it shows no control. */}
                   {!ordersOn

@@ -773,7 +773,7 @@ Deno.test("settlestat and funding ask the gateway for the day as MMDD (cpReportD
   for (const s of seen) check(`${s.url} asks date=1009`, new URL(s.url).searchParams.get("date") === "1009", s.url);
 });
 
-Deno.test("cpRefund: the refund's own order id rides along when given (348), never otherwise; the gateway's code and words come back", async () => {
+Deno.test("cpRefund: the refund's own order id rides along when given (349), never otherwise; the gateway's code and words come back", async () => {
   const seen: Seen[] = [];
   recordAll({ respstat: "C", respcode: "29", resptext: "Txn not settled", retref: "rf-9" }, seen);
   try {
