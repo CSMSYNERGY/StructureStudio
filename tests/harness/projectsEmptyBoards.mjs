@@ -166,6 +166,8 @@ async function run(label, S, act) {
           S.boards = [...S.boards, b]; all.set(b.id, b); S.itemsOf[b.id] = [];
           return json(route, { ok: true, board: b });
         }
+        case "board_access":   // since e4cefc8e (10-23) ⚙ Board settings loads who can see the board
+          return json(route, { visibility: "everyone", board: (all.get(body.boardId) || {}).name || "", people: [], iOwn: true });
         case "archive_board":
           S.boards = S.boards.filter((b) => b.id !== body.id);
           S.archived = [...(S.archived || []), body.id];
