@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { verifyCaller } from "../_shared/verifyCaller.ts";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { sendSupportAlert } from "../_shared/supportNotify.ts";
+import { supportChatUrl } from "../_shared/supportChatLink.ts";
 
 // Portal-facing bug / feature-request intake for portal.html.
 //
@@ -26,8 +27,10 @@ import { sendSupportAlert } from "../_shared/supportNotify.ts";
 // support assistant's hand-off, file kind "ticket". A ticket is born in Projects and NEVER goes to
 // Monday (neither board has a ticket kind); it lands on a "support" Projects board when one exists,
 // else on Bugs. A ticket handed off from the assistant carries `supportConversationId`, which must be
-// the CALLER's own chat (else 403); its last 10 messages are attached to the Projects item as an
-// internal note, and the chat is marked handed_off. Bug and feature are unchanged, so the portal on
+// the CALLER's own chat (else 403); its last 6 messages are attached to the Projects item as an
+// internal note, the item's "Conversation" link column gets a "Full chat" link to the whole chat in the
+// Admin console (_shared/supportChatLink.ts), and the chat is marked handed_off. Bug and feature are
+// unchanged, so the portal on
 // main keeps working exactly as it did. Every kind now also emails the support inbox
 // (_shared/supportNotify.ts, the SUPPORT_NOTIFY_TO secret), after the row is saved and without
 // making the builder wait.
@@ -258,15 +261,19 @@ function statusAfterPush(kind: "bug" | "feature"): string {
 // Returns whether the submission is on the board (created now, or already there). Callers that
 // still push to Monday ignore it; with MONDAY_PUSH_DISABLED=1 it IS the answer to "did this
 // reach our tracker", which is what the widget's `pushed` flag tells the builder.
-// Which Projects board a kind lands on, in order of preference. A ticket goes to a "support" board
-// when the team has made one in the Projects UI (no seeding), and to Bugs until then.
+// Which Projects board a kind lands on, in order of preference. A ticket goes to the "support" board
+// (made in the Projects UI on 10-30, no seeding), and to Bugs when that board is missing or archived.
+// ⚠️ Never archive and recreate the Support board: create_board suffixes a clashing slug (archived
+// boards count), so the new one would be support-xxxx and never receive a ticket. Fix it in place.
 const BOARD_SLUGS: Record<string, string[]> = { bug: ["bugs"], feature: ["features"], ticket: ["support", "bugs"] };
 
 // deno-lint-ignore no-explicit-any
 async function mirrorToProjects(admin: any, row: any): Promise<boolean> {
   try {
     const slugs = BOARD_SLUGS[row.kind] ?? ["bugs"];
-    const { data: boards } = await admin.from("pm_boards").select("id, slug").in("slug", slugs);
+    // Live boards only, like every board lookup in portal-projects. Without the filter an archived
+    // board kept receiving items nobody could see, and the builder was told it reached the tracker.
+    const { data: boards } = await admin.from("pm_boards").select("id, slug").in("slug", slugs).is("archived_at", null);
     // deno-lint-ignore no-explicit-any
     const board = slugs.map((s) => (boards || []).find((b: any) => b.slug === s)).find(Boolean);
     if (!board) return false;
@@ -320,6 +327,12 @@ async function mirrorToProjects(admin: any, row: any): Promise<boolean> {
         // deno-lint-ignore no-explicit-any
         const opt = (c.settings?.options || []).find((o: any) => o.label === row.severity);
         if (opt) values[c.id] = [opt.id];
+      } else if (c.type === "link" && c.name === "Conversation") {
+        // A ticket handed off from the assistant: a link to the whole chat (the note holds only the
+        // last 6 messages). The same {url, text} shape portal-projects keeps for a link cell. Bugs has
+        // no such column, so a ticket on the fallback board simply gets no link.
+        const url = supportChatUrl(row.support_conversation_id);
+        if (url) values[c.id] = { url, text: "Full chat" };
       }
     }
     const { data: maxRow } = await admin.from("pm_items").select("position")
@@ -501,25 +514,33 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
     // before the Monday push, so an unexpected push crash cannot lose the pm_item.
     const mirrored = await mirrorToProjects(admin, row);
 
-    // The chat that became this ticket: its last 10 messages go onto the Projects item as an
+    // The chat that became this ticket: its last 6 messages go onto the Projects item as an
     // INTERNAL note (client_visible false: the builder already has the chat), and the chat is marked
-    // handed off. Best-effort: the ticket is saved, and a failure here must not unsave it.
+    // handed off. Six is Carolyn's number (10-29 call); the item's "Full chat" link (mirrorToProjects)
+    // opens the rest. Best-effort: the ticket is saved, and a failure here must not unsave it.
+    // What the alert email may claim is what is actually on the item: the note only if it was written,
+    // the link only if the item holds it (a ticket on the Bugs fallback, or a Support board without a
+    // "Conversation" link column, has none).
     let chatMessages = 0;
+    let chatLinked = false;
     if (conversationId) {
       try {
         const { data: msgs } = await admin.from("support_messages").select("role, body, created_at")
           .eq("conversation_id", conversationId).eq("client_id", clientId)
-          .order("created_at", { ascending: false }).limit(10);
+          .order("created_at", { ascending: false }).limit(6);
         // deno-lint-ignore no-explicit-any
         const lines = (msgs || []).reverse().map((m: any) => `${m.role === "user" ? submitterName : "Studio Assistant"}: ${String(m.body).slice(0, 2000)}`);
-        chatMessages = lines.length;
-        const { data: item } = await admin.from("pm_items").select("id, board_id").eq("feedback_submission_id", row.id).maybeSingle();
+        const { data: item } = await admin.from("pm_items").select("id, board_id, values").eq("feedback_submission_id", row.id).maybeSingle();
+        const chatUrl = supportChatUrl(conversationId);
+        // deno-lint-ignore no-explicit-any
+        chatLinked = !!(item && chatUrl && Object.values(item.values || {}).some((v: any) => v && v.url === chatUrl));
         if (item && lines.length) {
-          await admin.from("pm_updates").insert({
+          const { error: noteErr } = await admin.from("pm_updates").insert({
             item_id: item.id, author_kind: "client", author_email: user.email ?? null,
             body: `Chat with Studio Assistant before this ticket (last ${lines.length} messages):\n\n${lines.join("\n\n")}`,
             client_visible: false, attachments: [],
           });
+          if (!noteErr) chatMessages = lines.length;
         }
         await admin.from("support_conversations").update({
           status: "handed_off", submission_id: row.id, updated_at: new Date().toISOString(),
@@ -536,7 +557,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       const out = await sendSupportAlert({
         kind, title: row.title, detail: row.detail, severity: row.severity, clientId,
         businessName: cs?.business_name ?? null, submitterName, submitterEmail: user.email ?? null,
-        submissionId: row.id, chatMessages,
+        submissionId: row.id, chatMessages, chatLinked,
       });
       if (out.error && out.error !== "SUPPORT_NOTIFY_TO is not set") {
         await logEdgeError({ fn: "portal-feedback", req, code: "support_alert_failed", message: `The support alert email was not sent: ${out.error}.`, severity: "warn", clientId, context: { submission: row.id } });

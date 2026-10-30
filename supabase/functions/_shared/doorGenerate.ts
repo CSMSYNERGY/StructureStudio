@@ -191,6 +191,9 @@ export function doorMeetWindow(p: XY, photo: XY, padPx: number): CloseUpWindow {
 export const DOOR_STAGEB_MAX_TOKENS = 12000;
 export const DOOR_STAGEB_MIN_LEFT_MS = 120_000;
 export const DOOR_MAX_GAPS = 8;
+// The gap rows a press files (and Stage B is asked about): more than the warning names, so rewordings the
+// grouping keeps apart never push a real gap out of the ledger.
+export const DOOR_MAX_GAP_ROWS = 16;
 
 // ─── WARNINGS P4 ADDS ─────────────────────────────────────────────────────────────────────────────
 // doorLook.ts's DOOR_WARNINGS cover the reads and the close-ups. These cover what a press itself did.
@@ -207,7 +210,11 @@ const mismatchWarning = (xs: string[]): DoorWarning => ({
   code: "observed_mismatch",
   text: `We saw ${quoted(xs)} in your photo but couldn't place ${xs.length === 1 ? "it" : "them"} on the door. Check ${xs.length === 1 ? "it" : "them"} before you save.`,
 });
-const gapWarning = (xs: string[]): DoorWarning => ({ code: "vocab_gap", text: `We can't draw ${quoted(xs)} yet. We've noted it so we can add it.` });
+// Names the first DOOR_MAX_GAPS; every one it names is filed (vocabGaps holds up to DOOR_MAX_GAP_ROWS).
+const gapWarning = (xs: string[]): DoorWarning => {
+  const shown = xs.slice(0, DOOR_MAX_GAPS), more = xs.length - shown.length;
+  return { code: "vocab_gap", text: `We can't draw ${quoted(shown)}${more > 0 ? ` (and ${more} more)` : ""} yet. We've noted it so we can add it.` };
+};
 function pushWarning(list: DoorWarning[], w: DoorWarning) {
   if (!list.some((x) => x.code === w.code)) list.push(w);
 }
@@ -284,7 +291,7 @@ export function doorPhrases(v: unknown, most = DOOR_MAX_GAPS): string[] {
   const out: string[] = [];
   for (const s of Array.isArray(v) ? v.slice(0, 40) : []) {
     if (typeof s !== "string") continue;
-    const t = s.replace(/[^A-Za-z0-9 ,.'()/-]/g, " ").trim().replace(/\s+/g, " ").slice(0, 80).trim();
+    const t = s.replace(/[\u2018\u2019\u02bc]/g, "'").replace(/[^A-Za-z0-9 ,.'()/-]/g, " ").trim().replace(/\s+/g, " ").slice(0, 80).trim();
     if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
     if (out.length >= most) break;
   }
@@ -294,11 +301,14 @@ export function doorPhrases(v: unknown, most = DOOR_MAX_GAPS): string[] {
 // One gap per thing. Three reads name one thing three ways ("small black slide latch on each leaf's mid
 // rail", "small black keeper latch on each mid rail", "lock escutcheon on each mid rail"), so phrases are
 // grouped by the things they name and each group files its first wording. A phrase's things are its words
-// less the ones that only place, size or colour it, with a door's usual synonyms made one word; a phrase
-// sharing a thing with a group joins the first such group (and never merges two groups, which could lose a
-// real gap). MODEL-WRITTEN TEXT, already through doorPhrases.
-const GAP_SYNONYMS: Record<string, string> = Object.fromEntries([
+// less the ones that only place, count, size, colour or make it, with a door's usual synonyms made one
+// family word. A phrase joins the first group it shares a family with (latch, logo, meet, ...), or whose
+// things all are its own or are all in it; anything less (one shared ordinary word) is two things. A group
+// keeps its first wording's things, so a phrase that names two things never pulls the second one's own
+// phrase in. Losing a real gap is worse than filing one twice. MODEL-WRITTEN TEXT, already through doorPhrases.
+const GAP_FAMILIES: Record<string, string> = Object.fromEntries([
   ...["latch", "catch", "keeper", "lock", "escutcheon", "bolt", "hasp", "fitting", "hardware"].map((w) => [w, "latch"]),
+  ...["deadbolt"].map((w) => [w, "deadbolt"]),
   ...["knob", "doorknob"].map((w) => [w, "knob"]),
   ...["logo", "sticker", "decal", "label", "badge", "plaque", "brand", "maker", "dealer"].map((w) => [w, "logo"]),
   ...["astragal", "joint", "meeting", "meet"].map((w) => [w, "meet"]),
@@ -307,12 +317,15 @@ const GAP_SYNONYMS: Record<string, string> = Object.fromEntries([
   ...["weatherstrip", "weatherstripping", "weather"].map((w) => [w, "weatherstrip"]),
   ...["peephole", "peep"].map((w) => [w, "peephole"]),
 ]);
-// Words that place, size, colour or make a thing, or only join words: never the thing itself.
+const GAP_FAMILY = new Set(Object.values(GAP_FAMILIES));
+// Words that place, count, measure, size, colour or make a thing, or only join words: never the thing.
 const GAP_NOT_A_THING = new Set((
   "a an the of on in at to with and or near by each both one two three four its it is are be not no nor rather than from for as " +
   "that this which like looks look appear appears show shows just only also between instead seems " +
   "along above below under over beneath across around about beside behind next through without within up down halfway " +
   "has have sits sit set mounted fitted " +
+  "all every any some most several many few five six seven eight nine ten eleven twelve half quarter third fifth " +
+  "inch foot feet height high deep eye level percent missing none empty hidden held covered shut closed showing " +
   "left right top bottom upper lower middle mid centre center side edge leaf leave door panel rail stile corner front back " +
   "black white grey gray dark light brown silver bronze red green blue tan cream beige " +
   "metal metallic steel iron brass chrome nickel aluminium aluminum galvanized galvanised stainless rubber vinyl wood wooden glass painted " +
@@ -323,21 +336,24 @@ const GAP_NOT_A_THING = new Set((
 // the knob there only says where, so it must not join the deadbolt to the knob's group.
 const GAP_PLACED_BY = /\b(?:above|below|beneath|under|over|next to|beside|near|by|rather than|instead of)\b/;
 function gapThings(phrase: string): string[] {
-  const own = phrase.toLowerCase().replace(/'s\b/g, "").split(GAP_PLACED_BY)[0];
-  return own.split(/[^a-z]+/).flatMap((w) => {
-    const s = /(ch|sh|x)es$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w;
-    return !s || GAP_NOT_A_THING.has(w) || GAP_NOT_A_THING.has(s) ? [] : [GAP_SYNONYMS[s] ?? s];
-  });
+  const own = phrase.toLowerCase()
+    .replace(/'s\b|\b[a-z]+n't\b/g, " ") // possessives and negated verbs ("doesn't")
+    .replace(/\bkick[- ]?plate/g, "kickplate").replace(/\bmail[- ]?slot/g, "mailslot").replace(/\bdead[- ]?bolt(?: lock)?/g, "deadbolt")
+    .split(GAP_PLACED_BY)[0];
+  return [...new Set(own.split(/[^a-z]+/).flatMap((w) => {
+    const s = /(ss|ch|sh|x)es$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w;
+    return s.length < 2 || GAP_NOT_A_THING.has(w) || GAP_NOT_A_THING.has(s) ? [] : [GAP_FAMILIES[s] ?? s];
+  }))];
 }
 export function doorGapPhrases(phrases: readonly string[]): string[] {
   const groups: { first: string; things: Set<string> }[] = [];
+  const sameThing = (g: Set<string>, t: string[]) =>
+    t.some((x) => GAP_FAMILY.has(x) && g.has(x)) || (t.length > 0 && g.size > 0 && (t.every((x) => g.has(x)) || [...g].every((x) => t.includes(x))));
   for (const p of phrases) {
     const things = gapThings(p);
-    const same = groups.find((g) => things.some((t) => g.things.has(t)));
-    if (!same) groups.push({ first: p, things: new Set(things) });
-    else for (const t of things) same.things.add(t);
+    if (!groups.some((g) => sameThing(g.things, things))) groups.push({ first: p, things: new Set(things) });
   }
-  return groups.slice(0, DOOR_MAX_GAPS).map((g) => g.first);
+  return groups.slice(0, DOOR_MAX_GAP_ROWS).map((g) => g.first);
 }
 
 export function doorObservedMismatches(observed: readonly string[], spec: DoorLook): string[] {
@@ -432,7 +448,7 @@ export function finishDoorDraft(c: DoorConsensus, spec: DoorLook, warnings: read
   if (wanted.knownGaps.includes(DOOR_SIX_PANEL_GAP)) pushWarning(ws, pressWarning("six_panel"));
   if (unexplained.length) pushWarning(ws, gapWarning(unexplained));
   // Room for the known gaps too, so every phrase the warning names is filed.
-  const vocabGaps = doorPhrases([...wanted.knownGaps, ...unexplained], DOOR_MAX_GAPS + wanted.knownGaps.length);
+  const vocabGaps = doorPhrases([...wanted.knownGaps, ...unexplained], DOOR_MAX_GAP_ROWS + wanted.knownGaps.length);
   return { spec: out, warnings: ws, vocabGaps, mismatches, unexplained, stageBAdded };
 }
 

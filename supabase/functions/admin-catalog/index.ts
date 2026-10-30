@@ -60,6 +60,7 @@ import {
 import { requestFlags } from "../_shared/numberRequestFlags.ts";
 // The StructureStudio library and the builders' library requests (migration 339): ./library.ts.
 import { handleAdminLibraryAction } from "./library.ts";
+import { handleSupportChatsAction } from "./supportChats.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -411,6 +412,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     "library_items_list", "library_requests_list",
     // Doors builders made from photos (347): a read of their saved looks; promoting one needs can_write.
     "library_door_looks_list",
+    // Admin → Support chats (Ahsan 10-30): the Studio Assistant's chats, read-only. Operator JWT only
+    // (supportChats.ts refuses the password path), and every chat opened is audited.
+    "support_chats_list", "support_chat_get",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -2194,6 +2198,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "library_door_looks_list":
       case "library_door_look_promote":
         return await handleAdminLibraryAction(sb, String(action), p as Record<string, unknown>, identity as { via: string; userId?: string; email?: string }, json);
+
+      // ── Admin → Support chats (migration 340's tables; Ahsan 2026-10-30) ──────────────────────
+      case "support_chats_list":
+      case "support_chat_get":
+        return await handleSupportChatsAction(sb, String(action), p as Record<string, unknown>, identity as { via: string; userId?: string; email?: string }, json);
 
       case "number_requests_list": {
         const since = new Date(Date.now() - 30 * 86_400_000).toISOString();

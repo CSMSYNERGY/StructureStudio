@@ -398,6 +398,11 @@ Deno.test("a strap's length: the upper median of the straps, held to the photo a
   // A pivot read 3 in off the photo counts only to the photo's edge (the 2 in strip): 7.6 in, not 10.6.
   const off = read([10.4, 44, 69.6].map((y) => ({ pivot: d.p(-3, y), tip: d.p(7.6, y) })));
   assertEquals(len([off, off, off]), 7.6);
+  // A double whose one leaf's straps read short (the Classic reference door's reads): the long ones decide.
+  const pair = withStrips(doubleDoor({ brace: "none", base: "classic" }), 2), q = inches(76, 80);
+  const strap = (x: number, y: number, len: number) => ({ pivot: q.p(x, y), tip: q.p(x < 38 ? x + len : x - len, y) });
+  const classic = withMeasure(pair.read, { hinges: [strap(1, 10.4, 1.4), strap(1, 44, 1.7), strap(1, 69.6, 1.7), strap(75, 10.4, 2.6), strap(75, 44, 5.3), strap(75, 69.6, 5.3)] });
+  assertEquals((settled(cons(stageADoorLook([classic, classic, classic], pair.ctx))).spec.hinges as Rec).lenIn, 5.3);
   // A tip given at its pivot is a hinge with no strap: it is no length beside the ones that have one.
   const bare = read([{ pivot: d.p(1, 10.4), tip: d.p(1, 10.4) }, ok(44), { pivot: d.p(1, 69.6), tip: d.p(1, 69.6) }]);
   assertEquals(len([bare, bare, bare]), 6.6);

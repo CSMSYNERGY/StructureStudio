@@ -252,7 +252,7 @@ try {
       ok("A2 the pipelines read in order from the left, and Contacts | Design list is the bubble at the right (Ahsan 2026-10-13)",
         JSON.stringify(r.pipes) === JSON.stringify(["Shed Deals", "Manufacturer Outreach", "Sold"]) && JSON.stringify(r.lists) === JSON.stringify(["Contacts", "Design list"]) && !r.stacked,
         `pipelines: ${r.pipes.join(" | ")} / bubble: ${r.lists.join(" | ")}`);
-      ok("A3 one sidebar item: Contacts, no Pipeline", r.nav.includes("Contacts") && !r.nav.includes("Pipeline") && r.activeNav.join() === "Contacts", r.nav.join(", "));
+      ok("A3 one sidebar item: Customer Hub, no Pipeline", r.nav.includes("Customer Hub") && !r.nav.includes("Pipeline") && r.activeNav.join() === "Customer Hub", r.nav.join(", "));
       ok("A4 no pipeline drop-down picker; the board's own controls are still there", !r.select && r.controls.length === 3, `select ${r.select}; ${r.controls.join(", ")}`);
       ok("A5 no page errors", errors.length === 0, errors.join(" | "));
     }
@@ -489,7 +489,7 @@ try {
     const r = await settled(page, "designs");
     ok("F1 a Crew Leader (designs only) lands on the Design list", r.view === "designs" && r.path === "/contacts/designs", JSON.stringify(r));
     ok("F2 and is shown nothing else: no Contacts tab, no boards", JSON.stringify(r.tabs) === JSON.stringify(["Design list"]), r.tabs.join(" | "));
-    ok("F3 the sidebar still calls it Contacts", r.nav.includes("Contacts") && !r.nav.includes("Pipeline"), r.nav.join(", "));
+    ok("F3 the sidebar calls it Customer Hub (renamed 2026-10-29)", r.nav.includes("Customer Hub") && !r.nav.includes("Pipeline"), r.nav.join(", "));
     await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/contacts/p-${pipeId(0)}`);
     const t = await settled(page, "designs");
     ok("F4 a typed board address puts them back on the Design list", t.view === "designs" && t.path === "/contacts/designs", JSON.stringify({ view: t.view, path: t.path }));
@@ -572,7 +572,7 @@ try {
       summary: document.body.innerText.includes("SUMMARY"),
     }));
     ok("J1 a card opens its customer at /contacts/c-…", rec.path === `/contacts/c-${CONTACT_ID}` && rec.summary, JSON.stringify(rec));
-    ok("J2 and the sidebar stays on Contacts (C22)", rec.activeNav.join() === "Contacts", rec.activeNav.join());
+    ok("J2 and the sidebar stays on the Customer Hub (C22)", rec.activeNav.join() === "Customer Hub", rec.activeNav.join());
     await shot(page, "U1-1280-record-inside-contacts.png");
     await page.getByRole("button", { name: "Back", exact: true }).first().click();
     const r = await settled(page, "pipe");

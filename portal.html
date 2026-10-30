@@ -225,6 +225,13 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-sup-menu .tx{display:flex;flex-direction:column;min-width:0}
 .ss-sup-menu .lb{font-size:13px;font-weight:700;color:#1E293B}
 .ss-sup-menu .sb{font-size:11.5px;color:#64748B}
+/* My Synergy Phone's download pop-up (11-sms SsPhoneAppPromo): the full-size card grows out of the corner card. */
+.ss-app-promo-pop{animation:ssAppPromoIn .18s ease-out;transform-origin:bottom right}
+@keyframes ssAppPromoIn{from{opacity:0;transform:translateY(14px) scale(.94)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.ss-app-promo-pop{animation:none}}
+/* On a narrow screen the account menu opens under the small card's corner (the card draws above the
+   sticky rail), so the card steps aside while that menu is open. */
+.ss-shell:has(.ss-user-wrap:hover,.ss-user-wrap:focus-within) [data-ss-app-promo="small"]{visibility:hidden}
 .ss-sup-chat{position:fixed;top:70px;right:16px;width:400px;height:min(620px,calc(100vh - 86px));background:#FFF;border:1px solid #E2E8F0;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,0.3);display:flex;flex-direction:column;z-index:950;color:#0F172A;overflow:hidden;font-family:inherit}
 .ss-sup-head{display:flex;align-items:center;gap:8px;padding:12px 14px;background:linear-gradient(100deg,#3D3672 0%,#1B7895 100%);color:#FFF}
 .ss-sup-title{flex:1;min-width:0;display:flex;flex-direction:column}
@@ -242,6 +249,14 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-sup-card{align-self:stretch;border:1px solid #C7D2FE;background:#EEF2FF;border-radius:10px;padding:10px 12px}
 .ss-sup-card-t{font-size:11.5px;font-weight:800;color:#3D3672;text-transform:uppercase;letter-spacing:.3px}
 .ss-sup-card-b{font-size:13px;color:#1E293B;margin-top:3px}
+.ss-sup-rate{align-self:flex-start;display:flex;align-items:center;gap:2px;margin:-5px 0 0 2px;font-size:11.5px;color:#64748B}
+.ss-sup-rate button{background:none;border:1px solid transparent;border-radius:6px;padding:1px 5px;font-size:13px;line-height:1.3;cursor:pointer;opacity:.75;filter:grayscale(.6);font-family:inherit}
+.ss-sup-rate button:hover,.ss-sup-rate button:focus-visible{opacity:1;filter:none;border-color:#E2E8F0}
+.ss-sup-rate button[aria-pressed="true"]{opacity:1;filter:none;background:#EEF2FF;border-color:#C7D2FE}
+.ss-sup-rate span{margin-left:4px}
+.ss-sup-why{align-self:stretch;display:flex;gap:6px;margin-top:-2px}
+.ss-sup-why input{flex:1;min-width:0;border:1px solid #CBD5E1;border-radius:7px;padding:6px 9px;font-size:12.5px;font-family:inherit}
+.ss-sup-why button{background:#3D3672;color:#FFF;border:none;border-radius:7px;padding:6px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit}
 .ss-sup-form{display:flex;gap:8px;align-items:flex-end;padding:10px 12px;border-top:1px solid #E2E8F0}
 .ss-sup-form textarea{flex:1;min-width:0;resize:none;border:1px solid #CBD5E1;border-radius:8px;padding:8px 10px;font-size:13.5px;font-family:inherit;line-height:1.4}
 .ss-clogo{width:34px;height:34px;border-radius:8px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.32);display:flex;align-items:center;justify-content:center;color:#FFF;flex-shrink:0;font-size:12px;font-weight:800}
@@ -410,8 +425,8 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
-<script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=b9ad65ea"></script>
-<script defer src="/portal.app.compiled.js?v=326a18e5" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=cbeebde3"></script>
+<script defer src="/portal.app.compiled.js?v=bafd0c24" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline
