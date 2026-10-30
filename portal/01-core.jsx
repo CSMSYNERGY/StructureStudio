@@ -1406,12 +1406,15 @@ async function ssPhoneFetchGreeting(accessToken, fetchImpl) {
   const blob = await res.blob();
   return URL.createObjectURL(blob);
 }
-// Store links, PLACEHOLDERS until the listings are published. A link still carrying PLACEHOLDER
-// is shown as "coming soon" rather than as a button to a page that does not exist.
+// Store links. A link still carrying PLACEHOLDER is shown as "coming soon" rather than as a button
+// to a page that does not exist. The iPhone and Android apps are published (2026-10-30: App Store
+// id 6819597681, Play package com.mysynergyphone.app); the Chrome one waits for its Web Store id.
+// ⚠️ 11-sms.jsx's SS_APP_QR draws a QR code of the iOS and Android addresses EXACTLY as written
+// here and shows no code for one that differs, so a changed link needs its code made again.
 const SS_PHONE_LINKS = {
   chrome: "https://chromewebstore.google.com/detail/PLACEHOLDER_MY_SYNERGY_PHONE_EXTENSION_ID",
-  ios: "https://apps.apple.com/app/PLACEHOLDER_MY_SYNERGY_PHONE_IOS",
-  android: "https://play.google.com/store/apps/details?id=PLACEHOLDER_MY_SYNERGY_PHONE_ANDROID",
+  ios: "https://apps.apple.com/app/id6819597681",
+  android: "https://play.google.com/store/apps/details?id=com.mysynergyphone.app",
 };
 function ssPhoneLinkReady(url) { return !!url && !/PLACEHOLDER/.test(url); }
 

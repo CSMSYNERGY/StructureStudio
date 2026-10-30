@@ -659,6 +659,27 @@ Deno.test("one vocabulary gap per thing: three reads naming one thing three ways
   assertEquals(doorGapPhrases(["weatherstrip along the bottom", "weather strip at the bottom", "rubber weatherstripping"]), ["weatherstrip along the bottom"]);
   assertEquals(doorGapPhrases(["peephole", "peep hole"]), ["peephole"]);
   assertEquals(doorGapPhrases(["arched top", "arch-top door"]), ["arched top"]);
+  // Round 2 (wf_73ef8d61-d20). A group keeps its first wording's things: a phrase naming two things joins
+  // the first group and never pulls the second thing's own phrase in, in either order.
+  assertEquals(doorGapPhrases(["a small knob", "knob with a logo on it", "a logo badge"]), ["a small knob", "a logo badge"]);
+  assertEquals(doorGapPhrases(["small round knob rather than lever", "keyed dead bolt above the knob", "knob with a keyed deadbolt"]), ["small round knob rather than lever", "keyed dead bolt above the knob"]);
+  // Counting, measuring and state words join nothing.
+  assertEquals(doorGapPhrases(["grilles on all the lites", "woodgrain on all the panels"]).length, 2);
+  assertEquals(doorGapPhrases(["kick plate 8 inches high", "transom 12 inches high"]).length, 2);
+  assertEquals(doorGapPhrases(["latch missing on the left leaf", "hinge pin missing", "brace missing"]).length, 3);
+  // A curly apostrophe or a contraction leaves no one-letter word to join on.
+  assertEquals(doorGapPhrases(["maker\u2019s logo", "door\u2019s kick plate", "owner\u2019s name plate"]).length, 3);
+  assertEquals(doorGapPhrases(["vent doesn\u2019t show louvres", "transom isn\u2019t glazed", "peephole can\u2019t be seen clearly"]).length, 3);
+  // Compounds and -sses plurals are one word.
+  assertEquals(doorGapPhrases(["brass kickplate", "brass kick plate"]), ["brass kickplate"]);
+  assertEquals(doorGapPhrases(["keyed deadbolt", "dead bolt lock"]), ["keyed deadbolt"]);
+  assertEquals(doorGapPhrases(["panel recess", "panel recesses"]), ["panel recess"]);
+  // A deadbolt is its own fitting: it never merges with a latch or a hasp (round-3 check).
+  assertEquals(doorGapPhrases(["small black slide latch on each mid rail", "keyed deadbolt"]).length, 2);
+  assertEquals(doorGapPhrases(["hasp and padlock on the mid rail", "keyed deadbolt"]).length, 2);
+  // More than the warning's 8 things: every group is still filed, up to DOOR_MAX_GAP_ROWS.
+  const twelve = ["an arched top", "a peephole", "a kick plate", "a mail slot", "a doorbell", "a transom", "a sidelight", "a weatherstrip", "a closer", "a sweep", "a threshold ramp", "a pet door"];
+  assertEquals(doorGapPhrases(twelve), twelve);
 });
 
 Deno.test("with the 6-panel's known gap, every phrase the warning names is also filed", () => {
@@ -669,6 +690,11 @@ Deno.test("with the 6-panel's known gap, every phrase the warning names is also 
   const text = r.warnings.find((w) => w.code === "vocab_gap")?.text ?? "";
   for (const m of text.matchAll(/"([^"]+)"/g)) assert(r.vocabGaps.includes(m[1]), `"${m[1]}" is in the warning but not filed`);
   assertEquals([r.vocabGaps.length, r.vocabGaps[0]], [9, "6-panel"]);
+  // Twelve things: all twelve are filed, the warning names eight and counts the rest.
+  const more = ["an arched top", "a peephole", "a kick plate", "a mail slot", "a doorbell", "a transom", "a sidelight", "a weatherstrip", "a closer", "a sweep", "a threshold ramp", "a pet door"];
+  const r2 = doorDraftFromReads([0, 1, 2].map(() => ({ ...read, unexplained: more })), ctx);
+  assertEquals(r2.vocabGaps, more);
+  assert((r2.warnings.find((w) => w.code === "vocab_gap")?.text ?? "").includes("(and 4 more)"));
 });
 
 // The pivot test door (ai_door_calls 8a960327, 2026-10-28): its warning named what V4 draws.

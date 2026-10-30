@@ -838,11 +838,23 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
             .limit(AUTO_TOPUP_DAILY_MAX + 1);
           autoCount = Array.isArray(recent) ? recent.length : null;
         }
+        // The door-look meter (343, portal-settings/doorGenerate.ts DOOR_METER) prices making a door
+        // from a photo, which only a builder with client_settings.door_looks_beta can run. Once it is
+        // active it would list on every builder's card, priced for a thing their portal does not offer,
+        // so it shows only where the flag is on. Read only when that meter is in the list; a failed read
+        // hides it, since a price missing for a beta builder is the smaller wrong.
+        const DOOR_METER = "door_look_generation";
+        let meterRows: any[] = price.data ?? [];
+        if (meterRows.some((p) => p.kind === DOOR_METER)) {
+          const { data: doorRow, error: doorErr } = await admin.from("client_settings").select("door_looks_beta").eq("client_id", clientId).maybeSingle();
+          if (doorErr) console.warn("door_looks_beta read failed; hiding the door-look meter:", doorErr.message);
+          if (doorErr || doorRow?.door_looks_beta !== true) meterRows = meterRows.filter((p) => p.kind !== DOOR_METER);
+        }
         // A COST-PLUS meter (calls and texts, 259) has no price to show: what a builder pays is
         // Twilio's real cost times the markup, per call or text. Its price_cents is 0, which this
         // card printed as "No charge" — the opposite of true. Send the sentence instead, and a
         // null price so the card's "balance covers N" count does not divide by a made-up number.
-        const meters = (price.data ?? []).map((p: any) => {
+        const meters = meterRows.map((p: any) => {
           const billedAs = p.pricing === "cost_plus" ? costPlusNote(p.kind, p.unit_label) : null;
           return {
             kind: p.kind, label: p.label, unitLabel: p.unit_label,

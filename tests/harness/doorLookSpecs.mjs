@@ -281,6 +281,8 @@ const CLASSIC_Z = look("classic", { panels: [{ fill: "z", zFrom: "strike" }, { f
 const VENT1 = look("basic", { src: { leaves: 1, hinge: "right" }, parts: [{ t: "vent", u0: 0.6, v0: 0.15, u1: 0.9, v1: 0.3 }] });
 const ZLEFT = look("zbrace", { src: { leaves: 1, hinge: "left" } });
 const TRANSOM_H = look("basic", { hinges: { count: 3, at: [0.1, 0.5, 0.95] } });
+// Butt hinges at the table's outermost heights (0.01 / 0.99, 10-27): every piece must stay on the leaf.
+const BUTT_ENDS = look("basic", { frame: { fIn: 1.5 }, hinges: { type: "butt", count: 2, at: [0.01, 0.99], finish: "galv" } });
 
 // One door of a block: its row (with or without its look) and where it stands.
 const L_DOORS = [
@@ -295,6 +297,7 @@ const L_DOORS = [
   { key: "fills", spec: FILLS, style: "american", w: 36, h: 80, wall: "east", at: 7.5, op: "left", c: paint("#5b636b", "#ebe5d3") },
   { key: "dutch", spec: DUTCH, style: "dutch", w: 36, h: 80, wall: "east", at: 12, op: "right", c: paint("#c8b192", "#1f2328") },
   { key: "classicZ", spec: CLASSIC_Z, style: "classic", w: 36, h: 80, wall: "east", at: 16.5, op: "left", c: paint("#8fcfa4", "#1f2328") },
+  { key: "buttEnds", spec: BUTT_ENDS, style: "basic", w: 36, h: 80, wall: "east", at: 21, op: "right" },
   // The mirroring cases share the west wall, so their hinge sides compare in one frame.
   { key: "oneOnTwo", spec: VENT1, style: "basic", w: 72, h: 80, wall: "west", at: 4.25, op: "double" },
   { key: "twoOnOne", spec: ZB, style: "zbrace", w: 36, h: 80, wall: "west", at: 9.5, op: "right" },
@@ -482,6 +485,10 @@ async function runL(browser, rect) {
       rows.map((r) => r.y.toFixed(3)).join(",") + " vs " + rails.map((m) => ctrOf(m, 1).toFixed(3)).join(","));
     const sc = got.scroll.meshes, srows = hingeRows(sc), mid = sc.filter((m) => m.part === "midRail")[0];
     ok("L3 scroll: a board door's three hinges, the middle one on its mid rail", srows.length === 3 && !!mid && near(srows[1].y, ctrOf(mid, 1), 0.01), srows.map((r) => r.y.toFixed(3)).join(","));
+    // At 0.01 / 0.99 a butt hinge's plates and knuckle stay on the leaf: none below its foot or above its head.
+    const be = got.buttEnds.meshes, blb = leafBox(be), bh = be.filter((m) => m.part === "hinge");
+    ok("L3 buttEnds: butt hinges at 0.01 / 0.99 stay on the leaf (clamped by the knuckle's own height)", bh.length > 0 && bh.every((m) => m.min[1] >= blb.y0 - 1e-3 && m.max[1] <= blb.y1 + 1e-3),
+      `leaf ${blb.y0.toFixed(3)}-${blb.y1.toFixed(3)}, hinges ${Math.min(...bh.map((m) => m.min[1])).toFixed(3)}-${Math.max(...bh.map((m) => m.max[1])).toFixed(3)}`);
     const th = got.transomH.meshes, rail = th.find((m) => m.part === "transomRail"), trows = hingeRows(th);
     ok("L3 transomH: under a transom no hinge goes above the transom rail's middle (a 95% hinge is brought down)", !!rail && trows.length === 3 && trows.every((r) => r.y <= ctrOf(rail, 1) + 1e-3)
       && near(trows[2].y, ctrOf(rail, 1), 0.01), trows.map((r) => r.y.toFixed(3)).join(",") + ` vs rail ${rail ? ctrOf(rail, 1).toFixed(3) : "none"}`);
