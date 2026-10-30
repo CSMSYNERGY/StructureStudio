@@ -20,6 +20,10 @@
 // A link to one chat is /console/chats?chat=<id> (the portal's Admin → Support chats tab). Tickets
 // handed off from a chat may carry it; support_chat_get takes the chat id alone for that reason and
 // reads the builder from the chat itself.
+//
+// TRACKING (migration 348): each answer may carry the builder's 👍/👎 (and the line under a 👎) and
+// the assistant's own "didn't know" note. The chat keeps the tallies (up_count, down_count, gap_count,
+// a trigger's recount), so the list filters `show: "down"` and `show: "gap"` on the chat itself.
 
 // deno-lint-ignore no-explicit-any
 type Db = any;
@@ -51,8 +55,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CLIENT_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const STATUSES = ["open", "handed_off", "closed"];
-const CONV_COLS = "id, client_id, user_id, status, submission_id, model, message_count, cost_micros, created_at, last_message_at";
-const MSG_COLS = "id, role, body, tools, cost_micros, model, created_at";
+const SHOWS = ["down", "gap"];
+const CONV_COLS = "id, client_id, user_id, status, submission_id, model, message_count, cost_micros, created_at, last_message_at, up_count, down_count, gap_count";
+const MSG_COLS = "id, role, body, tools, cost_micros, model, created_at, rating, rating_note, gap";
 /** The tables themselves are missing: a database without migration 340. */
 const missing = (err: unknown) => ["42P01", "PGRST205"].includes(String((err as { code?: string } | null)?.code ?? ""));
 const NOT_APPLIED = { error: "Migration 340 isn't applied on this database yet.", code: "support_chats_unavailable" };
@@ -137,8 +142,22 @@ async function firstQuestionsOf(sb: Db, ids: string[]): Promise<Map<string, stri
   return out;
 }
 
+/** The newest "didn't know" note of each chat that has one (gap_count > 0). One read; best-effort,
+ *  like the first questions: a failed or full read shows those chats without the note, never fails. */
+async function gapNotesOf(sb: Db, ids: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const r = await sb.from("support_messages").select("conversation_id, gap, created_at")
+    .in("conversation_id", ids).not("gap", "is", null).order("created_at", { ascending: false }).limit(MAX_ROWS);
+  if (r.error) return out;
+  for (const m of (r.data ?? []) as { conversation_id: string; gap: string }[]) {
+    if (!out.has(String(m.conversation_id))) out.set(String(m.conversation_id), previewOf(m.gap));
+  }
+  return out;
+}
+
 // deno-lint-ignore no-explicit-any
-function chatView(c: any, names: Map<string, string | null>, people: Map<string, Person>, tickets: Map<string, Ticket>, first?: Map<string, string>) {
+function chatView(c: any, names: Map<string, string | null>, people: Map<string, Person>, tickets: Map<string, Ticket>, first?: Map<string, string>, gapNotes?: Map<string, string>) {
   const sub = c.submission_id ? String(c.submission_id) : null;
   return {
     id: String(c.id), clientId: String(c.client_id), companyName: names.get(String(c.client_id)) ?? null,
@@ -147,7 +166,9 @@ function chatView(c: any, names: Map<string, string | null>, people: Map<string,
     ticket: sub ? (tickets.get(sub) ?? { id: sub, title: null, status: null }) : null,
     messageCount: Number(c.message_count) || 0, costMicros: Number(c.cost_micros) || 0, model: c.model ?? null,
     createdAt: c.created_at, lastMessageAt: c.last_message_at,
+    up: Number(c.up_count) || 0, down: Number(c.down_count) || 0, gaps: Number(c.gap_count) || 0,
     ...(first ? { firstQuestion: first.get(String(c.id)) ?? null } : {}),
+    ...(gapNotes ? { gapNote: gapNotes.get(String(c.id)) ?? null } : {}),
   };
 }
 
@@ -157,16 +178,20 @@ function chatView(c: any, names: Map<string, string | null>, people: Map<string,
 async function monthOf(sb: Db, deps: ChatDeps) {
   const since = monthStartUtc(deps.now());
   const head = { count: "exact", head: true };
-  const [usage, chats, questions, tickets] = await Promise.all([
+  const [usage, chats, questions, tickets, up, down, gaps] = await Promise.all([
     sb.rpc("support_usage", { p_client_id: "", p_user_id: NIL_UUID }),
     sb.from("support_conversations").select("id", head).gte("created_at", since),
     sb.from("support_messages").select("id", head).eq("role", "user").gte("created_at", since),
     sb.from("feedback_submissions").select("id", head).eq("kind", "ticket").not("support_conversation_id", "is", null).gte("created_at", since),
+    // Ratings and notes on THIS month's answers (348), whenever the builder pressed the thumb.
+    sb.from("support_messages").select("id", head).eq("rating", 1).gte("created_at", since),
+    sb.from("support_messages").select("id", head).eq("rating", -1).gte("created_at", since),
+    sb.from("support_messages").select("id", head).not("gap", "is", null).gte("created_at", since),
   ]);
   const n = (r: { error?: unknown; count?: number | null }) => (r.error ? null : Number(r.count ?? 0));
   return {
     since,
-    chats: n(chats), questions: n(questions), tickets: n(tickets),
+    chats: n(chats), questions: n(questions), tickets: n(tickets), up: n(up), down: n(down), gaps: n(gaps),
     costMicros: usage.error ? null : Number(usage.data?.month_cost_micros) || 0,
     capMicros: monthlyCapMicros(deps.env),
   };
@@ -202,10 +227,14 @@ async function listChats(sb: Db, p: Record<string, unknown>, json: Json, deps: C
   if (clientId !== null && !CLIENT_ID.test(clientId)) return json({ error: "That isn't a builder id." }, 400);
   const status = optional(p.status);
   if (status !== null && !STATUSES.includes(status)) return json({ error: "Status is open, handed_off or closed." }, 400);
+  const show = optional(p.show);
+  if (show !== null && !SHOWS.includes(show)) return json({ error: "Show is down or gap." }, 400);
 
   let q = sb.from("support_conversations").select(CONV_COLS);
   if (clientId) q = q.eq("client_id", clientId);
   if (status) q = q.eq("status", status);
+  if (show === "down") q = q.gt("down_count", 0);
+  if (show === "gap") q = q.gt("gap_count", 0);
   if (before) q = q.lt("last_message_at", before);
   const r = await q.order("last_message_at", { ascending: false }).limit(CHATS_PAGE + 1);
   if (r.error && missing(r.error)) return json({ ok: true, installed: false, chats: [], more: false, next: null });
@@ -217,17 +246,18 @@ async function listChats(sb: Db, p: Record<string, unknown>, json: Json, deps: C
   const uniq = (xs: unknown[]) => [...new Set(xs.filter(Boolean).map(String))];
 
   const firstPage = before === null;
-  const [names, people, tickets, first, month, filter] = await Promise.all([
+  const [names, people, tickets, first, gapNotes, month, filter] = await Promise.all([
     namesOf(sb, uniq(rows.map((c) => c.client_id))),
     peopleOf(sb, uniq(rows.map((c) => c.user_id))),
     ticketsOf(sb, uniq(rows.map((c) => c.submission_id))),
     firstQuestionsOf(sb, rows.map((c) => String(c.id))),
+    gapNotesOf(sb, rows.filter((c) => Number(c.gap_count) > 0).map((c) => String(c.id))),
     firstPage ? monthOf(sb, deps) : Promise.resolve(undefined),
     firstPage ? buildersOf(sb) : Promise.resolve(undefined),
   ]);
   return json({
     ok: true, installed: true,
-    chats: rows.map((c) => chatView(c, names, people, tickets, first)),
+    chats: rows.map((c) => chatView(c, names, people, tickets, first, gapNotes)),
     more, next: more ? rows[rows.length - 1].last_message_at : null,
     ...(firstPage && filter ? { month, builders: filter.builders, ...(filter.capped ? { buildersCapped: true } : {}) } : {}),
   });
@@ -291,6 +321,7 @@ async function getChat(sb: Db, p: Record<string, unknown>, identity: Identity, j
       id: String(x.id), role: x.role === "assistant" ? "assistant" : "user", body: String(x.body ?? ""),
       tools: Array.isArray(x.tools) ? x.tools.map(String) : [], costMicros: Number(x.cost_micros) || 0,
       model: x.model ?? null, createdAt: x.created_at,
+      rating: x.rating === 1 ? 1 : x.rating === -1 ? -1 : null, ratingNote: x.rating_note ?? null, gap: x.gap ?? null,
     })),
     truncated: msgs.length > CHAT_MESSAGES_MAX,
   });

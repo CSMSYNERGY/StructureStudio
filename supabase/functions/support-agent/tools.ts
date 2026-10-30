@@ -11,6 +11,8 @@
 //
 // READ-ONLY. Nothing here writes. offer_handoff has no side effect: it only tells the portal to show
 // a "Send this to our team" card, which the builder presses themselves (portal-feedback files it).
+// note_gap reads and writes nothing either: agent.ts stores its words on the answer (migration 348,
+// support_messages.gap) for Admin → Support chats' "Didn't know" filter.
 //
 // NO END-CUSTOMER DATA. No tool reads contacts, designs, orders, conversations or anything else a
 // builder's customers typed. The assistant answers "how do I" and "what is set on my account", not
@@ -123,6 +125,22 @@ export const TOOL_DEFS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "note_gap",
+    description:
+      "Record a question you could not answer from the knowledge or the account tools, so the team can add the answer to " +
+      "what you know. Use it whenever you say you're not sure, or offer a hand-off because you lacked the information " +
+      "(not for a bug report or a feature request). The builder never sees it. Call it once per question, alongside your answer.",
+    strict: true,
+    input_schema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question, in a few plain words, with no names, emails, phone numbers or customer details, e.g. \"How to export a price list\"." },
+      },
+      required: ["question"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 export type ToolName = (typeof TOOL_DEFS)[number]["name"];
@@ -133,6 +151,8 @@ export interface ToolOutcome {
   isError: boolean;
   /** offer_handoff only: what the portal's card shows. */
   handoff?: { title: string; summary: string };
+  /** note_gap only: the question it could not answer, stored on the answer (migration 348). */
+  gap?: string;
 }
 
 const ok = (data: unknown): ToolOutcome => ({ content: JSON.stringify(data), isError: false });
@@ -147,6 +167,7 @@ export async function runTool(name: string, input: unknown, ctx: ToolCtx): Promi
       case "get_my_requests": return await myRequests(ctx);
       case "search_whats_new": return await whatsNew(ctx, input);
       case "offer_handoff": return handoff(input);
+      case "note_gap": return noteGap(input);
       default:
         // Sonnet occasionally calls a declared tool by a near-miss name; say the exact names.
         return err(`Unknown tool "${String(name).slice(0, 60)}". The tools are: ${TOOL_DEFS.map((t) => t.name).join(", ")}.`);
@@ -345,4 +366,13 @@ function handoff(input: unknown): ToolOutcome {
     isError: false,
     handoff: { title, summary },
   };
+}
+
+/** The gap column holds 300 characters (348); several notes in one answer share it. */
+export const GAP_CHARS = 300;
+
+function noteGap(input: unknown): ToolOutcome {
+  const q = String((input as { question?: unknown } | null)?.question ?? "").replace(/\s+/g, " ").trim().slice(0, GAP_CHARS);
+  if (!q) return err("note_gap needs the question.");
+  return { content: JSON.stringify({ ok: true, note: "Noted for the team. Now answer the builder." }), isError: false, gap: q };
 }

@@ -4,7 +4,7 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { usableFeatureSet } from "../_shared/featureCheck.ts";
 import { TITLES, type GateTable } from "../_shared/access.ts";
-import { type AgentDeps, type AgentStore, handleEnabled, handleNew, handleSend, handleStatus, MAX_STORED_CHARS, type Totals } from "./agent.ts";
+import { type AgentDeps, type AgentStore, handleEnabled, handleNew, handleRate, handleSend, handleStatus, MAX_STORED_CHARS, type StoredMessage, type Totals } from "./agent.ts";
 
 // The support assistant behind the portal's top-bar Support button (migration 340). Everything that
 // decides anything is in agent.ts (agent_test.ts) and tools.ts (tools_test.ts); this file only wires
@@ -25,6 +25,7 @@ import { type AgentDeps, type AgentStore, handleEnabled, handleNew, handleSend, 
 //   { action: "status" }                           name, availability, the open chat
 //   { action: "send", text, conversationId? }      one question, one answer
 //   { action: "new" }                              close the open chat; the next send starts fresh
+//   { action: "rate", messageId, rating, note? }   👍 1 / 👎 -1 / 0 clears, on one of their own answers (348)
 //
 // Secrets: SUPPORT_ANTHROPIC_API_KEY (its own key, in a console workspace with a monthly spend
 // limit; unset, ANTHROPIC_API_KEY, the one shared with phone-call-summary, answers instead),
@@ -49,14 +50,15 @@ const GATES: GateTable = {
   status: "open",
   send: "self",
   new: "self",
+  rate: "self",
 };
 
 const TITLE_LABEL = new Map(TITLES.map((t) => [t.key as string, t.label]));
 
 // deno-lint-ignore no-explicit-any
 function makeStore(admin: any): AgentStore {
-  const row = (r: { id: string; role: "user" | "assistant"; body: string; created_at: string }) =>
-    ({ id: r.id, role: r.role, body: r.body, created_at: r.created_at });
+  const row = (r: { id: string; role: "user" | "assistant"; body: string; created_at: string; rating?: number | null }): StoredMessage =>
+    ({ id: r.id, role: r.role, body: r.body, created_at: r.created_at, rating: r.rating === 1 ? 1 : r.rating === -1 ? -1 : null });
   return {
     async enabled(clientId) {
       // A database without 346, or any read fault, is OFF (agent.ts: the switch fails closed).
@@ -91,7 +93,7 @@ function makeStore(admin: any): AgentStore {
       return data.id;
     },
     async history(conversationId, limit) {
-      const { data, error } = await admin.from("support_messages").select("id, role, body, created_at")
+      const { data, error } = await admin.from("support_messages").select("id, role, body, created_at, rating")
         .eq("conversation_id", conversationId).order("created_at", { ascending: false }).limit(limit);
       if (error) throw new Error("history read failed");
       return (data ?? []).reverse().map(row);
@@ -106,9 +108,20 @@ function makeStore(admin: any): AgentStore {
         cache_read_tokens: t ? t.cacheRead : null, cache_write_tokens: t ? t.cacheWrite : null,
         cost_micros: t ? t.costMicros : 0,
         stop_reason: m.stopReason ?? null, model: m.model ?? null,
-      }).select("id, role, body, created_at").single();
+        ...(m.gap ? { gap: m.gap } : {}),
+      }).select("id, role, body, created_at, rating").single();
       if (error || !data) throw new Error("message insert failed");
       return row(data);
+    },
+    async rate(who, messageId, rating, note) {
+      // Matched on the caller's tenant AND user AND an answer: an id from anyone else's chat, or the
+      // builder's own words, updates nothing (and 348's CHECK refuses a rating on a question anyway).
+      const { data, error } = await admin.from("support_messages")
+        .update({ rating, rating_note: note, rated_at: new Date().toISOString() })
+        .eq("id", messageId).eq("client_id", who.clientId).eq("user_id", who.userId).eq("role", "assistant")
+        .select("id");
+      if (error) throw new Error("rating write failed");
+      return (data ?? []).length > 0;
     },
     async bumpConversation(id, d) {
       // Read-then-write: two answers landing in the same instant can undercount a total by one
@@ -191,6 +204,10 @@ Deno.serve(withErrorLog(FN, async (req: Request) => {
   }
   if (action === "new") {
     const out = await handleNew(deps, who);
+    return json(out.body, out.status);
+  }
+  if (action === "rate") {
+    const out = await handleRate(deps, who, { messageId: p.messageId, rating: p.rating, note: p.note });
     return json(out.body, out.status);
   }
   return json({ error: "Unknown action." }, 400);
