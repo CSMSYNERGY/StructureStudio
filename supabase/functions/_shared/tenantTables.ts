@@ -174,6 +174,7 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   orders: { fate: "retain", outsideMigrations: true, why: "Money that moved (payments cascades from it). No migration creates it." },
   payments: { fate: "retain", outsideMigrations: true, why: "Money that moved. No migration creates it." },
   payment_attempts: { fate: "retain", why: "Card attempts; payments point at them with NO ACTION." },
+  payment_refunds: { fate: "retain", why: "Every refund on an order payment, card network or by hand (migration 349); cascades from payments and orders." },
   invoice_sends: { fate: "retain", why: "Invoices sent." },
   change_orders: { fate: "retain", why: "Signed changes to an order (NO ACTION to orders)." },
   order_unlocks: { fate: "retain", why: "Order unlocks that change orders consume (NO ACTION to orders)." },

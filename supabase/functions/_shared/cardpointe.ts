@@ -603,15 +603,31 @@ export async function cpVoid(merchant: CpMerchant, retref: string): Promise<bool
 }
 
 /** Return money on a SETTLED transaction. A refund is a new event, never a mutation of the
- *  original — the original settled and the books have to show both. */
+ *  original — the original settled and the books have to show both.
+ *
+ *  ⚠️ PARTIAL AMOUNTS ARE A REFUND, NEVER A VOID. CardPointe's docs (void, refund): a void takes an
+ *  amount only to shrink an authorization nobody captured yet (setlstat "Authorized"); our sales
+ *  capture at once (Queued for Capture), so a void cancels the WHOLE sale, and on a debit card a
+ *  partial void amount voids the whole amount anyway. cpVoid therefore never sends one. A refund
+ *  takes any amount up to what is left, once the sale has SETTLED (overnight); before that the
+ *  gateway refuses it, unless the MID is set up to refund unsettled sales.
+ *
+ *  `orderid` (2026-10-29, partial refunds): the refund's OWN order id. Without one the gateway files
+ *  the refund under the sale's order id, so an inquireByOrderid on the sale could answer with the
+ *  refund. With one, a refund whose answer we lost can be looked up by itself
+ *  (cpInquireByOrderId), and a retry never has to guess. */
 export async function cpRefund(
   merchant: CpMerchant,
   retref: string,
   amountCents: number,
-): Promise<{ ok: boolean; retref: string | null; raw: Record<string, unknown> }> {
-  const j = await cpPost(merchant, "PUT", "/refund", { merchid: merchant.merchid, retref, amount: cpAmount(amountCents) });
+  orderid?: string,
+): Promise<{ ok: boolean; retref: string | null; respcode: string | null; resptext: string | null; raw: Record<string, unknown> }> {
+  const body: Record<string, unknown> = { merchid: merchant.merchid, retref, amount: cpAmount(amountCents) };
+  if (orderid) body.orderid = orderid;
+  const j = await cpPost(merchant, "PUT", "/refund", body);
   const ok = requireRespstat(j) === "A";
-  return { ok, retref: typeof j.retref === "string" ? j.retref : null, raw: j };
+  const str = (v: unknown) => (typeof v === "string" || typeof v === "number") && String(v).trim() ? String(v).trim() : null;
+  return { ok, retref: typeof j.retref === "string" ? j.retref : null, respcode: str(j.respcode), resptext: str(j.resptext), raw: j };
 }
 
 /** The inquireByOrderid path, built in one place for the recovery call and the Verify button. */

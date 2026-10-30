@@ -55,7 +55,8 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
-import { stubAuth, stubDb } from "./supabase_stub.ts";
+import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
+import { type LedgerRefund, type RefundLedger, refundLedger } from "./refundLedgerFake.ts";
 
 // The UAT system's configuration (cardpointe.ts reads it per call since phase 3; set here once, for
 // the whole file). Every attempt below has no cp_env, which is UAT.
@@ -115,6 +116,10 @@ type World = {
   updateFails?: string[];
   /** A database without migration 309: a payments select naming funding_checked_through is refused. */
   noCursorColumn?: boolean;
+  /** Refunds already in the ledger (migration 349). */
+  refunds?: Partial<LedgerRefund>[];
+  /** Set by call(): the ledger over this call's copies of `payments`. */
+  ledger?: RefundLedger;
 };
 type Trace = {
   gateway: { path: string; body: any; url: URL }[];
@@ -163,6 +168,9 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
       return { data: [], error: null };
     case "invoice_sends":
       return { data: null, error: null };
+    case "payment_refunds":
+      // void_payment's in-flight check and reconcile's refund pass (migration 349).
+      return world.ledger!.read(ops);
     case "client_settings":
       return { data: world.settings === undefined ? { payments_online_enabled: true, cardpointe_merchid: NEW_MID, billing_exempt: true, business_name: "Acme Sheds" } : world.settings, error: null };
     case "payment_attempts": {
@@ -227,7 +235,11 @@ const ENV: Record<string, string> = {
   SUPABASE_SERVICE_ROLE_KEY: "stub-service",
 };
 
-async function call(body: Record<string, unknown>, world: World) {
+async function call(body: Record<string, unknown>, given: World) {
+  // The refund steps (migration 349) move money on the payment, so each call works on its own copies:
+  // a constant like CARD is never changed by the test before it.
+  const payments = (given.payments ?? []).map((p) => ({ ...p }));
+  const world: World = { ...given, payments, ledger: refundLedger(payments, given.refunds ?? []) };
   const trace: Trace = { gateway: [], errors: [], errorReads: 0, writes: [], audit: [] };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
@@ -235,6 +247,7 @@ async function call(body: Record<string, unknown>, world: World) {
   stubAuth.user = { id: USER_ID, email: "owner@example.test" };
   stubAuth.error = null;
   stubDb.from = (table: string) => chain(world, trace, table, []);
+  stubRpc.rpc = (fn: string, args: any) => world.ledger!.rpc(fn, args);
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (!href.startsWith(GATEWAY + "/")) return Promise.reject(new Error(`TEST FAILURE: unexpected fetch to ${href}`));
@@ -253,10 +266,11 @@ async function call(body: Record<string, unknown>, world: World) {
       headers: { authorization: "Bearer harness", "content-type": "application/json", "user-agent": "harness/1.0" },
       body: JSON.stringify(body),
     }));
-    return { status: res.status, body: await res.json(), trace };
+    return { status: res.status, body: await res.json(), trace, payments, ledger: world.ledger! };
   } finally {
     globalThis.fetch = realFetch;
     stubDb.from = null;
+    stubRpc.rpc = null;
     stubAuth.user = null;
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) Deno.env.delete(k);
@@ -286,7 +300,9 @@ Deno.test("a full refund after the MID changed is sent on the ORIGINAL MID", asy
   const r = await call({ action: "refund_payment", paymentId: "p-card" }, { payments: [CARD], attempts: ATTEMPTS });
   assertEquals(r.status, 200, JSON.stringify(r.body));
   assertEquals(r.trace.gateway.map((g) => g.path), ["/refund"]);
-  assertEquals(r.trace.gateway[0].body, { merchid: OLD_MID, retref: "rt-card", amount: "1000.00" });
+  assertEquals(r.trace.gateway[0].body, { merchid: OLD_MID, retref: "rt-card", amount: "1000.00", orderid: r.ledger.refunds[0].gateway_orderid });
+  // Since 349 the refund carries its OWN order id (the ledger row's), so a lost answer can be looked up by it.
+  assert(/^ssr_/.test(String(r.trace.gateway[0].body.orderid)), JSON.stringify(r.trace.gateway[0].body));
 });
 
 Deno.test("neither the tenant's current MID nor the deployment default is ever asked", async () => {
@@ -334,7 +350,7 @@ Deno.test("a tenant switched OFF can still void and refund (on the original MID)
   const f = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 2500 }, { settings: OFF, payments: [CARD], attempts: ATTEMPTS });
   assertEquals(f.status, 200, JSON.stringify(f.body));
   assertEquals(f.body.refunded, 2500);
-  assertEquals(f.trace.gateway[0].body, { merchid: OLD_MID, retref: "rt-card", amount: "25.00" });
+  assertEquals(f.trace.gateway[0].body, { merchid: OLD_MID, retref: "rt-card", amount: "25.00", orderid: f.ledger.refunds[0].gateway_orderid });
   // A tenant with no settings row at all is the same.
   const n = await call({ action: "void_payment", paymentId: "p-card" }, { settings: null, payments: [CARD], attempts: ATTEMPTS });
   assertEquals(n.status, 200, JSON.stringify(n.body));
@@ -1028,4 +1044,223 @@ Deno.test("reconcile on a database WITHOUT 309's column: the lists are read with
   assertEquals(paymentUpdates(r.trace).filter((w) => "funding_checked_through" in w.row), [], "no place is written");
   const again = await call({ action: "reconcile" }, { ...world, priorErrors: [{ ...rows[0], client_id: TENANT, source: "edge:portal-payments", created_at: new Date().toISOString() }] });
   assertEquals(again.trace.errors.filter((e) => e.code === "reconcile_funding_needs_migration"), []);
+});
+
+// ─── 8. Partial refunds (migration 349): the ledger, the net, one refund per key ───────────────
+// What the Orders page's Refund box sends: an amount up to what is left and one requestKey per refund
+// the builder means. The ledger fake (refundLedgerFake.ts) follows payment_refund_open/close rule for
+// rule; tests/sql/migration349.test.cjs holds the SQL itself to them.
+const TAKEN = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
+const SETTLED_CARD: Pay = { ...CARD, method: "card", received_at: TAKEN(3) };
+const refundCalls = (t: Trace) => t.gateway.filter((g) => g.path === "/refund");
+const inquiries = (t: Trace) => t.gateway.filter((g) => g.path.startsWith("/inquireByOrderid/"));
+const KEY = "rk-0000000000000001";
+
+Deno.test("8a. a partial refund sends that amount with its own order id, and the payment keeps its net", async () => {
+  const r = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, { payments: [SETTLED_CARD], attempts: ATTEMPTS });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.body, { ok: true, refunded: 25000, retref: "rf-1", leftCents: 75000, refundedCents: 25000, fullyRefunded: false });
+  assertEquals(refundCalls(r.trace).map((g) => g.body), [{ merchid: OLD_MID, retref: "rt-card", amount: "250.00", orderid: r.ledger.refunds[0].gateway_orderid }]);
+  const p = r.payments[0] as any;
+  assertEquals([p.amount_cents, p.refunded_cents, p.voided_at ?? null], [75000, 25000, null]);
+  assert(/Refunded \$250\.00 on \d{4}-\d{2}-\d{2} \(ref rf-1\)$/.test(p.note), p.note);
+  assertEquals(r.ledger.refunds.map((x) => [x.state, x.amount_cents, x.request_key, x.gateway_retref]), [["done", 25000, KEY, "rf-1"]]);
+  assert(r.trace.audit.some((a: any) => /cents=25000/.test(JSON.stringify(a))), JSON.stringify(r.trace.audit));
+});
+
+Deno.test("8b. the same key again (a retry, a double click) is the first refund's answer, and no second refund", async () => {
+  const first = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, { payments: [SETTLED_CARD], attempts: ATTEMPTS });
+  assertEquals(first.status, 200, JSON.stringify(first.body));
+  // The second click arrives with the ledger and the payment as the first left them.
+  const again = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, {
+    payments: first.payments as Pay[], attempts: ATTEMPTS, refunds: first.ledger.refunds,
+  });
+  assertEquals(again.status, 200, JSON.stringify(again.body));
+  assertEquals(again.body.replay, true);
+  assertEquals(again.body.refunded, 25000);
+  assertEquals(refundCalls(again.trace), [], "the card network is not asked twice");
+  assertEquals((again.payments[0] as any).amount_cents, 75000, "the payment moves once");
+  // The same key for ANOTHER amount is refused, not sent.
+  const other = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 100, requestKey: KEY }, {
+    payments: first.payments as Pay[], attempts: ATTEMPTS, refunds: first.ledger.refunds,
+  });
+  assertEquals([other.status, other.body.reason], [409, "key_reused"]);
+  assertEquals(refundCalls(other.trace), []);
+});
+
+Deno.test("8c. partials down to nothing: the last one voids it as refunded; a further one is `already`; no amount means all that is left", async () => {
+  let pays: Pay[] = [SETTLED_CARD];
+  let refunds: Partial<LedgerRefund>[] = [];
+  for (const [cents, key] of [[30000, "rk-c-0000001"], [20000, "rk-c-0000002"]] as const) {
+    const r = await call({ action: "refund_payment", paymentId: "p-card", amountCents: cents, requestKey: key }, { payments: pays, attempts: ATTEMPTS, refunds });
+    assertEquals(r.status, 200, JSON.stringify(r.body));
+    pays = r.payments as Pay[];
+    refunds = r.ledger.refunds;
+  }
+  assertEquals((pays[0] as any).amount_cents, 50000);
+  // An older page (or the "already settled" chain after a void) sends no amount: the rest, 500.00.
+  const rest = await call({ action: "refund_payment", paymentId: "p-card" }, { payments: pays, attempts: ATTEMPTS, refunds });
+  assertEquals(rest.status, 200, JSON.stringify(rest.body));
+  assertEquals(refundCalls(rest.trace)[0].body.amount, "500.00");
+  assertEquals([rest.body.refunded, rest.body.leftCents, rest.body.refundedCents, rest.body.fullyRefunded], [50000, 0, 100000, true]);
+  const p = rest.payments[0] as any;
+  assert(p.voided_at && p.void_reason === "refunded $1000.00", JSON.stringify(p));
+  const after = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 100, requestKey: "rk-c-0000004" }, { payments: rest.payments as Pay[], attempts: ATTEMPTS, refunds: rest.ledger.refunds });
+  assertEquals(after.body, { ok: true, already: true });
+  assertEquals(after.trace.gateway, []);
+});
+
+Deno.test("8d. more than is left, zero, a fraction of a cent: refused before anything is filed or sent", async () => {
+  const part = { ...SETTLED_CARD, amount_cents: 40000, refunded_cents: 60000 } as Pay;
+  for (const amountCents of [40001, 0, -5, 12.5, "abc"]) {
+    const r = await call({ action: "refund_payment", paymentId: "p-card", amountCents, requestKey: KEY }, { payments: [part], attempts: ATTEMPTS });
+    assertEquals(r.status, 400, `${amountCents}: ${JSON.stringify(r.body)}`);
+    assertEquals([r.body.reason, r.body.refundableCents], ["amount", 40000]);
+    assert(/up to \$400\.00/.test(r.body.error), r.body.error);
+    assertEquals(r.trace.gateway, []);
+    assertEquals(r.ledger.refunds, []);
+  }
+});
+
+Deno.test("8e. a refund the card network refuses because the sale has not settled: the partial wording, nothing moved, the payment free again", async () => {
+  const today = { ...SETTLED_CARD, received_at: TAKEN(0.1) };
+  const r = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, {
+    payments: [today], attempts: ATTEMPTS, gateway: () => ({ respstat: "C", respcode: "29", resptext: "Txn not settled" }),
+  });
+  assertEquals(r.status, 409, JSON.stringify(r.body));
+  assertEquals(r.body.reason, "not_settled");
+  assert(/only the whole payment can be cancelled, not \$250\.00/.test(r.body.error) && /tomorrow/.test(r.body.error), r.body.error);
+  assertEquals((r.payments[0] as any).amount_cents, 100000);
+  assertEquals(r.ledger.refunds.map((x) => [x.state, x.gateway_resptext]), [["failed", "Txn not settled"]]);
+  // The same wording comes from the age alone when the gateway's words say nothing about settling.
+  const vague = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, {
+    payments: [today], attempts: ATTEMPTS, gateway: () => ({ respstat: "C", respcode: "05", resptext: "Invalid request" }),
+  });
+  assertEquals(vague.body.reason, "not_settled");
+  // On an older sale it is a plain refusal, the gateway's words digit-masked.
+  const old = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, {
+    payments: [SETTLED_CARD], attempts: ATTEMPTS, gateway: () => ({ respstat: "C", respcode: "05", resptext: "Refused 4111111111111111" }),
+  });
+  assertEquals([old.status, old.body.reason], [409, "refund_declined"]);
+  assert(!/4111/.test(old.body.error) && /Nothing was refunded/.test(old.body.error), old.body.error);
+  // A failed refund frees the payment: a new key goes ahead.
+  const next = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: "rk-e-0000002" }, {
+    payments: old.payments as Pay[], attempts: ATTEMPTS, refunds: old.ledger.refunds,
+  });
+  assertEquals(next.status, 200, JSON.stringify(next.body));
+});
+
+Deno.test("8f. a refund whose answer is LOST is never 'nothing changed, try again': asked by its order id, recorded if found, held if not", async () => {
+  // Found approved by the inquire right after the timeout: recorded done.
+  const found = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, {
+    payments: [SETTLED_CARD], attempts: ATTEMPTS,
+    gateway: (path) => path === "/refund" ? 504 : { respstat: "A", respcode: "00", retref: "rf-late", amount: "250.00" },
+  });
+  assertEquals(found.status, 200, JSON.stringify(found.body));
+  assertEquals(inquiries(found.trace).length, 1);
+  assert(inquiries(found.trace)[0].path.includes(found.ledger.refunds[0].gateway_orderid!), inquiries(found.trace)[0].path);
+  assertEquals([found.body.refunded, found.body.retref, (found.payments[0] as any).amount_cents], [25000, "rf-late", 75000]);
+
+  // Not found: held, filed as a fault once, the payment unchanged, and the next refund refused.
+  const lost = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, {
+    payments: [SETTLED_CARD], attempts: ATTEMPTS, gateway: (path) => path === "/refund" ? 504 : {},
+  });
+  assertEquals([lost.status, lost.body.reason], [409, "refund_unconfirmed"]);
+  assert(/Don't refund it again/.test(lost.body.error), lost.body.error);
+  assertEquals(lost.ledger.refunds.map((x) => x.state), ["unknown"]);
+  assertEquals((lost.payments[0] as any).amount_cents, 100000);
+  assert(faultCodes(lost.trace).includes("refund_unconfirmed"), JSON.stringify(lost.trace.errors));
+  const msg = String(lost.trace.errors.find((e) => e.code === "refund_unconfirmed")?.message);
+  assert(/payment_refund_close\(1, 'done'/.test(msg) && /payment_refund_close\(1, 'failed'/.test(msg), msg);
+
+  const blocked = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 100, requestKey: "rk-f-0000002" }, {
+    payments: lost.payments as Pay[], attempts: ATTEMPTS, refunds: lost.ledger.refunds, gateway: () => ({}),
+  });
+  assertEquals([blocked.status, blocked.body.reason], [409, "refund_unconfirmed"]);
+  assertEquals(refundCalls(blocked.trace), [], "no second refund while the first is unknown");
+  // …and a void is held too: cancelling the sale on top of a refund that may have gone through.
+  const v = await call({ action: "void_payment", paymentId: "p-card" }, { payments: lost.payments as Pay[], attempts: ATTEMPTS, refunds: lost.ledger.refunds });
+  assertEquals([v.status, v.body.reason], [409, "refund_unconfirmed"]);
+  assertEquals(v.trace.gateway, []);
+
+  // Once the gateway answers the inquire (approved), the next click records it and goes ahead.
+  const later = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 100, requestKey: "rk-f-0000003" }, {
+    payments: lost.payments as Pay[], attempts: ATTEMPTS, refunds: lost.ledger.refunds,
+    gateway: (path) => path === "/refund" ? { respstat: "A", respcode: "00", retref: "rf-next" } : { respstat: "A", retref: "rf-late", amount: "250.00" },
+  });
+  assertEquals(later.status, 200, JSON.stringify(later.body));
+  assertEquals(later.ledger.refunds.map((x) => x.state), ["done", "done"]);
+  assertEquals((later.payments[0] as any).amount_cents, 100000 - 25000 - 100);
+});
+
+Deno.test("8g. the limiter refusing the refund: nothing went back, said so, and the payment is free", async () => {
+  const r = await call({ action: "refund_payment", paymentId: "p-card", amountCents: 25000, requestKey: KEY }, {
+    payments: [SETTLED_CARD], attempts: ATTEMPTS,
+    gateway: () => new Response(JSON.stringify({}), { status: 429, headers: { "X-Rate-Limit-Retry-After-Seconds": "20" } }),
+  });
+  assertEquals(r.status, 502, JSON.stringify(r.body));
+  assert(/Nothing was refunded/.test(r.body.error), r.body.error);
+  assertEquals(r.ledger.refunds.map((x) => x.state), ["failed"]);
+  assertEquals(inquiries(r.trace), [], "a known refusal needs no inquire");
+});
+
+Deno.test("8h. reconcile asks about a lost refund by its order id and records what it finds; one still in flight is left alone", async () => {
+  const old = (id: number, orderid: string) => ({
+    id, client_id: TENANT, payment_id: "p-card", order_id: "o-1", amount_cents: 25000, kind: "gateway" as const, state: "unknown" as const,
+    gateway_orderid: orderid, created_at: TAKEN(1),
+  });
+  const r = await call({ action: "reconcile" }, {
+    payments: [SETTLED_CARD], attempts: ATTEMPTS, refunds: [old(1, "ssr_00000000000000000001")],
+    gateway: (path) => path.startsWith("/inquireByOrderid/") ? { respstat: "A", retref: "rf-found", amount: "250.00" } : {},
+  });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.body.refunds, [{ refundId: 1, state: "done" }]);
+  assertEquals(inquiries(r.trace)[0].path, `/inquireByOrderid/ssr_00000000000000000001/${OLD_MID}`);
+  assertEquals((r.payments[0] as any).amount_cents, 75000);
+  // One a minute old is still in flight: not asked.
+  const fresh = await call({ action: "reconcile" }, {
+    payments: [SETTLED_CARD], attempts: ATTEMPTS, refunds: [{ ...old(1, "ssr_00000000000000000001"), state: "pending", created_at: TAKEN(1 / 1440) }],
+  });
+  assertEquals(fresh.body.refunds, []);
+  assertEquals(inquiries(fresh.trace), []);
+});
+
+// ─── 9. Refunds by hand (cash, check, a card run elsewhere) ────────────────────────────────────
+const CASH: Pay = { id: "p-cash", order_id: "o-1", amount_cents: 30000, gateway: null as unknown as string, gateway_txn_id: null as unknown as string, attempt_id: null, method: "cash", note: "paid at the lot" };
+
+Deno.test("9a. a by-hand refund of part of a cash payment is recorded at once, with how it went back, and asks no card network", async () => {
+  const r = await call({ action: "refund_payment", paymentId: "p-cash", amountCents: 7500, requestKey: KEY, refundMethod: "check", reference: "chk 1043", reason: "trim kit returned" }, { payments: [CASH] });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.body, { ok: true, refunded: 7500, retref: null, leftCents: 22500, refundedCents: 7500, fullyRefunded: false, byHand: true });
+  assertEquals(r.trace.gateway, []);
+  const p = r.payments[0] as any;
+  assert(p.note.startsWith("paid at the lot\n") && /Refunded \$75\.00 by check on .* \(ref chk 1043\)$/.test(p.note), p.note);
+  assertEquals(r.ledger.refunds.map((x) => [x.kind, x.state, x.method, x.reference, x.reason]), [["manual", "done", "check", "chk 1043", "trim kit returned"]]);
+  // Repeated: a replay.
+  const again = await call({ action: "refund_payment", paymentId: "p-cash", amountCents: 7500, requestKey: KEY, refundMethod: "check" }, { payments: r.payments as Pay[], refunds: r.ledger.refunds });
+  assertEquals([again.status, again.body.replay, (again.payments[0] as any).amount_cents], [200, true, 22500]);
+  // The rest, with no method named: the payment's own (cash), and it is refunded in full.
+  const rest = await call({ action: "refund_payment", paymentId: "p-cash", requestKey: "rk-9a-000003" }, { payments: r.payments as Pay[], refunds: r.ledger.refunds });
+  assertEquals([rest.status, rest.body.fullyRefunded, rest.ledger.refunds[1].method], [200, true, "cash"]);
+});
+
+Deno.test("9b. by-hand refusals: more than is left, a voided payment, a GHL payment", async () => {
+  const over = await call({ action: "refund_payment", paymentId: "p-cash", amountCents: 30001, requestKey: KEY }, { payments: [CASH] });
+  assertEquals([over.status, over.body.reason, over.body.refundableCents], [400, "amount", 30000]);
+  const voided = await call({ action: "refund_payment", paymentId: "p-cash", amountCents: 100, requestKey: KEY }, { payments: [{ ...CASH, voided_at: TAKEN(1) }] });
+  assertEquals([voided.status, voided.body.reason], [409, "voided"]);
+  const ghl = await call({ action: "refund_payment", paymentId: "p-cash", amountCents: 100, requestKey: KEY }, { payments: [{ ...CASH, gateway: "ghl" }] });
+  assertEquals(ghl.status, 400);
+  assert(/Synergy\/GHL/.test(ghl.body.error), ghl.body.error);
+  for (const r of [over, voided, ghl]) assertEquals(r.ledger.refunds, []);
+});
+
+Deno.test("9c. refunds are gated like today's: a member with view-only Orders is refused before anything is read or sent", async () => {
+  const viewer = { client_id: TENANT, role: "user", title: "sales_rep", access: { orders: "view" }, user_id: USER_ID };
+  for (const pay of [SETTLED_CARD, CASH]) {
+    const r = await call({ action: "refund_payment", paymentId: pay.id, amountCents: 100, requestKey: KEY }, { payments: [pay], attempts: ATTEMPTS, member: viewer });
+    assertEquals(r.status, 403, JSON.stringify(r.body));
+    assertEquals(r.trace.gateway, []);
+    assertEquals(r.ledger.calls, []);
+  }
 });

@@ -47,7 +47,7 @@
 //     P7 keyed, a charge answered 429 with no flag: it never reached the gateway, so the keyed
 //        frame is NOT loaded again and the server's sentence shows without "Key the card in
 //        again"; that same frame's next token is then charged
-//   R  a payment row's Refund (window.confirm accepted)
+//   R  a payment row's Refund (the Refund box since 349, partialRefund.mjs drives the rest of it)
 //     R1 a bank payment still clearing whose void answers "already settled": no refund_payment is
 //        sent, and the page's OWN sentence "This bank payment is still clearing. It can be
 //        refunded once it clears." shows, not the void's "already settled" (the server's
@@ -744,7 +744,11 @@ try {
   ok("R0: both payments show a Refund", await until(async () => (await refunds.count()) === 2, 15000), String(await refunds.count()));
   let voids = callsOf("portal-payments", "void_payment").length;
   let refunded = callsOf("portal-payments", "refund_payment").length;
+  // Taken today, so the box offers the whole payment cancelled (a void) first, as the old confirm did.
+  const box = page.locator("[data-ss-refund-modal]");
+  const cancelWhole = () => box.getByRole("button", { name: "Cancel the whole payment" });
   await refunds.nth(0).click();
+  await tap(cancelWhole());
   ok("R1: a bank payment still clearing: the void is asked",
     await until(() => callsOf("portal-payments", "void_payment").length > voids, 6000) && lastOf("portal-payments", "void_payment").paymentId === S.payments[0].id);
   // The sentence is the PAGE's own (04-orders.jsx), not passed through from the server: the void
@@ -755,11 +759,13 @@ try {
     && !(await page.evaluate(() => document.body.innerText.includes("That payment has already settled"))));
   voids = callsOf("portal-payments", "void_payment").length;
   refunded = callsOf("portal-payments", "refund_payment").length;   // an older page chained one in R1
+  await tap(box.getByRole("button", { name: "Close" }));
   await refunds.nth(1).click();
+  await tap(cancelWhole());
   ok("R2: a card payment whose void answers \"already settled\" is refunded, as before",
     await until(() => callsOf("portal-payments", "refund_payment").length > refunded, 6000)
     && lastOf("portal-payments", "refund_payment").paymentId === S.payments[1].id
-    && callsOf("portal-payments", "void_payment").length === voids + 1 && await waitText("Refunded $50.00.", 4000));
+    && callsOf("portal-payments", "void_payment").length === voids + 1 && await waitText("Refunded $50.00 to the customer (card ending 1111).", 4000));
 
   // ── X ──
   ok("X: no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
