@@ -1,5 +1,6 @@
 // THE SIZES & PRICES TABLE (/settings/sheds-table, build plan Phase 2: the shell and the read-only
-// grid), driven for real on the COMPILED portal. Phase 5 extends this file with the editing cases.
+// grid; Phase 3: editing and autosave), driven for real on the COMPILED portal. Phase 5 adds paste,
+// adding sizes, refresh and the backup.
 //
 //   A  THE SHEDS CARD: retitled "Sizes, prices & included options"; "Open sizes & prices table ↗" is a
 //      real anchor to /settings/sheds-table (target=_blank, rel=noopener); a "Prefer Excel?" row holds
@@ -35,8 +36,24 @@
 //      access map opens view-only; a billing lock shows the lock.
 //   G  NARROW (390 px): the page does not scroll sideways, the header is at most 90 px, at least 8 rows
 //      show.
-//   T  TIMING (always printed, never a failure): first render and arrow-key time at 1x (210 sizes x 38
-//      columns, about 8,000 cells) and 3x (630 x 38, about 24,000).
+//   P  EDITING AND AUTOSAVE (Phase 3), against a fake of save_pricing_cells answering as migration 350
+//      does (fakeServer): a digit opens the editor over the box holding it; Enter/Tab/Shift+Tab/Up/Down
+//      commit and move, Left/Right stay in the text, Escape cancels, F2/Enter/double-click edit in place;
+//      Delete clears one box; Space and a second click tick Offered; Ctrl+Z says no undo; the ring
+//      stays on a frozen box while the grid scrolls sideways; Shift+arrows draw one range rectangle.
+//      A price and an option box each send one size with only that field, from what was on file, on its
+//      version; the badge goes not saved → saving → saved; 10 quick edits make at most 2 calls. A
+//      colleague's change to the same box turns it amber with their number and the status line; to
+//      another box it is resent once; a refused box is red with the server's reason; text the rules
+//      refuse is red at once and never sent; conflict/refusal answers each log one info row, counts
+//      only. A 500 goes amber then green (Retry now too); a hung main host goes through the side door;
+//      a lost answer resends as a duplicate; five failures stop saving with one info row, then Retry
+//      and Discard; a 403 makes the page view-only. ?as= and a view-only access map refuse every edit
+//      path; Real-Time Pricing locks prices only. The leave prompt fires for an editor holding changed
+//      text and for an unsent edit, and not once saved; Back to Sheds sends first.
+//   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
+//      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails only if an arrow key re-renders a row
+//      or a commit re-renders more than the one it changed.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine). Every style, size,
 // option and account here is made up; this repo is public.
@@ -165,19 +182,104 @@ const H = { "access-control-allow-origin": "*", "access-control-expose-headers":
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A fake of the save side (Phase 3): portal-settings' size_table and save_pricing_cells over one
+// account's rows, answering exactly as _shared/pricingCells.ts and migration 350 do. Each size entry
+// is judged by both checks (its version AND every `from`), and answered saved / duplicate / conflict /
+// missing with the size's version, row (price, active, label, width_ft, length_ft, style_id,
+// sort_order, created_at) and cells (the sent boxes only), plus cellErrors for a box the server will
+// not take (an option that is no column, Real-Time Pricing, Offered with no price).
+//   F.script   one step per save request, either host, in order: { status } fails it without
+//              writing; { lose: true } writes, then answers 500 (an answer lost on the way back);
+//              { hang: true } never answers; { before(F) } runs first (a colleague's save);
+//              { delayMs } waits. F.delayMs waits on every save.
+//   F.poke(id, { price?, active?, cells? })   a colleague's save straight into the rows.
+//   F.refuse   option keys the server answers "no column" for.
+function fakeServer(cat, table) {
+  let clock = 0;
+  const ver = () => `2026-10-31T00:00:00.${String(++clock).padStart(6, "0")}+00:00`;
+  const sizes = new Map(table.sizes.map((z) => [z.id, { ...z }]));
+  const inc = new Map();
+  table.inclusions.forEach((x) => { if (x.included) { if (!inc.has(x.size_id)) inc.set(x.size_id, {}); inc.get(x.size_id)[x.item_key] = Number(x.qty) || 1; } });
+  const priceOf = (z) => (z.base_price == null ? null : Number(z.base_price));
+  const F = {
+    script: [], refuse: [], delayMs: 0, rtp: !!table.rtpOn, bad: [],
+    table: (clientId) => ({ ok: true, clientId, rtpOn: F.rtp, styles: table.styles, sizes: [...sizes.values()].map((z) => ({ ...z })),
+      inclusions: [...inc.entries()].flatMap(([id, c]) => Object.entries(c).map(([k, q]) => ({ size_id: id, item_key: k, included: true, qty: q }))),
+      counts: { sizes: sizes.size, inclusions: [...inc.values()].reduce((n, c) => n + Object.keys(c).length, 0) } }),
+    size: (id) => sizes.get(id),
+    cells: (id) => ({ ...(inc.get(id) || {}) }),
+    poke: (id, change) => {
+      const z = sizes.get(id);
+      if ("price" in change) z.base_price = change.price;
+      if ("active" in change) z.active = change.active;
+      if (change.cells) { const c = inc.get(id) || {}; Object.entries(change.cells).forEach(([k, q]) => { if (q > 0) c[k] = q; else delete c[k]; }); inc.set(id, c); }
+      z.updated_at = ver();
+    },
+    // The edge's shape check (validatePayload's core): a body it would answer 400 is a parity bug.
+    malformed: (body) => {
+      const list = [...(body.creates || []), ...(body.removes || []), ...(body.sizes || [])];
+      if (!list.length || list.length > 50) return "entries";
+      for (const s of body.sizes || []) {
+        if (typeof s.base !== "string" || !s.from || !s.to) return "shape";
+        if (("price" in s.to) !== ("price" in s.from) || ("active" in s.to) !== ("active" in s.from)) return "from/to";
+        if (Object.keys(s.to.cells || {}).sort().join() !== Object.keys(s.from.cells || {}).sort().join()) return "cells";
+        if (Object.values(s.to.cells || {}).some((q) => !Number.isInteger(q) || q < 0)) return "qty";
+      }
+      return null;
+    },
+    apply: (body) => {
+      const allowed = new Set(OPTION_KEYS(cat).filter((k) => !F.refuse.includes(k)));
+      const results = (body.sizes || []).map((e) => {
+        const z = sizes.get(e.id);
+        if (!z) return { id: e.id, status: "missing", version: null, row: null, cells: {}, reason: "That size isn't on this account any more." };
+        const c = inc.get(e.id) || {};
+        const cur = (k) => c[k] || 0;
+        const same = (side) => (!("price" in side) || side.price === priceOf(z)) && (!("active" in side) || side.active === !!z.active)
+          && Object.entries(side.cells || {}).every(([k, v]) => v === cur(k));
+        const errs = {};
+        let status;
+        if (z.updated_at === e.base && same(e.from)) {
+          let p = priceOf(z);
+          if ("price" in e.to) { if (F.rtp) errs.price = "Real-Time Pricing sets prices on this account"; else p = e.to.price; }
+          let act = "active" in e.to ? e.to.active : (priceOf(z) == null && p != null ? true : !!z.active);
+          if (act && p == null) { if ("active" in e.to) errs.active = "Add a price first"; act = false; }
+          z.base_price = p; z.active = act; z.updated_at = ver();
+          Object.entries(e.to.cells || {}).forEach(([k, q]) => {
+            if (!allowed.has(k)) { errs[k] = "That option has no column in your sizes table"; return; }
+            if (q > 0) c[k] = q; else delete c[k];
+          });
+          inc.set(e.id, c);
+          status = "saved";
+        } else status = same(e.to) ? "duplicate" : "conflict";
+        const cells = {};
+        Object.keys(e.to.cells || {}).forEach((k) => { cells[k] = cur(k); });
+        return { id: e.id, status, version: z.updated_at, cells, ...(Object.keys(errs).length ? { cellErrors: errs } : {}),
+          row: { price: priceOf(z), active: !!z.active, label: z.label, width_ft: z.width_ft, length_ft: z.length_ft, style_id: z.style_id, sort_order: z.sort_order, created_at: z.created_at } };
+      });
+      return { created: [], removed: [], results };
+    },
+  };
+  return F;
+}
+
 // S: { own, operator, operatorDelayMs (is_operator answers late), role, access, locked, cat(clientId),
 //      table(clientId), sizeTableDelayMs, sizeTableFailures, countSkew (size_table answers with counts
-//      that never add up), createdStyleId, peopleRefused (list_users answers 403) }
+//      that never add up), createdStyleId, peopleRefused (list_users answers 403), fake (fakeServer:
+//      size_table and save_pricing_cells answer from its rows), win (window.* values set before the
+//      page's own scripts: __ssPgBackoffMs, __ssSaveDeadlineMs) }
 async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
   const S = { own: OWN, operator: false, operatorDelayMs: 0, role: "owner", access: null, locked: false, sizeTableDelayMs: 0, sizeTableFailures: 0, countSkew: false, ...S0 };
   S.cat = S.cat || ((cid) => catalogFor(cid));
-  S.table = S.table || ((cid) => tableFor(cid, S.cat(cid)));
+  S.table = S.table || (S.fake ? (cid) => S.fake.table(cid) : (cid) => tableFor(cid, S.cat(cid)));
   const ctx = await browser.newContext({ viewport: { width, height }, serviceWorkers: "block", acceptDownloads: true });
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
   }, [REF, SESSION]);
+  if (S.win) await ctx.addInitScript((w) => { Object.assign(window, w); }, S.win);
   const calls = [];
   const errors = [];
+  const logs = [];      // every log_error row the page wrote (the stub keeps them here)
+  const dialogs = [];   // the type of every dialog the page raised (beforeunload included), each dismissed
   await ctx.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
   const handler = async (route) => {
     const req = route.request();
@@ -187,6 +289,7 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
     try { body = JSON.parse(req.postData() || "{}"); } catch (_e) { /* not JSON */ }
     const rpc = /\/rest\/v1\/rpc\/([a-z_]+)/.exec(url);
     if (rpc) {
+      if (rpc[1] === "log_error") { logs.push(body); return json(route, null); }
       if (rpc[1] === "is_operator") {
         if (S.operatorDelayMs) await sleep(S.operatorDelayMs);
         return json(route, !!S.operator);
@@ -229,6 +332,20 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
         const t = S.table(tenant);
         return json(route, S.countSkew ? { ...t, counts: { sizes: t.sizes.length + 1, inclusions: t.inclusions.length } } : t);
       }
+      if (a === "save_pricing_cells" && S.fake) {
+        const F = S.fake;
+        const step = F.script.length ? F.script.shift() : {};
+        if (step.hang) return undefined;   // never answered: the page's deadline gives up on it
+        if (step.delayMs) await sleep(step.delayMs);
+        if (F.delayMs) await sleep(F.delayMs);
+        const bad = F.malformed(body);
+        if (bad) { F.bad.push(bad); return json(route, { error: `Malformed save (${bad}).` }, 400); }
+        if (step.before) step.before(F);
+        if (step.status && !step.lose) return json(route, { error: step.error || `Test failure (${step.status}).` }, step.status);
+        const out = F.apply(body);
+        if (step.lose) return json(route, { error: "The answer was lost on the way back (test)." }, 500);
+        return json(route, { ok: true, clientId: tenant, ...out });
+      }
       if (a === "create_style") return json(route, { ok: true, clientId: tenant, styleId: S.createdStyleId || uid("5", 77) });
       if (a === "import_pricing_csv") return json(route, { ok: true, clientId: tenant, imported: 2, created: 1, updated: 1, skipped: [] });
       return json(route, { ok: true, clientId: tenant });
@@ -241,9 +358,9 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
   page.on("console", (m) => { if (m.type() === "error" && /Minified React error|#310|Rendered more hooks/.test(m.text())) errors.push(m.text()); });
-  page.on("dialog", (d) => d.dismiss());
+  page.on("dialog", (d) => { dialogs.push(d.type()); d.dismiss().catch(() => {}); });
   if (path) await page.goto(`${BASE}${path}`);
-  return { ctx, page, calls, errors, S };
+  return { ctx, page, calls, errors, S, logs, dialogs };
 }
 const tableCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && (c.action === "size_table" || (c.action === "catalog" && "targetClientId" in c.body)));
 const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tbody tr", { timeout });
@@ -822,13 +939,481 @@ if (want("G")) {
   await ctx.close();
 }
 
+// ── P: editing and autosave (Phase 3) ──
+const sel = (id, col) => `tr[data-s="${id}"] td[data-c="${col}"]`;
+const saveCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && c.action === "save_pricing_cells");
+const barnOf = (t) => t.sizes.filter((z) => z.style_id === t.styles[0].id).sort((a, b) => a.sort_order - b.sort_order);
+const keyCol = (cat, key) => 3 + OPTION_KEYS(cat).indexOf(key);
+const named = (z) => `Test Barn ${z.label}`;
+const look = (page, id, col) => page.evaluate((s) => { const td = document.querySelector(s); return td ? { text: td.textContent, cls: td.className, invalid: td.getAttribute("aria-invalid") } : null; }, sel(id, col));
+const state = (page) => page.evaluate(() => ({
+  badge: (document.querySelector(".ss-pg-badge") || {}).textContent || "",
+  readout: (document.querySelector(".ss-pg-readout") || {}).textContent || "",
+  status: [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "),
+  editor: (() => { const i = document.querySelector(".ss-pg-ed"); return i ? { value: i.value, label: i.getAttribute("aria-label"), mode: i.inputMode, focused: document.activeElement === i } : null; })(),
+  editable: document.querySelector(".ss-pg").getAttribute("data-ss-pg-editable"),
+  actions: [...document.querySelectorAll(".ss-pg-bact")].map((b) => b.textContent),
+}));
+const waitBadge = (page, re, timeout = 12000) => page.waitForFunction((src) => new RegExp(src).test((document.querySelector(".ss-pg-badge") || {}).textContent || ""), re.source, { timeout }).then(() => true, () => false);
+// Every badge text in order, from now on (a MutationObserver on the toolbar).
+const watchBadge = (page) => page.evaluate(() => {
+  window.__ssBadges = [];
+  const rec = () => { const t = (document.querySelector(".ss-pg-badge") || {}).textContent || ""; if (window.__ssBadges[window.__ssBadges.length - 1] !== t) window.__ssBadges.push(t); };
+  rec();
+  new MutationObserver(rec).observe(document.querySelector(".ss-pg-bar"), { subtree: true, childList: true, characterData: true });
+});
+const badgesSeen = (page) => page.evaluate(() => window.__ssBadges || []);
+// Waits until `k` more save calls have gone out since `n0` and the badge is green again.
+const saved = async (page, calls, n0, k = 1, timeout = 15000) => {
+  const until = Date.now() + timeout;
+  while (Date.now() < until) {
+    if (saveCalls(calls).length >= n0 + k && /^All changes saved · /.test((await state(page)).badge)) return true;
+    await sleep(60);
+  }
+  return false;
+};
+const typeIn = async (page, id, col, text, key = "Enter") => {
+  await page.locator(sel(id, col)).click();
+  await page.keyboard.type(text);
+  if (key) await page.keyboard.press(key);
+};
+
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const LOFT = keyCol(cat, "loft"), WB = keyCol(cat, "workbench");
+  F.delayMs = 500;   // long enough to see "Saving…"
+  const { ctx, page, calls, errors, logs } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await watchBadge(page);
+
+  // A price: a digit opens the editor holding it; Enter commits and moves down; one call.
+  const z1 = barn[0], z2 = barn[1], z3 = barn[2];
+  await page.locator(sel(z1.id, 1)).click();
+  await page.keyboard.type("5150");
+  let s = await state(page);
+  ok("P: a digit opens the editor over the price, holding what was typed, focused, named for a screen reader",
+    !!s.editor && s.editor.value === "5150" && s.editor.focused && s.editor.label === `${named(z1)}, Price` && s.editor.mode === "decimal", JSON.stringify(s.editor));
+  ok("P: an open editor holding changed text counts as a change not saved yet", s.badge === "1 change not saved yet", s.badge);
+  const geo = await page.evaluate((a) => { const td = document.querySelector(a).getBoundingClientRect(), ed = document.querySelector(".ss-pg-ed").getBoundingClientRect(); return [td.left, td.top, td.width, td.height, ed.left, ed.top, ed.width, ed.height].map(Math.round); }, sel(z1.id, 1));
+  ok("P: …and sits exactly over its box", geo.slice(0, 4).join() === geo.slice(4).join(), JSON.stringify(geo));
+  let n0 = saveCalls(calls).length;
+  await page.keyboard.press("Enter");
+  s = await state(page);
+  let c = await look(page, z1.id, 1);
+  ok("P: Enter commits and moves down; the box shows $5,150 with the waiting mark (a blue corner)",
+    s.readout === `Price · ${named(z2)}` && !s.editor && c.text === "$5,150" && /ss-pg-m-p/.test(c.cls), JSON.stringify({ readout: s.readout, c }));
+  ok("P: …saved", await saved(page, calls, n0));
+  const seen = await badgesSeen(page);
+  const iNot = seen.indexOf("1 change not saved yet"), iSav = seen.indexOf("Saving 1 change…");
+  const iOk = seen.findIndex((x, i) => i > iSav && /^All changes saved · \d/.test(x));
+  ok("P: the badge goes '1 change not saved yet' → 'Saving 1 change…' → 'All changes saved · <time>'", iNot >= 0 && iSav > iNot && iOk > iSav, JSON.stringify(seen));
+  let sc = saveCalls(calls).slice(n0);
+  const want1 = { action: "save_pricing_cells", targetClientId: null, creates: [], removes: [], sizes: [{ id: z1.id, base: z1.updated_at, from: { price: z1.base_price }, to: { price: 5150 } }] };
+  ok("P: one call: one size, only the price, from what was on file, on the version read, targetClientId on the body",
+    sc.length === 1 && JSON.stringify(sc[0].body) === JSON.stringify(want1), JSON.stringify(sc.map((x) => x.body)));
+  c = await look(page, z1.id, 1);
+  ok("P: saved: the mark clears and the server holds it", !/ss-pg-m-/.test(c.cls) && F.size(z1.id).base_price === 5150, JSON.stringify(c));
+
+  // An option box: numeric editor; Tab commits and moves right; only that box travels.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(z3.id, LOFT)).click();
+  await page.keyboard.type("50");
+  s = await state(page);
+  ok("P: an option box's editor is numeric and named for its column", !!s.editor && s.editor.mode === "numeric" && s.editor.label === `${named(z3)}, Loft (sq ft)`, JSON.stringify(s.editor));
+  await page.keyboard.press("Tab");
+  s = await state(page);
+  ok("P: Tab commits and moves right", s.readout === `Workbench · ${named(z3)}` && (await look(page, z3.id, LOFT)).text === "50", s.readout);
+  ok("P: …saved", await saved(page, calls, n0));
+  sc = saveCalls(calls).slice(n0);
+  ok("P: an option edit sends one size with only that box in `from` and `to`",
+    sc.length === 1 && JSON.stringify(sc[0].body.sizes) === JSON.stringify([{ id: z3.id, base: z3.updated_at, from: { cells: { loft: 0 } }, to: { cells: { loft: 50 } } }]), JSON.stringify(sc.map((x) => x.body.sizes)));
+  await page.keyboard.press("Shift+Tab");
+  ok("P: Shift+Tab moves left", (await state(page)).readout === `Loft (sq ft) · ${named(z3)}`);
+
+  // Enter, F2, double-click edit in place; Escape cancels; Left/Right stay in the text; a box left as
+  // it was sends nothing.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(z2.id, 1)).click();
+  await page.keyboard.press("Enter");
+  s = await state(page);
+  ok("P: Enter on a box edits it in place, as a plain number", !!s.editor && s.editor.value === String(z2.base_price), JSON.stringify(s.editor));
+  await page.keyboard.type("9");
+  await page.keyboard.press("Escape");
+  s = await state(page);
+  ok("P: Escape cancels: the editor closes and the box keeps its value", !s.editor && (await look(page, z2.id, 1)).text === "$123,456.78" && /^All changes saved/.test(s.badge), JSON.stringify(s));
+  await page.keyboard.press("F2");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowRight");
+  s = await state(page);
+  ok("P: F2 edits in place; Left and Right move the caret, not the cell", !!s.editor && s.readout === `Price · ${named(z2)}`, JSON.stringify(s));
+  await page.keyboard.press("ArrowDown");
+  s = await state(page);
+  ok("P: Down commits and moves", !s.editor && s.readout === `Price · ${named(z3)}`, s.readout);
+  await page.locator(sel(z3.id, LOFT)).dblclick();
+  s = await state(page);
+  ok("P: a double-click edits in place", !!s.editor && s.editor.value === "50", JSON.stringify(s.editor));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(1300);
+  ok("P: …and none of that sent anything", saveCalls(calls).length === n0, String(saveCalls(calls).length - n0));
+  // Delete clears one box (a 0, not included), and never asks.
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Delete");
+  ok("P: Delete clears the box", (await look(page, z3.id, LOFT)).text === "");
+  ok("P: …saved as 0 (nothing included), with no question asked", await saved(page, calls, n0) && JSON.stringify(saveCalls(calls)[n0].body.sizes[0].to) === '{"cells":{"loft":0}}'
+    && F.cells(z3.id).loft === undefined, JSON.stringify(saveCalls(calls).slice(n0).map((x) => x.body.sizes)));
+  // Space on Offered; typing on Offered opens nothing; a click on the selected Offered box ticks it back.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(z1.id, 2)).click();
+  await page.keyboard.press("Space");
+  ok("P: Space on Offered unticks it", (await look(page, z1.id, 2)).text === "");
+  await page.keyboard.type("x");
+  ok("P: typing on Offered opens no editor", !(await state(page)).editor);
+  const offOk = await saved(page, calls, n0);
+  const offSent = saveCalls(calls)[n0] && saveCalls(calls)[n0].body.sizes[0];
+  ok("P: …saved as Offered off alone, from ticked", offOk && !!offSent && JSON.stringify([offSent.from, offSent.to]) === '[{"active":true},{"active":false}]' && F.size(z1.id).active === false,
+    JSON.stringify(saveCalls(calls).slice(n0).map((x) => x.body.sizes)));
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(z1.id, 2)).click();
+  ok("P: a click on the Offered box already selected ticks it again", (await look(page, z1.id, 2)).text === "✓" && await saved(page, calls, n0) && F.size(z1.id).active === true);
+  await page.keyboard.press("Control+z");
+  ok("P: Ctrl+Z says undo isn't in this version", (await state(page)).status === "Undo isn't in this version yet. Type the old value back.", (await state(page)).status);
+  // The overlay: a ring over a frozen box stays on it while the grid scrolls sideways (the sticky
+  // lane), and one rectangle covers a Shift+arrows range.
+  const ringOn = (a) => page.evaluate((s0) => {
+    const r = [...document.querySelectorAll(".ss-pg-ring")].find((x) => x.style.display === "block");
+    const td = document.querySelector(s0).getBoundingClientRect();
+    return r ? [r.getBoundingClientRect(), td].map((b) => [b.left, b.top, b.width, b.height].map(Math.round).join()) : null;
+  }, a);
+  // 25 option columns fit across 1280 px; at 1000 the grid scrolls sideways.
+  await page.setViewportSize({ width: 1000, height: 860 });
+  await page.locator(sel(z2.id, 1)).click();
+  const rp0 = await ringOn(sel(z2.id, 1));
+  await page.evaluate(() => { document.querySelector(".ss-pg-box").scrollLeft = 300; });
+  await page.waitForTimeout(100);
+  const rp = await ringOn(sel(z2.id, 1));
+  const sl = await page.evaluate(() => document.querySelector(".ss-pg-box").scrollLeft);
+  ok("P: the ring over a frozen Price box stays on it while the grid scrolls sideways", !!rp && rp[0] === rp[1] && rp0[0] === rp[0] && sl > 0, JSON.stringify({ rp0, rp, sl }));
+  await page.locator(sel(z2.id, 1 + 6)).click();
+  const rs = await ringOn(sel(z2.id, 1 + 6));
+  ok("P: …and the ring over an option box scrolled into view sits on it too", !!rs && rs[0] === rs[1], JSON.stringify(rs));
+  await page.evaluate(() => { document.querySelector(".ss-pg-box").scrollLeft = 0; });
+  await page.setViewportSize({ width: 1280, height: 860 });
+  await page.locator(sel(z3.id, LOFT)).click();
+  const ro = await ringOn(sel(z3.id, LOFT));
+  ok("P: …and over an option box", !!ro && ro[0] === ro[1], JSON.stringify(ro));
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowDown");
+  const rng = await page.evaluate(([a, b]) => {
+    const r = [...document.querySelectorAll(".ss-pg-range")].filter((x) => x.style.display === "block");
+    const ta = document.querySelector(a).getBoundingClientRect(), tb = document.querySelector(b).getBoundingClientRect();
+    return { n: r.length, rr: r[0] ? [r[0].getBoundingClientRect()].map((x) => [x.left, x.top, x.right, x.bottom].map(Math.round).join())[0] : null,
+      want: [ta.left, ta.top, tb.right, tb.bottom].map(Math.round).join(), selected: document.querySelectorAll('[aria-selected="true"]').length,
+      readout: document.querySelector(".ss-pg-readout").textContent };
+  }, [sel(z3.id, LOFT), sel(barn[3].id, LOFT + 2)]);
+  ok("P: Shift+arrows stretch one rectangle over the range; the active cell stays the one selected", rng.n === 1 && rng.rr === rng.want && rng.selected === 1 && rng.readout === `Loft (sq ft) · ${named(z3)}`, JSON.stringify(rng));
+  await page.keyboard.press("Escape");
+  ok("P: Escape drops the range", (await page.evaluate(() => [...document.querySelectorAll(".ss-pg-range")].filter((x) => x.style.display === "block").length)) === 0);
+
+  // Ten quick edits make at most two calls.
+  F.delayMs = 0;
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(barn[3].id, LOFT)).click();
+  for (let i = 0; i < 10; i++) { await page.keyboard.type(String(11 + i)); await page.keyboard.press("Enter"); }
+  ok("P: …saved", await saved(page, calls, n0));
+  sc = saveCalls(calls).slice(n0);
+  const entries = sc.reduce((n, x) => n + x.body.sizes.length, 0);
+  ok("P: 10 quick edits make at most 2 calls, with all 10 boxes", sc.length <= 2 && entries === 10, `${sc.length} call(s), ${entries} entries`);
+
+  // Changed elsewhere: a colleague's price lands first. Amber with ↺, their number shown, not resent;
+  // the badge jumps to it; the status line says both numbers; Dismiss clears it.
+  F.delayMs = 300;
+  const z5 = barn[4];
+  F.script.push({ before: (f) => f.poke(z5.id, { price: 4950 }) });
+  n0 = saveCalls(calls).length;
+  await typeIn(page, z5.id, 1, "4800");
+  await waitBadge(page, /^1 box needs you$/);
+  c = await look(page, z5.id, 1);
+  ok("P: a colleague's change to the same box: amber with ↺, their $4,950 shown, nothing resent",
+    c.text === "$4,950" && /ss-pg-m-c/.test(c.cls) && c.invalid === "true" && saveCalls(calls).length - n0 === 1 && F.size(z5.id).base_price === 4950, JSON.stringify(c));
+  await page.locator(sel(z1.id, 1)).click();
+  await page.locator(".ss-pg-badge-btn").click();
+  s = await state(page);
+  ok("P: '1 box needs you' jumps to it, and the status line gives both numbers",
+    s.readout === `Price · ${named(z5)}` && s.status === `${named(z5)} · Price: changed elsewhere to $4,950 while you typed $4,800. Type it again if yours is right.`, JSON.stringify(s));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click();
+  s = await state(page);
+  ok("P: Dismiss clears it", !s.status && /^All changes saved/.test(s.badge) && !/ss-pg-m-c/.test((await look(page, z5.id, 1)).cls), JSON.stringify(s));
+  await page.screenshot({ path: join(shots, "P-after-conflict.png") });
+
+  // A colleague changed ANOTHER box of the same size: one resend on the new version, nothing red.
+  const z6 = barn[5];
+  F.script.push({ before: (f) => f.poke(z6.id, { cells: { workbench: 3 } }) });
+  n0 = saveCalls(calls).length;
+  await typeIn(page, z6.id, 1, "3333");
+  ok("P: …saved", await saved(page, calls, n0, 2));
+  sc = saveCalls(calls).slice(n0);
+  ok("P: a colleague's change to another box of the size: exactly one resend, on the new version, the price alone, nothing red",
+    sc.length === 2 && sc[1].body.sizes[0].base !== sc[0].body.sizes[0].base && JSON.stringify(sc[1].body.sizes[0].to) === '{"price":3333}'
+    && F.size(z6.id).base_price === 3333 && F.cells(z6.id).workbench === 3 && !/ss-pg-m-/.test((await look(page, z6.id, 1)).cls), JSON.stringify(sc.map((x) => x.body.sizes)));
+
+  // A box the server refuses (here: Workbench is no column any more): red with !, the server's value
+  // kept, the reason on the status line, never resent.
+  F.refuse = ["workbench"];
+  const z7 = barn[6];
+  n0 = saveCalls(calls).length;
+  await typeIn(page, z7.id, WB, "2");
+  await waitBadge(page, /^1 box needs you$/);
+  await page.keyboard.press("ArrowUp");
+  s = await state(page);
+  c = await look(page, z7.id, WB);
+  ok("P: a refused box goes red with !, keeps the server's value, and the status line gives the server's reason",
+    c.text === "" && /ss-pg-m-r/.test(c.cls) && c.invalid === "true" && s.status === `${named(z7)} · Workbench: That option has no column in your sizes table.` && saveCalls(calls).length - n0 === 1, JSON.stringify({ c, s }));
+  F.refuse = [];
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click();
+  const cl = logs.filter((l) => l.p_code === "pricing_table_conflicts");
+  ok("P: each answer with a conflict or a refusal wrote one info row, counts only (no prices, nothing typed)",
+    cl.length === 3 && cl.every((l) => l.p_severity === "info" && !/4800|4950|3333|"2"/.test(JSON.stringify(l.p_context))), JSON.stringify(cl.map((l) => l.p_context)));
+
+  // Text the rules refuse: red at once, the cursor stays, nothing is sent.
+  const z8 = barn[7];
+  n0 = saveCalls(calls).length;
+  await typeIn(page, z8.id, LOFT, "abc");
+  s = await state(page);
+  c = await look(page, z8.id, LOFT);
+  ok("P: 'abc' in an option box goes red at once, the cursor stays on it, and the status line says why",
+    s.readout === `Loft (sq ft) · ${named(z8)}` && /ss-pg-m-r/.test(c.cls) && s.status === `${named(z8)} · Loft (sq ft): “abc” wasn't saved. Whole numbers only, 0 or more.`, JSON.stringify({ s, c }));
+  await page.keyboard.type("yes");
+  await page.keyboard.press("Enter");
+  ok("P: …so does 'yes'", (await state(page)).status === `${named(z8)} · Loft (sq ft): “yes” wasn't saved. Whole numbers only, 0 or more.`, (await state(page)).status);
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.type("-5");
+  await page.keyboard.press("Enter");
+  ok("P: …and '-5' in a price", (await state(page)).status === `${named(z8)} · Price: “-5” wasn't saved. A price is a number, 0 or more.`, (await state(page)).status);
+  await page.waitForTimeout(1300);
+  ok("P: none of them was sent", saveCalls(calls).length === n0);
+  await page.keyboard.type("1999");
+  await page.keyboard.press("Enter");
+  await waitBadge(page, /^1 box needs you$/);
+  ok("P: a valid number typed over it goes, and only the box still wrong stays red", saveCalls(calls).length === n0 + 1 && F.size(z8.id).base_price === 1999
+    && !/ss-pg-m-r/.test((await look(page, z8.id, 1)).cls) && /ss-pg-m-r/.test((await look(page, z8.id, LOFT)).cls));
+  ok("P: the grid is a writable grid while editable", (await page.locator(".ss-pg-grid").getAttribute("aria-readonly")) === null);
+  ok("P: no malformed save ever reached the server", F.bad.length === 0, F.bad.join(","));
+  await page.screenshot({ path: join(shots, "P-editing.png") });
+  ok("P: no page errors (editing)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// Transport: a 500 then the retry (and Retry now), a hung main host through the side door, an answer
+// lost on the way back, five failures in a row stopping saving, Retry, and Discard.
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const { ctx, page, calls, errors, logs } = await open("/settings/sheds-table", { cat: () => cat, fake: F,
+    win: { __ssPgBackoffMs: [1500, 1500, 1500, 1500], __ssSaveDeadlineMs: 1200 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await watchBadge(page);
+  F.script.push({ status: 500 });
+  let n0 = saveCalls(calls).length;
+  await typeIn(page, barn[0].id, 1, "777");
+  const amber = await waitBadge(page, /^Can't reach the server\. Retrying in \d+ s; your changes are kept$/);
+  let s = await state(page);
+  ok("P: a 500: amber 'Can't reach the server. Retrying in N s; your changes are kept', with Retry now", amber && s.actions.includes("Retry now"), JSON.stringify(s));
+  const tRetry = Date.now();
+  await page.locator(".ss-pg-bact", { hasText: "Retry now" }).click();
+  ok("P: …saved", await saved(page, calls, n0, 2));
+  let sc = saveCalls(calls).slice(n0);
+  ok("P: Retry now sends the very same call at once, and it lands", sc.length === 2 && JSON.stringify(sc[0].body) === JSON.stringify(sc[1].body) && sc[1].at - tRetry < 1000
+    && F.size(barn[0].id).base_price === 777, JSON.stringify(sc.map((x) => [x.host, x.at - tRetry])));
+  // The main host hangs: after the deadline the side door is used; its 500 shows amber; the backoff
+  // resends (straight to the side door while the main host is remembered as stalled); green.
+  F.script.push({ hang: true }, { status: 500 });
+  await page.evaluate(() => { window.__ssBadges = []; });
+  n0 = saveCalls(calls).length;
+  await typeIn(page, barn[1].id, 1, "888");
+  ok("P: …saved", await saved(page, calls, n0, 3, 20000));
+  sc = saveCalls(calls).slice(n0);
+  const seen = await badgesSeen(page);
+  ok("P: a hung main host: the side door is used, the badge goes amber, then green",
+    sc.map((x) => x.host).join() === "main,side,side" && seen.some((x) => /^Can't reach the server/.test(x)) && /^All changes saved/.test(seen[seen.length - 1]) && F.size(barn[1].id).base_price === 888,
+    `${sc.map((x) => x.host).join()} | ${JSON.stringify(seen)}`);
+  ok("P: …and the side door was filed as pricing_table_side_door (info)", logs.some((l) => l.p_code === "pricing_table_side_door" && l.p_severity === "info"));
+  // An answer lost on the way back: the call landed, the resend comes back duplicate; nothing red.
+  F.script.push({ lose: true });
+  n0 = saveCalls(calls).length;
+  await typeIn(page, barn[2].id, 1, "999");
+  ok("P: …saved", await saved(page, calls, n0, 2, 20000));
+  ok("P: a lost answer: the same call again lands as a duplicate, the box saved, nothing red",
+    saveCalls(calls).length - n0 === 2 && F.size(barn[2].id).base_price === 999 && !/ss-pg-m-/.test((await look(page, barn[2].id, 1)).cls) && (await state(page)).badge.startsWith("All changes saved"));
+  ok("P: no page errors (transport)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const { ctx, page, calls, errors, logs } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgBackoffMs: [150, 150, 150, 150] } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  for (let i = 0; i < 5; i++) F.script.push({ status: 500 });
+  let n0 = saveCalls(calls).length;
+  await typeIn(page, barn[0].id, 1, "1234");
+  const stopped = await waitBadge(page, /^Saving stopped: couldn't reach the server$/, 20000);
+  let s = await state(page);
+  const stops = logs.filter((l) => l.p_code === "pricing_table_saving_stopped");
+  ok("P: five failures in a row: 'Saving stopped', with Retry and Discard these changes", stopped && s.actions.join() === "Retry,Discard these changes" && saveCalls(calls).length - n0 === 5, JSON.stringify(s));
+  ok("P: …and one info row, its status only", stops.length === 1 && stops[0].p_severity === "info" && JSON.stringify(stops[0].p_context) === '{"status":500}', JSON.stringify(stops));
+  ok("P: …the box keeps what was typed, marked unsaved", (await look(page, barn[0].id, 1)).text === "$1,234" && /ss-pg-m-p/.test((await look(page, barn[0].id, 1)).cls));
+  await page.locator(".ss-pg-bact", { hasText: "Retry" }).first().click();
+  ok("P: Retry sends it again, and it lands", await saved(page, calls, n0, 6) && F.size(barn[0].id).base_price === 1234);
+  for (let i = 0; i < 5; i++) F.script.push({ status: 500 });
+  n0 = saveCalls(calls).length;
+  const was = (await look(page, barn[1].id, 1)).text;
+  await typeIn(page, barn[1].id, 1, "4321");
+  await waitBadge(page, /^Saving stopped/, 20000);
+  await page.locator(".ss-pg-bact", { hasText: "Discard these changes" }).click();
+  await page.waitForTimeout(1300);
+  s = await state(page);
+  ok("P: Discard these changes: the box shows what the server holds again, the badge is green, nothing more goes",
+    (await look(page, barn[1].id, 1)).text === was && /^All changes saved/.test(s.badge) && saveCalls(calls).length - n0 === 5 && F.size(barn[1].id).base_price !== 4321, JSON.stringify(s));
+  ok("P: no page errors (stopped)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// A 403 on a save: view-only from then on; nothing more is sent, nothing more can be typed.
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  F.script.push({ status: 403, error: "You don't have access to that (test)." });
+  const n0 = saveCalls(calls).length;
+  await typeIn(page, barn[0].id, 1, "2222");
+  const vo = await waitBadge(page, /^View only: You can't change Sheds on this account$/);
+  await page.locator(sel(barn[1].id, 1)).click();
+  await page.keyboard.type("5");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(1500);
+  const s = await state(page);
+  ok("P: a 403 stops saving: 'View only: You can't change Sheds on this account', no editor, nothing more sent",
+    vo && s.editable === "0" && !s.editor && saveCalls(calls).length - n0 === 1 && (await page.locator(".ss-pg-grid").getAttribute("aria-readonly")) === "true", JSON.stringify(s));
+  ok("P: …the edit that was refused stays on screen marked unsaved", (await look(page, barn[0].id, 1)).text === "$2,222" && /ss-pg-m-p/.test((await look(page, barn[0].id, 1)).cls));
+  ok("P: no page errors (403)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// View-only refuses every edit path: an operator wearing a team member (?as=), and a view-only
+// access map. Then Real-Time Pricing, which locks the price column alone.
+for (const [what, path, S0] of want("P") ? [
+  ["?as=", `/settings/sheds-table?view=${VIEWED}&as=${WEAR}`, { own: OPS, operator: true }],
+  ["a view-only access map", "/settings/sheds-table", { role: "user", access: { settings_structures: "view", designs: "view" } }],
+] : []) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const LOFT = keyCol(cat, "loft");
+  const { ctx, page, calls, errors } = await open(path, { ...S0, cat: (cid) => ({ ...cat, clientId: cid }), fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const z = barn[0];
+  const before = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-grid tbody td")].map((td) => td.textContent).join("|"));
+  const tries = [];
+  const note = async (label) => tries.push(`${label}:${await page.locator(".ss-pg-ed").count()}`);
+  await page.locator(sel(z.id, 1)).click();
+  await page.keyboard.type("9"); await note("type");
+  await page.keyboard.press("$"); await note("$");
+  await page.keyboard.press("Enter"); await note("Enter");
+  await page.keyboard.press("F2"); await note("F2");
+  await page.locator(sel(z.id, 1)).dblclick(); await note("dblclick");
+  await page.keyboard.press("Delete"); await note("Delete");
+  await page.keyboard.press("Backspace"); await note("Backspace");
+  await page.locator(sel(z.id, LOFT)).click();
+  await page.keyboard.type("5"); await note("type option");
+  await page.locator(sel(z.id, LOFT)).dblclick(); await note("dblclick option");
+  await page.locator(sel(z.id, 2)).click();
+  await page.keyboard.press("Space"); await note("Space on Offered");
+  await page.locator(sel(z.id, 2)).click(); await note("click Offered again");
+  await page.waitForTimeout(1300);
+  const after = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-grid tbody td")].map((td) => td.textContent).join("|"));
+  ok(`P: view-only (${what}) refuses every edit path: no editor, no change, no save call`,
+    tries.every((t) => t.endsWith(":0")) && before === after && saveCalls(calls).length === 0 && (await state(page)).badge.startsWith("View only"), tries.join(" "));
+  ok(`P: no page errors (view-only, ${what})`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat, { rtpOn: true }));
+  const barn = barnOf(F.table(OWN));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.locator(sel(barn[0].id, 1)).click();
+  await page.keyboard.type("5");
+  let s = await state(page);
+  ok("P: Real-Time Pricing: typing on a price opens no editor and says why", !s.editor && s.status === "Real-Time Pricing sets prices on this account.", JSON.stringify(s));
+  const n0 = saveCalls(calls).length;
+  await typeIn(page, barn[0].id, keyCol(cat, "loft"), "12");
+  ok("P: …while the option boxes still save", await saved(page, calls, n0) && F.cells(barn[0].id).loft === 12);
+  ok("P: no page errors (RTP)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// Leaving: the browser asks first while the editor holds changed text (never committed), and while
+// an edit is unsent or in flight; once everything is saved it does not. Back to Sheds sends first.
+// One page per case: Chrome does not raise a second beforeunload on a page whose first was dismissed.
+for (const [what, prep, asks] of want("P") ? [
+  ["while the editor holds changed text (the box never left)", async (page) => { await page.keyboard.type("77"); }, true],
+  ["while an edit is unsent or saving", async (page) => { await page.keyboard.type("77"); await page.keyboard.press("Enter"); }, true],
+  ["once everything is saved", async (page, calls) => { await page.keyboard.type("77"); await page.keyboard.press("Enter"); await saved(page, calls, 0, 1, 15000); }, false],
+  ["after an edit opened and closed unchanged", async (page) => { await page.keyboard.press("Enter"); await page.keyboard.press("Escape"); }, false],
+] : []) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  F.delayMs = 2500;
+  const { ctx, page, calls, errors, dialogs } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.locator(sel(barn[0].id, keyCol(cat, "loft"))).click();
+  await prep(page, calls);
+  const before = await state(page);
+  await page.close({ runBeforeUnload: true });
+  await sleep(700);
+  const asked = dialogs.includes("beforeunload");
+  ok(`P: leaving ${what} ${asks ? "asks first" : "does not ask"}`, asks ? asked && !page.isClosed() : !asked && page.isClosed(),
+    JSON.stringify({ dialogs, badge: before.badge, editor: !!before.editor }));
+  ok(`P: no page errors (leaving ${what})`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  F.delayMs = 600;
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await typeIn(page, barn[0].id, 1, "6060");
+  const t0 = Date.now();
+  await page.locator(".ss-pg-back").click();
+  await page.waitForURL(/\/settings\/sheds$/, { timeout: 10000 }).catch(() => {});
+  const sc = saveCalls(calls);
+  ok("P: Back to Sheds sends the unsent edit at once, waits for it, then leaves",
+    new URL(page.url()).pathname === "/settings/sheds" && sc.length === 1 && sc[0].at - t0 < 500 && F.size(barn[0].id).base_price === 6060, `${page.url()} ${sc.map((x) => x.at - t0)}`);
+  ok("P: no page errors (Back)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
 // ── T: timing ──
 if (!process.env.SKIP_TIMING && want("T")) {
   for (const [tag, perStyle] of [["1x", 70], ["3x", 210]]) {
     const cat = catalogFor(OWN, { extra: 13 });                    // 25 + 13 = 38 option columns
     const table = tableFor(OWN, cat, { perStyle });                 // 3 styles x perStyle sizes
     const cells = table.sizes.length * (3 + OPTION_KEYS(cat).length);
-    const { ctx, page, errors } = await open(null, { cat: () => cat, table: () => table }, { width: 1440, height: 900 });
+    const F = fakeServer(cat, table);   // the typing below saves; answers held back past the measuring
+    F.delayMs = 4000;
+    const { ctx, page, errors } = await open(null, { cat: () => cat, fake: F }, { width: 1440, height: 900 });
     await page.goto(`${BASE}/settings/sheds-table`);
     await waitGrid(page, 60000).catch(() => {});
     await page.waitForTimeout(800);
@@ -840,17 +1425,26 @@ if (!process.env.SKIP_TIMING && want("T")) {
         nav: Math.round((painted.length ? painted[painted.length - 1].startTime : 0)) };
     });
     // Arrow keys: dispatched on the grid in the page, timed from the keydown to the update laid out
-    // (React's microtask flush, then a forced layout), and to the next frame.
+    // (React's microtask flush, the overlay placed, then a forced layout), and to the next frame. A
+    // MutationObserver on the body counts the size rows whose content changed (aria-selected, which
+    // the overlay sets on the active cell by hand, aside): an arrow key should change none.
     await page.locator(".ss-pg-grid tbody tr[data-s] td[data-c='1']").first().click();
     const keys = await page.evaluate(async () => {
       const g = document.querySelector(".ss-pg-grid");
-      const sync = [], frame = [];
+      const sync = [], frame = [], touched = new Set();
+      const mo = new MutationObserver((ms) => ms.forEach((m) => {
+        if (m.type === "attributes" && m.attributeName === "aria-selected") return;
+        const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+        const tr = el && el.closest("tr[data-s]");
+        if (tr) touched.add(tr);
+      }));
+      mo.observe(g.querySelector("tbody"), { subtree: true, childList: true, characterData: true, attributes: true });
       const press = async (key) => {
         const t0 = performance.now();
         g.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
         await new Promise((r) => queueMicrotask(r));
-        const act = g.querySelector("td.ss-pg-act");
-        if (act) act.getBoundingClientRect();
+        const ring = [...document.querySelectorAll(".ss-pg-ring")].find((r) => r.style.display === "block");
+        if (ring) ring.getBoundingClientRect();
         sync.push(performance.now() - t0);
         await new Promise((r) => requestAnimationFrame(() => r()));
         frame.push(performance.now() - t0);
@@ -858,13 +1452,65 @@ if (!process.env.SKIP_TIMING && want("T")) {
       for (let i = 0; i < 30; i++) await press("ArrowRight");
       for (let i = 0; i < 40; i++) await press("ArrowDown");
       for (let i = 0; i < 30; i++) await press("ArrowLeft");
+      mo.disconnect();
       const q = (a, p) => { const s = [...a].sort((x, y) => x - y); return Math.round(s[Math.min(s.length - 1, Math.floor(p * s.length))] * 100) / 100; };
       return { n: sync.length, syncMed: q(sync, 0.5), syncP95: q(sync, 0.95), syncMax: q(sync, 1), frameMed: q(frame, 0.5), frameP95: q(frame, 0.95),
-        readout: document.querySelector(".ss-pg-readout").textContent };
+        readout: document.querySelector(".ss-pg-readout").textContent, rows: touched.size };
+    });
+    // Typing: a digit on the grid opens the editor holding it (keydown -> editor laid out); three
+    // keystrokes go into it (each an input event: the page keeps the text out of React state, so
+    // nothing renders); Enter commits and moves down (keydown -> laid out, and the next frame), and
+    // the rows whose content changed are counted: one, the committed row.
+    await page.locator(".ss-pg-grid tbody tr[data-s] td[data-c='4']").first().click();
+    const typing = await page.evaluate(async () => {
+      const g = document.querySelector(".ss-pg-grid");
+      const open = [], key = [], commit = [], frame = [], rows = [];
+      const tick = () => new Promise((r) => queueMicrotask(r));
+      for (let i = 0; i < 20; i++) {
+        let t0 = performance.now();
+        g.dispatchEvent(new KeyboardEvent("keydown", { key: String((i % 8) + 1), bubbles: true, cancelable: true }));
+        await tick();
+        const ed = document.querySelector(".ss-pg-ed");
+        if (!ed) return { broken: `no editor after keydown ${i}` };
+        ed.getBoundingClientRect();
+        open.push(performance.now() - t0);
+        for (let k = 0; k < 3; k++) {
+          t0 = performance.now();
+          ed.value += String(k + 1);
+          ed.dispatchEvent(new Event("input", { bubbles: true }));
+          await tick();
+          ed.getBoundingClientRect();
+          key.push(performance.now() - t0);
+        }
+        const touched = new Set();
+        const mo = new MutationObserver((ms) => ms.forEach((m) => {
+          if (m.type === "attributes" && m.attributeName === "aria-selected") return;
+          const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+          const tr = el && el.closest("tr[data-s]");
+          if (tr) touched.add(tr);
+        }));
+        mo.observe(g.querySelector("tbody"), { subtree: true, childList: true, characterData: true, attributes: true });
+        t0 = performance.now();
+        ed.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+        await tick();
+        g.getBoundingClientRect();
+        commit.push(performance.now() - t0);
+        await new Promise((r) => requestAnimationFrame(() => r()));
+        frame.push(performance.now() - t0);
+        mo.disconnect();
+        rows.push(touched.size);
+      }
+      const q = (a, p) => { const s = [...a].sort((x, y) => x - y); return Math.round(s[Math.min(s.length - 1, Math.floor(p * s.length))] * 100) / 100; };
+      return { n: open.length, openMed: q(open, 0.5), openP95: q(open, 0.95), keyMed: q(key, 0.5), keyP95: q(key, 0.95),
+        commitMed: q(commit, 0.5), commitP95: q(commit, 0.95), frameMed: q(frame, 0.5), frameP95: q(frame, 0.95), rows: [...new Set(rows)] };
     });
     console.log(`TIMING ${tag}: ${table.sizes.length} sizes x ${3 + OPTION_KEYS(cat).length} columns = ${cells} cells; first render (data in -> grid committed and measured) ${first.grid} ms over ${first.passes} commit(s), -> next frame ${first.painted} ms (page load -> table painted ${first.nav} ms, shell boot and stubbed reads included); ` +
-      `arrow key (keydown -> laid out) median ${keys.syncMed} ms, p95 ${keys.syncP95} ms, max ${keys.syncMax} ms; keydown -> next frame median ${keys.frameMed} ms, p95 ${keys.frameP95} ms (${keys.n} keys)`);
+      `arrow key (keydown -> laid out) median ${keys.syncMed} ms, p95 ${keys.syncP95} ms, max ${keys.syncMax} ms; keydown -> next frame median ${keys.frameMed} ms, p95 ${keys.frameP95} ms (${keys.n} keys, ${keys.rows} rows changed); ` +
+      `typing: digit -> editor open median ${typing.openMed} ms, p95 ${typing.openP95} ms; keystroke in the editor median ${typing.keyMed} ms, p95 ${typing.keyP95} ms; ` +
+      `Enter -> committed and moved median ${typing.commitMed} ms, p95 ${typing.commitP95} ms, -> next frame median ${typing.frameMed} ms, p95 ${typing.frameP95} ms; rows changed per commit ${JSON.stringify(typing.rows)} (${typing.n} commits)`);
     ok(`T${tag}: the grid rendered and the arrows moved (${cells} cells)`, first.grid != null && keys.n === 100 && /· Test /.test(keys.readout), keys.readout);
+    ok(`T${tag}: an arrow key re-renders no row`, keys.rows === 0, String(keys.rows));
+    ok(`T${tag}: a commit re-renders one row (the committed one)`, !typing.broken && JSON.stringify(typing.rows) === "[1]", typing.broken || JSON.stringify(typing.rows));
     ok(`T${tag}: no page errors`, errors.length === 0, errors.join(" | "));
     await ctx.close();
   }

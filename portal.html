@@ -391,11 +391,16 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-badge-green{background:#F0FDF4;border-color:#BBF7D0;color:#15803D}
 .ss-pg-badge-grey{background:#F1F5F9;border-color:#E2E8F0;color:#475569}
 .ss-pg-badge-red{background:#FEF2F2;border-color:#FECACA;color:#B91C1C}
+.ss-pg-badge-blue{background:#EFF6FF;border-color:#BFDBFE;color:#1D4ED8}
+.ss-pg-badge-amber{background:#FFFBEB;border-color:#FDE68A;color:#92400E}
+.ss-pg-badge-btn{font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer;text-decoration:underline}
+.ss-pg-bact{font:inherit;font-size:12px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:3px 8px;cursor:pointer;white-space:nowrap;flex-shrink:0}
 .ss-pg-q{width:28px;height:28px;border-radius:50%;border:1px solid #CBD5E1;background:#FFF;font:inherit;font-weight:800;color:#475569;cursor:pointer;flex-shrink:0}
 .ss-pg-op{background:#FEE2E2;border-bottom:1px solid #DC2626;color:#991B1B;font-size:12.5px;font-weight:700;padding:6px 14px;flex-shrink:0}
 .ss-pg-status{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:6px 14px;border-bottom:1px solid #E2E8F0;flex-shrink:0;line-height:1.4}
 .ss-pg-status-grey{background:#F8FAFC;color:#475569}
 .ss-pg-status-amber{background:#FEF3C7;color:#92400E}
+.ss-pg-status-red{background:#FEF2F2;color:#991B1B}
 .ss-pg-status button,.ss-pg-fail button,.ss-pg-narrow button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:4px 10px;cursor:pointer;flex-shrink:0}
 .ss-pg-legend{font-size:12.5px;color:#475569;background:#FFF;border-bottom:1px solid #E2E8F0;padding:6px 14px;flex-shrink:0;line-height:1.4}
 .ss-pg-narrow{display:flex;align-items:center;gap:10px;justify-content:space-between;font-size:12.5px;color:#1B7895;background:#DBEAFF;border-bottom:1px solid #75E6DA;padding:6px 14px;flex-shrink:0}
@@ -415,18 +420,19 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-grid td.ss-pg-size{text-align:left;font-weight:700}
 .ss-pg-grid td.ss-pg-price{text-align:right}
 .ss-pg-grid td.ss-pg-off{color:#15803D;font-weight:800}
-/* Layers: corner 6, header 5, frozen body 4 (plan 3.6). Section band at top 0, names at 22px. */
-.ss-pg-sec th{position:sticky;top:0;z-index:5;height:22px;padding:0 6px;font-size:10.5px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;text-overflow:ellipsis;text-align:left}
+/* Layers (plan 3.6): corner 7, header 6, the selection over a frozen column 5, frozen body 4, the
+   selection over an option column 2. Section band at top 0, names at 22px. */
+.ss-pg-sec th{position:sticky;top:0;z-index:6;height:22px;padding:0 6px;font-size:10.5px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;text-overflow:ellipsis;text-align:left}
 /* height = the measured --ss-pg-hh exactly: 8 px of padding top and bottom, no bottom border (the
    divider is a shadow), so a name's box is the height less 16 px, which is what .ss-pg-vh allows. */
-.ss-pg-names th{position:sticky;top:22px;z-index:5;height:var(--ss-pg-hh,64px);padding:8px 4px;vertical-align:top;text-align:center;border-bottom:0;box-shadow:inset 0 -2px 0 #CBD5E1}
+.ss-pg-names th{position:sticky;top:22px;z-index:6;height:var(--ss-pg-hh,64px);padding:8px 4px;vertical-align:top;text-align:center;border-bottom:0;box-shadow:inset 0 -2px 0 #CBD5E1}
 .ss-pg-names th.ss-pg-fh{vertical-align:bottom;text-align:left;font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.4px}
 .ss-pg-names th.ss-pg-s0{border-left:2px solid #CBD5E1}
 .ss-pg-grid .ss-pg-f0{position:sticky;left:0;z-index:4}
 .ss-pg-grid .ss-pg-f1{position:sticky;left:64px;z-index:4}
 .ss-pg-grid .ss-pg-f2{position:sticky;left:140px;z-index:4;border-right:2px solid #CBD5E1}
-.ss-pg-grid .ss-pg-corner{position:sticky;left:0;top:0;z-index:6;border-right:2px solid #CBD5E1}
-.ss-pg-grid thead .ss-pg-f0,.ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{z-index:6}
+.ss-pg-grid .ss-pg-corner{position:sticky;left:0;top:0;z-index:7;border-right:2px solid #CBD5E1}
+.ss-pg-grid thead .ss-pg-f0,.ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{z-index:7}
 /* A name stands on end, top to bottom, and wraps onto a second line inside its column rather
    than being cut. The header's height (--ss-pg-hh) is MEASURED to the longest name (PricingTablePage).
    vertical-RL, not -lr: both turn the letters the same way, but -lr puts a name's second line to the
@@ -443,7 +449,25 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 /* Hidden from the designer: 55% text, not opacity, because a frozen cell must stay opaque over
    whatever scrolls under it. */
 .ss-pg-grid tr.ss-pg-hid td{color:rgba(30,41,59,.55)}
-.ss-pg-grid td.ss-pg-act{box-shadow:inset 0 0 0 2px #3D3672}
+/* THE SELECTION, THE EDITOR AND THE MARKS (Phase 3, 2026-10-31). The ring and the range are one
+   overlay placed by the page (PgSelectionOverlay), never a class on a cell: .ss-pg-sheet is their
+   frame (the grid's own width), and .ss-pg-lane is a zero-size sticky strip at its left edge that
+   rides along with the frozen columns, so a ring over Price stays on Price while the options scroll. */
+.ss-pg-sheet{position:relative}
+.ss-pg-lane{position:sticky;left:0;width:0;height:0;z-index:5}
+.ss-pg-ring,.ss-pg-range{position:absolute;display:none;box-sizing:border-box;pointer-events:none;z-index:2}
+.ss-pg-ring{box-shadow:inset 0 0 0 2px #3D3672}
+.ss-pg-range{background:rgba(61,54,114,.08);border:1px solid rgba(61,54,114,.45)}
+.ss-pg-ed{position:absolute;z-index:3;box-sizing:border-box;margin:0;border:2px solid #3D3672;border-radius:0;padding:0 4px;font:inherit;font-size:13px;font-variant-numeric:tabular-nums;color:#1E293B;background:#FFF;outline:none;text-align:center;min-width:0}
+.ss-pg-ed-price{text-align:right}
+/* Marks: a shape as well as a colour (plan 3.13). Waiting to save: a blue corner. Refused or not
+   valid: a red outline and "!". Changed elsewhere: an amber outline and "↺". Backgrounds, not
+   ::after, so a frozen cell stays sticky. A saved box flashes green for 600 ms (.ss-pg-ok). */
+.ss-pg-grid td.ss-pg-m-p{background-image:linear-gradient(225deg,#2563EB 0 5px,transparent 5px)}
+.ss-pg-grid td.ss-pg-m-r{box-shadow:inset 0 0 0 2px #DC2626;background-color:#FEF2F2;background-repeat:no-repeat;background-position:right 2px top 2px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='10'%3E%3Crect x='2' y='0' width='2' height='6' fill='%23DC2626'/%3E%3Crect x='2' y='8' width='2' height='2' fill='%23DC2626'/%3E%3C/svg%3E")}
+.ss-pg-grid td.ss-pg-m-c{box-shadow:inset 0 0 0 2px #D97706;background-color:#FFFBEB;background-repeat:no-repeat;background-position:right 2px top 2px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M8.2 5.6A3.4 3.4 0 1 1 6.9 2.4' fill='none' stroke='%23D97706' stroke-width='1.5'/%3E%3Cpath d='M7.4 0.6v2.6H4.8' fill='none' stroke='%23D97706' stroke-width='1.5'/%3E%3C/svg%3E")}
+.ss-pg-grid td.ss-pg-ok{animation:ss-pg-ok .6s ease-out}
+@keyframes ss-pg-ok{from{background-color:#BBF7D0}}
 /* The full-width rows (a style's band, a placeholder, "Hidden styles") keep their words at the left
    edge while the grid scrolls sideways: .ss-pg-bandin is sticky, and that needs a cell that is NOT a
    scroll container. overflow:hidden (every other cell's) makes the cell one, and the words then
@@ -462,7 +486,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   .ss-pg-co{max-width:120px}
   .ss-pg-grid td.ss-pg-f1,.ss-pg-grid td.ss-pg-f2{position:static}
   .ss-pg-grid td.ss-pg-f1.ss-pg-rtp{position:relative;left:auto;z-index:auto}
-  .ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{left:auto;z-index:5}
+  .ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{left:auto;z-index:6}
   .ss-pg-grid .ss-pg-corner{left:auto}
   .ss-pg-names th{height:90px}
   .ss-pg-vh{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-inline-size:74px}
@@ -519,7 +543,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
-<script defer src="/portal.app.compiled.js?v=b1601aaf" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=010a5ac4" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

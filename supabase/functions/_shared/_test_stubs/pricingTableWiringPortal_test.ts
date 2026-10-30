@@ -19,6 +19,11 @@
 //   6. ssStyleSaveCall's new logCode defaults to the style saves' own code.
 //   7. Every settings-saved event says which page load sent it (SS_PAGE_ID), so the table can tell
 //      its own saves from another tab's.
+//   8. Phase 3 (editing): saves go one call at a time through ssStyleSaveCall as save_pricing_cells
+//      with targetClientId on the body and the answer's account checked by the page; every edit path
+//      checks the page can still edit; no log row carries a value; leaving asks first while anything
+//      is unsent or the editor holds changed text, and Back to Sheds sends first; the editor and the
+//      overlay keep their hooks above any return.
 //
 // Lifted with the xlsxCellText_test anchor idiom: the text between a signature and the next "\n}\n".
 // No network, no DOM: the lifted functions get stubs for exactly the names they use.
@@ -118,8 +123,55 @@ Deno.test("the operator strip says view-only whenever the badge does, never 'Cha
   const page = fnText(CATALOG, "function PricingTablePage(");
   assert(page.includes("const readOnly = !!viewOnly || tooBig;"), "readOnly is every reason the badge says View only");
   assert(page.includes(`const editable = load.phase === "ready" && !readOnly;`));
+  // Phase 3: a 403 on a save, or an answer for another account, ends editing too (lostEdit).
+  assert(page.includes(`const lostEdit = !!(q && (q.viewOnly || (q.stopped && q.stopped.kind === "tenant")));`));
   const strip = between(page, `<div className="ss-pg-op" role="note">`, "</div>", "the operator strip");
-  assert(/\{readOnly\s*\n\s*\? `Viewing \$\{companyName\} as operator\. This table is view-only\.`/.test(strip), strip);
+  assert(/\{\(readOnly \|\| lostEdit\)\s*\n\s*\? `Viewing \$\{companyName\} as operator\. This table is view-only\.`/.test(strip), strip);
+});
+
+// ── 8. Phase 3: editing and the save path ────────────────────────────────────────────────────
+Deno.test("saves go one at a time through ssStyleSaveCall as save_pricing_cells, targetClientId always on the body, the answer's account checked", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  assert(page.includes(`const body = { action: "save_pricing_cells", targetClientId: target || null, creates: flight.body.creates, removes: flight.body.removes, sizes: flight.body.sizes };`),
+    "the side door skips the invoke wrapper: the view-as target must be on the body");
+  assert(page.includes(`ssStyleSaveCall(body, "Pricing table", "pricing_table_side_door")`));
+  assert(page.includes("const v = ssPgAnswerKind(r, clientId);"), "the answer's clientId is the page's to check (the wrapper's tripwire never runs on the side door)");
+  // Every edit path goes through canEditNow (view-only, a 403, another account's answer).
+  for (const fn of ["const startEdit = (cell, key) => {\n    if (!cell || !canEditNow()) return;", "const toggleOffered = (cell) => {\n    if (!canEditNow()", "const clearCell = (cell) => {\n    if (!canEditNow()"]) {
+    assert(page.includes(fn), `an edit path without the view-only check: ${fn.split("\n")[0]}`);
+  }
+  // Only these three start a change in Phase 3, and each goes into the queue (apply), never to the network.
+  assertEquals((page.match(/ssStyleSaveCall\(/g) || []).length, 1, "one transport call site");
+  // Logs carry counts and statuses, never a price or what was typed.
+  for (const m of page.matchAll(/ssLogError\(([\s\S]*?)\);/g)) assert(!/typed|\.price|\bto\b|draft/.test(m[1]), `a log row that could carry a value: ${m[1].slice(0, 120)}`);
+});
+
+Deno.test("leaving asks first while anything is unsent or in flight, or the editor holds changed text; Back to Sheds sends first", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  const leave = between(page, "const onLeave = (e) => {", "\n    };", "the beforeunload handler");
+  assert(leave.includes("if (!(c.pending + c.inflight + c.creating + c.removing) && !dirtyRef.current) return undefined;"), leave);
+  assert(leave.includes("e.preventDefault();") && leave.includes(`e.returnValue = "";`));
+  assert(page.includes(`window.addEventListener("beforeunload", onLeave);`));
+  // The editor's text counts from its first different keystroke, without re-rendering per keystroke.
+  const input = between(page, "const onEditInput = (e) => {", "\n  };", "onEditInput");
+  assert(input.includes("draftRef.current = e.target.value;") && input.includes("if (d !== dirtyRef.current) { dirtyRef.current = d; setDraftDirty(d); }"));
+  assert(page.includes("const unsent = counts.pending + counts.creating + counts.removing + (draftDirty ? 1 : 0);"), "the badge counts an open editor's changed text");
+  const back = between(page, "const toSheds = ssNavClick(() => {", "\n  });", "Back to Sheds");
+  assert(back.includes("commitEdit();") && back.includes("setLeaving(true);") && back.includes("flushNow();"));
+  // Hiding the tab sends what is waiting at once.
+  assert(page.includes(`const onVis = () => { if (document.visibilityState === "hidden") fnRef.current.flushNow(); };`));
+});
+
+Deno.test("the editor and the overlay keep every hook above any return, and PgRow takes primitive marks", () => {
+  for (const sig of ["function PgEditor({ inputRef, init, label, price, onKeyDown, onInput, onBlur }) {", "function PgSelectionOverlay({ lane = false, ringRef, rangeRef, children = null }) {"]) {
+    const body = fnText(CATALOG, sig);
+    const first = body.search(/\n  (?:return\b|if \()/);
+    assert(first > 0, sig);
+    assertEquals(hookAt(body).filter((i) => i > first), [], `${sig}: a hook below the first return`);
+  }
+  const ed = fnText(CATALOG, "function PgEditor(");
+  assert(ed.includes(`type="text"`) && ed.includes(`inputMode={price ? "decimal" : "numeric"}`) && ed.includes("aria-label={label}"), "plan 3.5 and 3.17");
+  assert(CATALOG.includes("const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = \"\" }) {"));
 });
 
 // ── 4. The address, and the anchors that open it ─────────────────────────────────────────────
