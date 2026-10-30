@@ -81,21 +81,23 @@ export function parsePrice(v: unknown, stored?: number | null): Parsed<number | 
 
 /** An option box's text: a whole number from 0 to 999,999, blank meaning 0 (not included).
  *  Stricter than the importer on purpose: it turns yes-words into 1, rounds fractions and reads
- *  garbage as 0, which DELETES (pricingImport.ts parseInclusionQty). A value equal to the stored one
- *  is always accepted. */
+ *  garbage as 0, which DELETES (pricingImport.ts parseInclusionQty). Digits only once `$`, commas and
+ *  spaces are stripped, so Number()'s other spellings ("1e3", "0x1F", "+5") are refused too. A value
+ *  equal to the stored one is always accepted. */
 export function parseQty(v: unknown, stored?: number | null): Parsed<number> {
   const s = String(v ?? "").replace(/[$,\s]/g, "");
   if (s === "") return { ok: true, value: 0 };
+  if (!/^\d+$/.test(s)) return { ok: false, error: QTY_ERROR };
   const n = Number(s);
-  if (!Number.isInteger(n) || n < 0) return { ok: false, error: QTY_ERROR };
-  if (n <= MAX_QTY || (stored != null && n === Number(stored))) return { ok: true, value: n === 0 ? 0 : n };
+  if (n <= MAX_QTY || (stored != null && n === Number(stored))) return { ok: true, value: n };
   return { ok: false, error: QTY_MAX_ERROR };
 }
 
-/** A new size's width or length, in feet: above 0, at most 500, at most 2 decimals. */
+/** A new size's width or length, in feet: above 0, at most 500, at most 2 decimals. Written in
+ *  plain decimals ("10.5"), never Number()'s other spellings ("1e1", "0x10"). */
 export function parseDim(v: unknown): Parsed<number> {
   const s = String(v ?? "").replace(/\s/g, "");
-  const n = s === "" ? NaN : Number(s);
+  const n = /^\d+(\.\d+)?$/.test(s) ? Number(s) : NaN;
   if (Number.isFinite(n) && n > 0 && n <= MAX_DIM_FT && Number(n.toFixed(2)) === n) return { ok: true, value: n };
   return { ok: false, error: DIM_ERROR };
 }

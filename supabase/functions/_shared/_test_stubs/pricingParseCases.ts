@@ -46,6 +46,9 @@ export const QTY_CASES: ParseCase[] = [
   ["yes", undefined, "error"],
   ["x", undefined, "error"],
   ["abc", undefined, "error"],
+  ["1e3", undefined, "error"],    // Number() reads these as whole numbers; a box of counts does not
+  ["0x1F", undefined, "error"],
+  ["+5", undefined, "error"],
 ];
 
 /** A new size's width or length, in feet: above 0, at most 500, at most 2 decimals. */
@@ -60,4 +63,6 @@ export const DIM_CASES: ParseCase[] = [
   ["501", undefined, "error"],
   ["abc", undefined, "error"],
   ["", undefined, "error"],
+  ["1e1", undefined, "error"],    // plain decimals only
+  ["0x10", undefined, "error"],
 ];
