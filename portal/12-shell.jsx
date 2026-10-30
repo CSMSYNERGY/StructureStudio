@@ -554,7 +554,9 @@ async function ssFunctionsErrorBody(err) {
 
 // One portal-settings call with a deadline, and on a transport failure one more through the
 // functions hostname. Resolves in the invoke shape: { data, error }.
-async function ssStyleSaveCall(body, label) {
+// `logCode` names the side-door row in app_errors. Style saves keep "style_save_side_door"; the
+// Sizes & prices table passes "pricing_table_side_door" so its reads are not filed as style saves.
+async function ssStyleSaveCall(body, label, logCode = "style_save_side_door") {
   const ms = (typeof window !== "undefined" && Number(window.__ssSaveDeadlineMs)) || SS_STYLE_SAVE_DEADLINE_MS;
   const deadline = () => new Promise((res) => setTimeout(() => res({ data: null, error: { message: "timed out", ssTimeout: true } }), ms));
   const transport = (r) => !!(r && r.error && (r.error.ssTimeout || r.error.name === "FunctionsFetchError" || r.error.name === "FunctionsRelayError"));
@@ -564,7 +566,7 @@ async function ssStyleSaveCall(body, label) {
     ssMainHostStalledUntil = Date.now() + ((typeof window !== "undefined" && Number(window.__ssSaveHostMemoryMs)) || SS_MAIN_HOST_MEMORY_MS);
     try {
       ssLogError("portal", `${label}: the main host ${first.error.ssTimeout ? "timed out" : "failed"}; retrying through the functions host`,
-        "style_save_side_door", { fn: "portal-settings", action: body.action }, "info");
+        logCode, { fn: "portal-settings", action: body.action }, "info");
     } catch (_l) { /* a log line must never cost the save */ }
   }
   const second = await Promise.race([(async () => {
@@ -1062,7 +1064,11 @@ function Dashboard({ session }) {
       // the last one; the Advanced gate (below) reads a mismatch as "not answered yet".
       // phoneStatus: the VIEWED tenant's My Synergy Phone switch, so Call and the Calls page follow the
       // builder on screen rather than the operator's own account.
-      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null, phoneStatus: st.data.phoneStatus || null });
+      // companyName: the viewed builder's own name (status hands back their branding). A cold
+      // ?view= load seeds `viewing` with the slug and only the Designs page backfills it, so the
+      // Sizes & prices table's own tab reads it from here.
+      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null, phoneStatus: st.data.phoneStatus || null,
+        companyName: (st.data.branding && st.data.branding.companyName) || null });
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
@@ -2987,6 +2993,23 @@ function Dashboard({ session }) {
     if (!last || last.group !== t[3]) settingsGroups.push({ group: t[3], items: [t] });
     else last.items.push(t);
   });
+
+  // THE SIZES & PRICES TABLE (/settings/sheds-table, 2026-10-30): its own tab, opened from Settings →
+  // Sheds, with no rail and no top bar. Drawn here, below every hook and every early return, so
+  // Dashboard gains NO hook (React #310): the hold for ?view=, its 10 s timeout, the billing lock and
+  // the permission check all live in PricingTableGate (03-catalog.jsx), which renders the table only
+  // once the account on screen is the one the address asked for. Raw `tab`, not activeTab: while an
+  // operator's ?view= is still arming, the clamp can answer for their OWN account, and the gate must
+  // hold rather than show it. Keyed on the tenant like SettingsShell, so an account change remounts.
+  if (tab === "settings" && sub === SS_PRICING_TABLE_SUB) {
+    return (
+      <PricingTableGate key={"t-" + effClientId} clientId={effClientId}
+        viewing={viewing} isSupportOp={isSupportOp} supportCheckGaveUp={supportCheckGaveUp} viewedCtx={viewedCtx}
+        canAdmin={canAdmin} access={myAccess} gateLocked={gateLocked} billingActor={billingActor}
+        companyName={(viewing && viewedCtx && viewedCtx.clientId === viewing.clientId && viewedCtx.companyName) || shownBusiness}
+        onNav={(s) => navigate("settings", s)} />
+    );
+  }
 
   return (
     <div className="ss-shell">

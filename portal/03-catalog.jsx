@@ -2932,11 +2932,236 @@ function ssPricingColumns(cat) {
   ].filter((s) => s.cols.length);
 }
 
+// ─── Sizes & prices table: the pure half (2026-10-30) ───
+// Everything below up to PricingCsv is a top-level `function x(…) {` with no free variables beyond
+// the other functions here, so _test_stubs/pricingTableHelpers_test.ts lifts the SHIPPED text and
+// runs it. The components that draw the table are at the end of this file (PricingTableGate).
+//
+// The reads they model are portal-settings' `catalog` (only `items` and `fixtures`, through
+// ssPricingColumns) and `size_table` (styles, sizes, inclusions, counts, rtpOn, clientId; each list
+// read in 1000-row pages by client_id). See the build plan's section 4.1.
+
+// A stored price as the table shows it: "$4,800", "$4,800.50", "$0". More than two decimals shows as
+// stored ("$4,800.555"): the importer keeps whatever it was given, and rounding it on screen would
+// show a number that is not the one on file. null (not priced) is an empty box.
+function ssPgFmtPrice(v) {
+  if (v == null || v === "") return "";
+  const n = Number(v);
+  if (!isFinite(n)) return String(v);
+  const parts = String(Math.abs(n)).split(".");
+  const int = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  let dec = parts[1] || "";
+  if (dec.length === 1) dec += "0";
+  return (n < 0 ? "-$" : "$") + int + (dec ? "." + dec : "");
+}
+
+// The table's model: option columns, shown and hidden styles with their sizes in order, every cell's
+// text, and the truncation guard. `cat` is the catalog answer, `table` the size_table answer.
+//
+// THE GUARD (plan 4.2) says why the page must not trust this read, or null. First match wins:
+//   "count"             a list is shorter or longer than its exact count (counts missing counts too).
+//   "cap"               catalog's items or fixtures reached 1000 rows: those reads are NOT paged, and
+//                       PostgREST stops at 1000 without an error, so columns may be missing.
+//   "orphan_inclusion"  an inclusion names a size that is not in `sizes`.
+//   "orphan_size"       a size names a style that is not in `styles`.
+// All but "cap" can be a save landing between the reads, so the page reads once more before it
+// believes them. A tripped guard opens the table view-only. The Excel template refuses on "count"
+// alone (plan 4.8), which is why it is checked first: a row cut off a list goes out in the sheet as
+// 0, and the importer deletes it. The others are safe for the sheet: the importer writes only the
+// columns and sizes it is given, so a missing column or an orphan row is left as it is.
+//
+// Cells: an option box shows the quantity when the row says included (Number(qty) || 1, the
+// template's own rule) and is empty otherwise (Carolyn Q2: empty, not 0). A size is HIDDEN from the
+// designer when it is not active or has no price (trigger 029 forces the first when the second).
+// Versions (updated_at) are kept verbatim for the save path and never compared here.
+function ssPgModel(cat, table) {
+  const sections = ssPricingColumns(cat);
+  const cols = [];
+  sections.forEach((s, si) => s.cols.forEach((c) => cols.push({ key: c.key, label: c.label, section: si })));
+  const t = table || {};
+  const styles = Array.isArray(t.styles) ? t.styles.filter(Boolean) : [];
+  const sizes = Array.isArray(t.sizes) ? t.sizes.filter(Boolean) : [];
+  const incs = Array.isArray(t.inclusions) ? t.inclusions.filter(Boolean) : [];
+  const counts = t.counts || {};
+  const items = (cat && Array.isArray(cat.items)) ? cat.items : [];
+  const fixtures = (cat && Array.isArray(cat.fixtures)) ? cat.fixtures : [];
+  const styleIds = new Set(styles.map((s) => s.id));
+  const sizeIds = new Set(sizes.map((z) => z.id));
+  let guard = null;
+  if (Number(counts.sizes) !== sizes.length || Number(counts.inclusions) !== incs.length) guard = "count";
+  else if (items.length >= 1000 || fixtures.length >= 1000) guard = "cap";
+  else if (incs.some((x) => !sizeIds.has(x.size_id))) guard = "orphan_inclusion";
+  else if (sizes.some((z) => !styleIds.has(z.style_id))) guard = "orphan_size";
+
+  const inc = {};
+  incs.forEach((x) => { if (x.included) (inc[x.size_id] = inc[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
+  // sort_order, then id: the server's own order (nulls last, as Postgres sorts them ascending).
+  const ord = (a, b) => {
+    const sa = a.sort_order == null ? Infinity : Number(a.sort_order);
+    const sb = b.sort_order == null ? Infinity : Number(b.sort_order);
+    if (sa !== sb) return sa < sb ? -1 : 1;
+    const ia = String(a.id), ib = String(b.id);
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  };
+  const sizesBy = {};
+  [...sizes].sort(ord).forEach((z) => {
+    const price = z.base_price == null || z.base_price === "" ? null : Number(z.base_price);
+    const offered = !!z.active && price != null;
+    const mine = inc[z.id] || {};
+    const w = z.width_ft, l = z.length_ft;
+    (sizesBy[z.style_id] = sizesBy[z.style_id] || []).push({
+      id: z.id, styleId: z.style_id, label: z.label == null ? "" : String(z.label),
+      title: w != null && l != null ? `${w} ft × ${l} ft` : "",
+      width: w, length: l, price, priceText: ssPgFmtPrice(price), active: !!z.active, offered, hidden: !offered,
+      values: cols.map((c) => (mine[c.key] != null ? String(mine[c.key]) : "")),
+      version: z.updated_at == null ? null : z.updated_at, created: z.created_at == null ? null : z.created_at,
+    });
+  });
+  const band = (s) => ({ id: s.id, key: s.key, label: String(s.label || s.key || "Style"), code: s.code || null, active: !!s.active, sizes: sizesBy[s.id] || [] });
+  const ordered = [...styles].sort(ord);
+  return {
+    sections, cols, guard, rtpOn: t.rtpOn === true, clientId: t.clientId == null ? null : String(t.clientId),
+    styles: ordered.filter((s) => s.active).map(band),
+    hiddenStyles: ordered.filter((s) => !s.active).map(band),
+    sizeCount: sizes.length, inclusionCount: incs.length,
+  };
+}
+
+// The rows the grid draws, top to bottom: each shown style's band, then its sizes; a placeholder
+// under a style with nothing to show; then the folded "Hidden styles" section, and the hidden styles
+// themselves when it is open. `showHidden: false` folds away sizes the designer does not offer.
+// Only "size" rows are cells; bands and placeholders are never a place the cursor or a paste lands.
+function ssPgRows(model, opts) {
+  const o = opts || {};
+  const showHidden = o.showHidden !== false;
+  const out = [];
+  if (!model) return out;
+  const add = (s) => {
+    const hidden = s.sizes.filter((z) => z.hidden).length;
+    const shown = showHidden ? s.sizes : s.sizes.filter((z) => !z.hidden);
+    out.push({ kind: "band", id: "b-" + s.id, style: s, total: s.sizes.length, hidden, folded: showHidden ? 0 : hidden });
+    if (!s.sizes.length) out.push({ kind: "empty", id: "e-" + s.id, style: s, text: "No sizes yet." });
+    else if (!shown.length) out.push({ kind: "empty", id: "e-" + s.id, style: s, text: hidden === 1 ? "1 hidden size, folded away." : `${hidden} hidden sizes, folded away.` });
+    shown.forEach((z) => out.push({ kind: "size", id: z.id, size: z, style: s }));
+  };
+  model.styles.forEach(add);
+  if (model.hiddenStyles.length) {
+    out.push({ kind: "hiddenStyles", id: "hidden-styles", count: model.hiddenStyles.length, open: !!o.hiddenStylesOpen });
+    if (o.hiddenStylesOpen) model.hiddenStyles.forEach(add);
+  }
+  return out;
+}
+
+// Where a key moves the active cell: { sizeId, col }, or null when the key is not a move (so the
+// browser keeps it). `order` is the size ids in the order drawn, `ncols` counts Size, Price and
+// Offered too. Tab runs along the row and wraps to the next one; at either end of the grid it is
+// left to the browser, so the keyboard can always leave the table.
+function ssPgMove(order, ncols, at, key, shift) {
+  if (!order || !order.length || !(ncols > 0)) return null;
+  const found = at ? order.indexOf(at.sizeId) : -1;
+  const i = found < 0 ? 0 : found;
+  const c = found < 0 ? 0 : Math.max(0, Math.min(ncols - 1, Number(at.col) || 0));
+  const last = order.length - 1;
+  switch (key) {
+    case "ArrowUp": return { sizeId: order[Math.max(0, i - 1)], col: c };
+    case "ArrowDown": return { sizeId: order[Math.min(last, i + 1)], col: c };
+    case "ArrowLeft": return { sizeId: order[i], col: Math.max(0, c - 1) };
+    case "ArrowRight": return { sizeId: order[i], col: Math.min(ncols - 1, c + 1) };
+    case "Home": return { sizeId: order[i], col: 0 };
+    case "End": return { sizeId: order[i], col: ncols - 1 };
+    case "Tab":
+      if (found < 0) return { sizeId: order[0], col: 0 };
+      if (shift) return c > 0 ? { sizeId: order[i], col: c - 1 } : (i > 0 ? { sizeId: order[i - 1], col: ncols - 1 } : null);
+      return c < ncols - 1 ? { sizeId: order[i], col: c + 1 } : (i < last ? { sizeId: order[i + 1], col: 0 } : null);
+    default: return null;
+  }
+}
+
+// Where the active cell goes when the rows under it change: "Show hidden sizes" folded its size
+// away, or a Reload came back without it. The same cell while its size is still drawn (the column
+// clamped if columns went away); otherwise the nearest size that is, looking down `prev` (the order
+// before the change) first, then up, in the same column; null when none is. So the next arrow key
+// carries on from where the builder was, not from the top-left of the grid.
+function ssPgReanchor(prev, order, at, ncols) {
+  if (!at || !order || !order.length) return null;
+  const col = Math.max(0, Math.min((ncols > 0 ? ncols : 1) - 1, Number(at.col) || 0));
+  if (order.indexOf(at.sizeId) >= 0) return col === at.col ? at : { sizeId: at.sizeId, col };
+  const drawn = new Set(order);
+  const was = (prev || []).indexOf(at.sizeId);
+  if (was < 0) return null;
+  for (let i = was + 1; i < prev.length; i++) if (drawn.has(prev[i])) return { sizeId: prev[i], col };
+  for (let i = was - 1; i >= 0; i--) if (drawn.has(prev[i])) return { sizeId: prev[i], col };
+  return null;
+}
+
+// How tall the option headers must be so that NO name is cut (plan 3.4). Each name stands on end
+// (writing-mode: vertical-rl) and may wrap onto a second line inside its 44 px column, so a name
+// needs the length of its longer half at the best place to split it between two words; the header
+// is the longest of those plus `pad`. `measure(text)` is the text's length in px in the header font.
+// A browser filling line one as far as it fits never needs a third line at that length: its first
+// line takes at least the words the best split puts there, and what is left is part of the best
+// split's second line. One word longer than the rest is its own floor.
+function ssPgHeaderHeight(labels, measure, pad) {
+  let need = 0;
+  (labels || []).forEach((label) => {
+    const words = String(label == null ? "" : label).split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    let best = measure(words.join(" "));
+    for (let i = 1; i < words.length; i++) {
+      best = Math.min(best, Math.max(measure(words.slice(0, i).join(" ")), measure(words.slice(i).join(" "))));
+    }
+    need = Math.max(need, best);
+  });
+  return Math.ceil(need) + (Number(pad) || 0);
+}
+
+// The Excel template's header and rows, built from a FRESH catalog (columns) and size_table (styles,
+// sizes, inclusions), never from what Sheds loaded when it mounted: a table edit since then would
+// otherwise go back out in the sheet and be put back by the next upload. Same layout as before:
+// style, width, length, price, one column per option, active; a style with no sizes gets one starter
+// row. Option cells carry the included quantity (0 = not included).
+function ssPgTemplate(cat, table) {
+  const sections = ssPricingColumns(cat);
+  const its = sections.flatMap((s) => s.cols);
+  const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
+  const t = table || {};
+  const incBySize = {};
+  (Array.isArray(t.inclusions) ? t.inclusions : []).forEach((x) => { if (x && x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
+  // Numbers stay numbers so Excel treats width/length/price/counts as numeric; blanks/text pass through.
+  const numOr = (v) => (v === "" || v == null || isNaN(Number(v)) ? v : Number(v));
+  const ord = (a, b) => {
+    const sa = a.sort_order == null ? Infinity : Number(a.sort_order);
+    const sb = b.sort_order == null ? Infinity : Number(b.sort_order);
+    if (sa !== sb) return sa < sb ? -1 : 1;
+    const ia = String(a.id), ib = String(b.id);
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  };
+  const sizes = (Array.isArray(t.sizes) ? t.sizes : []).filter(Boolean).sort(ord);
+  const rows = [];
+  (Array.isArray(t.styles) ? t.styles : []).filter((s) => s && s.active).sort(ord).forEach((s) => {
+    const mine = sizes.filter((z) => z.style_id === s.id);
+    if (mine.length === 0) {
+      // No sizes yet → one starter row: fill width/length/price and copy the line down.
+      rows.push([s.label, "", "", "", ...its.map(() => 0), "yes"]);
+    } else {
+      mine.forEach((z) => {
+        const inc = incBySize[z.id] || {};
+        rows.push([s.label, numOr(z.width_ft), numOr(z.length_ft), z.base_price == null ? "" : numOr(z.base_price),
+          ...its.map((it) => Number(inc[it.key] || 0)), z.active ? "yes" : "no"]);
+      });
+    }
+  });
+  return { sections, headers, rows };
+}
+
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
   const [busy, setBusy] = useState(false);
   const [dlBusy, setDlBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // The Excel row's own banner (2026-10-30): an upload's result and a download's refusal draw under
+  // the two buttons that caused them, not at the top of the page over the styles card.
+  const [xlMsg, setXlMsg] = useState(null);
   const [result, setResult] = useState(null);
   const [fileKey, setFileKey] = useState(0);
   // building-style manager state
@@ -3006,7 +3231,8 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       const added = styleName.trim();
       setStyleName(""); setStyleCode(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
       await load();
-      setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the Excel template below.` });
+      // Drawn as a link to the table, jumped to the new style (create_style answers its styleId).
+      setMsg({ added: { name: added, styleId: (data && data.styleId) || null } });
     } catch (e) { setMsg({ err: e.message }); }
     setStyleBusy(false);
   };
@@ -3100,36 +3326,38 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   };
   const downloadTemplate = async () => {
     if (!cat || dlBusy) return;
-    const sections = optionSections();
-    const its = sections.flatMap((s) => s.cols);
-    const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
-    // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
-    // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
-    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
-    // Numbers stay numbers so Excel treats width/length/price/counts as numeric; blanks/text pass through.
-    const numOr = (v) => (v === "" || v == null || isNaN(Number(v)) ? v : Number(v));
-    const rows = [];
-    activeStyles().forEach((s) => {
-      const sizes = (cat.sizes || []).filter((z) => z.style_id === s.id);
-      if (sizes.length === 0) {
-        // No sizes yet → one starter row: fill width/length/price and copy the line down.
-        rows.push([s.label, "", "", "", ...its.map(() => 0), "yes"]);
-      } else {
-        sizes.forEach((z) => {
-          const inc = incBySize[z.id] || {};
-          rows.push([s.label, numOr(z.width_ft), numOr(z.length_ft), z.base_price == null ? "" : numOr(z.base_price),
-            ...its.map((it) => Number(inc[it.key] || 0)), z.active ? "yes" : "no"]);
-        });
-      }
-    });
+    // FRESH READS, not `cat` (2026-10-30). Sheds loaded `cat` when it mounted, and the Sizes & prices
+    // table may have changed numbers since, in another tab. A sheet built from the old copy puts
+    // those numbers back on its next upload, because the importer writes every box it is given.
+    // size_table also reads every list in pages: catalog's own inclusion read stops at 1000 rows, and
+    // a row cut off there went out as 0, which the importer then DELETED. A list that does not add
+    // up to its count (ssPgModel's "count") gets one more try, then the download is refused rather
+    // than built (plan 4.8). Only that: the table's other guards ("cap", an orphan row) cannot put
+    // a false 0 in the sheet, and the table sends a builder who trips them here, to Excel.
+    // The view-as target is read in the click's tick, like every other write path here.
+    const target = ssTargetClientId;
+    setDlBusy(true); setXlMsg(null);
+    let fresh = null;
+    for (let attempt = 0; attempt < 2 && !fresh; attempt++) {
+      const r = await ssPgFetch(target, cat.clientId || null);
+      if (!r.ok) { setXlMsg({ err: `Couldn't read your catalog for the template: ${r.error}` }); setDlBusy(false); return; }
+      if (ssPgModel(r.cat, r.table).guard !== "count") fresh = r;
+    }
+    if (!fresh) { setXlMsg({ err: "Couldn't read your whole catalog just now. Try again in a minute." }); setDlBusy(false); return; }
+    // onUpload maps a sheet's headers through `cat`'s columns, so `cat` becomes the catalog this sheet
+    // is built from. Kept as mounted, a column added or renamed in another tab since (the table's
+    // no-columns box sends builders to Options) would be in the sheet and then dropped, unmatched, by
+    // the upload, under a banner that still says "Imported". Same `catalog` answer load() stores.
+    setCat(fresh.cat);
+    const { sections, headers, rows } = ssPgTemplate(fresh.cat, fresh.table);
+    const fileBase = fresh.table.clientId || cat.clientId || "pricing";
 
-    setDlBusy(true); setMsg(null);
     let ExcelJS;
     try { ExcelJS = await loadExcelJS(); }
     catch (e) {
       // Library unreachable → still hand back a usable CSV so the download never fully fails.
-      downloadFile(`${cat.clientId || "pricing"}-pricing.csv`, toCSV(headers, rows.map((r) => r.map((v) => (v == null ? "" : String(v))))));
-      setMsg({ err: `${e.message} Downloaded a plain CSV instead.` });
+      downloadFile(`${fileBase}-pricing.csv`, toCSV(headers, rows.map((r) => r.map((v) => (v == null ? "" : String(v))))));
+      setXlMsg({ err: `${e.message} Downloaded a plain CSV instead.` });
       setDlBusy(false);
       return;
     }
@@ -3177,16 +3405,16 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: headers.length } };
 
       const buf = await wb.xlsx.writeBuffer();
-      downloadBlob(`${cat.clientId || "pricing"}-pricing.xlsx`,
+      downloadBlob(`${fileBase}-pricing.xlsx`,
         new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
     } catch (e) {
-      setMsg({ err: `Could not build the Excel file: ${e.message}` });
+      setXlMsg({ err: `Could not build the Excel file: ${e.message}` });
     }
     setDlBusy(false);
   };
   const onUpload = async (file) => {
     if (!file) return;
-    setBusy(true); setMsg(null); setResult(null);
+    setBusy(true); setMsg(null); setXlMsg(null); setResult(null);
     try {
       if (file.size > 5_000_000) throw new Error("File too large (max 5MB).");
       // Accept both the Excel template and a plain CSV (anything already filled out).
@@ -3246,8 +3474,8 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       setResult(data); await load();
       const parts = []; if (data.created) parts.push(`${data.created} added`); if (data.updated) parts.push(`${data.updated} updated`);
-      setMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : "") });
-    } catch (e) { setMsg({ err: e.message }); }
+      setXlMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : "") });
+    } catch (e) { setXlMsg({ err: e.message }); }
     setBusy(false); setFileKey((k) => k + 1);
   };
 
@@ -3258,6 +3486,16 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      {/* Add style's answer points straight at the table, jumped to the new style. A real link in
+          a new tab, like the card's own button below; the Excel template stays the other way. */}
+      {msg && msg.added && (
+        <div style={okStyle}>
+          Building style “{msg.added.name}” added.{" "}
+          <a href={ssPricingTableHref({ style: msg.added.styleId })} target="_blank" rel="noopener"
+            style={{ color: "#15803D", fontWeight: 800, textDecoration: "underline" }}>Open the sizes &amp; prices table</a>{" "}
+          to add its sizes, or use the Excel template below.
+        </div>
+      )}
 
       {editStyle && (
         <div onClick={() => !styleBusy && setEditStyle(null)}
@@ -3321,7 +3559,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
         <div style={S.h2}>Building styles</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
-          style using the Excel template below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          style in the sizes &amp; prices table below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
           design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
           sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
           use it only when you’re sure you won’t need that style again.
@@ -3410,52 +3648,61 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       </div>
 
       <div style={S.card}>
-        <div style={S.h2}>Pricing &amp; included options (Excel)</div>
-        {/* Sequencing banner (Carolyn 2026-08-06): the template's option columns ARE the
-            tenant's Options catalog, so pricing a size before the catalog exists means
-            re-downloading the sheet later to say what's included. Say so before they start. */}
+        {/* Retitled 2026-10-30: the table is the way in now, and Excel is the alternative under it. */}
+        <div style={S.h2}>Sizes, prices &amp; included options</div>
+        {/* Sequencing banner (Carolyn 2026-08-06): the option columns ARE the tenant's Options
+            catalog, so pricing a size before the catalog exists means coming back later to say
+            what's included. Say so before they start. */}
         <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "11px 14px", marginBottom: 12, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
           <span aria-hidden="true" style={{ fontSize: 15, lineHeight: 1.4 }}>💡</span>
           <div style={{ flex: 1, minWidth: 220, fontSize: 13, color: "#92400E", lineHeight: 1.55 }}>
             <b>Set up your Options first.</b> Every door, window, ramp, and add-on you offer becomes a
-            column in this sheet — that's how you say what comes <b>included</b> with each style and size.
-            Build that list under <b>Options</b>, then download the template so nothing is missing from it.
+            column in the table and the sheet — that's how you say what comes <b>included</b> with each style and size.
+            Build that list under <b>Options</b> first, so nothing is missing from it.
           </div>
           {onGoToOptions && (
             <button onClick={onGoToOptions} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", padding: "6px 12px", whiteSpace: "nowrap" }}>Go to Options →</button>
           )}
         </div>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-          Download the template (one row per building style), then add a row for every size you offer: type the
-          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
-          included in the price</b> — for a loft that's the included <b>square footage</b> (e.g. <b>50</b>), for doors
-          and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
-          included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
-          (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
-          The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
-          built-in items — so you can set how many of a specific catalog item come included with each size.
-        </p>
-        {/* This gate gives way to a two-button row (download template / upload sheet), so the
-            skeleton is two button-sized blocks — nothing more. Claiming any more shape here
-            would be inventing controls this card doesn't have. */}
+        {/* This gate gives way to the table link and the two-button Excel row, so the skeleton is
+            those three button-sized blocks — nothing more. Claiming any more shape here would be
+            inventing controls this card doesn't have. */}
         {!cat ? (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <SkelBar w={186} h={30} /><SkelBar w={156} h={30} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <SkelBar w={236} h={36} />
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <SkelBar w={96} h={14} /><SkelBar w={186} h={30} /><SkelBar w={156} h={30} />
+            </div>
           </div>
         ) : activeStyles().length === 0 ? (
           <div style={{ background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8, padding: "11px 14px", color: "#1B7895", fontSize: 13, lineHeight: 1.5 }}>
-            <b>Add a building style above first.</b> The pricing template is built from your styles — add at least one
-            (with a name &amp; photo), then come back here to download it and set sizes &amp; prices.
+            <b>Add a building style above first.</b> Sizes and prices are set per style — add at least one
+            (with a name &amp; photo), then come back here to set its sizes &amp; prices.
           </div>
         ) : (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <button onClick={downloadTemplate} disabled={dlBusy} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: dlBusy ? 0.6 : 1, cursor: dlBusy ? "default" : "pointer" }}>{dlBusy ? "Preparing…" : "⬇ Download Excel template"}</button>
-            <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
-              {busy ? "Importing…" : "⬆ Upload filled sheet"}
-              <input key={fileKey} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} style={{ display: "none" }}
-                onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
-            </label>
-          </div>
+          <>
+            <p style={{ fontSize: 13, color: "#64748B", marginBottom: 10, lineHeight: 1.5 }}>
+              Every size you sell, its price and what comes <b>included</b>, for all your styles in one table. It opens in its own tab.
+            </p>
+            {/* A REAL anchor in a new tab, never ssNavClick (01-core.jsx), which turns a plain left
+                click into same-document navigation. Middle-click and "open in new tab" work too. */}
+            <a href={ssPricingTableHref()} target="_blank" rel="noopener"
+              style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none", marginBottom: 14 }}>
+              Open sizes &amp; prices table ↗
+            </a>
+            {/* Prefer Excel? (Carolyn Q5: kept for good). The upload's answer draws right under it. */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#475569" }}>Prefer Excel?</span>
+              <button onClick={downloadTemplate} disabled={dlBusy} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: dlBusy ? 0.6 : 1, cursor: dlBusy ? "default" : "pointer" }}>{dlBusy ? "Preparing…" : "⬇ Download Excel template"}</button>
+              <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+                {busy ? "Importing…" : "⬆ Upload filled sheet"}
+                <input key={fileKey} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} style={{ display: "none" }}
+                  onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+              </label>
+            </div>
+            {xlMsg && xlMsg.err && <div data-ss-xl-msg="err" style={{ ...errStyle, marginTop: 12, marginBottom: 0 }}>{xlMsg.err}</div>}
+            {xlMsg && xlMsg.ok && <div data-ss-xl-msg="ok" style={{ ...okStyle, marginTop: 12, marginBottom: 0 }}>{xlMsg.ok}</div>}
+          </>
         )}
         {result && result.skipped && result.skipped.length > 0 && (
           <div style={{ marginTop: 12, fontSize: 13 }}>
@@ -3465,6 +3712,17 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             </ul>
           </div>
         )}
+        <p style={{ fontSize: 12.5, color: "#64748B", marginTop: 14, marginBottom: 0, lineHeight: 1.5 }}>
+          <b>Using Excel:</b> download the template (one row per building style), then add a row for every size you offer: type the
+          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
+          included in the price</b> — for a loft that's the included <b>square footage</b> (e.g. <b>50</b>), for doors
+          and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
+          included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
+          (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
+          The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
+          built-in items — so you can set how many of a specific catalog item come included with each size.
+          {" "}<b>Changed numbers in the table? Download a fresh template before you use Excel again.</b>
+        </p>
       </div>
     </>
   );
@@ -9345,3 +9603,649 @@ Any ${word} colour not shown here will be removed from their account. Their othe
   );
 }
 
+
+// ═══ THE SIZES & PRICES TABLE (/settings/sheds-table, 2026-10-30) ══════════════════════════════
+// Carolyn, 10-29 call: every style's sizes, prices and included options in one table, instead of
+// the Excel download and upload. Settings → Sheds opens it in its own tab (ssPricingTableHref,
+// 01-core.jsx), and Dashboard (12-shell.jsx) renders PricingTableGate for that address, chromeless,
+// before its main return. The build plan is _Extras/StructureStudio Pricing Table Editor Plan
+// 2026-10-30.md; this is its Phase 2, the shell and the read-only grid. Editing, the save queue,
+// paste and adding sizes come in later phases, on the seams marked "Phase 3" / "Phase 4" below.
+//
+// The pure half (ssPgModel, ssPgRows, ssPgMove, ssPgReanchor, ssPgHeaderHeight, ssPgTemplate, ssPgFmtPrice)
+// sits above PricingCsv, where pricingTableHelpers_test.ts lifts it from this file.
+//
+// SPEED (plan 3.5). Cells are plain <td> text, not inputs. Each size row is a PgRow (React.memo)
+// whose props are primitives, or arrays the model built once; the whole <thead> and <tbody> are
+// memoised on the rows. So moving the active cell re-renders the toolbar and nothing in the table:
+// the cell's ring and aria-selected are set on that one <td> directly, not held as per-cell state.
+
+const SS_PRICING_HOLD_MS = 10000;          // how long "Opening <account>…" waits for ?view= to arm
+const SS_PG_NARROW_MQ = "(max-width: 699.98px)";
+const SS_PG_SHOW_HIDDEN_KEY = "ss-pg-show-hidden";
+const SS_PG_SEC_H = 22;                     // the section band above the option names
+const SS_PG_LINE_H = 15;                    // one line of a standing name (portal.html .ss-pg-vh)
+const SS_PG_HEAD_MIN = 64;
+const SS_PG_HEAD_MAX = 600;
+const SS_PG_HEAD_NARROW = 90;               // below 700 px: capped, with an ellipsis
+const SS_PG_FROZEN_W = 170;                 // Size 64 + Price 76 + Offered 30
+const SS_PG_COL_W = 44;                     // one option column, about three digits wide
+const SS_PG_LEGEND = "Empty = not included. A number = how many come included (loft = sq ft). Blank price = size not offered. $0 = free.";
+const SS_PG_TOO_BIG = "This catalog is too big for the table right now. Use the Excel sheet, and let us know.";
+const SS_PG_RTP = "Real-Time Pricing sets prices on this account";
+
+// A Settings address in THIS tab that keeps the account (?view=) and the person (?as=), and
+// nothing else: Back to Sheds, Options, Billing.
+function ssPgSettingsHref(sub) {
+  const q = new URLSearchParams();
+  try {
+    const cur = new URLSearchParams(window.location.search || "");
+    ["view", "as"].forEach((k) => { const v = cur.get(k); if (v) q.set(k, v); });
+  } catch (_e) { /* no query */ }
+  const qs = q.toString();
+  return ssPageBase("settings", sub) + (qs ? "?" + qs : "");
+}
+
+// One canvas for measuring header names in the header's own font (ssPgHeaderHeight's `measure`).
+let ssPgCanvas = null;
+function ssPgMeasureCtx() {
+  try {
+    if (!ssPgCanvas) ssPgCanvas = document.createElement("canvas");
+    return ssPgCanvas.getContext("2d");
+  } catch (_e) { return null; }
+}
+
+// The table's two reads, side by side (plan 4.1): portal-settings `catalog` for the option columns
+// and `size_table` for styles, sizes, inclusions and their counts. Through ssStyleSaveCall
+// (12-shell.jsx) for its 25 s deadline and one retry through the functions host, filed as
+// pricing_table_side_door rather than as a style save.
+//
+// That side door is a raw fetch that skips 01-core's invoke wrapper, so:
+//   * `targetClientId` is ALWAYS on the body: the view-as target, or null on your own account;
+//   * `withUnpriced` is on the catalog body (the wrapper adds it on the main host only);
+//   * the wrapper's tenant tripwire never runs, so `expect` is checked HERE, on both answers, and a
+//     different account in either is a failure, never a table.
+// The Excel template's fresh read (PricingCsv) goes through here too.
+// Resolves { ok: true, cat, table } or { ok: false, error, status }.
+async function ssPgFetch(target, expect) {
+  const call = (body) => ssStyleSaveCall({ ...body, targetClientId: target || null }, "Pricing table", "pricing_table_side_door");
+  const [c, t] = await Promise.all([call({ action: "catalog", withUnpriced: true }), call({ action: "size_table" })]);
+  for (const r of [t, c]) {
+    if (r.error || !r.data || r.data.error) {
+      return { ok: false, status: (r.error && r.error.ssStatus) || null,
+        error: (r.error && r.error.message) || (r.data && r.data.error) || "No answer from the server." };
+    }
+  }
+  if (expect && (String(c.data.clientId || "") !== String(expect) || String(t.data.clientId || "") !== String(expect))) {
+    ssLogError("portal", "pricing table: the server answered for a different account", "pricing_table_wrong_tenant",
+      { asked: String(expect), catalog: c.data.clientId || null, sizeTable: t.data.clientId || null });
+    return { ok: false, status: null, error: "This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists." };
+  }
+  if (!Array.isArray(t.data.styles) || !Array.isArray(t.data.sizes) || !Array.isArray(t.data.inclusions)) {
+    return { ok: false, status: null, error: "The server's answer was missing your sizes." };
+  }
+  return { ok: true, cat: c.data, table: t.data };
+}
+
+// The toolbar's badge (plan 3.13), aria-live. Phase 2 has no saves, so it says how the load went
+// or why the page is view-only; Phase 3's save queue feeds it the rest.
+function PgBadge({ tone, text, title = null }) {
+  return <span className={"ss-pg-badge ss-pg-badge-" + tone} aria-live="polite" title={title || undefined}>{text}</span>;
+}
+
+// The line under the toolbar (plan 3.14), role=status. Phase 3 puts a red box's reason here; for
+// now it says why the page is view-only, or that the read did not add up.
+function PgStatusLine({ tone = "grey", children, action = null }) {
+  return (
+    <div className={"ss-pg-status ss-pg-status-" + tone} role="status">
+      <span>{children}</span>
+      {action}
+    </div>
+  );
+}
+
+// A whole-tab message in the table's frame: the hold, its timeout, the billing lock, no access.
+function PgMessage({ children, onNav = null }) {
+  return (
+    <div className="ss-pg">
+      <div className="ss-pg-bar">
+        {onNav && <a className="ss-pg-back" href={ssPgSettingsHref("sheds")} onClick={ssNavClick(() => onNav("sheds"))}>← Back to Sheds</a>}
+        <span className="ss-pg-title">Sizes &amp; prices</span>
+      </div>
+      <div className="ss-pg-msg" role="status">{children}</div>
+    </div>
+  );
+}
+
+// THE GATE (plan 5). Whether this tab may show the table at all, and for which account.
+//
+// ⛔ THE HOLD. A new tab starts as the operator's OWN account: isOperator is false until its rpc
+// answers, ?view= arms only after that (Dashboard's ?view= effect), and ssTargetClientId follows
+// `viewing` during render. Mount the table any sooner and its reads go to the operator's own
+// tenant under the builder's address. So while ?view= is in the address and the account on screen
+// is not yet that one (the test Dashboard's ?open= effect uses, a support operator's viewedCtx
+// included), this draws "Opening <account>…" and mounts NOTHING. After SS_PRICING_HOLD_MS it says
+// the account could not be opened, and it never falls back to the operator's own.
+//
+// ?as= (an operator wearing a team member) opens the table VIEW-ONLY. A cold load never reads `as`
+// back into the shell, so this tab has the operator's full rights, not that person's.
+//
+// Every hook is above the first return (React #310); the timer lives here so Dashboard gains none.
+function PricingTableGate({ clientId, viewing, isSupportOp, supportCheckGaveUp, viewedCtx, canAdmin, access, gateLocked, billingActor, companyName, onNav }) {
+  // What this tab was opened with, read once. `view` is lowercased the way Dashboard reads it.
+  const params = useMemo(() => {
+    try {
+      const q = new URLSearchParams(window.location.search || "");
+      return { view: (q.get("view") || "").trim().toLowerCase() || null, as: (q.get("as") || "").trim() || null, style: (q.get("style") || "").trim() || null };
+    } catch (_e) { return { view: null, as: null, style: null }; }
+  }, []);
+  const v = params.view;
+  const held = !!v && (!(viewing && viewing.clientId === v && (isSupportOp !== null || supportCheckGaveUp))
+    || (!!isSupportOp && !(viewedCtx && viewedCtx.clientId === v)));
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    if (!held) { setTimedOut(false); return undefined; }
+    const ms = (typeof window !== "undefined" && Number(window.__ssPricingHoldMs)) || SS_PRICING_HOLD_MS;
+    const t = setTimeout(() => setTimedOut(true), ms);
+    return () => clearTimeout(t);
+  }, [held]);
+  // The tab's title names the account (the popout's pattern), and goes back when the page does.
+  const shown = held ? v : companyName;
+  useEffect(() => {
+    let prev = null;
+    try { prev = document.title; document.title = `Sizes & prices · ${shown || ""} · Structure Studio`; } catch (_e) { /* no document */ }
+    return () => { try { if (prev != null) document.title = prev; } catch (_e) { /* no document */ } };
+  }, [shown]);
+  // ?as= names the person in the view-only message (plan 5), but this tab has only their id: a cold
+  // load never reads `as` back into the shell. So the name comes from the people list the account
+  // switcher reads (operator-portal list_users), once the hold lets go. Until it answers, or if it
+  // is refused, the message says "a team member", as the shell's own banner does.
+  const [asName, setAsName] = useState(null);
+  useEffect(() => {
+    if (held || !v || !params.as) return undefined;
+    let gone = false;
+    (async () => {
+      try {
+        const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId: v } });
+        if (gone || error || !data || data.error || !Array.isArray(data.users)) return;
+        const u = data.users.find((x) => x && x.userId === params.as);
+        if (u && (u.fullName || u.email)) setAsName(String(u.fullName || u.email));
+      } catch (_e) { /* the message keeps "a team member" */ }
+    })();
+    return () => { gone = true; };
+  }, [held, v, params.as]);
+
+  if (held) {
+    return (
+      <PgMessage>
+        {timedOut
+          ? "Couldn't open that account here. Close this tab and use the button on Sheds again."
+          : `Opening ${v}…`}
+      </PgMessage>
+    );
+  }
+  if (gateLocked) {
+    return (
+      <PgMessage onNav={onNav}>
+        This account's subscription needs attention.{" "}
+        {billingActor
+          ? <a href={ssPgSettingsHref("billing")} onClick={ssNavClick(() => onNav("billing"))}>Open Billing</a>
+          : "Ask the account owner to open Billing."}
+      </PgMessage>
+    );
+  }
+  // Both are booleans; never compare them with "edit" (memory disabled-ui-fails-silently).
+  const canRead = !!canAdmin || ssCanRead(access, "settings_structures");
+  const canEdit = !!canAdmin || ssCanWrite(access, "settings_structures");
+  if (!canRead) return <PgMessage onNav={onNav}>You don't have access to Sheds on this account.</PgMessage>;
+  const viewOnly = params.as
+    ? { as: true, short: "viewing as a team member", long: `You're viewing as ${asName || "a team member"}. The table is view-only here; open it from the account without “view as” to edit.` }
+    : !canEdit
+      ? { as: false, short: "no edit access", long: "You can see Sheds on this account but not change it. Ask an owner or admin for edit access to Sheds." }
+      : null;
+  return (
+    <PricingTablePage clientId={clientId} target={viewing ? viewing.clientId : null} companyName={companyName}
+      operatorView={!!viewing} viewOnly={viewOnly} styleParam={params.style} onNav={onNav} />
+  );
+}
+
+// THE PAGE (plan 3.2-3.9, 3.15-3.17). A flex column the height of the window: the toolbar, the
+// operator strip in view-as, the status line, the legend, and the grid box, which is the only thing
+// on the page that scrolls, both ways.
+//
+// ⚠️ EVERY HOOK IS IN THE TOP BLOCK, and there is no early return at all: the one return picks what
+// to draw. Later phases add their state up here too, never beside the handlers that use it (React
+// #310 turns the page white the moment its data arrives).
+function PricingTablePage({ clientId, target, companyName, operatorView, viewOnly, styleParam, onNav }) {
+  const [load, setLoad] = useState({ phase: "loading" });     // { phase: loading|error|ready, model?, at?, error?, status? }
+  // On by default; remembered in this browser. Storage can be blocked: then it is simply not kept.
+  const [showHidden, setShowHidden] = useState(() => {
+    try { return localStorage.getItem(SS_PG_SHOW_HIDDEN_KEY) !== "0"; } catch (_e) { return true; }
+  });
+  const [narrow, setNarrow] = useState(() => { try { return window.matchMedia(SS_PG_NARROW_MQ).matches; } catch (_e) { return false; } });
+  const [legendOpen, setLegendOpen] = useState(() => !narrow);   // starts folded on a phone (plan 3.15)
+  const [noteOff, setNoteOff] = useState(false);
+  const [hiddenStylesOpen, setHiddenStylesOpen] = useState(false);
+  const [active, setActive] = useState(null);      // { sizeId, col }: the active cell
+  const [peek, setPeek] = useState(null);          // the header column being pointed at, for the readout
+  const [headH, setHeadH] = useState(SS_PG_HEAD_MIN);
+  const [jumpTick, setJumpTick] = useState(0);     // the style picker asked for a jump (jumpRef)
+  const boxRef = useRef(null);
+  const gridRef = useRef(null);
+  const seqRef = useRef(0);
+  const markRef = useRef(null);
+  const activeRef = useRef(null);
+  const scrollNextRef = useRef(false);
+  const jumpRef = useRef(null);
+  const styleDoneRef = useRef(false);
+  const measuredRef = useRef(null);
+  const drawnRef = useRef(null);                   // the size order last drawn (ssPgReanchor)
+  activeRef.current = active;
+
+  const model = load.phase === "ready" ? load.model : null;
+  const rows = useMemo(() => ssPgRows(model, { showHidden, hiddenStylesOpen }), [model, showHidden, hiddenStylesOpen]);
+  const order = useMemo(() => rows.filter((r) => r.kind === "size").map((r) => r.id), [rows]);
+  const byId = useMemo(() => {
+    const m = {};
+    rows.forEach((r) => { if (r.kind === "size") m[r.id] = r; });
+    return m;
+  }, [rows]);
+  const ncols = 3 + (model ? model.cols.length : 0);
+  const hh = narrow ? SS_PG_HEAD_NARROW : headH;
+
+  // Both reads, and once more when the answer does not add up (plan 4.2): a save landing between two
+  // list reads is the usual cause, and a second read settles it. "cap" cannot change by reading
+  // again, so it is believed at once. Sequenced, so a Retry that overtakes a slow read wins.
+  const fetchAll = useCallback(async () => {
+    const my = ++seqRef.current;
+    setLoad({ phase: "loading" });
+    let r = null, m = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      r = await ssPgFetch(target, clientId);
+      if (my !== seqRef.current) return;
+      if (!r.ok) break;
+      m = ssPgModel(r.cat, r.table);
+      if (!m.guard || m.guard === "cap") break;
+    }
+    if (!r.ok) { setLoad({ phase: "error", error: r.error, status: r.status || null }); return; }
+    // Where tests/harness/pricingTable.mjs starts its first-render clock.
+    try { performance.mark("ss-pg-data"); } catch (_m) { /* no User Timing */ }
+    setLoad({ phase: "ready", model: m, at: Date.now() });
+  }, [target, clientId]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  useEffect(() => {
+    let mq = null;
+    try { mq = window.matchMedia(SS_PG_NARROW_MQ); } catch (_e) { return undefined; }
+    const on = () => { measuredRef.current = null; setNarrow(mq.matches); };
+    if (mq.addEventListener) mq.addEventListener("change", on); else mq.addListener(on);
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", on); else mq.removeListener(on); };
+  }, []);
+
+  // THE HEADER HEIGHT IS MEASURED, NOT CAPPED (plan 3.4). An estimate first, from the names' widths
+  // in the header's own font (ssPgHeaderHeight); then the drawn names are checked, and if any still
+  // runs to a third line or past its box the header grows 8 px and is checked again. All before
+  // paint, so no name is ever drawn cut. Below 700 px the header is a fixed 90 px with an ellipsis
+  // (portal.html), and the toolbar's readout carries the full name.
+  React.useLayoutEffect(() => {
+    if (!model || narrow || !gridRef.current) return;
+    const spans = [...gridRef.current.querySelectorAll("thead .ss-pg-vh")];
+    if (!spans.length) return;
+    if (measuredRef.current !== model) {
+      measuredRef.current = model;
+      const ctx = ssPgMeasureCtx();
+      let est = SS_PG_HEAD_MIN;
+      if (ctx) {
+        // From the longhands: the computed `font` shorthand is "" here, because the grid's
+        // tabular-nums is a font-variant the shorthand cannot say, and the canvas then measures in
+        // its own 10px default and the header grows 8 px at a time, one layout of the grid each.
+        try {
+          const cs = getComputedStyle(spans[spans.length - 1]);
+          ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        } catch (_f) { /* the canvas default */ }
+        est = Math.max(est, ssPgHeaderHeight(spans.map((sp) => sp.textContent), (s) => ctx.measureText(s).width + 1, 16));
+      }
+      est = Math.min(SS_PG_HEAD_MAX, est);
+      if (est !== headH) { setHeadH(est); return; }
+    }
+    const cut = spans.some((sp) => sp.getBoundingClientRect().width > SS_PG_LINE_H * 2 + 1 || sp.scrollHeight > sp.clientHeight + 1);
+    if (cut && headH < SS_PG_HEAD_MAX) setHeadH(Math.min(SS_PG_HEAD_MAX, headH + 8));
+  }, [model, narrow, headH]);
+
+  // The active cell's size folded away ("Show hidden sizes" off) or did not come back on a Reload:
+  // the cursor moves to the nearest size still drawn (ssPgReanchor), before paint, so the readout
+  // keeps a cell and the next arrow key starts there. While a read is out there are no rows at all,
+  // so the cursor and the order it was on are kept until the rows return.
+  React.useLayoutEffect(() => {
+    if (!model) return;
+    const prev = drawnRef.current;
+    drawnRef.current = order;
+    const a = activeRef.current;
+    if (!a || !prev || prev === order) return;
+    const next = ssPgReanchor(prev, order, a, ncols);
+    if (next !== a) setActive(next);
+  }, [order]);
+
+  // The active cell: its ring and aria-selected go on that one <td>, so a move re-renders no row.
+  // A keyboard move scrolls it into view; the box's scroll-padding keeps it clear of the frozen
+  // header and columns (plan 3.6).
+  React.useLayoutEffect(() => {
+    const prev = markRef.current;
+    if (prev) { prev.classList.remove("ss-pg-act"); prev.removeAttribute("aria-selected"); markRef.current = null; }
+    const g = gridRef.current;
+    if (!g || !active) return;
+    const id = (window.CSS && CSS.escape) ? CSS.escape(String(active.sizeId)) : String(active.sizeId);
+    const tr = g.querySelector(`tr[data-s="${id}"]`);
+    const td = tr && tr.children[active.col];
+    if (!td) return;
+    td.classList.add("ss-pg-act");
+    td.setAttribute("aria-selected", "true");
+    markRef.current = td;
+    if (scrollNextRef.current) {
+      scrollNextRef.current = false;
+      try { td.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (_s) { /* old browser */ }
+    }
+  }, [active, rows]);
+
+  // Where tests/harness/pricingTable.mjs stops its first-render clock: the grid committed at its
+  // measured height, and the frame after that.
+  React.useLayoutEffect(() => {
+    if (!model || !gridRef.current) return;
+    try {
+      performance.mark("ss-pg-grid");
+      requestAnimationFrame(() => setTimeout(() => { try { performance.mark("ss-pg-painted"); } catch (_m) { /* no User Timing */ } }, 0));
+    } catch (_m) { /* no User Timing */ }
+  }, [model, headH]);
+
+  // Jump to a style: ?style= once (Add style's link; Phase 4 also opens its add box), then the
+  // toolbar's picker. A hidden style opens the hidden section first and jumps on the next commit.
+  // The scroll waits a frame, so it lands below the header at its MEASURED height.
+  React.useLayoutEffect(() => {
+    if (!model) return;
+    if (!styleDoneRef.current) {
+      styleDoneRef.current = true;
+      if (styleParam) {
+        jumpRef.current = styleParam;
+        // Spent: ?style= comes back out of the address, so Back to Sheds and a reload do not jump.
+        try {
+          const q = new URLSearchParams(window.location.search);
+          q.delete("style");
+          const rest = q.toString();
+          window.history.replaceState(window.history.state, "", window.location.pathname + (rest ? "?" + rest : "") + window.location.hash);
+        } catch (_e) { /* history unavailable */ }
+      }
+    }
+    const want = jumpRef.current;
+    if (!want) return;
+    if (!hiddenStylesOpen && model.hiddenStyles.some((s) => s.id === want)) { setHiddenStylesOpen(true); return; }
+    jumpRef.current = null;
+    const first = rows.find((r) => r.kind === "size" && r.style.id === want);
+    requestAnimationFrame(() => {
+      const g = gridRef.current, box = boxRef.current;
+      const band = g && g.querySelector(`tr[data-band="${(window.CSS && CSS.escape) ? CSS.escape(String(want)) : want}"]`);
+      const thead = g && g.querySelector("thead");
+      if (!band || !box) return;
+      box.scrollTop = Math.max(0, band.offsetTop - (thead ? thead.offsetHeight : 0));
+      if (first) setActive({ sizeId: first.id, col: Math.min(1, ncols - 1) });
+    });
+  }, [model, rows, hiddenStylesOpen, jumpTick]);
+
+  const onPeek = useCallback((e) => {
+    const th = e.target && e.target.closest ? e.target.closest("th[data-col]") : null;
+    setPeek(th ? Number(th.getAttribute("data-col")) : null);
+  }, []);
+  const onPeekEnd = useCallback(() => setPeek(null), []);
+  const toggleHiddenStyles = useCallback(() => setHiddenStylesOpen((o) => !o), []);
+  const head = useMemo(() => (model ? (
+    <>
+      <colgroup>
+        <col style={{ width: 64 }} /><col style={{ width: 76 }} /><col style={{ width: 30 }} />
+        {model.cols.map((c) => <col key={c.key} style={{ width: SS_PG_COL_W }} />)}
+      </colgroup>
+      <PgHeader sections={model.sections} cols={model.cols} rtpOn={model.rtpOn} onPeek={onPeek} onPeekEnd={onPeekEnd} />
+    </>
+  ) : null), [model, onPeek, onPeekEnd]);
+  const body = useMemo(() => rows.map((r, i) => {
+    const ri = 3 + i;   // aria-rowindex: the two header rows come first
+    if (r.kind === "size") {
+      const z = r.size;
+      return <PgRow key={r.id} rowIndex={ri} sizeId={z.id} label={z.label} title={z.title} priceText={z.priceText}
+        offered={z.offered} noPrice={z.price == null} hidden={z.hidden} values={z.values} rtp={!!(model && model.rtpOn)} />;
+    }
+    if (r.kind === "band") {
+      return <PgStyleBand key={r.id} rowIndex={ri} styleId={r.style.id} label={r.style.label} total={r.total} hidden={r.hidden} folded={r.folded} ncols={ncols} />;
+    }
+    if (r.kind === "empty") return <PgNoteRow key={r.id} rowIndex={ri} text={r.text} ncols={ncols} />;
+    return <PgHiddenStylesRow key={r.id} rowIndex={ri} count={r.count} open={r.open} ncols={ncols} onToggle={toggleHiddenStyles} />;
+  }), [rows, model, ncols, toggleHiddenStyles]);
+
+  // ── Handlers and what to draw (no hooks below this line) ──
+  const onKeyDown = (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const next = ssPgMove(order, ncols, activeRef.current, e.key, e.shiftKey);
+    if (!next) return;
+    e.preventDefault();
+    scrollNextRef.current = true;
+    setActive(next);
+  };
+  const onMouseDown = (e) => {
+    const td = e.target && e.target.closest ? e.target.closest("td[data-c]") : null;
+    const tr = td && td.parentElement;
+    if (!td || !tr || !tr.getAttribute("data-s")) return;
+    e.preventDefault();   // no drag-select of text; focus is given by hand, without a scroll
+    try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* old browser */ }
+    setActive({ sizeId: tr.getAttribute("data-s"), col: Number(td.getAttribute("data-c")) || 0 });
+  };
+  // Tabbing into the grid lands on the first price.
+  const onFocus = () => { if (!activeRef.current && order.length) setActive({ sizeId: order[0], col: Math.min(1, ncols - 1) }); };
+  const toggleShowHidden = (on) => {
+    setShowHidden(on);
+    try { localStorage.setItem(SS_PG_SHOW_HIDDEN_KEY, on ? "1" : "0"); } catch (_e) { /* not remembered */ }
+  };
+
+  const colName = (c) => (c === 0 ? "Size" : c === 1 ? "Price" : c === 2 ? "Offered" : (model && model.cols[c - 3] ? model.cols[c - 3].label : ""));
+  const at = active ? byId[active.sizeId] : null;
+  // The active-column readout (plan 3.2): the full name of the column pointed at or in use, which
+  // is also where a name cut short on a phone is read in full.
+  const readout = !model ? "" : peek != null ? colName(peek) : at ? `${colName(active.col)} · ${at.style.label} ${at.size.label}` : "";
+  const tooBig = !!(model && model.guard);
+  const time = load.at ? new Date(load.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).toLowerCase() : "";
+  const badge = load.phase === "loading" ? { tone: "grey", text: "Loading…" }
+    : load.phase === "error" ? { tone: "red", text: "Couldn't load" }
+    : viewOnly ? { tone: "grey", text: "View only: " + viewOnly.short, title: viewOnly.long }
+    : tooBig ? { tone: "grey", text: "View only: catalog too big", title: SS_PG_TOO_BIG }
+    : { tone: "green", text: `All changes saved · ${time}` };
+  // Phase 3: no editor, no add strip and no paste unless this is true (plan 3.16). RTP locks the
+  // price column alone (model.rtpOn). `readOnly` is every reason the badge says "View only", and
+  // the operator strip follows it too, so the page never says both "View only" and "Changes are live".
+  const readOnly = !!viewOnly || tooBig;
+  const editable = load.phase === "ready" && !readOnly;
+  const noStyles = !!model && model.styles.length === 0;
+  const noCols = !!model && model.cols.length === 0;
+  const choices = model ? [...model.styles, ...model.hiddenStyles] : [];
+  const shedsHref = ssPgSettingsHref("sheds");
+  const toSheds = ssNavClick(() => onNav("sheds"));
+
+  return (
+    <div className="ss-pg" data-ss-pg-editable={editable ? "1" : "0"}>
+      <div className="ss-pg-bar">
+        {/* Phase 3: flushes pending saves before it leaves. */}
+        <a className="ss-pg-back" href={shedsHref} onClick={toSheds}>← Back to Sheds</a>
+        <span className="ss-pg-title">Sizes &amp; prices</span>
+        {operatorView && <span className="ss-pg-co" title={companyName}>{companyName}</span>}
+        <select className="ss-pg-jump" aria-label="Jump to style" value="" disabled={!choices.length}
+          onChange={(e) => { const id = e.target.value; if (id) { jumpRef.current = id; setJumpTick((n) => n + 1); } }}>
+          <option value="">Jump to style…</option>
+          {choices.map((s) => <option key={s.id} value={s.id}>{s.label}{s.active ? "" : " (hidden)"}</option>)}
+        </select>
+        <label className="ss-pg-tog">
+          <input type="checkbox" checked={showHidden} onChange={(e) => toggleShowHidden(e.target.checked)} />
+          Show hidden sizes
+        </label>
+        <span className="ss-pg-readout" title={readout || undefined}>{readout}</span>
+        <PgBadge {...badge} />
+        <button type="button" className="ss-pg-q" aria-expanded={legendOpen} aria-controls="ss-pg-legend"
+          title="What the boxes mean" onClick={() => setLegendOpen((o) => !o)}>?</button>
+      </div>
+      {/* The chromeless page has no top bar, so it says for itself whose account this is. */}
+      {operatorView && (
+        <div className="ss-pg-op" role="note">
+          {readOnly
+            ? `Viewing ${companyName} as operator. This table is view-only.`
+            : `Editing ${companyName} as operator. Changes are live.`}
+        </div>
+      )}
+      {viewOnly && <PgStatusLine>{viewOnly.long}</PgStatusLine>}
+      {tooBig && <PgStatusLine tone="amber" action={<button type="button" onClick={fetchAll}>Reload</button>}>{SS_PG_TOO_BIG}</PgStatusLine>}
+      {legendOpen && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}
+      {narrow && !noteOff && (
+        <div className="ss-pg-narrow">
+          <span>Easiest on a computer. You can still check and change numbers here.</span>
+          <button type="button" aria-label="Dismiss" onClick={() => setNoteOff(true)}>✕</button>
+        </div>
+      )}
+      {noCols && (
+        <div className="ss-pg-optbox">
+          <b>Set up your Options first.</b> Every door, window, ramp, and add-on you offer becomes a column here — that's
+          how you say what comes <b>included</b> with each size.{" "}
+          <a href={ssPgSettingsHref("options")} onClick={ssNavClick(() => onNav("options"))}>Go to Options →</a>
+        </div>
+      )}
+      {noStyles && (
+        <div className="ss-pg-msg ss-pg-msg-inline" role="status">
+          No building styles yet. <a href={shedsHref} onClick={toSheds}>Add one on Sheds.</a>
+        </div>
+      )}
+      <div className="ss-pg-box" ref={boxRef} aria-busy={load.phase === "loading" ? "true" : undefined}
+        style={{ scrollPaddingTop: SS_PG_SEC_H + hh, scrollPaddingLeft: narrow ? 64 : SS_PG_FROZEN_W }}>
+        {load.phase === "loading" ? <PgSkeleton />
+          : load.phase === "error" ? (
+            <div className="ss-pg-fail" role="alert">
+              <b>{load.status === 403 ? "You don't have access to Sheds on this account." : "Couldn't load your sizes."}</b>
+              {load.status !== 403 && load.error && <span className="ss-pg-fail-why">{load.error}</span>}
+              <button type="button" onClick={fetchAll}>Retry</button>
+            </div>
+          ) : (noStyles && !model.hiddenStyles.length) ? null : (
+            <table ref={gridRef} className="ss-pg-grid" role="grid" aria-label="Sizes and prices" tabIndex={0}
+              aria-rowcount={2 + rows.length} aria-colcount={ncols} aria-readonly={editable ? undefined : "true"}
+              style={{ width: SS_PG_FROZEN_W + SS_PG_COL_W * (ncols - 3), "--ss-pg-hh": hh + "px" }}
+              onKeyDown={onKeyDown} onMouseDown={onMouseDown} onFocus={onFocus}>
+              {head}
+              <tbody>{body}</tbody>
+            </table>
+          )}
+      </div>
+    </div>
+  );
+}
+
+// The two header rows (plan 3.3-3.4): the section band in each section's template colour, then the
+// names. Option names stand on end in a .ss-pg-vh span, top to bottom (Carolyn Q6), and wrap onto a
+// second line inside the column rather than being cut; the full name is also each header's title
+// and aria-label, and the toolbar's readout while it is pointed at.
+const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, onPeekEnd }) {
+  let from = 4;
+  return (
+    <thead onMouseOver={onPeek} onMouseLeave={onPeekEnd}>
+      <tr role="row" aria-rowindex={1} className="ss-pg-sec">
+        <th className="ss-pg-corner" colSpan={3} role="columnheader" aria-colindex={1} aria-colspan={3} aria-label="Size, price and offered" />
+        {sections.map((s) => {
+          const at = from;
+          from += s.cols.length;
+          return (
+            <th key={s.name} colSpan={s.cols.length} role="columnheader" aria-colindex={at} aria-colspan={s.cols.length}
+              title={s.name} style={{ background: "#" + String(s.argb || "FFF1F5F9").slice(2) }}>{s.name}</th>
+          );
+        })}
+      </tr>
+      <tr role="row" aria-rowindex={2} className="ss-pg-names">
+        <th role="columnheader" aria-colindex={1} data-col={0} className="ss-pg-f0 ss-pg-fh">Size</th>
+        <th role="columnheader" aria-colindex={2} data-col={1} className={"ss-pg-f1 ss-pg-fh" + (rtpOn ? " ss-pg-rtp" : "")}
+          title={rtpOn ? SS_PG_RTP : "Base price"}>Price{rtpOn ? " 🔒" : ""}</th>
+        <th role="columnheader" aria-colindex={3} data-col={2} className="ss-pg-f2" title="Offered in your designer" aria-label="Offered">
+          <span className="ss-pg-vh">Offered</span>
+        </th>
+        {cols.map((c, i) => (
+          <th key={c.key} role="columnheader" aria-colindex={4 + i} data-col={3 + i} title={c.label} aria-label={c.label}
+            className={i === 0 || cols[i - 1].section !== c.section ? "ss-pg-oh ss-pg-s0" : "ss-pg-oh"}>
+            <span className="ss-pg-vh">{c.label}</span>
+          </th>
+        ))}
+      </tr>
+    </thead>
+  );
+});
+
+// One size (plan 3.5). Primitive props only, plus `values`, which the model built once, so a row
+// re-renders only when its own size changes. Size, Price and Offered are frozen (portal.html).
+// The price is also the cell's title: "$123,456.78", or three decimals shown as stored, is wider
+// than the 76 px column and ends in an ellipsis, and the title is where it reads whole. Under
+// Real-Time Pricing the cell is grey with a lock (portal.html), and the title says why.
+const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp }) {
+  return (
+    <tr role="row" aria-rowindex={rowIndex} data-s={sizeId} className={hidden ? "ss-pg-hid" : undefined}>
+      <td role="gridcell" aria-colindex={1} data-c={0} className="ss-pg-f0 ss-pg-size" title={title || undefined}>{label}</td>
+      <td role="gridcell" aria-colindex={2} data-c={1} className={"ss-pg-f1 ss-pg-price" + (rtp ? " ss-pg-rtp" : "")}
+        title={rtp ? (priceText ? `${priceText} · ${SS_PG_RTP}` : SS_PG_RTP) : (priceText || undefined)}>{priceText}</td>
+      <td role="gridcell" aria-colindex={3} data-c={2} className={"ss-pg-f2 ss-pg-off" + (noPrice ? " ss-pg-dis" : "")}
+        title={noPrice ? "Add a price to offer it" : offered ? "Offered in your designer" : "Not offered"}>{offered ? "✓" : ""}</td>
+      {values.map((v, i) => <td key={i} role="gridcell" aria-colindex={4 + i} data-c={3 + i}>{v}</td>)}
+    </tr>
+  );
+});
+
+// A style's band: its name and how many sizes it has. The name sticks to the left edge while the
+// grid scrolls sideways. Phase 4 adds "＋ Add sizes" here.
+const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, total, hidden, folded, ncols }) {
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-band" data-band={styleId}>
+      <td role="rowheader" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
+        <div className="ss-pg-bandin">
+          <b>{label}</b>
+          <span>{total === 1 ? "1 size" : `${total} sizes`}{hidden ? ` · ${hidden} hidden${folded ? ", folded away" : ""}` : ""}</span>
+        </div>
+      </td>
+    </tr>
+  );
+});
+
+// A placeholder under a style with nothing to show. Not a cell: the cursor and a paste never land here.
+function PgNoteRow({ rowIndex, text, ncols }) {
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-note-row">
+      <td role="gridcell" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}><div className="ss-pg-bandin">{text}</div></td>
+    </tr>
+  );
+}
+
+// "Hidden styles (not in your designer)": folded until opened (plan 3.3).
+function PgHiddenStylesRow({ rowIndex, count, open, ncols, onToggle }) {
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-hs">
+      <td role="gridcell" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
+        <div className="ss-pg-bandin">
+          <button type="button" aria-expanded={open} onClick={onToggle}>{open ? "▾" : "▸"} Hidden styles (not in your designer) · {count}</button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// The grid while it loads: grey blocks in the grid's own shape (see SkelBar, 01-core.jsx).
+function PgSkeleton() {
+  const cols = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+  return (
+    <div className="ss-pg-skel" aria-hidden="true">
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <SkelBar w={164} h={96} />
+        {cols.map((i) => <SkelBar key={i} w={38} h={96} />)}
+      </div>
+      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((r) => (
+        <div key={r} style={{ display: "flex", gap: 6, marginBottom: 6, opacity: 1 - r * 0.07 }}>
+          <SkelBar w={164} h={20} />
+          {cols.map((i) => <SkelBar key={i} w={38} h={20} />)}
+        </div>
+      ))}
+    </div>
+  );
+}

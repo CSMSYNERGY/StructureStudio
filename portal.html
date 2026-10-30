@@ -374,6 +374,99 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .tight th,.tight td{padding-left:6px;padding-right:6px}
 .tight td{padding-top:8px;padding-bottom:8px}
 .tight input{box-sizing:border-box}
+/* ── THE SIZES & PRICES TABLE (/settings/sheds-table; 03-catalog.jsx PricingTablePage, 2026-10-30) ──
+   A window-high column whose grid box is the only thing that scrolls, both ways. 100dvh where the
+   browser has it: iOS Safari's 100vh runs under its own bar. Every class is .ss-pg-*; nothing else
+   in this file uses that prefix. */
+.ss-pg{height:100vh;height:100dvh;display:flex;flex-direction:column;background:#F6F9FE;color:#1E293B;overflow:hidden}
+.ss-pg-bar{display:flex;align-items:center;gap:10px;min-height:44px;padding:6px 14px;background:#FFF;border-bottom:1px solid #E2E8F0;flex-shrink:0;min-width:0}
+.ss-pg-back{font-size:12.5px;font-weight:700;color:#475569;text-decoration:none;border:1px solid #E2E8F0;background:#F8FAFC;border-radius:8px;padding:6px 10px;white-space:nowrap}
+.ss-pg-back:hover{background:#F1F5F9}
+.ss-pg-title{font-size:15px;font-weight:800;white-space:nowrap}
+.ss-pg-co{font-size:12.5px;font-weight:700;color:#991B1B;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-pg-jump{font:inherit;font-size:12.5px;font-weight:600;color:#334155;border:1px solid #CBD5E1;border-radius:7px;padding:5px 8px;background:#FFF;max-width:180px}
+.ss-pg-tog{display:flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;color:#475569;white-space:nowrap;cursor:pointer}
+.ss-pg-readout{flex:1;min-width:0;font-size:12.5px;font-weight:700;color:#334155;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.ss-pg-badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 10px;white-space:nowrap;border:1px solid;flex-shrink:0}
+.ss-pg-badge-green{background:#F0FDF4;border-color:#BBF7D0;color:#15803D}
+.ss-pg-badge-grey{background:#F1F5F9;border-color:#E2E8F0;color:#475569}
+.ss-pg-badge-red{background:#FEF2F2;border-color:#FECACA;color:#B91C1C}
+.ss-pg-q{width:28px;height:28px;border-radius:50%;border:1px solid #CBD5E1;background:#FFF;font:inherit;font-weight:800;color:#475569;cursor:pointer;flex-shrink:0}
+.ss-pg-op{background:#FEE2E2;border-bottom:1px solid #DC2626;color:#991B1B;font-size:12.5px;font-weight:700;padding:6px 14px;flex-shrink:0}
+.ss-pg-status{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:6px 14px;border-bottom:1px solid #E2E8F0;flex-shrink:0;line-height:1.4}
+.ss-pg-status-grey{background:#F8FAFC;color:#475569}
+.ss-pg-status-amber{background:#FEF3C7;color:#92400E}
+.ss-pg-status button,.ss-pg-fail button,.ss-pg-narrow button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:4px 10px;cursor:pointer;flex-shrink:0}
+.ss-pg-legend{font-size:12.5px;color:#475569;background:#FFF;border-bottom:1px solid #E2E8F0;padding:6px 14px;flex-shrink:0;line-height:1.4}
+.ss-pg-narrow{display:flex;align-items:center;gap:10px;justify-content:space-between;font-size:12.5px;color:#1B7895;background:#DBEAFF;border-bottom:1px solid #75E6DA;padding:6px 14px;flex-shrink:0}
+.ss-pg-optbox{background:#FEF3C7;border-bottom:1px solid #FDE68A;color:#92400E;font-size:13px;line-height:1.5;padding:9px 14px;flex-shrink:0}
+.ss-pg-optbox a{color:#92400E;font-weight:800}
+.ss-pg-msg{margin:40px auto;max-width:460px;padding:0 16px;text-align:center;font-size:14px;color:#475569;line-height:1.5}
+.ss-pg-msg-inline{margin:16px auto}
+.ss-pg-msg a{color:#3D3672;font-weight:700}
+.ss-pg-box{flex:1;min-height:0;overflow:auto;position:relative;background:#FFF;overscroll-behavior:contain}
+.ss-pg-fail{padding:40px 16px;text-align:center;font-size:14px;color:#475569;display:flex;flex-direction:column;gap:10px;align-items:center}
+.ss-pg-fail-why{font-size:12px;color:#94A3B8}
+.ss-pg-skel{padding:12px}
+/* The grid. border-collapse:separate so a sticky cell keeps its borders; one scroller for both axes. */
+.ss-pg-grid{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px;font-variant-numeric:tabular-nums;outline:none}
+.ss-pg-grid th,.ss-pg-grid td{border-right:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;background:#FFF;overflow:hidden}
+.ss-pg-grid td{height:28px;padding:0 4px;white-space:nowrap;text-overflow:ellipsis;text-align:center;cursor:default}
+.ss-pg-grid td.ss-pg-size{text-align:left;font-weight:700}
+.ss-pg-grid td.ss-pg-price{text-align:right}
+.ss-pg-grid td.ss-pg-off{color:#15803D;font-weight:800}
+/* Layers: corner 6, header 5, frozen body 4 (plan 3.6). Section band at top 0, names at 22px. */
+.ss-pg-sec th{position:sticky;top:0;z-index:5;height:22px;padding:0 6px;font-size:10.5px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;text-overflow:ellipsis;text-align:left}
+/* height = the measured --ss-pg-hh exactly: 8 px of padding top and bottom, no bottom border (the
+   divider is a shadow), so a name's box is the height less 16 px, which is what .ss-pg-vh allows. */
+.ss-pg-names th{position:sticky;top:22px;z-index:5;height:var(--ss-pg-hh,64px);padding:8px 4px;vertical-align:top;text-align:center;border-bottom:0;box-shadow:inset 0 -2px 0 #CBD5E1}
+.ss-pg-names th.ss-pg-fh{vertical-align:bottom;text-align:left;font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.4px}
+.ss-pg-names th.ss-pg-s0{border-left:2px solid #CBD5E1}
+.ss-pg-grid .ss-pg-f0{position:sticky;left:0;z-index:4}
+.ss-pg-grid .ss-pg-f1{position:sticky;left:64px;z-index:4}
+.ss-pg-grid .ss-pg-f2{position:sticky;left:140px;z-index:4;border-right:2px solid #CBD5E1}
+.ss-pg-grid .ss-pg-corner{position:sticky;left:0;top:0;z-index:6;border-right:2px solid #CBD5E1}
+.ss-pg-grid thead .ss-pg-f0,.ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{z-index:6}
+/* A name stands on end, top to bottom, and wraps onto a second line inside its column rather
+   than being cut. The header's height (--ss-pg-hh) is MEASURED to the longest name (PricingTablePage).
+   vertical-RL, not -lr: both turn the letters the same way, but -lr puts a name's second line to the
+   RIGHT of its first, so a reader who tilts their head to the right reads the two lines bottom one
+   first ("and Kickplate (6'x7')" above "Double Door with Transom"). -rl is the whole name turned a
+   quarter clockwise, second line to the left. Bottom-to-top instead is transform:rotate(180deg). */
+.ss-pg-vh{display:inline-block;vertical-align:top;writing-mode:vertical-rl;white-space:normal;line-height:15px;max-inline-size:calc(var(--ss-pg-hh,64px) - 16px);font-size:12px;font-weight:700;color:#1E293B;text-align:start}
+.ss-pg-grid .ss-pg-rtp{background:#F1F5F9;color:#64748B}
+/* A price Real-Time Pricing sets is grey AND locked (plan 3.13: a shape as well as a colour). The
+   lock sits in the cell's top-left corner, out of the right-aligned number's way; the sticky cell is
+   its box, and below 700 px, where the price is no longer frozen, position:relative keeps it so. */
+.ss-pg-grid tbody td.ss-pg-rtp::before{content:"\1F512";position:absolute;left:2px;top:2px;font-size:9px;line-height:1;opacity:.75}
+.ss-pg-grid td.ss-pg-dis{background:#F8FAFC}
+/* Hidden from the designer: 55% text, not opacity, because a frozen cell must stay opaque over
+   whatever scrolls under it. */
+.ss-pg-grid tr.ss-pg-hid td{color:rgba(30,41,59,.55)}
+.ss-pg-grid td.ss-pg-act{box-shadow:inset 0 0 0 2px #3D3672}
+/* The full-width rows (a style's band, a placeholder, "Hidden styles") keep their words at the left
+   edge while the grid scrolls sideways: .ss-pg-bandin is sticky, and that needs a cell that is NOT a
+   scroll container. overflow:hidden (every other cell's) makes the cell one, and the words then
+   stick inside it and scroll away with it. */
+.ss-pg-grid .ss-pg-band td{background:#F1F5F9;height:30px;padding:0;text-align:left;border-bottom:1px solid #CBD5E1;overflow:visible}
+.ss-pg-grid .ss-pg-note-row td{height:30px;padding:0;text-align:left;color:#64748B;font-style:italic;overflow:visible}
+.ss-pg-grid .ss-pg-hs td{background:#F8FAFC;height:32px;padding:0;text-align:left;overflow:visible}
+.ss-pg-bandin{position:sticky;left:0;display:inline-flex;align-items:center;gap:10px;padding:0 10px;max-width:calc(100vw - 40px);white-space:nowrap;font-size:13px}
+.ss-pg-bandin span{font-size:12px;color:#64748B;font-weight:600}
+.ss-pg-hs button{font:inherit;font-size:12.5px;font-weight:700;color:#475569;background:none;border:none;cursor:pointer;padding:6px 0}
+/* Below 700 px (plan 3.15): only Size stays frozen, the toolbar wraps, and the header is capped at
+   90 px with an ellipsis (the toolbar's readout carries the full name). */
+@media (max-width:699.98px){
+  .ss-pg-bar{flex-wrap:wrap;gap:8px}
+  .ss-pg-readout{order:9;flex-basis:100%;text-align:left}
+  .ss-pg-co{max-width:120px}
+  .ss-pg-grid td.ss-pg-f1,.ss-pg-grid td.ss-pg-f2{position:static}
+  .ss-pg-grid td.ss-pg-f1.ss-pg-rtp{position:relative;left:auto;z-index:auto}
+  .ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{left:auto;z-index:5}
+  .ss-pg-grid .ss-pg-corner{left:auto}
+  .ss-pg-names th{height:90px}
+  .ss-pg-vh{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-inline-size:74px}
+}
 </style>
 </head><body><div id="root"></div>
 <!-- SELF-HOSTED, deliberately not a CDN. These four are this page's only dependencies and there
@@ -426,7 +519,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=cbeebde3"></script>
-<script defer src="/portal.app.compiled.js?v=2ae9b787" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=9c4e92ed" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

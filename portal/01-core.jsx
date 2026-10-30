@@ -648,12 +648,23 @@ __ssFunctions.invoke = async (name, opts) => {
 };
 // Which portal-settings actions change something a designer reads. Over-matching costs a designer
 // two read RPCs; under-matching is the bug this exists for, so it errs wide.
-const SS_SETTINGS_WRITE_RE = /^(save_|delete_|reorder_|import_|set_|library_(add|edit|remove|seed_mine))/;
+// create_ and update_ joined on 2026-10-30 (the Sizes & prices table): Add style (create_style) and
+// a rename (update_style) have to reach a table open in another tab, or a new style never shows
+// there until a reload. save_pricing_cells, the table's own write, matches save_.
+const SS_SETTINGS_WRITE_RE = /^(create_|update_|save_|delete_|reorder_|import_|set_|library_(add|edit|remove|seed_mine))/;
+// Which page load sent an event (2026-10-30). The Sizes & prices table re-reads when ANOTHER page
+// saves Settings, and hears its own saves too (a channel delivers to every object on the name, and
+// the window event is this page's own), so every event says where it came from. Random per load;
+// the designer reads only clientId and ignores it.
+const SS_PAGE_ID = (() => {
+  try { if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID(); } catch (_c) { /* not a secure context */ }
+  return "p-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+})();
 // Same tab: a window event. Other tabs of this browser: a BroadcastChannel (a channel object also
 // delivers to other objects on the same name in this tab, so the designer here may hear both; it
 // coalesces them).
 function ssSettingsSaved(clientId) {
-  const detail = { clientId: clientId ? String(clientId) : null, at: Date.now() };
+  const detail = { clientId: clientId ? String(clientId) : null, at: Date.now(), source: SS_PAGE_ID };
   try { window.dispatchEvent(new CustomEvent("ss:settings-saved", { detail })); } catch (_e) { /* old browser */ }
   try { const bc = new BroadcastChannel("ss-settings"); bc.postMessage(detail); bc.close(); } catch (_b) { /* no BroadcastChannel */ }
 }
@@ -2270,6 +2281,32 @@ function ssDesignHref(code, version = null) {
   q.set("open", String(code || ""));
   if (version != null && version !== "") q.set("version", String(version));
   return ssPageBase("designer", null) + "?" + q.toString();
+}
+
+// ── The Sizes & prices table's address (2026-10-30) ───────────────────────────────────────
+// Settings → Sheds opens the table in its OWN tab: a real anchor with target="_blank", never
+// ssNavClick (which turns a left click into same-document navigation). The page lives at
+// /settings/sheds-table, a sub the Settings rail does not list; 12-shell.jsx's Dashboard renders it
+// chromeless before its main return (PricingTableGate, 03-catalog.jsx).
+//
+// What the address carries, and nothing else of the current query (the Projects popout's opener
+// strips ?view=; ssDesignHref keeps it, and this follows ssDesignHref):
+//   view   the account an operator has open, so the new tab opens THAT account, not their own.
+//   as     the person an operator is wearing (ssTargetUserId). A cold load never reads it back
+//          into the shell, so the new tab would otherwise get the operator's full rights; the
+//          table opens view-only whenever it is present instead.
+//   style  the style to jump to (Add style's success message).
+const SS_PRICING_TABLE_SUB = "sheds-table";
+function ssPricingTableHref({ style = null } = {}) {
+  const q = new URLSearchParams();
+  try {
+    const v = new URLSearchParams(window.location.search || "").get("view");
+    if (v) q.set("view", v);
+  } catch (_e) { /* no query */ }
+  if (ssTargetUserId) q.set("as", String(ssTargetUserId));
+  if (style != null && style !== "") q.set("style", String(style));
+  const qs = q.toString();
+  return ssPageBase("settings", SS_PRICING_TABLE_SUB) + (qs ? "?" + qs : "");
 }
 // The ?open= a cold load arrived with, read once: { code, version } or null. A code is the
 // design's short code, so anything that is not one (a hand-typed address, a mangled paste) is
