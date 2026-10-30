@@ -11,17 +11,20 @@
 //      React #310): its title, Back link, legend, three style bands, every size row; ?style= jumps to
 //      that style and leaves the address.
 //   C  HEADERS AT 1280 AND 1440: no option name is cut (each standing name fits its box in two lines
-//      at most, and no header cell overflows); "480" and "1200" fit a 44 px box; the header and the
-//      frozen Size/Price/Offered stay pinned on both scroll axes; the page itself never scrolls. A
-//      header screenshot is kept at each width (SS_PG_HEADER_SHOTS names a folder for them).
+//      at most, and no header cell overflows), and a two-line name reads in order when the head is
+//      tilted (its first line is the RIGHT one); "480" and "1200" fit a 44 px box; the header and the
+//      frozen Size/Price/Offered stay pinned on both scroll axes; the page itself never scrolls. Run on
+//      the 25-column fixture and again on the plan's 210 sizes x 38 columns. A header screenshot is
+//      kept at each width (SS_PG_HEADER_SHOTS names a folder for them).
 //   D  THE GRID: the active-column readout follows a click and the arrows; aria-selected moves;
 //      "Show hidden sizes" folds hidden rows and is remembered; Jump to style scrolls the band under
 //      the header; ARIA roles and counts.
 //   E  STATES: a slow size_table shows the skeleton and "Loading…"; a failed one says "Couldn't load
 //      your sizes." and Retry recovers; no styles says so; no option columns shows the Options box;
 //      a count that never adds up reads twice and opens view-only "too big".
-//   F  VIEW-AS: an operator's cold ?view=<builder> load makes every table read for that builder
-//      (targetClientId on every body) and draws the red operator strip; ?as= opens view-only; a
+//   F  VIEW-AS: an operator's cold ?view=<builder> load says "Opening <builder>…" and reads nothing
+//      while the operator check is out, then makes every table read for that builder (targetClientId
+//      on every body) and draws the red operator strip with the builder's name; ?as= opens view-only; a
 //      non-operator holding ?view= is told after 10 s that the account could not be opened, and no
 //      table read ever goes out; a view-only access map opens view-only; a billing lock shows the lock.
 //   G  NARROW (390 px): the page does not scroll sideways, the header is at most 90 px, at least 8 rows
@@ -35,8 +38,9 @@
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/pricingTable.mjs            (exit 0 = every check held)
 //
-// SS_BASE=http://127.0.0.1:<port> points it at another port. SKIP_TIMING=1 skips T. SHOTS go to
-// %TEMP%/ss-harness/pricing-table unless SS_SHOTS says otherwise.
+// SS_BASE=http://127.0.0.1:<port> points it at another port. SKIP_TIMING=1 skips T; PG_ONLY=C,F runs
+// only those sections. SHOTS go to %TEMP%/ss-harness/pricing-table unless SS_SHOTS says otherwise;
+// the header pictures for Carolyn (C, at 1280 and 1440) go to SS_PG_HEADER_SHOTS when it is set.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -49,6 +53,9 @@ const { ok, failed } = reporter();
 const shots = shotsDir("pricing-table");
 const headerShots = process.env.SS_PG_HEADER_SHOTS || shots;
 mkdirSync(headerShots, { recursive: true });
+// PG_ONLY=C,T runs those sections alone (the server check always runs).
+const ONLY = (process.env.PG_ONLY || "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+const want = (s) => !ONLY.length || ONLY.includes(s);
 
 // ── The server at BASE is this checkout (the Windows double-bind trap) ─────────────────────────
 {
@@ -150,10 +157,11 @@ const H = { "access-control-allow-origin": "*", "access-control-expose-headers":
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// S: { own, operator, role, access, locked, cat(clientId), table(clientId), sizeTableDelayMs, sizeTableFailures,
-//      countSkew (size_table answers with counts that never add up), createdStyleId }
+// S: { own, operator, operatorDelayMs (is_operator answers late), role, access, locked, cat(clientId),
+//      table(clientId), sizeTableDelayMs, sizeTableFailures, countSkew (size_table answers with counts
+//      that never add up), createdStyleId }
 async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
-  const S = { own: OWN, operator: false, role: "owner", access: null, locked: false, sizeTableDelayMs: 0, sizeTableFailures: 0, countSkew: false, ...S0 };
+  const S = { own: OWN, operator: false, operatorDelayMs: 0, role: "owner", access: null, locked: false, sizeTableDelayMs: 0, sizeTableFailures: 0, countSkew: false, ...S0 };
   S.cat = S.cat || ((cid) => catalogFor(cid));
   S.table = S.table || ((cid) => tableFor(cid, S.cat(cid)));
   const ctx = await browser.newContext({ viewport: { width, height }, serviceWorkers: "block", acceptDownloads: true });
@@ -171,7 +179,10 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
     try { body = JSON.parse(req.postData() || "{}"); } catch (_e) { /* not JSON */ }
     const rpc = /\/rest\/v1\/rpc\/([a-z_]+)/.exec(url);
     if (rpc) {
-      if (rpc[1] === "is_operator") return json(route, !!S.operator);
+      if (rpc[1] === "is_operator") {
+        if (S.operatorDelayMs) await sleep(S.operatorDelayMs);
+        return json(route, !!S.operator);
+      }
       if (rpc[1] === "is_support_operator") return json(route, false);
       if (rpc[1] === "can_open_projects") return json(route, false);
       return json(route, null);
@@ -225,7 +236,7 @@ const tableCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && 
 const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tbody tr", { timeout });
 
 // ── A: the Sheds card ────────────────────────────────────────────────────────────────────────
-{
+if (want("A") || want("B")) {
   const { ctx, page, calls, errors, S } = await open("/settings/sheds");
   await page.waitForSelector("text=Sizes, prices & included options", { timeout: 20000 });
   await page.waitForSelector("text=Open sizes & prices table", { timeout: 20000 });
@@ -314,6 +325,7 @@ const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tb
     await tab.goto(`${BASE}/settings/sheds-table`);
     await waitGrid(tab).catch(() => {});
     const t2 = await tab.evaluate(() => ({
+      path: location.pathname,
       title: document.title,
       back: (() => { const a = document.querySelector(".ss-pg-back"); return a ? { text: a.textContent, href: a.getAttribute("href") } : null; })(),
       legend: (document.querySelector(".ss-pg-legend") || {}).textContent || "",
@@ -322,6 +334,7 @@ const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tb
       shell: !!document.querySelector(".ss-shell"),
       badge: (document.querySelector(".ss-pg-badge") || {}).textContent || "",
     }));
+    ok("B: the address stays /settings/sheds-table once the shell has settled", t2.path === "/settings/sheds-table", t2.path);
     ok("B: the tab's title names the account", t2.title === `Sizes & prices · ${COMPANY[OWN]} · Structure Studio`, t2.title);
     ok("B: chromeless (no rail, no top bar), with Back to Sheds", !t2.shell && t2.back && /Back to Sheds/.test(t2.back.text) && t2.back.href === "/settings/sheds", JSON.stringify(t2.back));
     ok("B: the legend reads as the plan says", t2.legend === "Empty = not included. A number = how many come included (loft = sq ft). Blank price = size not offered. $0 = free.", t2.legend);
@@ -335,7 +348,7 @@ const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tb
 }
 
 // ── B2: ?style= jumps and leaves the address ──
-{
+if (want("B")) {
   const { ctx, page, errors, S } = await open(`/settings/sheds-table?style=${uid("5", 3)}`, {}, { width: 1440, height: 700 });
   await waitGrid(page).catch(() => {});
   await page.waitForTimeout(300);
@@ -356,9 +369,22 @@ const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tb
 }
 
 // ── C: headers at 1280 and 1440, pinned panes, fitting numbers. 25 option columns fit across 1280,
-// so the sideways pin is proved at 1000 px, where the grid has to scroll. ──
-for (const width of [1280, 1440, 1000]) {
-  const { ctx, page, errors } = await open("/settings/sheds-table", {}, { width, height: 900 });
+// so the sideways pin is proved at 1000 px, where the grid has to scroll; the plan's 210 x 38 fixture
+// scrolls sideways at both widths. ──
+const C_RUNS = [
+  { width: 1280, shot: "pricing-table-headers-1280.png" },
+  { width: 1440, shot: "pricing-table-headers-1440.png" },
+  { width: 1000 },
+  { width: 1280, big: true, shot: "pricing-table-headers-38-columns-1280.png" },
+  { width: 1440, big: true, shot: "pricing-table-headers-38-columns-1440.png" },
+];
+for (const run of want("C") ? C_RUNS : []) {
+  const { width } = run;
+  const tag = (run.big ? "C38@" : "C@") + width;
+  const bigCat = run.big ? catalogFor(OWN, { extra: 13 }) : null;
+  const S0 = run.big ? { cat: () => bigCat, table: (() => { const t = tableFor(OWN, bigCat, { perStyle: 70 }); return () => t; })() } : {};
+  const nCols = OPTION_KEYS(run.big ? bigCat : catalogFor(OWN)).length;
+  const { ctx, page, errors } = await open("/settings/sheds-table", S0, { width, height: 900 });
   await waitGrid(page).catch(() => {});
   await page.waitForTimeout(400);
   const h = await page.evaluate(() => {
@@ -373,18 +399,23 @@ for (const width of [1280, 1440, 1000]) {
     }).map((sp) => sp.textContent);
     const names = document.querySelector(".ss-pg-names th.ss-pg-oh");
     const longest = spans.reduce((a, sp) => (sp.textContent.length > a.length ? sp.textContent : a), "");
-    const twoLine = spans.filter((sp) => Math.round(sp.getBoundingClientRect().width / 15) === 2).length;
-    return { n: spans.length, cut, headH: names ? Math.round(names.getBoundingClientRect().height) : 0, longest, twoLine,
+    const two = spans.filter((sp) => Math.round(sp.getBoundingClientRect().width / 15) === 2);
+    // Read with the head tilted right, line one must be the upper line, i.e. the RIGHT one on screen:
+    // the name's first letter stands right of its last.
+    const charX = (t, i) => { const rg = document.createRange(); rg.setStart(t, i); rg.setEnd(t, i + 1); const b = rg.getBoundingClientRect(); return b.left + b.width / 2; };
+    const backwards = two.filter((sp) => { const t = sp.firstChild; return !(charX(t, 0) > charX(t, t.length - 1)); }).map((sp) => sp.textContent);
+    return { n: spans.length, cut, headH: names ? Math.round(names.getBoundingClientRect().height) : 0, longest, twoLine: two.length, backwards,
       ellipsis: spans.some((sp) => getComputedStyle(sp).textOverflow === "ellipsis") };
   });
-  ok(`C${width}: 25 option headers plus Offered, none cut`, h.n === 26 && h.cut.length === 0, `cut: ${JSON.stringify(h.cut)}; header ${h.headH}px; ${h.twoLine} on two lines`);
-  ok(`C${width}: the longest name is the 46-character door, drawn whole`, h.longest === LONG, h.longest);
-  ok(`C${width}: no ellipsis on the headers at this width`, !h.ellipsis);
+  ok(`${tag}: ${nCols} option headers plus Offered, none cut`, h.n === nCols + 1 && h.cut.length === 0, `cut: ${JSON.stringify(h.cut)}; header ${h.headH}px; ${h.twoLine} on two lines`);
+  ok(`${tag}: a two-line name reads in order (first line on the right, top to bottom)`, h.twoLine > 0 && h.backwards.length === 0, JSON.stringify(h.backwards));
+  ok(`${tag}: the longest name is the 46-character door, drawn whole`, h.longest === LONG, h.longest);
+  ok(`${tag}: no ellipsis on the headers at this width`, !h.ellipsis);
   const fit = await page.evaluate(() => {
     const cells = [...document.querySelectorAll(".ss-pg-grid tbody td[data-c]")].filter((td) => td.textContent === "480" || td.textContent === "1200");
     return { n: cells.length, over: cells.filter((td) => td.scrollWidth > td.clientWidth).map((td) => td.textContent), w: cells[0] ? Math.round(cells[0].getBoundingClientRect().width) : 0 };
   });
-  ok(`C${width}: "480" and "1200" fit their 44 px boxes`, fit.n > 0 && fit.over.length === 0 && fit.w === 44, JSON.stringify(fit));
+  ok(`${tag}: "480" and "1200" fit their 44 px boxes`, fit.n > 0 && fit.over.length === 0 && fit.w === 44, JSON.stringify(fit));
   // Pinned on both axes: scroll the box right and down; Size/Price/Offered and the header stay put.
   const pin = await page.evaluate(async () => {
     const box = document.querySelector(".ss-pg-box");
@@ -406,21 +437,19 @@ for (const width of [1280, 1440, 1000]) {
     return res;
   });
   const sideways = pin.scrollLeft > 0 && pin.sizeX[0] === pin.sizeX[1] && pin.priceX[0] === pin.priceX[1] && pin.offX[0] === pin.offX[1] && pin.optX[1] < pin.optX[0];
-  if (width === 1000) ok(`C${width}: Size, Price and Offered stay pinned while the grid scrolls sideways`, sideways, JSON.stringify(pin));
-  else ok(`C${width}: the grid fits across without a sideways scroll, or stays pinned in one`, pin.scrollLeft === 0 || sideways, JSON.stringify(pin));
-  ok(`C${width}: the header stays pinned while it scrolls down`, pin.scrollTop > 0 && pin.headTop === pin.boxTop + 22, JSON.stringify({ headTop: pin.headTop, boxTop: pin.boxTop }));
-  ok(`C${width}: the page itself never scrolls, either way`, pin.pageX && pin.pageY);
-  const box = await page.locator(".ss-pg-box").boundingBox();
+  if (width === 1000) ok(`${tag}: Size, Price and Offered stay pinned while the grid scrolls sideways`, sideways, JSON.stringify(pin));
+  else ok(`${tag}: the grid fits across without a sideways scroll, or stays pinned in one`, pin.scrollLeft === 0 || sideways, JSON.stringify(pin));
+  ok(`${tag}: the header stays pinned while it scrolls down`, pin.scrollTop > 0 && pin.headTop === pin.boxTop + 22, JSON.stringify({ headTop: pin.headTop, boxTop: pin.boxTop }));
+  ok(`${tag}: the page itself never scrolls, either way`, pin.pageX && pin.pageY);
   const thead = await page.locator(".ss-pg-grid thead").boundingBox();
-  if (width !== 1000) await page.screenshot({ path: join(headerShots, `pricing-table-headers-${width}.png`), clip: { x: 0, y: 0, width, height: Math.min(900, Math.round(thead.y + thead.height + 28 * 6)) } });
-  await page.screenshot({ path: join(shots, `C-${width}-full.png`) });
-  ok(`C${width}: no page errors`, errors.length === 0, errors.join(" | "));
-  void box;
+  if (run.shot) await page.screenshot({ path: join(headerShots, run.shot), clip: { x: 0, y: 0, width, height: Math.min(900, Math.round(thead.y + thead.height + 28 * 6)) } });
+  await page.screenshot({ path: join(shots, `${tag.replace("@", "-")}-full.png`) });
+  ok(`${tag}: no page errors`, errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
 // ── D: the grid's moves, readout, folding, jump, ARIA ──
-{
+if (want("D")) {
   const { ctx, page, errors, S } = await open("/settings/sheds-table", {}, { width: 1440, height: 800 });
   await waitGrid(page).catch(() => {});
   const t = S.table(OWN);
@@ -464,15 +493,24 @@ for (const width of [1280, 1440, 1000]) {
   // Hidden rows are drawn at 55% text.
   const dim = await page.evaluate(() => { const tr = document.querySelector("tr.ss-pg-hid"); return tr ? getComputedStyle(tr.children[0]).color : null; });
   ok("D: a hidden size is drawn at 55%", dim === "rgba(30, 41, 59, 0.55)", dim);
-  // Jump to style.
-  await page.locator(".ss-pg-jump").selectOption({ label: "Test Utility Shed" });
-  await page.waitForTimeout(250);
-  const j = await page.evaluate((id) => {
-    const band = document.querySelector(`tr[data-band="${id}"]`).getBoundingClientRect();
-    const head = document.querySelector(".ss-pg-names th.ss-pg-f0").getBoundingClientRect();
-    return { band: Math.round(band.top), head: Math.round(head.bottom), readout: document.querySelector(".ss-pg-readout").textContent, val: document.querySelector(".ss-pg-jump").value };
-  }, t.styles[2].id);
-  ok("D: Jump to style puts the band just under the header and lands on its first price", Math.abs(j.band - j.head) <= 2 && /^Price · Test Utility Shed /.test(j.readout) && j.val === "", JSON.stringify(j));
+  // Jump to style. The middle style's band lands just under the header. The last style has too few
+  // rows under it to reach the top, so the box goes to its end and the band shows below the header.
+  const jumpTo = async (label, id) => {
+    await page.locator(".ss-pg-jump").selectOption({ label });
+    await page.waitForTimeout(250);
+    return page.evaluate((sid) => {
+      const box = document.querySelector(".ss-pg-box");
+      const band = document.querySelector(`tr[data-band="${sid}"]`).getBoundingClientRect();
+      const head = document.querySelector(".ss-pg-names th.ss-pg-f0").getBoundingClientRect();
+      return { band: Math.round(band.top), head: Math.round(head.bottom), atEnd: Math.abs(box.scrollTop + box.clientHeight - box.scrollHeight) <= 1,
+        boxBottom: Math.round(box.getBoundingClientRect().bottom), readout: document.querySelector(".ss-pg-readout").textContent, val: document.querySelector(".ss-pg-jump").value };
+    }, id);
+  };
+  const j = await jumpTo("Test Lofted Barn", t.styles[1].id);
+  ok("D: Jump to style puts the band just under the header and lands on its first price", Math.abs(j.band - j.head) <= 2 && /^Price · Test Lofted Barn /.test(j.readout) && j.val === "", JSON.stringify(j));
+  const jl = await jumpTo("Test Utility Shed", t.styles[2].id);
+  ok("D: …the last style scrolls as far as the grid goes, its band in view under the header", (Math.abs(jl.band - jl.head) <= 2 || (jl.atEnd && jl.band >= jl.head - 2 && jl.band < jl.boxBottom))
+    && /^Price · Test Utility Shed /.test(jl.readout), JSON.stringify(jl));
   // The legend folds.
   await page.locator(".ss-pg-q").click();
   ok("D: '?' folds the legend", !(await page.locator(".ss-pg-legend").count()));
@@ -482,7 +520,7 @@ for (const width of [1280, 1440, 1000]) {
 }
 
 // ── D2: hidden styles fold into their own section ──
-{
+if (want("D")) {
   const { ctx, page, errors } = await open("/settings/sheds-table", { table: (cid) => tableFor(cid, catalogFor(cid), { hiddenStyle: true }) });
   await waitGrid(page).catch(() => {});
   const before = await page.locator(".ss-pg-band b").allTextContents();
@@ -495,7 +533,7 @@ for (const width of [1280, 1440, 1000]) {
 }
 
 // ── E: loading, failure, empty, no columns, too big ──
-{
+if (want("E")) {
   const { ctx, page, errors, S } = await open(null, { sizeTableDelayMs: 1500 });
   await page.goto(`${BASE}/settings/sheds-table`);
   await page.waitForSelector(".ss-pg-skel", { timeout: 15000 }).catch(() => {});
@@ -517,7 +555,7 @@ for (const width of [1280, 1440, 1000]) {
   ok("E: no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-{
+if (want("E")) {
   const { ctx, page, errors } = await open("/settings/sheds-table", { table: (cid) => tableFor(cid, catalogFor(cid), { noStyles: true }) });
   await page.waitForSelector("text=No building styles yet.", { timeout: 15000 }).catch(() => {});
   const t = await page.locator(".ss-pg-msg-inline").textContent().catch(() => "");
@@ -525,7 +563,7 @@ for (const width of [1280, 1440, 1000]) {
   ok("E: no page errors (no styles)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-{
+if (want("E")) {
   const { ctx, page, errors } = await open("/settings/sheds-table", { cat: (cid) => catalogFor(cid, { cols: "none" }) });
   await waitGrid(page).catch(() => {});
   const box = await page.locator(".ss-pg-optbox").textContent().catch(() => "");
@@ -535,7 +573,7 @@ for (const width of [1280, 1440, 1000]) {
   await page.screenshot({ path: join(shots, "E-no-columns.png") });
   await ctx.close();
 }
-{
+if (want("E")) {
   const { ctx, page, calls, errors } = await open(null, { countSkew: true });
   await page.goto(`${BASE}/settings/sheds-table`);
   await waitGrid(page).catch(() => {});
@@ -549,22 +587,30 @@ for (const width of [1280, 1440, 1000]) {
 }
 
 // ── F: view-as and permissions ──
-{
-  const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}`, { own: OPS, operator: true });
+if (want("F")) {
+  // is_operator answers 2.5 s late, so the hold is long enough to see: the tab is the operator's OWN
+  // account until it answers, and nothing may be read for it.
+  const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}`, { own: OPS, operator: true, operatorDelayMs: 2500 });
+  await page.waitForSelector(".ss-pg-msg", { timeout: 15000 }).catch(() => {});
+  const holding = await page.locator(".ss-pg-msg").textContent().catch(() => "");
+  const readsWhileHeld = tableCalls(calls).length + calls.filter((c) => c.action === "size_table").length;
+  ok("F: while the operator check is out, the tab says 'Opening <builder>…' and reads no table", holding === `Opening ${VIEWED}…` && readsWhileHeld === 0, `${holding}; ${readsWhileHeld} reads`);
   await waitGrid(page).catch(() => {});
+  await page.waitForFunction((name) => (document.querySelector(".ss-pg-op") || {}).textContent === `Editing ${name} as operator. Changes are live.`, COMPANY[VIEWED], { timeout: 10000 }).catch(() => {});
   const tc = tableCalls(calls);
   ok("F: an operator's cold ?view= load reads the table for the viewed builder only",
     tc.length >= 2 && tc.every((c) => c.body.targetClientId === VIEWED), tc.map((c) => `${c.action}->${c.body.targetClientId}`).join(" "));
   const f = await page.evaluate(() => ({ strip: (document.querySelector(".ss-pg-op") || {}).textContent || "", co: (document.querySelector(".ss-pg-co") || {}).textContent || "",
     title: document.title, editable: document.querySelector(".ss-pg").getAttribute("data-ss-pg-editable"), back: document.querySelector(".ss-pg-back").getAttribute("href") }));
-  ok("F: the red operator strip and the company name", f.strip === `Editing ${VIEWED} as operator. Changes are live.` || f.strip === `Editing ${COMPANY[VIEWED]} as operator. Changes are live.`, f.strip);
+  ok("F: the red operator strip names the builder (their company name, not the address's slug)", f.strip === `Editing ${COMPANY[VIEWED]} as operator. Changes are live.` && f.co === COMPANY[VIEWED], JSON.stringify(f));
+  ok("F: …and so does the tab's title", f.title === `Sizes & prices · ${COMPANY[VIEWED]} · Structure Studio`, f.title);
   ok("F: Back to Sheds keeps ?view=", f.back === `/settings/sheds?view=${VIEWED}`, f.back);
   ok("F: an operator in view-as may edit", f.editable === "1");
   await page.screenshot({ path: join(shots, "F-view-as.png") });
   ok("F: no page errors (view-as)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-{
+if (want("F")) {
   const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}&as=${WEAR}`, { own: OPS, operator: true });
   await waitGrid(page).catch(() => {});
   const f = await page.evaluate(() => ({ strip: (document.querySelector(".ss-pg-op") || {}).textContent || "", badge: document.querySelector(".ss-pg-badge").textContent,
@@ -575,7 +621,7 @@ for (const width of [1280, 1440, 1000]) {
   ok("F: no page errors (as)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-{
+if (want("F")) {
   const t0 = Date.now();
   const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}`, { own: OWN, operator: false });
   await page.waitForSelector(".ss-pg-msg", { timeout: 15000 }).catch(() => {});
@@ -589,7 +635,7 @@ for (const width of [1280, 1440, 1000]) {
   ok("F: no page errors (hold)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-{
+if (want("F")) {
   const { ctx, page, errors } = await open("/settings/sheds-table", { role: "user", access: { settings_structures: "view", designs: "view" } });
   await waitGrid(page).catch(() => {});
   const f = await page.evaluate(() => ({ badge: document.querySelector(".ss-pg-badge").textContent, editable: document.querySelector(".ss-pg").getAttribute("data-ss-pg-editable"),
@@ -598,7 +644,7 @@ for (const width of [1280, 1440, 1000]) {
   ok("F: no page errors (view access)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-{
+if (want("F")) {
   const { ctx, page, calls, errors } = await open("/settings/sheds-table", { role: "user", access: { designs: "view" } });
   await page.waitForTimeout(2500);
   const here = await page.evaluate(() => location.pathname);
@@ -606,7 +652,7 @@ for (const width of [1280, 1440, 1000]) {
   ok("F: no page errors (no access)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-{
+if (want("F")) {
   const { ctx, page, calls, errors } = await open("/settings/sheds-table", { locked: true });
   await page.waitForSelector("text=This account's subscription needs attention.", { timeout: 15000 }).catch(() => {});
   const m = await page.locator(".ss-pg-msg").textContent().catch(() => "");
@@ -616,7 +662,7 @@ for (const width of [1280, 1440, 1000]) {
 }
 
 // ── G: narrow ──
-{
+if (want("G")) {
   const { ctx, page, errors } = await open("/settings/sheds-table", {}, { width: 390, height: 844 });
   await waitGrid(page).catch(() => {});
   await page.waitForTimeout(300);
@@ -638,7 +684,7 @@ for (const width of [1280, 1440, 1000]) {
 }
 
 // ── T: timing ──
-if (!process.env.SKIP_TIMING) {
+if (!process.env.SKIP_TIMING && want("T")) {
   for (const [tag, perStyle] of [["1x", 70], ["3x", 210]]) {
     const cat = catalogFor(OWN, { extra: 13 });                    // 25 + 13 = 38 option columns
     const table = tableFor(OWN, cat, { perStyle });                 // 3 styles x perStyle sizes
@@ -677,7 +723,7 @@ if (!process.env.SKIP_TIMING) {
       return { n: sync.length, syncMed: q(sync, 0.5), syncP95: q(sync, 0.95), syncMax: q(sync, 1), frameMed: q(frame, 0.5), frameP95: q(frame, 0.95),
         readout: document.querySelector(".ss-pg-readout").textContent };
     });
-    console.log(`TIMING ${tag}: ${table.sizes.length} sizes x ${3 + OPTION_KEYS(cat).length} columns = ${cells} cells; first render (data in -> grid committed and measured) ${first.grid} ms over ${first.passes} commit(s), -> next frame ${first.painted} ms; ` +
+    console.log(`TIMING ${tag}: ${table.sizes.length} sizes x ${3 + OPTION_KEYS(cat).length} columns = ${cells} cells; first render (data in -> grid committed and measured) ${first.grid} ms over ${first.passes} commit(s), -> next frame ${first.painted} ms (page load -> table painted ${first.nav} ms, shell boot and stubbed reads included); ` +
       `arrow key (keydown -> laid out) median ${keys.syncMed} ms, p95 ${keys.syncP95} ms, max ${keys.syncMax} ms; keydown -> next frame median ${keys.frameMed} ms, p95 ${keys.frameP95} ms (${keys.n} keys)`);
     ok(`T${tag}: the grid rendered and the arrows moved (${cells} cells)`, first.grid != null && keys.n === 100 && /· Test /.test(keys.readout), keys.readout);
     ok(`T${tag}: no page errors`, errors.length === 0, errors.join(" | "));
