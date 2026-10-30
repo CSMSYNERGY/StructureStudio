@@ -973,7 +973,10 @@ function SupportMenu({ clientId, onSubmitted, onNavigate }) {
 // ─── "My Requests": this tenant's bugs + feature requests, with our replies ───
 // The component and the `mine` route slug keep the older "submissions" naming — the rows
 // are still feedback_submissions, and renaming the slug would break existing links.
-function MySubmissions({ refreshKey }) {
+// `supportOn` is the shell's switch (346): off, the empty-state sentence points at the 💬 Feedback
+// pill those builders still have, word for word as before, and the Tickets chip shows only when a
+// ticket row exists (release review, 10-30).
+function MySubmissions({ refreshKey, supportOn = false }) {
   const [rows, setRows] = useState(null);       // null = loading
   const [comments, setComments] = useState({}); // submission_id -> [comment]
   const [error, setError] = useState(null);
@@ -1082,7 +1085,8 @@ function MySubmissions({ refreshKey }) {
         <span style={{ ...S.h2, marginBottom: 0 }}>My Requests</span>
         <span style={{ fontSize: 12, color: "#94A3B8" }}>({rows.length})</span>
         <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
-          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"], ["ticket", "🎫 Tickets"]].map(([k, lbl]) => (
+          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"],
+            ...(supportOn || rows.some((r) => r.kind === "ticket") ? [["ticket", "🎫 Tickets"]] : [])].map(([k, lbl]) => (
             <button key={k} type="button" onClick={() => setFilter(k)}
               style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999, cursor: "pointer",
                 border: filter === k ? "1px solid " + ACCENT : "1px solid #E2E8F0",
@@ -1097,8 +1101,13 @@ function MySubmissions({ refreshKey }) {
 
       {rows.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0", lineHeight: 1.6 }}>
-          You haven't sent us anything yet. Use the <b>Support</b> button at the top of the page to report
-          a problem, request a feature or send us a ticket — it'll show up here so you can follow what happens to it.
+          {supportOn ? (<>
+            You haven't sent us anything yet. Use the <b>Support</b> button at the top of the page to report
+            a problem, request a feature or send us a ticket — it'll show up here so you can follow what happens to it.
+          </>) : (<>
+            You haven't sent us anything yet. Use the <b>💬 Feedback</b> button in the bottom-right corner
+            to report an issue or request a feature — it'll show up here so you can follow what happens to it.
+          </>)}
         </div>
       ) : shown.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>Nothing here under this filter.</div>
@@ -1382,7 +1391,7 @@ function SetupChecklist({ items, counts, canEdit, onPatch, onReload, onNavigate,
 // changelog is now one view inside it, not the whole page. ───
 // `canAdmin` reaches SetupChecklist for one reason: only an owner/admin can open
 // Settings → Billing, so only they get the "add this add-on" button on a padlocked step.
-function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
+function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin, supportOn = false }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   // The sub-tab lives in the URL (/support/setup — /releases/setup still
@@ -1593,7 +1602,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
       {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
         canEdit={!setupData || setupData.canEdit !== false}
         onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
-        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
+        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} supportOn={supportOn} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
         : rows.length === 0
