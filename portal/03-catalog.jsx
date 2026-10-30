@@ -3359,8 +3359,9 @@ function ssPgRebase(sent, server, again) {
 // pending and inflight are { to, from, seq } and error is { kind: "invalid" | "refused" | "conflict",
 // typed, reason, server? }. removes: { [id]: "pending" | "inflight" }. flight: the one call out, with
 // what it sent. Plus the clock marks for the send timing, the failure count, why saving stopped or
-// the page went view-only, the count of answers (oks, for the refresh rule) and a note for the
-// status line.
+// the page went view-only, the count of answers (oks, for the refresh rule), a note for the status
+// line, and `unsure`: { [id]: true } for sizes a discarded call may have changed all the same,
+// until a fresh read says what is on file.
 //
 // EVENTS: init, commit, invalid, dismiss, create, remove, flush, send, ok, fail, resume, discard,
 // refresh, columns, note-off. Times come in on the event (`at`), never from a clock in here.
@@ -3368,7 +3369,10 @@ function ssPgRebase(sent, server, again) {
 // THE COMMIT RULE. A field's baseline is its in-flight `to` when it has one, otherwise what the
 // server confirmed. A value equal to the baseline drops any unsent edit (nothing to send);
 // anything else is pending { to, from: baseline }. So typing 480 and then 400 again while 480 is
-// out queues { to: 400, from: 480 }, which goes after the answer: it is never thrown away.
+// out queues { to: 400, from: 480 }, which goes after the answer: it is never thrown away. The
+// editor's commit also carries `seen`, what the box showed when typing began: if an answer moved
+// the box under the open editor, the text was typed against a value that is gone, and the box goes
+// red instead (see "commit").
 function ssPgQueue(q, ev) {
   const e = ev || {};
   const at = e.at == null ? 0 : Number(e.at);
@@ -3377,7 +3381,7 @@ function ssPgQueue(q, ev) {
     if (Array.isArray(e.cols)) { cols = {}; e.cols.forEach((k) => { cols[k] = true; }); }
     return { sizes: { ...(e.sizes || {}) }, fields: {}, removes: {}, cols, seq: 0, n: 0, flight: null, failures: 0,
       stopped: null, viewOnly: null, oks: 0, firstAt: null, lastAt: null, flush: false, retried: {}, note: null,
-      flash: null, reread: false, renamed: {} };
+      flash: null, reread: false, renamed: {}, unsure: null };
   }
   if (!q) return q;
   // One size's field map with one field set (or gone when nothing is left on it), copied.
@@ -3429,6 +3433,20 @@ function ssPgQueue(q, ev) {
       const y = { ...x };
       delete y.error;
       delete y.pending;
+      // The editor's `seen`. An answer that landed while it was open moved this box: a colleague's
+      // value adopted from a conflict on another box of the size, or the box's own flight in
+      // conflict. Committed as usual, its `from` would be that new value, and the server's from-check
+      // would let it overwrite the colleague's. So it goes red as changed elsewhere, with both values,
+      // and nothing is sent (plan 1: never quietly replaces theirs). A box the server refused keeps
+      // its reason. Typing exactly what is there now is no change at all.
+      if ("seen" in e) {
+        const shown = x.pending ? x.pending.to : base;
+        if (!ssPgSame(shown, e.seen) && !ssPgSame(e.value, shown)) {
+          y.error = x.error && x.error.kind === "refused" ? { ...x.error, typed: e.value }
+            : { kind: "conflict", typed: e.value, server: ssPgVal(q.sizes[e.sizeId], e.f), reason: null };
+          return timed({ ...q, fields: put(q.fields, e.sizeId, e.f, y) }, false);
+        }
+      }
       let seq = q.seq;
       if (!ssPgSame(e.value, base)) y.pending = { to: e.value, from: base, seq: ++seq };
       return timed({ ...q, seq, fields: put(q.fields, e.sizeId, e.f, y) }, !!y.pending);
@@ -3455,6 +3473,15 @@ function ssPgQueue(q, ev) {
     }
     case "remove": {
       if (!q.sizes[e.id] || q.removes[e.id]) return q;
+      // A size whose create has not gone yet is simply never added: nothing goes for it. Queued, the
+      // next call would name the id in both creates and removes, and the server refuses such a call
+      // whole (validatePayload), turning every other box in it red. A create already out is answered
+      // before the remove can go: one call at a time.
+      if (q.sizes[e.id].creating === "pending") {
+        const sizes = { ...q.sizes };
+        delete sizes[e.id];
+        return timed({ ...q, sizes, fields: setSize(q.fields, e.id, {}) }, false);
+      }
       return timed({ ...q, removes: { ...q.removes, [e.id]: "pending" }, flush: true }, true);
     }
     case "flush":
@@ -3579,6 +3606,15 @@ function ssPgQueue(q, ev) {
         } else if (r.status === "conflict" && r.row) {
           // REBASE (ssPgRebase): landed boxes clear, untouched ones go again once on the new
           // version from what is there now, and real conflicts turn red with both values.
+          //
+          // A follow-up typed on a box during its flight folds into that box's resend: the newest
+          // value, from what is there now. Plan 4.6 turns such a follow-up red when ITS box is in
+          // conflict, because the value it started from never landed; that is the red verdict here.
+          // On a resend nobody else touched the box, the value the flight started from still holds,
+          // and the server checks `from` again, so going red would only ask the builder to retype
+          // what they just typed, under "changed elsewhere" when nothing was. A box marked not valid
+          // during the flight keeps that mark (as when the flight is saved): the in-flight value
+          // still goes, and the red "wasn't saved" stays until the builder types over it.
           const verdict = ssPgRebase(sent.fields, server, !!retried[r.id]);
           let again = false;
           fs.forEach((f) => {
@@ -3591,8 +3627,9 @@ function ssPgQueue(q, ev) {
               delete y.inflight;
               if (y.pending || y.error) mine[f] = y; else delete mine[f];
             } else if (verdict[f] === "resend") {
-              if (ssPgSame(want, now)) delete mine[f];
-              else { mine[f] = { pending: { to: want, from: now, seq: x.pending ? x.pending.seq : x.inflight.seq } }; again = true; }
+              const red = x.error ? { error: x.error } : {};
+              if (ssPgSame(want, now)) { if (x.error) mine[f] = red; else delete mine[f]; }
+              else { mine[f] = { pending: { to: want, from: now, seq: x.pending ? x.pending.seq : x.inflight.seq }, ...red }; again = true; }
             } else {
               mine[f] = { error: { kind: "conflict", typed: want, server: now, reason: null } };
             }
@@ -3683,7 +3720,10 @@ function ssPgQueue(q, ev) {
     case "discard": {
       // "Discard these changes": every unsent and in-flight edit goes, and the boxes show what the
       // server last confirmed. Red boxes stay: they say what did not save. A late answer for the
-      // call that was out is ignored (no flight is waiting for it).
+      // call that was out is ignored (no flight is waiting for it). That call may have landed all
+      // the same: a timeout gives up on a request already on its way, and a 5xx can follow a commit.
+      // So its sizes are `unsure` until a fresh read (refresh) says what is on file; the page reads
+      // at once, and the badge does not say "saved" meanwhile.
       const fields = {};
       Object.keys(q.fields).forEach((id) => {
         const mine = {};
@@ -3692,7 +3732,12 @@ function ssPgQueue(q, ev) {
       });
       const sizes = {};
       Object.keys(q.sizes).forEach((id) => { if (!q.sizes[id].creating) sizes[id] = q.sizes[id]; });
-      return { ...q, fields, sizes, removes: {}, flight: null, failures: 0, retried: {},
+      let unsure = q.unsure;
+      if (q.flight) {
+        unsure = { ...(q.unsure || {}) };
+        [...Object.keys(q.flight.sent), ...q.flight.creates, ...q.flight.removes].forEach((id) => { unsure[id] = true; });
+      }
+      return { ...q, fields, sizes, removes: {}, flight: null, failures: 0, retried: {}, unsure,
         stopped: q.stopped && q.stopped.kind === "tenant" ? q.stopped : null, flush: false, firstAt: null, lastAt: null };
     }
     case "refresh": {
@@ -3702,19 +3747,23 @@ function ssPgQueue(q, ev) {
       // anything pending, in flight or red KEEPS ITS VERSION, so the server's checks still judge
       // its edits; its boxes show the new values except those in flight, and an unsent edit that
       // started from a value that is no longer there turns red at once and is never sent.
+      // A discarded call's sizes (`unsure`) are settled by this read; if one of them moved, part of
+      // what was discarded had landed, and the status line says so.
       if (e.okAt !== q.oks) return q.reread ? q : { ...q, reread: true };
       const fresh = e.sizes || {};
       const sizes = {};
       const changed = {};
       let fields = q.fields;
+      const moved = (was, t) => ["price", "active", ...Object.keys({ ...(was.cells || {}), ...(t.cells || {}) }).map((k) => "c:" + k)]
+        .filter((f) => !ssPgSame(ssPgVal(was, f), ssPgVal(t, f)));
+      const landed = !!q.unsure && Object.keys(q.unsure).some((id) => q.sizes[id] && fresh[id] && moved(q.sizes[id], fresh[id]).length > 0);
       Object.keys(fresh).forEach((id) => {
         const was = q.sizes[id], t = fresh[id];
         const mine = q.fields[id];
         if (!mine && !(was && was.creating) && !q.removes[id]) {
           sizes[id] = t;
           if (was) {
-            const keys = ["price", "active", ...Object.keys({ ...(was.cells || {}), ...(t.cells || {}) }).map((k) => "c:" + k)];
-            const diff = keys.filter((f) => !ssPgSame(ssPgVal(was, f), ssPgVal(t, f)));
+            const diff = moved(was, t);
             if (diff.length) changed[id] = diff;
           }
           return;
@@ -3738,7 +3787,8 @@ function ssPgQueue(q, ev) {
       });
       // A size the read no longer has keeps its place only while something local hangs on it.
       Object.keys(q.sizes).forEach((id) => { if (!(id in sizes) && (q.fields[id] || q.sizes[id].creating || q.removes[id])) sizes[id] = q.sizes[id]; });
-      return timed({ ...q, sizes, fields, reread: false, flash: { n: q.oks, changed } }, false);
+      const note = landed ? { text: "Part of what you discarded had already saved. The table shows what's on file now." } : q.note;
+      return timed({ ...q, sizes, fields, reread: false, unsure: null, note, flash: { n: q.oks, changed } }, false);
     }
     case "columns": {
       // Columns that went away (archived in Options, in another tab): an unsent or red box in one is

@@ -389,7 +389,14 @@ function serve(db: Record<string, Row>, body: Any, opts: { rtp?: boolean; allowe
     for (const k of Object.keys(e.to.cells ?? {})) cells[k] = cur(k);
     return { id: e.id, status, version: row.version, row: rowOf(row), cells, ...(Object.keys(errs).length ? { cellErrors: errs } : {}) };
   });
-  return { ok: true, clientId: "test-barns", created, removed: [], results };
+  // Removes: a size never priced and with nothing included goes; one that exists nowhere is gone already.
+  const removed = (body.removes || []).map((id: string) => {
+    const r = db[id];
+    if (!r) return { id, status: "removed", gone: true };
+    if (r.price == null && !Object.keys(r.cells).length) { delete db[id]; return { id, status: "removed" }; }
+    return { id, status: "refused", reason: "Only a size that was never priced or edited can be removed. Untick Offered to hide it." };
+  });
+  return { ok: true, clientId: "test-barns", created, removed, results };
 }
 const copy = (db: Record<string, Row>) => JSON.parse(JSON.stringify(db)) as Record<string, Row>;
 const Q = (q: Any, ...events: Any[]) => events.reduce((s, e) => S.ssPgQueue(s, e), q);
@@ -692,6 +699,118 @@ Deno.test("queue: 401, an answer for another account, Discard, and an answer the
   const made = Q(start(db), { type: "create", id: Z, styleId: sid(1), width: 10, length: 16, at: 0 }, { type: "send" });
   const lost = Q(made, { type: "ok", n: made.flight.n, answer: { ok: true, created: [], removed: [], results: [] } });
   assertEquals([lost.sizes[Z], lost.note && lost.note.text], [undefined, "Couldn't add 10x16: the server didn't answer. Add it again."]);
+});
+
+// Review fixes (2026-10-31).
+Deno.test("queue: an answer that moves a box under the open editor turns the editor's commit red, and a colleague's value is never overwritten", () => {
+  const db = DB();
+  // Offered unticked goes out; the editor opens on Price showing $400.
+  let q = Q(start(db), commit(A, "active", false), { type: "send" });
+  const seen = S.ssPgVal(q.sizes[A], "price");
+  db[A].price = 450; db[A].version = nextV();   // a colleague, meanwhile
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) });
+  assertEquals(q.sizes[A].price, 450, "the conflict on Offered brought the colleague's price");
+  q = Q(q, { ...commit(A, "price", 500), seen });
+  assertEquals(field(q, A, "price"), { error: { kind: "conflict", typed: 500, server: 450, reason: null } });
+  assertEquals(S.ssPgErrorLine("Test Barn 10x12", { name: "Price", kind: "price" }, field(q, A, "price").error),
+    "Test Barn 10x12 · Price: changed elsewhere to $450 while you typed $500. Type it again if yours is right.");
+  let body;
+  [q, body] = roundTrip(q, db);
+  assertEquals(body.sizes.map((s: Any) => s.to), [{ active: false }], "only Offered's resend goes; the price is never sent");
+  assertEquals([db[A].price, db[A].active, S.ssPgBuildBatch(q)], [450, false, null]);
+  // Typing exactly what is there now is no change; typing again, the editor seeing $450, is an edit.
+  assertEquals(field(Q(q, { ...commit(A, "price", 450), seen }), A, "price"), undefined);
+  assertEquals(field(Q(q, { ...commit(A, "price", 500), seen: 450 }), A, "price").pending, { to: 500, from: 450, seq: 2 });
+});
+
+Deno.test("queue: the editor's own box moving with its own flight is not a conflict; its flight's red verdict is, and a refusal keeps its reason", () => {
+  // Opened over an in-flight 480 that lands, or comes back to be resent: an ordinary edit.
+  let db = DB();
+  let q = Q(start(db), commit(A, "price", 480), { type: "send" });
+  const seen = 480;   // the box shows the in-flight 480
+  const landed = Q(q, { type: "ok", n: q.flight.n, answer: serve(copy(db), q.flight.body) }, { ...commit(A, "price", 500), seen });
+  assertEquals(field(landed, A, "price"), { pending: { to: 500, from: 480, seq: 2 } });
+  db = DB();
+  q = Q(start(db), commit(A, "price", 480), { type: "send" });
+  db[A].cells.loft = 60; db[A].version = nextV();   // a colleague, on another box
+  const resent = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) }, { ...commit(A, "price", 500), seen });
+  assertEquals(field(resent, A, "price"), { pending: { to: 500, from: 400, seq: 2 } }, "from what is on file: nobody else touched it");
+  // The flight itself in conflict: the box shows the colleague's $4,950 now, so what was typed goes red.
+  db = DB();
+  q = Q(start(db), commit(A, "price", 480), { type: "send" });
+  db[A].price = 4950; db[A].version = nextV();
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) }, { ...commit(A, "price", 500), seen });
+  assertEquals(field(q, A, "price"), { error: { kind: "conflict", typed: 500, server: 4950, reason: null } });
+  assertEquals(S.ssPgBuildBatch(q), null);
+  // Refused while the editor was open: the server's reason stays.
+  db = DB();
+  q = Q(start(db), commit(A, "c:101", 2), { type: "send" });
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body, { allowed: ["loft"] }) }, { ...commit(A, "c:101", 3), seen: 2 });
+  assertEquals(field(q, A, "c:101"), { error: { kind: "refused", typed: 3, reason: "That option has no column in your sizes table" } });
+});
+
+Deno.test("queue: a resend keeps a box marked not valid during the flight red; a follow-up folds into the resend from what is on file", () => {
+  // 480 out, then "abc" typed over the same box; a colleague changes another box: conflict, resend.
+  let db = DB();
+  const bad = { type: "invalid", sizeId: A, f: "price", typed: "abc", reason: "A price is a number, 0 or more" };
+  let q = Q(start(db), commit(A, "price", 480), { type: "send" }, bad);
+  db[A].cells.loft = 60; db[A].version = nextV();
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) });
+  assertEquals(field(q, A, "price"), { pending: { to: 480, from: 400, seq: 1 }, error: { kind: "invalid", typed: "abc", reason: "A price is a number, 0 or more" } },
+    "the in-flight 480 goes again (as it would have landed), and the red 'abc' stays");
+  let body;
+  [q, body] = roundTrip(q, db);
+  assertEquals(body.sizes[0].to, { price: 480 });
+  assertEquals([db[A].price, field(q, A, "price"), S.ssPgCount(q).red], [480, { error: { kind: "invalid", typed: "abc", reason: "A price is a number, 0 or more" } }, 1]);
+  // 480 out, 490 typed after it; the colleague's change is on another box: one resend of 490, from 400.
+  db = DB();
+  q = Q(start(db), commit(A, "price", 480), { type: "send" }, commit(A, "price", 490));
+  db[A].cells.loft = 60; db[A].version = nextV();
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) });
+  assertEquals(field(q, A, "price"), { pending: { to: 490, from: 400, seq: 2 } });
+  [q, body] = roundTrip(q, db);
+  assertEquals([body.sizes[0].from, body.sizes[0].to, db[A].price, db[A].cells.loft, S.ssPgCount(q).red], [{ price: 400 }, { price: 490 }, 490, 60, 0]);
+});
+
+Deno.test("queue: removing a size whose create has not gone drops it here; one whose create is out goes after the answer; never both in one call", () => {
+  const zero = { pending: 0, inflight: 0, red: 0, creating: 0, removing: 0 };
+  const db = DB();
+  const make = { type: "create", id: Z, styleId: sid(1), width: 10, length: 16, at: 0 };
+  let q = Q(start(db), make, commit(Z, "price", 3000), { type: "remove", id: Z });
+  assertEquals([q.sizes[Z], q.fields[Z], S.ssPgBuildBatch(q), S.ssPgCount(q)], [undefined, undefined, null, zero], "never added: nothing to send");
+  q = Q(start(db), make, { type: "send" }, { type: "remove", id: Z });
+  assertEquals(q.removes, { [Z]: "pending" });
+  let body;
+  q = Q(q, { type: "ok", n: q.flight.n, answer: serve(db, q.flight.body) });
+  [q, body] = roundTrip(q, db);   // validatePayload accepts it (roundTrip asserts)
+  assertEquals([body.creates, body.removes], [[], [Z]]);
+  assertEquals([q.sizes[Z], db[Z], S.ssPgCount(q)], [undefined, undefined, zero]);
+  // Every call a create-then-remove can build passes the server's shape check.
+  q = Q(start(db), make, { type: "create", id: E, styleId: sid(1), width: 12, length: 16, at: 0 }, { type: "remove", id: Z }, { type: "remove", id: A });
+  assert(validatePayload(S.ssPgBuildBatch(q).body).ok, JSON.stringify(validatePayload(S.ssPgBuildBatch(q).body)));
+});
+
+Deno.test("queue: Discard after a call that may have landed is unsure until a fresh read, which shows what is on file and says part had saved", () => {
+  const db = DB();
+  let q = Q(start(db), commit(A, "price", 480), { type: "send" });
+  serve(db, q.flight.body);   // it landed; every answer was lost
+  for (let i = 0; i < 5; i++) q = Q(q, { type: "fail", n: q.flight.n, kind: "transport" });
+  q = Q(q, { type: "discard" });
+  assertEquals([q.unsure, q.sizes[A].price, q.flight, S.ssPgCount(q).pending], [{ [A]: true }, 400, null, 0]);
+  assertEquals(Q(start(db), commit(B, "price", 1), { type: "discard" }).unsure, null, "edits that never went out: nothing to be unsure of");
+  q = Q(q, { type: "refresh", okAt: q.oks, sizes: copy(db) });
+  assertEquals([q.unsure, q.sizes[A].price, q.sizes[A].version], [null, 480, db[A].version]);
+  assertEquals(q.note, { text: "Part of what you discarded had already saved. The table shows what's on file now." });
+  // Typing 400 back now sends it, from the 480 on file.
+  let body;
+  [q, body] = roundTrip(Q(q, commit(A, "price", 400)), db);
+  assertEquals([body.sizes[0].from, db[A].price], [{ price: 480 }, 400]);
+  // Nothing had landed: the read settles it without a note.
+  const db2 = DB();
+  let r = Q(start(db2), commit(A, "price", 480), { type: "send" });
+  for (let i = 0; i < 5; i++) r = Q(r, { type: "fail", n: r.flight.n, kind: "transport" });
+  r = Q(r, { type: "discard" }, { type: "refresh", okAt: 0, sizes: copy(db2) });
+  assertEquals([r.unsure, r.note, r.sizes[A].price], [null, null, 400]);
 });
 
 Deno.test("queue: the 50-entry and 2,500-box caps split work into calls, and every box goes exactly once", () => {
