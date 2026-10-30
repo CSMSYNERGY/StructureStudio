@@ -435,14 +435,22 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    quarter clockwise, second line to the left. Bottom-to-top instead is transform:rotate(180deg). */
 .ss-pg-vh{display:inline-block;vertical-align:top;writing-mode:vertical-rl;white-space:normal;line-height:15px;max-inline-size:calc(var(--ss-pg-hh,64px) - 16px);font-size:12px;font-weight:700;color:#1E293B;text-align:start}
 .ss-pg-grid .ss-pg-rtp{background:#F1F5F9;color:#64748B}
+/* A price Real-Time Pricing sets is grey AND locked (plan 3.13: a shape as well as a colour). The
+   lock sits in the cell's top-left corner, out of the right-aligned number's way; the sticky cell is
+   its box, and below 700 px, where the price is no longer frozen, position:relative keeps it so. */
+.ss-pg-grid tbody td.ss-pg-rtp::before{content:"\1F512";position:absolute;left:2px;top:2px;font-size:9px;line-height:1;opacity:.75}
 .ss-pg-grid td.ss-pg-dis{background:#F8FAFC}
 /* Hidden from the designer: 55% text, not opacity, because a frozen cell must stay opaque over
    whatever scrolls under it. */
 .ss-pg-grid tr.ss-pg-hid td{color:rgba(30,41,59,.55)}
 .ss-pg-grid td.ss-pg-act{box-shadow:inset 0 0 0 2px #3D3672}
-.ss-pg-grid .ss-pg-band td{background:#F1F5F9;height:30px;padding:0;text-align:left;border-bottom:1px solid #CBD5E1}
-.ss-pg-grid .ss-pg-note-row td{height:30px;padding:0;text-align:left;color:#64748B;font-style:italic}
-.ss-pg-grid .ss-pg-hs td{background:#F8FAFC;height:32px;padding:0;text-align:left}
+/* The full-width rows (a style's band, a placeholder, "Hidden styles") keep their words at the left
+   edge while the grid scrolls sideways: .ss-pg-bandin is sticky, and that needs a cell that is NOT a
+   scroll container. overflow:hidden (every other cell's) makes the cell one, and the words then
+   stick inside it and scroll away with it. */
+.ss-pg-grid .ss-pg-band td{background:#F1F5F9;height:30px;padding:0;text-align:left;border-bottom:1px solid #CBD5E1;overflow:visible}
+.ss-pg-grid .ss-pg-note-row td{height:30px;padding:0;text-align:left;color:#64748B;font-style:italic;overflow:visible}
+.ss-pg-grid .ss-pg-hs td{background:#F8FAFC;height:32px;padding:0;text-align:left;overflow:visible}
 .ss-pg-bandin{position:sticky;left:0;display:inline-flex;align-items:center;gap:10px;padding:0 10px;max-width:calc(100vw - 40px);white-space:nowrap;font-size:13px}
 .ss-pg-bandin span{font-size:12px;color:#64748B;font-weight:600}
 .ss-pg-hs button{font:inherit;font-size:12.5px;font-weight:700;color:#475569;background:none;border:none;cursor:pointer;padding:6px 0}
@@ -453,6 +461,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   .ss-pg-readout{order:9;flex-basis:100%;text-align:left}
   .ss-pg-co{max-width:120px}
   .ss-pg-grid td.ss-pg-f1,.ss-pg-grid td.ss-pg-f2{position:static}
+  .ss-pg-grid td.ss-pg-f1.ss-pg-rtp{position:relative;left:auto;z-index:auto}
   .ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{left:auto;z-index:5}
   .ss-pg-grid .ss-pg-corner{left:auto}
   .ss-pg-names th{height:90px}
@@ -510,7 +519,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=cbeebde3"></script>
-<script defer src="/portal.app.compiled.js?v=084ed681" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=d8c5eaa0" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

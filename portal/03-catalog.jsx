@@ -2958,14 +2958,17 @@ function ssPgFmtPrice(v) {
 // The table's model: option columns, shown and hidden styles with their sizes in order, every cell's
 // text, and the truncation guard. `cat` is the catalog answer, `table` the size_table answer.
 //
-// THE GUARD (plan 4.2) says why the page must not trust this read, or null:
+// THE GUARD (plan 4.2) says why the page must not trust this read, or null. First match wins:
+//   "count"             a list is shorter or longer than its exact count (counts missing counts too).
 //   "cap"               catalog's items or fixtures reached 1000 rows: those reads are NOT paged, and
 //                       PostgREST stops at 1000 without an error, so columns may be missing.
-//   "count"             a list is shorter or longer than its exact count (counts missing counts too).
 //   "orphan_inclusion"  an inclusion names a size that is not in `sizes`.
 //   "orphan_size"       a size names a style that is not in `styles`.
 // All but "cap" can be a save landing between the reads, so the page reads once more before it
-// believes them. A tripped guard opens the table view-only, and the Excel template refuses to build.
+// believes them. A tripped guard opens the table view-only. The Excel template refuses on "count"
+// alone (plan 4.8), which is why it is checked first: a row cut off a list goes out in the sheet as
+// 0, and the importer deletes it. The others are safe for the sheet: the importer writes only the
+// columns and sizes it is given, so a missing column or an orphan row is left as it is.
 //
 // Cells: an option box shows the quantity when the row says included (Number(qty) || 1, the
 // template's own rule) and is empty otherwise (Carolyn Q2: empty, not 0). A size is HIDDEN from the
@@ -2985,8 +2988,8 @@ function ssPgModel(cat, table) {
   const styleIds = new Set(styles.map((s) => s.id));
   const sizeIds = new Set(sizes.map((z) => z.id));
   let guard = null;
-  if (items.length >= 1000 || fixtures.length >= 1000) guard = "cap";
-  else if (Number(counts.sizes) !== sizes.length || Number(counts.inclusions) !== incs.length) guard = "count";
+  if (Number(counts.sizes) !== sizes.length || Number(counts.inclusions) !== incs.length) guard = "count";
+  else if (items.length >= 1000 || fixtures.length >= 1000) guard = "cap";
   else if (incs.some((x) => !sizeIds.has(x.size_id))) guard = "orphan_inclusion";
   else if (sizes.some((z) => !styleIds.has(z.style_id))) guard = "orphan_size";
 
@@ -3072,6 +3075,23 @@ function ssPgMove(order, ncols, at, key, shift) {
       return c < ncols - 1 ? { sizeId: order[i], col: c + 1 } : (i < last ? { sizeId: order[i + 1], col: 0 } : null);
     default: return null;
   }
+}
+
+// Where the active cell goes when the rows under it change: "Show hidden sizes" folded its size
+// away, or a Reload came back without it. The same cell while its size is still drawn (the column
+// clamped if columns went away); otherwise the nearest size that is, looking down `prev` (the order
+// before the change) first, then up, in the same column; null when none is. So the next arrow key
+// carries on from where the builder was, not from the top-left of the grid.
+function ssPgReanchor(prev, order, at, ncols) {
+  if (!at || !order || !order.length) return null;
+  const col = Math.max(0, Math.min((ncols > 0 ? ncols : 1) - 1, Number(at.col) || 0));
+  if (order.indexOf(at.sizeId) >= 0) return col === at.col ? at : { sizeId: at.sizeId, col };
+  const drawn = new Set(order);
+  const was = (prev || []).indexOf(at.sizeId);
+  if (was < 0) return null;
+  for (let i = was + 1; i < prev.length; i++) if (drawn.has(prev[i])) return { sizeId: prev[i], col };
+  for (let i = was - 1; i >= 0; i--) if (drawn.has(prev[i])) return { sizeId: prev[i], col };
+  return null;
 }
 
 // How tall the option headers must be so that NO name is cut (plan 3.4). Each name stands on end
@@ -3310,8 +3330,10 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     // table may have changed numbers since, in another tab. A sheet built from the old copy puts
     // those numbers back on its next upload, because the importer writes every box it is given.
     // size_table also reads every list in pages: catalog's own inclusion read stops at 1000 rows, and
-    // a row cut off there went out as 0, which the importer then DELETED. A read that does not add
-    // up (ssPgModel's guard) gets one more try, then the download is refused rather than built.
+    // a row cut off there went out as 0, which the importer then DELETED. A list that does not add
+    // up to its count (ssPgModel's "count") gets one more try, then the download is refused rather
+    // than built (plan 4.8). Only that: the table's other guards ("cap", an orphan row) cannot put
+    // a false 0 in the sheet, and the table sends a builder who trips them here, to Excel.
     // The view-as target is read in the click's tick, like every other write path here.
     const target = ssTargetClientId;
     setDlBusy(true); setXlMsg(null);
@@ -3319,7 +3341,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     for (let attempt = 0; attempt < 2 && !fresh; attempt++) {
       const r = await ssPgFetch(target, cat.clientId || null);
       if (!r.ok) { setXlMsg({ err: `Couldn't read your catalog for the template: ${r.error}` }); setDlBusy(false); return; }
-      if (!ssPgModel(r.cat, r.table).guard) fresh = r;
+      if (ssPgModel(r.cat, r.table).guard !== "count") fresh = r;
     }
     if (!fresh) { setXlMsg({ err: "Couldn't read your whole catalog just now. Try again in a minute." }); setDlBusy(false); return; }
     const { sections, headers, rows } = ssPgTemplate(fresh.cat, fresh.table);
@@ -9585,8 +9607,8 @@ Any ${word} colour not shown here will be removed from their account. Their othe
 // 2026-10-30.md; this is its Phase 2, the shell and the read-only grid. Editing, the save queue,
 // paste and adding sizes come in later phases, on the seams marked "Phase 3" / "Phase 4" below.
 //
-// The pure half (ssPgModel, ssPgRows, ssPgMove, ssPgHeaderHeight, ssPgTemplate, ssPgFmtPrice) sits
-// above PricingCsv, where pricingTableHelpers_test.ts lifts it from this file.
+// The pure half (ssPgModel, ssPgRows, ssPgMove, ssPgReanchor, ssPgHeaderHeight, ssPgTemplate, ssPgFmtPrice)
+// sits above PricingCsv, where pricingTableHelpers_test.ts lifts it from this file.
 //
 // SPEED (plan 3.5). Cells are plain <td> text, not inputs. Each size row is a PgRow (React.memo)
 // whose props are primitives, or arrays the model built once; the whole <thead> and <tbody> are
@@ -9729,6 +9751,24 @@ function PricingTableGate({ clientId, viewing, isSupportOp, supportCheckGaveUp, 
     try { prev = document.title; document.title = `Sizes & prices · ${shown || ""} · Structure Studio`; } catch (_e) { /* no document */ }
     return () => { try { if (prev != null) document.title = prev; } catch (_e) { /* no document */ } };
   }, [shown]);
+  // ?as= names the person in the view-only message (plan 5), but this tab has only their id: a cold
+  // load never reads `as` back into the shell. So the name comes from the people list the account
+  // switcher reads (operator-portal list_users), once the hold lets go. Until it answers, or if it
+  // is refused, the message says "a team member", as the shell's own banner does.
+  const [asName, setAsName] = useState(null);
+  useEffect(() => {
+    if (held || !v || !params.as) return undefined;
+    let gone = false;
+    (async () => {
+      try {
+        const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId: v } });
+        if (gone || error || !data || data.error || !Array.isArray(data.users)) return;
+        const u = data.users.find((x) => x && x.userId === params.as);
+        if (u && (u.fullName || u.email)) setAsName(String(u.fullName || u.email));
+      } catch (_e) { /* the message keeps "a team member" */ }
+    })();
+    return () => { gone = true; };
+  }, [held, v, params.as]);
 
   if (held) {
     return (
@@ -9754,7 +9794,7 @@ function PricingTableGate({ clientId, viewing, isSupportOp, supportCheckGaveUp, 
   const canEdit = !!canAdmin || ssCanWrite(access, "settings_structures");
   if (!canRead) return <PgMessage onNav={onNav}>You don't have access to Sheds on this account.</PgMessage>;
   const viewOnly = params.as
-    ? { as: true, short: "viewing as a team member", long: "You're viewing as a team member. The table is view-only here; open it from the account without “view as” to edit." }
+    ? { as: true, short: "viewing as a team member", long: `You're viewing as ${asName || "a team member"}. The table is view-only here; open it from the account without “view as” to edit.` }
     : !canEdit
       ? { as: false, short: "no edit access", long: "You can see Sheds on this account but not change it. Ask an owner or admin for edit access to Sheds." }
       : null;
@@ -9794,6 +9834,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const jumpRef = useRef(null);
   const styleDoneRef = useRef(false);
   const measuredRef = useRef(null);
+  const drawnRef = useRef(null);                   // the size order last drawn (ssPgReanchor)
   activeRef.current = active;
 
   const model = load.phase === "ready" ? load.model : null;
@@ -9865,6 +9906,20 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const cut = spans.some((sp) => sp.getBoundingClientRect().width > SS_PG_LINE_H * 2 + 1 || sp.scrollHeight > sp.clientHeight + 1);
     if (cut && headH < SS_PG_HEAD_MAX) setHeadH(Math.min(SS_PG_HEAD_MAX, headH + 8));
   }, [model, narrow, headH]);
+
+  // The active cell's size folded away ("Show hidden sizes" off) or did not come back on a Reload:
+  // the cursor moves to the nearest size still drawn (ssPgReanchor), before paint, so the readout
+  // keeps a cell and the next arrow key starts there. While a read is out there are no rows at all,
+  // so the cursor and the order it was on are kept until the rows return.
+  React.useLayoutEffect(() => {
+    if (!model) return;
+    const prev = drawnRef.current;
+    drawnRef.current = order;
+    const a = activeRef.current;
+    if (!a || !prev || prev === order) return;
+    const next = ssPgReanchor(prev, order, a, ncols);
+    if (next !== a) setActive(next);
+  }, [order]);
 
   // The active cell: its ring and aria-selected go on that one <td>, so a move re-renders no row.
   // A keyboard move scrolls it into view; the box's scroll-padding keeps it clear of the frozen
@@ -9996,8 +10051,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     : tooBig ? { tone: "grey", text: "View only: catalog too big", title: SS_PG_TOO_BIG }
     : { tone: "green", text: `All changes saved · ${time}` };
   // Phase 3: no editor, no add strip and no paste unless this is true (plan 3.16). RTP locks the
-  // price column alone (model.rtpOn).
-  const editable = load.phase === "ready" && !viewOnly && !tooBig;
+  // price column alone (model.rtpOn). `readOnly` is every reason the badge says "View only", and
+  // the operator strip follows it too, so the page never says both "View only" and "Changes are live".
+  const readOnly = !!viewOnly || tooBig;
+  const editable = load.phase === "ready" && !readOnly;
   const noStyles = !!model && model.styles.length === 0;
   const noCols = !!model && model.cols.length === 0;
   const choices = model ? [...model.styles, ...model.hiddenStyles] : [];
@@ -10028,7 +10085,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       {/* The chromeless page has no top bar, so it says for itself whose account this is. */}
       {operatorView && (
         <div className="ss-pg-op" role="note">
-          {viewOnly && viewOnly.as
+          {readOnly
             ? `Viewing ${companyName} as operator. This table is view-only.`
             : `Editing ${companyName} as operator. Changes are live.`}
         </div>
@@ -10116,12 +10173,15 @@ const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, o
 
 // One size (plan 3.5). Primitive props only, plus `values`, which the model built once, so a row
 // re-renders only when its own size changes. Size, Price and Offered are frozen (portal.html).
+// The price is also the cell's title: "$123,456.78", or three decimals shown as stored, is wider
+// than the 76 px column and ends in an ellipsis, and the title is where it reads whole. Under
+// Real-Time Pricing the cell is grey with a lock (portal.html), and the title says why.
 const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp }) {
   return (
     <tr role="row" aria-rowindex={rowIndex} data-s={sizeId} className={hidden ? "ss-pg-hid" : undefined}>
       <td role="gridcell" aria-colindex={1} data-c={0} className="ss-pg-f0 ss-pg-size" title={title || undefined}>{label}</td>
       <td role="gridcell" aria-colindex={2} data-c={1} className={"ss-pg-f1 ss-pg-price" + (rtp ? " ss-pg-rtp" : "")}
-        title={rtp ? SS_PG_RTP : undefined}>{priceText}</td>
+        title={rtp ? (priceText ? `${priceText} · ${SS_PG_RTP}` : SS_PG_RTP) : (priceText || undefined)}>{priceText}</td>
       <td role="gridcell" aria-colindex={3} data-c={2} className={"ss-pg-f2 ss-pg-off" + (noPrice ? " ss-pg-dis" : "")}
         title={noPrice ? "Add a price to offer it" : offered ? "Offered in your designer" : "Not offered"}>{offered ? "✓" : ""}</td>
       {values.map((v, i) => <td key={i} role="gridcell" aria-colindex={4 + i} data-c={3 + i}>{v}</td>)}

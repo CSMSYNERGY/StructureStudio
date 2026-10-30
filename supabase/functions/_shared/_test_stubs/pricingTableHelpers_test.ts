@@ -81,10 +81,11 @@ Deno.test("ssPricingColumns: empty sections drop out, and a missing catalog give
 // names are the other helpers lifted with it.
 const PURE = ["function fmtFtIn(inches) {", "function ssPricingColumns(cat) {", "function ssPgFmtPrice(v) {",
   "function ssPgModel(cat, table) {", "function ssPgRows(model, opts) {", "function ssPgMove(order, ncols, at, key, shift) {",
+  "function ssPgReanchor(prev, order, at, ncols) {",
   "function ssPgHeaderHeight(labels, measure, pad) {", "function ssPgTemplate(cat, table) {"].map(lift).join("\n");
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const H = new Function(`${PURE}; return { ssPgFmtPrice, ssPgModel, ssPgRows, ssPgMove, ssPgHeaderHeight, ssPgTemplate };`)() as Record<string, (...a: Any[]) => Any>;
+const H = new Function(`${PURE}; return { ssPgFmtPrice, ssPgModel, ssPgRows, ssPgMove, ssPgReanchor, ssPgHeaderHeight, ssPgTemplate };`)() as Record<string, (...a: Any[]) => Any>;
 
 // Made-up ids and names only: this repo is public.
 const sid = (n: number) => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, "0")}`;
@@ -180,6 +181,19 @@ Deno.test("ssPgModel: the truncation guard trips on a count mismatch, an orphan,
   assertEquals(H.ssPgModel({ ...TCAT, fixtures: Array.from({ length: 1000 }, (_, i) => ({ id: i, name: "F", category: "door", archived: true })) }, TABLE).guard, "cap");
 });
 
+Deno.test("ssPgModel: a count that does not add up is reported first, even past the 1000-row cap", () => {
+  // The Excel template refuses on "count" alone (plan 4.8): a row cut off a list would go out as 0
+  // and the importer would delete it. So a capped catalog must not hide a short list behind "cap".
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `k${i}`, label: `Item ${i}` }));
+  const short = { ...TABLE, counts: { sizes: SIZES.length, inclusions: INCS.length + 1 } };
+  assertEquals(H.ssPgModel({ ...TCAT, items: many(1000) }, short).guard, "count");
+  const orphanInc = [...INCS, { size_id: zid(99), item_key: "loft", included: true, qty: 1 }];
+  assertEquals(H.ssPgModel(TCAT, { ...TABLE, inclusions: orphanInc, counts: { sizes: SIZES.length, inclusions: orphanInc.length + 1 } }).guard, "count");
+  // Past the cap, with every list adding up: "cap", which the template builds anyway (the importer
+  // never touches a column the sheet does not carry); the table still opens view-only on it.
+  assertEquals(H.ssPgModel({ ...TCAT, items: many(1000) }, TABLE).guard, "cap");
+});
+
 Deno.test("ssPgRows: bands, sizes, placeholders, folding hidden sizes, and the hidden-styles section", () => {
   const m = H.ssPgModel(TCAT, TABLE);
   const shape = (rows: Any[]) => rows.map((r) => r.kind === "size" ? r.size.label : r.kind === "band" ? `[${r.style.label} ${r.total}/${r.hidden}/${r.folded}]` : r.kind === "empty" ? `(${r.text})` : `{hidden ${r.count} ${r.open}}`);
@@ -212,6 +226,26 @@ Deno.test("ssPgMove: arrows clamp at the edges, Home/End, Tab wraps rows and let
   assertEquals(mv({ sizeId: "gone", col: 3 }, "ArrowRight"), { sizeId: "a", col: 1 }, "a folded-away cell restarts at the first");
   assertEquals(mv({ sizeId: "b", col: 2 }, "Enter"), null, "not a move: the browser keeps the key");
   assertEquals(H.ssPgMove([], 5, null, "ArrowDown", false), null);
+});
+
+Deno.test("ssPgReanchor: a folded-away or vanished size hands the cursor to its nearest drawn neighbour, same column", () => {
+  const prev = ["a", "b", "c", "d", "e"];
+  const at = { sizeId: "c", col: 4 };
+  // Still drawn: the very same object back, so the page sets nothing.
+  assertEquals(H.ssPgReanchor(prev, prev, at, 9) === at, true);
+  // Folded away ("Show hidden sizes" off): the next drawn size below it, then above it.
+  assertEquals(H.ssPgReanchor(prev, ["a", "b", "e"], at, 9), { sizeId: "e", col: 4 });
+  assertEquals(H.ssPgReanchor(prev, ["a", "b"], at, 9), { sizeId: "b", col: 4 });
+  // Gone on a Reload along with its neighbours: the first survivor below it in the old order.
+  assertEquals(H.ssPgReanchor(prev, ["a", "e", "x"], { sizeId: "c", col: 1 }, 9), { sizeId: "e", col: 1 });
+  // Columns went away on the same Reload: the column is clamped.
+  assertEquals(H.ssPgReanchor(prev, ["a", "b", "c"], at, 4), { sizeId: "c", col: 3 });
+  assertEquals(H.ssPgReanchor(prev, ["a", "e"], at, 4), { sizeId: "e", col: 3 });
+  // Nothing drawn, no cursor, or a cursor the old order never had: no cursor.
+  assertEquals(H.ssPgReanchor(prev, [], at, 9), null);
+  assertEquals(H.ssPgReanchor(prev, ["a"], null, 9), null);
+  assertEquals(H.ssPgReanchor(prev, ["a"], { sizeId: "zz", col: 1 }, 9), null);
+  assertEquals(H.ssPgReanchor(null, ["a"], at, 9), null);
 });
 
 Deno.test("ssPgHeaderHeight: the longer half at the best split, the longest name, plus padding", () => {

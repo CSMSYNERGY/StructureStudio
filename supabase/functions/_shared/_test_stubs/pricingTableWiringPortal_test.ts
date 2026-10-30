@@ -106,6 +106,20 @@ Deno.test("the gate holds on the ?open= rule, times out at 10 s without falling 
   assert(gate.includes(`const canRead = !!canAdmin || ssCanRead(access, "settings_structures");`));
   assert(gate.includes(`const canEdit = !!canAdmin || ssCanWrite(access, "settings_structures");`));
   assert(/const viewOnly = params\.as\s*\n\s*\? \{ as: true,/.test(gate), "?as= must open view-only, whatever the rights");
+  // …naming the person (plan 5) from the switcher's people list once the hold lets go; this tab has
+  // only their id. "a team member" until that answers, or if it is refused.
+  const named = between(gate, "const [asName, setAsName] = useState(null);", "if (held) {", "the ?as= name lookup");
+  assert(named.includes("if (held || !v || !params.as) return undefined;"), "the name is read for the viewed account only, after the hold");
+  assert(named.includes(`sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId: v } })`));
+  assert(gate.includes("long: `You're viewing as ${asName || \"a team member\"}. The table is view-only here;"), "the view-only message names the person");
+});
+
+Deno.test("the operator strip says view-only whenever the badge does, never 'Changes are live' beside it", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  assert(page.includes("const readOnly = !!viewOnly || tooBig;"), "readOnly is every reason the badge says View only");
+  assert(page.includes(`const editable = load.phase === "ready" && !readOnly;`));
+  const strip = between(page, `<div className="ss-pg-op" role="note">`, "</div>", "the operator strip");
+  assert(/\{readOnly\s*\n\s*\? `Viewing \$\{companyName\} as operator\. This table is view-only\.`/.test(strip), strip);
 });
 
 // ── 4. The address, and the anchors that open it ─────────────────────────────────────────────
@@ -137,6 +151,9 @@ Deno.test("the Sheds card and Add style's answer open the table as real anchors 
   const dl = between(card, "const downloadTemplate = async () => {", "const onUpload = async (file) => {", "downloadTemplate");
   assert(dl.includes("await ssPgFetch(target, cat.clientId || null)") && dl.includes("ssPgModel(r.cat, r.table).guard") && dl.includes("ssPgTemplate(fresh.cat, fresh.table)"));
   assert(!/cat\.(sizes|inclusions)/.test(dl), "the template reads sizes or inclusions off the mounted catalog again");
+  // Only a list that does not add up refuses the sheet (plan 4.8). "cap" and an orphan row build it:
+  // the table sends a builder who trips them to Excel, so Excel must not refuse them too.
+  assert(dl.includes(`if (ssPgModel(r.cat, r.table).guard !== "count") fresh = r;`), "the template refuses on a guard other than \"count\" again");
 });
 
 // ── 5. The page's reads ──────────────────────────────────────────────────────────────────────

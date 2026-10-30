@@ -5,28 +5,33 @@
 //      real anchor to /settings/sheds-table (target=_blank, rel=noopener); a "Prefer Excel?" row holds
 //      Download and Upload; the warning sentence is in the instructions. An upload's answer draws
 //      UNDER the buttons. Download reads catalog + size_table fresh (targetClientId on both bodies)
-//      and the sheet is built from size_table; when the counts never add up it is refused. Add style's
-//      answer links to the table with ?style=<new id>.
+//      and the sheet is built from size_table; when the counts never add up it is refused, but past
+//      the 1000-row cap or with an orphan row it is still built. Add style's answer links to the table
+//      with ?style=<new id>.
 //   B  THE NEW TAB: the link opens a tab whose cold load renders the table with no page error (no
 //      React #310): its title, Back link, legend, three style bands, every size row; ?style= jumps to
 //      that style and leaves the address.
 //   C  HEADERS AT 1280 AND 1440: no option name is cut (each standing name fits its box in two lines
 //      at most, and no header cell overflows), and a two-line name reads in order when the head is
-//      tilted (its first line is the RIGHT one); "480" and "1200" fit a 44 px box; the header and the
-//      frozen Size/Price/Offered stay pinned on both scroll axes; the page itself never scrolls. Run on
-//      the 25-column fixture and again on the plan's 210 sizes x 38 columns. A header screenshot is
-//      kept at each width (SS_PG_HEADER_SHOTS names a folder for them).
+//      tilted (its first line is the RIGHT one); "480" and "1200" fit a 44 px box, and a price wider
+//      than its box reads whole in its title; the header, the frozen Size/Price/Offered and a style's
+//      name stay pinned on both scroll axes; the page itself never scrolls. Run on the 25-column
+//      fixture and again on the plan's 210 sizes x 38 columns. A header screenshot is kept at each
+//      width (SS_PG_HEADER_SHOTS names a folder for them).
 //   D  THE GRID: the active-column readout follows a click and the arrows; aria-selected moves;
-//      "Show hidden sizes" folds hidden rows and is remembered; Jump to style scrolls the band under
-//      the header; ARIA roles and counts.
+//      "Show hidden sizes" folds hidden rows and is remembered, and a cursor on a folded size moves to
+//      the next size still drawn; Jump to style scrolls the band under the header; ARIA roles and counts.
 //   E  STATES: a slow size_table shows the skeleton and "Loading…"; a failed one says "Couldn't load
 //      your sizes." and Retry recovers; no styles says so; no option columns shows the Options box;
-//      a count that never adds up reads twice and opens view-only "too big".
+//      a count that never adds up reads twice and opens view-only "too big"; Real-Time Pricing greys
+//      every price and locks it, at 1440 and at 390 px.
 //   F  VIEW-AS: an operator's cold ?view=<builder> load says "Opening <builder>…" and reads nothing
 //      while the operator check is out, then makes every table read for that builder (targetClientId
-//      on every body) and draws the red operator strip with the builder's name; ?as= opens view-only; a
-//      non-operator holding ?view= is told after 10 s that the account could not be opened, and no
-//      table read ever goes out; a view-only access map opens view-only; a billing lock shows the lock.
+//      on every body) and draws the red operator strip with the builder's name; ?as= opens view-only,
+//      naming the person (or "a team member" when the people list is refused); a view-as page that is
+//      view-only for another reason says so in the strip too; a non-operator holding ?view= is told
+//      after 10 s that the account could not be opened, and no table read ever goes out; a view-only
+//      access map opens view-only; a billing lock shows the lock.
 //   G  NARROW (390 px): the page does not scroll sideways, the header is at most 90 px, at least 8 rows
 //      show.
 //   T  TIMING (always printed, never a failure): first render and arrow-key time at 1x (210 sizes x 38
@@ -80,6 +85,8 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 const WEAR = "00000000-0000-4000-8000-0000000000b2";   // a made-up team member an operator wears
+const WEAR_NAME = "Sam Example";
+const WIDE_PRICE = 123456.78;                         // "$123,456.78": wider than the 76 px Price box
 const LONG = "Double Door with Transom and Kickplate (6'x7')";   // 46 characters with its size
 
 const hex = (n, w = 12) => n.toString(16).padStart(w, "0");
@@ -120,7 +127,7 @@ const OPTION_KEYS = (cat) => {
 };
 
 // Styles and sizes. `scale` multiplies the sizes per style (the timing fixtures).
-function tableFor(clientId, cat, { styles = 3, perStyle = null, hiddenStyle = false, noStyles = false } = {}) {
+function tableFor(clientId, cat, { styles = 3, perStyle = null, hiddenStyle = false, noStyles = false, rtpOn = false } = {}) {
   if (noStyles) return { ok: true, clientId, rtpOn: false, styles: [], sizes: [], inclusions: [], counts: { sizes: 0, inclusions: 0 } };
   const NAMES = ["Test Barn", "Test Lofted Barn", "Test Utility Shed"];
   const st = [];
@@ -137,7 +144,7 @@ function tableFor(clientId, cat, { styles = 3, perStyle = null, hiddenStyle = fa
       const w = ws[k % ws.length], l = ls[Math.floor(k / ws.length) % ls.length] + 4 * Math.floor(k / (ws.length * ls.length));
       n++;
       const unpriced = n % 11 === 0, untick = n % 13 === 0;
-      const price = unpriced ? null : 1200 + w * l * 9 + (n % 3 === 0 ? 0.5 : 0);
+      const price = unpriced ? null : n === 2 ? WIDE_PRICE : 1200 + w * l * 9 + (n % 3 === 0 ? 0.5 : 0);
       const id = uid("7", n);
       sizes.push({ id, style_id: s.id, label: `${w}x${l}`, width_ft: w, length_ft: l, base_price: price, active: !unpriced && !untick,
         sort_order: k, created_at: "2026-10-01T00:00:00.000001+00:00", updated_at: `2026-10-20T00:00:00.${String(100000 + n)}+00:00` });
@@ -148,7 +155,7 @@ function tableFor(clientId, cat, { styles = 3, perStyle = null, hiddenStyle = fa
       if (n % 7 === 0) incs.push({ size_id: id, item_key: "workbench", included: false, qty: 2 });
     }
   });
-  return { ok: true, clientId, rtpOn: false, styles: st, sizes, inclusions: incs, counts: { sizes: sizes.length, inclusions: incs.length } };
+  return { ok: true, clientId, rtpOn, styles: st, sizes, inclusions: incs, counts: { sizes: sizes.length, inclusions: incs.length } };
 }
 
 // ── The fake backend ─────────────────────────────────────────────────────────────────────────
@@ -159,7 +166,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // S: { own, operator, operatorDelayMs (is_operator answers late), role, access, locked, cat(clientId),
 //      table(clientId), sizeTableDelayMs, sizeTableFailures, countSkew (size_table answers with counts
-//      that never add up), createdStyleId }
+//      that never add up), createdStyleId, peopleRefused (list_users answers 403) }
 async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
   const S = { own: OWN, operator: false, operatorDelayMs: 0, role: "owner", access: null, locked: false, sizeTableDelayMs: 0, sizeTableFailures: 0, countSkew: false, ...S0 };
   S.cat = S.cat || ((cid) => catalogFor(cid));
@@ -197,6 +204,11 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
     calls.push({ fn: name, action: body.action, body, host, at: Date.now() });
     if (name === "portal-billing") {
       return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], paid: [], features: { crm: true }, status: S.locked ? "past_due" : "active", locked: !!S.locked, reason: S.locked ? "unpaid" : null }, wallet: null });
+    }
+    // The people on an account (the switcher's list; the table's ?as= message names one of them).
+    if (name === "operator-portal" && body.action === "list_users") {
+      return S.peopleRefused ? json(route, { error: "Not allowed (test)." }, 403)
+        : json(route, { ok: true, users: [{ userId: USER.id, fullName: "Pat Example", role: "owner" }, { userId: WEAR, fullName: WEAR_NAME, email: "sam@example.test", role: "user", title: "sales_rep" }] });
     }
     if (name === "operator-portal") return json(route, { ok: true, clientId: VIEWED, companyName: COMPANY[VIEWED], designs: [], versions: [], capturedLeads: [], crmContacts: [], crmContactsTotal: 0, clients: [] });
     if (name === "support-agent") return json(route, { ok: true, on: false });
@@ -294,6 +306,34 @@ if (want("A") || want("B")) {
   ok("A: a read that never adds up is refused, after one more try", /Couldn't read your whole catalog just now/.test(refused || "") && calls.slice(before2).filter((c) => c.action === "size_table").length === 2, refused);
   ok("A: …and nothing was downloaded", !(await dl2P));
   S.countSkew = false;
+
+  // …but ONLY a count refuses it. Past the 1000-row cap, or with an orphan row, the table opens
+  // view-only and sends the builder here, so the sheet must still be built: the importer never
+  // touches a column or a size the sheet does not carry, so neither can put a false 0 in it.
+  const builds = async (what) => {
+    const from = calls.length;
+    const p = page.waitForEvent("download", { timeout: 15000 }).catch(() => null);
+    await page.getByRole("button", { name: /Download Excel template/ }).click();
+    const d = await p;
+    await page.waitForTimeout(200);
+    // exceljs is unreachable here, so the card says it handed back a CSV instead; that is not a refusal.
+    const msg = (await page.locator('[data-ss-xl-msg="err"]').textContent().catch(() => "")) || "";
+    ok(`A: ${what}: the sheet is still built, from one read`, !!d && !/Couldn't read your/.test(msg) && calls.slice(from).filter((c) => c.action === "size_table").length === 1,
+      `${d ? "downloaded" : "no download"}; ${msg}`);
+  };
+  const plainCat = S.cat, plainTable = S.table;
+  const capped = catalogFor(OWN);
+  capped.items = [...capped.items, ...Array.from({ length: 1000 }, (_, i) => ({ key: `bulk${i}`, label: `Bulk Item ${i}`, archived: true }))];
+  S.cat = (cid) => ({ ...capped, clientId: cid });
+  await builds("past the 1000-row cap");
+  S.cat = plainCat;
+  S.table = (cid) => {
+    const tt = plainTable(cid);
+    const incs = [...tt.inclusions, { size_id: uid("7", 9999), item_key: "loft", included: true, qty: 5 }];
+    return { ...tt, inclusions: incs, counts: { sizes: tt.sizes.length, inclusions: incs.length } };
+  };
+  await builds("an inclusion on a size that is not there");
+  S.table = plainTable;
 
   // Add style: the answer links to the table, jumped to the new style.
   S.createdStyleId = uid("5", 42);
@@ -416,13 +456,23 @@ for (const run of want("C") ? C_RUNS : []) {
     return { n: cells.length, over: cells.filter((td) => td.scrollWidth > td.clientWidth).map((td) => td.textContent), w: cells[0] ? Math.round(cells[0].getBoundingClientRect().width) : 0 };
   });
   ok(`${tag}: "480" and "1200" fit their 44 px boxes`, fit.n > 0 && fit.over.length === 0 && fit.w === 44, JSON.stringify(fit));
+  // A price can outgrow the 76 px Price box ("$123,456.78", or three decimals shown as stored): it
+  // ends in an ellipsis there, so its title must carry it whole. Every cut price, not just this one.
+  const wide = await page.evaluate((text) => {
+    const tds = [...document.querySelectorAll(".ss-pg-grid tbody td.ss-pg-price")];
+    const td = tds.find((x) => x.textContent === text);
+    return { found: !!td, cutHere: td ? td.scrollWidth > td.clientWidth : null, title: td ? td.title : null,
+      unreadable: tds.filter((x) => x.scrollWidth > x.clientWidth && !(x.title || "").includes(x.textContent)).map((x) => x.textContent) };
+  }, "$123,456.78");
+  ok(`${tag}: a price wider than its box reads whole in its title`, wide.found && wide.title === "$123,456.78" && wide.unreadable.length === 0, JSON.stringify(wide));
   // Pinned on both axes: scroll the box right and down; Size/Price/Offered and the header stay put.
   const pin = await page.evaluate(async () => {
     const box = document.querySelector(".ss-pg-box");
     const bb = box.getBoundingClientRect();
     const first = document.querySelector(".ss-pg-grid tbody tr[data-s]");
+    const band = document.querySelector(".ss-pg-grid .ss-pg-band .ss-pg-bandin");
     const at = () => ({ size: first.children[0].getBoundingClientRect(), price: first.children[1].getBoundingClientRect(), off: first.children[2].getBoundingClientRect(),
-      opt: document.querySelector(".ss-pg-names th.ss-pg-oh").getBoundingClientRect() });
+      opt: document.querySelector(".ss-pg-names th.ss-pg-oh").getBoundingClientRect(), band: band.getBoundingClientRect() });
     const a = at();
     box.scrollLeft = 400; box.scrollTop = 0;
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -431,7 +481,7 @@ for (const run of want("C") ? C_RUNS : []) {
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const headRow = document.querySelector(".ss-pg-names th.ss-pg-f0").getBoundingClientRect();
     const res = { scrollLeft: box.scrollLeft, scrollTop: box.scrollTop, sizeX: [Math.round(a.size.left), Math.round(b.size.left)], priceX: [Math.round(a.price.left), Math.round(b.price.left)],
-      offX: [Math.round(a.off.left), Math.round(b.off.left)], optX: [Math.round(a.opt.left), Math.round(b.opt.left)], headTop: Math.round(headRow.top), boxTop: Math.round(bb.top), boxLeft: Math.round(bb.left),
+      offX: [Math.round(a.off.left), Math.round(b.off.left)], optX: [Math.round(a.opt.left), Math.round(b.opt.left)], bandX: [Math.round(a.band.left), Math.round(b.band.left)], headTop: Math.round(headRow.top), boxTop: Math.round(bb.top), boxLeft: Math.round(bb.left),
       pageX: document.documentElement.scrollWidth <= window.innerWidth, pageY: document.documentElement.scrollHeight <= window.innerHeight };
     box.scrollLeft = 0; box.scrollTop = 0;
     return res;
@@ -439,7 +489,8 @@ for (const run of want("C") ? C_RUNS : []) {
   const sideways = pin.scrollLeft > 0 && pin.sizeX[0] === pin.sizeX[1] && pin.priceX[0] === pin.priceX[1] && pin.offX[0] === pin.offX[1] && pin.optX[1] < pin.optX[0];
   if (width === 1000) ok(`${tag}: Size, Price and Offered stay pinned while the grid scrolls sideways`, sideways, JSON.stringify(pin));
   else ok(`${tag}: the grid fits across without a sideways scroll, or stays pinned in one`, pin.scrollLeft === 0 || sideways, JSON.stringify(pin));
-  ok(`${tag}: the header stays pinned while it scrolls down`, pin.scrollTop > 0 && pin.headTop === pin.boxTop + 22, JSON.stringify({ headTop: pin.headTop, boxTop: pin.boxTop }));
+  // The style's name, too (plan 3.6): a band cell that is a scroll container would let it scroll away.
+  ok(`${tag}: a style's name stays at the left edge while the grid scrolls sideways`, pin.scrollLeft === 0 || pin.bandX[0] === pin.bandX[1], JSON.stringify({ scrollLeft: pin.scrollLeft, bandX: pin.bandX }));  ok(`${tag}: the header stays pinned while it scrolls down`, pin.scrollTop > 0 && pin.headTop === pin.boxTop + 22, JSON.stringify({ headTop: pin.headTop, boxTop: pin.boxTop }));
   ok(`${tag}: the page itself never scrolls, either way`, pin.pageX && pin.pageY);
   const thead = await page.locator(".ss-pg-grid thead").boundingBox();
   if (run.shot) await page.screenshot({ path: join(headerShots, run.shot), clip: { x: 0, y: 0, width, height: Math.min(900, Math.round(thead.y + thead.height + 28 * 6)) } });
@@ -481,8 +532,27 @@ if (want("D")) {
   ok("D: ARIA: grid with row and column counts, rows and gridcells indexed, named headers, a polite badge",
     aria.role === "grid" && aria.rows === aria.trs && aria.cols === 28 && aria.rowRole === "row" && aria.rowIdx === "4" && aria.cellRole === "gridcell" && aria.cellIdx === "4" && aria.th === "Loft (sq ft)" && aria.live === "polite", JSON.stringify(aria));
   // Show hidden sizes: off folds them away, and is remembered.
-  const hiddenN = t.sizes.filter((z) => z.base_price == null || !z.active).length;
+  const isHid = (z) => z.base_price == null || !z.active;
+  const hiddenN = t.sizes.filter(isHid).length;
+  // The cursor on a hidden size when they fold: it moves to the next size still drawn, and the
+  // arrows carry on from there, not from the top-left of the grid. (The toggle takes focus, so the
+  // grid is focused again by hand, as Tab back into it would; that keeps the cursor where it is.)
+  const full = t.styles.flatMap((s) => t.sizes.filter((z) => z.style_id === s.id).sort((a, b) => a.sort_order - b.sort_order));
+  const hi = full.findIndex((z, i) => i > 0 && isHid(z));
+  const below = full.slice(hi + 1).filter((z) => !isHid(z));
+  const named = (z) => `Loft (sq ft) · ${t.styles.find((s) => s.id === z.style_id).label} ${z.label}`;
+  await page.locator(`tr[data-s="${full[hi].id}"] td[data-c="3"]`).click();
+  // Leaving the header clears its peek in the readout a beat after the click (not a discrete event).
+  await page.waitForFunction((x) => document.querySelector(".ss-pg-readout").textContent === x, named(full[hi]), { timeout: 3000 }).catch(() => {});
+  const r4a = await read();
   await page.getByLabel("Show hidden sizes").uncheck();
+  const r4 = await read();
+  await page.locator(".ss-pg-grid").focus();
+  await page.keyboard.press("ArrowDown");
+  const r5 = await read();
+  ok("D: a cursor on a hidden size that folds away moves to the next size still drawn",
+    r4a.readout === named(full[hi]) && r4.readout === named(below[0]) && r4.sel.length === 1 && r4.sel[0] === `${below[0].id}:3`, JSON.stringify({ was: r4a.readout, now: r4 }));
+  ok("D: …and the next arrow key carries on from there", r5.readout === named(below[1]) && r5.sel[0] === `${below[1].id}:3`, JSON.stringify(r5));
   const folded = await page.locator(".ss-pg-grid tbody tr[data-s]").count();
   ok("D: 'Show hidden sizes' off folds the hidden sizes away", folded === t.sizes.length - hiddenN && hiddenN > 0, `${folded} rows, ${hiddenN} hidden`);
   await page.reload();
@@ -585,6 +655,32 @@ if (want("E")) {
   ok("E: no page errors (too big)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
+// Real-Time Pricing on: every price is grey AND locked (plan 3.9, 3.13: a shape as well as a colour).
+// The lock is the cell's ::before, placed in its corner, so the cell must be its box at both widths:
+// sticky when frozen, relative below 700 px where the price is not frozen.
+for (const width of want("E") ? [1440, 390] : []) {
+  const { ctx, page, errors } = await open("/settings/sheds-table", { table: (cid) => tableFor(cid, catalogFor(cid), { rtpOn: true }) }, { width, height: 844 });
+  await waitGrid(page).catch(() => {});
+  const r = await page.evaluate(() => {
+    const tds = [...document.querySelectorAll(".ss-pg-grid tbody td.ss-pg-price")];
+    const lock = (x) => getComputedStyle(x, "::before");
+    const priced = tds.find((x) => x.textContent);
+    // A relative cell still takes `left`: it must stay under its own header, not shift right.
+    const col = Math.round(document.querySelector(".ss-pg-names th.ss-pg-f1").getBoundingClientRect().left);
+    return { n: tds.length, rtp: tds.filter((x) => x.classList.contains("ss-pg-rtp")).length,
+      offColumn: tds.filter((x) => Math.round(x.getBoundingClientRect().left) !== col).length,
+      locked: tds.filter((x) => /\u{1F512}/u.test(lock(x).content) && lock(x).position === "absolute").length,
+      boxed: tds.filter((x) => getComputedStyle(x).position !== "static").length,
+      grey: priced ? getComputedStyle(priced).backgroundColor : null, title: priced ? priced.title : null,
+      head: (document.querySelector(".ss-pg-names th.ss-pg-f1") || {}).textContent || "" };
+  });
+  ok(`E@${width}: Real-Time Pricing greys every price and locks it in its own cell, and the title says why`,
+    r.n > 0 && r.rtp === r.n && r.locked === r.n && r.boxed === r.n && r.offColumn === 0 && r.grey === "rgb(241, 245, 249)"
+    && /^\$[\d,.]+ · Real-Time Pricing sets prices on this account$/.test(r.title || "") && /\u{1F512}/u.test(r.head), JSON.stringify(r));
+  await page.screenshot({ path: join(shots, `E-rtp-${width}.png`) });
+  ok(`E@${width}: no page errors (RTP)`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
 
 // ── F: view-as and permissions ──
 if (want("F")) {
@@ -610,15 +706,36 @@ if (want("F")) {
   ok("F: no page errors (view-as)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-if (want("F")) {
-  const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}&as=${WEAR}`, { own: OPS, operator: true });
+for (const refused of want("F") ? [false, true] : []) {
+  const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}&as=${WEAR}`, { own: OPS, operator: true, peopleRefused: refused });
   await waitGrid(page).catch(() => {});
+  // The person's name comes from the people list after the grid's reads; give it a moment.
+  if (!refused) await page.waitForFunction((n) => ((document.querySelector(".ss-pg-status") || {}).textContent || "").includes(n), WEAR_NAME, { timeout: 5000 }).catch(() => {});
+  else await page.waitForTimeout(800);
   const f = await page.evaluate(() => ({ strip: (document.querySelector(".ss-pg-op") || {}).textContent || "", badge: document.querySelector(".ss-pg-badge").textContent,
     status: (document.querySelector(".ss-pg-status") || {}).textContent || "", editable: document.querySelector(".ss-pg").getAttribute("data-ss-pg-editable"),
     ro: document.querySelector(".ss-pg-grid").getAttribute("aria-readonly") }));
-  ok("F: ?as= opens view-only, and says why", f.editable === "0" && f.ro === "true" && f.badge === "View only: viewing as a team member" && /You're viewing as a team member\. The table is view-only here/.test(f.status) && /view-only/.test(f.strip), JSON.stringify(f));
+  const who = refused ? "a team member" : WEAR_NAME;
+  const people = calls.filter((c) => c.fn === "operator-portal" && c.action === "list_users");
+  ok(`F: ?as= opens view-only, and says why, naming ${refused ? "nobody when the people list is refused" : "the person"}`,
+    f.editable === "0" && f.ro === "true" && f.badge === "View only: viewing as a team member"
+    && f.status.includes(`You're viewing as ${who}. The table is view-only here;`) && f.strip === `Viewing ${COMPANY[VIEWED]} as operator. This table is view-only.`, JSON.stringify(f));
+  ok("F: …the name is read for the viewed builder, once", people.length === 1 && people[0].body.clientId === VIEWED, JSON.stringify(people.map((c) => c.body)));
   ok("F: …and its reads still go to the viewed builder", tableCalls(calls).every((c) => c.body.targetClientId === VIEWED));
   ok("F: no page errors (as)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+// View-only for a reason other than ?as= (here the read never adds up): the strip must not say
+// "Changes are live" beside a "View only" badge.
+if (want("F")) {
+  const { ctx, page, errors } = await open(`/settings/sheds-table?view=${VIEWED}`, { own: OPS, operator: true, countSkew: true });
+  await waitGrid(page).catch(() => {});
+  await page.waitForSelector(".ss-pg-status-amber", { timeout: 15000 }).catch(() => {});
+  const f = await page.evaluate(() => ({ strip: (document.querySelector(".ss-pg-op") || {}).textContent || "", badge: document.querySelector(".ss-pg-badge").textContent,
+    editable: document.querySelector(".ss-pg").getAttribute("data-ss-pg-editable") }));
+  ok("F: a view-as page that is view-only because it is too big says view-only in the strip too",
+    f.editable === "0" && /^View only/.test(f.badge) && f.strip === `Viewing ${COMPANY[VIEWED]} as operator. This table is view-only.`, JSON.stringify(f));
+  ok("F: no page errors (view-as, too big)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 if (want("F")) {
