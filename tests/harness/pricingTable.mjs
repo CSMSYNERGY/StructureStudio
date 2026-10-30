@@ -6,7 +6,8 @@
 //      Download and Upload; the warning sentence is in the instructions. An upload's answer draws
 //      UNDER the buttons. Download reads catalog + size_table fresh (targetClientId on both bodies)
 //      and the sheet is built from size_table; when the counts never add up it is refused, but past
-//      the 1000-row cap or with an orphan row it is still built. Add style's answer links to the table
+//      the 1000-row cap or with an orphan row it is still built. A column added after Sheds loaded is
+//      in the sheet, and uploading that sheet sends its boxes. Add style's answer links to the table
 //      with ?style=<new id>.
 //   B  THE NEW TAB: the link opens a tab whose cold load renders the table with no page error (no
 //      React #310): its title, Back link, legend, three style bands, every size row; ?style= jumps to
@@ -334,6 +335,27 @@ if (want("A") || want("B")) {
   };
   await builds("an inclusion on a size that is not there");
   S.table = plainTable;
+
+  // A column added after Sheds loaded (Options, in another tab) is in the sheet Download builds, so
+  // uploading that same sheet must carry its boxes too. The card's own catalog was last read before
+  // this door existed; an upload that maps headers through it drops the column and still says "Imported".
+  const LATE = { id: 555, name: "Test Late Door", category: "door", width_in: 36, height_in: 76, active: true, archived: false };
+  S.cat = (cid) => { const c = plainCat(cid); return { ...c, fixtures: [...c.fixtures, LATE] }; };
+  const lateP = page.waitForEvent("download", { timeout: 15000 }).catch(() => null);
+  await page.getByRole("button", { name: /Download Excel template/ }).click();
+  const lateDl = await lateP;
+  let lateCsv = "";
+  if (lateDl) { try { lateCsv = readFileSync(await lateDl.path(), "utf8"); } catch (_e) { /* no file */ } }
+  ok("A: a column added since Sheds loaded is in the downloaded sheet", lateCsv.split(/\r?\n/)[0].includes("Test Late Door"), lateCsv.slice(0, 120));
+  const upFrom = calls.length;
+  await page.locator('input[type="file"][accept*=".xlsx"]').setInputFiles({ name: "sheet.csv", mimeType: "text/csv", buffer: Buffer.from(lateCsv) });
+  await page.waitForSelector('[data-ss-xl-msg="ok"]', { timeout: 10000 }).catch(() => {});
+  const imp = calls.slice(upFrom).find((c) => c.action === "import_pricing_csv");
+  const impRows = (imp && imp.body.rows) || [];
+  ok("A: …and uploading that sheet sends the new column's boxes, not just the columns Sheds loaded with",
+    impRows.length > 0 && impRows.every((r) => r.inclusions && String(LATE.id) in r.inclusions),
+    imp ? `${impRows.length} rows; first row's keys: ${Object.keys((impRows[0] || {}).inclusions || {}).join(",")}` : "no import_pricing_csv call");
+  S.cat = plainCat;
 
   // Add style: the answer links to the table, jumped to the new style.
   S.createdStyleId = uid("5", 42);

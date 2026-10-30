@@ -154,6 +154,13 @@ Deno.test("the Sheds card and Add style's answer open the table as real anchors 
   // Only a list that does not add up refuses the sheet (plan 4.8). "cap" and an orphan row build it:
   // the table sends a builder who trips them to Excel, so Excel must not refuse them too.
   assert(dl.includes(`if (ssPgModel(r.cat, r.table).guard !== "count") fresh = r;`), "the template refuses on a guard other than \"count\" again");
+  // …and the upload maps headers through the columns that sheet was built from: a column added since
+  // Sheds mounted is in the sheet, and onUpload reads `cat`, so `cat` must become fresh.cat first.
+  const adopt = dl.indexOf("setCat(fresh.cat);");
+  assert(adopt > dl.indexOf("if (!fresh) {") && adopt < dl.indexOf("ssPgTemplate(fresh.cat, fresh.table)"), "the sheet's catalog must become `cat` once the read is accepted, before the sheet is built");
+  const up = between(card, "const onUpload = async (file) => {", "\n  };\n", "onUpload");
+  assert(up.includes("optionCols().forEach((it) => { labelToKey[it.label.toLowerCase()] = it.key;"), "the upload's column map moved off `cat`: re-check that it matches the sheet's columns");
+  assert(card.includes("const optionSections = () => ssPricingColumns(cat);"));
 });
 
 // ── 5. The page's reads ──────────────────────────────────────────────────────────────────────

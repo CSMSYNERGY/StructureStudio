@@ -3344,6 +3344,11 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       if (ssPgModel(r.cat, r.table).guard !== "count") fresh = r;
     }
     if (!fresh) { setXlMsg({ err: "Couldn't read your whole catalog just now. Try again in a minute." }); setDlBusy(false); return; }
+    // onUpload maps a sheet's headers through `cat`'s columns, so `cat` becomes the catalog this sheet
+    // is built from. Kept as mounted, a column added or renamed in another tab since (the table's
+    // no-columns box sends builders to Options) would be in the sheet and then dropped, unmatched, by
+    // the upload, under a banner that still says "Imported". Same `catalog` answer load() stores.
+    setCat(fresh.cat);
     const { sections, headers, rows } = ssPgTemplate(fresh.cat, fresh.table);
     const fileBase = fresh.table.clientId || cat.clientId || "pricing";
 
