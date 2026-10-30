@@ -639,6 +639,63 @@ function ssSupportText(text, onLink) {
   return out;
 }
 
+// 👍 / 👎 under one answer (migration 348; Carolyn 10-27: "see how it's responding, how the users
+// are responding"). It is for the team's tracking: an operator reads the ratings in Admin → Support
+// chats. One tap saves; a 👎 is saved at once and then asks "What was wrong?" with one optional
+// line. The same thumb again clears it. Only an answer the server stored can be rated (its id is a
+// uuid): a cap's sentence and the "pending" copy of a question are not stored.
+function SupportRate({ m, onRated }) {
+  const [asking, setAsking] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState("");     // "Thanks!" or why it didn't save
+  const save = async (rating, why) => {
+    setBusy(true); setSaid("");
+    const prev = m.rating === 1 || m.rating === -1 ? m.rating : null;
+    onRated(m.id, rating === 0 ? null : rating);   // shown at once, put back if it fails
+    let saved = false;
+    try {
+      const { data, error } = await sb.functions.invoke("support-agent", { body: { action: "rate", messageId: m.id, rating, ...(why ? { note: why } : {}) } });
+      if (error || !data || data.error) throw new Error("rate failed");
+      saved = true;
+      setSaid(rating === 0 ? "" : "Thanks!");
+    } catch (_e) {
+      onRated(m.id, prev);
+      setSaid("That didn't save. Please try again.");
+    }
+    setBusy(false);
+    return saved;
+  };
+  const up = () => { if (busy) return; setAsking(false); save(m.rating === 1 ? 0 : 1); };
+  const down = async () => {
+    if (busy) return;
+    if (m.rating === -1) { setAsking(false); save(0); return; }
+    if (await save(-1)) { setAsking(true); setSaid(""); }
+  };
+  const sendWhy = async (e) => {
+    e.preventDefault();
+    const why = note.trim();
+    if (!why) { setAsking(false); setSaid("Thanks!"); return; }
+    if (await save(-1, why)) { setAsking(false); setNote(""); }
+  };
+  return (
+    <>
+      <div className="ss-sup-rate" data-ss-sup-rate={m.rating === 1 ? "up" : m.rating === -1 ? "down" : "none"}>
+        <button type="button" onClick={up} disabled={busy} aria-pressed={m.rating === 1} aria-label="Helpful" title="Helpful">👍</button>
+        <button type="button" onClick={down} disabled={busy} aria-pressed={m.rating === -1} aria-label="Not helpful" title="Not helpful">👎</button>
+        {said && <span role="status">{said}</span>}
+      </div>
+      {asking && (
+        <form className="ss-sup-why" onSubmit={sendWhy}>
+          <input value={note} maxLength={300} autoFocus placeholder="What was wrong? (optional)" aria-label="What was wrong?"
+            onChange={(e) => setNote(e.target.value)} />
+          <button type="submit" disabled={busy}>Send</button>
+        </form>
+      )}
+    </>
+  );
+}
+
 // The assistant's chat panel, under the Support button (about 400 × 620 at desktop, a full-screen
 // sheet on a phone). Plain text in and out; a "Thinking…" line while support-agent answers; the
 // hand-off card opens the ticket form already written. Chats are saved (migration 340) and the
@@ -747,6 +804,7 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
     setMessages([]); setConvId(null); setHandoff(null); setErr("");
   };
 
+  const rated = useCallback((id, rating) => setMessages((ms) => ms.map((x) => (x.id === id ? { ...x, rating } : x))), []);
   const name = (status && status.name) || "Studio Assistant";
   const available = !!(status && status.available);
   const goTo = (page, sub) => { onNavigate(page, sub); if (window.innerWidth < 640) onClose(); };
@@ -775,9 +833,12 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
           <div className="ss-sup-bot">{loadErr || status.unavailable || "The assistant isn't available right now."} {SS_REPLY_PROMISE}</div>
         )}
         {messages.map((m) => (
-          <div key={m.id} className={m.role === "user" ? "ss-sup-me" : "ss-sup-bot"}>
-            {m.role === "user" ? m.body : ssSupportText(m.body, goTo)}
-          </div>
+          <React.Fragment key={m.id}>
+            <div className={m.role === "user" ? "ss-sup-me" : "ss-sup-bot"}>
+              {m.role === "user" ? m.body : ssSupportText(m.body, goTo)}
+            </div>
+            {m.role === "assistant" && !m.cap && SS_UUID_RE.test(String(m.id)) && <SupportRate m={m} onRated={rated} />}
+          </React.Fragment>
         ))}
         {busy && <div className="ss-sup-muted">Thinking…</div>}
         {handoff && !busy && (

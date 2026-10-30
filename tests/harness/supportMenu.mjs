@@ -26,6 +26,9 @@
 //      the pill too.
 //   J  SWITCHED OFF AFTER ON: a remembered "on" paints the button first; the server's "off" puts the
 //      pill back and is remembered.
+//   K  👍 / 👎 (migration 348): under each stored answer only; a thumb posts `rate` with that answer's
+//      id, the same thumb again clears it, a 👎 then asks "What was wrong?" and posts the line; a save
+//      that fails puts the thumb back and says so.
 //
 // Supabase is stubbed at the network layer: no login, nothing leaves the machine. support-agent's
 // answers are canned here; the real agent is proved separately (agent_test.ts, the 20-question run).
@@ -47,6 +50,9 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 const CONV = "00000000-0000-4000-8000-00000000c0c1";
+// Stored answers carry uuids (support_messages.id); only those can be rated.
+let msgSeq = 0;
+const msgId = () => `10000000-0000-4000-8000-${String(++msgSeq).padStart(12, "0")}`;
 const ANSWER = "You can change that on Settings > Company > Branding: /settings/branding. Not https://example.com/settings.";
 
 const { ok, failed } = reporter();
@@ -100,11 +106,15 @@ async function openPortal(width, height, { on = true, remembered = null } = {}) 
         return json(route, {
           ok: true, conversationId: CONV,
           messages: [
-            { id: "m1", role: "user", body: body.text, created_at: "2026-10-27T12:00:00Z" },
-            { id: "m2", role: "assistant", body: ANSWER, created_at: "2026-10-27T12:00:05Z" },
+            { id: msgId(), role: "user", body: body.text, created_at: "2026-10-27T12:00:00Z", rating: null },
+            { id: msgId(), role: "assistant", body: ANSWER, created_at: "2026-10-27T12:00:05Z", rating: null },
           ],
           handoff: /broken/.test(body.text) ? { title: "Estimates not reaching customers", summary: "Estimates stopped arriving since Monday." } : null,
         });
+      }
+      if (body.action === "rate") {
+        if (state.failRate) return json(route, { error: "Something went wrong." }, 500);
+        return json(route, { ok: true, messageId: body.messageId, rating: body.rating === 0 ? null : body.rating });
       }
       return json(route, { ok: true });
     }
@@ -235,6 +245,41 @@ for (const [width, height, tag] of [[1440, 900, "1440"], [375, 812, "375"]]) {
   await page.screenshot({ path: join(shots, `${tag}-7-answer.png`) });
   const sent = state.agent.find((b) => b.action === "send");
   ok(`${tag} E: the question went to support-agent as text only`, sent && sent.text === "Where do I change my logo?" && !sent.targetClientId, JSON.stringify(sent));
+
+  // K — 👍 / 👎 under the answer.
+  const rateRow = page.locator(".ss-sup-rate");
+  ok(`${tag} K: one row of thumbs, under the answer, none under the question`, await rateRow.count() === 1
+    && await page.evaluate(() => { const r = document.querySelector(".ss-sup-rate"); return !!r && r.previousElementSibling && r.previousElementSibling.classList.contains("ss-sup-bot"); }));
+  const upBtn = rateRow.getByRole("button", { name: "Helpful", exact: true });
+  const downBtn = rateRow.getByRole("button", { name: "Not helpful", exact: true });
+  const rates = () => state.agent.filter((b) => b.action === "rate");
+  await upBtn.click();
+  await page.locator(".ss-sup-rate", { hasText: "Thanks!" }).waitFor({ timeout: 3000 }).catch(() => {});
+  const r1 = rates().at(-1);
+  ok(`${tag} K: 👍 posts rate 1 with the answer's uuid, nothing else`, r1 && r1.rating === 1 && /^10000000-0000-4000-8000-\d{12}$/.test(r1.messageId) && !("note" in r1)
+    && JSON.stringify(Object.keys(r1).sort()) === JSON.stringify(["action", "messageId", "rating"]), JSON.stringify(r1));
+  ok(`${tag} K: …shows as pressed, and says thanks`, await upBtn.getAttribute("aria-pressed") === "true" && await rateRow.innerText().then((x) => x.includes("Thanks!")));
+  await page.screenshot({ path: join(shots, `${tag}-7b-thumbs-up.png`) });
+  await upBtn.click();
+  await page.waitForTimeout(400);
+  ok(`${tag} K: the same thumb again clears it (rate 0)`, rates().at(-1).rating === 0 && await upBtn.getAttribute("aria-pressed") === "false", JSON.stringify(rates().at(-1)));
+  await downBtn.click();
+  const why = page.getByLabel("What was wrong?");
+  ok(`${tag} K: 👎 saves at once, then asks what was wrong`, await why.waitFor({ timeout: 3000 }).then(() => true, () => false) && rates().at(-1).rating === -1 && !("note" in rates().at(-1)));
+  ok(`${tag} K: …with the focus in that box`, await page.evaluate(() => document.activeElement && document.activeElement.getAttribute("aria-label") === "What was wrong?"));
+  await page.screenshot({ path: join(shots, `${tag}-7c-thumbs-down.png`) });
+  await why.fill("It sent me to the wrong page");
+  await page.locator(".ss-sup-why button[type=submit]").click();
+  await page.waitForTimeout(500);
+  const r4 = rates().at(-1);
+  ok(`${tag} K: the line goes with the 👎`, r4.rating === -1 && r4.note === "It sent me to the wrong page" && r4.messageId === r1.messageId, JSON.stringify(r4));
+  ok(`${tag} K: the box goes, 👎 stays pressed, thanks`, await why.count() === 0 && await downBtn.getAttribute("aria-pressed") === "true" && (await rateRow.innerText()).includes("Thanks!"));
+  state.failRate = true;
+  await upBtn.click();
+  await page.locator(".ss-sup-rate", { hasText: "didn't save" }).waitFor({ timeout: 3000 }).catch(() => {});
+  ok(`${tag} K: a save that fails puts the thumb back and says so`, await downBtn.getAttribute("aria-pressed") === "true" && await upBtn.getAttribute("aria-pressed") === "false"
+    && (await rateRow.innerText()).includes("That didn't save. Please try again."));
+  state.failRate = false;
 
   // F — the hand-off.
   await page.locator(".ss-sup-form textarea").fill("my estimates are broken");

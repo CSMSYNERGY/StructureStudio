@@ -2625,9 +2625,11 @@ function AdmNumberRequests({ onPick, onFlash }) {
 // records each chat opened in admin_audit.
 // A link to one chat is /console/chats?chat=<id>: it opens that chat, and the ?chat= comes off the
 // address at once, because ssPagePath carries the query string onto every page opened next.
+// Tracking (migration 348): the builders' 👍/👎 on each answer, the line under a 👎, and the
+// assistant's own "didn't know" notes, with a Show filter for each.
 const ADM_CHAT_STATUS = { open: ["Open", "on"], handed_off: ["Became a ticket", "warn"], closed: ["Closed", "neutral"] };
-// The assistant's lookups (support-agent/tools.ts), in words. Its one other tool, offer_handoff,
-// is not a lookup: an answer that used it says "offered a ticket" instead.
+// The assistant's lookups (support-agent/tools.ts), in words. Its two other tools are not lookups:
+// an answer that used offer_handoff says "offered a ticket", and note_gap shows as its "Didn't know" line.
 const ADM_CHAT_TOOLS = {
   get_account_overview: "their account", get_catalog_summary: "their catalog", get_my_requests: "their requests",
   search_whats_new: "What's new",
@@ -2642,6 +2644,9 @@ function admChatWhen(iso) {
   return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 const admChatWho = (c) => (c && c.person ? (c.person.name || c.person.email || "Unknown person") : "Unknown person");
+// "👍 2 · 👎 1 · didn't know 1", the non-zero parts only.
+const admChatTally = (c) => [c.up ? `👍 ${c.up}` : "", c.down ? `👎 ${c.down}` : "", c.gaps ? `didn't know ${c.gaps}` : ""].filter(Boolean).join(" · ");
+const ADM_CHAT_SHOW = [["", "Every chat"], ["down", "👎 Not helpful"], ["handed_off", "Became a ticket"], ["gap", "Didn't know"]];
 
 function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
   const [copied, setCopied] = useState(false);
@@ -2670,6 +2675,7 @@ function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
             <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
               {admChatWho(c)}{c.person && c.person.name && c.person.email ? ` <${c.person.email}>` : ""}
               {` · started ${admChatWhen(c.createdAt)} · ${c.messageCount} message${c.messageCount === 1 ? "" : "s"} · ${admChatUsd(c.costMicros)}`}
+              {admChatTally(c) ? ` · ${admChatTally(c)}` : ""}
             </div>
           )}
           {c && c.ticket && (
@@ -2694,7 +2700,7 @@ function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
           )}
           {open.messages.map((m) => {
             const mine = m.role === "user";
-            const used = (m.tools || []).filter((t) => t !== "offer_handoff").map((t) => ADM_CHAT_TOOLS[t] || t);
+            const used = (m.tools || []).filter((t) => t !== "offer_handoff" && t !== "note_gap").map((t) => ADM_CHAT_TOOLS[t] || t);
             const offered = (m.tools || []).includes("offer_handoff");
             return (
               <div key={m.id} data-adm-chat-msg={m.role} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "88%" }}>
@@ -2711,6 +2717,18 @@ function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
                 }}>
                   {m.body}
                 </div>
+                {!mine && (m.rating === 1 || m.rating === -1) && (
+                  <div data-adm-chat-rating={m.rating === 1 ? "up" : "down"}
+                    style={{ fontSize: 12, fontWeight: 700, color: m.rating === 1 ? "#166534" : "#B91C1C", margin: "3px 0 0 4px" }}>
+                    {m.rating === 1 ? "👍 Helpful" : "👎 Not helpful"}
+                    {m.rating === -1 && m.ratingNote ? <span style={{ fontWeight: 500, color: "#334155" }}>{` — “${m.ratingNote}”`}</span> : ""}
+                  </div>
+                )}
+                {!mine && m.gap && (
+                  <div data-adm-chat-gap style={{ fontSize: 12, fontWeight: 700, color: "#92400E", margin: "3px 0 0 4px" }}>
+                    Didn't know: <span style={{ fontWeight: 500 }}>{m.gap}</span>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -2734,14 +2752,18 @@ function AdmSupportChats({ onOpenBuilder, onFlash }) {
   const [next, setNext] = useState(null);        // the `before` marker of the next page, or null
   const [loadingMore, setLoadingMore] = useState(false);
   const [builder, setBuilder] = useState("");
-  const [onlyTickets, setOnlyTickets] = useState(false);
+  const [show, setShow] = useState("");          // "", "down", "handed_off" or "gap" (ADM_CHAT_SHOW)
   const [open, setOpen] = useState(null);        // { id, chat, messages, truncated, err }
   // `onFlash` is the shell's flash, a new function every render; a ref keeps the loads off it.
   const flashRef = useRef(onFlash);
   flashRef.current = onFlash;
   // A filter changed while a page was loading: the older answer is dropped, not shown.
   const seq = useRef(0);
-  const filters = () => ({ clientId: builder || undefined, status: onlyTickets ? "handed_off" : undefined });
+  const filters = () => ({
+    clientId: builder || undefined,
+    status: show === "handed_off" ? "handed_off" : undefined,
+    show: show === "down" || show === "gap" ? show : undefined,
+  });
 
   useEffect(() => {
     const mine = ++seq.current;
@@ -2763,7 +2785,7 @@ function AdmSupportChats({ onOpenBuilder, onFlash }) {
         setList([]);
       }
     })();
-  }, [builder, onlyTickets]);
+  }, [builder, show]);
 
   const loadMore = async () => {
     if (!next) return;
@@ -2822,6 +2844,9 @@ function AdmSupportChats({ onOpenBuilder, onFlash }) {
             <AdmBillingStat label="Chats this month" value={month.chats ?? "—"} />
             <AdmBillingStat label="Questions" value={month.questions ?? "—"} />
             <AdmBillingStat label="Became tickets" value={month.tickets ?? "—"} />
+            <AdmBillingStat label="👍 Helpful" value={month.up ?? "—"} />
+            <AdmBillingStat label="👎 Not helpful" value={month.down ?? "—"} />
+            <AdmBillingStat label="Didn't know" value={month.gaps ?? "—"} />
             <AdmBillingStat label="Spend" value={admChatUsd(month.costMicros)} sub={`of the ${admChatUsd(month.capMicros)} monthly limit`} />
           </div>
         )}
@@ -2831,14 +2856,14 @@ function AdmSupportChats({ onOpenBuilder, onFlash }) {
             <option value="">Every builder</option>
             {builders.map((b) => <option key={b.clientId} value={b.clientId}>{`${b.companyName || b.clientId} (${b.chats})`}</option>)}
           </select>
-          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, color: "#334155", fontWeight: 600, cursor: "pointer" }}>
-            <input type="checkbox" checked={onlyTickets} onChange={(e) => setOnlyTickets(e.target.checked)} />
-            Only chats that became tickets
-          </label>
+          <select value={show} onChange={(e) => setShow(e.target.value)} aria-label="Show"
+            style={{ ...S.input, width: "auto", minWidth: 170, maxWidth: "100%" }}>
+            {ADM_CHAT_SHOW.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+          </select>
         </div>
         {!list && <div style={quiet}>Loading…</div>}
         {list && !installed && <div style={quiet}>Migration 340 isn't applied on this database yet.</div>}
-        {list && installed && list.length === 0 && <div style={quiet}>{builder || onlyTickets ? "No chats match." : "No chats yet."}</div>}
+        {list && installed && list.length === 0 && <div style={quiet}>{builder || show ? "No chats match." : "No chats yet."}</div>}
         {list && list.map((c) => {
           const [word, tone] = ADM_CHAT_STATUS[c.status] || [c.status, "neutral"];
           return (
@@ -2852,8 +2877,14 @@ function AdmSupportChats({ onOpenBuilder, onFlash }) {
                 <span style={{ display: "block", color: "#334155", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {c.firstQuestion || <span style={{ color: "#94A3B8", fontStyle: "italic" }}>No question yet</span>}
                 </span>
+                {c.gapNote && (
+                  <span data-adm-chat-row-gap style={{ display: "block", color: "#92400E", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    Didn't know: {c.gapNote}
+                  </span>
+                )}
                 <span style={{ display: "block", color: "#64748B" }}>
                   {admChatWhen(c.lastMessageAt)} · {c.messageCount} message{c.messageCount === 1 ? "" : "s"} · {admChatUsd(c.costMicros)}
+                  {admChatTally(c) ? ` · ${admChatTally(c)}` : ""}
                 </span>
               </span>
               <span style={{ flexShrink: 0 }}><AdmChip tone={tone}>{word}</AdmChip></span>

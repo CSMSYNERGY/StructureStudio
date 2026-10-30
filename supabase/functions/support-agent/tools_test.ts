@@ -108,7 +108,8 @@ function scoped(c: Call): boolean {
 Deno.test("WIRING: every query of every tool is scoped to the caller's tenant (global tables excepted)", async () => {
   for (const t of TOOL_DEFS) {
     const { db, calls } = recordingDb(FIXTURES);
-    const input = t.name === "search_whats_new" ? { query: "door" } : t.name === "offer_handoff" ? { title: "t", summary: "s" } : {};
+    const input = t.name === "search_whats_new" ? { query: "door" } : t.name === "offer_handoff" ? { title: "t", summary: "s" }
+      : t.name === "note_gap" ? { question: "q" } : {};
     await runTool(t.name, input, ctx(db));
     for (const c of calls) {
       if (GLOBAL_TABLES.has(c.table)) continue;
@@ -126,7 +127,21 @@ Deno.test("WIRING: no tool schema has an id field or a way to name another accou
       assert(!/id$|client|tenant|user|account|builder|slug/i.test(p), `${t.name} has a property "${p}" that could aim at another account`);
     }
   }
-  assertEquals(TOOL_DEFS.map((t) => t.name), ["get_account_overview", "get_catalog_summary", "get_my_requests", "search_whats_new", "offer_handoff"]);
+  assertEquals(TOOL_DEFS.map((t) => t.name), ["get_account_overview", "get_catalog_summary", "get_my_requests", "search_whats_new", "offer_handoff", "note_gap"]);
+});
+
+Deno.test("note_gap: touches no table, folds whitespace, caps at 300, and refuses an empty question", async () => {
+  const { db, calls } = recordingDb(FIXTURES);
+  const out = await runTool("note_gap", { question: "  How to\n export   a price list " }, ctx(db));
+  assertEquals(calls.length, 0, "no database touched");
+  assertEquals(out.isError, false);
+  assertEquals(out.gap, "How to export a price list");
+  assert(!out.content.includes("price list"), "the tool result does not echo the question back");
+  const long = await runTool("note_gap", { question: "x".repeat(400) }, ctx(db));
+  assertEquals(long.gap?.length, 300);
+  const none = await runTool("note_gap", { question: "   " }, ctx(db));
+  assertEquals(none.isError, true);
+  assertEquals(none.gap, undefined);
 });
 
 Deno.test("account overview: the setup list as Getting set up shows it, connections as booleans, no secrets", async () => {
