@@ -26,8 +26,15 @@
 //     the unique keys as a lost race does): the label key trips first, and the answer is still exists
 //     or duplicate, found by dimensions, never "label taken";
 //   * removes: only a size never priced or edited, with no boxes and no BOM lines, and only this
-//     builder's; an id nobody holds is already gone;
-//   * per-size isolation: one size forced to fail is refused, its boxes untouched, the others save;
+//     builder's; an id nobody holds is already gone, and another builder's size answers exactly the
+//     same (and stays), so the answer says nothing about other accounts;
+//   * per-size isolation: one size forced to fail is refused, its boxes untouched, the others save; a
+//     malformed size id is refused on its own, not by the up-front lock;
+//   * passing failures: a lock timeout, a deadlock and a serialization failure, raised inside a size,
+//     a create and a remove, fail the WHOLE call with their SQLSTATE and leave nothing written (the
+//     edge answers 500 and the browser resends); a mutant without the re-raise answers "refused";
+//   * WHAT STAYS OPEN, pinned: a create resent after its size was removed inserts it again, unpriced,
+//     hidden and removable;
 //   * tenant safety, the 50-entry and 2,500-box caps, and a 50-entry call that runs;
 //   * mutants: without the version check A→B→A writes the orphan; without the starting-value check a
 //     stale edit lands on a refreshed version.
@@ -500,10 +507,13 @@ async function staleRefreshCase(db) {
     const r = await call(m, { removes: [SZ_NEW, SZ_A, SZ_EDITED, SZ_INC, SZ_BOM, SZ_THEIRS_NEW, uid(998)] });
     const st = Object.fromEntries(r.removed.map((x) => [x.id, x]));
     ok(st[SZ_NEW].status === "removed" && !await sizeOf(m, SZ_NEW) && st[SZ_NEW].gone === undefined, "a size never priced or edited, with nothing in it, is removed", J(st[SZ_NEW]));
-    for (const [id, what] of [[SZ_A, "a priced size"], [SZ_EDITED, "a once-edited size"], [SZ_INC, "a size with a box filled"], [SZ_BOM, "a size with BOM lines"], [SZ_THEIRS_NEW, "another builder's size"]]) {
+    for (const [id, what] of [[SZ_A, "a priced size"], [SZ_EDITED, "a once-edited size"], [SZ_INC, "a size with a box filled"], [SZ_BOM, "a size with BOM lines"]]) {
       ok(st[id].status === "refused" && /Untick Offered/.test(st[id].reason) && !!await sizeOf(m, id), `${what} is refused and stays`, J(st[id]));
     }
     ok(st[uid(998)].status === "removed" && st[uid(998)].gone === true, "an id nobody holds is already gone", J(st[uid(998)]));
+    const { id: _a, ...theirs } = st[SZ_THEIRS_NEW], { id: _b, ...nobodys } = st[uid(998)];
+    ok(C(theirs) === C(nobodys), "another builder's size answers exactly as an id nobody holds: nothing about other accounts", J([theirs, nobodys]));
+    ok((await sizeOf(m, SZ_THEIRS_NEW))?.client_id === U, "...and it stays, theirs");
     const again = await call(m, { removes: [SZ_NEW] });
     ok(again.removed[0].status === "removed" && again.removed[0].gone === true, "a resent remove that landed answers removed (gone), not refused", J(again));
   }
@@ -531,6 +541,92 @@ async function staleRefreshCase(db) {
       "...with the database's sentence and what the server holds", J(r.results[1]));
     ok((await sizeOf(p, SZ_B)).price === 500 && C(await cellsOf(p, SZ_B)) === C(before), "...its price and its boxes are untouched, the box written before the failure included", J(await cellsOf(p, SZ_B)));
     ok((await sizeOf(p, SZ_A)).price === 401 && (await sizeOf(p, SZ_C)).price === 250, "...and the sizes either side saved");
+
+    // The edge never sends a malformed id; the function still refuses one per entry. The up-front
+    // lock reads every id the call names, so it must pass over this one rather than fail on its cast.
+    const bad = await call(p, { removes: ["not-a-uuid"], sizes: [
+      { id: "not-a-uuid-either", base: await version(p, SZ_A), from: { price: 401 }, to: { price: 402 } },
+      entry(SZ_C, await version(p, SZ_C), { price: 250 }, { price: 260 }),
+    ] });
+    ok(!bad.err && bad.removed[0].status === "refused" && bad.results[0].status === "refused" && bad.results[1].status === "saved"
+      && (await sizeOf(p, SZ_C)).price === 260, "a malformed id is refused on its own entry, and the size beside it saves", J(bad));
+  }
+
+  // A lock wait past lock_timeout, a deadlock and a serialization failure must fail the whole call,
+  // never one entry: an entry's "refused" is shown red and never retried, for an edit that only had
+  // to wait. PGlite has one connection, so no real lock can be waited on; a trigger raises each
+  // SQLSTATE where the real one would surface, inside a size, a create and a remove.
+  const passingCase = async (sql) => {
+    const d = await fresh(SEED_REMOVES);
+    const a = await apply(d, sql);
+    if (a.err) return { err: a.err };
+    await d.exec(`
+      create function public.t_wait_box() returns trigger language plpgsql as $t$
+      begin
+        if new.qty = 55 then raise exception 'test: canceling statement due to lock timeout' using errcode = '55P03'; end if;
+        return new;
+      end $t$;
+      create function public.t_wait_size() returns trigger language plpgsql as $t$
+      begin
+        if tg_op = 'INSERT' then
+          if new.width_ft = 55 then raise exception 'test: deadlock detected' using errcode = '40P01'; end if;
+          return new;
+        end if;
+        if old.label = '20x20' then raise exception 'test: could not serialize access' using errcode = '40001'; end if;
+        return old;
+      end $t$;
+      create trigger t_wait before insert or update on public.building_size_inclusions for each row execute function public.t_wait_box();
+      create trigger t_wait before insert or delete on public.building_sizes for each row execute function public.t_wait_size();`);
+    const vA = await version(d, SZ_A);
+    const sizeEdit = entry(SZ_A, vA, { price: 400 }, { price: 401 });
+    const okCreate = { id: uid(701), styleId: ST_SHED, width: 9, length: 9, label: "9x9" };
+    const out = {
+      size: await call(d, { creates: [okCreate], sizes: [sizeEdit, entry(SZ_B, await version(d, SZ_B), { cells: { loft: 0 } }, { cells: { loft: 55 } })] }),
+      create: await call(d, { creates: [okCreate, { id: uid(702), styleId: ST_SHED, width: 55, length: 55, label: "55x55" }], sizes: [sizeEdit] }),
+      remove: await call(d, { creates: [okCreate], removes: [SZ_NEW], sizes: [sizeEdit] }),
+    };
+    out.untouched = (await sizeOf(d, SZ_A)).price === 400 && await version(d, SZ_A) === vA && !await sizeOf(d, uid(701))
+      && !!await sizeOf(d, SZ_NEW) && (await cellsOf(d, SZ_B)).loft === "off:3";
+    return out;
+  };
+  console.log("migration 350: a lock timeout, a deadlock or a serialization failure fails the whole call");
+  {
+    const r = await passingCase();
+    ok(!r.err, "applies", r.err);
+    ok(r.size && r.size.code === "55P03", "a lock timeout inside a size fails the call with 55P03", J(r.size));
+    ok(r.create && r.create.code === "40P01", "a deadlock inside a create fails the call with 40P01", J(r.create));
+    ok(r.remove && r.remove.code === "40001", "a serialization failure inside a remove fails the call with 40001", J(r.remove));
+    ok(r.untouched === true, "...and nothing any of the three calls did is left: the price, its version, the create, the remove, the box");
+  }
+  console.log("migration 350: without the re-raise, a lock timeout is a refused size (mutant)");
+  {
+    const raise = "    exception\n      when transaction_rollback or lock_not_available then raise;\n      when others then\n        v_status := 'refused';\n        v_reason := case when length(sqlerrm) <= 200 and strpos(sqlerrm, '<') = 0 then sqlerrm else 'The database refused this change.' end;\n        v_errs := '{}'::jsonb;";
+    const sql = MIG().replace(raise, raise.replace("      when transaction_rollback or lock_not_available then raise;\n", ""));
+    ok(sql !== MIG(), "(the mutant formed: the sizes handler catches everything)");
+    const r = await passingCase(sql);
+    ok(!r.err && r.size && !r.size.err && r.size.results[1].status === "refused" && /lock timeout/.test(r.size.results[1].reason),
+      "...and the size that only had to wait comes back refused, under Postgres's sentence", J(r.size));
+  }
+
+  // WHAT STAYS OPEN (the migration's header): nothing records a removed id, so a create's stalled
+  // original landing after its side-door copy AND the builder's Remove inserts the size again. Pinned
+  // so that closing it is a deliberate change: the row is unpriced, hidden, never edited, removable.
+  console.log("migration 350: a create resent after its size was removed inserts it again (stays open)");
+  {
+    const x = await fresh();
+    await apply(x);
+    const N = uid(801);
+    const create = { creates: [{ id: N, styleId: ST_SHED, width: 11, length: 11, label: "11x11" }] };
+    const side = await call(x, create);
+    const removed = await call(x, { removes: [N] });
+    const late = await call(x, create);
+    ok(side.created[0].status === "created" && removed.removed[0].status === "removed" && removed.removed[0].gone === undefined,
+      "the side-door copy creates it and the builder removes it", J([side, removed]));
+    const z = await sizeOf(x, N);
+    ok(late.created[0].status === "created" && z && z.price === null && z.active === false && z.untouched === true,
+      "the late original creates it again: unpriced, not offered, never edited", J([late, z]));
+    const again = await call(x, { removes: [N] });
+    ok(again.removed[0].status === "removed" && again.removed[0].gone === undefined && !await sizeOf(x, N), "...and a Remove takes it away again", J(again));
   }
 
   console.log("migration 350: a whole call resent after it landed");

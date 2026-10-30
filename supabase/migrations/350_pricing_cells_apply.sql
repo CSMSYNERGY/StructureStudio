@@ -36,6 +36,9 @@
 --      active and not archived. This is the sheet's own column list (ssPricingColumns,
 --      portal/03-catalog.jsx; the importer takes no partitionWall either). rtp_enabled from
 --      client_settings, false without a row.
+--      LOCKS: every existing size the call removes or edits is locked here, in ONE statement, in id
+--      order. Two saves naming the same sizes in different orders then queue on the first one instead
+--      of deadlocking halfway through (each loop below would otherwise lock in the order sent).
 --   1. CREATES, in order, each in its own begin … exception block:
 --      • the style must be this tenant's, else refused "That style isn't on this account.";
 --      • look the size up by DIMENSIONS first (client_id, style_id, width_ft, length_ft): the same id
@@ -52,9 +55,13 @@
 --      report "label taken" for a size that simply already exists.
 --   2. REMOVES: only a size that was never priced or edited: base_price is null, updated_at =
 --      created_at (both default to now() on insert; set_updated_at moves updated_at on every update),
---      no inclusion rows and no Real-Time Pricing BOM lines. Anything else → refused, "untick Offered
---      to hide it". An id this tenant has no size for, and that no other tenant holds either, answers
---      removed with gone=true: it is already gone (a resend of a remove that landed).
+--      no inclusion rows and no Real-Time Pricing BOM lines. A size of this tenant's that is anything
+--      else → refused, "untick Offered to hide it". An id this tenant has no size for answers removed
+--      with gone=true: there is nothing here to remove (a resend of a remove that landed, which the
+--      plan's "0 rows → refused" would have shown the builder as a red box for a size that is gone).
+--      Decided on this tenant's rows only, like every statement here, so an id another builder holds
+--      answers exactly as an id nobody holds: the answer says nothing about other accounts.
+--      (gone is an addition to the plan's §4.3 removed shape; the browser treats it as removed.)
 --   3. SIZES, in order, each in its own begin … exception block:
 --      • LOCK the row (select … for update, by id AND client_id); no row → missing. Any other save
 --        of the same size waits here until this one commits;
@@ -74,6 +81,14 @@
 --        200 characters, never one carrying '<', the importer's reason() rule).
 --      Every answer carries the size's current version, row and cells, so the browser shows what the
 --      server holds.
+--   PASSING FAILURES ARE NEVER ANSWERED PER ENTRY. A lock wait past lock_timeout (5 s, 55P03), a
+--   deadlock (40P01) or any other transaction_rollback error is raised again from every entry's
+--   handler (creates, removes and sizes alike): the whole call rolls back, portal-settings answers it
+--   500 through dbFail, and the browser resends the same call after its backoff, which is safe (it
+--   comes back duplicate). Answered per entry it would be "refused", which the browser shows red and
+--   never retries, under Postgres's own sentence, for an edit that only had to wait. The likeliest
+--   case is the side-door copy waiting on a stalled original that then commits. A timed-out wait also
+--   ends the call at once, so 50 entries cannot add up 50 waits.
 --   One call is one PostgREST request is one transaction. The edge caps a call at 50 entries because
 --   each entry's exception block is a subtransaction, and Postgres caches 64 subtransaction ids per
 --   backend before every snapshot falls back to pg_subtrans lookups.
@@ -97,7 +112,15 @@
 -- inclusions later with no guard, so an upload overlapping a table save still wins on the boxes it
 -- writes, as any upload does today. Row-lock waits between two sessions cannot be tested in PGlite
 -- (one connection); they rest on Postgres semantics. lock_timeout 5 s turns a stuck wait into a
--- refused size rather than a hung save.
+-- failed call the browser resends, rather than a hung save.
+-- A late create after its size was removed. A create's stalled original can land after its
+-- side-door copy landed AND the builder then removed that size (Remove takes only a size nobody
+-- priced or edited, and leaves no trace of it). Nothing on file says the id was ever used, so the
+-- late copy inserts the size again: unpriced, not offered, never edited, so no price, no design
+-- and no quote changes, and nobody is waiting for that answer. The next refresh shows it as a
+-- hidden size the builder can remove again. Closing it needs a record of removed ids (a new table,
+-- which this migration does not add: no tenantTables.ts entry, no RLS change) or a browser clock on
+-- every create (refused by a skewed clock as easily as by a late copy). The test pins the behaviour.
 --
 -- ROLLBACK (after portal-settings is reverted to a version without save_pricing_cells):
 --   drop function if exists public.pricing_cells_apply(text, jsonb, jsonb, jsonb);
@@ -117,6 +140,7 @@ declare
   c_max_entries constant int := 50;
   c_max_cells   constant int := 2500;
   c_max_qty     constant int := 999999;
+  c_uuid        constant text := '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
   v_creates     jsonb := coalesce(p_creates, '[]'::jsonb);
   v_removes     jsonb := coalesce(p_removes, '[]'::jsonb);
   v_sizes       jsonb := coalesce(p_sizes, '[]'::jsonb);
@@ -179,6 +203,20 @@ begin
      where f.client_id = p_client_id and f.active is not false and f.archived is not true);
   v_rtp := coalesce((select cs.rtp_enabled from public.client_settings cs where cs.client_id = p_client_id), false);
 
+  -- Every existing size this call removes or edits, locked now in ONE statement, in id order (the
+  -- locks are taken above the sort, so in that order). Two saves naming the same sizes in different
+  -- orders then queue on the first instead of deadlocking halfway through. A malformed id is left to
+  -- its own entry below, which refuses it: the CASE never casts what the pattern did not pass.
+  -- Outside any entry's block, so a wait past lock_timeout here ends the whole call (see the header).
+  perform 1 from public.building_sizes z
+   where z.client_id = p_client_id
+     and z.id = any (array(
+           select case when e.x ->> 'id' ~* c_uuid then (e.x ->> 'id')::uuid end from jsonb_array_elements(v_sizes) e(x)
+           union all
+           select case when e.x #>> '{}' ~* c_uuid then (e.x #>> '{}')::uuid end from jsonb_array_elements(v_removes) e(x)))
+   order by z.id
+   for update;
+
   -- ── 1. Creates ─────────────────────────────────────────────────────────────────────────────
   for v_e in select x from jsonb_array_elements(v_creates) as t(x) loop
     v_id := null; v_hit := null; v_status := null; v_reason := null;
@@ -212,6 +250,8 @@ begin
         end if;
       end if;
     exception
+      -- A lock wait past lock_timeout, a deadlock: the whole call fails and is resent (header).
+      when transaction_rollback or lock_not_available then raise;
       when unique_violation then
         -- A concurrent create of the same size landed between the look-up and the insert. Look again
         -- by dimensions; the violated constraint's NAME is never read (see the header).
@@ -258,16 +298,20 @@ begin
       get diagnostics v_n = row_count;
       if v_n = 1 then
         v_status := 'removed';
-      elsif not exists (select 1 from public.building_sizes z where z.id = v_id) then
+      elsif not exists (select 1 from public.building_sizes z where z.id = v_id and z.client_id = p_client_id) then
+        -- Nothing of this tenant's to remove: a resend of a remove that landed, or an id that was
+        -- never theirs. Another builder's rows are not looked at, so both answer alike (header).
         v_status := 'removed';
         v_gone := true;
       else
         v_status := 'refused';
         v_reason := 'Only a size that was never priced or edited can be removed. Untick Offered to hide it.';
       end if;
-    exception when others then
-      v_status := 'refused';
-      v_reason := case when length(sqlerrm) <= 200 and strpos(sqlerrm, '<') = 0 then sqlerrm else 'The database refused this change.' end;
+    exception
+      when transaction_rollback or lock_not_available then raise;
+      when others then
+        v_status := 'refused';
+        v_reason := case when length(sqlerrm) <= 200 and strpos(sqlerrm, '<') = 0 then sqlerrm else 'The database refused this change.' end;
     end;
     v_ans := jsonb_build_object('id', v_e #>> '{}', 'status', v_status);
     if v_gone then v_ans := v_ans || jsonb_build_object('gone', true); end if;
@@ -360,10 +404,12 @@ begin
           v_status := 'conflict';
         end if;
       end if;
-    exception when others then
-      v_status := 'refused';
-      v_reason := case when length(sqlerrm) <= 200 and strpos(sqlerrm, '<') = 0 then sqlerrm else 'The database refused this change.' end;
-      v_errs := '{}'::jsonb;
+    exception
+      when transaction_rollback or lock_not_available then raise;
+      when others then
+        v_status := 'refused';
+        v_reason := case when length(sqlerrm) <= 200 and strpos(sqlerrm, '<') = 0 then sqlerrm else 'The database refused this change.' end;
+        v_errs := '{}'::jsonb;
     end;
     -- What the server holds now, whatever happened: the browser shows it.
     v_ans := jsonb_build_object('id', v_e ->> 'id', 'status', v_status);
