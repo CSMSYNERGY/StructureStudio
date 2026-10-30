@@ -639,6 +639,63 @@ function ssSupportText(text, onLink) {
   return out;
 }
 
+// 👍 / 👎 under one answer (migration 348; Carolyn 10-27: "see how it's responding, how the users
+// are responding"). It is for the team's tracking: an operator reads the ratings in Admin → Support
+// chats. One tap saves; a 👎 is saved at once and then asks "What was wrong?" with one optional
+// line. The same thumb again clears it. Only an answer the server stored can be rated (its id is a
+// uuid): a cap's sentence and the "pending" copy of a question are not stored.
+function SupportRate({ m, onRated }) {
+  const [asking, setAsking] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState("");     // "Thanks!" or why it didn't save
+  const save = async (rating, why) => {
+    setBusy(true); setSaid("");
+    const prev = m.rating === 1 || m.rating === -1 ? m.rating : null;
+    onRated(m.id, rating === 0 ? null : rating);   // shown at once, put back if it fails
+    let saved = false;
+    try {
+      const { data, error } = await sb.functions.invoke("support-agent", { body: { action: "rate", messageId: m.id, rating, ...(why ? { note: why } : {}) } });
+      if (error || !data || data.error) throw new Error("rate failed");
+      saved = true;
+      setSaid(rating === 0 ? "" : "Thanks!");
+    } catch (_e) {
+      onRated(m.id, prev);
+      setSaid("That didn't save. Please try again.");
+    }
+    setBusy(false);
+    return saved;
+  };
+  const up = () => { if (busy) return; setAsking(false); save(m.rating === 1 ? 0 : 1); };
+  const down = async () => {
+    if (busy) return;
+    if (m.rating === -1) { setAsking(false); save(0); return; }
+    if (await save(-1)) { setAsking(true); setSaid(""); }
+  };
+  const sendWhy = async (e) => {
+    e.preventDefault();
+    const why = note.trim();
+    if (!why) { setAsking(false); setSaid("Thanks!"); return; }
+    if (await save(-1, why)) { setAsking(false); setNote(""); }
+  };
+  return (
+    <>
+      <div className="ss-sup-rate" data-ss-sup-rate={m.rating === 1 ? "up" : m.rating === -1 ? "down" : "none"}>
+        <button type="button" onClick={up} disabled={busy} aria-pressed={m.rating === 1} aria-label="Helpful" title="Helpful">👍</button>
+        <button type="button" onClick={down} disabled={busy} aria-pressed={m.rating === -1} aria-label="Not helpful" title="Not helpful">👎</button>
+        {said && <span role="status">{said}</span>}
+      </div>
+      {asking && (
+        <form className="ss-sup-why" onSubmit={sendWhy}>
+          <input value={note} maxLength={300} autoFocus placeholder="What was wrong? (optional)" aria-label="What was wrong?"
+            onChange={(e) => setNote(e.target.value)} />
+          <button type="submit" disabled={busy}>Send</button>
+        </form>
+      )}
+    </>
+  );
+}
+
 // The assistant's chat panel, under the Support button (about 400 × 620 at desktop, a full-screen
 // sheet on a phone). Plain text in and out; a "Thinking…" line while support-agent answers; the
 // hand-off card opens the ticket form already written. Chats are saved (migration 340) and the
@@ -747,6 +804,7 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
     setMessages([]); setConvId(null); setHandoff(null); setErr("");
   };
 
+  const rated = useCallback((id, rating) => setMessages((ms) => ms.map((x) => (x.id === id ? { ...x, rating } : x))), []);
   const name = (status && status.name) || "Studio Assistant";
   const available = !!(status && status.available);
   const goTo = (page, sub) => { onNavigate(page, sub); if (window.innerWidth < 640) onClose(); };
@@ -775,9 +833,12 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
           <div className="ss-sup-bot">{loadErr || status.unavailable || "The assistant isn't available right now."} {SS_REPLY_PROMISE}</div>
         )}
         {messages.map((m) => (
-          <div key={m.id} className={m.role === "user" ? "ss-sup-me" : "ss-sup-bot"}>
-            {m.role === "user" ? m.body : ssSupportText(m.body, goTo)}
-          </div>
+          <React.Fragment key={m.id}>
+            <div className={m.role === "user" ? "ss-sup-me" : "ss-sup-bot"}>
+              {m.role === "user" ? m.body : ssSupportText(m.body, goTo)}
+            </div>
+            {m.role === "assistant" && !m.cap && SS_UUID_RE.test(String(m.id)) && <SupportRate m={m} onRated={rated} />}
+          </React.Fragment>
         ))}
         {busy && <div className="ss-sup-muted">Thinking…</div>}
         {handoff && !busy && (
@@ -802,7 +863,11 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
         </form>
       ) : status !== null && (
         <div className="ss-sup-form">
-          <button type="button" onClick={() => onTicket(null, null)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%" }}>Submit a ticket</button>
+          {/* The assistant is off (no key, or over the month's cap), but the builder may have been
+              chatting until it went off: status still returns the open chat. The ticket carries it,
+              so the team gets the last messages and the "Full chat" link in exactly this case
+              (Carolyn, 10-29). An empty chat is not sent: there is nothing to link to. */}
+          <button type="button" onClick={() => onTicket(null, messages.length ? convId : null)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%" }}>Submit a ticket</button>
         </div>
       )}
     </div>
@@ -912,7 +977,10 @@ function SupportMenu({ clientId, onSubmitted, onNavigate }) {
 // ─── "My Requests": this tenant's bugs + feature requests, with our replies ───
 // The component and the `mine` route slug keep the older "submissions" naming — the rows
 // are still feedback_submissions, and renaming the slug would break existing links.
-function MySubmissions({ refreshKey }) {
+// `supportOn` is the shell's switch (346): off, the empty-state sentence points at the 💬 Feedback
+// pill those builders still have, word for word as before, and the Tickets chip shows only when a
+// ticket row exists (release review, 10-30).
+function MySubmissions({ refreshKey, supportOn = false }) {
   const [rows, setRows] = useState(null);       // null = loading
   const [comments, setComments] = useState({}); // submission_id -> [comment]
   const [error, setError] = useState(null);
@@ -1021,7 +1089,8 @@ function MySubmissions({ refreshKey }) {
         <span style={{ ...S.h2, marginBottom: 0 }}>My Requests</span>
         <span style={{ fontSize: 12, color: "#94A3B8" }}>({rows.length})</span>
         <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
-          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"], ["ticket", "🎫 Tickets"]].map(([k, lbl]) => (
+          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"],
+            ...(supportOn || rows.some((r) => r.kind === "ticket") ? [["ticket", "🎫 Tickets"]] : [])].map(([k, lbl]) => (
             <button key={k} type="button" onClick={() => setFilter(k)}
               style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999, cursor: "pointer",
                 border: filter === k ? "1px solid " + ACCENT : "1px solid #E2E8F0",
@@ -1036,8 +1105,13 @@ function MySubmissions({ refreshKey }) {
 
       {rows.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0", lineHeight: 1.6 }}>
-          You haven't sent us anything yet. Use the <b>Support</b> button at the top of the page to report
-          a problem, request a feature or send us a ticket — it'll show up here so you can follow what happens to it.
+          {supportOn ? (<>
+            You haven't sent us anything yet. Use the <b>Support</b> button at the top of the page to report
+            a problem, request a feature or send us a ticket — it'll show up here so you can follow what happens to it.
+          </>) : (<>
+            You haven't sent us anything yet. Use the <b>💬 Feedback</b> button in the bottom-right corner
+            to report an issue or request a feature — it'll show up here so you can follow what happens to it.
+          </>)}
         </div>
       ) : shown.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>Nothing here under this filter.</div>
@@ -1321,7 +1395,7 @@ function SetupChecklist({ items, counts, canEdit, onPatch, onReload, onNavigate,
 // changelog is now one view inside it, not the whole page. ───
 // `canAdmin` reaches SetupChecklist for one reason: only an owner/admin can open
 // Settings → Billing, so only they get the "add this add-on" button on a padlocked step.
-function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
+function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin, supportOn = false }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   // The sub-tab lives in the URL (/support/setup — /releases/setup still
@@ -1532,7 +1606,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
       {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
         canEdit={!setupData || setupData.canEdit !== false}
         onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
-        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
+        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} supportOn={supportOn} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
         : rows.length === 0

@@ -10,8 +10,8 @@
 //      four numbers, every chat newest first with builder, person, first question, size and status
 //   B. clicking a chat opens the whole conversation, oldest first, with who said it, the lookups an
 //      answer used, and the ticket it became; HTML in a message is text, never markup; Escape closes
-//   C. the builder filter and "Only chats that became tickets" ask the server, and say so when
-//      nothing matches
+//   C. the builder filter and the Show filter (👎 Not helpful, Became a ticket, Didn't know) ask
+//      the server, and say so when nothing matches
 //   D. "Load older chats" asks for the page before the last chat, adds it, and goes away at the end
 //   E. a link to one chat (/console/chats?chat=<id>) opens it, asks with the chat id alone, and takes
 //      ?chat= off the address so it does not ride onto the next page
@@ -21,6 +21,8 @@
 //   I. a non-operator never sees the Admin tab and never asks for a chat
 //   J. a chat longer than the most shown: its newest messages, past one read's 1000-row cap, and a
 //      line saying older ones aren't shown
+// Tracking (migration 348) rides along: A checks this month's 👍 / 👎 / Didn't know and each row's
+// tally and "didn't know" note; B checks each answer's rating, the line under a 👎, and the note.
 // B also checks focus (it moves into the dialog and back to the row, so Space or Enter cannot click
 // the row behind it) and that a text selection let go over the backdrop does not close the dialog.
 // The fake returns at most 1000 rows a read, like the project's db-max-rows.
@@ -54,10 +56,10 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 
-// ── The in-memory database: the live columns only (read 2026-10-30), like supportChats_test.ts ──
+// ── The in-memory database: the live columns only (read 2026-10-30, plus 348's), like supportChats_test.ts ──
 const COLUMNS = {
-  support_conversations: ["id", "client_id", "user_id", "status", "submission_id", "model", "message_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "created_at", "updated_at", "last_message_at"],
-  support_messages: ["id", "conversation_id", "client_id", "user_id", "role", "body", "tools", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "stop_reason", "model", "created_at"],
+  support_conversations: ["id", "client_id", "user_id", "status", "submission_id", "model", "message_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "created_at", "updated_at", "last_message_at", "up_count", "down_count", "gap_count"],
+  support_messages: ["id", "conversation_id", "client_id", "user_id", "role", "body", "tools", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "stop_reason", "model", "created_at", "rating", "rating_note", "rated_at", "gap"],
   client_configs: ["client_id", "updated_at", "company_name"],
   feedback_submissions: ["id", "client_id", "kind", "title", "status", "created_at", "support_conversation_id"],
   admin_audit: ["id", "created_at", "action", "target_client_id", "row_count", "note", "actor_email", "actor_user_id"],
@@ -88,6 +90,7 @@ function fakeDb(W) {
       in(c, vs) { col(c); st.filters.push((r) => vs.includes(r[c])); return b; },
       lt(c, v) { col(c); st.filters.push((r) => cmp(r[c], v) < 0); return b; },
       gte(c, v) { col(c); st.filters.push((r) => cmp(r[c], v) >= 0); return b; },
+      gt(c, v) { col(c); st.filters.push((r) => Number(r[c] ?? 0) > v); return b; },
       not(c, op, v) { col(c); st.filters.push((r) => r[c] != null); return b; },
       order(c, o) { col(c); st.orders.push([c, !o || o.ascending !== false]); return b; },
       limit(n) { st.lim = n; return b; },
@@ -115,11 +118,12 @@ let mid = 0;
 const msg = (n, role, body, minutesAgo, o = {}) => ({
   id: `10000000-0000-4000-8000-${String(++mid).padStart(12, "0")}`, conversation_id: cid(n), client_id: o.client_id || "demo-builder",
   user_id: U1, role, body, tools: o.tools || [], cost_micros: role === "assistant" ? 2400 : 0, model: role === "assistant" ? "claude-sonnet-5-5" : null,
-  stop_reason: null, created_at: ago(minutesAgo),
+  stop_reason: null, created_at: ago(minutesAgo), rating: o.rating ?? null, rating_note: o.rating_note ?? null, gap: o.gap ?? null,
 });
 const conv = (n, minutesAgo, o = {}) => ({
   id: cid(n), client_id: "demo-builder", user_id: U1, status: "open", submission_id: null, model: "claude-sonnet-5-5",
-  message_count: 2, cost_micros: 4800, created_at: ago(minutesAgo + 5), updated_at: ago(minutesAgo), last_message_at: ago(minutesAgo), ...o,
+  message_count: 2, cost_micros: 4800, created_at: ago(minutesAgo + 5), updated_at: ago(minutesAgo), last_message_at: ago(minutesAgo),
+  up_count: 0, down_count: 0, gap_count: 0, ...o,
 });
 function baseWorld() {
   mid = 0;
@@ -131,17 +135,17 @@ function baseWorld() {
       client_configs: [{ client_id: "demo-builder", company_name: "Demo Sheds" }, { client_id: "acme-barns", company_name: "Acme Barns" }],
       feedback_submissions: [{ id: TICKET, client_id: "acme-barns", kind: "ticket", title: "Prices look wrong", status: "submitted", created_at: ago(30), support_conversation_id: cid(2) }],
       support_conversations: [
-        conv(1, 10, { message_count: 4 }),
-        conv(2, 30, { client_id: "acme-barns", user_id: U2, status: "handed_off", submission_id: TICKET, message_count: 2, cost_micros: 9000 }),
+        conv(1, 10, { message_count: 4, up_count: 1, down_count: 1 }),
+        conv(2, 30, { client_id: "acme-barns", user_id: U2, status: "handed_off", submission_id: TICKET, message_count: 2, cost_micros: 9000, gap_count: 1 }),
         conv(3, 60, { status: "closed" }),
       ],
       support_messages: [
         msg(1, "user", "Which styles have no prices yet?", 14),
-        msg(1, "assistant", "Two styles have no prices: Utility and Lofted Barn.\nOpen Settings > Pricing to add them.", 13, { tools: ["get_account_overview", "get_catalog_summary"] }),
+        msg(1, "assistant", "Two styles have no prices: Utility and Lofted Barn.\nOpen Settings > Pricing to add them.", 13, { tools: ["get_account_overview", "get_catalog_summary"], rating: 1 }),
         msg(1, "user", "Can I paste <b>bold</b> here?", 12),
-        msg(1, "assistant", "Yes, it shows as plain text.", 10),
+        msg(1, "assistant", "Yes, it shows as plain text.", 10, { rating: -1, rating_note: "Too short" }),
         msg(2, "user", "My prices look wrong on the 12x16", 32, { client_id: "acme-barns" }),
-        msg(2, "assistant", "I'll pass this to the team.", 30, { client_id: "acme-barns", tools: ["offer_handoff"] }),
+        msg(2, "assistant", "I'll pass this to the team.", 30, { client_id: "acme-barns", tools: ["note_gap", "offer_handoff"], gap: "Why a size's price differs from the sheet" }),
         msg(3, "user", "Thanks, that's all", 61),
       ],
     },
@@ -228,10 +232,13 @@ try {
     const month = await page.locator("[data-adm-chat-month]").innerText();
     ok("A: this month's numbers: 3 chats, 4 questions, 1 ticket", /CHATS THIS MONTH\s*3/i.test(month) && /QUESTIONS\s*4/i.test(month) && /BECAME TICKETS\s*1/i.test(month), month.replace(/\s+/g, " "));
     ok("A: spend against the monthly limit", /\$0\.48/.test(month) && month.includes("of the $200.00 monthly limit"), month.replace(/\s+/g, " "));
+    ok("A: this month's 👍 1, 👎 1, didn't know 1", /HELPFUL\s*1/i.test(month) && /NOT HELPFUL\s*1/i.test(month) && /DIDN'T KNOW\s*1/i.test(month), month.replace(/\s+/g, " "));
     const list = await rows(page).allInnerTexts();
     ok("A: three chats, newest first", list.length === 3 && list[0].includes("Which styles have no prices yet?") && list[1].includes("My prices look wrong") && list[2].includes("Thanks, that's all"), JSON.stringify(list.map((s) => s.slice(0, 40))));
     ok("A: each row names the builder and the person", list[0].includes("Demo Sheds") && list[0].includes("Pat Example") && list[1].includes("Acme Barns") && list[1].includes("staff@acme.test"));
     ok("A: size, cost and status on each row", list[0].includes("4 messages") && list[1].includes("$0.01") && list[1].includes("Became a ticket") && list[2].includes("Closed") && list[0].includes("Open"));
+    ok("A: a row's thumbs tally, and none on a chat without ratings", list[0].includes("👍 1 · 👎 1") && !list[2].includes("👍"), list[0]);
+    ok("A: a chat with a gap shows its note", list[1].includes("Didn't know: Why a size's price differs from the sheet") && list[1].includes("didn't know 1") && !list[0].includes("Didn't know"), list[1]);
     ok("A: one list call, unfiltered", of(t.calls, "support_chats_list").length === 1 && !of(t.calls, "support_chats_list")[0].body.clientId && !of(t.calls, "support_chats_list")[0].body.status);
     await shot(page, "01-list.png");
 
@@ -247,6 +254,10 @@ try {
     ok("B: the lookups an answer used, in words", bubbles[1].text.includes("looked at their account, their catalog"), bubbles[1].text.split("\n")[0]);
     ok("B: line breaks in an answer are kept", bubbles[1].text.includes("Lofted Barn.\nOpen Settings"));
     ok("B: HTML in a message is text, not markup", bubbles[2].text.includes("<b>bold</b>") && (await page.locator('[data-adm-chat-msg] b').count()) === 0);
+    const ratings = await page.locator("[data-adm-chat-rating]").evaluateAll((els) => els.map((e) => [e.getAttribute("data-adm-chat-rating"), e.innerText]));
+    ok("B: each rated answer says how the builder rated it, with the line under a 👎", ratings.length === 2 && ratings[0][0] === "up" && ratings[0][1].includes("👍 Helpful")
+      && ratings[1][0] === "down" && ratings[1][1].includes("👎 Not helpful") && ratings[1][1].includes("“Too short”"), JSON.stringify(ratings));
+    ok("B: the rating sits under its answer", bubbles[1].text.includes("👍 Helpful") && bubbles[3].text.includes("Too short") && !bubbles[0].text.includes("Helpful"));
     const head = await dialogText(page);
     ok("B: the dialog names the builder, person and email", head.includes("Demo Sheds") && head.includes("Pat Example <owner@demo.test>"));
     ok("B: opening the chat was audited with whose it is", S.world.audit.some((a) => a.action === "support_chat_read" && a.target_client_id === "demo-builder" && a.note === `chat=${cid(1)}`));
@@ -267,6 +278,8 @@ try {
     }));
     const handoff = await dialogText(page);
     ok("B: an answer that offered a ticket says so, not as a lookup", handoff.includes("· offered a ticket") && !handoff.includes("looked at offered"));
+    ok("B: its \"didn't know\" note, and note_gap is not shown as a lookup", (await page.locator("[data-adm-chat-gap]").innerText()).includes("Didn't know: Why a size's price differs from the sheet")
+      && !handoff.includes("note_gap") && !handoff.includes("looked at"), handoff.replace(/\s+/g, " ").slice(0, 300));
     // Select text in a message and let go over the backdrop (the left margin): the dialog stays.
     const bubble = await page.locator("[data-adm-chat-msg]").first().boundingBox();
     await page.mouse.move(bubble.x + bubble.width - 12, bubble.y + bubble.height - 10);
@@ -290,10 +303,24 @@ try {
     const opts = await page.getByLabel("Builder").locator("option").allInnerTexts();
     ok("C: the filter lists builders with their counts", opts.includes("Acme Barns (1)") && opts.includes("Demo Sheds (2)"), JSON.stringify(opts));
     await page.getByLabel("Builder").selectOption("demo-builder");
-    await page.getByLabel("Only chats that became tickets").check();
+    await page.getByLabel("Show").selectOption("handed_off");
     ok("C: none of Demo Sheds' chats became tickets: says so", await waitText(page, "No chats match."));
     const last = of(t.calls, "support_chats_list").at(-1);
-    ok("C: …asked with the builder and handed_off", last.body.clientId === "demo-builder" && last.body.status === "handed_off", JSON.stringify(last.body));
+    ok("C: …asked with the builder and handed_off", last.body.clientId === "demo-builder" && last.body.status === "handed_off" && !last.body.show, JSON.stringify(last.body));
+    const showOpts = await page.getByLabel("Show").locator("option").allInnerTexts();
+    ok("C: Show offers every chat, 👎, tickets and didn't know", JSON.stringify(showOpts) === JSON.stringify(["Every chat", "👎 Not helpful", "Became a ticket", "Didn't know"]), JSON.stringify(showOpts));
+    await page.getByLabel("Builder").selectOption("");
+    await page.getByLabel("Show").selectOption("down");
+    ok("C: 👎 Not helpful lists the one chat with a thumbs down", await waitFor(page, () => {
+      const r = [...document.querySelectorAll("[data-adm-chat-row]")]; return r.length === 1 && r[0].innerText.includes("Which styles have no prices yet?");
+    }));
+    const downCall = of(t.calls, "support_chats_list").at(-1);
+    ok("C: …asked with show down and no status", downCall.body.show === "down" && !downCall.body.status && !downCall.body.clientId, JSON.stringify(downCall.body));
+    await page.getByLabel("Show").selectOption("gap");
+    ok("C: Didn't know lists the one chat with a note", await waitFor(page, () => {
+      const r = [...document.querySelectorAll("[data-adm-chat-row]")]; return r.length === 1 && r[0].innerText.includes("Didn't know: Why a size's price");
+    }));
+    ok("C: …asked with show gap", of(t.calls, "support_chats_list").at(-1).body.show === "gap");
     ok("C: no page errors", t.pageErrors.length === 0, t.pageErrors.join(" | "));
     await t.ctx.close();
 

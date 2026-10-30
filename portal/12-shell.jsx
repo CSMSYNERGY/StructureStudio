@@ -3833,7 +3833,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "support" && (
               <ReleasesView submissionsKey={feedbackKey}
                 sub={activeTab === "support" ? sub : null} onSub={(x) => navigate("support", x)}
-                onNavigate={navigate} canAdmin={mirrorAdmin} />
+                onNavigate={navigate} canAdmin={mirrorAdmin} supportOn={supportOn} />
             )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through

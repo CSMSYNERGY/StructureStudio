@@ -34,7 +34,13 @@
 //      server-side fallback on;
 //   3. up to 4 rounds of tools, 45 s per call and 90 s per turn; a refusal, a cut-off answer or a
 //      fault answers with a fixed sentence and offers a ticket;
-//   4. the answer is stored with its tokens and cost (tokens x the list price, an estimate).
+//   4. the answer is stored with its tokens and cost (tokens x the list price, an estimate), and
+//      with its "didn't know" note when it called note_gap (migration 348).
+//
+// ══ TRACKING (migration 348; Carolyn 10-27, Ahsan 10-30 "just for tracking") ══
+// The builder can 👍 or 👎 each answer (`rate`), with one optional line under a 👎; the assistant
+// notes the questions it could not answer (note_gap). Both are stored on the answer and read only by
+// operators, in Admin → Support chats (admin-catalog/supportChats.ts). A builder never sees a gap note.
 //
 // ══ CACHING ══
 // tools, then the rules + knowledge (one system block, the cache breakpoint), are identical for
@@ -47,12 +53,12 @@
 // only, migration 340) and in the request to Claude.
 
 import { KNOWLEDGE } from "./knowledge.ts";
-import { runTool, TOOL_DEFS, type ToolCtx } from "./tools.ts";
+import { GAP_CHARS, runTool, TOOL_DEFS, type ToolCtx } from "./tools.ts";
 
 export const ASSISTANT_NAME = "Studio Assistant";
 /** Returned by `status`, so a deploy can be proved by asking the live function (its bundle cannot
  *  be downloaded). Bump it with every change to this function. */
-export const BUILD = "346.2";
+export const BUILD = "348.1";
 export const DEFAULT_MODEL = "claude-sonnet-5-5";
 export const REPLY_PROMISE = "A person on our team replies within 24 hours.";
 /** Room for low-effort thinking plus a chat-length answer. A longer one is cut and said so. */
@@ -69,6 +75,8 @@ export const DEFAULT_DAILY_CAP = 60;
 /** The support key's console spend limit (Carolyn 10-27). Raise both together. */
 export const DEFAULT_MONTHLY_CAP_USD = 200;
 export const RETENTION_DAYS = 180;
+/** migration 348's CHECK on support_messages.rating_note: the line under a 👎. */
+export const RATING_NOTE_CHARS = 300;
 /** Stage 2 (live Zoom in business hours) is not built. The menu item renders only when this is true. */
 export const LIVE_SUPPORT_AVAILABLE = false;
 
@@ -106,7 +114,7 @@ export const SYSTEM_RULES = [
   "How to help:",
   "- Answer from the knowledge below and from the account tools. Use the tools to check specifics about this builder's own account (what is set, missing or switched on, their styles, their requests) even when you feel confident, rather than assuming.",
   "- Before saying a feature exists, has shipped or is planned, check with search_whats_new. Never promise dates for anything not yet built.",
-  "- If the knowledge and the tools don't answer it, say you're not sure rather than guessing, and offer to send it to the team.",
+  "- If the knowledge and the tools don't answer it, say you're not sure rather than guessing, and offer to send it to the team. Also call note_gap with the question in a few words, so the team can teach you the answer.",
   "- Earlier answers in this chat were checked with the tools whenever they needed to be; only their words are kept here, not the lookups. Treat them as checked: never tell the person an earlier answer was unchecked, and never retract one for that reason. If you need an account fact again, look it up again.",
   "- You can't change anything in the account. Say where the setting is and how to change it.",
   "- When the person reports something broken, asks for something the product doesn't do, asks for a person, or you can't solve it, call offer_handoff with a short title and summary, then tell them they can send it with the button. " + REPLY_PROMISE,
@@ -139,6 +147,8 @@ export interface StoredMessage {
   role: "user" | "assistant";
   body: string;
   created_at: string;
+  /** The builder's 👍 (1) or 👎 (-1) on an answer; null when not rated (348). */
+  rating?: 1 | -1 | null;
 }
 
 export interface Usage {
@@ -169,8 +179,11 @@ export interface AgentStore {
   history(conversationId: string, limit: number): Promise<StoredMessage[]>;
   addMessage(row: {
     conversationId: string; who: Who; role: "user" | "assistant"; body: string;
-    tools?: string[]; totals?: Totals; stopReason?: string | null; model?: string | null;
+    tools?: string[]; totals?: Totals; stopReason?: string | null; model?: string | null; gap?: string | null;
   }): Promise<StoredMessage>;
+  /** Sets (or clears, null) the rating on one ANSWER in the person's own chats. False when no such
+   *  answer is theirs. Throws on a write fault. */
+  rate(who: Who, messageId: string, rating: 1 | -1 | null, note: string | null): Promise<boolean>;
   bumpConversation(conversationId: string, delta: { messages: number; totals: Totals; model: string | null }): Promise<void>;
   closeConversations(who: Who): Promise<void>;
   /** Deletes chats idle longer than `days`, every tenant's. */
@@ -289,6 +302,8 @@ export interface TurnResult {
   totals: Totals;
   tools: string[];
   handoff: { title: string; summary: string } | null;
+  /** note_gap's question(s), joined, at most GAP_CHARS; null when it knew. */
+  gap: string | null;
 }
 
 async function askClaude(
@@ -344,10 +359,14 @@ export async function runTurn(
   let totals = zeroTotals();
   const tools: string[] = [];
   let handoff: TurnResult["handoff"] = null;
+  const gaps: string[] = [];
   let answeredBy: string | null = null;
   const toolCtx: ToolCtx = { ...deps.toolCtx, clientId: who.clientId, userId: who.userId };
 
-  const done = (text: string, stopReason: string): TurnResult => ({ text, stopReason, model: answeredBy ?? model, totals, tools, handoff });
+  const done = (text: string, stopReason: string): TurnResult => ({
+    text, stopReason, model: answeredBy ?? model, totals, tools, handoff,
+    gap: gaps.length ? [...new Set(gaps)].join(" · ").slice(0, GAP_CHARS) : null,
+  });
 
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     const lastChance = round === MAX_TOOL_ROUNDS;
@@ -406,6 +425,7 @@ export async function runTurn(
         tools.push(name.slice(0, 40));
         const out = await runTool(name, u.input, toolCtx);
         if (out.handoff) handoff = out.handoff;
+        if (out.gap) gaps.push(out.gap);
         return { type: "tool_result", tool_use_id: u.id, content: out.content, ...(out.isError ? { is_error: true } : {}) };
       }));
       messages.push({ role: "user", content: results });
@@ -500,7 +520,7 @@ export async function handleSend(deps: AgentDeps, who: Who, payload: { text?: un
   // 4. The answer and its cost.
   const botRow = await deps.store.addMessage({
     conversationId, who, role: "assistant", body: turn.text,
-    tools: turn.tools, totals: turn.totals, stopReason: turn.stopReason, model: turn.model,
+    tools: turn.tools, totals: turn.totals, stopReason: turn.stopReason, model: turn.model, gap: turn.gap,
   });
   await deps.store.bumpConversation(conversationId, { messages: 2, totals: turn.totals, model: turn.model }).catch(() => undefined);
 
@@ -510,4 +530,22 @@ export async function handleSend(deps: AgentDeps, who: Who, payload: { text?: un
     // 20-question pass checks, and harmless to show.
     body: { ok: true, conversationId, messages: [userRow, botRow], handoff: turn.handoff, tools: turn.tools },
   };
+}
+
+const MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** 👍 (1), 👎 (-1) or cleared (0) on one of the person's OWN answers, with an optional line under a
+ *  👎 (migration 348). Nothing is asked of Claude and nothing is spent, so no cap applies; the store
+ *  matches the answer on the caller's tenant AND user, never on the id alone. */
+export async function handleRate(deps: AgentDeps, who: Who, payload: { messageId?: unknown; rating?: unknown; note?: unknown }): Promise<Reply> {
+  const id = typeof payload.messageId === "string" ? payload.messageId.trim().toLowerCase() : "";
+  if (!MESSAGE_ID.test(id)) return { status: 400, body: { error: "Which answer?" } };
+  const r = payload.rating;
+  if (r !== 1 && r !== -1 && r !== 0) return { status: 400, body: { error: "A rating is 1, -1 or 0." } };
+  const raw = typeof payload.note === "string" ? payload.note.replace(/\s+/g, " ").trim() : "";
+  if (raw.length > RATING_NOTE_CHARS) return { status: 400, body: { error: `Please keep it under ${RATING_NOTE_CHARS} characters.` } };
+  const rating = r === 0 ? null : r;
+  const found = await deps.store.rate(who, id, rating, rating === -1 && raw ? raw : null);
+  if (!found) return { status: 404, body: { error: "That answer isn't here any more." } };
+  return { status: 200, body: { ok: true, messageId: id, rating } };
 }

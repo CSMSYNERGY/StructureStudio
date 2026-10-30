@@ -5,7 +5,8 @@
 // Run: deno test --allow-env --allow-read --node-modules-dir=none admin-catalog/   (from supabase/functions)
 // Self-contained (no jsr:/npm: imports), like support-agent/agent_test.ts.
 //
-// The fake database answers only with the columns these tables have live (read 2026-10-30) and
+// The fake database answers only with the columns these tables have live (read 2026-10-30, plus
+// migration 348's seven) and
 // refuses any other with 42703, the way PostgREST does: a fake that accepts any column passes a
 // select that fails in production. It also returns at most MAX_ROWS (1000) rows per read whatever
 // limit() or range() asks, like this project's db-max-rows: the first version of this module read
@@ -28,8 +29,8 @@ function assertEquals<T>(actual: T, expected: T, msg = ""): void {
 }
 
 const COLUMNS: Record<string, string[]> = {
-  support_conversations: ["id", "client_id", "user_id", "status", "submission_id", "model", "message_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "created_at", "updated_at", "last_message_at"],
-  support_messages: ["id", "conversation_id", "client_id", "user_id", "role", "body", "tools", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "stop_reason", "model", "created_at"],
+  support_conversations: ["id", "client_id", "user_id", "status", "submission_id", "model", "message_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "created_at", "updated_at", "last_message_at", "up_count", "down_count", "gap_count"],
+  support_messages: ["id", "conversation_id", "client_id", "user_id", "role", "body", "tools", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micros", "stop_reason", "model", "created_at", "rating", "rating_note", "rated_at", "gap"],
   client_configs: ["client_id", "updated_at", "company_name", "tagline", "logo_url", "header_bg", "accent_color", "contact_fields", "default_sizes", "options", "styles_per_row", "brand_colors"],
   feedback_submissions: ["id", "client_id", "submitted_by", "submitter_name", "submitter_email", "kind", "title", "detail", "severity", "attachment_path", "status", "monday_item_id", "monday_board_id", "monday_error", "created_at", "status_changed_at", "updated_at", "source_app", "source_ref", "support_conversation_id"],
   admin_audit: ["id", "created_at", "action", "target_client_id", "row_count", "note", "actor_email", "actor_user_id"],
@@ -84,6 +85,7 @@ class Query {
   in(c: string, vs: unknown[]) { this.col(c); this.filters.push((r) => vs.includes(r[c])); return this; }
   lt(c: string, v: unknown) { this.col(c); this.filters.push((r) => cmp(r[c], v) < 0); return this; }
   gte(c: string, v: unknown) { this.col(c); this.filters.push((r) => cmp(r[c], v) >= 0); return this; }
+  gt(c: string, v: number) { this.col(c); this.filters.push((r) => Number(r[c] ?? 0) > v); return this; }
   not(c: string, op: string, v: unknown) {
     this.col(c);
     if (op !== "is" || v !== null) throw new Error("fake: only not(col, 'is', null)");
@@ -157,7 +159,7 @@ function conv(n: number, o: Row = {}): Row {
   return {
     id: cid(n), client_id: "demo-builder", user_id: U1, status: "open", submission_id: null, model: "claude-sonnet-5-5",
     message_count: 2, input_tokens: 10, output_tokens: 20, cache_read_tokens: 0, cache_write_tokens: 0, cost_micros: 1500,
-    created_at: at(n), updated_at: at(n), last_message_at: at(n), ...o,
+    created_at: at(n), updated_at: at(n), last_message_at: at(n), up_count: 0, down_count: 0, gap_count: 0, ...o,
   };
 }
 let mid = 0;
@@ -317,7 +319,7 @@ Deno.test("this month: spend from support_usage, counts since midnight UTC on th
   ];
   const r = await call(w, "support_chats_list");
   assertEquals(r.body.month, {
-    since: "2026-10-01T00:00:00.000Z", chats: 1, questions: 2, tickets: 1, costMicros: 480_000, capMicros: 200_000_000,
+    since: "2026-10-01T00:00:00.000Z", chats: 1, questions: 2, tickets: 1, up: 0, down: 0, gaps: 0, costMicros: 480_000, capMicros: 200_000_000,
   });
   const raised = await call(w, "support_chats_list", {}, OP, deps({ SUPPORT_AI_MONTHLY_CAP_USD: "500" }));
   assertEquals(raised.body.month.capMicros, 500_000_000);
@@ -497,4 +499,80 @@ Deno.test("a failed builders read gives no filter list, never a short one", asyn
   assertEquals(r.body.chats.length, 1);
   assertEquals(r.body.builders, null);
   assertEquals(r.body.month.chats, 1, "the month still counts");
+});
+
+// ── Tracking: thumbs and "didn't know" (migration 348) ─────────────────────────────────────────
+
+Deno.test("tracking: each chat carries its thumbs and gap counts, and a gap chat its newest note", async () => {
+  const w = world();
+  w.rows.support_conversations = [
+    conv(1, { up_count: 2, down_count: 1 }),
+    conv(2, { gap_count: 2 }),
+    conv(3),
+  ];
+  w.rows.support_messages = [
+    msg(2, "user", "Can I export prices?", 2),
+    msg(2, "assistant", "Not sure.", 3, { gap: "Exporting prices" }),
+    msg(2, "assistant", "Not sure either.", 4, { gap: "  Bulk   discounts " }),
+  ];
+  const r = await call(w, "support_chats_list");
+  const byId = Object.fromEntries(r.body.chats.map((c: Row) => [c.id, c]));
+  assertEquals([byId[cid(1)].up, byId[cid(1)].down, byId[cid(1)].gaps], [2, 1, 0]);
+  assertEquals([byId[cid(2)].up, byId[cid(2)].down, byId[cid(2)].gaps], [0, 0, 2]);
+  assertEquals(byId[cid(2)].gapNote, "Bulk discounts", "the newest note, folded");
+  assertEquals(byId[cid(1)].gapNote, null, "no note on a chat without gaps");
+  const gapReads = w.reads.filter((t) => t === "support_messages").length;
+  const w2 = world();
+  w2.rows.support_conversations = [conv(1), conv(3)];
+  await call(w2, "support_chats_list");
+  assert(w2.reads.filter((t) => t === "support_messages").length < gapReads, "no gap read when no chat on the page has one");
+});
+
+Deno.test("tracking: show down and show gap filter on the chat; anything else is refused", async () => {
+  const w = world();
+  w.rows.support_conversations = [conv(1, { down_count: 1 }), conv(2, { gap_count: 1 }), conv(3, { up_count: 3 }), conv(4, { down_count: 2, gap_count: 1 })];
+  const down = await call(w, "support_chats_list", { show: "down" });
+  assertEquals(down.body.chats.map((c: Row) => c.id), [cid(4), cid(1)]);
+  const gap = await call(w, "support_chats_list", { show: "gap" });
+  assertEquals(gap.body.chats.map((c: Row) => c.id), [cid(4), cid(2)]);
+  const both = await call(w, "support_chats_list", { show: "down", clientId: "other-builder" });
+  assertEquals(both.body.chats, [], "show and builder combine");
+  for (const show of ["up", "DOWN", "down;", 1]) {
+    assertEquals((await call(w, "support_chats_list", { show })).status, 400, `show ${String(show)}`);
+  }
+  assertEquals((await call(w, "support_chats_list", { show: "" })).body.chats.length, 4, "empty is every chat");
+});
+
+Deno.test("tracking: this month's thumbs and gap counts, on this month's answers only", async () => {
+  const w = world();
+  const may = (m: number) => new Date(Date.UTC(2026, 9, 1, 0, m)).toISOString();
+  w.rows.support_messages = [
+    msg(1, "assistant", "a", 0, { rating: 1, created_at: may(5) }),
+    msg(1, "assistant", "b", 0, { rating: 1, created_at: may(6) }),
+    msg(1, "assistant", "c", 0, { rating: -1, rating_note: "wrong", created_at: may(7) }),
+    msg(1, "assistant", "d", 0, { gap: "x", created_at: may(8) }),
+    msg(1, "assistant", "last month", 0, { rating: -1, gap: "y", created_at: "2026-09-30T23:59:00.000Z" }),
+  ];
+  const r = await call(w, "support_chats_list");
+  assertEquals([r.body.month.up, r.body.month.down, r.body.month.gaps], [2, 1, 1]);
+  w.fail = { support_messages: "XX000" };
+  const failed = await call(w, "support_chats_list");
+  assertEquals([failed.body.month.up, failed.body.month.down, failed.body.month.gaps], [null, null, null], "a failed count is a dash, never 0");
+});
+
+Deno.test("tracking: one chat's answers carry their rating, the line under a thumbs down, and the gap note", async () => {
+  const w = world();
+  w.rows.support_conversations = [conv(1, { up_count: 1, down_count: 1, gap_count: 1 })];
+  w.rows.support_messages = [
+    msg(1, "user", "q", 0),
+    msg(1, "assistant", "good", 1, { rating: 1, rated_at: at(2) }),
+    msg(1, "assistant", "bad", 3, { rating: -1, rating_note: "Wrong page", rated_at: at(4) }),
+    msg(1, "assistant", "unsure", 5, { gap: "Exporting prices" }),
+  ];
+  const r = await call(w, "support_chat_get", { chatId: cid(1) });
+  assertEquals(r.status, 200);
+  assertEquals(r.body.messages.map((m: Row) => [m.rating, m.ratingNote, m.gap]), [
+    [null, null, null], [1, null, null], [-1, "Wrong page", null], [null, null, "Exporting prices"],
+  ]);
+  assertEquals([r.body.chat.up, r.body.chat.down, r.body.chat.gaps], [1, 1, 1]);
 });

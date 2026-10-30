@@ -273,7 +273,7 @@ function PMDrawer({ onClose, labelledBy, children }) {
 // The one thing that cannot live in a row — a conversation — lives here, and the
 // client's original words sit at the bottom of it as the first entry in the thread.
 // Header and footer are pinned; only the thread scrolls.
-function PMItemPanel({ item, canWrite, onClose, onRename, onArchive, onMove }) {
+function PMItemPanel({ item, columns = [], canWrite, onClose, onRename, onArchive, onMove }) {
   const [detail, setDetail] = useState(null);      // { updates, submission }
   const [err, setErr] = useState("");
   const [name, setName] = useState(item.name);
@@ -368,6 +368,12 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive, onMove }) {
   const tag = (bg, fg, text) => (
     <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.4, borderRadius: 4, padding: "1px 6px", background: bg, color: fg, whiteSpace: "nowrap" }}>{text}</span>
   );
+  // The card's own LINK cells, under the Created line: on the Support board that is a ticket's
+  // "Full chat" (Carolyn, 10-29), which is easy to miss in the grid once the card is open. Any link
+  // column counts, only http(s) values, the same anchor as the grid cell. A plain array, no hook.
+  const links = columns.filter((c) => c.type === "link")
+    .map((c) => ({ c, v: item.values && item.values[c.id] }))
+    .filter(({ v }) => v && typeof v.url === "string" && /^https?:\/\//i.test(v.url));
 
   return (
     <>
@@ -403,6 +409,18 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive, onMove }) {
             <span style={{ color: "#94A3B8" }}>Loading history…</span>
           )}
         </div>
+        {links.length > 0 && (
+          <div style={{ fontSize: 12, marginTop: 6, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+            {links.map(({ c, v }) => (
+              <span key={c.id} style={{ color: "#64748B" }}>
+                {c.name}:{" "}
+                <a href={v.url} target="_blank" rel="noreferrer" style={{ color: "#1B7895", fontWeight: 600 }}>
+                  {v.text || v.url.replace(/^https?:\/\//, "").slice(0, 40)}
+                </a>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Thread — the only scrolling region */}
@@ -2282,6 +2300,7 @@ function ProjectsTab({ sub, onSub }) {
            commit would wipe a half-typed update draft (found live, 2026-08-27). */
         <PMItemPanel key={openItem.id}
           item={openItem} canWrite={canWrite}
+          columns={data.columns}
           onClose={() => setOpenItemId(null)}
           onRename={onRename} onArchive={onArchive}
           onMove={canWrite ? ((it) => setMoving([{ id: it.id, name: it.name }])) : null} />

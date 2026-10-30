@@ -8,8 +8,8 @@
 // Every value here is an obviously fake fixture: this repo is public.
 
 import {
-  addUsage, type AgentDeps, type AgentStore, apiKeyFrom, clip, DEFAULT_DAILY_CAP, DEFAULT_MODEL, effectiveDailyCap, handleEnabled, handleNew, handleSend,
-  handleStatus, MAX_TOOL_ROUNDS, MAX_USER_CHARS, modelFrom, monthlyCapMicros, SENTENCES, type StoredMessage, toMessages,
+  addUsage, type AgentDeps, type AgentStore, apiKeyFrom, clip, DEFAULT_DAILY_CAP, DEFAULT_MODEL, effectiveDailyCap, handleEnabled, handleNew, handleRate, handleSend,
+  handleStatus, MAX_TOOL_ROUNDS, MAX_USER_CHARS, modelFrom, monthlyCapMicros, RATING_NOTE_CHARS, SENTENCES, type StoredMessage, SYSTEM_RULES, toMessages,
   USER_10M_CAP, type Usage, zeroTotals,
 } from "./agent.ts";
 import { KNOWLEDGE } from "./knowledge.ts";
@@ -34,11 +34,14 @@ interface World {
   env?: Record<string, string>;
   claude?: (body: Record<string, unknown>, call: number) => Response | Promise<Response>;
   clock?: () => number;
+  /** What store.rate answers: false = no such answer is the caller's. Default true. */
+  rateFinds?: boolean;
 }
 
 function world(w: World = {}) {
   const asked: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
-  const stored: { role: string; body: string; tools?: string[]; costMicros?: number; stopReason?: string | null; model?: string | null }[] = [];
+  const stored: { role: string; body: string; tools?: string[]; costMicros?: number; stopReason?: string | null; model?: string | null; gap?: string | null }[] = [];
+  const rated: { who: unknown; id: string; rating: number | null; note: string | null }[] = [];
   const logs: { code: string; message: string; severity?: string; context?: Record<string, unknown> }[] = [];
   const toolDb: string[] = [];
   let swept = 0;
@@ -55,11 +58,12 @@ function world(w: World = {}) {
     createConversation: () => { convs++; return Promise.resolve("00000000-0000-4000-8000-00000000c0c1"); },
     history: () => Promise.resolve([...history]),
     addMessage: (m) => {
-      stored.push({ role: m.role, body: m.body, tools: m.tools, costMicros: m.totals?.costMicros, stopReason: m.stopReason, model: m.model });
+      stored.push({ role: m.role, body: m.body, tools: m.tools, costMicros: m.totals?.costMicros, stopReason: m.stopReason, model: m.model, gap: m.gap });
       const row: StoredMessage = { id: `m${stored.length}`, role: m.role, body: m.body, created_at: "2026-10-27T12:00:00Z" };
       history.push(row);
       return Promise.resolve(row);
     },
+    rate: (who, id, rating, note) => { rated.push({ who, id, rating, note }); return Promise.resolve(w.rateFinds !== false); },
     bumpConversation: () => Promise.resolve(),
     closeConversations: () => { closed++; return Promise.resolve(); },
     sweep: () => { swept++; return Promise.resolve(); },
@@ -92,7 +96,7 @@ function world(w: World = {}) {
     log: (e) => { logs.push(e); return Promise.resolve(); },
     now: w.clock ?? (() => Date.parse("2026-10-27T12:00:00Z")),
   };
-  return { deps, asked, stored, logs, toolDb, history, counts: () => ({ swept, closed, convs, calls: call }) };
+  return { deps, asked, stored, rated, logs, toolDb, history, counts: () => ({ swept, closed, convs, calls: call }) };
 }
 
 function reply(text: string, extra: Record<string, unknown> = {}): Response {
@@ -283,7 +287,7 @@ Deno.test("Claude is asked with Sonnet 5.5 at low effort, the fallback, strict t
   assert(!("thinking" in body), "thinking left adaptive (disabled is a 400 on Sonnet 5.5)");
   // deno-lint-ignore no-explicit-any
   const tools = body.tools as any[];
-  assert(tools.length === 5 && tools.every((t) => t.strict === true && t.input_schema.additionalProperties === false), "five strict tools");
+  assert(tools.length === 6 && tools.every((t) => t.strict === true && t.input_schema.additionalProperties === false), "six strict tools");
   // deno-lint-ignore no-explicit-any
   const system = body.system as any[];
   assertEquals(system.length, 2);
@@ -401,4 +405,80 @@ Deno.test("new closes the open chat (kept for the team) and the next send starts
   await handleSend(w.deps, WHO, { text: "one" });
   await handleNew(w.deps, WHO);
   assertEquals(w.counts().closed, 1);
+});
+
+// ── tracking: note_gap and rate (migration 348) ─────────────────────────────────────────────
+
+Deno.test("note_gap: the answer is stored with its gap; the builder's reply never carries it", async () => {
+  const w = world({
+    claude: (_b, n) => (n === 1 ? toolUse("note_gap", { question: "How to export a price list" }) : reply("I'm not sure. I can send this to the team.")),
+  });
+  const r = await handleSend(w.deps, WHO, { text: "can I export my prices?" });
+  assertEquals(w.stored[0].gap, undefined, "the builder's words carry no gap");
+  assertEquals(w.stored[1].gap, "How to export a price list");
+  assertEquals(w.stored[1].tools, ["note_gap"]);
+  assert(!JSON.stringify(r.body.messages).includes("export a price list"), "no gap in what the portal gets");
+  assertEquals(w.toolDb.length, 0, "no database touched");
+  const plain = world();
+  await handleSend(plain.deps, WHO, { text: "logo?" });
+  assertEquals(plain.stored[1].gap, null, "an answer it knew stores no gap");
+});
+
+Deno.test("note_gap: two notes in one answer share the column, once each, capped at 300", async () => {
+  const two = (_b: Record<string, unknown>, n: number) => {
+    if (n > 1) return reply("Not sure about either.");
+    return new Response(JSON.stringify({
+      model: "claude-sonnet-5-5", stop_reason: "tool_use",
+      content: [
+        { type: "tool_use", id: "toolu_1", name: "note_gap", input: { question: "Export prices" } },
+        { type: "tool_use", id: "toolu_2", name: "note_gap", input: { question: "Bulk discounts" } },
+        { type: "tool_use", id: "toolu_3", name: "note_gap", input: { question: "Export prices" } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }), { status: 200 });
+  };
+  const w = world({ claude: two });
+  await handleSend(w.deps, WHO, { text: "two things" });
+  assertEquals(w.stored[1].gap, "Export prices · Bulk discounts");
+  const long = world({ claude: (_b, n) => (n === 1 ? toolUse("note_gap", { question: "y".repeat(299) + " z" }) : reply("ok")) });
+  await handleSend(long.deps, WHO, { text: "x" });
+  assert((long.stored[1].gap ?? "").length <= 300, "fits migration 348's CHECK");
+});
+
+Deno.test("the rules tell the assistant to note what it could not answer", () => {
+  assert(SYSTEM_RULES.includes("call note_gap"), "the not-sure rule names note_gap");
+});
+
+Deno.test("rate: thumbs up, thumbs down with a line, and cleared, on the caller's own answer", async () => {
+  const ID = "00000000-0000-4000-8000-00000000a0a1";
+  const w = world();
+  const up = await handleRate(w.deps, WHO, { messageId: ID, rating: 1, note: "ignored for a thumbs up" });
+  assertEquals(up, { status: 200, body: { ok: true, messageId: ID, rating: 1 } });
+  const down = await handleRate(w.deps, WHO, { messageId: ID.toUpperCase(), rating: -1, note: "  Wrong\n  page  " });
+  assertEquals(down.body.rating, -1);
+  const cleared = await handleRate(w.deps, WHO, { messageId: ID, rating: 0, note: "x" });
+  assertEquals(cleared.body.rating, null);
+  assertEquals(w.rated, [
+    { who: WHO, id: ID, rating: 1, note: null },
+    { who: WHO, id: ID, rating: -1, note: "Wrong page" },
+    { who: WHO, id: ID, rating: null, note: null },
+  ], "the store gets the caller (never a body id for who), the folded line only under a thumbs down");
+  assertEquals(w.counts().calls, 0, "Claude is never asked");
+});
+
+Deno.test("rate: refuses a bad id, a bad rating and a long line; 404 when the answer is not theirs", async () => {
+  const ID = "00000000-0000-4000-8000-00000000a0a1";
+  const w = world();
+  for (const messageId of [undefined, "", "m2", "1; drop table", `${ID}x`]) {
+    assertEquals((await handleRate(w.deps, WHO, { messageId, rating: 1 })).status, 400, `id ${String(messageId)}`);
+  }
+  for (const rating of [2, -2, "1", null, undefined, 0.5]) {
+    assertEquals((await handleRate(w.deps, WHO, { messageId: ID, rating })).status, 400, `rating ${String(rating)}`);
+  }
+  assertEquals((await handleRate(w.deps, WHO, { messageId: ID, rating: -1, note: "x".repeat(RATING_NOTE_CHARS + 1) })).status, 400);
+  assertEquals(w.rated.length, 0, "nothing reached the store");
+  const gone = world({ rateFinds: false });
+  const r = await handleRate(gone.deps, WHO, { messageId: ID, rating: 1 });
+  assertEquals(r.status, 404);
+  assertEquals(r.body.error, "That answer isn't here any more.");
 });
