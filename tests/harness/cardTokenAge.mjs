@@ -40,7 +40,7 @@
 //        and the bank charge, 300 s after its token, carries rail ach and NO entry
 //     P8 swipe refused by the frame: the modal shows CardPointe's own code and words after "didn't get a
 //        clean read" (the frame's 1001, with the chip hint, then CardSecure's NNNN), with card-like runs
-//        cut and track-shaped words dropped, on screen and in the swipe_refused row (warn); 20 s of
+//        cut and track-shaped words dropped, on screen and in the swipe_refused row (warn); 40 s of
 //        silence after the reader starts typing files swipe_no_answer; a reader burst that reaches the
 //        page is counted (swipe_missed_frame, keysOutsideFrame, armed), never kept, and arms the reader
 //        again; nothing is charged
@@ -641,17 +641,20 @@ try {
       trackShown && !txt.includes("DOE") && !!t.p_context && t.p_context.reason === null && t.p_context.errorCode === "0008"
       && !JSON.stringify(t).includes("DOE"), JSON.stringify(t.p_context || null));
 
-    // Silence after the reader starts typing: the 20 s timer files swipe_no_answer.
+    // Silence after the reader starts typing: the 40 s timer files swipe_no_answer, and not before.
     await ready();
     n = logRows.length;
     await postRaw({ cardTyping: true });
     await page.waitForTimeout(200);
-    await ff(21_000);
+    await ff(25_000);
+    ok("P8: 25 s into a read (a slow tap takes 15-16 s, then 2 s of quiet), the page still waits",
+      !(await textOf(modal)).includes("That card didn't go through.") && rowsSince(n, "swipe_no_answer").length === 0, await brief(modal));
+    await ff(16_000);
     ok("P8: a read with no answer says it didn't go through",
       await until(async () => (await textOf(modal)).includes("That card didn't go through. Try it again, or key the card in."), 4000), await brief(modal));
     const s = rowsSince(n, "swipe_no_answer")[0] || {};
-    ok("P8: ...and files one swipe_no_answer row (warn, waited 20 s)",
-      rowsSince(n, "swipe_no_answer").length === 1 && s.p_severity === "warn" && s.p_context && s.p_context.waitedMs === 20000,
+    ok("P8: ...and files one swipe_no_answer row (warn, waited 40 s)",
+      rowsSince(n, "swipe_no_answer").length === 1 && s.p_severity === "warn" && s.p_context && s.p_context.waitedMs === 40000,
       JSON.stringify(s.p_context || null));
 
     // A swipe whose START reaches the page (focus outside the card box) and whose rest the frame

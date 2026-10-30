@@ -289,7 +289,7 @@ const swipe = async (blob, msPerChar = 0) => {
 };
 // The portal's read window (READ_WAIT_MS in portal/04-orders.jsx): from the frame's first
 // "typing" to the Fiserv-refusal sentence.
-const READ_WAIT = 20000;
+const READ_WAIT = 40000;
 
 let modal = null;
 const recordBtn = page.getByRole("button", { name: "Record a payment" });

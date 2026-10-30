@@ -4364,10 +4364,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const stopReadTimer = () => { if (readTimerRef.current) { clearTimeout(readTimerRef.current); readTimerRef.current = null; } };
   // How long a read may take, from the reader's FIRST key, before the page says Fiserv refused it.
   // The frame says "typing" once per read and nothing at the end of one, so this window has to
-  // hold the whole read: a key pressed before the swipe, the reader's own typing speed (never
-  // measured), the frame's 2 s of quiet and CardSecure's answer. At 8 s a slow read was told
-  // "refused" while the reader was still typing (2026-10-13).
-  const READ_WAIT_MS = 20000;
+  // hold the whole read: a key pressed before the swipe, the reader's own typing speed, the
+  // frame's 2 s of quiet and CardSecure's answer. At 8 s a slow read was told "refused" while the
+  // reader was still typing (2026-10-13). 20 s was still too short: the VP3350 measured 2026-10-30
+  // types a tap for 15-16 s (about 1,060 keys, 40-110 a second), so the frame only sends at
+  // 17-18 s and the answer lands near 19 s, and a slower tap was thrown away mid-answer. 40 s
+  // leaves a whole second tap's worth of room.
+  const READ_WAIT_MS = 40000;
   // ⚠️ A CARD TOKEN HOLDS THE CVV FOR 2 MINUTES, AND FOR ONE AUTH. Fiserv (CardPointe integrations),
   // 2026-10-14: the CVV stays linked to the CardSecure token for 2 minutes. Counted from the moment
   // the frame posts the token, on the wall clock, and treated as used up by the first auth, approved
