@@ -31,7 +31,7 @@ window.__ssSupport20 = async function ({ others = [], from = 0, url = "https://j
   const Q = [
     ["how-to", "How do I add a new door to my catalog?", (t) => has(t, /options/i, /door/i)],
     ["how-to", "Where do I change my logo?", (t) => has(t, /branding/i)],
-    ["how-to", "How do I set my prices for each building size?", (t) => has(t, /sheds/i, /(template|spreadsheet|excel|upload)/i)],
+    ["how-to", "How do I set my prices for each building size?", (t) => has(t, /sheds/i, /(table|template|spreadsheet|excel|upload)/i)],
     ["how-to", "What's the difference between leaving a price blank and putting 0?", (t) => has(t, /(hid|not offered|not priced|can't pick|cannot pick)/i, /(included|free)/i)],
     ["how-to", "How can I test sending an estimate without emailing my real customer?", (t) => has(t, /(beta mode|testing)/i, /test inbox/i)],
     ["how-to", "How do I add a salesperson and limit what they can see?", (t) => has(t, /team/i, /(job title|access)/i)],
