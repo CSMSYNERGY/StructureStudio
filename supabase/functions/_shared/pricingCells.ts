@@ -3,11 +3,12 @@
 // _Extras/StructureStudio Pricing Table Editor Plan 2026-10-30.md, sections 4.1-4.4 and 4.10.
 //
 // THE READ (readSizeTable). Styles, sizes and inclusions of the caller's tenant, each read in 1000-row
-// pages by client_id only (pagedRead.ts), so no list of ids ever rides in a URL, plus exact head
-// counts of sizes and inclusions. The browser compares the counts with what came back and opens the
-// table view-only when they differ after one re-read (the truncation guard): a cut-short read must
-// never become the base of an edit, and must never become an Excel template either, because the
-// importer deletes a box the sheet shows as 0.
+// keyset pages by client_id only (pagedRead.ts), so no list of ids ever rides in a URL and a save
+// landing between two pages cannot push a stored row out of both, plus exact head counts of sizes
+// and inclusions. The browser compares the counts with what came back and opens the table view-only
+// when they differ after one re-read (the truncation guard): a cut-short read must never become the
+// base of an edit, and must never become an Excel template either, because the importer deletes a
+// box the sheet shows as 0.
 //
 // THE WRITE (validatePayload, then savePricingCells). One call to pricing_cells_apply (migration 350),
 // which writes each size's price, Offered and included options together, after checking both the
@@ -25,18 +26,22 @@
 //
 // RETRIES. The rpc goes through attempt() (pagedRead.ts): retried only when the database never
 // answered. A retry after a first try that did commit is safe: the function checks every size again
-// and answers duplicate (creates and sizes) or removed with gone (removes).
+// and answers duplicate (creates and sizes) or removed with gone (removes). A lock wait past the
+// function's lock_timeout or a deadlock is never answered per size: the function raises it, the
+// whole call rolls back, and it comes back here with its SQLSTATE, so it is thrown (dbFail, a 500)
+// and the browser resends the call after its backoff (migration 350's header).
 //
 // THE AUDIT ROW. One best-effort admin_audit row per call, COUNTS ONLY (the repo is public: no style
 // or size names). Not auditStrict: the write has committed by then, and a strict failure would turn a
 // saved batch into an error and a resend. An operator's call also gets operator_save_pricing_cells
-// from portal-settings' dispatcher.
+// from portal-settings' dispatcher. A remove answered gone deleted nothing in this call (a resend of
+// one that landed), so it is counted as gone, never as removed.
 //
 // Dependency-free (the client is passed in), so _test_stubs/pricingCells_test.ts runs it against
 // pricingImportFake.ts and a stubbed rpc.
 
 // deno-lint-ignore-file no-explicit-any
-import { attempt, countRows, readAllPaged } from "./pagedRead.ts";
+import { attempt, countRows, readAllPaged, sortRows } from "./pagedRead.ts";
 
 /** Creates, removes and sizes in one call, together (one subtransaction each in the function). */
 export const MAX_CALL_ENTRIES = 50;
@@ -232,10 +237,12 @@ export type SizeTable = {
  *  the caller answers it with dbFail. The option COLUMNS are not here: the page reads them from the
  *  catalog action, through ssPricingColumns, the same list the Excel template uses. */
 export async function readSizeTable(sb: any, clientId: string): Promise<SizeTable> {
+  // Paged by each table's unique key (pagedRead.ts says why), then put in the plan's order.
+  const byPlace = (rows: any[]) => sortRows(rows, ["sort_order", "id"]);
   const [styles, sizes, inclusions, sizeCount, inclusionCount, settings] = await Promise.all([
-    readAllPaged(sb, "building_styles", "id, key, label, code, active, sort_order", ["sort_order", "id"], clientId),
-    readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, active, sort_order, created_at, updated_at", ["sort_order", "id"], clientId),
-    // No id column on this table: its key is (size_id, item_key), which is also the page order.
+    readAllPaged(sb, "building_styles", "id, key, label, code, active, sort_order", ["id"], clientId).then(byPlace),
+    readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, active, sort_order, created_at, updated_at", ["id"], clientId).then(byPlace),
+    // No id column on this table: its key is (size_id, item_key), which is also the order it comes in.
     readAllPaged(sb, "building_size_inclusions", "size_id, item_key, included, qty", ["size_id", "item_key"], clientId),
     countRows(sb, "building_sizes", "id", clientId),
     countRows(sb, "building_size_inclusions", "size_id", clientId),
@@ -254,6 +261,10 @@ export async function readSizeTable(sb: any, clientId: string): Promise<SizeTabl
 
 export type Audit = (action: string, rowCount?: number | null, note?: string | null) => Promise<void>;
 export type PricingCellsAnswer = { created: any[]; removed: any[]; results: any[] };
+
+/** A remove that deleted a size in this call. "removed" with gone: true deleted nothing: the size
+ *  was not on the account (a resend of a remove that landed). */
+const removedNow = (r: any) => r?.status === "removed" && r?.gone !== true;
 
 /** The audit note: counts only. saved / created / removed / conflicts / refused first (the plan's
  *  shape), then what the saved sizes changed: prices written, sizes hidden from the designer, boxes
@@ -276,11 +287,11 @@ export function auditNote(v: PricingCellsPayload, out: PricingCellsAnswer): stri
   }
   const refused = n(out.results, "refused") + n(out.created, "refused") + n(out.removed, "refused");
   return [
-    `saved=${n(out.results, "saved")}`, `created=${n(out.created, "created")}`, `removed=${n(out.removed, "removed")}`,
+    `saved=${n(out.results, "saved")}`, `created=${n(out.created, "created")}`, `removed=${out.removed.filter(removedNow).length}`,
     `conflicts=${n(out.results, "conflict")}`, `refused=${refused}`,
     `prices=${prices}`, `hidden=${hidden}`, `cellsCleared=${cleared}`, `cellsSet=${set}`,
     `duplicates=${n(out.results, "duplicate") + n(out.created, "duplicate")}`, `exists=${n(out.created, "exists")}`,
-    `missing=${n(out.results, "missing")}`,
+    `missing=${n(out.results, "missing")}`, `gone=${out.removed.filter((r) => r?.status === "removed" && r?.gone === true).length}`,
   ].join(" ");
 }
 
@@ -297,7 +308,7 @@ export async function savePricingCells(sb: any, clientId: string, v: PricingCell
   const out: PricingCellsAnswer = { created: list(data.created), removed: list(data.removed), results: list(data.results) };
   const rows = out.results.filter((r) => r?.status === "saved").length
     + out.created.filter((r) => r?.status === "created").length
-    + out.removed.filter((r) => r?.status === "removed").length;
+    + out.removed.filter(removedNow).length;
   await audit("portal_save_pricing_cells", rows, auditNote(v, out)).catch(() => {});
   return out;
 }

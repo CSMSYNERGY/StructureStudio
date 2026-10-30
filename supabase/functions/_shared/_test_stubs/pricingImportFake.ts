@@ -1,6 +1,7 @@
 // An in-memory stand-in for the three tables the pricing-sheet importer touches, behind just enough
-// of supabase-js's query builder: select / eq / in / order / range / maybeSingle, update, insert,
-// upsert (onConflict) and delete, with `.select()` after a write returning the written rows.
+// of supabase-js's query builder: select / eq / gt / in / order / range / limit / maybeSingle,
+// update, insert, upsert (onConflict) and delete, with `.select()` after a write returning the
+// written rows.
 //
 // It keeps the constraints that decide what an import can do (building_sizes is unique on
 // (client_id, style_id, width_ft, length_ft) and on (style_id, label); an inclusion is unique on
@@ -9,6 +10,8 @@
 // Every awaited statement is one entry in `calls`, so a test can count round trips.
 //
 // `maxRows` mimics PostgREST's db-max-rows: a read answers at most that many rows.
+// gt and order compare alike (numbers by value, everything else as text), as they do in Postgres,
+// so a keyset page (gt the last key read, ordered by that key) picks up where the last one ended.
 // select(cols, { count: "exact" }) also answers `count`, every matching row whatever the range or
 // maxRows; with `head: true` it answers no rows at all, as PostgREST's HEAD does (the sizes table's
 // truncation guard counts this way, 2026-10-30). Every `.in(...)` an awaited statement carries is
@@ -44,6 +47,12 @@ const SCHEMA: Record<string, Set<string>> = {
 };
 const NUMERIC = new Set(["width_ft", "length_ft", "base_price", "qty", "sort_order"]);
 const same = (col: string, a: any, b: any) => NUMERIC.has(col) ? Number(a) === Number(b) : String(a) === String(b);
+/** Order two values of one column the way gt and order both do here. */
+const cmp = (col: string, a: any, b: any) => {
+  if (NUMERIC.has(col)) return Number(a) - Number(b);
+  const x = String(a), y = String(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+};
 const UNIQUE: Record<string, string[][]> = {
   building_sizes: [["client_id", "style_id", "width_ft", "length_ft"], ["style_id", "label"]],
   building_size_inclusions: [["size_id", "item_key"]],
@@ -95,8 +104,9 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
   const run = (table: keyof Tables, ops: any[][]) => {
     const find = (name: string) => ops.find((o) => o[0] === name);
     const verb = ["update", "insert", "upsert", "delete"].find((v) => find(v)) ?? "select";
-    const filters = ops.filter((o) => o[0] === "eq" || o[0] === "in");
-    const matches = (r: any) => filters.every(([op, col, v]) => op === "eq" ? same(col, r[col], v) : (v as any[]).some((x) => same(col, r[col], x)));
+    const filters = ops.filter((o) => o[0] === "eq" || o[0] === "gt" || o[0] === "in");
+    const matches = (r: any) => filters.every(([op, col, v]) =>
+      op === "eq" ? same(col, r[col], v) : op === "gt" ? r[col] != null && cmp(col, r[col], v) > 0 : (v as any[]).some((x) => same(col, r[col], x)));
     const one = !!(find("maybeSingle") || find("single"));
     const returning = verb !== "select" && !!find("select");
     const payloadOf = (v: any) => Array.isArray(v) ? v : [v];
@@ -126,9 +136,11 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
       const count = countOpts.count === "exact" ? rows.length : undefined;
       if (countOpts.head) return { data: null, count, error: null };
       const orders = ops.filter((o) => o[0] === "order").map((o) => o[1] as string);
-      if (orders.length) rows.sort((a, b) => { for (const c of orders) { const x = String(a[c]), y = String(b[c]); if (x !== y) return x < y ? -1 : 1; } return 0; });
+      if (orders.length) rows.sort((a, b) => { for (const c of orders) { const d = cmp(c, a[c], b[c]); if (d) return d < 0 ? -1 : 1; } return 0; });
       const range = find("range");
       if (range) rows = rows.slice(range[1], range[2] + 1);
+      const limit = find("limit");
+      if (limit) rows = rows.slice(0, limit[1]);
       rows = rows.slice(0, opts.maxRows ?? Infinity);
       return { data: one ? (rows[0] ?? null) : rows, ...(count === undefined ? {} : { count }), error: null };
     }
@@ -173,7 +185,7 @@ export function fakeDb(seed: Partial<Tables>, opts: Opts = {}) {
   const from = (table: string) => {
     const build = (ops: any[][]): any => {
       const q: any = {};
-      for (const m of ["select", "eq", "in", "order", "range", "maybeSingle", "single", "update", "insert", "upsert", "delete"]) {
+      for (const m of ["select", "eq", "gt", "in", "order", "range", "limit", "maybeSingle", "single", "update", "insert", "upsert", "delete"]) {
         q[m] = (...a: unknown[]) => build([...ops, [m, ...a]]);
       }
       q.then = (ok: any, bad: any) => Promise.resolve().then(() => run(table as keyof Tables, ops)).then(ok, bad);

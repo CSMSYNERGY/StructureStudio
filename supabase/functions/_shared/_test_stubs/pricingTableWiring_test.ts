@@ -12,7 +12,10 @@
 //   3. Every answer carries clientId: the page checks it itself, because its calls go through the
 //      side door, which skips the invoke wrapper's tenant tripwire.
 //   4. A malformed save is a 400 and makes no rpc call; a database error is dbFail's sentence with
-//      the ref "save your table changes" (or "load your sizes"), logged, and not audited as saved.
+//      the ref "save your table changes" (or "load your sizes"), logged, and not audited as saved;
+//      a lock timeout is one of those 500s (the page resends it).
+//   The client_settings fake refuses a column the table lacks (42703, as PostgREST does), and the
+//   one settings read is checked to filter on the resolved tenant.
 //   5. A save answers the function's three lists as they came, with one audit row of counts.
 //
 // HOW. deleteDesignWiring_test's idiom: Deno.serve is stubbed while portal-settings/index.ts is
@@ -78,9 +81,22 @@ type World = {
   rpc?: (args: any) => { data: any; error: any };
   readFails?: boolean;
 };
-type Trace = { rpc: { fn: string; args: any }[]; audit: any[]; faults: any[]; catalogReads: string[] };
+type Trace = { rpc: { fn: string; args: any }[]; audit: any[]; faults: any[]; catalogReads: string[]; settingsReads: any[][][] };
 
 const eqOf = (ops: any[][], col: string) => (ops.find((o) => o[0] === "eq" && o[1] === col) ?? [])[2];
+/** client_settings' columns these two actions may name (rtp_enabled: 152). The fake refuses any
+ *  other, as PostgREST does (42703), so a misspelled column fails here instead of turning every
+ *  size_table call into a 500 live. */
+const SETTINGS_COLS = new Set(["client_id", "rtp_enabled"]);
+function settingsAnswer(ops: any[][], settings: Record<string, unknown> | null | undefined) {
+  const named = [
+    ...ops.filter((o) => o[0] === "select").flatMap((o) => String(o[1] ?? "*").split(",").map((c) => c.trim())),
+    ...ops.filter((o) => ["eq", "neq", "is", "in", "order"].includes(o[0])).map((o) => String(o[1])),
+  ];
+  const unknown = named.find((c) => !SETTINGS_COLS.has(c));
+  if (unknown) return { data: null, error: { code: "42703", message: `column client_settings.${unknown} does not exist` } };
+  return { data: settings ?? null, error: null };
+}
 function chain(answer: (ops: any[][]) => any): any {
   const build = (ops: any[][]): any => {
     const q: any = {};
@@ -96,7 +112,7 @@ function chain(answer: (ops: any[][]) => any): any {
 }
 
 async function drive(body: Record<string, unknown>, world: World = {}) {
-  const trace: Trace = { rpc: [], audit: [], faults: [], catalogReads: [] };
+  const trace: Trace = { rpc: [], audit: [], faults: [], catalogReads: [], settingsReads: [] };
   const db = fakeDb({ building_styles: STYLES, building_sizes: SIZES, building_size_inclusions: INCLUSIONS }, { maxRows: 1000 });
   const caller = world.caller ?? { role: "owner", title: "owner", access: null };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
@@ -115,7 +131,7 @@ async function drive(body: Record<string, unknown>, world: World = {}) {
         case "client_users": return { data: [{ client_id: OWN, role: caller.role, title: caller.title ?? null, access: caller.access ?? null, user_id: USER_ID }], error: null };
         case "app_operators": return { data: world.operator ? { user_id: USER_ID, email: "op@example.test", can_bill: false, support_only: false, ...world.operator } : null, error: null };
         case "client_configs": { const c = eqOf(ops, "client_id"); return { data: [OWN, OTHER].includes(c) ? { client_id: c } : null, error: null }; }
-        case "client_settings": return { data: world.settings ?? null, error: null };
+        case "client_settings": trace.settingsReads.push(ops); return settingsAnswer(ops, world.settings);
         case "admin_audit": trace.audit.push(insert); return { data: null, error: null };
         case "app_errors": trace.faults.push(insert); return { data: null, error: null };
       }
@@ -174,6 +190,10 @@ Deno.test("an owner reads the whole table, with clientId, counts and Real-Time P
   assertEquals(r.body.rtpOn, true);
   assertEquals(r.body.sizes.find((z: any) => z.id === uid(11)).updated_at, V, "the version every edit sends back");
   assertEquals(r.ins, [], "no read carries a list of ids");
+  // The settings fake refuses any column client_settings lacks; here, the one read names rtp_enabled
+  // and filters on client_id = the tenant the token resolved to.
+  assertEquals(r.trace.settingsReads.map((ops) => [(ops.find((o) => o[0] === "select") ?? [])[1], eqOf(ops, "client_id")]), [["rtp_enabled", OWN]]);
+  assertEquals(settingsAnswer([["select", "rtp_enable"], ["eq", "client_id", OWN]], { rtp_enabled: true }).error?.code, "42703", "(the fake refuses a misspelled column)");
 });
 
 Deno.test("a view-only person reads the table and cannot save; someone without Sheds gets neither", async () => {
@@ -219,6 +239,7 @@ Deno.test("an operator's view-as reaches the viewed builder, and the save is aud
   const read = await drive({ action: "size_table", targetClientId: OTHER }, { operator: { can_write: false } });
   assertEquals(read.status, 200, "a read-only operator can read");
   assertEquals([read.body.clientId, read.body.sizes.map((z: any) => z.id)], [OTHER, [uid(21)]]);
+  assertEquals(read.trace.settingsReads.map((ops) => eqOf(ops, "client_id")), [OTHER], "...and Real-Time Pricing is read for the viewed builder");
   const ro = await drive({ ...SAVE, targetClientId: OTHER }, { operator: { can_write: false } });
   assertEquals([ro.status, ro.trace.rpc.length], [403, 0], "a read-only operator cannot save");
 });
@@ -268,4 +289,11 @@ Deno.test("a database error is dbFail's sentence, logged, and not audited as a s
 
   const read = await drive({ action: "size_table" }, { readFails: true });
   assertEquals([read.status, read.body.ref], [500, "load your sizes"]);
+
+  // A lock wait past the function's lock_timeout fails the whole call (migration 350 raises it rather
+  // than refusing one size). It must reach the browser as a 5xx, which the page resends after its
+  // backoff, and never as a 400 or a 200 with refused boxes.
+  const busy = await drive(SAVE, { rpc: () => ({ data: null, error: { code: "55P03", message: "canceling statement due to lock timeout" } }) });
+  assertEquals([busy.status, busy.body.ref, busy.trace.rpc.length], [500, "save your table changes", 1]);
+  assertEquals(audited(busy.trace, "portal_save_pricing_cells").length, 0);
 });

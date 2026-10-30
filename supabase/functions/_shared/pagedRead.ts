@@ -8,9 +8,19 @@
 // (pricingImport.ts). One fill-down in the sizes table across 210 sizes adds 210 rows, so a builder
 // can cross 1000 in a minute.
 //
-// readAllPaged, attempt and isSqlstate are COPIES of readAll, attempt and isSqlstate in
-// _shared/pricingImport.ts, which stays byte-identical (its bulk tests pin it). Fix a bug in both.
-// countRows is the head count the browser checks a paged read against (the truncation guard).
+// KEYSET PAGES, NOT OFFSETS (review, 2026-10-30). Each page is its own request, so its own snapshot.
+// With offsets (range 0-999, then 1000-1999), a save that deletes a row the first page already read
+// shifts every later row back by one, and the row that sat at offset 1000 is in neither page; one
+// more row added further down evens the length out, so it even matches the head count and the
+// browser's truncation guard passes a read with a stored row missing. Here every page starts after
+// the last KEY the page before ended on, and the key is the table's unique key, which never changes
+// on a row. A row that is there for the whole read is read exactly once, whatever is added or taken
+// away around it. That departs from the plan's "a copy of readAll": pricingImport.ts's readAll still
+// pages by offset (its bulk tests pin it byte-identical); it reads only inside its own import.
+//
+// attempt and isSqlstate are COPIES of attempt and isSqlstate in _shared/pricingImport.ts, which
+// stays byte-identical. Fix a bug in both. countRows is the head count the browser checks a paged
+// read against (the truncation guard).
 //
 // Dependency-free (the client is passed in). Importers: portal-settings (through pricingCells.ts)
 // and admin-catalog. Deploy both when this file changes.
@@ -44,20 +54,56 @@ export const attempt = async (run: () => any): Promise<{ data?: any; error: any 
   return { error };
 };
 
-/** Every row of one tenant's table, read in pages so a catalog past 1000 rows is not cut short.
- *  `order` must end in a unique key (id, or the table's primary key), so no row sits on a page
- *  boundary twice or not at all. Filters by client_id ONLY: no list of ids ever rides in a URL. */
-export async function readAllPaged(sb: any, table: string, cols: string, order: string[], clientId: string): Promise<any[]> {
-  const out: any[] = [];
-  for (let from = 0; ; from += READ_PAGE) {
-    let q = sb.from(table).select(cols).eq("client_id", clientId);
-    for (const col of order) q = q.order(col);
-    const { data, error } = await attempt(() => q.range(from, from + READ_PAGE - 1));
+/** Every row of one tenant's table, read in keyset pages so a catalog past 1000 rows is not cut
+ *  short and a row is never skipped by a page boundary that moved. `key` is the table's unique
+ *  key, one column or two (building_size_inclusions has no id: its key is size_id, item_key), and
+ *  `cols` must name it. Rows come back in key order; sortRows puts them in a display order.
+ *  Filters by client_id ONLY: no list of ids ever rides in a URL. */
+export async function readAllPaged(sb: any, table: string, cols: string, key: string[], clientId: string): Promise<any[]> {
+  const [k1, k2] = key;
+  const page = async (narrow: (q: any) => any, by: string[]): Promise<any[]> => {
+    let q = narrow(sb.from(table).select(cols).eq("client_id", clientId));
+    for (const col of by) q = q.order(col);
+    const { data, error } = await attempt(() => q.limit(READ_PAGE));
     if (error) throw error;
-    const page = data ?? [];
-    out.push(...page);
-    if (page.length < READ_PAGE) return out;
+    const rows = data ?? [];
+    const last = rows[rows.length - 1];
+    if (last && by.some((c) => last[c] == null)) throw new Error(`readAllPaged: ${table} rows came back without their key (${by.join(", ")})`);
+    return rows;
+  };
+  const out: any[] = [];
+  let after: unknown = undefined;   // the last k1 read
+  for (;;) {
+    const rows = await page((q) => after === undefined ? q : q.gt(k1, after), key);
+    out.push(...rows);
+    if (rows.length < READ_PAGE) return out;
+    const last = rows[rows.length - 1];
+    if (k2 !== undefined) {
+      // The page may have stopped inside one k1's rows: read the rest of them by k2 before going
+      // past that k1 (a single k1 can hold more than a page).
+      let after2 = last[k2];
+      for (;;) {
+        const rest = await page((q) => q.eq(k1, last[k1]).gt(k2, after2), [k2]);
+        out.push(...rest);
+        if (rest.length < READ_PAGE) break;
+        after2 = rest[rest.length - 1][k2];
+      }
+    }
+    after = last[k1];
   }
+}
+
+/** Rows in the order `order by c1, c2, …` gives them in Postgres, for the columns the callers sort
+ *  on: numbers (sort_order) by value, uuids as their lowercase text (the byte order Postgres uses),
+ *  NULLs last. A new array; the rows themselves are not copied. */
+export function sortRows(rows: any[], order: string[]): any[] {
+  const cmp = (a: unknown, b: unknown) => {
+    if (a == null || b == null) return a == null ? (b == null ? 0 : 1) : -1;
+    if (typeof a === "number" && typeof b === "number") return a - b;
+    const x = String(a), y = String(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  };
+  return [...rows].sort((a, b) => { for (const c of order) { const d = cmp(a[c], b[c]); if (d) return d; } return 0; });
 }
 
 /** How many rows of one tenant's table exist, from an exact head count (no rows travel). `col`

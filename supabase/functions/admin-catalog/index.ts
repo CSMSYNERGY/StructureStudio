@@ -20,7 +20,7 @@ import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
 import { importPricingRows } from "../_shared/pricingImport.ts";
 // Whole-tenant reads in 1000-row pages (2026-10-30): the console's catalog and the clone read sizes
 // and inclusions through it. Shared with portal-settings (pricingCells.ts): deploy both when it changes.
-import { readAllPaged } from "../_shared/pagedRead.ts";
+import { readAllPaged, sortRows } from "../_shared/pagedRead.ts";
 // delete_client cancels the builder's subscriptions and removes their saved card at the gateway
 // before it wipes anything (2026-10-05). nmi.ts is the one gateway client; see its importer ledger.
 import { nmiConfigured, nmiPost } from "../_shared/nmi.ts";
@@ -651,11 +651,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Sizes and inclusions are read WHOLE, in 1000-row pages (2026-10-30). PostgREST cuts any
         // read at 1000 rows without saying so, and both consoles build their pricing sheet from this
         // answer: an inclusion cut off showed as 0 in the sheet, and the importer deletes a 0 on
-        // re-upload. A readAllPaged failure throws the database's error, as these reads did.
+        // re-upload. Paged by each table's unique key (pagedRead.ts says why), sizes then put back
+        // in list order. A readAllPaged failure throws the database's error, as these reads did.
         const [styles, items, sizes, incl] = await Promise.all([
           sb.from("building_styles").select("id, client_id, key, label, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
           sb.from("client_layout_items").select("*").eq("client_id", clientId).order("sort_order"),
-          readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, sort_order, active", ["sort_order", "id"], clientId),
+          readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, sort_order, active", ["id"], clientId)
+            .then((rows) => sortRows(rows, ["sort_order", "id"])),
           readAllPaged(sb, "building_size_inclusions", "size_id, item_key, included, qty", ["size_id", "item_key"], clientId),
         ]);
         if (styles.error) throw styles.error; if (items.error) throw items.error;
@@ -923,7 +925,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             try { return await run(); } catch (e) { throw new Error(`${what}: ${(e as { message?: string })?.message ?? String(e)}`); }
           };
           const szSrc = await pagedOrThrow("clone sizes read", () =>
-            readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, sort_order, active", ["sort_order", "id"], T));
+            readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, sort_order, active", ["id"], T));
           const szRows = szSrc.filter((z: any) => styleIdMap.has(z.style_id)).map((z: any) => ({
             client_id: Cc, style_id: styleIdMap.get(z.style_id), label: z.label, width_ft: z.width_ft,
             length_ft: z.length_ft, base_price: z.base_price, sort_order: z.sort_order, active: z.active,

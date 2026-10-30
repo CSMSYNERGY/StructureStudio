@@ -8,8 +8,8 @@
 // The sizes table makes 1,000 easy to cross: one fill-down of a door across 210 sizes is 210 rows.
 //
 // WHAT IS PINNED: get_client_catalog returns all 1,200 of a builder's inclusions and all their sizes,
-// and only theirs; create_client's clone copies all 1,200 of a template's inclusions onto the new
-// builder's sizes. The fake answers 1,000 rows a read, as PostgREST does, so the unpaged reads this
+// and only theirs, the sizes in list order though they are paged by id; create_client's clone copies
+// all 1,200 of a template's inclusions onto the new builder's sizes. The fake answers 1,000 rows a read, as PostgREST does, so the unpaged reads this
 // replaced fail both.
 //
 // HOW. deleteClientHarness's idiom: Deno.serve is stubbed while admin-catalog/index.ts is imported,
@@ -121,8 +121,16 @@ Deno.test("get_client_catalog returns all 1,200 inclusions and all 40 sizes, and
   assert(r.body.inclusions.every((i: any) => i.size_id !== uid(900)), "another builder's inclusion came along");
   assertEquals(new Set(r.body.inclusions.map((i: any) => `${i.size_id}|${i.item_key}`)).size, 1200, "no row twice across the page boundary");
   assertEquals(r.db.ins, [], "no read carries a list of ids");
+  // Keyset pages (pagedRead.ts): the first stops 10 boxes into the 34th size, so the rest of that
+  // size is read by item_key before the sizes after it.
   const pages = r.db.calls.filter((c) => c.table === "building_size_inclusions" && c.verb === "select").length;
-  assertEquals(pages, 2, "read in two pages");
+  assertEquals(pages, 3, "two pages and the rest of the size the first one stopped inside");
+  // Paged by id, then put back in list order: sort_order by value, then id (the two styles' sizes
+  // share places 0-19 here).
+  const order = r.body.buildingSizes.map((z: any) => [z.sort_order, z.id]);
+  const want = [...order].sort((a: any, b: any) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  assertEquals(order, want, "sizes come back in list order");
+  assertEquals(order.slice(0, 2), [[0, uid(100)], [0, uid(120)]]);
 });
 
 Deno.test("create_client's clone copies all 1,200 of the template's inclusions onto the new builder's sizes", async () => {
