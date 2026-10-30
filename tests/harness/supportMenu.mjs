@@ -58,7 +58,8 @@ const browser = await chromium.launch({ channel: process.env.PW_CHANNEL === "bun
 
 // `on`: what support-agent's `enabled` answers (true, false, or "error" for a 400 like the live
 // 340.2's). `remembered`: a "1"/"0" already in localStorage from an earlier load, or null.
-async function openPortal(width, height, { on = true, remembered = null } = {}) {
+// `requests`: what My Requests reads (feedback_submissions); null = the two sample rows.
+async function openPortal(width, height, { on = true, remembered = null, requests = null } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, serviceWorkers: "block" });
   await ctx.addInitScript(([ref, s, client, rem]) => {
     try {
@@ -82,6 +83,7 @@ async function openPortal(width, height, { on = true, remembered = null } = {}) 
     if (url.includes("/rest/v1/client_users")) return json(route, [{ client_id: CLIENT, role: "owner", user_id: USER.id }]);
     if (url.includes("/rest/v1/feedback_submissions")) {
       if (req.method() === "HEAD") return route.fulfill({ status: 200, headers: { ...H, "content-range": "0-1/2" }, body: "" });
+      if (requests) return json(route, requests);
       return json(route, [
         { id: "f1", kind: "ticket", title: "Help with my link", detail: "x", severity: null, status: "submitted", submitter_name: "Pat Example", attachment_path: null, monday_item_id: null, created_at: "2026-10-27T10:00:00Z", status_changed_at: null },
         { id: "f2", kind: "bug", title: "Door looks wrong", detail: "y", severity: "Medium", status: "in_review", submitter_name: "Pat Example", attachment_path: null, monday_item_id: "1", created_at: "2026-10-26T10:00:00Z", status_changed_at: null },
@@ -327,6 +329,30 @@ for (const [width, height, tag] of [[1440, 900, "1440"], [375, 812, "375"]]) {
   ok("1440 J: the server's off puts the pill back", after.pill === "💬 Feedback" && after.support === 0, JSON.stringify(after));
   ok("1440 J: …and remembers it", await page.evaluate((c) => localStorage.getItem(`ss:supportOn:${c}`), CLIENT) === "0");
   ok("1440 J: no page errors", state.errors.length === 0, state.errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
+// K — My Requests follows the switch (release review, 10-30): off, the empty list points at the
+// 💬 Feedback pill word for word as before and offers no Tickets chip; on, the Support wording.
+const BUG_ONLY = [{ id: "f2", kind: "bug", title: "Door looks wrong", detail: "y", severity: "Medium", status: "in_review", submitter_name: "Pat Example", attachment_path: null, monday_item_id: "1", created_at: "2026-10-26T10:00:00Z", status_changed_at: null }];
+for (const [on, requests, tag] of [[false, [], "off, nothing sent"], [false, BUG_ONLY, "off, a bug sent"], [true, [], "on, nothing sent"]]) {
+  const { ctx, page, state } = await openPortal(1440, 900, { on, remembered: on ? "1" : "0", requests });
+  await page.goto(`${BASE}/support/mine`);
+  await page.waitForSelector("text=My Requests", { timeout: 15000 });
+  await page.waitForTimeout(800);
+  const text = await page.locator("main, body").first().innerText();
+  const chip = await page.locator("button", { hasText: "🎫 Tickets" }).count();
+  if (!on && !requests.length) {
+    ok(`K (${tag}): the empty list names the 💬 Feedback button in the bottom-right corner, as before`,
+      /Use the 💬 Feedback button in the bottom-right corner\s+to report an issue or request a feature/.test(text) && !/Support button at the top/.test(text), text.slice(0, 300));
+    await page.screenshot({ path: join(shots, "1440-13-switch-off-my-requests-empty.png") });
+  }
+  if (!on) ok(`K (${tag}): no Tickets chip without a ticket`, chip === 0, String(chip));
+  if (on) {
+    ok(`K (${tag}): switched on, the empty list names the Support button`, /Use the Support button at the top of the page/.test(text), text.slice(0, 300));
+    ok(`K (${tag}): …and offers the Tickets chip`, chip === 1, String(chip));
+  }
+  ok(`K (${tag}): no page errors`, state.errors.length === 0, state.errors.slice(0, 3).join(" | "));
   await ctx.close();
 }
 
