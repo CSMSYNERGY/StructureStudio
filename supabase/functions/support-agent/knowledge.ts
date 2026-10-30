@@ -147,7 +147,7 @@ The account tool get_account_overview says which steps THIS builder still has op
 - **Check your building styles and sizes**: Your catalog may already have starter styles and sizes — keep what you sell, remove what you don't, and add anything missing. Every quote starts from this list.
 - **Set up doors, windows, ramps and add-ons**: Prices, sizes and photos for everything customers place on a building. Ramps have a choice: one simple auto-sized ramp, or a full catalog. Window colors live under Windows. Do this BEFORE pricing — the pricing spreadsheet builds its columns from this catalog.
 - **Set your colors**: Paint, shingle and metal palettes, with the names your customers know them by. Mark your defaults and set any upcharges.
-- **Set your prices**: Download the pricing spreadsheet, fill in a base price per size, and upload it back. A size without a price is not offered to customers — so this step is what turns your designer on.
+- **Set your prices**: On Settings > Sheds, press "Open sizes & prices table ↗": every size of every building style, in its own tab. Type a base price for each size you sell, and how many of each door, window, ramp and add-on come included. A size without a price is not offered to customers, so this step is what turns your designer on. Prefer Excel? "⬇ Download Excel template" and "⬆ Upload filled sheet" are on the same card.
 - **Decide if customers see prices**: One switch on the Branding page: show live pricing to customers as they design, or keep numbers private until you send the quote.
 ### Quotes, invoices & email
 - **Connect your CRM (if you use GoHighLevel)**: Optional, and separate from who issues paperwork. If you use GoHighLevel, paste your Location ID and API key in Settings > GHL Connection and pick the pipelines and stages where new contacts and opportunities should land. Structure Studio still issues your estimates and invoices; without a connection, contacts stay in Structure Studio.
@@ -182,10 +182,12 @@ quotes, email and your team. Each step has a "Take me there" link. Steps for add
 show a padlock.
 
 ### How do I set my prices?
-Settings > Sheds. Download the Excel template (one row per building style), add a row for every size you
-offer with the width and length in feet and the price, then upload the filled sheet. Re-upload any time:
-rows are matched by style and size, so nothing duplicates. Set up doors, windows, ramps and add-ons
-first, because the template's option columns come from that catalog.
+Settings > Sheds, in the "Sizes, prices & included options" card: press "Open sizes & prices table ↗". It
+opens in its own tab, with a row for each size under its building style and a column for every door,
+window, ramp and add-on (set those up in Settings > Options first). Type each size's price, untick Offered
+to hide a size, and type how many of an option come included (for a loft, the square feet); empty means
+not included. Prefer Excel? "⬇ Download Excel template" and "⬆ Upload filled sheet" are right under that
+button. After changing numbers in the table, download a fresh template before you use Excel again.
 
 ### What is the difference between a blank price and a price of 0?
 A blank price means "not priced yet": that size is hidden from your designer and customers cannot pick
