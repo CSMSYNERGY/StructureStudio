@@ -4112,6 +4112,13 @@ function Dashboard({ session }) {
         />
       )}
 
+      {/* My Synergy Phone's download pop-up (11-sms, Ahsan 2026-10-30): on Settings pages, by the Calls
+          rail item's own rule (phoneOffered, and the person holds the phone area: the app refuses
+          anyone whose phone level is none), above the Feedback pill when that pill is showing. */}
+      {!gateLocked && activeTab === "settings" && phoneOffered && !navHidden("calls") && (
+        <SsPhoneAppPromo raised={!viewing && !supportOn} />
+      )}
+
       {/* A door being drawn from a photo (03-catalog's ssDoorJob): its pill on every page while it
           runs out of sight, and the pop-up when it is done (Ahsan 2026-10-28). */}
       <SsDoorJobDock clientId={effClientId} onOpenDoors={() => navigate("settings", "doors")} />
