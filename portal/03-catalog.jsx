@@ -8988,11 +8988,15 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
 //
 // ⚠️ ONE component, one mount, one `rows` buffer — ColorsShell passes `section` to a SINGLE
 // <ColorsView> rather than rendering three of them behind {sub === ...} branches, and that is
-// load-bearing. `rows` is ONE flat list across all three categories and `save` submits the
-// whole list, so three mounts would remount on every tab switch: edits made in Paint would be
-// silently thrown away by a click on Shingles, and the Save button in each card — which
-// already saves all three categories — would submit a list that had just been re-fetched.
-// Keep the element in one stable position so React preserves this state.
+// load-bearing. `rows` is ONE flat list across all three categories, so three mounts would
+// remount on every tab switch and edits made in Paint would be silently thrown away by a click
+// on Shingles. Keep the element in one stable position so React preserves this state.
+//
+// SINCE 2026-10-30 EACH PAGE'S SAVE IS ITS OWN (Carolyn: "currently the save on each page is
+// saving all 3 pages"): `save(ckey)` sends only that section's rows plus `section`, which
+// narrows the server's delete sweep to match, and `load(ckey)` refreshes only that section so
+// unsaved edits on the other two survive. The shared buffer above is what makes that refresh
+// scoping necessary — a plain reload would wipe the pages you had not saved yet.
 function ColorsView({ viewingLabel = null, section = "all" }) {
   const [cat, setCat] = useState(null);
   // One flat list across all categories; a row's category is set by its flags:
@@ -9002,11 +9006,15 @@ function ColorsView({ viewingLabel = null, section = "all" }) {
   const [msg, setMsg] = useState(null);
   const [libOpen, setLibOpen] = useState(null);   // which section's library is open
 
-  const load = async () => {
+  // `only` reloads ONE section's rows and leaves the other two alone (see `save`): all three
+  // palettes share this one unsaved-edit buffer, so a scoped save must not refetch over edits
+  // a builder has sitting on another page. Without it, saving Paint silently discarded them —
+  // the same whole-buffer coupling the section-scoped save exists to break.
+  const load = async (only = null) => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
-    setRows((data.colors || []).map((c) => ({
+    const fresh = (data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
       shingle: !!c.shingle, metal: !!c.metal, door: !!c.door,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
@@ -9020,7 +9028,9 @@ function ColorsView({ viewingLabel = null, section = "all" }) {
       // every column added to `colors` has to be added in FOUR places -- the migration, the
       // server's SELECT, the server's write, and here. Three of the four were done.
       code: c.code || "",
-    })));
+    }));
+    if (!only) { setRows(fresh); return; }
+    setRows((prev) => [...prev.filter((r) => catOf(r) !== only), ...fresh.filter((r) => catOf(r) === only)]);
   };
   useEffect(() => { load(); }, []);
 
@@ -9037,14 +9047,29 @@ function ColorsView({ viewingLabel = null, section = "all" }) {
   // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
   const swap = (gi, gj) => setRows((rs) => { if (gj < 0 || gj >= rs.length) return rs; const next = rs.slice(); [next[gi], next[gj]] = [next[gj], next[gi]]; return next; });
 
-  // One save persists every section at once — the whole list is always sent, so the
-  // server's "delete anything not in the payload" stays safe across categories.
-  const save = async () => {
-    // Full-list replace: the server removes any colour not in this payload. Harmless
-    // on your own palette, not harmless on someone else's.
-    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE colour list with these ${rows.length} colour(s)?
+  // Which palette a row belongs to. Mirrors renderSection's filter exactly — paint is the
+  // absence of the other two flags, not a flag of its own. Defined above `save`/`load`
+  // because both now use it to work one section at a time.
+  const catOf = (r) => (r.shingle ? "shingle" : r.metal ? "metal" : "paint");
+  const SECTION_WORD = { paint: "paint", shingle: "shingle", metal: "metal" };
 
-Anything not shown here will be removed from their account.`)) return;
+  // EACH PAGE SAVES ITS OWN PALETTE (Carolyn 2026-10-30: "we need all the save colors to work
+  // on their own page. currently the save on each page is saving all 3 pages"). `ckey` is the
+  // section whose Save button was clicked; only that section's rows are validated and sent,
+  // and `section` tells the server to narrow its delete sweep to the same set.
+  //
+  // ⚠️ SENDING FEWER ROWS IS NOT ENOUGH ON ITS OWN — `save_colors` deletes anything absent
+  // from the payload, so posting only the paint rows without `section` would wipe every
+  // shingle and metal colour. The two halves ship together; never send a filtered list to a
+  // server build that does not read `section`.
+  const save = async (ckey) => {
+    const mine = rows.map((r, gi) => ({ r, gi })).filter(({ r }) => catOf(r) === ckey);
+    const word = SECTION_WORD[ckey] || ckey;
+    // Full-list replace WITHIN THIS SECTION: the server removes any colour of this kind not in
+    // the payload. Harmless on your own palette, not harmless on someone else's.
+    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE ${word} colour list with these ${mine.length} colour(s)?
+
+Any ${word} colour not shown here will be removed from their account. Their other colour pages are left alone.`)) return;
     setBusy(true); setMsg(null);
     try {
       // Rates are validated, never coerced: `Number(r.rate) || 0` used to turn an unparseable
@@ -9056,7 +9081,7 @@ Anything not shown here will be removed from their account.`)) return;
       const numOf = (v) => { const s = String(v ?? "").trim(); return s === "" ? 0 : Number(s); };
       const badRate = (v) => { const n = numOf(v); return !Number.isFinite(n) || n < 0; };
       const bad = [];
-      rows.forEach((r) => {
+      mine.forEach(({ r }) => {
         const name = r.label || "unnamed colour";
         if (badRate(r.rate)) bad.push(`${name} ("${r.rate}")`);
         if (badRate(r.door_rate)) bad.push(`${name} door price ("${r.door_rate}")`);
@@ -9064,20 +9089,23 @@ Anything not shown here will be removed from their account.`)) return;
       if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.join(", ")}.`);
       // Serial code is REQUIRED on every siding, trim and roof colour (316, Carolyn 2026-10-18).
       // A door-only colour never appears in a serial, so it is exempt.
-      const noCode = rows.filter((r) => ssColorNeedsCode(r) && !String(r.code || "").trim()).map((r) => r.label || "unnamed colour");
+      const noCode = mine.filter(({ r }) => ssColorNeedsCode(r) && !String(r.code || "").trim()).map(({ r }) => r.label || "unnamed colour");
       if (noCode.length) throw new Error(`Nothing was saved — every siding, trim and roof colour needs a serial code (it is part of each building's serial number). Missing: ${noCode.join(", ")}.`);
-      const colors = rows.map((r, i) => ({
+      // sortOrder stays the row's GLOBAL index, exactly as before: the three palettes are read
+      // back filtered, so only the order WITHIN a section matters, and keeping the global index
+      // means a scoped save never renumbers rows it did not send.
+      const colors = mine.map(({ r, gi: i }) => ({
         id: r.id || undefined, label: r.label,
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: numOf(r.rate),
         doorRate: numOf(r.door_rate), taxable: r.taxable !== false, code: r.code || "",
       }));
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", section: ckey, colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      await load();
+      await load(ckey);
       const skipped = data.skipped || [];
-      setMsg({ ok: `Saved ${data.saved || 0} colour(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+      setMsg({ ok: `Saved ${data.saved || 0} ${word} colour(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
@@ -9088,10 +9116,6 @@ Anything not shown here will be removed from their account.`)) return;
   const tdc = { ...S.td, padding: "8px 5px" };
   const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
   const chk = (gi, field) => <input type="checkbox" checked={!!rows[gi][field]} onChange={(e) => setRow(gi, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
-
-  // Which palette a row belongs to. Mirrors renderSection's filter exactly — paint is the
-  // absence of the other two flags, not a flag of its own.
-  const catOf = (r) => (r.shingle ? "shingle" : r.metal ? "metal" : "paint");
 
   // "Custom" marks the ONE entry in a palette that lets the shopper type their own colour:
   // the designer looks it up with `colors.find((c) => c.allowCustom)` and, when it is picked,
@@ -9113,6 +9137,7 @@ Anything not shown here will be removed from their account.`)) return;
       ckey === "paint" ? (!r.shingle && !r.metal) : ckey === "shingle" ? r.shingle : r.metal);
     // Each section quick-adds from its own supplier palette, not the shared paint set.
     const lib = ckey === "metal" ? METAL_LIBRARY : ckey === "shingle" ? SHINGLE_LIBRARY : COLOR_LIBRARY;
+    const saveLabel = `Save ${SECTION_WORD[ckey] || ckey} colors`;
     return (
       <div style={S.card}>
         <div style={S.h2}>{title}</div>
@@ -9221,14 +9246,16 @@ Anything not shown here will be removed from their account.`)) return;
           <button onClick={() => addRow(undefined, ckey)} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
           <button onClick={() => setLibOpen((o) => o === ckey ? null : ckey)} style={S.btn("#F1F5F9", "#334155")}>{libOpen === ckey ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
           <div style={{ flex: 1 }} />
-          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+          {/* Named for its own palette, because it only saves that one now — "Save colors" on
+              three pages is what made the old whole-list save look like a page-level save. */}
+          <button onClick={() => save(ckey)} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : saveLabel}</button>
         </div>
         {libOpen === ckey && (
           <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
-            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
+            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>{saveLabel}</b>.</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {lib.map((c) => (
-                <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
+                <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click ${saveLabel} to apply.` }); }}
                   style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
                   <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
                   {c.name}

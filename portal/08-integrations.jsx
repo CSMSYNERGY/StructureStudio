@@ -5374,9 +5374,11 @@ function OptionsShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
 
 // ── Colors: one rail item, three tabs ────────────────────────────────────────────────────
 // ⚠️ ONE <ColorsView>, with the section as a PROP. Not three mounts behind {sub === ...}
-// branches: the component holds every category in one unsaved-edit buffer and saves the lot,
-// so remounting on a tab switch would discard edits without a word. Same element, same
-// position, so React keeps the instance.
+// branches: the component holds every category in one unsaved-edit buffer, so remounting on a
+// tab switch would discard edits without a word. Same element, same position, so React keeps
+// the instance. (Each page's Save writes only its own palette since 2026-10-30 — that is a
+// property of `save(ckey)`, not of the mounting, and the shared buffer is still why this
+// element must not move.)
 function ColorsShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
   const section = sub === "shingles" ? "shingle" : sub === "metal" ? "metal" : "paint";

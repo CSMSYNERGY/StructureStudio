@@ -6920,9 +6920,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
     { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
-    const exRes = await admin.from("colors").select("id").eq("client_id", clientId);
+    // SECTION-SCOPED SAVE (Carolyn 2026-10-30: "we need all the save colors to work on their
+    // own page. currently the save on each page is saving all 3 pages"). Settings → Colors is
+    // three pages — Paint, Shingle, Metal — and each one's Save button used to post the whole
+    // palette, so saving Paint also wrote (and could delete from) the other two.
+    //
+    // ⚠️ THE DELETE SWEEP IS WHY THIS IS A SERVER CHANGE and not just "send fewer rows". This
+    // action is a full-list replace: anything absent from the payload is DELETED. Posting only
+    // the paint rows against an unscoped sweep would wipe every shingle and metal colour. So
+    // `section` narrows the sweep to the rows that page owns, and nothing else changes.
+    // Absent `section` keeps the old whole-palette behaviour (an older browser, and the
+    // `section === "all"` view).
+    const SECTIONS = new Set(["paint", "shingle", "metal"]);
+    const section = (payload.section === undefined || payload.section === null || payload.section === "all")
+      ? null : String(payload.section);
+    if (section !== null && !SECTIONS.has(section)) return json({ error: `Unknown colour section "${section}".` }, 400);
+    const exRes = await admin.from("colors").select("id, shingle, metal").eq("client_id", clientId);
     if (exRes.error) return dbFail(req, clientId, "read your current colors", exRes.error);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    // A colour's section is NOT a column — it is derived from its flags, paint being the
+    // absence of the other two. Same predicate as migration 161's per-section unique indexes
+    // and as the browser's `catOf`, so all three agree on which page a colour lives on.
+    const sectOfFlags = (shingle: unknown, metal: unknown) => (shingle === true ? "shingle" : metal === true ? "metal" : "paint");
+    const storedSect = new Map<string, string>();
+    for (const r of (exRes.data ?? []) as any[]) storedSect.set(String(r.id), sectOfFlags(r.shingle, r.metal));
+    // Every id, so an id the payload names is still an UPDATE rather than a duplicate insert.
+    const existingIds = new Set(storedSect.keys());
+    // Only the ids this page owns are deletion candidates.
+    const sweepIds = section === null
+      ? new Set(existingIds)
+      : new Set([...storedSect.entries()].filter(([, s]) => s === section).map(([id]) => id));
     const keptIds = new Set<string>();
     let saved = 0; const skipped: string[] = [];
     let i = 0;
@@ -6936,6 +6962,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (isExisting) keptIds.add(rid);
       const unchanged = isExisting ? " — existing colour left unchanged" : "";
       const label = String(row?.label ?? "").trim();
+      // A page may only write its own palette. The flags the payload sends decide the section;
+      // a client that omits them (older browser) is read against what is stored. Refusing here
+      // keeps the narrowed sweep honest: a row the sweep set does not cover must not be able
+      // to slip a write through on another page's save.
+      if (section !== null) {
+        const rowSect = (Object.prototype.hasOwnProperty.call(row ?? {}, "shingle") || Object.prototype.hasOwnProperty.call(row ?? {}, "metal"))
+          ? sectOfFlags(row?.shingle, row?.metal)
+          : (isExisting ? storedSect.get(rid) : "paint");
+        if (rowSect !== section) {
+          skipped.push(`${label || `row ${i}`}: belongs to the ${rowSect} colours, not ${section}${unchanged}`);
+          i++; continue;
+        }
+      }
       if (!label) { skipped.push(`row ${i}: blank label${unchanged}`); i++; continue; }
       const method = String(row?.pricingMethod ?? "each").trim() || "each";
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"${unchanged}`); i++; continue; }
@@ -7009,7 +7048,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       saved++; i++;
     }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    const toDelete = [...sweepIds].filter((id) => !keptIds.has(id));
     let deleted = 0;
     if (toDelete.length) {
       const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
