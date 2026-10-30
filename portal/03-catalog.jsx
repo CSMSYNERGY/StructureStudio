@@ -10422,6 +10422,15 @@ function ssPgSettingsHref(sub) {
   return ssPageBase("settings", sub) + (qs ? "?" + qs : "");
 }
 
+// The browser's Back and Forward, held while the table has something unsaved: installed by
+// PricingTablePage while it is mounted, and asked first by Dashboard's popstate handler
+// (12-shell.jsx), which routes nothing when it answers true. The page has then put its own address
+// back and leaves once its edits have saved, the way Back to Sheds does. Asked from the shell, not
+// from a popstate listener of the page's own: Chrome runs window's popstate listeners in the order
+// they were added, and the shell's (added first, and again whenever its view-as state changes)
+// unmounts the table before a later one runs.
+let ssPgPopHold = null;
+
 // One canvas for measuring header names in the header's own font (ssPgHeaderHeight's `measure`).
 let ssPgCanvas = null;
 function ssPgMeasureCtx() {
@@ -10650,6 +10659,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const awaitRef = useRef(0);                      // the flight this page last sent (ssPgQueue's flight.n)
   const retryTimerRef = useRef(null);
   const aliveRef = useRef(true);
+  const addrRef = useRef(null);                    // this page's own address, for putting it back over a held Back
+  const passRef = useRef(false);                   // the popstate this page sends itself on its way out (go)
   const viewsRef = useRef({});                     // size id → its last row view (ssPgRowView), so PgRow's memo holds
   const dragRef = useRef(false);
   const flashRef = useRef(null);
@@ -10818,20 +10829,27 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     return () => clearInterval(t);
   }, [retryAt]);
 
-  // Leaving (Back to Sheds, Go to Options) waits for the queue to empty (plan 3.2: it flushes
-  // first). A box that went red since the click calls the wait off and the cursor goes to it, so the
-  // builder reads what didn't save before going anywhere (plan 1, 3.14): `was` is the queue's boxes
-  // at the click, and a red box is new when its mark is not the one it had then. A transport
-  // failure, a stop or a 403 calls the wait off too, and the status line says the page stayed, with
-  // Leave anyway (`stuck`); the click is never swallowed and nothing unsent is dropped unseen.
+  // Leaving (Back to Sheds, Go to Options, the browser's Back) waits for the queue to empty (plan
+  // 3.2: it flushes first). A box that went red since the click calls the wait off and the cursor
+  // goes to it, so the builder reads what didn't save before going anywhere (plan 1, 3.14): `was` is
+  // the queue's boxes at the click, and a red box is new when its mark is not the one it had then. A
+  // transport failure, a stop or a 403 calls the wait off too, and the status line says the page
+  // stayed, with Leave anyway (`stuck`); the click is never swallowed and nothing unsent is dropped
+  // unseen. Starting another edit while it waits calls it off as well (backToWork), so the page
+  // never goes with the editor open.
   useEffect(() => {
     if (!leaving || !q) return;
     const isNew = (id, f, x) => { const p = leaving.was[id] && leaving.was[id][f]; return !p || p.error !== x.error; };
     const red = Object.keys(q.fields).some((id) => Object.keys(q.fields[id]).some((f) => q.fields[id][f].error && isNew(id, f, q.fields[id][f])));
     if (red) { setLeaving(null); fnRef.current.jumpRed(isNew); return; }
     if (q.viewOnly || q.stopped || q.failures) { setLeaving(null); setStuck({ to: leaving.to }); return; }
-    if (!counts.pending && !counts.inflight && !counts.creating && !counts.removing && !q.flight) onNav(leaving.to);
+    if (!counts.pending && !counts.inflight && !counts.creating && !counts.removing && !q.flight) fnRef.current.go(leaving.to);
   }, [leaving, q, counts]);
+  // This page's own address after every render (?style= comes back out of it once), for the held
+  // Back below: by the time popstate fires the address bar has already moved.
+  useEffect(() => {
+    addrRef.current = { url: window.location.pathname + window.location.search + window.location.hash, state: window.history.state };
+  });
   // "You're still on this page" goes away once nothing is left unsent.
   useEffect(() => {
     if (stuck && !(counts.pending + counts.inflight + counts.creating + counts.removing)) setStuck(null);
@@ -10858,9 +10876,19 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // LEAVING THE TAB (plan 4.9): the browser asks first while anything is unsent or in flight, or the
   // editor holds text that differs from its box. There is no keepalive send (the invoke wrapper has
   // none, and a request cut off by leaving is an abort); Phase 4's local backup is the safety net.
-  // Hiding the tab sends what is waiting at once (plan 4.6), and so does leaving the page inside
-  // the app by any way that skips leaveTo (the browser's Back, an account change): its answer is
-  // never read, and the server's checks make it safe.
+  // Hiding the tab sends what is waiting at once (plan 4.6).
+  //
+  // THE BROWSER'S BACK AND FORWARD inside the app (and anything else that moves the address with
+  // popstate) leave the way Back to Sheds does (ssPgPopHold): while anything is unsent, in flight or
+  // typed in the editor, this page's address goes back (pushState, as the shell does for the
+  // Advanced page) and leaveFor sends first, then goes where the pop was going, or stays on what
+  // didn't save. Let through, the page would unmount with a follow-up still behind a call out (none
+  // can go while one is), and that call's answer, red or not, would never be read. Nothing waiting:
+  // the shell routes the pop as usual.
+  //
+  // Leaving any other way (an account change, signing out) commits the editor and sends what waits
+  // on the way out, as far as one call can: its answer is never read, and the server's checks make
+  // it safe.
   useEffect(() => {
     aliveRef.current = true;
     const onLeave = (e) => {
@@ -10870,16 +10898,29 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       e.returnValue = "";
       return "";
     };
+    const holdPop = () => {
+      if (passRef.current) return false;
+      const c = ssPgCount(qRef.current), back = addrRef.current;
+      if ((!(c.pending + c.inflight + c.creating + c.removing) && !dirtyRef.current) || !back) return false;
+      const to = { url: window.location.pathname + window.location.search + window.location.hash, state: window.history.state };
+      try { window.history.pushState(back.state, "", back.url); } catch (_h) { return false; }
+      try { ssPhonePortMoved(); } catch (_p) { /* the phone extension hears of it on the next move */ }
+      fnRef.current.leaveFor(to);
+      return true;
+    };
     const onVis = () => { if (document.visibilityState === "hidden") fnRef.current.flushNow(); };
     const onUp = () => { dragRef.current = false; };
     window.addEventListener("beforeunload", onLeave);
+    ssPgPopHold = holdPop;
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("mouseup", onUp);
     return () => {
+      try { fnRef.current.commitEdit(); } catch (_c) { /* best effort: the page is going */ }
       try { fnRef.current.flushNow(); } catch (_f) { /* best effort: the page is going */ }
       aliveRef.current = false;
       clearTimeout(retryTimerRef.current);
       window.removeEventListener("beforeunload", onLeave);
+      if (ssPgPopHold === holdPop) ssPgPopHold = null;
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("mouseup", onUp);
     };
@@ -11089,6 +11130,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const st = apply({ type: "commit", sizeId, f, value: p.value, at: Date.now(), ...(extra || {}) });
     return !(st.fields[sizeId] && st.fields[sizeId][f] && st.fields[sizeId][f].error);
   };
+  // Back to work while a leave waits for its save (Back clicked, then a box): the leave is called
+  // off, and the builder clicks Back again when done. Going once the queue emptied would drop an
+  // editor opened meanwhile, whose text is in no queue, or leave in the middle of the next edit.
+  const backToWork = () => { if (leaving) setLeaving(null); };
   const startEdit = (cell, key) => {
     if (!cell || !canEditNow()) return;
     if (cell.col === 0) { setTip(SS_PG_SIZE_FIXED); return; }
@@ -11096,6 +11141,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
     const f = fieldOf(cell.col);
     if (!f || !qRef.current.sizes[cell.sizeId]) return;
+    backToWork();
     const text0 = editText(cell.sizeId, f);
     const init = key != null ? key : text0;
     // `seen`: the value the builder is typing over, for the queue's check that nothing moved it
@@ -11131,6 +11177,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!canEditNow() || !qRef.current.sizes[cell.sizeId]) return;
     // Offered needs a price on file (the server ticks it with the first one): plan 3.9.
     if (qRef.current.sizes[cell.sizeId].price == null || shownOf(cell.sizeId, "price") == null) { setTip(SS_PG_ADD_PRICE + "."); return; }
+    backToWork();
     apply({ type: "commit", sizeId: cell.sizeId, f: "active", value: !shownOf(cell.sizeId, "active"), at: Date.now() });
   };
   // Delete or Backspace on one box (plan 3.10): a blank price, an empty option, Offered unticked.
@@ -11139,6 +11186,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!canEditNow() || !cell || cell.col === 0) return;
     if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
     if (cell.col === 2) { if (shownOf(cell.sizeId, "active")) toggleOffered(cell); return; }
+    backToWork();
     commitText(cell.sizeId, cell.col, "");
   };
   const moveTo = (next, which = "active") => {
@@ -11321,24 +11369,36 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       try { if (el) el.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (_s) { /* old browser */ }
     }
   };
-  fnRef.current = { place, sendNow, flushNow, jumpRed };
+  // Where leaving goes: a Settings tab by name (Back to Sheds, Go to Options), or the address a held
+  // Back or Forward was going to, routed the way the shell routes those (the address moves, then a
+  // popstate, which this page's hold lets through).
+  const go = (to) => {
+    if (typeof to === "string") { onNav(to); return; }
+    passRef.current = true;
+    try {
+      window.history.pushState(to.state, "", to.url);
+      window.dispatchEvent(new PopStateEvent("popstate", { state: to.state }));
+    } catch (_h) { /* history unavailable */ } finally { passRef.current = false; }
+  };
 
-  // Back to Sheds and Go to Options leave the same way (plan 3.2, 4.6): the editor is committed and
-  // what waits is sent first; the page goes once the queue is empty (the `leaving` effect). It
-  // stays when the editor's text went red (the cursor is on that box, its reason on the status
-  // line), and when nothing can be sent first (saving stopped or retrying, or view-only after a
-  // 403): then the status line says the page stayed, with Leave anyway. A middle click or a
-  // modified one is the browser's: a new tab, nothing waits.
-  const leaveTo = (sub) => ssNavClick(() => {
+  // Back to Sheds, Go to Options and a held Back or Forward leave the same way (plan 3.2, 4.6): the
+  // editor is committed and what waits is sent first; the page goes once the queue is empty (the
+  // `leaving` effect). It stays when the editor's text went red (the cursor is on that box, its
+  // reason on the status line), and when nothing can be sent first (saving stopped or retrying, or
+  // view-only after a 403): then the status line says the page stayed, with Leave anyway. A middle
+  // click or a modified one is the browser's: a new tab, nothing waits.
+  const leaveFor = (to) => {
     setStuck(null);
     if (!commitEdit()) { focusGrid(); return; }
     const cur = qRef.current, c = ssPgCount(cur);
-    if (!cur || !(c.pending + c.inflight + c.creating + c.removing)) { onNav(sub); return; }
-    if (cur.viewOnly || cur.stopped || cur.failures) { setStuck({ to: sub }); return; }
-    setLeaving({ to: sub, was: cur.fields });
+    if (!cur || !(c.pending + c.inflight + c.creating + c.removing)) { go(to); return; }
+    if (cur.viewOnly || cur.stopped || cur.failures) { setStuck({ to }); return; }
+    setLeaving({ to, was: cur.fields });
     flushNow();
-  });
+  };
+  const leaveTo = (sub) => ssNavClick(() => leaveFor(sub));
   const toSheds = leaveTo("sheds");
+  fnRef.current = { place, sendNow, flushNow, jumpRed, go, commitEdit, leaveFor };
   // Pressing a link would blur the open editor, and the blur commits it before the click, so the
   // click would never see a box that commit turned red. Held on the editor, the click commits it.
   const holdEditor = (e) => { if (editRef.current) e.preventDefault(); };
@@ -11386,7 +11446,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const unsaved = counts.pending + counts.inflight + counts.creating + counts.removing;
   const stuckLine = stuck && unsaved > 0 ? (
     <PgStatusLine tone="amber" action={<>
-      <button type="button" onClick={() => { const to = stuck.to; setStuck(null); onNav(to); }}>Leave anyway</button>
+      <button type="button" onClick={() => { const to = stuck.to; setStuck(null); go(to); }}>Leave anyway</button>
       {dismissBtn(() => setStuck(null))}
     </>}>{`${n(unsaved, "1 change isn't", "changes aren't")} saved yet, so you're still on this page.`}</PgStatusLine>
   ) : null;

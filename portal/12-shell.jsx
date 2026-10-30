@@ -1392,6 +1392,9 @@ function Dashboard({ session }) {
   useEffect(() => { lastAddrRef.current = { url: window.location.pathname + window.location.search + window.location.hash, state: window.history.state }; });
   useEffect(() => {
     const onPop = () => {
+      // The sizes table holds Back and Forward while it has something unsaved (ssPgPopHold,
+      // 03-catalog.jsx): it has put its own address back, and leaves once that has saved.
+      if (ssPgPopHold && ssPgPopHold()) return;
       const p = ssParsePath();
       const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
       const urlView = (isOperator && v && /^[a-z0-9][a-z0-9-]*$/.test(v)) ? v : null;

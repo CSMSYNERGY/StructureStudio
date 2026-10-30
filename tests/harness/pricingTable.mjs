@@ -54,8 +54,11 @@
 //      The leave prompt fires for an editor holding changed text and for an unsent edit, and not once
 //      saved; Back to Sheds sends first, and stays on a box that goes red (text refused, or the save
 //      changed elsewhere) or says why it stayed (saving stopped) with Leave anyway; Go to Options and
-//      the browser's Back send first too. "1 box needs you" unfolds a hidden size to reach its box. An
-//      answer that moves a box under the open editor turns what is then typed red, never sent.
+//      the browser's Back send first too. The browser's Back is held while anything waits (a
+//      follow-up in the editor behind a call out, the editor's text alone), goes after it saves, and
+//      stays on a box that went red or while saving is stopped; a box typed into while Back to Sheds
+//      waits keeps the page. "1 box needs you" unfolds a hidden size to reach its box. An answer that
+//      moves a box under the open editor turns what is then typed red, never sent.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails only if an arrow key re-renders a row
 //      or a commit re-renders more than the one it changed.
@@ -1513,6 +1516,125 @@ for (const how of want("P") ? ["Go to Options", "the browser's Back"] : []) {
     new URL(page.url()).pathname === dest && sc.length === 1 && JSON.stringify(sc[0].body.sizes[0].to) === '{"price":7777}' && F.size(barn[0].id).base_price === 7777
     && (await page.locator(".ss-pg-grid").count()) === 0, JSON.stringify({ url: page.url(), saves: sc.map((x) => x.body.sizes) }));
   ok(`P: no page errors (${how})`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// The browser's own Back inside the app (review round 2, 2026-10-31). The entry before the table
+// becomes Sheds (as after Back to Sheds, then Forward), and history.back() moves the address bar
+// before any script sees it, as a real Back does. Resolves once that popstate has been handled. The
+// cases below read the page's own location: Playwright's page.url() can still be on the Sheds
+// address written here a moment before.
+const browserBack = (page) => page.evaluate(() => new Promise((done) => {
+  const st = window.history.state;
+  window.history.replaceState(null, "", "/settings/sheds");
+  window.history.pushState(st, "", "/settings/sheds-table");
+  window.addEventListener("popstate", () => setTimeout(done, 50), { once: true });
+  window.history.back();
+}));
+const pathOf = (page) => page.evaluate(() => window.location.pathname).catch(() => null);
+const waitPath = (page, path, timeout) => page.waitForFunction((p) => window.location.pathname === p, path, { timeout }).then(() => true, () => false);
+// Held while anything waits: a follow-up still in the editor behind a call out goes after that call's
+// answer, then the page goes where Back was going; a Back whose save comes back changed elsewhere
+// stays on that box; a Back while saving is stopped says the page stayed, and Leave anyway goes where
+// Back was going. Before, the page unmounted at once: the follow-up was never sent, a red answer was
+// never read.
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  F.delayMs = 1500;
+  const { ctx, page, calls, errors, dialogs } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgBackoffMs: [150, 150, 150, 150] } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const here = async () => (await pathOf(page)) === "/settings/sheds-table";
+  const gone = async () => (await pathOf(page)) === "/settings/sheds" && (await page.locator(".ss-pg-grid").count()) === 0;
+  await typeIn(page, barn[0].id, 1, "5150");
+  await waitBadge(page, /^Saving/);
+  await page.locator(sel(barn[0].id, 1)).click();
+  await page.keyboard.type("6000");                 // a follow-up of the same box, still in the editor
+  await browserBack(page);
+  let s = await state(page);
+  ok("P: the browser's Back while a save is out, with a follow-up in the editor, keeps the table (and its address) while it saves",
+    await here() && s.editable === "1" && /^Saving/.test(s.badge) && !s.editor, JSON.stringify({ at: await pathOf(page), s }));
+  await waitPath(page, "/settings/sheds", 10000);
+  await page.waitForTimeout(300);
+  const sc = saveCalls(calls);
+  ok("P: …sends the follow-up after the answer, then goes where Back was going",
+    await gone() && sc.map((x) => JSON.stringify(x.body.sizes[0].to)).join() === '{"price":5150},{"price":6000}' && F.size(barn[0].id).base_price === 6000 && !dialogs.length,
+    JSON.stringify({ at: await pathOf(page), saves: sc.map((x) => x.body.sizes), dialogs }));
+  await page.goto(`${BASE}/settings/sheds-table`);
+  await waitGrid(page).catch(() => {});
+  F.script.push({ before: (f) => f.poke(barn[1].id, { price: 4950 }) });
+  await typeIn(page, barn[1].id, 1, "4800");
+  await waitBadge(page, /^Saving/);
+  await browserBack(page);
+  await waitBadge(page, /^1 box needs you$/);
+  await page.waitForTimeout(300);
+  s = await state(page);
+  ok("P: the browser's Back whose save comes back changed elsewhere stays, jumps to that box, and the status line gives both numbers",
+    await here() && s.readout === `Price · ${named(barn[1])}` && F.size(barn[1].id).base_price === 4950
+    && s.status === `${named(barn[1])} · Price: changed elsewhere to $4,950 while you typed $4,800. Type it again if yours is right.`, JSON.stringify({ at: await pathOf(page), s }));
+  F.delayMs = 0;
+  for (let i = 0; i < 5; i++) F.script.push({ status: 500 });
+  await typeIn(page, barn[2].id, 1, "1234");
+  await waitBadge(page, /^Saving stopped/, 20000);
+  await browserBack(page);
+  await page.waitForTimeout(300);
+  s = await state(page);
+  ok("P: the browser's Back while saving is stopped stays and says so, with Leave anyway",
+    await here() && s.status === "1 change isn't saved yet, so you're still on this page.", JSON.stringify({ at: await pathOf(page), s }));
+  await page.locator(".ss-pg-status button", { hasText: "Leave anyway" }).click({ timeout: 3000 }).catch(() => {});
+  await waitPath(page, "/settings/sheds", 5000);
+  await page.waitForTimeout(300);
+  ok("P: …and Leave anyway goes where Back was going", await gone(), String(await pathOf(page)));
+  ok("P: no page errors (the browser's Back, held)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// Back to Sheds waits for its save; a box clicked and typed into meanwhile calls the leave off, so the
+// editor's text is never dropped by the page going (review round 2). The editor's text alone holds
+// the browser's Back too, and goes first; with nothing waiting, Back leaves at once.
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const LOFT = keyCol(cat, "loft");
+  F.delayMs = 1500;
+  const { ctx, page, calls, errors, dialogs } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const here = async () => (await pathOf(page)) === "/settings/sheds-table";
+  await typeIn(page, barn[0].id, 1, "5151");
+  await page.locator(".ss-pg-back").click();       // waits for that save
+  await page.waitForTimeout(300);
+  await page.locator(sel(barn[1].id, 1)).click();
+  await page.keyboard.type("4321");                 // back to work: the editor holds 4321
+  await page.waitForTimeout(2500);                  // the first save has landed meanwhile
+  let s = await state(page);
+  ok("P: a box typed into while Back to Sheds waits for its save keeps the page, and the editor its text",
+    await here() && !!s.editor && s.editor.value === "4321" && s.editor.focused && F.size(barn[0].id).base_price === 5151 && s.badge === "1 change not saved yet",
+    JSON.stringify({ at: await pathOf(page), s }));
+  const n0 = saveCalls(calls).length;
+  await page.keyboard.press("Enter");
+  ok("P: …and that text saves like any other edit", await saved(page, calls, n0) && F.size(barn[1].id).base_price === 4321 && await here(), String(await pathOf(page)));
+  await page.locator(sel(barn[2].id, LOFT)).click();
+  await page.keyboard.type("99");                   // never committed
+  await browserBack(page);
+  s = await state(page);
+  const held = await here() && /^Saving/.test(s.badge) && !s.editor;
+  await waitPath(page, "/settings/sheds", 10000);
+  await page.waitForTimeout(300);
+  const sc = saveCalls(calls);
+  ok("P: the browser's Back with only the editor's text holds the page, sends that text, then goes",
+    held && (await pathOf(page)) === "/settings/sheds" && (await page.locator(".ss-pg-grid").count()) === 0
+    && sc.length === n0 + 2 && JSON.stringify(sc[sc.length - 1].body.sizes[0].to) === '{"cells":{"loft":99}}' && F.cells(barn[2].id).loft === 99,
+    JSON.stringify({ held, at: await pathOf(page), saves: sc.slice(n0).map((x) => x.body.sizes) }));
+  await page.goto(`${BASE}/settings/sheds-table`);
+  await waitGrid(page).catch(() => {});
+  const n1 = saveCalls(calls).length;
+  await browserBack(page);
+  await page.waitForTimeout(200);
+  ok("P: with nothing waiting, the browser's Back leaves at once and sends nothing",
+    (await pathOf(page)) === "/settings/sheds" && (await page.locator(".ss-pg-grid").count()) === 0 && saveCalls(calls).length === n1, String(await pathOf(page)));
+  ok("P: no page errors (back to work while leaving)", errors.length === 0 && !dialogs.length, errors.join(" | ") + JSON.stringify(dialogs));
   await ctx.close();
 }
 

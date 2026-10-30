@@ -22,8 +22,9 @@
 //   8. Phase 3 (editing): saves go one call at a time through ssStyleSaveCall as save_pricing_cells
 //      with targetClientId on the body and the answer's account checked by the page; every edit path
 //      checks the page can still edit; no log row carries a value; leaving asks first while anything
-//      is unsent or the editor holds changed text, and Back to Sheds sends first; the editor and the
-//      overlay keep their hooks above any return.
+//      is unsent or the editor holds changed text, and Back to Sheds sends first, as does the browser's
+//      Back or Forward, which the page holds while anything is unsent; the editor and the overlay keep
+//      their hooks above any return.
 //
 // Lifted with the xlsxCellText_test anchor idiom: the text between a signature and the next "\n}\n".
 // No network, no DOM: the lifted functions get stubs for exactly the names they use.
@@ -146,7 +147,7 @@ Deno.test("saves go one at a time through ssStyleSaveCall as save_pricing_cells,
   for (const m of page.matchAll(/ssLogError\(([\s\S]*?)\);/g)) assert(!/typed|\.price|\bto\b|draft/.test(m[1]), `a log row that could carry a value: ${m[1].slice(0, 120)}`);
 });
 
-Deno.test("leaving asks first while anything is unsent or in flight, or the editor holds changed text; Back to Sheds sends first", () => {
+Deno.test("leaving asks first while anything is unsent or in flight, or the editor holds changed text; Back to Sheds and the browser's Back send first", () => {
   const page = fnText(CATALOG, "function PricingTablePage(");
   const leave = between(page, "const onLeave = (e) => {", "\n    };", "the beforeunload handler");
   assert(leave.includes("if (!(c.pending + c.inflight + c.creating + c.removing) && !dirtyRef.current) return undefined;"), leave);
@@ -159,10 +160,12 @@ Deno.test("leaving asks first while anything is unsent or in flight, or the edit
   // Back to Sheds and Go to Options leave the same way: commit, send, wait. A box the editor's commit
   // turned red keeps the page open; a click that cannot send first says so (Leave anyway), never
   // silently.
-  const leaveTo = between(page, "const leaveTo = (sub) => ssNavClick(() => {", "\n  });", "leaveTo");
-  assert(leaveTo.includes("if (!commitEdit()) { focusGrid(); return; }"), "the editor's red box must keep the page open");
-  assert(leaveTo.includes("setLeaving({ to: sub, was: cur.fields });") && leaveTo.includes("flushNow();"));
-  assert(leaveTo.includes("if (cur.viewOnly || cur.stopped || cur.failures) { setStuck({ to: sub }); return; }"));
+  const leaveFor = between(page, "const leaveFor = (to) => {", "\n  };", "leaveFor");
+  assert(leaveFor.includes("if (!commitEdit()) { focusGrid(); return; }"), "the editor's red box must keep the page open");
+  assert(leaveFor.includes("setLeaving({ to, was: cur.fields });") && leaveFor.includes("flushNow();"));
+  assert(leaveFor.includes("if (cur.viewOnly || cur.stopped || cur.failures) { setStuck({ to }); return; }"));
+  assert(leaveFor.includes("{ go(to); return; }"), leaveFor);
+  assert(page.includes("const leaveTo = (sub) => ssNavClick(() => leaveFor(sub));"));
   assert(page.includes(`const toSheds = leaveTo("sheds");`));
   assert(page.includes(`onClick={leaveTo("options")}>Go to Options →</a>`), "Go to Options must send first too");
   assert(!/ssNavClick\(\(\) => onNav\(/.test(page), "an in-app link out of the table that skips leaveTo");
@@ -172,9 +175,46 @@ Deno.test("leaving asks first while anything is unsent or in flight, or the edit
   const wait = between(page, "useEffect(() => {\n    if (!leaving || !q) return;", "}, [leaving, q, counts]);", "the leaving effect");
   assert(wait.includes("if (red) { setLeaving(null); fnRef.current.jumpRed(isNew); return; }"), wait);
   assert(wait.includes("if (q.viewOnly || q.stopped || q.failures) { setLeaving(null); setStuck({ to: leaving.to }); return; }"), wait);
-  // Hiding the tab sends what is waiting at once, and so does any other way out of the page.
+  assert(wait.includes("fnRef.current.go(leaving.to);") && !wait.includes("onNav("), "the wait goes the way the click asked (a tab, or where a held Back was going)");
+  // Hiding the tab sends what is waiting at once, and so does any other way out of the page, the
+  // editor's text included.
   assert(page.includes(`const onVis = () => { if (document.visibilityState === "hidden") fnRef.current.flushNow(); };`));
-  assert(page.includes("try { fnRef.current.flushNow(); } catch (_f) { /* best effort: the page is going */ }"), "the unmount flush");
+  assert(page.includes("try { fnRef.current.commitEdit(); } catch (_c) { /* best effort: the page is going */ }\n      try { fnRef.current.flushNow(); } catch (_f) { /* best effort: the page is going */ }"),
+    "the unmount commits the editor, then flushes");
+  // Review round 2 (2026-10-31). The browser's Back or Forward while anything is unsent, in flight or
+  // in the editor is held and leaves through leaveFor. Let through, the page unmounted with a
+  // follow-up behind a call out and that call's answer unread. The shell's popstate handler asks the
+  // hold before it routes anything: a listener of the page's own runs after the shell's, which has
+  // unmounted the table by then (Chrome runs window's popstate listeners in the order they were added).
+  assert(/\nlet ssPgPopHold = null;\n/.test(CATALOG), "the hold is a module-level hook the page installs");
+  const shellPop = between(SHELL, "const onPop = () => {", "const p = ssParsePath();", "Dashboard's popstate handler");
+  assert(shellPop.includes("if (ssPgPopHold && ssPgPopHold()) return;"), "the shell must ask the table's hold before it routes a pop");
+  assert(page.includes("ssPgPopHold = holdPop;") && page.includes("if (ssPgPopHold === holdPop) ssPgPopHold = null;"), "installed while mounted, and only its own taken down");
+  const hold = between(page, "const holdPop = () => {", "\n    };", "the popstate hold");
+  const run = (o: { pass?: boolean; counts?: Record<string, number>; dirty?: boolean; back?: unknown }) => {
+    const did: any = { pushed: null, left: null, said: 0 };
+    const win = { location: { pathname: "/settings/sheds", search: "", hash: "" }, history: { state: { page: "settings", sub: "sheds" }, pushState: (st: unknown, _t: string, url: string) => { did.pushed = { st, url }; } } };
+    const zero = { pending: 0, inflight: 0, creating: 0, removing: 0 };
+    const held = new Function("window", "passRef", "qRef", "addrRef", "dirtyRef", "fnRef", "ssPgCount", "ssPhonePortMoved", `${hold}\n    };\n    return holdPop();`)(
+      win, { current: !!o.pass }, { current: {} }, { current: o.back === undefined ? { url: "/settings/sheds-table", state: null } : o.back }, { current: !!o.dirty },
+      { current: { leaveFor: (to: unknown) => { did.left = to; } } }, () => ({ ...zero, ...(o.counts || {}) }), () => { did.said++; });
+    return { held, ...did };
+  };
+  assertEquals(run({ counts: { inflight: 1 } }), { held: true, pushed: { st: null, url: "/settings/sheds-table" }, left: { url: "/settings/sheds", state: { page: "settings", sub: "sheds" } }, said: 1 });
+  assertEquals(run({ dirty: true }).held, true, "the editor's text alone holds it");
+  for (const k of ["pending", "creating", "removing"]) assertEquals(run({ counts: { [k]: 1 } }).held, true, k);
+  assertEquals(run({}), { held: false, pushed: null, left: null, said: 0 }, "nothing waiting: the shell routes it");
+  assertEquals(run({ pass: true, counts: { pending: 1 } }).held, false, "the page's own way out (go) is let through");
+  assertEquals(run({ back: null, counts: { pending: 1 } }).held, false, "no address to put back: never half-held");
+  const go = between(page, "const go = (to) => {", "\n  };", "go");
+  assert(go.includes(`if (typeof to === "string") { onNav(to); return; }`) && go.includes("passRef.current = true;") && go.includes("finally { passRef.current = false; }"), go);
+  assertEquals((page.match(/\bonNav\(/g) || []).length, 1, "every way out of the table goes through go (and so through leaveFor or Leave anyway)");
+  assert(page.includes("setStuck(null); go(to); }}>Leave anyway</button>"));
+  // Starting another edit while a leave waits calls it off: the page never goes with the editor open.
+  assert(page.includes("const backToWork = () => { if (leaving) setLeaving(null); };"));
+  for (const fn of ["const startEdit = (cell, key) => {", "const toggleOffered = (cell) => {", "const clearCell = (cell) => {"]) {
+    assert(between(page, fn, "\n  };", fn).includes("backToWork();"), `${fn} must call a waiting leave off`);
+  }
   // The editor's commit carries what the box showed when typing began (the queue's `seen` check).
   assert(page.includes("seen: shownOf(cell.sizeId, f) };") && page.includes("commitText(ed.sizeId, ed.col, text, { seen: ed.seen })"));
 });
