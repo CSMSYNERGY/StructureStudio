@@ -24,15 +24,27 @@ Deno.test("the knowledge names no inbox and none of our own consoles", () => {
   assert(KNOWLEDGE.includes("24 hours"), "the reply promise is in the FAQ");
 });
 
-/** One FAQ answer, heading to the next heading, on one line. */
-async function faqAnswer(question: string): Promise<string> {
+/** One FAQ answer's non-empty lines, heading to the next heading of any level. */
+async function faqLines(question: string): Promise<string[]> {
   const faq = (await Deno.readTextFile(new URL("./faq.md", import.meta.url))).replace(/\r/g, "");
   const i = faq.indexOf(`### ${question}\n`);
   assert(i >= 0, `faq.md has "### ${question}"`);
   const body = faq.slice(faq.indexOf("\n", i) + 1);
-  const j = body.indexOf("\n###");
-  return (j < 0 ? body : body.slice(0, j)).replace(/\s+/g, " ").trim();
+  const j = body.search(/\n#+ /);
+  return (j < 0 ? body : body.slice(0, j)).split("\n").filter((l) => l.trim());
 }
+
+/** One FAQ answer on one line. */
+async function faqAnswer(question: string): Promise<string> {
+  return (await faqLines(question)).join(" ").replace(/\s+/g, " ").trim();
+}
+
+// FAQ answers run two to six lines of faq.md. The prices answer is the one that keeps growing as the
+// table gains controls (it reached nine lines once), so it is held to that here.
+Deno.test("the prices answer fits in six lines of faq.md", async () => {
+  const n = (await faqLines("How do I set my prices?")).length;
+  assert(n >= 2 && n <= 6, `the prices answer is ${n} lines: keep it to 2-6`);
+});
 
 // The table (Pricing Table 2026-10-30) adds no sizes until its "＋ Add sizes" ships, so a new row in
 // the Excel template is how a size is added, and the answer must say how to write one. Real-Time
