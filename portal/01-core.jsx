@@ -153,8 +153,51 @@ function ssLogError(source, message, code, context, severity) {
   } catch (_) { /* logging must never break the app */ }
 }
 window.ssLogError = ssLogError;
-window.addEventListener("error", (e) => ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
-  { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename, line: e && e.lineno }));
+// An uncaught error that is NOT OUR CODE lands as info, marked context._demoted =
+// "foreign_script", instead of error. Same rule as index.mount.jsx and admin.app.jsx. On
+// 2026-10-15/16, 54 designer error rows came from one iPhone running Brave, and not one of them
+// was ours; the portal has the same exposure. Two shapes:
+//  (1) A MUTED error: "Script error.", no filename, line 0, no error object. That is the
+//      browser's redaction for a script from another origin loaded without CORS, or one the
+//      browser injected itself. The portal loads two such scripts: the Google Maps loader (in
+//      the lazy designer) and NMI Collect.js (03-catalog.jsx, the card form). So a throw inside
+//      Collect.js lands as info too. That is accepted: a muted error carries nothing we could
+//      act on, and the card flow reports its own failures (load error, cancel, timeout) by
+//      rejecting through its own paths.
+//  (2) An error at line 0 or 1 of an HTML document on our own host. Line 1 of every page is
+//      <!DOCTYPE html> and our inline scripts start far below it (line 23 or later on all three
+//      pages), so this is a script the browser or an extension injected: reader mode
+//      (__firefox__.reader on Brave/Firefox iOS), a wallet's window.ethereum, Dark Reader.
+//      Compared by host plus a non-.js path, NOT by href: the portal rewrites its URL with
+//      history.* on every route change, and an injected script keeps the URL it was injected
+//      at. Our bundles are always .js URLs, so a line-1 error in a minified bundle stays error.
+// ⚠️ An empty filename WITH a line or an error object stays error: that is eval'd code, not a
+// muted error. The muted rule holds only while nothing we ship runs through eval, new Function or
+// in-browser Babel (on 2026-08-05 our own "ReactDOM is not defined" arrived from Babel with file
+// ""). The designer's nativeImport new Function only returns import()'s promise, so its failures
+// arrive as rejections, not here. Revisit this if any of those come back.
+// The marker makes the info repetition check (CLAUDE.md, app_errors severity) skip these rows ON
+// PURPOSE, because one injected-script burst would trip it; CLAUDE.md has a foreign_script count
+// to run instead.
+function ssForeignError(e) {
+  if (!e) return false;
+  const f = String(e.filename || "");
+  // A sandboxed frame without allow-same-origin has origin "null": every script of ours is
+  // cross-origin there, so a muted error may be ours. Keep those error.
+  if (!f) return !e.lineno && !e.error && self.origin !== "null";
+  let u;
+  try { u = new URL(f, location.href); } catch (_) { return false; }
+  return u.host === location.host && !/\.js$/i.test(u.pathname) && (e.lineno || 0) <= 1;
+}
+// context.file drops the #fragment: an injected script on a /login#access_token=... landing
+// would otherwise write the token into the row (p_url is already stripped).
+window.addEventListener("error", (e) => {
+  const foreign = ssForeignError(e);
+  ssLogError(SS_ERR_SOURCE, (e && e.message) || "window.onerror", e && e.error && e.error.name,
+    { stack: e && e.error && e.error.stack ? String(e.error.stack).slice(0, 2000) : null, file: e && e.filename ? String(e.filename).split("#")[0] : e && e.filename, line: e && e.lineno,
+      ...(foreign ? { _demoted: "foreign_script" } : {}) },
+    foreign ? "info" : undefined);
+});
 window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; ssLogError(SS_ERR_SOURCE, (r && r.message) || String(r), r && r.name,
   { stack: r && r.stack ? String(r.stack).slice(0, 2000) : null }); });
 
@@ -275,7 +318,10 @@ let ssTargetUserId = null;
 // ⚠️ An operator has no client_users row on the viewed tenant and therefore no host row of
 // their own there: portal-meetings answers `myHost: null` for them, deliberately. A CSM
 // Synergy operator does not have a booking page on a builder's account.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings"];
+// support-agent joined on 2026-10-27 (migration 340) for the OPPOSITE reason: so a view-as call
+// reaches the server AS one, which then refuses it. The assistant answers for the signed-in builder
+// only; without the injection a stray call would quietly answer for the operator's own account.
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings", "support-agent"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
@@ -504,7 +550,9 @@ __ssFunctions.invoke = async (name, opts) => {
       // error when a charged draft was lost. So this row is a countable info row under its own code,
       // never a fault on its own: a phone that backgrounds the tab mid-press is not an outage.
       // `status` still tells the two apart (null: broke off; 504: the deadline).
-      const ssDraftDropped = !ssAborted && Boolean(opts && opts.body && opts.body.action === "calibrate_style_ai" && opts.body.stream === true)
+      // A streamed door draft (generate_door_look, door looks from a photo) drops the same two ways and is
+      // picked up the same way (generate_door_look_recover).
+      const ssDraftDropped = !ssAborted && Boolean(opts && opts.body && (opts.body.action === "calibrate_style_ai" || opts.body.action === "generate_door_look") && opts.body.stream === true)
         && ((Boolean(res.error) && st === null && ["SyntaxError", "TypeError"].indexOf(res.error.name || "") !== -1)
           || (!res.error && Boolean(res.data) && res.data.code === "stream_deadline"));
       // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"
@@ -637,7 +685,9 @@ const TAB_META = {
   //
   // `designs` and `pipelines` are no longer pages. Their old addresses (bookmarks, links already
   // sent, browser history) all land here through ssCanonRoute below.
-  contacts: ["Contacts", "Everyone who has enquired, their designs, and your pipelines"],
+  // "Customer Hub" since 2026-10-29 (Carolyn) — the sidebar label and this page header are the
+  // same string; the id, the address and the icon are unchanged. See the nav item in 12-shell.
+  contacts: ["Customer Hub", "Everyone who has enquired, their designs, and your pipelines"],
   // Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations
   // would be email, all of it ... I want that bar at the top that shows that I can sort and see
   // just that." One row per customer, from crm_inbox; replying happens on their record.
@@ -1973,7 +2023,9 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
 // gate — they were behind `schedUnlocked` in Team and they are behind it here.
 function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
   return [
-    ["company", "Business Details", "Your legal business details, address, and the terms printed on estimates"],
+    // Serial numbers live on this tab since 2026-09-11 (08-integrations.jsx CompanyShell), not on
+    // Locations. support-kb.mjs lifts these descriptions into the support assistant's knowledge.
+    ["company", "Business Details", "Your legal business details, address, the terms printed on estimates, and your building serial numbers"],
     ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
     ["team", "Team", "People, access, and commission rates"],
     // COMMISSIONS joined Company on 2026-09-11 (Carolyn: "commissions also needs to go to
@@ -1982,7 +2034,7 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     // Still owner-only, the gate it carried as a rail item: portal-commissions refuses an
     // operator outright and grants are owner-only, so this is not merely a UI courtesy.
     ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
-    ["locations", "Locations", "Your sales lots, and the serial numbers your buildings are given"],
+    ["locations", "Locations", "Your sales lots: where inventory buildings sit, the delivery pickup point, and each lot's own tax rate"],
     ...(schedUnlocked ? [["crews", "Crews", "Who builds — each crew gets its own Build Schedule calendar"]] : []),
     ...(schedUnlocked ? [["drivers", "Drivers", "Who delivers, what they can haul, and the territories they cover"]] : []),
     // TAX (Ahsan 2026-09-17, from the owner's 2026-09-14 ask that every product, installation
@@ -2032,8 +2084,8 @@ function ssColorTabs() {
 // never what those links were pointing at.
 function ssBillingTabs() {
   return [
-    ["billing", "Subscription", "Your plan, payment method, and invoices"],
-    ["wallet", "Wallet", "Prepaid credit for usage — top-ups, auto top-up, and what has been charged"],
+    ["billing", "Subscription", "Your plan: what you pay, your features, and the next renewal"],
+    ["wallet", "Wallet", "Your card on file, and prepaid credit for usage — top-ups, auto top-up, and what has been charged"],
   ];
 }
 

@@ -24,8 +24,9 @@
 // checked against their exact shape before anything trusts them (a prefix check is beaten by `..`).
 
 import { runAutoTopup } from "../_shared/walletAutoTopup.ts";
+import { readDoorLooksFlag } from "./doorLooks.ts";
 import {
-  type Category, CLADDING_PROFILES, cleanLook, cleanName, DOOR_STYLES, ENTRY_NAME_MAX, isLibraryId, LIBRARY_CATEGORIES, type Look,
+  type Category, CLADDING_PROFILES, cleanLook, cleanName, DOOR_STYLES, ENTRY_NAME_MAX, isDoorLookEntry, isLibraryId, LIBRARY_CATEGORIES, type Look,
   lookKey, rowValuesFor, templateOut, UUID,
 } from "../_shared/libraryLook.ts";
 export { cleanLook, isLibraryId, templateOut };
@@ -52,6 +53,30 @@ export const LIBRARY_OFF: Refusal = { status: 403, code: "library_off", error: "
 export const LIBRARY_UNAVAILABLE: Refusal = { status: 503, code: "library_unavailable", error: "The library isn't available yet. Try again later." };
 const ENTRY_NOT_FOUND: Refusal = { status: 404, code: "library_entry_not_found", error: "That isn't in your library any more. Reload the page and pick another." };
 const TEMPLATE_NOT_FOUND: Refusal = { status: 404, code: "library_template_not_found", error: "That isn't in the StructureStudio library any more. Reload the page and pick another." };
+// A door made from a photo (345): one of the builder's own door looks (343), saved Ready first.
+const DOOR_LOOK_NOT_FOUND: Refusal = { status: 404, code: "library_door_look_not_found", error: "That 3D door isn't in your catalog any more. Reload the page and try again." };
+const DOOR_LOOK_NOT_READY: Refusal = { status: 409, code: "library_door_look_not_ready", error: "Save that 3D door first, then add it to your library." };
+const DOOR_LOOK_FIXED: Refusal = { status: 400, code: "library_door_look_fixed", error: "A door made from your photo keeps its look. Rename it here, or make a new one from a photo." };
+const DOOR_LOOKS_NOT_YET: Refusal = { status: 503, code: "library_door_looks_unavailable", error: "Doors made from photos can't go in the library yet. Try again later." };
+/** The templates that are promoted doors (347): id -> their spec. A database without 347 has none. */
+async function promotedDoors(admin: Db): Promise<{ map: Map<string, Record<string, unknown>>; error?: unknown }> {
+  const map = new Map<string, Record<string, unknown>>();
+  const r = await admin.from("library_items").select("id, door_spec").not("door_spec", "is", null);
+  if (r.error) return librarySchemaMissing(r.error) ? { map } : { map, error: r.error };
+  for (const x of r.data ?? []) if (x.door_spec && typeof x.door_spec === "object") map.set(String(x.id), x.door_spec);
+  return { map };
+}
+/** 345's guards and check, in the builder's words: a database without 345 refuses the shape (23514 on
+ *  client_library_look_chk), and its triggers refuse a look that is not this builder's or not ready. */
+const doorLookDbRefusal = (err: unknown): Refusal | null => {
+  const e = err as { code?: string; message?: string } | null;
+  const code = String(e?.code ?? ""), msg = String(e?.message ?? "");
+  if (code === "23514" && /client_library_look_chk/.test(msg)) return DOOR_LOOKS_NOT_YET;
+  if (code === "23514" && /keeps its look/.test(msg)) return DOOR_LOOK_FIXED;
+  if (code === "23514" && /Save that 3D door look/.test(msg)) return DOOR_LOOK_NOT_READY;
+  if (code === "23503" && /isn't in this catalog/.test(msg)) return DOOR_LOOK_NOT_FOUND;
+  return null;
+};
 
 /** A database without 339 (or a PostgREST that has not reloaded): the column or table is unknown. */
 export const librarySchemaMissing = (err: unknown): boolean =>
@@ -75,11 +100,28 @@ const TEMPLATE_COLS = "id, category, slug, name, description, search_terms, look
 const ENTRY_COLS = "id, category, library_item_id, template_version, name, look, active, sort_order, created_at, updated_at";
 const REQUEST_COLS = "id, category, status, name, width_in, height_in, photos, supplier_url, notes, charged_cents, refunded_cents, refund_reason, result_note, result_client_library_id, created_at, updated_at, decided_at";
 // deno-lint-ignore no-explicit-any
-export const entryOut = (r: any, usedOn: string[] = []) => ({
+export const entryOut = (r: any, usedOn: string[] = [], doorLook?: DoorLookInfo | null) => ({
   id: r.id, category: r.category, name: r.name, look: r.look ?? {}, templateId: r.library_item_id ?? null,
   templateVersion: r.template_version ?? null, active: r.active !== false, sortOrder: r.sort_order ?? 0,
   usedOn,
+  // A door made from a photo (345): its tile and whether its look still draws. Only on such entries.
+  ...(doorLook !== undefined ? { doorLook } : {}),
 });
+type DoorLookInfo = { thumbUrl: string | null; status: string; name: string };
+/** The looks the builder's photo-made door entries name, by look id. A database without 343 has none. */
+// deno-lint-ignore no-explicit-any
+async function doorLooksOf(admin: Db, clientId: string, entries: any[]): Promise<{ map: Map<string, DoorLookInfo>; error?: unknown }> {
+  const map = new Map<string, DoorLookInfo>();
+  const ids = [...new Set(entries.filter((e) => e.category === "door" && isDoorLookEntry(e.look)).map((e) => String(e.look.doorLookId)))];
+  if (!ids.length) return { map };
+  const { data, error } = await admin.from("door_looks").select("id, name, status, thumb_url").eq("client_id", clientId).in("id", ids);
+  if (error) return librarySchemaMissing(error) ? { map } : { map, error };
+  for (const r of data ?? []) map.set(String(r.id), { thumbUrl: r.thumb_url ?? null, status: String(r.status), name: String(r.name ?? "") });
+  return { map };
+}
+// deno-lint-ignore no-explicit-any
+const doorLookFor = (map: Map<string, DoorLookInfo>, r: any): DoorLookInfo | null | undefined =>
+  r.category === "door" && isDoorLookEntry(r.look) ? map.get(String(r.look.doorLookId)) ?? null : undefined;
 // deno-lint-ignore no-explicit-any
 const requestOut = (r: any) => ({
   id: r.id, category: r.category, status: r.status, name: r.name, widthIn: r.width_in ?? null, heightIn: r.height_in ?? null,
@@ -227,14 +269,21 @@ const gridName = (look: Look) => (look.liteRows == null ? "Standard window" : `$
  * door's photo" (the plan's default). Rows already linked are left alone.
  */
 export async function seedMine(admin: Db, clientId: string): Promise<{ created: number; linked: number; skipped: number } | { dbError: unknown; where: string }> {
-  const [tpl, ent, sc, fx] = await Promise.all([
+  // A door on its own 3D look (343) is left out: an entry put on it would replace that look (345's one
+  // look per row), and seeding runs by itself on the first open. A database without 343 has no such door.
+  const unlinked = () => admin.from("fixture_items").select("id, category, door_style, lite_rows, lite_cols").eq("client_id", clientId).in("category", ["door", "window"]).is("client_library_id", null);
+  const [tpl, ent, sc, fxOwn] = await Promise.all([
     admin.from("library_items").select("id, category, slug, name, look, version, status"),
     admin.from("client_library").select("id, category, name, look").eq("client_id", clientId),
     admin.from("style_cladding").select("id, cladding_id, label_override, exposure_in, rate, active").eq("client_id", clientId).is("client_library_id", null),
-    admin.from("fixture_items").select("id, category, door_style, lite_rows, lite_cols").eq("client_id", clientId).in("category", ["door", "window"]).is("client_library_id", null),
+    unlinked().is("door_look_id", null),
   ]);
+  const fx = fxOwn.error && librarySchemaMissing(fxOwn.error) ? await unlinked() : fxOwn;
   for (const r of [tpl, ent, sc, fx]) if (r.error) return { dbError: r.error, where: "read your catalog" };
-  const templates: Template[] = (tpl.data ?? []) as Template[];
+  // A promoted door (347) draws its own spec over its base, so a plain row is never linked to one.
+  const promoted = await promotedDoors(admin);
+  if (promoted.error) return { dbError: promoted.error, where: "read the StructureStudio library" };
+  const templates: Template[] = ((tpl.data ?? []) as Template[]).filter((x) => !promoted.map.has(String(x.id)));
   const entries: Entry[] = (ent.data ?? []).map((e: Entry) => ({ ...e, look: (e.look ?? {}) as Look }));
   const taken: Record<Category, Set<string>> = { cladding: new Set(), door: new Set(), window: new Set() };
   for (const e of entries) taken[e.category].add(e.name.toLowerCase());
@@ -327,11 +376,22 @@ export async function handleLibraryAction(c: LibraryCtx): Promise<Response> {
     ]);
     for (const r of [tpl, ent, req0]) if (r.error) return failOr(r.error, "load your library");
     if (usage.error) return failOr(usage.error, "load your library");
+    const looks = await doorLooksOf(admin, clientId, ent.data ?? []);
+    if (looks.error) return failOr(looks.error, "load your library");
+    // Doors promoted from a builder's photo (347): only for a builder with door looks on, since using one
+    // gives them their own 3D look. A failed flag read hides them.
+    const promoted = await promotedDoors(admin);
+    if (promoted.error) return failOr(promoted.error, "load your library");
+    const doorLooksOn = promoted.map.size > 0 && (await readDoorLooksFlag(admin, clientId)).on === true;
     return json({
       ok: true,
-      templates: (tpl.data ?? []).map(templateOut),
+      templates: (tpl.data ?? [])
+        // deno-lint-ignore no-explicit-any
+        .filter((r: any) => doorLooksOn || !promoted.map.has(String(r.id)))
+        // deno-lint-ignore no-explicit-any
+        .map((r: any) => (promoted.map.has(String(r.id)) ? { ...templateOut(r), fromPhoto: true } : templateOut(r))),
       // deno-lint-ignore no-explicit-any
-      entries: (ent.data ?? []).map((r: any) => entryOut(r, usage.map.get(String(r.id)) ?? [])),
+      entries: (ent.data ?? []).map((r: any) => entryOut(r, usage.map.get(String(r.id)) ?? [], doorLookFor(looks.map, r))),
       requests: (req0.data ?? []).map(requestOut),
       // null = say nothing about money (a failed read must not promise "free").
       requestPrice: price ? { priceCents: price.visible ? price.priceCents : null, active: price.active, exempt: price.exempt } : null,
@@ -345,13 +405,69 @@ export async function handleLibraryAction(c: LibraryCtx): Promise<Response> {
     return json({ ok: true, ...r });
   }
 
+  if (action === "library_add" && payload.doorLookId !== undefined && payload.templateId === undefined) {
+    // A door made from a photo (345): the builder's own Ready look becomes a library entry, drawn over
+    // the look's base, so it shows in every door's "How it looks in 3D" like any other library door.
+    const doorLookId = String(payload.doorLookId ?? "").trim().toLowerCase();
+    if (!isLibraryId(doorLookId)) return refuse(DOOR_LOOK_NOT_FOUND);
+    const l = await admin.from("door_looks").select("id, name, base, status, thumb_url").eq("client_id", clientId).eq("id", doorLookId).maybeSingle();
+    if (l.error) return librarySchemaMissing(l.error) ? refuse(DOOR_LOOKS_NOT_YET) : failOr(l.error, "read that 3D door");
+    if (!l.data || l.data.status === "archived") return refuse(DOOR_LOOK_NOT_FOUND);
+    if (l.data.status !== "ready") return refuse(DOOR_LOOK_NOT_READY);
+    const look = cleanLook("door", { doorStyle: l.data.base, doorLookId }, { doorLook: true });
+    if (!look) return json({ error: "That 3D door can't be saved. Reload the page and try again.", code: "library_bad_look" }, 400);
+    const name = cleanName(payload.name ?? l.data.name);
+    if (!name) return json({ error: `Give it a name of 1 to ${ENTRY_NAME_MAX} characters.`, code: "library_bad_name" }, 400);
+    const ins = await admin.from("client_library").insert({ client_id: clientId, category: "door", library_item_id: null, template_version: null, name, look })
+      .select(ENTRY_COLS).single();
+    if (ins.error) {
+      if (String(ins.error.code ?? "") === "23505") return json({ error: `You already have "${name}". Pick another name.`, code: "library_name_taken" }, 409);
+      const r = doorLookDbRefusal(ins.error);
+      if (r) return refuse(r);
+      return failOr(ins.error, "add that to your library");
+    }
+    await audit("portal_library_add", 1, `entry=${ins.data.id} doorLook=${doorLookId}`).catch(() => {});
+    return json({ ok: true, entry: entryOut(ins.data, [], { thumbUrl: l.data.thumb_url ?? null, status: "ready", name: String(l.data.name ?? "") }) });
+  }
+
   if (action === "library_add") {
     const templateId = String(payload.templateId ?? "").trim().toLowerCase();
     if (!isLibraryId(templateId)) return refuse(TEMPLATE_NOT_FOUND);
-    const t = await admin.from("library_items").select("id, category, name, look, version, status").eq("id", templateId).maybeSingle();
+    const t = await admin.from("library_items").select("id, category, name, look, version, status, thumb_url").eq("id", templateId).maybeSingle();
     if (t.error) return failOr(t.error, "read that template");
     if (!t.data || t.data.status !== "active") return refuse(TEMPLATE_NOT_FOUND);
     const cat = t.data.category as Category;
+    // A door promoted from a builder's photo (347): the builder gets their OWN ready 3D look with its
+    // spec (free, no AI), and an entry naming it (345), so it draws in their designer like one they made.
+    const promoted = cat === "door" ? await promotedDoors(admin) : { map: new Map<string, Record<string, unknown>>() };
+    if ("error" in promoted && promoted.error) return failOr(promoted.error, "read that template");
+    const spec = promoted.map.get(String(t.data.id));
+    if (spec) {
+      const dl = await readDoorLooksFlag(admin, clientId);
+      if (dl.error) return failOr(dl.error, "check door looks are on for your account");
+      if (!dl.on) return refuse(TEMPLATE_NOT_FOUND);
+      const name = cleanName(payload.name ?? t.data.name);
+      if (!name) return json({ error: `Give it a name of 1 to ${ENTRY_NAME_MAX} characters.`, code: "library_bad_name" }, 400);
+      const base = String((t.data.look as Look).doorStyle ?? "");
+      const look = await admin.from("door_looks").insert({
+        client_id: clientId, name, base, spec, spec_version: 1, status: "ready", thumb_url: t.data.thumb_url ?? null, created_by: userId,
+      }).select("id").single();
+      if (look.error) return librarySchemaMissing(look.error) ? refuse(DOOR_LOOKS_NOT_YET) : failOr(look.error, "add that door to your catalog");
+      const ins = await admin.from("client_library").insert({
+        client_id: clientId, category: "door", library_item_id: t.data.id, template_version: t.data.version, name,
+        look: { doorStyle: base, doorLookId: String(look.data.id) },
+      }).select(ENTRY_COLS).single();
+      if (ins.error) {
+        // The copy is unreferenced: take it back, so a refused import leaves nothing behind.
+        await admin.from("door_looks").delete().eq("client_id", clientId).eq("id", look.data.id);
+        if (String(ins.error.code ?? "") === "23505") return json({ error: `You already have "${name}". Pick another name.`, code: "library_name_taken" }, 409);
+        const r = doorLookDbRefusal(ins.error);
+        if (r) return refuse(r);
+        return failOr(ins.error, "add that to your library");
+      }
+      await audit("portal_library_add", 1, `entry=${ins.data.id} template=${t.data.id} doorLook=${look.data.id}`).catch(() => {});
+      return json({ ok: true, entry: entryOut(ins.data, [], { thumbUrl: t.data.thumb_url ?? null, status: "ready", name }) });
+    }
     // The builder's copy: the template's look, with their edit on top when they made one.
     const look = cleanLook(cat, payload.look === undefined ? t.data.look : payload.look);
     if (!look) return json({ error: "That look can't be saved. Reload the page and try again.", code: "library_bad_look" }, 400);
@@ -384,7 +500,12 @@ export async function handleLibraryAction(c: LibraryCtx): Promise<Response> {
       if (!name) return json({ error: `Give it a name of 1 to ${ENTRY_NAME_MAX} characters.`, code: "library_bad_name" }, 400);
       patch.name = name;
     }
-    if (payload.look !== undefined) {
+    // A door made from a photo keeps its look (345): a rename only. The Rename form sends the look it
+    // was opened with, so the SAME look is a rename; any other is refused in words.
+    if (payload.look !== undefined && isDoorLookEntry(cur.data.look)) {
+      const same = cleanLook(cat, payload.look, { doorLook: true });
+      if (!same || lookKey(same) !== lookKey(cur.data.look as Look)) return refuse(DOOR_LOOK_FIXED);
+    } else if (payload.look !== undefined) {
       const look = cleanLook(cat, payload.look);
       if (!look) return json({ error: "That look can't be saved. Reload the page and try again.", code: "library_bad_look" }, 400);
       if (cat === "cladding" && look.profile !== (cur.data.look as Look).profile) {
@@ -398,6 +519,8 @@ export async function handleLibraryAction(c: LibraryCtx): Promise<Response> {
     const up = await admin.from("client_library").update(patch).eq("client_id", clientId).eq("id", id).select(ENTRY_COLS).single();
     if (up.error) {
       if (String(up.error.code ?? "") === "23505") return json({ error: `You already have "${patch.name}". Pick another name.`, code: "library_name_taken" }, 409);
+      const r = doorLookDbRefusal(up.error);
+      if (r) return refuse(r);
       return failOr(up.error, "save that library entry");
     }
     await audit("portal_library_edit", 1, `entry=${id} fields=${Object.keys(patch).join(",")}`).catch(() => {});

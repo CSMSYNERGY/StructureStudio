@@ -46,6 +46,9 @@ const recRow = (over: Record<string, unknown> = {}) => ({
 const api = /^https:\/\/api\.twilio\.com\/2010-04-01\/Accounts\/AC0+/;
 const isStart = (u: URL) => api.test(u.href) && /\/Calls\/CA[0-9a-f]+\/Recordings\.json$/.test(u.pathname);
 const isUpdate = (u: URL) => api.test(u.href) && /\/Calls\/CA[0-9a-f]+\/Recordings\/RE[0-9a-f]+\.json$/.test(u.pathname);
+/** The customer's leg itself, which a 21220 start asks Twilio about. */
+const isLeg = (u: URL) => api.test(u.href) && u.pathname.endsWith(`/Calls/${CALL_SID}.json`);
+const legReads = (net: FakeNet) => net.seen.filter((s) => s.method === "GET" && isLeg(s.url));
 const form = (s: Seen) => Object.fromEntries(new URLSearchParams(s.body));
 const recUpdates = (net: FakeNet) => net.seen.filter((s) => s.method === "POST" && isUpdate(s.url)).map((s) => form(s).Status);
 const recPatches = (net: FakeNet) => net.writes("phone_call_recordings", "PATCH").map((s) => s.json);
@@ -54,14 +57,16 @@ const eventTypes = (net: FakeNet) => net.writes("phone_call_events").map((s) => 
 /**
  * The recording stubs every lifecycle test needs; `existing` is the call's row, if it has one, and
  * `marks` the call events the start reads (an unannounced call's recording_unannounced).
+ * `startStatus` makes Twilio refuse the start, with `startCode` (21220, "not in-progress", unless
+ * given). The customer's leg itself (GET /Calls/<sid>.json) is not stubbed: FakeNet answers 500.
  */
-function recordingNet(net: FakeNet, opts: { existing?: Record<string, unknown> | null; claim?: boolean; startStatus?: number; settings?: unknown[]; marks?: string[] } = {}) {
+function recordingNet(net: FakeNet, opts: { existing?: Record<string, unknown> | null; claim?: boolean; startStatus?: number; startCode?: number; settings?: unknown[]; marks?: string[] } = {}) {
   net.rest("GET", "phone_call_recordings", () => (opts.existing ? [opts.existing] : []));
   net.rest("POST", "phone_call_recordings", () => (opts.claim === false ? [] : [{ id: REC_ID }]));
   net.rest("PATCH", "phone_call_recordings", () => [{ id: REC_ID }]);
   net.rest("GET", "client_settings", () => opts.settings ?? [{ phone_recording_notice_text: null, phone_transcribe_calls: true }]);
   net.rest("GET", "phone_call_events", eventRows((opts.marks ?? []).map((type) => ({ call_id: CALL_ID, type, at: new Date().toISOString(), data: null }))));
-  net.on("POST", isStart, () => (opts.startStatus ? jsonRes({ code: 21220 }, opts.startStatus) : jsonRes({ sid: REC_SID, status: "in-progress", channels: 2 })));
+  net.on("POST", isStart, () => (opts.startStatus ? jsonRes({ code: opts.startCode ?? 21220 }, opts.startStatus) : jsonRes({ sid: REC_SID, status: "in-progress", channels: 2 })));
   net.on("POST", isUpdate, () => jsonRes({ sid: REC_SID }));
   net.rest("POST", "phone_call_events", () => []);
   net.rest("POST", "app_errors", () => []);
@@ -427,16 +432,57 @@ describe("starting the one recording", () => {
     expect(net.seen.filter((s) => isStart(s.url))).toEqual([]);
   });
 
-  it("Twilio refusing: the row says failed, the fault is logged (code and status only), and the call goes on", async () => {
-    const net = setup(liveCall({ status: "ringing", answered_by: null }), { startStatus: 400 });
+  it("Twilio refusing: the row says failed, the fault is logged as an error (code and status only), and the call goes on", async () => {
+    const net = setup(liveCall({ status: "ringing", answered_by: null }), { startStatus: 403, startCode: 20003 });
     const { res } = await answer();
     expect(res.status).toBe(204);
     expect(recPatches(net)[0]).toMatchObject({ status: "failed" });
     const fault = net.writes("app_errors")[0].json;
-    expect(fault.code).toBe("recording_start_failed");
-    expect(fault.message).toMatch(/HTTP 400, code 21220/);
+    expect(fault).toMatchObject({ code: "recording_start_failed", severity: "error" });
+    expect(fault.message).toMatch(/Twilio refused to record: .*HTTP 403, code 20003/);
+    expect(eventTypes(net)).toContain("recording_failed");
+    // Only a 21220 asks Twilio about the leg.
+    expect(legReads(net)).toEqual([]);
     // The answer itself still landed.
     expect(net.writes("phone_calls", "PATCH")[0].json).toMatchObject({ status: "in_progress", answered_by: USER_A });
+  });
+
+  it("a 21220 on a leg Twilio shows as over (the customer hung up during the announcement) is logged at info, Twilio's code kept", async () => {
+    const net = setup(liveCall({ status: "ringing", answered_by: null }), { startStatus: 400 });
+    net.on("GET", isLeg, () => jsonRes({ sid: CALL_SID, status: "completed" }));
+    const { res } = await answer();
+    expect(res.status).toBe(204);
+    const patch = net.writes("phone_call_recordings", "PATCH")[0];
+    expect(patch.json).toMatchObject({ status: "failed" });
+    expect(patch.json.last_error).toMatch(/HTTP 400, code 21220/);
+    expect(patch.url.searchParams.get("status")).toBe("eq.starting");
+    const fault = net.writes("app_errors")[0].json;
+    expect(fault).toMatchObject({ code: "recording_start_failed", severity: "info", context: { reason: "call_ended" } });
+    expect(fault.message).toMatch(/code 21220/);
+    // The customer's leg, asked once.
+    expect(legReads(net)).toHaveLength(1);
+    const mark = net.writes("phone_call_events").find((w) => w.json.type === "recording_failed")!;
+    expect(mark.json.data).toEqual({ reason: "call_ended" });
+  });
+
+  it.each([
+    ["a leg Twilio still shows live (a start before the answer, or on the wrong leg)", () => jsonRes({ sid: CALL_SID, status: "in-progress" })],
+    ["a leg still ringing", () => jsonRes({ sid: CALL_SID, status: "ringing" })],
+    ["a leg Twilio has no record of (404)", () => jsonRes({ code: 20404 }, 404)],
+    ["a leg that can't be read (FakeNet's 500)", null],
+  ])("a 21220 on %s stays an error", async (_l, leg) => {
+    const net = setup(liveCall({ status: "ringing", answered_by: null }), { startStatus: 400 });
+    if (leg) net.on("GET", isLeg, leg);
+    await answer();
+    expect(recPatches(net)[0]).toMatchObject({ status: "failed" });
+    expect(recPatches(net)[0].last_error).toMatch(/HTTP 400, code 21220/);
+    const fault = net.writes("app_errors")[0].json;
+    expect(fault).toMatchObject({ code: "recording_start_failed", severity: "error" });
+    expect(fault.context).not.toHaveProperty("reason");
+    expect(fault.message).toMatch(/Twilio refused to record: .*HTTP 400, code 21220/);
+    expect(legReads(net)).toHaveLength(1);
+    const mark = net.writes("phone_call_events").find((w) => w.json.type === "recording_failed")!;
+    expect(mark.json.data).toBeNull();
   });
 
   it.each([

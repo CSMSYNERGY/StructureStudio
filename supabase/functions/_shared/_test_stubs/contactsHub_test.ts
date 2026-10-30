@@ -319,11 +319,13 @@ Deno.test("with the bubble on the line, pipelines fold into the drop-down sooner
 });
 
 // ─── 5. Pins on the wiring ─────────────────────────────────────────────────────────────────────
-Deno.test("one sidebar item: Contacts, and no Pipeline", () => {
-  assert(SHELL.includes('{navItem("contacts", "Contacts")}'), "the Contacts item is gone");
+Deno.test("one sidebar item, labelled Customer Hub, and no Pipeline", () => {
+  // The LABEL changed on 2026-10-29 (Carolyn); the page id did not, which is what keeps the
+  // icon, the /contacts addresses and TAB_AREA working. Pin both halves.
+  assert(SHELL.includes('{navItem("contacts", "Customer Hub")}'), "the Customer Hub item is gone");
   assert(!/navItem\("designs"/.test(SHELL), "the Pipeline item is back in the sidebar");
   const meta = slice(CORE, "const TAB_META = {", "\n};", "TAB_META");
-  assert(/\n {2}contacts: \["Contacts", "[^"]+"\],/.test(meta), "TAB_META has no Contacts page");
+  assert(/\n {2}contacts: \["Customer Hub", "[^"]+"\],/.test(meta), "TAB_META has no Customer Hub page");
   assert(!/\n {2}designs: \[/.test(meta) && !/\n {2}pipelines: \[/.test(meta), "Pipeline is a page of its own again");
   const area = slice(CORE, "const TAB_AREA = {", "};", "TAB_AREA");
   assert(/\n {2}contacts: \["contacts", "designs"\],/.test(area), "the hub must open with either area");

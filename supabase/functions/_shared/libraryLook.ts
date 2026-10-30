@@ -13,11 +13,16 @@ export const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export const UUID_RE = new RegExp(`^${UUID}$`, "i");
 export const isLibraryId = (v: unknown): v is string => typeof v === "string" && UUID_RE.test(v);
 // ── Looks ──────────────────────────────────────────────────────────────────────────────────
+/** The seven built looks a door made from a photo is drawn over (343's door_looks_base_chk). */
+export const DOOR_LOOK_BASES: readonly string[] = ["plank", "zbrace", "xbrace", "american", "basic", "classic", "dutch"];
+const LOWER_UUID_RE = new RegExp(`^${UUID}$`);
 /**
- * The cleaned look, or null. The same rule as 339's library_look_ok, so a look this accepts the
- * database accepts. Canonical: a lap course only when set, a window grid only as a pair.
+ * The cleaned look, or null. The same rule as 339's library_look_ok (345's for a door that names one of
+ * the builder's own looks), so a look this accepts the database accepts. Canonical: a lap course only
+ * when set, a window grid only as a pair. `doorLook` lets a door look carry a doorLookId (a builder's
+ * entry made from a photo); it is never set for a StructureStudio template, which is everyone's.
  */
-export function cleanLook(category: Category, raw: unknown): Look | null {
+export function cleanLook(category: Category, raw: unknown, opts: { doorLook?: boolean } = {}): Look | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
   const keys = Object.keys(r).filter((k) => r[k] !== undefined);
@@ -31,8 +36,12 @@ export function cleanLook(category: Category, raw: unknown): Look | null {
     return { profile, exposureIn: Math.round(n * 100) / 100 };
   }
   if (category === "door") {
-    if (keys.some((k) => k !== "doorStyle")) return null;
+    if (keys.some((k) => k !== "doorStyle" && !(opts.doorLook && k === "doorLookId"))) return null;
     const s = String(r.doorStyle ?? "");
+    if (r.doorLookId !== undefined) {
+      const id = r.doorLookId;
+      return typeof id === "string" && LOWER_UUID_RE.test(id) && DOOR_LOOK_BASES.includes(s) ? { doorStyle: s, doorLookId: id } : null;
+    }
     return DOOR_STYLES.includes(s) ? { doorStyle: s } : null;
   }
   if (keys.some((k) => k !== "liteRows" && k !== "liteCols")) return null;
@@ -50,6 +59,10 @@ export function cleanName(raw: unknown, max = ENTRY_NAME_MAX): string | null {
   if (!s) return null;
   return s.length > max ? null : s;
 }
+
+/** A builder's door entry made from a photo (345): it names one of their own looks. */
+export const isDoorLookEntry = (look: unknown): boolean =>
+  !!look && typeof look === "object" && typeof (look as Record<string, unknown>).doorLookId === "string";
 
 /** What a door row or a window row draws for a look (the values 339's trigger writes). */
 export function rowValuesFor(category: "door" | "window", look: Look): Record<string, unknown> {

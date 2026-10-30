@@ -509,12 +509,17 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
         const mail = await sendMeetingEmail(admin, { meetingId: result.id, which: "booked", req });
         confirmationSent = mail.sent;
       }
+      // When the host's Google/Outlook invited the customer, our email carries no .ics, so
+      // the page must not say "with a calendar invite attached".
+      const { data: cal } = await admin.from("meetings").select("calendar_invited")
+        .eq("id", result.id).maybeSingle();
 
       return json({
         ok: true,
         id: result.id,
         manageToken: result.cancelToken,
         confirmationSent,
+        calendarInvited: !!cal?.calendar_invited,
         meeting: {
           typeName: type.name,
           startsAt: new Date(startMs).toISOString(),

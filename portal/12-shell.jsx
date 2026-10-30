@@ -61,7 +61,16 @@ const ICONS = {
 // design around, and a shared reference cannot drift. Same module-scope, built-once
 // reasoning as ICONS — see its comment.
 const SETTINGS_ICONS = {
-  structures: ICONS.pricing,                 // the house — building styles and sizes
+  // A SHED, not a house: a gable building with the double doors a shed actually has, rather than
+  // the dwelling-with-windows this used to borrow from ICONS.pricing. The item it belongs to is
+  // the first on the rail and the one builders open most.
+  //
+  // ⚠️ KEYED ON `sheds`, and that rename is why the rail item had NO icon at all. These keys are
+  // rail IDS; when Structures became Sheds the id moved and this map kept the old spelling, so
+  // `SETTINGS_ICONS.structures` matched nothing and `{SETTINGS_ICONS[id]}` rendered undefined —
+  // silently, because a missing icon is not an error, just a gap where a glyph should be. Nothing
+  // reads `structures` any more, so the old key is gone rather than left to rot beside this one.
+  sheds: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V10l7-6 7 6v11"/><path d="M9 21v-7h6v7"/><path d="M12 14v7"/></svg>,
   options: ICONS["layout-pricing"],          // the slider rows — add-ons and rates
   colors: ICONS.colors,
   designer: ICONS.designer,
@@ -2454,6 +2463,10 @@ function Dashboard({ session }) {
     // practice, but leaning on that would make a stale upload handler a one-line edit away.
   }), [canAdmin, view3dUnlocked, effClientId, viewing]);
 
+  // The top bar's Support button, or the old floating Feedback pill: client_settings.support_ai_beta
+  // per builder (346; useSupportOn in 04-orders.jsx). A hook, so above the early returns (React #310).
+  const supportOn = useSupportOn(tenant && tenant !== "none" ? tenant.clientId : null, !viewing);
+
   if (tenant === null) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
   }
@@ -3002,14 +3015,19 @@ function Dashboard({ session }) {
               `advancedOn` is false until the entitlement answers, so the item arrives late on a
               cold load and never flashes for anyone else. */}
           {advancedOn && navItem("advanced", "Advanced")}
-          {/* ONE item again (Carolyn 2026-10-12): "One place." Contacts holds the contact list,
+          {/* ONE item again (Carolyn 2026-10-12): "One place." This page holds the contact list,
               the Design list and every pipeline as tabs of its own (ContactsHub, 02-sales), so
-              the separate Pipeline item is gone. Its addresses still land here (ssCanonRoute). */}
-          {navItem("contacts", "Contacts")}
-          {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under
-              Contacts: the same people, seen by their latest message. Only with the CRM: unlike
-              Contacts, which stays in the rail to sell it, one locked item there is enough. A
-              typed /conversations without it still lands on the CRM card below. */}
+              the separate Pipeline item is gone. Its addresses still land here (ssCanonRoute).
+              LABEL ONLY (Carolyn 2026-10-29): "I want to change Contacts to Customer Hub", same
+              icon. The page id stays `contacts`, so ICONS[id], every /contacts address, TAB_AREA
+              and the settings area keep working untouched — and the tab INSIDE the hub is still
+              called Contacts (02-sales), because it is the contact list beside the Design list.
+              It now shares a name with the Settings rail group that configures it (01-core). */}
+          {navItem("contacts", "Customer Hub")}
+          {/* Every customer's latest email, text or call (Carolyn 2026-08-21). Directly under the
+              Customer Hub: the same people, seen by their latest message. Only with the CRM:
+              unlike the hub, which stays in the rail to sell it, one locked item there is enough.
+              A typed /conversations without it still lands on the CRM card below. */}
           {crmUnlocked && navItem("conversations", "Conversations")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
@@ -3173,7 +3191,8 @@ function Dashboard({ session }) {
                   applies unchanged; `.neutral` opts out of Sign Out's red hover. */}
               {!viewing && (
                 <button type="button" className="neutral" role="menuitem"
-                  title="Email CSM Synergy about your account — for bugs, use the Feedback button"
+                  title={supportOn ? "Email CSM Synergy about your account — for bugs, use the Support button at the top"
+                    : "Email CSM Synergy about your account — for bugs, use the Feedback button"}
                   onClick={() => {
                     const subj = `Structure Studio — ${shownBusiness || "support request"}`;
                     window.location.href = "mailto:support@csmsynergy.com?subject=" + encodeURIComponent(subj);
@@ -3258,6 +3277,14 @@ function Dashboard({ session }) {
               rail and on a tablet, where `.ss-switch-wrap` used to be display:none and the
               Accounts page was the only way through — see the media queries in portal.html,
               where that rule had to be SCOPED TO THE RAIL or it would have hidden this. */}
+          {/* THE SUPPORT BUTTON (Carolyn, 10-26 call; SupportMenu in 04-orders.jsx). For a builder
+              with the switch on (346) it replaces the floating Feedback pill. Hidden while viewing
+              another account, as the pill is: a ticket or a chat would be filed under the
+              operator's own business. */}
+          {!viewing && supportOn && (
+            <SupportMenu clientId={tenant.clientId} onNavigate={navigate}
+              onSubmitted={() => setFeedbackKey((k) => k + 1)} />
+          )}
           {isOperator ? (
             <div className="ss-switch-wrap" ref={pickerRef}>
               <button type="button" className="ss-switch" onMouseEnter={() => ssWarmThrottled("operator-portal")} onClick={() => setPickerOpen((o) => !o)}
@@ -4073,16 +4100,22 @@ function Dashboard({ session }) {
         </div>
       </section>
 
-      {/* Bug / feature intake. Hidden while an operator is viewing someone else's
-          account: portal-feedback attributes a submission to the JWT's own tenant,
-          which would NOT be the client on screen — filing from here would land the
-          ticket under the operator's own business and read as that client's report. */}
-      {!viewing && (
+      {/* Bug / feature intake for a builder whose Support switch is off (346): beta's pill as it was.
+          Hidden while an operator is viewing someone else's account: portal-feedback attributes a
+          submission to the JWT's own tenant, which would NOT be the client on screen — filing from
+          here would land the ticket under the operator's own business and read as that client's
+          report. */}
+      {!viewing && !supportOn && (
         <FeedbackWidget
           clientId={tenant.clientId}
           onSubmitted={() => setFeedbackKey((k) => k + 1)}
         />
       )}
+
+      {/* A door being drawn from a photo (03-catalog's ssDoorJob): its pill on every page while it
+          runs out of sight, and the pop-up when it is done (Ahsan 2026-10-28). */}
+      <SsDoorJobDock clientId={effClientId} onOpenDoors={() => navigate("settings", "doors")} />
+
 
       {/* Operator filling in someone else's details from the Accounts tab. Contact fields
           only — role and tenant are not editable here, since either would move access. */}

@@ -94,9 +94,15 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   billing_subscriptions: { fate: "wipe", why: "Mirror of the payment gateway, cancelled there first." },
   billing_customers: { fate: "wipe", why: "Mirror of the gateway's saved card, removed there first." },
   feedback_submissions: { fate: "wipe", why: "Bug reports filed from the portal (feedback_comments cascades)." },
+  // Migration 340. The support assistant's chats with this builder's team, and their turns.
+  support_conversations: { fate: "wipe", why: "Support assistant chats (support_messages cascades)." },
+  support_messages: { fate: "cascade", parent: "support_conversations", why: "The turns of a support chat." },
   fixture_items: { fate: "wipe", why: "Door and window catalog." },
   client_library: { fate: "wipe", why: "The builder's own library of claddings, doors and windows (migration 339): named copies of StructureStudio templates. Style and fixture rows point at it with SET NULL." },
   library_requests: { fate: "wipe", why: "Requests for a cladding, door or window not in the library (migration 339). The money is in wallet_transactions, which is kept." },
+  // Migration 343. A builder's own 3D door looks: catalog, like the door rows that use them
+  // (fixture_items points at them ON DELETE SET NULL, so the purge order does not matter).
+  door_looks: { fate: "wipe", why: "The builder's own 3D door looks (migration 343); their door rows point at them with SET NULL." },
   qbo_item_map: { fate: "wipe", why: "QuickBooks item ids from their company. Tenant-default rows have no style, so they do not cascade." },
   phone_number_requests: { fate: "wipe", why: "Bring-your-number requests." },
   app_errors: { fate: "wipe", why: "Error log rows." },
@@ -152,6 +158,7 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   commission_settings: { fate: "wipe", why: "Commission rules." },
   commission_members: { fate: "wipe", why: "Who earns commission." },
   ai_style_calls: { fate: "wipe", why: "Our own count of AI calibration calls (what the builder was charged is in usage_charges)." },
+  ai_door_calls: { fate: "wipe", why: "Our own ledger of door-look generations (migration 343), with the private photo paths; what the builder was charged is in usage_charges and wallet_transactions." },
   phone_devices: { fate: "wipe", why: "Phone app devices and push tokens." },
   phone_quick_sends: { fate: "wipe", why: "Saved quick-send texts." },
   phone_quick_send_seeded: { fate: "wipe", why: "Once-only seeding marker." },
@@ -196,7 +203,8 @@ export interface TenantBucket {
 export const TENANT_BUCKETS: Readonly<Record<string, TenantBucket>> = {
   "floor-plans": { fate: "wipe", outsideMigrations: true, why: "Floor plan images, {client}/{file}. Made in the dashboard." },
   branding: { fate: "wipe", why: "Logos, {client}/{file}." },
-  fixtures: { fate: "wipe", why: "Door and window photos (public), {client}/{file}." },
+  fixtures: { fate: "wipe", why: "Door and window photos (public), {client}/{file}. Also door-look tiles and opt-in door photo copies (343)." },
+  "door-refs": { fate: "wipe", why: "Door-look reference photos (private, migration 343), {client}/door-ref-{uuid}.{ext}." },
   "feedback-attachments": { fate: "wipe", why: "Bug report screenshots." },
   "inventory-photos": { fate: "wipe", why: "Inventory photos (public), {client}/{unit}/{file}." },
   "form-assets": { fate: "wipe", why: "Lead form and email template images (public), {client}/{file}." },

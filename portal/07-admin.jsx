@@ -649,8 +649,14 @@ function AdmOverlay({ onClose, maxWidth = 520, labelledBy, children }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+  // Close only on a press that STARTED on the backdrop. Selecting text inside the dialog and letting
+  // go over the backdrop fires a click on the backdrop itself (the nearest common ancestor), which
+  // closed the dialog mid-selection (Support chats review, 2026-10-30).
+  const downOnBackdrop = useRef(false);
   return (
-    <div onClick={onClose} role="presentation"
+    <div onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (e.target === e.currentTarget && downOnBackdrop.current) onClose(); downOnBackdrop.current = false; }}
+      role="presentation"
       style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
       <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} onClick={(e) => e.stopPropagation()}
         style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
@@ -1962,6 +1968,7 @@ function AdmTaxLookups() {
 const ADM_TABS = [
   ["clients", "Builders",        "Every tenant on the platform — search, create, and open",       "global"],
   ["billing", "Billing",         "Subscribers, revenue, billing health and phone & text charges across the platform", "global"],
+  ["chats",   "Support chats",   "Every chat builders had with the Studio Assistant, newest first (read-only)", "global"],
   ["account", "Account",        "Owner logins, billing posture, and deletion",                   "client"],
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
@@ -2180,6 +2187,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       {sub === "billing" && <AdmBilling />}
       {sub === "billing" && <AdmPhoneBilling clients={clients} />}
       {sub === "billing" && <AdmTaxLookups />}
+      {sub === "chats" && <AdmSupportChats onOpenBuilder={(cid) => { pickClient(cid); setSub("account"); }} onFlash={flash} />}
       {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
       {sub === "master" && <AdmLibrary />}
       {sub === "master" && <AdmTaxCodes />}
@@ -2222,6 +2230,77 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
 // SsLibLookEdit are the builder side's (portal/03-catalog.jsx), so both sides describe a look alike.
 const ADM_LIB_CATS = [["cladding", "Claddings"], ["door", "Doors"], ["window", "Windows"]];
 const ADM_LIB_BLANK_LOOK = { cladding: { profile: "lap" }, door: { doorStyle: "plank" }, window: { liteRows: 2, liteCols: 2 } };
+// Doors builders made from photos (347; Carolyn's 10-27 call): every builder's saved 3D door, for an
+// operator to copy into the StructureStudio library under a NEW name. The template carries no builder
+// name or id (Ahsan 10-27: promote freely, strip the name); the builder keeps their own copy.
+function AdmLibraryDoorLooks({ items, onPromoted }) {
+  const [looks, setLooks] = useState(null);
+  const [installed, setInstalled] = useState(true);
+  const [form, setForm] = useState(null);       // { look, name, description, searchTerms }
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await adminApi("library_door_looks_list", {});
+      setInstalled(r.installed !== false);
+      setLooks(r.looks || []);
+    } catch (e) { setMsg({ err: e.message || "Couldn't load builders' doors." }); setLooks([]); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const itemName = (id) => ((items || []).find((t) => t.id === id) || {}).name || "a template";
+  const promote = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await adminApi("library_door_look_promote", { doorLookId: form.look.id, name: form.name, description: form.description, searchTerms: form.searchTerms });
+      setMsg({ ok: `Added "${r.item.name}" to the StructureStudio library. Builders with door looks on can use it now.${r.tileCopied ? "" : " (Its picture couldn't be copied.)"}` });
+      setForm(null);
+      await load();
+      if (onPromoted) onPromoted();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  if (!installed) return null;
+  return (
+    <div style={{ marginTop: 14, borderTop: "1px solid #E2E8F0", paddingTop: 10 }} data-adm-door-looks="1">
+      <div style={{ fontWeight: 800, fontSize: 13.5, color: "#1E293B" }}>Doors builders made from photos</div>
+      <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px", maxWidth: 680 }}>
+        Add one to the StructureStudio library under a StructureStudio name. The template keeps no builder name or details; the builder keeps their own copy.
+      </div>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {!looks && <SkelBar />}
+      {looks && !looks.length && <div style={{ fontSize: 12.5, color: "#64748B" }}>No builder has saved a 3D door yet.</div>}
+      {(looks || []).map((l) => (
+        <div key={l.id}>
+          <div style={{ ...ADM_ROW, flexWrap: "wrap" }} data-adm-door-look={l.name}>
+            <SsLibPic category="door" look={{ doorStyle: l.base }} size={38} thumbUrl={l.thumbUrl} />
+            <div style={{ flex: "1 1 300px", minWidth: 0, fontSize: 12.5 }}>
+              <div style={{ fontWeight: 800, color: "#1E293B" }}>{l.name}</div>
+              <div style={{ color: "#64748B" }}>{l.companyName || l.clientId} · drawn over {ssLibLookWords("door", { doorStyle: l.base }).replace(/ \(built in 3D\)$/, "")}{l.leaves === 2 ? " · double" : ""}{l.fromPhoto ? " · from a photo" : ""}</div>
+            </div>
+            {l.promotedItemId
+              ? <AdmChip tone="on">In the library as {itemName(l.promotedItemId)}</AdmChip>
+              : <button type="button" onClick={() => { setForm({ look: l, name: "", description: "", searchTerms: "" }); setMsg(null); }}
+                  style={{ ...S.btn("#ECFDF5", "#047857"), padding: "4px 10px", fontSize: 12 }}>Add to the StructureStudio library</button>}
+          </div>
+          {form && form.look.id === l.id && (
+            <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, margin: "6px 0 10px", background: "#F8FAFC", display: "grid", gap: 8, maxWidth: 640 }} data-adm-door-look-promote="1">
+              <input type="text" value={form.name} maxLength={80} placeholder="A StructureStudio name (not the builder's)" onChange={(e) => setForm({ ...form, name: e.target.value })} style={S.input} aria-label="StructureStudio name" />
+              <textarea rows={2} maxLength={600} value={form.description} placeholder="What it looks like, in a sentence" onChange={(e) => setForm({ ...form, description: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Description" />
+              <input type="text" value={form.searchTerms} placeholder="Search words, comma separated (e.g. barn, z brace, ranch)" onChange={(e) => setForm({ ...form, searchTerms: e.target.value })} style={S.input} aria-label="Search words" />
+              <div style={{ fontSize: 11.5, color: "#64748B" }}>No builder or supplier names here: every builder with door looks on sees it.</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" disabled={busy} onClick={promote} style={S.btn(ACCENT, "#FFF")}>{busy ? "Adding…" : "Add to the library"}</button>
+                <button type="button" onClick={() => setForm(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AdmLibrary() {
   const [items, setItems] = useState(null);
   const [installed, setInstalled] = useState(true);
@@ -2247,7 +2326,7 @@ function AdmLibrary() {
   const save = async () => {
     setBusy("save"); setMsg(null);
     try {
-      const body = { name: edit.name, description: edit.description, searchTerms: edit.searchTerms, look: edit.look };
+      const body = { name: edit.name, description: edit.description, searchTerms: edit.searchTerms, ...(edit.fromPhoto ? {} : { look: edit.look }) };
       if (edit.id) await adminApi("library_item_save", { id: edit.id, ...body });
       else await adminApi("library_item_save", { category: edit.category, ...body, sortOrder: (list.length + 1) * 10 });
       setMsg({ ok: edit.id ? `Saved "${edit.name}". Builders' copies are unchanged.` : `Added "${edit.name}". Builders can use it now.` });
@@ -2284,7 +2363,7 @@ function AdmLibrary() {
             {Object.keys(SS_LIB_CLADDING_NAMES).map((k) => <option key={k} value={k}>Drawn as {SS_LIB_CLADDING_NAMES[k]}</option>)}
           </select>
         )}
-        <SsLibLookEdit category={edit.category} look={edit.look} onChange={(look) => setEdit({ ...edit, look })} />
+        {!edit.fromPhoto && <SsLibLookEdit category={edit.category} look={edit.look} onChange={(look) => setEdit({ ...edit, look })} />}
       </div>
       <textarea rows={2} maxLength={600} value={edit.description} placeholder="What it looks like, in a sentence" onChange={(e) => setEdit({ ...edit, description: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Description" />
       <input type="text" value={edit.searchTerms} placeholder="Search words, comma separated (e.g. lap, clapboard, engineered wood)" onChange={(e) => setEdit({ ...edit, searchTerms: e.target.value })} style={S.input} aria-label="Search words" />
@@ -2315,22 +2394,24 @@ function AdmLibrary() {
       {list.map((t, i) => (
         <div key={t.id}>
           <div style={{ ...ADM_ROW, opacity: t.status === "archived" ? 0.55 : 1, flexWrap: "wrap" }} data-adm-library-item={t.name}>
-            <SsLibPic category={t.category} look={t.look} size={38} />
+            <SsLibPic category={t.category} look={t.look} size={38} thumbUrl={t.fromPhoto ? t.thumbUrl : null} />
             <div style={{ flex: "1 1 300px", minWidth: 0, fontSize: 12.5 }}>
               <div style={{ fontWeight: 800, color: "#1E293B" }}>{t.name} <span style={{ fontWeight: 500, color: "#94A3B8" }}>v{t.version}</span></div>
-              <div style={{ color: "#64748B" }}>{ssLibLookWords(t.category, t.look)}{t.searchTerms && t.searchTerms.length ? ` · ${t.searchTerms.join(", ")}` : ""}</div>
+              <div style={{ color: "#64748B" }}>{t.fromPhoto ? "Drawn in 3D from a builder's photo" : ssLibLookWords(t.category, t.look)}{t.searchTerms && t.searchTerms.length ? ` · ${t.searchTerms.join(", ")}` : ""}</div>
             </div>
+            {t.fromPhoto && <AdmChip tone="neutral">From a photo</AdmChip>}
             <AdmChip tone={t.copies ? "on" : "neutral"}>{t.copies} {t.copies === 1 ? "copy" : "copies"}</AdmChip>
             {t.status === "archived" && <AdmChip tone="warn">Archived</AdmChip>}
             <button type="button" disabled={!!busy || i === 0} onClick={() => move(i, -1)} title="Move up" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↑</button>
             <button type="button" disabled={!!busy || i === list.length - 1} onClick={() => move(i, 1)} title="Move down" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↓</button>
-            <button type="button" onClick={() => setEdit({ id: t.id, category: t.category, name: t.name, description: t.description || "", searchTerms: (t.searchTerms || []).join(", "), look: t.look || {} })}
+            <button type="button" onClick={() => setEdit({ id: t.id, category: t.category, name: t.name, description: t.description || "", searchTerms: (t.searchTerms || []).join(", "), look: t.look || {}, fromPhoto: t.fromPhoto === true })}
               style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>Edit</button>
             <button type="button" disabled={busy === t.id} onClick={() => archive(t)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>{t.status === "archived" ? "Restore" : "Archive"}</button>
           </div>
           {edit && edit.id === t.id && editor}
         </div>
       ))}
+      {cat === "door" && <AdmLibraryDoorLooks items={items} onPromoted={load} />}
     </div>
   );
 }
@@ -2534,6 +2615,261 @@ function AdmNumberRequests({ onPick, onFlash }) {
         </div>
       ))}
     </div>
+  );
+}
+
+// ── Support chats (global; Ahsan 2026-10-30) ─────────────────────────────────────────────
+// Every Studio Assistant chat, newest first, read-only: admin-catalog support_chats_list and
+// support_chat_get (admin-catalog/supportChats.ts). The chats are service-role only (migration 340),
+// so this page never reads a table itself; the server refuses everyone but a signed-in operator and
+// records each chat opened in admin_audit.
+// A link to one chat is /console/chats?chat=<id>: it opens that chat, and the ?chat= comes off the
+// address at once, because ssPagePath carries the query string onto every page opened next.
+const ADM_CHAT_STATUS = { open: ["Open", "on"], handed_off: ["Became a ticket", "warn"], closed: ["Closed", "neutral"] };
+// The assistant's lookups (support-agent/tools.ts), in words. Its one other tool, offer_handoff,
+// is not a lookup: an answer that used it says "offered a ticket" instead.
+const ADM_CHAT_TOOLS = {
+  get_account_overview: "their account", get_catalog_summary: "their catalog", get_my_requests: "their requests",
+  search_whats_new: "What's new",
+};
+function admChatUsd(micros) {
+  if (micros == null) return "—";
+  const usd = Number(micros) / 1e6;
+  return usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
+}
+function admChatWhen(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+const admChatWho = (c) => (c && c.person ? (c.person.name || c.person.email || "Unknown person") : "Unknown person");
+
+function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
+  const [copied, setCopied] = useState(false);
+  // Focus moves into the dialog, and back to what opened it on close. Left on the row button behind
+  // the overlay, Space or Enter would click that row again: the chat reloads and is audited twice.
+  const bodyRef = useRef(null);
+  useEffect(() => {
+    const opener = document.activeElement;
+    if (bodyRef.current) bodyRef.current.focus();
+    return () => { if (opener && typeof opener.focus === "function" && document.contains(opener)) opener.focus(); };
+  }, []);
+  const c = open.chat;
+  const link = `${window.location.origin}/console/chats?chat=${open.id}`;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(link); setCopied(true); }
+    catch (_e) { window.prompt("Copy this link to the chat:", link); }
+  };
+  const smallBtn = (bg, fg) => ({ ...S.btn(bg, fg), padding: "6px 12px", fontSize: 12.5 });
+  return (
+    <AdmOverlay onClose={onClose} maxWidth={760} labelledBy="adm-chat-title">
+      <div ref={bodyRef} tabIndex={-1} data-adm-chat-dialog style={{ outline: "none" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div id="adm-chat-title" style={{ fontSize: 16, fontWeight: 800, color: "#1E293B" }}>{c ? (c.companyName || c.clientId) : "Support chat"}</div>
+          {c && (
+            <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+              {admChatWho(c)}{c.person && c.person.name && c.person.email ? ` <${c.person.email}>` : ""}
+              {` · started ${admChatWhen(c.createdAt)} · ${c.messageCount} message${c.messageCount === 1 ? "" : "s"} · ${admChatUsd(c.costMicros)}`}
+            </div>
+          )}
+          {c && c.ticket && (
+            <div data-adm-chat-ticket style={{ fontSize: 12.5, color: "#92400E", fontWeight: 700, marginTop: 2 }}>
+              Became a ticket{c.ticket.title ? `: “${c.ticket.title}”` : ""}{c.ticket.status ? ` (${String(c.ticket.status).replace(/_/g, " ")})` : ""}
+            </div>
+          )}
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close"
+          style={{ background: "none", border: "none", fontSize: 24, lineHeight: 1, cursor: "pointer", color: "#64748B", padding: "0 4px" }}>×</button>
+      </div>
+      {open.err && <div style={S.err}>{open.err}</div>}
+      {!open.err && !open.messages && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading the chat…</div>}
+      {open.messages && (
+        <div data-adm-chat-messages={open.messages.length}
+          style={{ maxHeight: "min(60vh, 560px)", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "4px 2px", borderTop: "1px solid #F1F5F9", borderBottom: "1px solid #F1F5F9" }}>
+          {open.messages.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B", padding: "8px 0" }}>No messages in this chat.</div>}
+          {open.truncated && (
+            <div data-adm-chat-truncated style={{ fontSize: 12, color: "#92400E", fontWeight: 700 }}>
+              {`A long chat: only its newest ${open.messages.length.toLocaleString()} messages are shown.`}
+            </div>
+          )}
+          {open.messages.map((m) => {
+            const mine = m.role === "user";
+            const used = (m.tools || []).filter((t) => t !== "offer_handoff").map((t) => ADM_CHAT_TOOLS[t] || t);
+            const offered = (m.tools || []).includes("offer_handoff");
+            return (
+              <div key={m.id} data-adm-chat-msg={m.role} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "88%" }}>
+                <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 700, margin: mine ? "0 4px 2px auto" : "0 0 2px 4px", textAlign: mine ? "right" : "left" }}>
+                  {mine ? admChatWho(c) : "Studio Assistant"} · {admChatWhen(m.createdAt)}
+                  {!mine && used.length > 0 ? ` · looked at ${used.join(", ")}` : ""}
+                  {!mine && offered ? " · offered a ticket" : ""}
+                  {!mine && m.costMicros ? ` · ${admChatUsd(m.costMicros)}` : ""}
+                </div>
+                <div style={{
+                  background: mine ? "#DBEAFF" : "#F8FAFC", border: mine ? "1px solid #C3D9F7" : "1px solid #E2E8F0",
+                  borderRadius: 10, padding: "8px 11px", fontSize: 13, color: "#1E293B", lineHeight: 1.5,
+                  whiteSpace: "pre-wrap", overflowWrap: "anywhere",
+                }}>
+                  {m.body}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        <button type="button" onClick={copy} style={smallBtn("#F1F5F9", "#334155")}>{copied ? "Link copied" : "Copy link"}</button>
+        {c && <button type="button" onClick={() => { onClose(); onOpenBuilder(c.clientId); }} style={smallBtn("#F1F5F9", "#334155")}>Open builder</button>}
+      </div>
+      </div>
+    </AdmOverlay>
+  );
+}
+
+function AdmSupportChats({ onOpenBuilder, onFlash }) {
+  const [list, setList] = useState(null);        // null = loading
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);   // admin-catalog older than this page
+  const [month, setMonth] = useState(null);
+  const [builders, setBuilders] = useState([]);
+  const [next, setNext] = useState(null);        // the `before` marker of the next page, or null
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [builder, setBuilder] = useState("");
+  const [onlyTickets, setOnlyTickets] = useState(false);
+  const [open, setOpen] = useState(null);        // { id, chat, messages, truncated, err }
+  // `onFlash` is the shell's flash, a new function every render; a ref keeps the loads off it.
+  const flashRef = useRef(onFlash);
+  flashRef.current = onFlash;
+  // A filter changed while a page was loading: the older answer is dropped, not shown.
+  const seq = useRef(0);
+  const filters = () => ({ clientId: builder || undefined, status: onlyTickets ? "handed_off" : undefined });
+
+  useEffect(() => {
+    const mine = ++seq.current;
+    setList(null);
+    setNext(null);
+    (async () => {
+      try {
+        const r = await adminApi("support_chats_list", filters());
+        if (mine !== seq.current) return;
+        setInstalled(r.installed !== false);
+        setList(r.chats || []);
+        setNext(r.more ? r.next : null);
+        if (r.month) setMonth(r.month);
+        if (r.builders) setBuilders(r.builders);
+      } catch (e) {
+        if (mine !== seq.current) return;
+        if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+        flashRef.current({ err: e.message || "Couldn't load the support chats." });
+        setList([]);
+      }
+    })();
+  }, [builder, onlyTickets]);
+
+  const loadMore = async () => {
+    if (!next) return;
+    const mine = seq.current;
+    setLoadingMore(true);
+    try {
+      const r = await adminApi("support_chats_list", { ...filters(), before: next });
+      if (mine === seq.current) {
+        setList((cur) => {
+          const have = new Set((cur || []).map((c) => c.id));
+          return [...(cur || []), ...(r.chats || []).filter((c) => !have.has(c.id))];
+        });
+        setNext(r.more ? r.next : null);
+      }
+    } catch (e) {
+      flashRef.current({ err: e.message || "Couldn't load older chats." });
+    }
+    setLoadingMore(false);
+  };
+
+  const openChat = async (id, clientId) => {
+    setOpen({ id, chat: null, messages: null, truncated: false, err: null });
+    try {
+      const r = await adminApi("support_chat_get", { chatId: id, ...(clientId ? { clientId } : {}) });
+      setOpen((cur) => (cur && cur.id === id ? { id, chat: r.chat, messages: r.messages || [], truncated: !!r.truncated, err: null } : cur));
+    } catch (e) {
+      setOpen((cur) => (cur && cur.id === id ? { ...cur, err: e.message || "Couldn't open that chat." } : cur));
+    }
+  };
+
+  // A link to one chat (/console/chats?chat=<id>): open it once, and take ?chat= off the address.
+  useEffect(() => {
+    let id = "";
+    try {
+      const qs = new URLSearchParams(window.location.search);
+      if (qs.has("chat")) {
+        id = String(qs.get("chat") || "").trim().toLowerCase();
+        qs.delete("chat");
+        const rest = qs.toString();
+        window.history.replaceState(window.history.state, "", window.location.pathname + (rest ? "?" + rest : "") + window.location.hash);
+      }
+    } catch (_e) { /* history unavailable */ }
+    if (id && SS_UUID_RE.test(id)) openChat(id, null);
+    else if (id) flashRef.current({ err: "That chat link isn't complete." });
+  }, []);
+
+  if (hidden) return null;
+  const quiet = { fontSize: 12.5, color: "#64748B" };
+  return (
+    <>
+      <div style={S.card} data-adm-support-chats={list ? list.length : "loading"}>
+        <CardHead title="Support chats"
+          desc="Every chat builders had with the Studio Assistant, newest first. Read-only: nothing here changes a chat or a ticket. Builders are told chats are saved so our team can follow up; each is deleted after 180 days without a message." />
+        {month && (
+          <div data-adm-chat-month style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(108px, 1fr))", gap: 14, padding: "2px 0 14px", borderBottom: "1px solid #F1F5F9", marginBottom: 12 }}>
+            <AdmBillingStat label="Chats this month" value={month.chats ?? "—"} />
+            <AdmBillingStat label="Questions" value={month.questions ?? "—"} />
+            <AdmBillingStat label="Became tickets" value={month.tickets ?? "—"} />
+            <AdmBillingStat label="Spend" value={admChatUsd(month.costMicros)} sub={`of the ${admChatUsd(month.capMicros)} monthly limit`} />
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 6 }}>
+          <select value={builder} onChange={(e) => setBuilder(e.target.value)} aria-label="Builder"
+            style={{ ...S.input, width: "auto", minWidth: 200, maxWidth: "100%" }}>
+            <option value="">Every builder</option>
+            {builders.map((b) => <option key={b.clientId} value={b.clientId}>{`${b.companyName || b.clientId} (${b.chats})`}</option>)}
+          </select>
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, color: "#334155", fontWeight: 600, cursor: "pointer" }}>
+            <input type="checkbox" checked={onlyTickets} onChange={(e) => setOnlyTickets(e.target.checked)} />
+            Only chats that became tickets
+          </label>
+        </div>
+        {!list && <div style={quiet}>Loading…</div>}
+        {list && !installed && <div style={quiet}>Migration 340 isn't applied on this database yet.</div>}
+        {list && installed && list.length === 0 && <div style={quiet}>{builder || onlyTickets ? "No chats match." : "No chats yet."}</div>}
+        {list && list.map((c) => {
+          const [word, tone] = ADM_CHAT_STATUS[c.status] || [c.status, "neutral"];
+          return (
+            <button key={c.id} type="button" onClick={() => openChat(c.id, c.clientId)} data-adm-chat-row={c.status}
+              style={{ ...ADM_ROW, width: "100%", background: "none", border: "none", borderBottom: "1px solid #F1F5F9", cursor: "pointer", textAlign: "left", fontFamily: "inherit", alignItems: "flex-start" }}>
+              <AdmTile name={c.companyName || c.clientId} size={30} />
+              <span style={{ display: "block", flex: "1 1 auto", minWidth: 0, fontSize: 12.5, color: "#1E293B", lineHeight: 1.5 }}>
+                <span style={{ display: "block", fontWeight: 800 }}>
+                  {c.companyName || c.clientId} <span style={{ fontWeight: 500, color: "#64748B" }}>· {admChatWho(c)}</span>
+                </span>
+                <span style={{ display: "block", color: "#334155", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {c.firstQuestion || <span style={{ color: "#94A3B8", fontStyle: "italic" }}>No question yet</span>}
+                </span>
+                <span style={{ display: "block", color: "#64748B" }}>
+                  {admChatWhen(c.lastMessageAt)} · {c.messageCount} message{c.messageCount === 1 ? "" : "s"} · {admChatUsd(c.costMicros)}
+                </span>
+              </span>
+              <span style={{ flexShrink: 0 }}><AdmChip tone={tone}>{word}</AdmChip></span>
+            </button>
+          );
+        })}
+        {next && (
+          <div style={{ marginTop: 10 }}>
+            <button type="button" disabled={loadingMore} onClick={loadMore} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12.5 }}>
+              {loadingMore ? "Loading…" : "Load older chats"}
+            </button>
+          </div>
+        )}
+      </div>
+      {open && <AdmSupportChatDialog open={open} onClose={() => setOpen(null)} onOpenBuilder={onOpenBuilder} />}
+    </>
   );
 }
 

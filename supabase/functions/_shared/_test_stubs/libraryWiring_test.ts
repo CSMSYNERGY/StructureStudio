@@ -15,6 +15,14 @@
 //     function; an armed meter holds then captures under library_request; insufficient funds is 402 and
 //     stores nothing; a photo path of another shape is refused;
 //   * library_request_cancel credits back what was charged, once.
+//   * a door made from a photo (345): library_add with a doorLookId makes an entry drawn over the look's
+//     base, from a READY look of this builder's only; a database without 345 answers 503 in words; the
+//     library read carries the look's tile; such an entry is rename-only; a template never takes a
+//     doorLookId; save_fixture refuses a save naming both looks, and an entry put on a row clears the
+//     row's own look (one look per door row).
+//   * a door promoted from a builder's photo (347): shown only to a builder with door looks on, marked
+//     fromPhoto; importing it gives the builder their OWN ready copy of its spec and an entry naming it;
+//     a name already taken leaves no copy behind; seeding never links a plain door to it.
 //
 // HOW. numberRequestsHandler_test's idiom: Deno.serve is stubbed while index.ts is imported, the import
 // map swaps supabase-js for supabase_stub.ts, and stubDb / stubRpc / stubStorage route every call into
@@ -48,6 +56,7 @@ const USER_ID = "00000000-0000-4000-8000-0000000000b8";
 const U = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const T_LAP = U(901), T_PANEL = U(902), T_AMERICAN = U(903), T_AUTO = U(904), T_SIX = U(905), T_STD = U(906);
 const STYLE = U(11);
+const LOOK_READY = U(801), LOOK_DRAFT = U(802), LOOK_OLD = U(803), LOOK_THEIRS = U(804);
 
 type Row = Record<string, any>;
 type World = {
@@ -56,6 +65,10 @@ type World = {
   flag: boolean | "missing";
   meter?: { price_cents: number; active: boolean; visible?: boolean };
   wallet?: (fn: string, args: any) => any;
+  /** A database without 345: library_look_ok refuses a door look that names a doorLookId. */
+  no345?: boolean;
+  /** client_settings.door_looks_beta when it differs from the library's flag. */
+  doorLooks?: boolean;
 };
 type Trace = { reads: Array<{ table: string; ops: any[][] }>; writes: Array<{ table: string; verb: string; row: any; ops: any[][] }>; rpc: Array<{ fn: string; args: any }> };
 
@@ -89,6 +102,12 @@ function world(): World {
       ],
       library_requests: [],
       wallet_accounts: [],
+      door_looks: [
+        { id: LOOK_READY, client_id: OWN, name: "Our photo door", base: "classic", status: "ready", version: 1, spec: { v: 1, base: "classic", src: { leaves: 1, hinge: "left" } }, thumb_url: "https://stub.supabase.co/storage/v1/object/public/fixtures/acme-sheds/door-look-1.png" },
+        { id: LOOK_DRAFT, client_id: OWN, name: "A draft", base: "plank", status: "draft", version: 1, spec: { v: 1, base: "plank", src: { leaves: 1, hinge: "left" } }, thumb_url: null },
+        { id: LOOK_OLD, client_id: OWN, name: "An old one", base: "dutch", status: "archived", thumb_url: null },
+        { id: LOOK_THEIRS, client_id: OTHER, name: "Their photo door", base: "zbrace", status: "ready", thumb_url: null },
+      ],
     },
   };
 }
@@ -97,8 +116,10 @@ const has = (ops: any[][], op: string) => ops.some((o) => o[0] === op);
 const argOf = (ops: any[][], op: string) => (ops.find((o) => o[0] === op) ?? []).slice(1);
 /** Apply the query's filters to a row. */
 function matches(r: Row, ops: any[][]): boolean {
+  // A JSON path filter (`look->>doorLookId`), as PostgREST reads one.
+  const val = (c: string) => { const i = c.indexOf("->>"); return i < 0 ? r[c] : (r[c.slice(0, i)] ?? {})[c.slice(i + 3)]; };
   for (const o of ops) {
-    if (o[0] === "eq" && r[o[1]] !== o[2]) return false;
+    if (o[0] === "eq" && val(o[1]) !== o[2]) return false;
     if (o[0] === "is" && o[2] === null && r[o[1]] != null) return false;
     if (o[0] === "not" && o[2] === "is" && o[3] === null && r[o[1]] == null) return false;
     if (o[0] === "in" && !(o[2] as unknown[]).includes(r[o[1]])) return false;
@@ -125,7 +146,7 @@ function answer(w: World, t: Trace, table: string, ops: any[][]): any {
     case "client_settings": {
       const sel = String(argOf(ops, "select")[0] ?? "");
       if (sel.includes("library_beta") && w.flag === "missing") return { data: null, error: { code: "42703", message: "column client_settings.library_beta does not exist" } };
-      return { data: { library_beta: w.flag === true, billing_exempt: false, internal_account: false }, error: null };
+      return { data: { library_beta: w.flag === true, door_looks_beta: w.doorLooks ?? w.flag === true, billing_exempt: false, internal_account: false }, error: null };
     }
     case "usage_prices":
       return { data: w.meter ? { visible: true, ...w.meter } : null, error: null };
@@ -136,6 +157,9 @@ function answer(w: World, t: Trace, table: string, ops: any[][]): any {
     const list: Row[] = (Array.isArray(raw) ? raw : [raw]).map((r: Row) => ({ id: U(seq++), created_at: "2026-10-27T10:00:00Z", ...r }));
     if (table === "client_library") {
       for (const r of list) {
+        if (w.no345 && r.look && r.look.doorLookId !== undefined) {
+          return { data: null, error: { code: "23514", message: "new row for relation \"client_library\" violates check constraint \"client_library_look_chk\"" } };
+        }
         if (rows.some((x) => x.client_id === r.client_id && x.category === r.category && String(x.name).toLowerCase() === String(r.name).toLowerCase())) {
           return { data: null, error: { code: "23505", message: "duplicate key value violates unique constraint \"client_library_name_key\"" } };
         }
@@ -416,4 +440,152 @@ Deno.test("seed_mine never renames a label: a second course under the same name 
   const laps = w.tables.client_library.filter((x) => x.client_id === OWN && x.category === "cladding" && x.look.profile === "lap");
   assertEquals(laps.map((x) => x.name), ['7" LP Lap Siding'], "no renamed second entry");
   assertEquals(w.tables.style_cladding.find((x) => x.id === U(25))!.client_library_id, null, "that row keeps its label and stays unlinked");
+});
+
+Deno.test("a door made from a photo: library_add with a doorLookId, from this builder's ready look only", async () => {
+  const w = world();
+  const r = await call({ action: "library_add", doorLookId: LOOK_READY }, w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.body.entry.look, { doorStyle: "classic", doorLookId: LOOK_READY }, "drawn over the look's base, naming the look");
+  assertEquals([r.body.entry.name, r.body.entry.templateId], ["Our photo door", null], "the look's own name, and no template");
+  assertEquals(r.body.entry.doorLook, { thumbUrl: w.tables.door_looks[0].thumb_url, status: "ready", name: "Our photo door" });
+  const named = await call({ action: "library_add", doorLookId: LOOK_READY, name: "  Barn   door from photo " }, w);
+  assertEquals([named.status, named.body.entry?.name], [200, "Barn door from photo"], "a name of the builder's own, cleaned");
+  const dup = await call({ action: "library_add", doorLookId: LOOK_READY, name: "our photo door" }, w);
+  assertEquals([dup.status, dup.body.code], [409, "library_name_taken"]);
+  for (const [id, status, code] of [[LOOK_DRAFT, 409, "library_door_look_not_ready"], [LOOK_OLD, 404, "library_door_look_not_found"], [LOOK_THEIRS, 404, "library_door_look_not_found"], ["not-a-uuid", 404, "library_door_look_not_found"]]) {
+    const x = await call({ action: "library_add", doorLookId: id }, w);
+    assertEquals([x.status, x.body.code], [status, code], String(id));
+    assert(!x.t.writes.some((y) => y.table === "client_library"), "nothing written for " + id);
+  }
+  assertEquals(w.tables.client_library.filter((x) => x.client_id === OWN).length, 2, "two entries, both from the ready look");
+  scopedToOwn(r.t);
+  const lookRead = r.t.reads.find((x) => x.table === "door_looks")!;
+  assert(lookRead.ops.some((o) => o[0] === "eq" && o[1] === "client_id" && o[2] === OWN), "the look is read in this builder's catalog only");
+});
+
+Deno.test("a door made from a photo: a database without 345 refuses in words; a template never takes a doorLookId", async () => {
+  const w = world(); w.no345 = true;
+  const r = await call({ action: "library_add", doorLookId: LOOK_READY }, w);
+  assertEquals([r.status, r.body.code], [503, "library_door_looks_unavailable"], JSON.stringify(r.body));
+  const w2 = world();
+  const tpl = await call({ action: "library_add", templateId: T_AMERICAN, look: { doorStyle: "american", doorLookId: LOOK_READY } }, w2);
+  assertEquals([tpl.status, tpl.body.code], [400, "library_bad_look"], "a template's copy can't name a builder's look");
+});
+
+Deno.test("a door made from a photo: the library read carries its tile, and it is rename-only", async () => {
+  const w = world();
+  w.tables.client_library.push(
+    { id: U(611), client_id: OWN, category: "door", name: "Our photo door", look: { doorStyle: "classic", doorLookId: LOOK_READY }, library_item_id: null },
+    { id: U(612), client_id: OWN, category: "door", name: "Our Classic", look: { doorStyle: "classic" }, library_item_id: null },
+  );
+  const lib = await call({ action: "library" }, w);
+  assertEquals(lib.status, 200);
+  const byName = Object.fromEntries(lib.body.entries.map((e: any) => [e.name, e]));
+  assertEquals(byName["Our photo door"].doorLook, { thumbUrl: w.tables.door_looks[0].thumb_url, status: "ready", name: "Our photo door" });
+  assert(!("doorLook" in byName["Our Classic"]), "an entry from a template carries no doorLook key");
+  const rename = await call({ action: "library_edit", id: U(611), name: "Front door", look: { doorStyle: "classic", doorLookId: LOOK_READY } }, w);
+  assertEquals(rename.status, 200, JSON.stringify(rename.body));
+  assertEquals(rename.body.entry.name, "Front door");
+  const up = rename.t.writes.find((x) => x.table === "client_library")!.row;
+  assert(!("look" in up), "a rename sends the same look and writes no look");
+  for (const look of [{ doorStyle: "dutch" }, { doorStyle: "classic" }, { doorStyle: "classic", doorLookId: LOOK_THEIRS }]) {
+    const x = await call({ action: "library_edit", id: U(611), look }, w);
+    assertEquals([x.status, x.body.code], [400, "library_door_look_fixed"], JSON.stringify(look));
+    assert(!x.t.writes.some((y) => y.table === "client_library"), "nothing written");
+  }
+  const gain = await call({ action: "library_edit", id: U(612), look: { doorStyle: "classic", doorLookId: LOOK_READY } }, w);
+  assertEquals(gain.status, 400, "an entry from a template never gains a look");
+  scopedToOwn(lib.t);
+});
+
+Deno.test("save_fixture: one look per door row", async () => {
+  const w = world();
+  w.tables.client_library.push({ id: U(613), client_id: OWN, category: "door", name: "Our photo door", look: { doorStyle: "classic", doorLookId: LOOK_READY }, library_item_id: null });
+  w.tables.fixture_items[0].door_look_id = LOOK_READY;
+  const base = { action: "save_fixture", category: "door", id: U(31), name: "Double barn door", widthIn: 60, heightIn: 72, price: 300, opDouble: true, swingOut: true };
+  const both = await call({ ...base, clientLibraryId: U(613), doorLookId: LOOK_READY }, w);
+  assertEquals([both.status, both.body.code], [400, "door_one_look"], JSON.stringify(both.body));
+  assert(!both.t.writes.some((x) => x.table === "fixture_items"), "nothing written");
+  const link = await call({ ...base, doorStyle: "american", clientLibraryId: U(613) }, w);
+  assertEquals(link.status, 200, JSON.stringify(link.body));
+  const up = link.t.writes.find((x) => x.table === "fixture_items")!.row;
+  assertEquals([up.client_library_id, up.door_style, up.door_look_id], [U(613), "classic", null], "the entry goes on, drawn over its base, and the row's own look comes off");
+  scopedToOwn(link.t);
+});
+
+Deno.test("seed_mine leaves a door on its own 3D look alone (an entry would replace that look, 345)", async () => {
+  const w = world();
+  w.tables.fixture_items.push({ id: U(34), client_id: OWN, category: "door", name: "Photo door", door_style: "classic", lite_rows: null, lite_cols: null, client_library_id: null, door_look_id: LOOK_READY, sort_order: 1 });
+  const r = await call({ action: "library_seed_mine" }, w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(w.tables.fixture_items.find((x) => x.id === U(34))!.client_library_id, null, "the door on its own look is not linked");
+  assertEquals(w.tables.fixture_items.find((x) => x.id === U(34))!.door_look_id, LOOK_READY, "...and keeps it");
+  assert(w.tables.fixture_items.find((x) => x.id === U(31))!.client_library_id != null, "the other door is still linked");
+});
+
+Deno.test("save_door_look: a look in the library keeps its base and is not replaced away (345), in words, before any row moves", async () => {
+  const w = world();
+  w.tables.client_library.push({ id: U(614), client_id: OWN, category: "door", name: "Front door", look: { doorStyle: "classic", doorLookId: LOOK_READY }, library_item_id: null });
+  const rebase = await call({ action: "save_door_look", id: LOOK_READY, version: 1, name: "Our photo door", spec: { v: 1, base: "dutch", src: { leaves: 1, hinge: "left" } } }, w);
+  assertEquals([rebase.status, rebase.body.code], [409, "door_look_in_library"], JSON.stringify(rebase.body));
+  assert(/in your library as "Front door"/.test(rebase.body.error), rebase.body.error);
+  assert(!rebase.t.writes.some((x) => x.table === "door_looks"), "nothing written");
+  const rename = await call({ action: "save_door_look", id: LOOK_READY, version: 1, name: "Our photo door, renamed" }, w);
+  assertEquals(rename.status, 200, "a save that keeps the base still goes through");
+  const replace = await call({ action: "save_door_look", id: LOOK_DRAFT, version: 1, name: "A draft", replaceId: LOOK_READY }, w);
+  assertEquals([replace.status, replace.body.code], [409, "door_look_in_library"], JSON.stringify(replace.body));
+  assert(!replace.t.writes.some((x) => x.table === "fixture_items" || x.table === "door_looks"), "no door row moved and no look written");
+});
+
+const T_PROMO = U(907);
+const PROMO_SPEC = { v: 1, base: "american", src: { leaves: 2, hinge: "left" }, panels: [{ fill: "pickets", count: 6 }] };
+const withPromoted = (w: World) => {
+  w.tables.library_items.push({ id: T_PROMO, category: "door", slug: "ranch-pickets", name: "Ranch picket door", look: { doorStyle: "american" }, door_spec: PROMO_SPEC,
+    thumb_url: "https://stub.supabase.co/storage/v1/object/public/fixtures/library/door-1.png", version: 1, status: "active", sort_order: 70, search_terms: ["pickets"] });
+  return w;
+};
+
+Deno.test("a promoted door: shown only with door looks on, marked fromPhoto", async () => {
+  const w = withPromoted(world());
+  const on = await call({ action: "library" }, w);
+  assertEquals(on.status, 200);
+  const promo = on.body.templates.find((x: any) => x.id === T_PROMO);
+  assert(promo && promo.fromPhoto === true && /library\/door-1\.png$/.test(promo.thumbUrl), JSON.stringify(promo));
+  assert(!("fromPhoto" in on.body.templates.find((x: any) => x.id === T_AMERICAN)), "a built-in template carries no fromPhoto");
+  assert(!JSON.stringify(promo).includes("door_spec") && !("spec" in promo), "the spec itself is not sent to the browser");
+  w.doorLooks = false;
+  const off = await call({ action: "library" }, w);
+  assert(!off.body.templates.some((x: any) => x.id === T_PROMO), "hidden from a builder without door looks");
+  assert(off.body.templates.some((x: any) => x.id === T_AMERICAN), "...who still sees every other template");
+});
+
+Deno.test("importing a promoted door: the builder's own ready copy, and an entry naming it", async () => {
+  const w = withPromoted(world());
+  const r = await call({ action: "library_add", templateId: T_PROMO, name: "Our picket door", look: { doorStyle: "plank" } }, w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const copy = w.tables.door_looks.find((x) => x.client_id === OWN && x.name === "Our picket door")!;
+  assert(copy, "a door_looks row of the builder's own");
+  assertEquals([copy.base, copy.status, copy.spec_version, copy.thumb_url], ["american", "ready", 1, w.tables.library_items.find((x) => x.id === T_PROMO)!.thumb_url]);
+  assertEquals(copy.spec, PROMO_SPEC, "the template's spec, copied");
+  assertEquals(r.body.entry.look, { doorStyle: "american", doorLookId: copy.id }, "the entry names the copy, over its base (the look sent is ignored)");
+  assertEquals(r.body.entry.templateId, T_PROMO);
+  assertEquals(r.body.entry.doorLook.status, "ready");
+  scopedToOwn(r.t);
+  const dup = await call({ action: "library_add", templateId: T_PROMO, name: "our picket door" }, w);
+  assertEquals([dup.status, dup.body.code], [409, "library_name_taken"]);
+  assertEquals(w.tables.door_looks.filter((x) => x.client_id === OWN && x.base === "american" && x.spec === PROMO_SPEC).length, 1, "a refused import leaves no copy behind");
+  w.doorLooks = false;
+  const off = await call({ action: "library_add", templateId: T_PROMO, name: "Another" }, w);
+  assertEquals(off.status, 404, "not for a builder without door looks");
+  assert(!off.t.writes.some((x) => x.table === "door_looks" || x.table === "client_library"), "nothing written");
+});
+
+Deno.test("seed_mine never links a plain door to a promoted door's template", async () => {
+  const w = withPromoted(world());
+  const r = await call({ action: "library_seed_mine" }, w);
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const entry = w.tables.client_library.find((x) => x.id === w.tables.fixture_items.find((y) => y.id === U(31))!.client_library_id)!;
+  assertEquals([entry.library_item_id, entry.look], [T_AMERICAN, { doorStyle: "american" }], "the plain American door is linked to the built-in template");
+  assert(!w.tables.client_library.some((x) => x.library_item_id === T_PROMO), "no entry is made from the promoted door");
 });
