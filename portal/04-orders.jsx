@@ -802,7 +802,11 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
         </form>
       ) : status !== null && (
         <div className="ss-sup-form">
-          <button type="button" onClick={() => onTicket(null, null)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%" }}>Submit a ticket</button>
+          {/* The assistant is off (no key, or over the month's cap), but the builder may have been
+              chatting until it went off: status still returns the open chat. The ticket carries it,
+              so the team gets the last messages and the "Full chat" link in exactly this case
+              (Carolyn, 10-29). An empty chat is not sent: there is nothing to link to. */}
+          <button type="button" onClick={() => onTicket(null, messages.length ? convId : null)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%" }}>Submit a ticket</button>
         </div>
       )}
     </div>

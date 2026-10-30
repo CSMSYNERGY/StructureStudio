@@ -11,6 +11,9 @@
 // builder's submission is already saved before this runs, and an email fault must not turn a saved
 // report into an error on their screen. portal-feedback hands it to EdgeRuntime.waitUntil, so the
 // builder does not wait for it either.
+//
+// NO CONSOLE LINKS. The full-chat link of a ticket lives on its Projects item only; this email says
+// where it is. Reply-To is the builder, and a reply must not carry an operator-only address to them.
 
 import { rsSendEmail, resendConfigured } from "./resend.ts";
 import { PLATFORM_NOTIFY_FROM } from "./leadFormMail.ts";
@@ -39,6 +42,8 @@ export interface SupportAlert {
   submissionId: string;
   /** A ticket handed off from the assistant: how many chat messages were attached to the item. */
   chatMessages?: number;
+  /** And whether the item holds the "Full chat" link (only a Support board with a Conversation column). */
+  chatLinked?: boolean;
 }
 
 export function supportAlertContent(a: SupportAlert): { subject: string; text: string; html: string } {
@@ -52,7 +57,9 @@ export function supportAlertContent(a: SupportAlert): { subject: string; text: s
     `From: ${a.submitterName}${a.submitterEmail ? ` <${a.submitterEmail}>` : ""}`,
     `Title: ${a.title}`,
     ...(a.severity ? [`${a.kind === "feature" ? "Importance" : "Severity"}: ${a.severity}`] : []),
-    ...(a.chatMessages ? [`Handed off from the assistant: the last ${a.chatMessages} chat messages are on the Projects item.`] : []),
+    // Says WHERE the full chat is, never the link itself: Reply-To is the builder, so a reply from the
+    // inbox would quote an operator-only console address back to them.
+    ...(a.chatMessages ? [`Handed off from the assistant: the last ${a.chatMessages} chat messages${a.chatLinked ? " and a link to the full chat" : ""} are on the Projects item.`] : []),
     "",
     (a.detail || "(no details)").slice(0, 4000),
     "",

@@ -26,6 +26,9 @@
 //      the pill too.
 //   J  SWITCHED OFF AFTER ON: a remembered "on" paints the button first; the server's "off" puts the
 //      pill back and is remembered.
+//   K  ASSISTANT OFF MID-CHAT (Carolyn, 10-29): `status` says unavailable but still returns the open
+//      chat. The fallback "Submit a ticket" under it posts that chat's id, so the ticket on the board
+//      gets the last messages and the "Full chat" link; an empty chat posts no id.
 //
 // Supabase is stubbed at the network layer: no login, nothing leaves the machine. support-agent's
 // answers are canned here; the real agent is proved separately (agent_test.ts, the 20-question run).
@@ -33,7 +36,10 @@
 //   python -m http.server 8867 --bind 127.0.0.1   (repo root, after npm run compile)
 //   SS_BASE=http://127.0.0.1:8867 node tests/harness/supportMenu.mjs   (exit 0 = every check held)
 //
-// Shots land in %TEMP%/ss-harness/support-menu (SS_SHOTS overrides).
+// Shots land in %TEMP%/ss-harness/support-menu (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an older
+// portal.app.compiled.js> serves that file instead: before 10-29 the fallback button sent no chat,
+// so K1 fails there.
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { chromium } from "@playwright/test";
 import { reporter, BASE, REF, shotsDir, serveAppRoutes } from "./lib.mjs";
@@ -48,6 +54,7 @@ const SESSION = {
 };
 const CONV = "00000000-0000-4000-8000-00000000c0c1";
 const ANSWER = "You can change that on Settings > Company > Branding: /settings/branding. Not https://example.com/settings.";
+const ARTIFACT = process.env.SS_PORTAL_ARTIFACT ? readFileSync(process.env.SS_PORTAL_ARTIFACT, "utf8") : null;
 
 const { ok, failed } = reporter();
 const shots = shotsDir("support-menu");
@@ -58,7 +65,8 @@ const browser = await chromium.launch({ channel: process.env.PW_CHANNEL === "bun
 
 // `on`: what support-agent's `enabled` answers (true, false, or "error" for a 400 like the live
 // 340.2's). `remembered`: a "1"/"0" already in localStorage from an earlier load, or null.
-async function openPortal(width, height, { on = true, remembered = null } = {}) {
+// `status`: fields laid over support-agent's `status` answer (K: the assistant off, a chat still open).
+async function openPortal(width, height, { on = true, remembered = null, status = null } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, serviceWorkers: "block" });
   await ctx.addInitScript(([ref, s, client, rem]) => {
     try {
@@ -94,7 +102,7 @@ async function openPortal(width, height, { on = true, remembered = null } = {}) 
     if (url.includes("/support-agent")) {
       state.agent.push(body);
       if (body.action === "enabled") return on === "error" ? json(route, { error: "Unknown action." }, 400) : json(route, { ok: true, on });
-      if (body.action === "status") return json(route, { ok: true, name: "Studio Assistant", replyPromise: "A person on our team replies within 24 hours.", available: true, unavailable: null, liveSupport: { available: false }, conversation: null });
+      if (body.action === "status") return json(route, { ok: true, name: "Studio Assistant", replyPromise: "A person on our team replies within 24 hours.", available: true, unavailable: null, liveSupport: { available: false }, conversation: null, ...status });
       if (body.action === "send") {
         await new Promise((r) => setTimeout(r, 900));   // long enough to see "Thinking…"
         return json(route, {
@@ -120,6 +128,7 @@ async function openPortal(width, height, { on = true, remembered = null } = {}) 
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await serveAppRoutes(page);
+  if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
   await page.goto(`${BASE}/orders`);
   await page.waitForSelector(".ss-topbar", { timeout: 20000 });
   await page.waitForTimeout(800);
@@ -327,6 +336,46 @@ for (const [width, height, tag] of [[1440, 900, "1440"], [375, 812, "375"]]) {
   ok("1440 J: the server's off puts the pill back", after.pill === "💬 Feedback" && after.support === 0, JSON.stringify(after));
   ok("1440 J: …and remembers it", await page.evaluate((c) => localStorage.getItem(`ss:supportOn:${c}`), CLIENT) === "0");
   ok("1440 J: no page errors", state.errors.length === 0, state.errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
+// K — the assistant went off (over the month's cap) while a chat was open. `status` still returns
+// the chat; the fallback button under it is the only way to a ticket from the panel.
+const OFF_CONV = "00000000-0000-4000-8000-00000000c0c2";
+const OFF = "The assistant is taking a break for the rest of the month. Please send this to our team as a ticket.";
+const OFF_MESSAGES = [
+  { id: "k1", role: "user", body: "How do I add a second price list?", created_at: "2026-10-29T09:00:00Z" },
+  { id: "k2", role: "assistant", body: "Price lists live under Settings > Pricing. Use New list to start one.", created_at: "2026-10-29T09:00:04Z" },
+];
+for (const [k, messages] of [["K1", OFF_MESSAGES], ["K2", []]]) {
+  const { ctx, page, state } = await openPortal(1440, 900, { status: { available: false, unavailable: OFF, conversation: { id: OFF_CONV, messages } } });
+  const btn = page.locator(".ss-topbar .ss-sup-btn");
+  await btn.waitFor({ timeout: 10000 });
+  await btn.click();
+  await page.locator(".ss-sup-menu button", { hasText: "Ask the assistant" }).click();
+  await page.waitForSelector(".ss-sup-chat");
+  await page.locator(".ss-sup-bot", { hasText: "taking a break" }).waitFor({ timeout: 5000 }).catch(() => {});
+  const fallback = page.locator(".ss-sup-chat .ss-sup-form button", { hasText: "Submit a ticket" });
+  const saved = await page.locator(".ss-sup-chat .ss-sup-me", { hasText: "second price list" }).count();
+  ok(`1440 ${k}: assistant off, the fallback Submit a ticket shows${messages.length ? " under the saved chat" : ""}`,
+    (await fallback.count()) === 1 && (await page.locator(".ss-sup-chat .ss-sup-form textarea").count()) === 0 && saved === (messages.length ? 1 : 0),
+    JSON.stringify({ fallback: await fallback.count(), saved }));
+  await page.screenshot({ path: join(shots, `1440-13-${k}-assistant-off.png`) });
+  await fallback.click();
+  // The ticket is the modal one: the chat panel is a dialog too, and its button says "Submit a ticket".
+  const kdlg = page.locator('[role=dialog][aria-modal="true"]', { hasText: "Submit a Ticket" });
+  await kdlg.waitFor();
+  const attached = await kdlg.locator("text=Your chat with the assistant is attached").count() > 0;
+  ok(`1440 ${k}: the ticket form ${messages.length ? "says the chat is attached" : "attaches no chat"}`, messages.length ? attached : !attached);
+  await kdlg.locator("input").first().fill("Price lists question");
+  await page.screenshot({ path: join(shots, `1440-14-${k}-ticket.png`) });
+  await kdlg.locator("button[type=submit]").click();
+  await page.waitForSelector("text=we've got it");
+  const kt = state.feedback.at(-1);
+  ok(messages.length ? "1440 K1: the ticket posts the open chat's id" : "1440 K2: an empty chat posts no chat id",
+    kt && kt.kind === "ticket" && (messages.length ? kt.supportConversationId === OFF_CONV : kt.supportConversationId == null),
+    JSON.stringify(kt));
+  ok(`1440 ${k}: no page errors`, state.errors.length === 0, state.errors.slice(0, 3).join(" | "));
   await ctx.close();
 }
 
