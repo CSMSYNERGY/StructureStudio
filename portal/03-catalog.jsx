@@ -2891,6 +2891,47 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
 }
 
 // ─── Pricing & inclusions (CSV self-serve; via portal-settings, JWT-scoped) ───
+// Every option THIS client offers = built-in layout items + their catalog fixtures (doors/
+// windows/ramps). Each becomes a pricing column so an owner can set how many the base price
+// includes per size. Catalog columns key on the fixture id, so an "included" catalog item rides
+// the same building_size_inclusions pipeline (item_key = fixture id). Label carries the size so
+// multiple sizes of one style stay distinct and never collide with a built-in's label.
+// Columns are grouped into the same sections the Options tab shows top-to-bottom — built-in
+// options, then the Doors, Ramps and Windows catalog sections — each with a header fill colour
+// for the Excel template. Archived options drop out entirely (they can't be added to new builds,
+// so they must not be an inclusion column — get_config + submit-estimate also stop netting them).
+// Shared by the Excel template (PricingCsv) and the Pricing Table, so both show the same columns
+// in the same order. `cat` is portal-settings' catalog payload ({ items, fixtures, ... }).
+function ssPricingColumns(cat) {
+  // Drop the built-in "ramp" — the ramp is now a self-contained option managed in the Ramp
+  // settings section (simple price or custom catalog ramps), not a per-building inclusion column.
+  // Mirrors LayoutPricing, which also hides the ramp row.
+  // Nor a partition wall (migration 278): it is the customer's own layout inside the building, never
+  // part of a size's price, so it has no column (submit-estimate ignores such a row too).
+  const layout = ((cat && cat.items) || []).filter((it) => !it.archived && it.key !== "ramp" && it.key !== "partitionWall").map((it) => ({ key: it.key, label: it.label }));
+  const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
+  // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"), and
+  // since the column is matched by its exact label on re-import, a garbled header would silently
+  // drop the inclusion. ASCII round-trips safely through any spreadsheet.
+  const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
+  const inCat = (f, c) => (f.category || "door") === c; // a missing category reads as "door" (matches DoorsView)
+  const byCat = (c) => fx.filter((f) => inCat(f, c)).map(col);
+  const KNOWN_CATS = ["door", "ramp", "window", "vent"];
+  const other = fx.filter((f) => !KNOWN_CATS.includes(f.category || "door")).map(col);
+  // Section order follows the Options tab's own Exterior grouping (Doors · Windows ·
+  // Vents · Ramps) so the sheet reads the way the screen does. "Other" still catches any
+  // category added later without a section here — a new fixture kind must never fall out
+  // of the export silently, which is what a bare `byCat` list per known name would do.
+  return [
+    { name: "Built-in options", argb: "FFDBEAFF", cols: layout },
+    { name: "Doors",            argb: "FFFEE9C7", cols: byCat("door") },
+    { name: "Windows",          argb: "FFDCF1FB", cols: byCat("window") },
+    { name: "Vents",            argb: "FFEAF3E6", cols: byCat("vent") },
+    { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
+    { name: "Other",            argb: "FFF1F5F9", cols: other },
+  ].filter((s) => s.cols.length);
+}
+
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
   const [busy, setBusy] = useState(false);
@@ -2927,44 +2968,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const items = () => (cat && cat.items) || [];
   const allStyles = () => (cat && cat.styles) || [];
   const activeStyles = () => allStyles().filter((s) => s.active);
-  // Every option THIS client offers = built-in layout items + their catalog fixtures (doors/
-  // windows/ramps). Each becomes a CSV column so an owner can set how many the base price includes
-  // per size. Catalog columns key on the fixture id, so an "included" catalog item rides the same
-  // building_size_inclusions pipeline (item_key = fixture id). Label carries the size so multiple
-  // sizes of one style stay distinct and never collide with a built-in's label.
-  // Option columns grouped into the same sections the Options tab shows top-to-bottom — built-in
-  // options, then the Doors, Ramps and Windows catalog sections — each with a header fill colour
-  // for the Excel template. Archived options drop out entirely (they can't be added to new builds,
-  // so they must not be an inclusion column — get_config + submit-estimate also stop netting them).
-  const optionSections = () => {
-    // Drop the built-in "ramp" — the ramp is now a self-contained option managed in the Ramp
-    // settings section (simple price or custom catalog ramps), not a per-building inclusion column.
-    // Mirrors LayoutPricing, which also hides the ramp row.
-    // Nor a partition wall (migration 278): it is the customer's own layout inside the building, never
-    // part of a size's price, so it has no column (submit-estimate ignores such a row too).
-    const layout = items().filter((it) => !it.archived && it.key !== "ramp" && it.key !== "partitionWall").map((it) => ({ key: it.key, label: it.label }));
-    const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
-    // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"), and
-    // since the column is matched by its exact label on re-import, a garbled header would silently
-    // drop the inclusion. ASCII round-trips safely through any spreadsheet.
-    const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
-    const inCat = (f, c) => (f.category || "door") === c; // a missing category reads as "door" (matches DoorsView)
-    const byCat = (c) => fx.filter((f) => inCat(f, c)).map(col);
-    const KNOWN_CATS = ["door", "ramp", "window", "vent"];
-    const other = fx.filter((f) => !KNOWN_CATS.includes(f.category || "door")).map(col);
-    // Section order follows the Options tab's own Exterior grouping (Doors · Windows ·
-    // Vents · Ramps) so the sheet reads the way the screen does. "Other" still catches any
-    // category added later without a section here — a new fixture kind must never fall out
-    // of the export silently, which is what a bare `byCat` list per known name would do.
-    return [
-      { name: "Built-in options", argb: "FFDBEAFF", cols: layout },
-      { name: "Doors",            argb: "FFFEE9C7", cols: byCat("door") },
-      { name: "Windows",          argb: "FFDCF1FB", cols: byCat("window") },
-      { name: "Vents",            argb: "FFEAF3E6", cols: byCat("vent") },
-      { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
-      { name: "Other",            argb: "FFF1F5F9", cols: other },
-    ].filter((s) => s.cols.length);
-  };
+  // The option columns live in ssPricingColumns (top level, above) so the Pricing Table builds
+  // exactly the same columns as this sheet.
+  const optionSections = () => ssPricingColumns(cat);
   const optionCols = () => optionSections().flatMap((s) => s.cols);
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
