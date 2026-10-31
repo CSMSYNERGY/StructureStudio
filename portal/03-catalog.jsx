@@ -4625,8 +4625,8 @@ function ssPgOffLost(q, d) {
 // value, seen }], sizes } or { ok: false, error, problems }. `seen` is the box as drawn now, for the
 // queue's check that nothing moved it before the edit lands (a confirm can be open meanwhile).
 // `sizes` is one entry per size that changes, in drawn order, for the confirm (ssPgChangeSummary):
-// { id, name, prices, options, offered, wasShown, nowShown, zero }; shown = offered in the designer,
-// zero = put at $0 there by this change.
+// { id, name, prices, options, offered, wasShown, nowShown, zero }; shown = offered in the designer
+// (never for a size of a hidden style), zero = put at $0 there by this change.
 function ssPgPlanCells(view, targets, opts) {
   const v = view || {}, o = opts || {}, q = v.q || {}, cols = v.cols || [];
   const byId = {};
@@ -4696,14 +4696,17 @@ function ssPgPlanCells(view, targets, opts) {
     if (!mine.length) return;
     mine.forEach((d) => edits.push(d));
     // Offered in the designer before and after: the server ticks Offered when a size with no price on
-    // file gets one, unless Offered itself was sent, or goes with the price unticked (`off`).
+    // file gets one, unless Offered itself was sent, or goes with the price unticked (`off`). A size
+    // of a hidden style is in the designer neither before nor after: it doesn't show that style.
     let active = activeTo !== undefined ? activeTo : before.active;
     if (activeTo === undefined && s.price == null && price != null) active = !(offTo !== undefined ? offTo : waitOff);
-    // `zero`: this change puts the size at $0 in the designer (ssPgFreeAt's rule): its price set to
-    // exactly 0, the server not holding 0 already, and the size offered once it saves.
-    const nowShown = active && price != null;
-    const zero = nowShown && ssPgSame(price, 0) && mine.some((d) => d.f === "price") && !ssPgSame(ssPgVal(s, "price"), 0);
-    sizes.push({ id: t.id, name: where, prices, options, offered, wasShown: before.active && before.price != null, nowShown, zero });
+    const styleShown = !!(r.style && r.style.active);
+    const nowShown = styleShown && active && price != null;
+    // `zero`: this change puts the size at $0 in the designer, by ssPgZeroNew's rule: free once it
+    // saves (at exactly 0 and offered) and not free before it (ssPgFreeAt, the queue as drawn now),
+    // and the server not holding it at 0 and offered already.
+    const zero = nowShown && ssPgSame(price, 0) && !ssPgFreeAt(q, t.id) && !(ssPgSame(ssPgVal(s, "price"), 0) && ssPgVal(s, "active"));
+    sizes.push({ id: t.id, name: where, prices, options, offered, wasShown: styleShown && before.active && before.price != null, nowShown, zero });
   });
   if (problems) return { ok: false, error: `${first}${problems > 1 ? ` ${problems - 1} more ${problems === 2 ? "problem" : "problems"}.` : ""}`, problems };
   return { ok: true, edits, sizes };
@@ -4830,7 +4833,8 @@ function ssPgChangeSummary(sizes) {
 // draws it: its price as drawn is exactly 0, and it is offered, or will be once that price saves:
 // its Offered as drawn or waiting to save, or, for a first price (none on file), the tick the server
 // gives it with that price unless a paste said "no" with it (`off`, ssPgBuildBatch). A size being
-// removed is not.
+// removed is not. The queue knows no styles: the callers leave out a hidden style's sizes
+// (ssPgHiddenStyleSizes).
 function ssPgFreeAt(q, id) {
   const s = q && q.sizes ? q.sizes[id] : null;
   if (!s || (q.removes && q.removes[id])) return false;
@@ -4843,25 +4847,34 @@ function ssPgFreeAt(q, id) {
   return !!s.active;
 }
 
-// Which of `ids` (the sizes a commit, a paste, a fill or a clear touched) that change just put at $0
-// in the designer: free now (ssPgFreeAt, on `after`, the queue after it), drawn at another price
-// before (`before`, the queue before it), and not at 0 on the server already, so typing 0 again over
-// a 0, a resend, or a 0 already stored (typed earlier, or from the Excel upload) says nothing. A box
-// the commit rule turned red took nothing, so it is not counted. → those ids, each once, in order.
-function ssPgZeroNew(before, after, ids) {
+// Which of `ids` (the sizes a commit, a paste, a fill or a clear touched: a price, an Offered tick or
+// anything else) that change just put at $0 in the designer: free after it (ssPgFreeAt on `after`,
+// the queue after it) and not free before it (on `before`, the queue before it), so a 0 typed on a
+// size with Offered unticked says nothing until Offered is ticked, and then it does; and not held at
+// 0 and offered by the server already, so typing 0 again over a 0, a resend, or a 0 already stored
+// (typed earlier, or from the Excel upload) says nothing. This is the confirm's `zero` mark
+// (ssPgPlanCells), so the two count the same sizes. A size of a hidden style (`hidden`, { [id]: true },
+// ssPgHiddenStyleSizes) is not in the designer at all, and a box the commit rule turned red took
+// nothing: neither is counted. → those ids, each once, in order.
+function ssPgZeroNew(before, after, ids, hidden) {
   const out = [];
   const seen = {};
-  const was = (id) => {
-    const s = before && before.sizes ? before.sizes[id] : null;
-    const x = before && before.fields && before.fields[id] ? before.fields[id].price : null;
-    return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, "price");
-  };
   (ids || []).forEach((id) => {
     if (seen[id]) return;
     seen[id] = true;
     const s = after && after.sizes ? after.sizes[id] : null;
-    if (s && !ssPgSame(was(id), 0) && !ssPgSame(ssPgVal(s, "price"), 0) && ssPgFreeAt(after, id)) out.push(id);
+    if (!s || (hidden && hidden[id])) return;
+    if (ssPgSame(ssPgVal(s, "price"), 0) && ssPgVal(s, "active")) return;
+    if (ssPgFreeAt(after, id) && !ssPgFreeAt(before, id)) out.push(id);
   });
+  return out;
+}
+
+// The sizes of the hidden styles ({ [sizeId]: true }, from the model the grid draws): the designer
+// doesn't show a hidden style at all, so none of its sizes is free there, whatever its price.
+function ssPgHiddenStyleSizes(model) {
+  const out = {};
+  ((model && model.hiddenStyles) || []).forEach((st) => ((st && st.sizes) || []).forEach((z) => { out[z.id] = true; }));
   return out;
 }
 
@@ -4880,26 +4893,30 @@ function ssPgZeroText(ids, nameOf) {
 // The Excel upload's $0 sizes (Settings > Sheds, "⬆ Upload filled sheet"), counted in the browser
 // from the rows it sends, by the importer's own rules (pricingImport.ts): a price is blank, or a
 // number once `$`, commas and spaces are stripped (so "$0", "0.00" and " 0 " are all 0); a row needs
-// a style the account knows (`styles`: label or key, any case; none given, any name) and a width and
-// length above 0; a later row for the same size wins; `active` no, n, 0, false or inactive hides it.
-// → how many sizes the sheet leaves at $0 in the designer.
+// a style the account knows (`styles`: label or key, any case; with none, the importer skips every
+// row as an unknown style, and nothing counts) and a width and length above 0; a later row for the
+// same size wins; `active` no, n, 0, false or inactive hides it. A size of a hidden style (its
+// `active` false) is saved all the same, but the designer doesn't show that style, so it isn't free
+// there and doesn't count. → how many sizes the sheet leaves at $0 in the designer.
 function ssPricingSheetZeros(rows, styles) {
-  const byName = {};
+  const byName = {}, hidden = {};
   (Array.isArray(styles) ? styles : []).forEach((st) => [st && st.label, st && st.key].forEach((t) => {
     const k = String(t == null ? "" : t).trim().toLowerCase();
-    if (k) byName[k] = st.id == null ? k : st.id;
+    if (!k) return;
+    byName[k] = st.id == null ? k : st.id;
+    if (st.active === false) hidden[byName[k]] = true;
   }));
-  const known = Object.keys(byName).length > 0;
   const num = (v) => (v === "" || v == null ? { blank: true, n: NaN } : { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) });
   const off = (v) => ["no", "n", "0", "false", "inactive"].includes(String(v == null ? "" : v).trim().toLowerCase());
   const last = {};
   (Array.isArray(rows) ? rows : []).forEach((r) => {
     const name = String(r && r.style != null ? r.style : "").trim().toLowerCase();
-    if (!name || (known && byName[name] == null)) return;
+    if (!name || byName[name] == null) return;
     const w = num(r.width), l = num(r.length), p = num(r.price);
     if (w.blank || l.blank || !Number.isFinite(w.n) || !Number.isFinite(l.n) || w.n <= 0 || l.n <= 0) return;
     if (!p.blank && (!Number.isFinite(p.n) || p.n < 0)) return;
-    last[`${known ? byName[name] : name}|${w.n}|${l.n}`] = !p.blank && p.n === 0 && !off(r.active);
+    const id = byName[name];
+    last[`${id}|${w.n}|${l.n}`] = !hidden[id] && !p.blank && p.n === 0 && !off(r.active);
   });
   return Object.keys(last).filter((k) => last[k]).length;
 }
@@ -12159,10 +12176,12 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     return next;
   };
   // The $0 note: a change (`before` → `after`, around one apply) that just put sizes at $0 in the
-  // designer (ssPgZeroNew; `ids` the sizes whose price it set) says so on the status line, one note
-  // per change. It never holds the save back: the change is already in the queue.
+  // designer (ssPgZeroNew; `ids` the sizes it touched: a typed price, an Offered tick, a paste, a
+  // fill or a clear) says so on the status line, one note per change. A hidden style's sizes are
+  // never named: the designer doesn't show that style. It never holds the save back: the change is
+  // already in the queue.
   const noteZero = (before, after, ids) => {
-    const z = ssPgZeroNew(before, after, ids);
+    const z = ssPgZeroNew(before, after, ids, ssPgHiddenStyleSizes(model));
     if (z.length) setZeroIds(z);
   };
   const fieldOf = (col) => (col === 1 ? "price" : col === 2 ? "active" : model && model.cols[col - 3] ? "c:" + model.cols[col - 3].key : null);
@@ -12621,7 +12640,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     // Offered needs a price on file (the server ticks it with the first one): plan 3.9.
     if (qRef.current.sizes[cell.sizeId].price == null || shownOf(cell.sizeId, "price") == null) { setTip(SS_PG_ADD_PRICE + "."); return; }
     backToWork();
-    apply({ type: "commit", sizeId: cell.sizeId, f: "active", value: !shownOf(cell.sizeId, "active"), at: Date.now() });
+    // Ticking Offered on a size at $0 puts it in the designer free: the same note as typing the 0.
+    const was = qRef.current;
+    const st = apply({ type: "commit", sizeId: cell.sizeId, f: "active", value: !shownOf(cell.sizeId, "active"), at: Date.now() });
+    noteZero(was, st, [cell.sizeId]);
   };
   // Delete or Backspace on one box (plan 3.10): a blank price, an empty option, Offered unticked.
   // Never asks: only a change to more than one size does (plan 3.12: a range goes through clearSel).
@@ -12760,7 +12782,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     setTip(null);
     const was = qRef.current;
     apply({ type: "commits", edits, at: Date.now() });
-    noteZero(was, qRef.current, edits.filter((d) => d.f === "price").map((d) => d.sizeId));
+    noteZero(was, qRef.current, edits.map((d) => d.sizeId));
     sendNow();
     if (area) {
       setActive({ sizeId: area.first, col: area.c0 });
@@ -13030,15 +13052,16 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     earlierLine = ssPgEarlierText(earlierRed, where, fields);
   }
   // The $0 note (ssPgZeroText), for the sizes of the last such change still at $0 in the designer as
-  // drawn now (ssPgFreeAt): it goes by itself once the builder clears the price, unticks Offered or
-  // types another price, and a page that can't edit never shows it.
+  // drawn now (ssPgFreeAt) and not in a hidden style: it goes by itself once the builder clears the
+  // price, unticks Offered or types another price, and a page that can't edit never shows it.
   let zeroLine = "";
   if (zeroIds && canEdit && q && model) {
     const nameOf = (id) => {
       for (const st of [...model.styles, ...model.hiddenStyles]) { const z = st.sizes.find((x) => x.id === id); if (z) return `${st.label} ${z.label}`; }
       return "";
     };
-    zeroLine = ssPgZeroText(zeroIds.filter((id) => ssPgFreeAt(q, id)), nameOf);
+    const hid = ssPgHiddenStyleSizes(model);
+    zeroLine = ssPgZeroText(zeroIds.filter((id) => ssPgFreeAt(q, id) && !hid[id]), nameOf);
   }
   const tableW = SS_PG_FROZEN_W + SS_PG_COL_W * (ncols - 3);
   // Leaving was called off (`stuck`): the badge says why (stopped, retrying, view only), this says

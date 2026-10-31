@@ -548,13 +548,19 @@ Deno.test("the $0 note: typing and a paste, fill or clear say when they put size
   assert(typed.indexOf("const was = qRef.current;") < t1, "…and `was` is the queue before the commit");
   const change = between(page, "const applyChange = (edits, area) => {", "\n  };", "applyChange");
   const c1 = change.indexOf(`apply({ type: "commits", edits, at: Date.now() });`);
-  assert(c1 > 0 && change.indexOf(`noteZero(was, qRef.current, edits.filter((d) => d.f === "price").map((d) => d.sizeId));`) > c1
-    && change.indexOf("const was = qRef.current;") < c1, "a paste, a fill or a clear: one note for the whole change, after it is in the queue");
+  assert(c1 > 0 && change.indexOf(`noteZero(was, qRef.current, edits.map((d) => d.sizeId));`) > c1
+    && change.indexOf("const was = qRef.current;") < c1, "a paste, a fill or a clear: one note for the whole change (its prices and its Offered boxes), after it is in the queue");
+  // Ticking Offered on a size at $0 puts it in the designer free: the same note (the review of 10-31).
+  const tick = between(page, "const toggleOffered = (cell) => {", "\n  };", "toggleOffered");
+  const k1 = tick.indexOf(`const st = apply({ type: "commit", sizeId: cell.sizeId, f: "active", value: !shownOf(cell.sizeId, "active"), at: Date.now() });`);
+  assert(k1 > 0 && tick.indexOf("noteZero(was, st, [cell.sizeId]);") > k1 && tick.indexOf("const was = qRef.current;") < k1, "an Offered tick is judged after it is in the queue, against the queue before it");
   const note = between(page, "const noteZero = (before, after, ids) => {", "\n  };", "noteZero");
-  assert(note.includes("const z = ssPgZeroNew(before, after, ids);") && note.includes("if (z.length) setZeroIds(z);"), "the note names what ssPgZeroNew found, and only then");
+  assert(note.includes("const z = ssPgZeroNew(before, after, ids, ssPgHiddenStyleSizes(model));") && note.includes("if (z.length) setZeroIds(z);"),
+    "the note names what ssPgZeroNew found, and only then, never a hidden style's size");
   assert(!note.includes("return false") && !note.includes("apply("), "the note never holds a save back");
   assert(page.includes("if (zeroIds && canEdit && q && model) {"), "a page that can't edit never draws the note");
-  assert(page.includes("zeroLine = ssPgZeroText(zeroIds.filter((id) => ssPgFreeAt(q, id)), nameOf);"), "it follows what is drawn now: a size taken off $0 drops out");
+  assert(page.includes("const hid = ssPgHiddenStyleSizes(model);\n    zeroLine = ssPgZeroText(zeroIds.filter((id) => ssPgFreeAt(q, id) && !hid[id]), nameOf);"),
+    "it follows what is drawn now: a size taken off $0, or whose style is hidden, drops out");
   assert(page.includes(`: zeroLine ? <PgStatusLine tone="amber" action={dismissBtn(() => setZeroIds(null))}>{zeroLine}</PgStatusLine> : null}`), "on the status line, dismissable");
 });
 

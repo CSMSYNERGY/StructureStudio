@@ -3438,7 +3438,7 @@ if (want("H")) {
 // savable; the table and the Excel upload only say what it does. ──
 if (want("Z")) {
   const cat = catalogFor(OWN);
-  const F = fakeServer(cat, tableFor(OWN, cat));
+  const F = fakeServer(cat, tableFor(OWN, cat, { hiddenStyle: true }));
   const t = F.table(OWN);
   const barn = barnOf(t);
   const first = barn.find((z) => z.base_price == null);
@@ -3495,6 +3495,14 @@ if (want("Z")) {
   const sv4 = await saved(page, calls, n0);
   ok("Z: a 0 on a size with Offered unticked saves and says nothing (it isn't in the designer)", sv4 && F.size(z2.id).base_price === 0 && F.size(z2.id).active === false
     && (await statusText(page)) === "", JSON.stringify({ st: await statusText(page), size: F.size(z2.id) }));
+  // 4b. …until Offered is ticked on it: then it is free in the designer, and the note says so.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(z2.id, 2)).click();
+  await page.keyboard.press("Space");
+  const sv4b = await saved(page, calls, n0);
+  const st4b = await statusText(page);
+  ok("Z: …and ticking Offered on that $0 size then says so", sv4b && F.size(z2.id).base_price === 0 && F.size(z2.id).active === true && st4b === one(z2),
+    JSON.stringify({ st4b, size: F.size(z2.id) }));
   // 5. A paste of 0 onto two offered sizes: the confirm counts them, Continue saves, one note counts them.
   await page.locator(sel(z3.id, 1)).click();
   await clip.paste(page, "0\r\n0\r\n");
@@ -3516,6 +3524,50 @@ if (want("Z")) {
   const sv6 = await saved(page, calls, n0);
   const st6 = await statusText(page);
   ok("Z: a one-row fill of $0 saves at once and the note names the size", sv6 && !(await confirmOf(page)) && F.size(z5.id).base_price === 0 && st6 === one(z5), st6);
+  // 7. The confirm and the note count the same sizes. A first price of 0 pasted with Offered "no" (one
+  // size: at once), then "0 / yes" over it and the offered size under it: both end up free.
+  const under = barn[barn.indexOf(first) + 1];
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(first.id, 1)).click();
+  await clip.paste(page, "0\tno\r\n");
+  const sv7a = await saved(page, calls, n0);
+  ok("Z: a first price of 0 pasted with Offered no saves unoffered and says nothing", sv7a && F.size(first.id).base_price === 0 && F.size(first.id).active === false
+    && !(await confirmOf(page)) && (await statusText(page)) === one(z5), JSON.stringify({ st: await statusText(page), size: F.size(first.id) }));
+  await page.locator(sel(first.id, 1)).click();
+  await clip.paste(page, "0\tyes\r\n0\tyes\r\n");
+  const cf7 = await confirmOf(page);
+  ok("Z: \"0 / yes\" over it and an offered size: the confirm counts both at $0", !!cf7 && offered(under)
+    && cf7.text === `Change 2 sizes, ${named(first)} to ${named(under)}: 1 price, 2 sizes at $0 (free in your designer), 1 size now offered in your designer. Continue?`,
+    JSON.stringify(cf7));
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Enter");
+  const sv7 = await saved(page, calls, n0);
+  const st7 = await statusText(page);
+  ok("Z: …and after Continue the note counts the same two", sv7 && [first, under].every((z) => F.size(z.id).base_price === 0 && F.size(z.id).active === true)
+    && st7 === "2 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.", JSON.stringify({ st7, sizes: [F.size(first.id), F.size(under.id)] }));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click();
+  // 8. A hidden style isn't in the designer at all: a 0 typed or pasted on its sizes saves and says
+  // nothing about $0, and the confirm counts nothing as leaving or joining the designer.
+  await page.locator(".ss-pg-hs button").click();
+  const retired = t.sizes.filter((z) => z.style_id === t.styles[t.styles.length - 1].id).sort((a, b) => a.sort_order - b.sort_order);
+  const [r0, r2, r3] = [retired[0], retired[2], retired[3]];
+  const rName = (z) => `Test Retired Style ${z.label}`;
+  ok("Z: the fixture: a hidden style with priced, ticked sizes", t.styles[t.styles.length - 1].active === false && [r0, r2, r3].every((z) => z && z.base_price != null && z.active),
+    JSON.stringify([r0, r2, r3]));
+  n0 = saveCalls(calls).length;
+  await typeIn(page, r0.id, 1, "0");
+  const sv8 = await saved(page, calls, n0);
+  const st8 = await statusText(page);
+  ok("Z: a 0 typed on a hidden style's size saves and says nothing about $0", sv8 && F.size(r0.id).base_price === 0 && st8 === "", JSON.stringify({ st8, size: F.size(r0.id) }));
+  await page.locator(sel(r2.id, 1)).click();
+  await clip.paste(page, "0\r\n0\r\n");
+  const cf8 = await confirmOf(page);
+  ok("Z: a paste of 0 on two of its sizes: the confirm counts the prices only", !!cf8 && cf8.text === `Change 2 sizes, ${rName(r2)} to ${rName(r3)}: 2 prices. Continue?`, JSON.stringify(cf8));
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Enter");
+  const sv8b = await saved(page, calls, n0);
+  const st8b = await statusText(page);
+  ok("Z: …and Continue saves them with no $0 note", sv8b && F.size(r2.id).base_price === 0 && F.size(r3.id).base_price === 0 && st8b === "", st8b);
   ok("Z: no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
@@ -3541,7 +3593,7 @@ if (want("Z")) {
 }
 // On Sheds: the Excel upload's $0 sizes, counted from the sheet by the importer's own rules.
 if (want("Z")) {
-  const { ctx, page, calls, errors } = await open("/settings/sheds");
+  const { ctx, page, calls, errors } = await open("/settings/sheds", { table: (cid) => tableFor(cid, catalogFor(cid), { hiddenStyle: true }) });
   await page.waitForSelector("text=Open sizes & prices table", { timeout: 20000 });
   const steps = await page.evaluate(() => [...document.querySelectorAll("p")].map((p) => p.textContent).find((x) => /Using Excel:/.test(x)) || "");
   ok("Z: the Excel instructions say $0 is free", steps.includes("A blank price — or active = no — hides that size from your designer. A price of 0 doesn't hide a size: it shows in your designer as free."),
@@ -3559,9 +3611,9 @@ if (want("Z")) {
     });
   };
   // Three sizes at $0 ("$0", "0.00", "$0.00"); a 0 with active "no" is hidden, a blank price is hidden,
-  // and 1500 is a price: none of those count.
+  // 1500 is a price, and a 0 in a hidden style isn't in the designer: none of those count.
   const u1 = await upload("style,width,length,price,active\nTest Barn,10,12,$0,yes\nTest Barn,10,16,0.00,\nTest Barn,12,12,$0.00,yes\n"
-    + "Test Barn,12,16,0,no\nTest Barn,12,20,,yes\nTest Barn,8,12,1500,yes\n");
+    + "Test Barn,12,16,0,no\nTest Barn,12,20,,yes\nTest Barn,8,12,1500,yes\nTest Retired Style,8,12,0,yes\n");
   ok("Z: an upload with sizes priced $0 says how many under its result, and that blank or active no hides one",
     !!u1.ok && u1.under && u1.zero === "3 sizes in the sheet are priced $0, so they're free in your designer. To hide a size, leave its price blank or put no in the active column.",
     JSON.stringify(u1));

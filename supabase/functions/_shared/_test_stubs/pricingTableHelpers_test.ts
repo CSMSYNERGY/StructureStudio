@@ -1774,7 +1774,7 @@ Deno.test("ssPgEarlierText: the backup's red entries, named for the status line"
 // Lifted the same way, from the shipped text. The VIEW is what the page hands them: the drawn rows
 // (ssPgRows), the drawn size ids, the option columns, Real-Time Pricing, and the save queue.
 const P4B = ["function ssPgParseTsv(text) {", "function ssPgToTsv(rows) {", "function ssPgParseOffered(text) {",
-  "function ssPgSelectionBlock(view, ids, c0, c1) {", "function ssPgOffLost(q, d) {", "function ssPgPlanCells(view, targets, opts) {",
+  "function ssPgSelectionBlock(view, ids, c0, c1) {", "function ssPgOffLost(q, d) {", "function ssPgFreeAt(q, id) {", "function ssPgPlanCells(view, targets, opts) {",
   "function ssPgPastePlan(view, at, block, opts) {", "function ssPgFillPlan(view, sel, opts) {", "function ssPgClearPlan(view, sel, opts) {",
   "function ssPgChangeSummary(sizes) {"].map(lift).join("\n");
 const K = new Function(`${PURE}\n${SAVE}\n${P4}\n${P4B}; return { ssPgParseTsv, ssPgToTsv, ssPgParseOffered, ssPgSelectionBlock, ssPgOffLost, ssPgPlanCells,
@@ -2112,9 +2112,9 @@ Deno.test("ssPgChangeSummary: names the first and last size, counts prices, size
 
 // ─── The $0 note (Ahsan, after Carolyn's call on 10-30: a builder typed 0 on the sizes he didn't
 // sell, meaning "take these away"; $0 is a real price, and the designer offers such a size free) ───
-const ZERO = ["function ssPgFreeAt(q, id) {", "function ssPgZeroNew(before, after, ids) {", "function ssPgZeroText(ids, nameOf) {",
-  "function ssPricingSheetZeros(rows, styles) {"].map(lift).join("\n");
-const ZN = new Function(`${PURE}\n${SAVE}\n${ZERO}; return { ssPgFreeAt, ssPgZeroNew, ssPgZeroText, ssPricingSheetZeros };`)() as Record<string, (...a: Any[]) => Any>;
+const ZERO = ["function ssPgFreeAt(q, id) {", "function ssPgZeroNew(before, after, ids, hidden) {", "function ssPgHiddenStyleSizes(model) {",
+  "function ssPgZeroText(ids, nameOf) {", "function ssPricingSheetZeros(rows, styles) {"].map(lift).join("\n");
+const ZN = new Function(`${PURE}\n${SAVE}\n${ZERO}; return { ssPgFreeAt, ssPgZeroNew, ssPgHiddenStyleSizes, ssPgZeroText, ssPricingSheetZeros };`)() as Record<string, (...a: Any[]) => Any>;
 
 Deno.test("ssPgFreeAt: at $0 as drawn and offered, or offered once that first price saves; a paste's Offered \"no\" or a size being removed is not", () => {
   const db = DB();
@@ -2181,6 +2181,44 @@ Deno.test("ssPgZeroNew: a price just set to 0 on an offered size says so; a 0 al
   assertEquals([ZN.ssPgZeroNew(null, null, [B]), ZN.ssPgZeroNew(q0, q0, null)], [[], []]);
 });
 
+Deno.test("ssPgZeroNew: free after the change and not before it, so ticking Offered on a size at $0 says so; the server's own $0 offered, or a hidden style's size, never", () => {
+  const step = (q: Any, ...ev: Any[]): [Any, Any] => [q, Q(q, ...ev)];
+  // The review's case: A is $500 on file with Offered unticked. A 0 typed says nothing (it isn't in
+  // the designer)…
+  const dbU = DB();
+  dbU[A].price = 500;
+  dbU[A].active = false;
+  let [b, a] = step(start(dbU), commit(A, "price", 0));
+  assertEquals(ZN.ssPgZeroNew(b, a, [A]), [], "unticked: not free in the designer");
+  // …until Offered is ticked, and then it does: the size is free in the designer now.
+  [b, a] = step(a, commit(A, "active", true));
+  assertEquals([ZN.ssPgFreeAt(a, A), ZN.ssPgZeroNew(b, a, [A])], [true, [A]]);
+  // The same once that 0 has saved unticked: ticking Offered is what puts it in the designer free.
+  const db0 = DB();
+  db0[A].price = 0;
+  db0[A].active = false;
+  [b, a] = step(start(db0), commit(A, "active", true));
+  assertEquals(ZN.ssPgZeroNew(b, a, [A]), [A], "a $0 on file, unticked, then ticked");
+  // Unticking says nothing, nor does ticking a size at another price.
+  [b, a] = step(start(DB()), commit(B, "active", false));
+  assertEquals(ZN.ssPgZeroNew(b, a, [B]), []);
+  [b, a] = step(start(dbU), commit(A, "active", true));
+  assertEquals(ZN.ssPgZeroNew(b, a, [A]), []);
+  // The server holds A at $0 and offered: unticked, then ticked back (nothing left to send), says nothing.
+  const dbF = DB();
+  dbF[A].price = 0;
+  [b, a] = step(Q(start(dbF), commit(A, "active", false)), commit(A, "active", true));
+  assertEquals([ZN.ssPgFreeAt(b, A), ZN.ssPgFreeAt(a, A), ZN.ssPgZeroNew(b, a, [A])], [false, true, []], "back to what is on file");
+  // A size of a hidden style is never named: the designer doesn't show that style.
+  [b, a] = step(start(DB()), commit(B, "price", 0));
+  assertEquals([ZN.ssPgZeroNew(b, a, [B]), ZN.ssPgZeroNew(b, a, [B], { [B]: true }), ZN.ssPgZeroNew(b, a, [B], {})], [[B], [], [B]]);
+});
+
+Deno.test("ssPgHiddenStyleSizes: the sizes of the hidden styles, as the grid draws them", () => {
+  assertEquals(ZN.ssPgHiddenStyleSizes(M4()), { [Z6]: true }, "Test Old Style 6x8");
+  assertEquals([ZN.ssPgHiddenStyleSizes(null), ZN.ssPgHiddenStyleSizes({ styles: [] })], [{}, {}]);
+});
+
 Deno.test("ssPgZeroText: one size named, more counted; plain words; nothing for none", () => {
   const names: Record<string, string> = { [A]: "Test Barn 10x12" };
   assertEquals(ZN.ssPgZeroText([A], (id: string) => names[id] || ""),
@@ -2211,6 +2249,51 @@ Deno.test("ssPgPlanCells: a size the change puts at $0 in the designer is marked
   assertEquals(K.ssPgClearPlan(v, { r0: 0, r1: 2, c0: 1, c1: 1 }).sizes.map((s: Any) => s.zero), [false, false]);
 });
 
+Deno.test("the confirm and the $0 note count the same sizes: ssPgPlanCells' zero mark is what ssPgZeroNew finds once the change is in the queue", () => {
+  const m = M4();
+  const hidden = ZN.ssPgHiddenStyleSizes(m);
+  // A paste planned on the queue `q`, then put in as the page does: [the confirm's zero sizes, the
+  // note's sizes, the confirm's question, the queue after].
+  const both = (q: Any, at: Any, block: string[][], opts: Any = {}): [string[], string[], string, Any] => {
+    const p = K.ssPgPastePlan(viewOf(m, opts, q), at, block);
+    assert(p.ok, p.error);
+    const after = Q(q, { type: "commits", edits: p.edits, at: 1 });
+    return [p.sizes.filter((s: Any) => s.zero).map((s: Any) => s.id), ZN.ssPgZeroNew(q, after, p.edits.map((d: Any) => d.sizeId), hidden),
+      K.ssPgChangeSummary(p.sizes).text, after];
+  };
+  const q0 = viewOf(m).q;
+  // The review's case: a first price of 0 pasted with Offered "no" on 10x16 (no price), still waiting
+  // to be sent; then "0 / yes" over 10x16 and 12x24 ($4,800, offered). Both are free in the designer
+  // after it, and the confirm and the note both say 2.
+  const [z1, n1, , q1] = both(q0, { sizeId: Z2, col: 1 }, [["0", "no"]]);
+  assertEquals([z1, n1, field(q1, Z2, "price").pending.off], [[], [], true]);
+  const [z2, n2, text2] = both(q1, { sizeId: Z2, col: 1 }, [["0", "yes"], ["0", "yes"]]);
+  assertEquals([z2, n2], [[Z2, Z3], [Z2, Z3]]);
+  assertEquals(text2, "Change 2 sizes, Test Barn 10x16 to Test Barn 12x24: 1 price, 2 sizes at $0 (free in your designer), 1 size now offered in your designer. Continue?");
+  // Test Utility 8x10 ($2,100.50, Offered unticked): a 0 pasted says nothing; "yes" pasted after it,
+  // over the waiting 0, does, in the confirm and the note alike. In one paste, the same.
+  const [z3, n3, , q3] = both(q0, { sizeId: Z4, col: 1 }, [["0", "no"]]);
+  assertEquals([z3, n3], [[], []]);
+  const [z4, n4] = both(q3, { sizeId: Z4, col: 1 }, [["0", "yes"]]);
+  assertEquals([z4, n4], [[Z4], [Z4]]);
+  const [z5, n5, text5] = both(q0, { sizeId: Z4, col: 1 }, [["0", "yes"], ["0", "yes"]]);
+  assertEquals([z5, n5], [[Z4, Z5], [Z4, Z5]]);
+  assertEquals(text5, "Change 2 sizes, Test Utility 8x10 to Test Utility 8x12: 2 prices, 2 sizes at $0 (free in your designer), 1 size now offered in your designer. Continue?");
+  // 10x12, at $0 and offered on file: an option pasted beside its 0 changes nothing about $0.
+  const [z6, n6] = both(q0, { sizeId: Z1, col: 1 }, [["0", "yes", "5"], ["0", "no", ""]]);
+  assertEquals([z6, n6], [[], []]);
+  // Test Old Style 6x8 ($999, offered, in a hidden style): not in the designer, so neither says $0,
+  // and the confirm counts it neither as leaving the designer nor as joining it.
+  const open = { hiddenStylesOpen: true };
+  const [z7, n7] = both(q0, { sizeId: Z6, col: 1 }, [["0"]], open);
+  assertEquals([z7, n7], [[], []]);
+  const vo = viewOf(m, open);
+  const r = vo.order.indexOf(Z6);
+  const cleared = K.ssPgClearPlan(vo, { r0: r, r1: r, c0: 1, c1: 2 });
+  assertEquals(cleared.sizes.map((s: Any) => [s.wasShown, s.nowShown]), [[false, false]]);
+  assertEquals(K.ssPgChangeSummary(cleared.sizes).hidden, 0);
+});
+
 Deno.test("ssPricingSheetZeros: the sheet's sizes left at $0 in the designer, by the importer's own rules", () => {
   const styles = [{ id: "s1", label: "Test Barn", key: "test-barn" }, { id: "s2", label: "Test Utility", key: "test-utility" }];
   const row = (style: Any, width: Any, length: Any, price: Any, active: Any = "") => ({ style, width, length, price, active, inclusions: {} });
@@ -2227,7 +2310,14 @@ Deno.test("ssPricingSheetZeros: the sheet's sizes left at $0 in the designer, by
   const skipped = [row("", 10, 12, "0"), row("Test Shed", 10, 12, "0"), row("Test Barn", "", 12, "0"), row("Test Barn", 0, 12, "0"),
     row("Test Barn", "ten", 12, "0"), row("Test Barn", 10, -2, "0")];
   assertEquals(ZN.ssPricingSheetZeros(skipped, styles), 0);
-  assertEquals(ZN.ssPricingSheetZeros(skipped, null), 1, "no styles given: any style name counts (Test Shed); the empty one and the bad sizes still don't");
+  // No styles on the account: the importer skips every row as an unknown style, so nothing is at $0.
+  assertEquals([ZN.ssPricingSheetZeros(skipped, null), ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "0")], []), ZN.ssPricingSheetZeros(zeros, null)], [0, 0, 0],
+    "no styles: nothing counts, as the importer imports nothing");
+  // A hidden style's sizes are saved all the same, but the designer doesn't show that style: not free there.
+  const withHidden = [...styles.map((s) => ({ ...s, active: true })), { id: "s3", label: "Test Old Style", key: "test-old", active: false }];
+  assertEquals(ZN.ssPricingSheetZeros([row("Test Old Style", 6, 8, "0"), row("test-old", 6, 10, "$0"), row("Test Barn", 10, 12, "0")], withHidden), 1,
+    "only Test Barn 10x12");
+  assertEquals(ZN.ssPricingSheetZeros(zeros, withHidden), 6, "the shown styles count as before");
   // The same size twice: the later row wins, as the importer's; label and key are one style.
   assertEquals(ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "0"), row("test-barn", "10.0", 12, "4800")], styles), 0);
   assertEquals(ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "4800"), row("test-barn", 10, 12, "$0")], styles), 1);
