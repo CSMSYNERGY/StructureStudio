@@ -1341,6 +1341,50 @@ Deno.test("ssPgBackup: a box typed again while its value is in flight keeps both
   }
 });
 
+// The editor's text counts as typed (plan 3.10), and committing a value equal to its box's baseline
+// drops the unsent edit (commitBox). The backup used to skip such a draft and keep the edit, so Save
+// them sent the very value the builder had typed back over.
+Deno.test("ssPgBackup: the editor's text back where its box's unsent edit started takes that edit out, as committing it would; Save them never sends what was typed back over", () => {
+  const db = DB();
+  // 400 on file, 450 typed and unsent (a call out, a big paste or a retry holds it), the editor
+  // opened on it again and "400" typed back, then the tab closed.
+  const q1 = Q(start(db), commit(A, "price", 450), commit(A, "c:loft", 60));
+  const b1 = G.ssPgBackup(q1, { sizeId: A, key: "price", text: "400", seen: 450 }, 1, null);
+  assertEquals(b1.sizes, { [A]: { base: V0, fields: { "c:loft": { to: 60, from: 50 } } } }, "the price edit is gone; the size's other box stays");
+  assertEquals(G.ssPgBackup(Q(q1, commit(A, "price", 400)), null, 1, null).sizes, b1.sizes, "the same as committing the 400");
+  assertEquals(Object.keys(G.ssPgBackupLoad(JSON.stringify(b1), 1).sizes[A].fields), ["c:loft"]);
+  assertEquals(G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(db), commit(A, "price", 450)), { sizeId: A, key: "price", text: "$400", seen: 450 }, 1, null)), 1), null,
+    "nothing else waiting: nothing to offer");
+  assertEquals(G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(db), commit(A, "c:loft", 60)), { sizeId: A, key: "c:loft", text: "50", seen: 60 }, 1, null)), 1), null,
+    "an option box the same way");
+  // 480 in flight, 500 typed after it, then "480" typed in the editor: what is in flight is left,
+  // from where it started, and the 500 is gone.
+  const out = Q(start(db), commit(A, "price", 480), { type: "send" }, commit(A, "price", 500));
+  const b2 = G.ssPgBackup(out, { sizeId: A, key: "price", text: "480", seen: 500 }, 1, null);
+  assertEquals(b2.sizes[A].fields.price, { to: 480, from: 400 });
+  assertEquals(G.ssPgBackup(Q(out, commit(A, "price", 480)), null, 1, null).sizes, b2.sizes, "the same as committing the 480");
+  const l2 = G.ssPgBackupLoad(JSON.stringify(b2), 1);
+  const landed = DB();
+  landed[A].price = 480; landed[A].version = nextV();
+  const [r1] = roundTrip(Q(start(landed), { type: "restore", sizes: l2.sizes, at: 2 }), landed);
+  assertEquals([landed[A].price, S.ssPgCount(r1).pending, S.ssPgCount(r1).red], [480, 0, 0], "the 480 landed before the tab closed: Save them changes nothing, never 500");
+  const lost = DB();
+  const [r2] = roundTrip(Q(start(lost), { type: "restore", sizes: l2.sizes, at: 2 }), lost);
+  assertEquals([lost[A].price, S.ssPgCount(r2).red], [480, 0], "the 480 never landed: it goes again, never 500");
+  // A size still being added, $5,000 typed on it, then the editor cleared: no price goes with it
+  // (a first price would also tick Offered).
+  const adding = Q(start(db), { type: "create", id: Z, styleId: sid(1), width: 10, length: 16, at: 0 }, commit(Z, "price", 5000));
+  const b3 = G.ssPgBackup(adding, { sizeId: Z, key: "price", text: "", seen: 5000 }, 1, null);
+  assertEquals(b3.creates, { [Z]: { styleId: sid(1), width: 10, length: 16, fields: {} } });
+  assertEquals(G.ssPgBackupLoad(JSON.stringify(b3), 1), null, "nothing typed on it is left");
+  assertEquals(G.ssPgBackup(Q(adding, commit(Z, "price", null)), null, 1, null), null, "the same as committing the blank");
+  const b4 = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(adding, commit(Z, "c:loft", 40)), { sizeId: Z, key: "price", text: "", seen: 5000 }, 1, null)), 1);
+  assertEquals(b4.creates[Z].fields, { "c:loft": { to: 40, from: 0, at: 1 } }, "another box typed on it comes back with the size; the price doesn't");
+  // Text that differs is unchanged: the edit is stored, and ssPgBackupLoad puts the draft in its place.
+  const b5 = G.ssPgBackup(Q(start(db), commit(A, "price", 450)), { sizeId: A, key: "price", text: "420", seen: 450 }, 1, null);
+  assertEquals([b5.sizes[A].fields.price, G.ssPgBackupLoad(JSON.stringify(b5), 1).sizes[A].fields.price], [{ to: 450, from: 400 }, { to: 420, from: 400, at: 1 }]);
+});
+
 Deno.test("ssPgBackup and ssPgBackupLoad: an entry kept from an older backup keeps its own age, so an unanswered banner still ages out after 7 days", () => {
   const DAY = 24 * 3600 * 1000;
   const db = DB();

@@ -4230,11 +4230,12 @@ function ssPgRekeyCell(cell, before, after) {
 // `red`: every red box, { sizeId, key, kind, typed, reason, server? }; listed on open, never sent.
 // `draft`: the open editor's changed text (`draft` in: { sizeId, key, text, seen }), on the size's
 // version, from the value it was typed over (with `before` too while that value is in flight), or
-// from an unsent edit's own starting value. `keep` is an earlier backup still on offer (its banner
-// unanswered): what it holds stays in, except a box this page has since edited or marked (that is
-// newer), so a second crash before the builder answers loses neither. Each kept entry carries its
-// own `at` (ssPgBackupLoad stamps them), so rewriting it here never makes it younger: plan 4.9's
-// 7 days run from when it was typed. null when there is nothing to keep.
+// from an unsent edit's own starting value; text back at that starting value takes the unsent edit
+// out (plan 3.10: the editor's text counts as typed). `keep` is an earlier backup still on offer
+// (its banner unanswered): what it holds stays in, except a box this page has since edited or
+// marked (that is newer), so a second crash before the builder answers loses neither. Each kept
+// entry carries its own `at` (ssPgBackupLoad stamps them), so rewriting it here never makes it
+// younger: plan 4.9's 7 days run from when it was typed. null when there is nothing to keep.
 function ssPgBackup(q, draft, at, keep) {
   const sizes = {}, creates = {}, red = [], marked = {};
   const entryOf = (f, v) => {
@@ -4279,6 +4280,19 @@ function ssPgBackup(q, draft, at, keep) {
     d = { sizeId: draft.sizeId, key: draft.key, text: String(draft.text == null ? "" : draft.text), base: ds.creating ? null : ds.version, from: from === undefined ? null : from };
     if (x && x.inflight) d.before = x.inflight.from;
     if (ds.creating) newOne(draft.sizeId, ds.create);   // the draft goes with its size's create (base null)
+    // Text that puts the box back where its unsent edit started takes that edit away, as committing
+    // it would (commitBox drops an edit equal to its baseline): what is in flight stays, and nothing
+    // else goes for the box. ssPgBackupLoad skips a draft equal to its `from`, so the edit itself
+    // must not be stored either, or Save them would send the value the builder had typed back over.
+    const p = x && x.pending ? (draft.key === "price" ? ssPgParsePrice(d.text, d.from) : ssPgParseQty(d.text, d.from)) : null;
+    if (p && p.ok && ssPgSame(p.value, d.from)) {
+      const own = ds.creating ? creates[draft.sizeId] : sizes[draft.sizeId];
+      if (x.inflight) put(draft.sizeId, ds.version, draft.key, x.inflight);
+      else if (own) {
+        delete own.fields[draft.key];
+        if (!ds.creating && !Object.keys(own.fields).length) delete sizes[draft.sizeId];
+      }
+    }
   }
   if (keep) {
     Object.keys(keep.sizes || {}).forEach((id) => {
