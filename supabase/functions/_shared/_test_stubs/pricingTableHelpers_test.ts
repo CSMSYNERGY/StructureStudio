@@ -984,10 +984,10 @@ Deno.test("ssPgColBox: the overlay's columns; Size, Price and Offered frozen, Si
 // names are the helpers above it.
 const P4 = ["function ssPgParseSizeList(text, existing, max) {", "function ssPgSizeGrid(widthsText, lengthsText, existing, unticked, max) {",
   "function ssPgLocalModel(model, added, sizes) {", "function ssPgCanRemove(q, id, z) {", "function ssPgRekeyCell(cell, before, after) {",
-  "function ssPgBackup(q, draft, at, keep) {", "function ssPgBackupLoad(raw, now, maxAge) {", "function ssPgBackupMerge(list) {",
+  "function ssPgBackup(q, draft, at, keep) {", "function ssPgBackupMove(x) {", "function ssPgBackupLoad(raw, now, maxAge) {", "function ssPgBackupMerge(list) {",
   "function ssPgEarlierText(red, where, fields) {"].map(lift).join("\n");
-const G = new Function(`${PURE}\n${SAVE}\n${P4}; return { ssPgParseSizeList, ssPgSizeGrid, ssPgLocalModel, ssPgCanRemove, ssPgRekeyCell, ssPgBackup, ssPgBackupLoad,
-  ssPgBackupMerge, ssPgEarlierText };`)() as Record<string, (...a: Any[]) => Any>;
+const G = new Function(`${PURE}\n${SAVE}\n${P4}; return { ssPgParseSizeList, ssPgSizeGrid, ssPgLocalModel, ssPgCanRemove, ssPgRekeyCell, ssPgBackup, ssPgBackupMove,
+  ssPgBackupLoad, ssPgBackupMerge, ssPgEarlierText };`)() as Record<string, (...a: Any[]) => Any>;
 const labels = (list: Any[]) => list.map((z: Any) => z.label);
 
 Deno.test("ssPgParseSizeList: every way of writing a size, split by commas, semicolons or new lines, in the order typed", () => {
@@ -1338,7 +1338,65 @@ Deno.test("ssPgBackup: a box typed again while its value is in flight keeps both
     let t = Q(start(theirs), { type: "restore", sizes: b.sizes, at: 70 });
     [t] = roundTrip(t, theirs);
     assertEquals([theirs[A].price, field(t, A, "price").error.kind, field(t, A, "price").error.server], [450, "conflict", 450], `${what}: a colleague's 450 stays`);
+    // The 480 landed, then a colleague set it back to 400. The 400 on file is not the one under the
+    // flight: the size is on another version, so it goes from 480 and the server judges it. Going
+    // from 400 (by value alone) would write 500 over the colleague's 400 with no red box.
+    const reverted = DB();
+    reverted[A].price = 400; reverted[A].version = nextV();
+    let k = Q(start(reverted), { type: "restore", sizes: b.sizes, at: 70 });
+    assertEquals(field(k, A, "price").pending.from, 480, `${what} (480 landed, set back to 400 elsewhere): from 480, never the 400`);
+    [k] = roundTrip(k, reverted);
+    [k] = roundTrip(k, reverted);
+    if (want === 400) assertEquals([reverted[A].price, field(k, A, "price"), S.ssPgCount(k).red], [400, undefined, 0], `${what}: 400 is what was typed, so nothing to say`);
+    else assertEquals([reverted[A].price, field(k, A, "price").error], [400, { kind: "conflict", typed: 500, server: 400, reason: null }], `${what}: the colleague's 400 stays, red`);
+    // The 480 never landed, but a colleague's change to another box moved the version: from here that
+    // can't be told from the case above, so it is judged the same way (red), never written.
+    if (want === 500) {
+      const moved = DB();
+      moved[A].cells.loft = 70; moved[A].version = nextV();
+      let m = Q(start(moved), { type: "restore", sizes: b.sizes, at: 70 });
+      [m] = roundTrip(m, moved);
+      assertEquals([moved[A].price, field(m, A, "price").error.kind, field(m, A, "price").error.server], [400, "conflict", 400], `${what}: on another version the 400 is never assumed to be the one under the flight`);
+    }
   }
+});
+
+// A first price pasted with Offered "no" goes out with Offered unticked (`off`). A price typed during
+// that flight, or the editor's text over it, used to be stored without the `off`: the flight lost
+// with the tab, Save them sent the blank-to-price change alone, and the server ticked Offered, so the
+// size went into the designer.
+Deno.test("the backup: a first price pasted with Offered 'no' keeps it through a price typed during its flight and through the editor's text; Save them never ticks Offered", () => {
+  const db = DB();
+  const paste = { type: "commits", edits: [{ sizeId: C, f: "price", value: 4800, seen: null, off: true }], at: 0 };
+  const out = Q(start(db), paste, { type: "send" });
+  const b = G.ssPgBackup(Q(out, commit(C, "price", 5000)), null, 1, null);
+  assertEquals(b.sizes[C].fields.price, { to: 5000, from: 4800, before: null, off: true }, "the `off` rides on the blank leg under the flight");
+  const ed = G.ssPgBackup(out, { sizeId: C, key: "price", text: "5000", seen: 4800 }, 1, null).draft;
+  assertEquals(ed, { sizeId: C, key: "price", text: "5000", base: V0, from: 4800, before: null, off: true });
+  const unsentB = G.ssPgBackup(Q(start(db), paste), { sizeId: C, key: "price", text: "5000", seen: 4800 }, 1, null);
+  assertEquals(unsentB.draft, { sizeId: C, key: "price", text: "5000", base: V0, from: null, off: true }, "over the unsent first price, as committing it would");
+  for (const [what, stored] of [["typed during the flight", b], ["the editor's text over the flight", { ...b, sizes: {}, draft: ed }],
+    ["the editor's text over the unsent price", unsentB]] as [string, Any][]) {
+    const l = G.ssPgBackupLoad(JSON.stringify(stored), 1);
+    assertEquals([l.count, l.sizes[C].fields.price.off, l.sizes[C].fields.price.to], [1, true, 5000], what);
+    // Nothing landed: the size is still on the stored version, so it goes from the blank, unticked.
+    const lost = DB();
+    let r = Q(start(lost), { type: "restore", sizes: l.sizes, at: 2 });
+    let body;
+    [r, body] = roundTrip(r, lost);
+    assertEquals([body.sizes[0].to, lost[C].price, lost[C].active, S.ssPgCount(r).red], [{ price: 5000, active: false }, 5000, false, 0], `${what}: never landed`);
+    if (what === "the editor's text over the unsent price") continue;
+    // The 4800 landed, unticked: from 4800, and Offered stays as it is.
+    const landed = DB();
+    landed[C] = { version: nextV(), price: 4800, active: false, cells: {} };
+    r = Q(start(landed), { type: "restore", sizes: l.sizes, at: 2 });
+    [r] = roundTrip(r, landed);
+    [r] = roundTrip(r, landed);
+    assertEquals([landed[C].price, landed[C].active, S.ssPgCount(r).red], [5000, false, 0], `${what}: landed`);
+  }
+  // ssPgBackupLoad takes `off` only on a blank leg.
+  const both = { savedAt: 1, sizes: { [C]: { base: V0, fields: { price: { to: 5000, from: 4800, before: 4500, off: true } } } }, red: [], draft: null };
+  assertEquals(G.ssPgBackupLoad(JSON.stringify(both), 1).sizes[C].fields.price, { to: 5000, from: 4800, before: 4500, at: 1 });
 });
 
 // The editor's text counts as typed (plan 3.10), and committing a value equal to its box's baseline
@@ -1410,18 +1468,62 @@ Deno.test("ssPgBackup and ssPgBackupLoad: an entry kept from an older backup kee
   assertEquals(G.ssPgBackupLoad(JSON.stringify(red), 9 * DAY).red.map((r: Any) => [r.sizeId, r.at]), [[B, 9 * DAY]]);
 });
 
-Deno.test("ssPgBackupMerge: the backups of tables that closed, oldest first; a newer box wins, a size on a newer version takes its place whole, red once per box", () => {
+Deno.test("ssPgBackupMerge: the backups of tables that closed, oldest first; a newer box wins, a size on a newer version takes the older boxes onto it, red once per box", () => {
   const V1 = "2026-10-21T00:00:00.000001+00:00";
   const older = { savedAt: 10, count: 3, red: [{ sizeId: C, key: "price", kind: "invalid", typed: "a" }],
     sizes: { [A]: { base: V0, fields: { price: { to: 500, from: 400 }, "c:loft": { to: 60, from: 50 } } }, [B]: { base: V0, fields: { price: { to: 1, from: 2100 } } } } };
   const newer = { savedAt: 20, count: 2, red: [{ sizeId: C, key: "price", kind: "invalid", typed: "b" }],
     sizes: { [A]: { base: V0, fields: { price: { to: 600, from: 400 } } }, [B]: { base: V1, fields: { "c:loft": { to: 3, from: 0 } } } } };
   assertEquals(G.ssPgBackupMerge([newer, null, older]), {
-    savedAt: 20, count: 3, red: [{ sizeId: C, key: "price", kind: "invalid", typed: "b" }],
-    sizes: { [A]: { base: V0, fields: { price: { to: 600, from: 400 }, "c:loft": { to: 60, from: 50 } } }, [B]: { base: V1, fields: { "c:loft": { to: 3, from: 0 } } } },
+    savedAt: 20, count: 4, red: [{ sizeId: C, key: "price", kind: "invalid", typed: "b" }],
+    sizes: { [A]: { base: V0, fields: { price: { to: 600, from: 400 }, "c:loft": { to: 60, from: 50 } } }, [B]: { base: V1, fields: { price: { to: 1, from: 2100 }, "c:loft": { to: 3, from: 0 } } } },
   });
   assertEquals(G.ssPgBackupMerge([older]).sizes, older.sizes, "one backup: as it was");
   assertEquals([G.ssPgBackupMerge([]), G.ssPgBackupMerge(null)], [null, null]);
+});
+
+// Two tabs closed with unsent edits on ONE size, read at different versions (a colleague's save came
+// between them). The newer tab's version used to take the size whole: the older tab's box was never
+// offered, and the first backup written afterwards deleted its key, so it was gone without a word.
+Deno.test("ssPgBackupMerge: two closed tabs with edits on one size made on different versions; both are offered and both save, and a colleague's change since still turns red", () => {
+  assertEquals(G.ssPgBackupMove({ to: 500, from: 480, before: 400, at: 3 }), { to: 500, from: 480, at: 3 }, "moved: its own `from`, no `before`");
+  assertEquals(G.ssPgBackupMove({ to: 5000, from: 4800, before: null, off: true }), { to: 5000, from: 4800 }, "`off` went with the `before` leg");
+  assertEquals(G.ssPgBackupMove({ to: 4800, from: null, off: true, at: 1 }), { to: 4800, from: null, off: true, at: 1 }, "a first price keeps it");
+  // Tab 1 read A on V0 and typed loft 50 → 60. A colleague then changed A's price to 420 (V1); tab 2
+  // read that and typed the price 450. Both closed.
+  const db1 = DB();
+  const db2 = DB();
+  db2[A].price = 420; db2[A].version = nextV();
+  const one = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(db1), commit(A, "c:loft", 60)), null, 1, null)), 3);
+  const two = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(db2), commit(A, "price", 450)), null, 2, null)), 3);
+  const m = G.ssPgBackupMerge([two, one]);
+  assertEquals([m.count, m.sizes[A]], [2, { base: db2[A].version, fields: { "c:loft": { to: 60, from: 50, at: 1 }, price: { to: 450, from: 420, at: 2 } } }],
+    "both boxes, on the newer version, each from its own value");
+  let r = Q(start(db2), { type: "restore", sizes: m.sizes, at: 4 });
+  [r] = roundTrip(r, db2);
+  assertEquals([db2[A].price, db2[A].cells.loft, S.ssPgCount(r)], [450, 60, { pending: 0, inflight: 0, red: 0, creating: 0, removing: 0 }]);
+  // Tab 1's box changed by a colleague since: it rides on the newer version from its own value, so
+  // the server's from-check turns it red; tab 2's box still saves.
+  const db3 = copy(db2);
+  db3[A].price = 420; db3[A].cells.loft = 55; db3[A].version = nextV();
+  const m3 = G.ssPgBackupMerge([one, { ...two, sizes: { [A]: { ...two.sizes[A], base: db3[A].version } } }]);
+  let t = Q(start(db3), { type: "restore", sizes: m3.sizes, at: 4 });
+  [t] = roundTrip(t, db3);
+  [t] = roundTrip(t, db3);
+  assertEquals([db3[A].price, db3[A].cells.loft, field(t, A, "c:loft").error], [450, 55, { kind: "conflict", typed: 60, server: 55, reason: null }]);
+  // Tab 1 had 480 in flight with 500 typed after it. Moved onto tab 2's version, it goes from 480: the
+  // 400 there (the 480 landed, then set back elsewhere) is never assumed to be the one under it.
+  const out = Q(start(db1), commit(A, "price", 480), { type: "send" }, commit(A, "price", 500));
+  const fly = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(out, null, 1, null)), 3);
+  const db4 = DB();
+  db4[A].version = nextV();   // 480 landed (V1), then a colleague set it back to 400 (this version)
+  const loft = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(db4), commit(A, "c:loft", 60)), null, 2, null)), 3);
+  const m4 = G.ssPgBackupMerge([fly, loft]);
+  assertEquals(m4.sizes[A], { base: db4[A].version, fields: { price: { to: 500, from: 480, at: 1 }, "c:loft": { to: 60, from: 50, at: 2 } } });
+  let u = Q(start(db4), { type: "restore", sizes: m4.sizes, at: 4 });
+  [u] = roundTrip(u, db4);
+  [u] = roundTrip(u, db4);
+  assertEquals([db4[A].price, db4[A].cells.loft, field(u, A, "price").error], [400, 60, { kind: "conflict", typed: 500, server: 400, reason: null }]);
 });
 
 Deno.test("ssPgBackup: an earlier backup still on offer stays stored until it is answered, except where this page has a newer edit", () => {
@@ -1433,6 +1535,35 @@ Deno.test("ssPgBackup: an earlier backup still on offer stays stored until it is
   assertEquals(b.sizes[A].fields, { price: { to: 450, from: 400 }, "c:loft": { to: 60, from: 50 } }, "this page's newer price wins; the rest of the earlier edit stays");
   assertEquals([b.sizes[C], b.red], [keep.sizes[C], keep.red]);
   assertEquals(G.ssPgBackup(start(db), null, 9, { sizes: null, red: null }), null, "answered and dismissed: nothing kept");
+});
+
+// The earlier banner unanswered, and this page's read has the size on a newer version (a colleague's
+// save, or the earlier tab's own call that landed). Typing on another box of that size used to leave
+// every kept box of it out of storage until the new edit saved: the adopted key was already gone, so
+// a crash or a leave then lost the earlier edit. The editor's text did the same at the next read.
+Deno.test("ssPgBackup: an earlier backup on offer keeps its boxes on a size this page edits on a newer version, moved onto that version; the editor's text too", () => {
+  const earlier = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(DB()), commit(A, "c:loft", 60)), null, 1, null)), 2);
+  const keep = { sizes: earlier.sizes, red: earlier.red, creates: null };
+  const db = DB();
+  db[A].price = 420; db[A].version = nextV();
+  const V1 = db[A].version;
+  assertEquals(G.ssPgBackup(start(db), null, 3, keep).sizes, earlier.sizes, "nothing typed here: as it was");
+  const typed = G.ssPgBackup(Q(start(db), commit(A, "price", 450)), null, 3, keep);
+  assertEquals(typed.sizes[A], { base: V1, fields: { price: { to: 450, from: 420 }, "c:loft": { to: 60, from: 50, at: 1 } } }, "both, on this page's version");
+  const back = G.ssPgBackupLoad(JSON.stringify(typed), 4);
+  assertEquals(back.count, 2);
+  let r = Q(start(db), { type: "restore", sizes: back.sizes, at: 5 });
+  [r] = roundTrip(r, db);
+  assertEquals([db[A].price, db[A].cells.loft, S.ssPgCount(r).red], [450, 60, 0], "the next tab's Save them saves both");
+  // The editor open on the price instead: the draft and the kept box on one version, both read back.
+  const drafting = G.ssPgBackup(start(DB()), { sizeId: A, key: "price", text: "450", seen: 400 }, 3, { ...keep, sizes: { [A]: { ...keep.sizes[A], base: "2026-10-19T00:00:00.000001+00:00" } } });
+  assertEquals([drafting.sizes[A].base, drafting.draft.base], [V0, V0]);
+  const d = G.ssPgBackupLoad(JSON.stringify(drafting), 4);
+  assertEquals([d.count, Object.keys(d.sizes[A].fields).sort()], [2, ["c:loft", "price"]], "the draft is never dropped for being on another version than the kept box");
+  // A kept box with both legs, moved: no `before` (its own version's), so it goes from its in-flight value.
+  const fly = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(DB()), commit(A, "price", 480), { type: "send" }, commit(A, "price", 500)), null, 1, null)), 2);
+  const moved = G.ssPgBackup(Q(start(db), commit(A, "c:loft", 70)), null, 3, { sizes: fly.sizes, red: [], creates: null });
+  assertEquals(moved.sizes[A].fields.price, { to: 500, from: 480, at: 1 });
 });
 
 Deno.test("ssPgBackupLoad: the editor's draft becomes an edit; older than 7 days is dropped; anything the server would refuse whole is dropped", () => {
