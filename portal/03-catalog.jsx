@@ -4625,7 +4625,8 @@ function ssPgOffLost(q, d) {
 // value, seen }], sizes } or { ok: false, error, problems }. `seen` is the box as drawn now, for the
 // queue's check that nothing moved it before the edit lands (a confirm can be open meanwhile).
 // `sizes` is one entry per size that changes, in drawn order, for the confirm (ssPgChangeSummary):
-// { id, name, prices, options, offered, wasShown, nowShown }; shown = offered in the designer.
+// { id, name, prices, options, offered, wasShown, nowShown, zero }; shown = offered in the designer,
+// zero = put at $0 there by this change.
 function ssPgPlanCells(view, targets, opts) {
   const v = view || {}, o = opts || {}, q = v.q || {}, cols = v.cols || [];
   const byId = {};
@@ -4698,7 +4699,11 @@ function ssPgPlanCells(view, targets, opts) {
     // file gets one, unless Offered itself was sent, or goes with the price unticked (`off`).
     let active = activeTo !== undefined ? activeTo : before.active;
     if (activeTo === undefined && s.price == null && price != null) active = !(offTo !== undefined ? offTo : waitOff);
-    sizes.push({ id: t.id, name: where, prices, options, offered, wasShown: before.active && before.price != null, nowShown: active && price != null });
+    // `zero`: this change puts the size at $0 in the designer (ssPgFreeAt's rule): its price set to
+    // exactly 0, the server not holding 0 already, and the size offered once it saves.
+    const nowShown = active && price != null;
+    const zero = nowShown && ssPgSame(price, 0) && mine.some((d) => d.f === "price") && !ssPgSame(ssPgVal(s, "price"), 0);
+    sizes.push({ id: t.id, name: where, prices, options, offered, wasShown: before.active && before.price != null, nowShown, zero });
   });
   if (problems) return { ok: false, error: `${first}${problems > 1 ? ` ${problems - 1} more ${problems === 2 ? "problem" : "problems"}.` : ""}`, problems };
   return { ok: true, edits, sizes };
@@ -4797,22 +4802,106 @@ function ssPgClearPlan(view, sel, opts) {
 // changes boxes on MORE THAN ONE size asks first, naming the first and last size and counting what
 // changes: "Change 6 sizes, Test Barn 10x12 to Test Barn 12x24: 6 prices, 2 sizes hidden from your
 // designer, 14 included options. Continue?" A size that a first price puts in the designer is counted
-// too. One size never asks (`ask` false, `text` ""), as typing in a box never does.
+// too, and so is one this change puts at $0 there (`zero`, after Carolyn's call on 10-30: "2 sizes at
+// $0 (free in your designer)"). One size never asks (`ask` false, `text` ""), as typing in a box
+// never does.
 function ssPgChangeSummary(sizes) {
   const list = (Array.isArray(sizes) ? sizes : []).filter(Boolean);
   const sum = (k) => list.reduce((n, z) => n + (Number(z[k]) || 0), 0);
   const prices = sum("prices"), options = sum("options");
+  const zero = list.filter((z) => z.zero).length;
   const hidden = list.filter((z) => z.wasShown && !z.nowShown).length;
   const shown = list.filter((z) => !z.wasShown && z.nowShown).length;
   const n = (k, one, many) => (k === 1 ? `1 ${one}` : `${String(k).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} ${many}`);
   const parts = [];
   if (prices) parts.push(n(prices, "price", "prices"));
+  if (zero) parts.push(n(zero, "size at $0 (free in your designer)", "sizes at $0 (free in your designer)"));
   if (hidden) parts.push(n(hidden, "size hidden from your designer", "sizes hidden from your designer"));
   if (shown) parts.push(n(shown, "size now offered in your designer", "sizes now offered in your designer"));
   if (options) parts.push(n(options, "included option", "included options"));
   const ask = list.length > 1;
   const text = ask ? `Change ${n(list.length, "size", "sizes")}, ${list[0].name} to ${list[list.length - 1].name}${parts.length ? ": " + parts.join(", ") : ""}. Continue?` : "";
-  return { ask, sizes: list.length, prices, hidden, shown, options, text };
+  return { ask, sizes: list.length, prices, zero, hidden, shown, options, text };
+}
+
+// THE $0 NOTE (Ahsan, after Carolyn's call on 10-30: a builder typed 0 on the sizes he didn't sell,
+// meaning "take these away", but 0 is a real price (plan 3.9) and the designer offers such a size
+// FREE; a blank price is what hides one). Whether size `id` is at $0 in the designer as the queue `q`
+// draws it: its price as drawn is exactly 0, and it is offered, or will be once that price saves:
+// its Offered as drawn or waiting to save, or, for a first price (none on file), the tick the server
+// gives it with that price unless a paste said "no" with it (`off`, ssPgBuildBatch). A size being
+// removed is not.
+function ssPgFreeAt(q, id) {
+  const s = q && q.sizes ? q.sizes[id] : null;
+  if (!s || (q.removes && q.removes[id])) return false;
+  const fs = (q.fields && q.fields[id]) || {};
+  const now = (f) => { const x = fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
+  if (!ssPgSame(now("price"), 0)) return false;
+  const a = fs.active;
+  if (a && (a.pending || a.inflight)) return !!now("active");
+  if (s.price == null) { const x = fs.price; return !((x && x.pending && x.pending.off) || (x && x.inflight && x.inflight.off)); }
+  return !!s.active;
+}
+
+// Which of `ids` (the sizes a commit, a paste, a fill or a clear touched) that change just put at $0
+// in the designer: free now (ssPgFreeAt, on `after`, the queue after it), drawn at another price
+// before (`before`, the queue before it), and not at 0 on the server already, so typing 0 again over
+// a 0, a resend, or a 0 already stored (typed earlier, or from the Excel upload) says nothing. A box
+// the commit rule turned red took nothing, so it is not counted. → those ids, each once, in order.
+function ssPgZeroNew(before, after, ids) {
+  const out = [];
+  const seen = {};
+  const was = (id) => {
+    const s = before && before.sizes ? before.sizes[id] : null;
+    const x = before && before.fields && before.fields[id] ? before.fields[id].price : null;
+    return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, "price");
+  };
+  (ids || []).forEach((id) => {
+    if (seen[id]) return;
+    seen[id] = true;
+    const s = after && after.sizes ? after.sizes[id] : null;
+    if (s && !ssPgSame(was(id), 0) && !ssPgSame(ssPgVal(s, "price"), 0) && ssPgFreeAt(after, id)) out.push(id);
+  });
+  return out;
+}
+
+// The $0 note's words (the status line, plan 3.14), for the sizes still at $0 in the designer
+// (`ids`; `nameOf(id)` is "Test Barn 10x12"). One size is named; more are counted, the way the
+// confirm counts. "" when there are none.
+function ssPgZeroText(ids, nameOf) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!list.length) return "";
+  const name = list.length === 1 && typeof nameOf === "function" ? nameOf(list[0]) : "";
+  if (name) return `${name}: $0 means this size is free in your designer. To stop offering it, untick Offered or clear the price.`;
+  if (list.length === 1) return "A size is now $0, which means it's free in your designer. To stop offering it, untick Offered or clear the price.";
+  return `${String(list.length).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.`;
+}
+
+// The Excel upload's $0 sizes (Settings > Sheds, "⬆ Upload filled sheet"), counted in the browser
+// from the rows it sends, by the importer's own rules (pricingImport.ts): a price is blank, or a
+// number once `$`, commas and spaces are stripped (so "$0", "0.00" and " 0 " are all 0); a row needs
+// a style the account knows (`styles`: label or key, any case; none given, any name) and a width and
+// length above 0; a later row for the same size wins; `active` no, n, 0, false or inactive hides it.
+// → how many sizes the sheet leaves at $0 in the designer.
+function ssPricingSheetZeros(rows, styles) {
+  const byName = {};
+  (Array.isArray(styles) ? styles : []).forEach((st) => [st && st.label, st && st.key].forEach((t) => {
+    const k = String(t == null ? "" : t).trim().toLowerCase();
+    if (k) byName[k] = st.id == null ? k : st.id;
+  }));
+  const known = Object.keys(byName).length > 0;
+  const num = (v) => (v === "" || v == null ? { blank: true, n: NaN } : { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) });
+  const off = (v) => ["no", "n", "0", "false", "inactive"].includes(String(v == null ? "" : v).trim().toLowerCase());
+  const last = {};
+  (Array.isArray(rows) ? rows : []).forEach((r) => {
+    const name = String(r && r.style != null ? r.style : "").trim().toLowerCase();
+    if (!name || (known && byName[name] == null)) return;
+    const w = num(r.width), l = num(r.length), p = num(r.price);
+    if (w.blank || l.blank || !Number.isFinite(w.n) || !Number.isFinite(l.n) || w.n <= 0 || l.n <= 0) return;
+    if (!p.blank && (!Number.isFinite(p.n) || p.n < 0)) return;
+    last[`${known ? byName[name] : name}|${w.n}|${l.n}`] = !p.blank && p.n === 0 && !off(r.active);
+  });
+  return Object.keys(last).filter((k) => last[k]).length;
 }
 
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
@@ -5131,17 +5220,25 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
         const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
         return { style: cols[iStyle], width: cols[iWidth], length: cols[iLength], price: cols[iPrice], active: iActive >= 0 ? cols[iActive] : "", inclusions };
       });
+      // The sizes this sheet leaves at $0 (ssPricingSheetZeros, the importer's own number rules):
+      // $0 is a real price, so the designer offers them free (Carolyn's call, 10-30: a builder put 0 on
+      // the sizes he didn't sell). Said under the result; the upload goes ahead as it is.
+      const zeros = ssPricingSheetZeros(rows, allStyles());
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       setResult(data); await load();
       const parts = []; if (data.created) parts.push(`${data.created} added`); if (data.updated) parts.push(`${data.updated} updated`);
-      setXlMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : "") });
+      setXlMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : ""),
+        zero: !zeros ? "" : `${zeros === 1 ? "1 size in the sheet is priced $0, so it's" : `${zeros} sizes in the sheet are priced $0, so they're`} free in your designer. `
+          + "To hide a size, leave its price blank or put no in the active column." });
     } catch (e) { setXlMsg({ err: e.message }); }
     setBusy(false); setFileKey((k) => k + 1);
   };
 
   const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  // The upload's $0 note (ssPricingSheetZeros): amber, a warning that never stopped the upload.
+  const warnStyle = { background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 13px", color: "#92400E", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0 };
   return (
     <>
@@ -5363,6 +5460,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             </div>
             {xlMsg && xlMsg.err && <div data-ss-xl-msg="err" style={{ ...errStyle, marginTop: 12, marginBottom: 0 }}>{xlMsg.err}</div>}
             {xlMsg && xlMsg.ok && <div data-ss-xl-msg="ok" style={{ ...okStyle, marginTop: 12, marginBottom: 0 }}>{xlMsg.ok}</div>}
+            {xlMsg && xlMsg.ok && xlMsg.zero && <div data-ss-xl-msg="zero" style={{ ...warnStyle, marginTop: 8, marginBottom: 0 }}>{xlMsg.zero}</div>}
           </>
         )}
         {result && result.skipped && result.skipped.length > 0 && (
@@ -5380,6 +5478,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
           and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
           included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
           (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
+          A price of <b>0</b> doesn't hide a size: it shows in your designer as free.
           The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
           built-in items — so you can set how many of a specific catalog item come included with each size.
           {" "}<b>Changed numbers in the table? Download a fresh template before you use Excel again.</b>
@@ -11549,6 +11648,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // Phase 4b: copy, paste, fill down and clear.
   const [confirm, setConfirm] = useState(null);    // { text, edits, area }: a change to more than one size, waiting for Continue
   const [said, setSaid] = useState(null);          // { tone, text }: what the last copy, paste, fill or clear said (a refusal, "Copied 6 boxes.")
+  const [zeroIds, setZeroIds] = useState(null);    // the sizes the last change put at $0 in the designer (ssPgZeroNew): the $0 note
   const boxRef = useRef(null);
   const gridRef = useRef(null);
   const seqRef = useRef(0);
@@ -12058,6 +12158,13 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (next !== qRef.current) { qRef.current = next; setQ(next); }
     return next;
   };
+  // The $0 note: a change (`before` → `after`, around one apply) that just put sizes at $0 in the
+  // designer (ssPgZeroNew; `ids` the sizes whose price it set) says so on the status line, one note
+  // per change. It never holds the save back: the change is already in the queue.
+  const noteZero = (before, after, ids) => {
+    const z = ssPgZeroNew(before, after, ids);
+    if (z.length) setZeroIds(z);
+  };
   const fieldOf = (col) => (col === 1 ? "price" : col === 2 ? "active" : model && model.cols[col - 3] ? "c:" + model.cols[col - 3].key : null);
   const colOf = (f) => (f === "price" ? 1 : f === "active" ? 2 : colAt[String(f).slice(2)]);
   // A box's value as drawn: this page's newest edit, else the server's.
@@ -12457,7 +12564,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!f || !s || f === "active" || colOf(f) == null) return true;
     const p = f === "price" ? ssPgParsePrice(text, ssPgVal(s, f)) : ssPgParseQty(text, ssPgVal(s, f));
     if (!p.ok) { apply({ type: "invalid", sizeId, f, typed: text, reason: p.error, at: Date.now() }); return false; }
+    const was = qRef.current;
     const st = apply({ type: "commit", sizeId, f, value: p.value, at: Date.now(), ...(extra || {}) });
+    if (f === "price") noteZero(was, st, [sizeId]);
     return !(st.fields[sizeId] && st.fields[sizeId][f] && st.fields[sizeId][f].error);
   };
   // Back to work while a leave waits for its save (Back clicked, then a box): the leave is called
@@ -12649,7 +12758,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (late) { setSaid({ tone: "amber", text: `${whereOf(late.sizeId)}, Offered: its first price went out to save while you were deciding. Nothing was changed. Try again.` }); return; }
     backToWork();
     setTip(null);
+    const was = qRef.current;
     apply({ type: "commits", edits, at: Date.now() });
+    noteZero(was, qRef.current, edits.filter((d) => d.f === "price").map((d) => d.sizeId));
     sendNow();
     if (area) {
       setActive({ sizeId: area.first, col: area.c0 });
@@ -12918,6 +13029,17 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     model.cols.forEach((c) => { fields["c:" + c.key] = { name: c.label, kind: "qty" }; });
     earlierLine = ssPgEarlierText(earlierRed, where, fields);
   }
+  // The $0 note (ssPgZeroText), for the sizes of the last such change still at $0 in the designer as
+  // drawn now (ssPgFreeAt): it goes by itself once the builder clears the price, unticks Offered or
+  // types another price, and a page that can't edit never shows it.
+  let zeroLine = "";
+  if (zeroIds && canEdit && q && model) {
+    const nameOf = (id) => {
+      for (const st of [...model.styles, ...model.hiddenStyles]) { const z = st.sizes.find((x) => x.id === id); if (z) return `${st.label} ${z.label}`; }
+      return "";
+    };
+    zeroLine = ssPgZeroText(zeroIds.filter((id) => ssPgFreeAt(q, id)), nameOf);
+  }
   const tableW = SS_PG_FROZEN_W + SS_PG_COL_W * (ncols - 3);
   // Leaving was called off (`stuck`): the badge says why (stopped, retrying, view only), this says
   // the page stayed, and Leave anyway goes without what is unsent.
@@ -12985,7 +13107,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
         : errLine ? <PgStatusLine tone={aerr.kind === "conflict" ? "amber" : "red"} action={dismissBtn(() => apply({ type: "dismiss", sizeId: active.sizeId, f: af }))}>{errLine}</PgStatusLine>
         : earlierLine ? <PgStatusLine tone="amber" action={dismissBtn(dismissEarlierRed)}>{earlierLine}</PgStatusLine>
         : q && q.note ? <PgStatusLine tone="amber" action={dismissBtn(() => apply({ type: "note-off" }))}>{q.note.text}</PgStatusLine>
-        : tip ? <PgStatusLine action={dismissBtn(() => setTip(null))}>{tip}</PgStatusLine> : null}
+        : tip ? <PgStatusLine action={dismissBtn(() => setTip(null))}>{tip}</PgStatusLine>
+        : zeroLine ? <PgStatusLine tone="amber" action={dismissBtn(() => setZeroIds(null))}>{zeroLine}</PgStatusLine> : null}
       {legendOpen && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}
       {narrow && !noteOff && (
         <div className="ss-pg-narrow">

@@ -30,6 +30,10 @@
 //  10. Phase 4b: paste, fill down and clear check the page can still edit and go into the queue in
 //      one event; copy works on a view-only page; Ctrl/Cmd+D is held from the browser; the confirm is
 //      an accessible modal.
+//  11. The $0 note (10-31): a typed price and a paste, fill or clear each say when they put sizes at
+//      $0 in the designer, after the change is in the queue (never holding it back); the note is drawn
+//      only while the page can edit; the Excel upload counts the sheet's $0 sizes from the rows it
+//      sends and says so under its result, and the instructions say $0 is free.
 //
 // Lifted with the xlsxCellText_test anchor idiom: the text between a signature and the next "\n}\n".
 // No network, no DOM: the lifted functions get stubs for exactly the names they use.
@@ -533,4 +537,34 @@ Deno.test("PgConfirm: an accessible modal: every hook above its return, focus on
   assert(body.includes(`if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onNo(); return; }`), "Escape is Cancel");
   assert(body.includes(`if (e.key === "Tab") {`), "Tab stays inside");
   assert(body.includes(">Cancel</button>") && body.includes(">Continue</button>"));
+});
+
+// ── 11. The $0 note (Ahsan, after Carolyn's call on 10-30) ───────────────────────────────────
+Deno.test("the $0 note: typing and a paste, fill or clear say when they put sizes at $0, after the queue has the change; drawn only while the page can edit", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  const typed = between(page, "const commitText = (sizeId, f, text, extra = null) => {", "\n  };", "commitText");
+  const t1 = typed.indexOf(`const st = apply({ type: "commit", sizeId, f, value: p.value, at: Date.now(), ...(extra || {}) });`);
+  assert(t1 > 0 && typed.indexOf(`if (f === "price") noteZero(was, st, [sizeId]);`) > t1, "a typed price is judged after it is in the queue, against the queue before it");
+  assert(typed.indexOf("const was = qRef.current;") < t1, "…and `was` is the queue before the commit");
+  const change = between(page, "const applyChange = (edits, area) => {", "\n  };", "applyChange");
+  const c1 = change.indexOf(`apply({ type: "commits", edits, at: Date.now() });`);
+  assert(c1 > 0 && change.indexOf(`noteZero(was, qRef.current, edits.filter((d) => d.f === "price").map((d) => d.sizeId));`) > c1
+    && change.indexOf("const was = qRef.current;") < c1, "a paste, a fill or a clear: one note for the whole change, after it is in the queue");
+  const note = between(page, "const noteZero = (before, after, ids) => {", "\n  };", "noteZero");
+  assert(note.includes("const z = ssPgZeroNew(before, after, ids);") && note.includes("if (z.length) setZeroIds(z);"), "the note names what ssPgZeroNew found, and only then");
+  assert(!note.includes("return false") && !note.includes("apply("), "the note never holds a save back");
+  assert(page.includes("if (zeroIds && canEdit && q && model) {"), "a page that can't edit never draws the note");
+  assert(page.includes("zeroLine = ssPgZeroText(zeroIds.filter((id) => ssPgFreeAt(q, id)), nameOf);"), "it follows what is drawn now: a size taken off $0 drops out");
+  assert(page.includes(`: zeroLine ? <PgStatusLine tone="amber" action={dismissBtn(() => setZeroIds(null))}>{zeroLine}</PgStatusLine> : null}`), "on the status line, dismissable");
+});
+
+Deno.test("the $0 note on Sheds: the upload counts the sheet's $0 sizes from the rows it sends and says so under its result; the instructions say $0 is free", () => {
+  const csv = fnText(CATALOG, "function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {");
+  const up = between(csv, "const onUpload = async (file) => {", "\n  };", "onUpload");
+  const z = up.indexOf("const zeros = ssPricingSheetZeros(rows, allStyles());");
+  assert(z > 0 && z < up.indexOf(`sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } })`), "counted from exactly the rows that are sent");
+  assert(up.includes(`free in your designer. \``) && up.includes(`"To hide a size, leave its price blank or put no in the active column."`));
+  assert(csv.includes(`{xlMsg && xlMsg.ok && xlMsg.zero && <div data-ss-xl-msg="zero" style={{ ...warnStyle, marginTop: 8, marginBottom: 0 }}>{xlMsg.zero}</div>}`),
+    "only under a result that went through");
+  assert(csv.includes("A price of <b>0</b> doesn't hide a size: it shows in your designer as free."), "the Excel instructions say it too");
 });

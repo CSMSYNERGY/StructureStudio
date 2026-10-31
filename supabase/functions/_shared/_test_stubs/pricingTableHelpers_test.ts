@@ -2057,7 +2057,9 @@ Deno.test("fill down: the top row copied into the rows under it; one row tall ta
   // Rows 10x12 to 12x24, Price to Loft: $0, yes, blank.
   const f = K.ssPgFillPlan(v, { r0: 0, r1: 2, c0: 1, c1: 3 });
   assertEquals(onlyEdits(f), ["02 price=0 (seen null)", "03 price=0 (seen 4800)", "03 c:loft=0 (seen 50)"], "10x16 takes its first price, and Offered with it");
-  assertEquals(K.ssPgChangeSummary(f.sizes).text, "Change 2 sizes, Test Barn 10x16 to Test Barn 12x24: 2 prices, 1 size now offered in your designer, 1 included option. Continue?");
+  assertEquals(K.ssPgChangeSummary(f.sizes).text,
+    "Change 2 sizes, Test Barn 10x16 to Test Barn 12x24: 2 prices, 2 sizes at $0 (free in your designer), 1 size now offered in your designer, 1 included option. Continue?",
+    "the $0 of 10x12 copied down puts both sizes in the designer at $0");
   // One row: from the size drawn right above it. One size: no confirm.
   const one = K.ssPgFillPlan(v, { r0: 1, r1: 1, c0: 1, c1: 1 });
   assertEquals([onlyEdits(one), K.ssPgChangeSummary(one.sizes).ask], [["02 price=0 (seen null)"], false]);
@@ -2094,12 +2096,143 @@ Deno.test("clear: every selected box emptied, across styles; the Size column nev
 Deno.test("ssPgChangeSummary: names the first and last size, counts prices, sizes leaving or joining the designer, options; one size never asks", () => {
   const z = (name: string, prices: number, options: number, wasShown = true, nowShown = true) => ({ id: name, name, prices, options, offered: 0, wasShown, nowShown });
   const six = [z("Barn 10x12", 1, 3), z("Barn 10x16", 1, 3, true, false), z("Barn 10x20", 1, 2), z("Barn 12x16", 1, 2, true, false), z("Barn 12x20", 1, 2), z("Barn 12x24", 1, 2)];
-  assertEquals(K.ssPgChangeSummary(six), { ask: true, sizes: 6, prices: 6, hidden: 2, shown: 0, options: 14,
+  assertEquals(K.ssPgChangeSummary(six), { ask: true, sizes: 6, prices: 6, zero: 0, hidden: 2, shown: 0, options: 14,
     text: "Change 6 sizes, Barn 10x12 to Barn 12x24: 6 prices, 2 sizes hidden from your designer, 14 included options. Continue?" }, "the plan's own example");
   assertEquals(K.ssPgChangeSummary([z("A 1x1", 1, 0, true, false), z("A 1x2", 0, 1, false, true)]).text,
     "Change 2 sizes, A 1x1 to A 1x2: 1 price, 1 size hidden from your designer, 1 size now offered in your designer, 1 included option. Continue?");
-  assertEquals(K.ssPgChangeSummary([z("A 1x1", 1, 40)]), { ask: false, sizes: 1, prices: 1, hidden: 0, shown: 0, options: 40, text: "" }, "one size: typing never asks, nor does this");
+  assertEquals(K.ssPgChangeSummary([z("A 1x1", 1, 40)]), { ask: false, sizes: 1, prices: 1, zero: 0, hidden: 0, shown: 0, options: 40, text: "" }, "one size: typing never asks, nor does this");
   assertEquals([K.ssPgChangeSummary([]).ask, K.ssPgChangeSummary(null).ask], [false, false]);
+  // Sizes this change puts at $0 in the designer are counted right after the prices.
+  const zero = (name: string, wasShown = true) => ({ ...z(name, 1, 0, wasShown, true), zero: true });
+  assertEquals(K.ssPgChangeSummary([zero("A 1x1"), zero("A 1x2", false), z("A 1x3", 1, 0)]).text,
+    "Change 3 sizes, A 1x1 to A 1x3: 3 prices, 2 sizes at $0 (free in your designer), 1 size now offered in your designer. Continue?");
+  assertEquals(K.ssPgChangeSummary([zero("A 1x1"), z("A 1x2", 1, 0)]).text, "Change 2 sizes, A 1x1 to A 1x2: 2 prices, 1 size at $0 (free in your designer). Continue?");
+  assertEquals(K.ssPgChangeSummary([zero("A 1x1")]).zero, 1, "one size never asks, but is still counted");
+});
+
+// ─── The $0 note (Ahsan, after Carolyn's call on 10-30: a builder typed 0 on the sizes he didn't
+// sell, meaning "take these away"; $0 is a real price, and the designer offers such a size free) ───
+const ZERO = ["function ssPgFreeAt(q, id) {", "function ssPgZeroNew(before, after, ids) {", "function ssPgZeroText(ids, nameOf) {",
+  "function ssPricingSheetZeros(rows, styles) {"].map(lift).join("\n");
+const ZN = new Function(`${PURE}\n${SAVE}\n${ZERO}; return { ssPgFreeAt, ssPgZeroNew, ssPgZeroText, ssPricingSheetZeros };`)() as Record<string, (...a: Any[]) => Any>;
+
+Deno.test("ssPgFreeAt: at $0 as drawn and offered, or offered once that first price saves; a paste's Offered \"no\" or a size being removed is not", () => {
+  const db = DB();
+  db[A].price = 0;   // A: $0 on file, offered; B: $2,100 offered; C: no price
+  let q = start(db);
+  assertEquals([A, B, C].map((id) => ZN.ssPgFreeAt(q, id)), [true, false, false]);
+  // Typed 0 on B: free the moment it is committed, while it waits, while it is out and once saved.
+  q = Q(q, commit(B, "price", 0));
+  assert(ZN.ssPgFreeAt(q, B), "waiting to save");
+  q = Q(q, { type: "send" });
+  assert(ZN.ssPgFreeAt(q, B), "on its way");
+  // A first price of 0 on C: the server ticks Offered with it, so it is free from the commit on.
+  q = Q(q, commit(C, "price", 0));
+  assertEquals([ZN.ssPgFreeAt(q, C), q.sizes[C].active], [true, false], "Offered is drawn unticked until it saves, but it will be ticked");
+  // …unless a paste said "no" with it.
+  const off = Q(start(db), { type: "commits", edits: [{ sizeId: C, f: "price", value: 0, seen: null, off: true }], at: 0 });
+  assertEquals(ZN.ssPgFreeAt(off, C), false);
+  // Offered unticked on A: not in the designer, so not free there.
+  assertEquals(ZN.ssPgFreeAt(Q(start(db), commit(A, "active", false)), A), false);
+  // A size being removed, a size not in the queue, no queue.
+  assertEquals(ZN.ssPgFreeAt({ ...start(db), removes: { [A]: "pending" } }, A), false);
+  assertEquals([ZN.ssPgFreeAt(start(db), Z), ZN.ssPgFreeAt(null, A)], [false, false]);
+});
+
+Deno.test("ssPgZeroNew: a price just set to 0 on an offered size says so; a 0 already drawn or stored, a hidden size or a red box does not", () => {
+  const db = DB();
+  db[A].price = 0;
+  const q0 = start(db);
+  const step = (q: Any, ...ev: Any[]): [Any, Any] => [q, Q(q, ...ev)];
+  // Typed 0 over $2,100 (B), and a first price of 0 (C): both are new $0 sizes in the designer.
+  let [b, a] = step(q0, commit(B, "price", 0));
+  assertEquals(ZN.ssPgZeroNew(b, a, [B]), [B]);
+  [b, a] = step(q0, commit(C, "price", 0));
+  assertEquals(ZN.ssPgZeroNew(b, a, [C]), [C], "the classic: a new size priced 0 is offered free once it saves");
+  // A paste over B and C: one answer for both, each size once whatever how many of its boxes changed.
+  [b, a] = step(q0, { type: "commits", edits: [{ sizeId: B, f: "price", value: 0, seen: 2100 }, { sizeId: C, f: "price", value: 0, seen: null }], at: 0 });
+  assertEquals(ZN.ssPgZeroNew(b, a, [B, C, B]), [B, C]);
+  // Typing 0 again over A's stored 0: no change at all, and nothing said.
+  [b, a] = step(q0, commit(A, "price", 0));
+  assertEquals(ZN.ssPgZeroNew(b, a, [A]), []);
+  // A's 0 typed over an unsent 500: the 0 is the one on file, so nothing is said either.
+  const q500 = Q(q0, commit(A, "price", 500));
+  [b, a] = step(q500, commit(A, "price", 0));
+  assertEquals(ZN.ssPgZeroNew(b, a, [A]), [], "already stored: a re-save says nothing");
+  // B typed 0 twice: said once, on the first.
+  const q1 = Q(q0, commit(B, "price", 0));
+  [b, a] = step(q1, commit(B, "price", 0));
+  assertEquals(ZN.ssPgZeroNew(b, a, [B]), []);
+  // B saved at 0, then the resend / a read: nothing new.
+  const [saved] = roundTrip(q1, db);
+  assertEquals([saved.sizes[B].price, ZN.ssPgZeroNew(q1, saved, [B])], [0, []]);
+  // Not offered: a priced size with Offered unticked, or a first price pasted with Offered "no".
+  const unticked = Q(q0, commit(B, "active", false));
+  [b, a] = step(unticked, commit(B, "price", 0));
+  assertEquals(ZN.ssPgZeroNew(b, a, [B]), [], "hidden from the designer: not free there");
+  [b, a] = step(q0, { type: "commits", edits: [{ sizeId: C, f: "price", value: 0, seen: null, off: true }], at: 0 });
+  assertEquals(ZN.ssPgZeroNew(b, a, [C]), []);
+  // A box the commit rule turned red (it moved while the editor was open) took nothing.
+  [b, a] = step(q0, { ...commit(B, "price", 0), seen: 1900 });
+  assertEquals([!!field(a, B, "price").error, ZN.ssPgZeroNew(b, a, [B])], [true, []]);
+  // Another price, or a blank one: nothing.
+  [b, a] = step(q0, commit(B, "price", 10), commit(C, "price", null));
+  assertEquals(ZN.ssPgZeroNew(b, a, [B, C]), []);
+  assertEquals([ZN.ssPgZeroNew(null, null, [B]), ZN.ssPgZeroNew(q0, q0, null)], [[], []]);
+});
+
+Deno.test("ssPgZeroText: one size named, more counted; plain words; nothing for none", () => {
+  const names: Record<string, string> = { [A]: "Test Barn 10x12" };
+  assertEquals(ZN.ssPgZeroText([A], (id: string) => names[id] || ""),
+    "Test Barn 10x12: $0 means this size is free in your designer. To stop offering it, untick Offered or clear the price.");
+  assertEquals(ZN.ssPgZeroText([A, B, C], (id: string) => names[id] || ""),
+    "3 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.");
+  assertEquals(ZN.ssPgZeroText([B], () => ""), "A size is now $0, which means it's free in your designer. To stop offering it, untick Offered or clear the price.");
+  assertEquals(ZN.ssPgZeroText(Array.from({ length: 1200 }, (_, i) => String(i)), null).slice(0, 22), "1,200 sizes are now $0");
+  assertEquals([ZN.ssPgZeroText([], () => "x"), ZN.ssPgZeroText(null, null)], ["", ""]);
+});
+
+Deno.test("ssPgPlanCells: a size the change puts at $0 in the designer is marked zero, for the confirm", () => {
+  const m = M4();
+  const v = viewOf(m);
+  // Test Barn 10x12 is $0 already; 10x16 has no price; 12x24 is $4,800. Paste 0 down the Price column.
+  const p = K.ssPgPastePlan(v, { sizeId: Z1, col: 1 }, [["0"], ["0"], ["0"]]);
+  assertEquals(p.sizes.map((s: Any) => [s.name, s.zero]), [["Test Barn 10x16", true], ["Test Barn 12x24", true]], "10x12 changes nothing and is not listed");
+  assertEquals(K.ssPgChangeSummary(p.sizes).text,
+    "Change 2 sizes, Test Barn 10x16 to Test Barn 12x24: 2 prices, 2 sizes at $0 (free in your designer), 1 size now offered in your designer. Continue?");
+  // With Offered "no" for the first price, and on the unticked Test Utility 8x10: not in the designer, not counted.
+  const q = K.ssPgPastePlan(v, { sizeId: Z2, col: 1 }, [["0", "no"], ["0", "yes"]]);
+  assertEquals(q.sizes.map((s: Any) => [s.name, s.zero]), [["Test Barn 10x16", false], ["Test Barn 12x24", true]]);
+  const u = K.ssPgPastePlan(v, { sizeId: Z4, col: 1 }, [["0"], ["0"]]);
+  assertEquals(u.sizes.map((s: Any) => [s.name, s.zero]), [["Test Utility 8x10", false], ["Test Utility 8x12", true]]);
+  assertEquals(K.ssPgChangeSummary(u.sizes).text, "Change 2 sizes, Test Utility 8x10 to Test Utility 8x12: 2 prices, 1 size at $0 (free in your designer). Continue?");
+  // Any other price, or a clear: no zero.
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z2, col: 1 }, [["5"], ["6"]]).sizes.map((s: Any) => s.zero), [false, false]);
+  assertEquals(K.ssPgClearPlan(v, { r0: 0, r1: 2, c0: 1, c1: 1 }).sizes.map((s: Any) => s.zero), [false, false]);
+});
+
+Deno.test("ssPricingSheetZeros: the sheet's sizes left at $0 in the designer, by the importer's own rules", () => {
+  const styles = [{ id: "s1", label: "Test Barn", key: "test-barn" }, { id: "s2", label: "Test Utility", key: "test-utility" }];
+  const row = (style: Any, width: Any, length: Any, price: Any, active: Any = "") => ({ style, width, length, price, active, inclusions: {} });
+  // "$0", "0.00", " 0 ", "$ 0", "0,000" and a bare number 0 are all 0 once $, commas and spaces go.
+  const zeros = [row("Test Barn", 10, 12, "$0"), row("Test Barn", 10, 14, "0.00"), row("test barn", "10", "16", " 0 "), row("Test Utility", 8, 10, "$ 0"),
+    row("test-utility", 8, 12, "0,000"), row("Test Utility", 8, 14, 0)];
+  assertEquals(ZN.ssPricingSheetZeros(zeros, styles), 6);
+  // Not $0 in the designer: a blank price (hidden), a real price, active no/n/0/false/inactive, refused prices.
+  const not = [row("Test Barn", 12, 12, ""), row("Test Barn", 12, 14, null), row("Test Barn", 12, 16, "4800"), row("Test Barn", 12, 18, "0.5"),
+    ...["no", "N", "0", "false", " Inactive "].map((a, i) => row("Test Barn", 14, 10 + i, "0", a)),
+    row("Test Barn", 16, 10, "-0.01"), row("Test Barn", 16, 12, "abc"), row("Test Barn", 16, 14, "$-5")];
+  assertEquals(ZN.ssPricingSheetZeros(not, styles), 0);
+  // Rows the importer skips: no style, a style the account doesn't have, no or a bad width or length.
+  const skipped = [row("", 10, 12, "0"), row("Test Shed", 10, 12, "0"), row("Test Barn", "", 12, "0"), row("Test Barn", 0, 12, "0"),
+    row("Test Barn", "ten", 12, "0"), row("Test Barn", 10, -2, "0")];
+  assertEquals(ZN.ssPricingSheetZeros(skipped, styles), 0);
+  assertEquals(ZN.ssPricingSheetZeros(skipped, null), 1, "no styles given: any style name counts (Test Shed); the empty one and the bad sizes still don't");
+  // The same size twice: the later row wins, as the importer's; label and key are one style.
+  assertEquals(ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "0"), row("test-barn", "10.0", 12, "4800")], styles), 0);
+  assertEquals(ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "4800"), row("test-barn", 10, 12, "$0")], styles), 1);
+  assertEquals(ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "0"), row("Test Barn", 10, 12, "abc")], styles), 1, "a refused later row changes nothing");
+  assertEquals([ZN.ssPricingSheetZeros([], styles), ZN.ssPricingSheetZeros(null, styles)], [0, 0]);
 });
 
 Deno.test("queue commits: many boxes in one event, each by the commit rule and its seen check, flushed; the same as committing them one by one", () => {

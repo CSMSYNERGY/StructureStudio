@@ -113,6 +113,16 @@
 //      price cleared each move the style's count at once, with no read; with "Show hidden sizes" off,
 //      a size hidden under the cursor stays drawn (the band says how many are folded away), and stays
 //      across a read that lands with the editor open on it, which then saves there; a reload agrees.
+//   Z  "$0 MEANS FREE" (Ahsan, after Carolyn's call on 10-30: a builder typed 0 on sizes he didn't
+//      sell, meaning "remove"), against fakeServer: a 0 typed on an offered size saves and the status
+//      line says it is free in the designer, and stays through arrow keys until dismissed; typing 0
+//      again over that stored 0, or pasting it, says nothing; a first price of 0 says so too and the
+//      note goes by itself once that price is cleared; a 0 on a size with Offered unticked says
+//      nothing; a paste of 0 onto two sizes asks "…2 sizes at $0 (free in your designer)…" and then
+//      counts them; a one-row fill names its size. A view-only page never shows it. On Sheds, an
+//      upload whose sheet prices sizes at $0 ("$0", "0.00", "$0.00"; not "0" with active no, not a
+//      blank) says how many under the result, one without says nothing, and the Excel instructions
+//      say $0 is free.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails if an arrow key re-renders a row or a
 //      commit re-renders more than the one it changed, and at 1x if the plan's targets are missed
@@ -3421,6 +3431,153 @@ if (want("H")) {
   const b7 = await bandText(page, STYLE);
   ok("H: a reload agrees, and folds every hidden size", b7 === says(k + 1, k + 1) && (await page.locator(`tr[data-s="${o3.id}"]`).count()) === 0, JSON.stringify({ b7, want: says(k + 1, k + 1) }));
   ok("H: no page errors", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// ── Z: "$0 means free" (Ahsan, after Carolyn's call on 10-30). 0 is a real price (plan 3.9) and stays
+// savable; the table and the Excel upload only say what it does. ──
+if (want("Z")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const t = F.table(OWN);
+  const barn = barnOf(t);
+  const first = barn.find((z) => z.base_price == null);
+  const offered = (z) => z.base_price != null && z.active && z.base_price !== WIDE_PRICE;
+  const one = (z) => `${named(z)}: $0 means this size is free in your designer. To stop offering it, untick Offered or clear the price.`;
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const z1 = barn[0], z2 = barn[2], [z3, z4, z5] = [barn[3], barn[4], barn[5]];
+  ok("Z: the fixture: four offered, priced sizes and one with no price", [z1, z2, z3, z4, z5].every(offered) && !!first, JSON.stringify([z1, z2, z3, z4, z5].map((z) => z.base_price)));
+  // 1. A 0 typed over a price on an offered size: saved (never held back), and the note names the size.
+  let n0 = saveCalls(calls).length;
+  await typeIn(page, z1.id, 1, "0");
+  const st1 = await statusText(page);
+  const sv1 = await saved(page, calls, n0);
+  ok("Z: a 0 typed on an offered size saves, and the status line says $0 means free in the designer", sv1 && F.size(z1.id).base_price === 0 && F.size(z1.id).active === true
+    && st1 === one(z1) && (await statusText(page)) === one(z1), JSON.stringify({ st1, price: F.size(z1.id).base_price }));
+  await page.screenshot({ path: join(bandShots, "Z-1-typed-zero-note.png"), clip: { x: 0, y: 0, width: 1000, height: 220 } });
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
+  ok("Z: …and the note stays while the builder moves on", (await statusText(page)) === one(z1), await statusText(page));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click();
+  ok("Z: …until dismissed", (await statusText(page)) === "", await statusText(page));
+  // 2. The same 0 again: typed over the stored 0, then pasted over it. Nothing to say, nothing sent.
+  n0 = saveCalls(calls).length;
+  await typeIn(page, z1.id, 1, "0");
+  await page.waitForTimeout(1300);
+  const st2 = await statusText(page);
+  await page.locator(sel(z1.id, 1)).click();
+  await clip.paste(page, "0\r\n");
+  await page.waitForTimeout(300);
+  const st2b = await statusText(page);
+  ok("Z: a 0 already stored says nothing, typed again or pasted again, and sends nothing", st2 === "" && st2b === "Nothing to change: those boxes already say that." && saveCalls(calls).length === n0,
+    JSON.stringify({ st2, st2b, sent: saveCalls(calls).length - n0 }));
+  // 3. A first price of 0 on a size with none: the server ticks Offered with it, so it is free too.
+  n0 = saveCalls(calls).length;
+  await typeIn(page, first.id, 1, "0");
+  const sv3 = await saved(page, calls, n0);
+  const st3 = await statusText(page);
+  ok("Z: a first price of 0 says so too; saved, the size is offered", sv3 && st3 === one(first) && F.size(first.id).base_price === 0 && F.size(first.id).active === true
+    && (await look(page, first.id, 2)).text === "✓", JSON.stringify({ st3, size: F.size(first.id) }));
+  // …and taking it off $0 (here, clearing the price) takes the note away by itself.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(first.id, 1)).click();
+  await page.keyboard.press("Delete");
+  const sv3b = await saved(page, calls, n0);
+  ok("Z: …and the note goes by itself once that price is cleared", sv3b && F.size(first.id).base_price === null && (await statusText(page)) === "", await statusText(page));
+  // 4. A 0 on a size with Offered unticked: not in the designer, so nothing is said (it still saves).
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(z2.id, 2)).click();
+  await page.keyboard.press("Space");
+  await saved(page, calls, n0);
+  n0 = saveCalls(calls).length;
+  await typeIn(page, z2.id, 1, "0");
+  const sv4 = await saved(page, calls, n0);
+  ok("Z: a 0 on a size with Offered unticked saves and says nothing (it isn't in the designer)", sv4 && F.size(z2.id).base_price === 0 && F.size(z2.id).active === false
+    && (await statusText(page)) === "", JSON.stringify({ st: await statusText(page), size: F.size(z2.id) }));
+  // 5. A paste of 0 onto two offered sizes: the confirm counts them, Continue saves, one note counts them.
+  await page.locator(sel(z3.id, 1)).click();
+  await clip.paste(page, "0\r\n0\r\n");
+  const cf5 = await confirmOf(page);
+  ok("Z: a paste of 0 onto two sizes asks first, counting the sizes at $0", !!cf5
+    && cf5.text === `Change 2 sizes, ${named(z3)} to ${named(z4)}: 2 prices, 2 sizes at $0 (free in your designer). Continue?`, JSON.stringify(cf5));
+  if (cf5) await page.locator(".ss-pg-confirm [role=alertdialog]").screenshot({ path: join(bandShots, "Z-5-confirm-counts-zero.png") }).catch(() => {});
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Enter");   // Continue has the focus
+  const sv5 = await saved(page, calls, n0);
+  const st5 = await statusText(page);
+  ok("Z: …Continue saves both, and one note counts them", sv5 && F.size(z3.id).base_price === 0 && F.size(z4.id).base_price === 0
+    && st5 === "2 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.", st5);
+  await page.screenshot({ path: join(bandShots, "Z-5-paste-zero-note.png"), clip: { x: 0, y: 0, width: 1000, height: 260 } });
+  // 6. Fill down one row (Ctrl+D) from that $0 size: one size, at once, and the note names it.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(z5.id, 1)).click();
+  await page.keyboard.press("Control+D");
+  const sv6 = await saved(page, calls, n0);
+  const st6 = await statusText(page);
+  ok("Z: a one-row fill of $0 saves at once and the note names the size", sv6 && !(await confirmOf(page)) && F.size(z5.id).base_price === 0 && st6 === one(z5), st6);
+  ok("Z: no page errors", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+// A view-only page (no edit access): typing, pasting and filling 0 do nothing, and no note is drawn.
+if (want("Z")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { role: "user", access: { settings_structures: "view", designs: "view" }, cat: () => cat, fake: F },
+    { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await typeIn(page, barn[0].id, 1, "0");
+  await page.locator(sel(barn[3].id, 1)).click();
+  await clip.paste(page, "0\r\n0\r\n");
+  await page.locator(sel(barn[5].id, 1)).click();
+  await page.keyboard.press("Control+D");
+  await page.waitForTimeout(1200);
+  const st = await statusText(page);
+  ok("Z: view-only: a 0 typed, pasted or filled changes nothing and draws no $0 note", !/\$0/.test(st) && !/free in your designer/.test(st) && saveCalls(calls).length === 0
+    && F.size(barn[0].id).base_price === barn[0].base_price && !(await confirmOf(page)), JSON.stringify({ st, sent: saveCalls(calls).length }));
+  ok("Z: view-only: no page errors", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+// On Sheds: the Excel upload's $0 sizes, counted from the sheet by the importer's own rules.
+if (want("Z")) {
+  const { ctx, page, calls, errors } = await open("/settings/sheds");
+  await page.waitForSelector("text=Open sizes & prices table", { timeout: 20000 });
+  const steps = await page.evaluate(() => [...document.querySelectorAll("p")].map((p) => p.textContent).find((x) => /Using Excel:/.test(x)) || "");
+  ok("Z: the Excel instructions say $0 is free", steps.includes("A blank price — or active = no — hides that size from your designer. A price of 0 doesn't hide a size: it shows in your designer as free."),
+    steps.slice(steps.indexOf("A blank price"), steps.indexOf("A blank price") + 160));
+  const upload = async (csv) => {
+    const from = calls.length;
+    await page.locator('input[type="file"][accept*=".xlsx"]').setInputFiles({ name: "sheet.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
+    const until = Date.now() + 10000;
+    while (Date.now() < until && !calls.slice(from).some((c) => c.action === "import_pricing_csv")) await sleep(50);
+    await page.waitForSelector('[data-ss-xl-msg="ok"]', { timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(200);
+    return page.evaluate(() => {
+      const ok = document.querySelector('[data-ss-xl-msg="ok"]'), zero = document.querySelector('[data-ss-xl-msg="zero"]');
+      return { ok: ok ? ok.textContent : null, zero: zero ? zero.textContent : null, under: !!(ok && zero && (ok.compareDocumentPosition(zero) & Node.DOCUMENT_POSITION_FOLLOWING)) };
+    });
+  };
+  // Three sizes at $0 ("$0", "0.00", "$0.00"); a 0 with active "no" is hidden, a blank price is hidden,
+  // and 1500 is a price: none of those count.
+  const u1 = await upload("style,width,length,price,active\nTest Barn,10,12,$0,yes\nTest Barn,10,16,0.00,\nTest Barn,12,12,$0.00,yes\n"
+    + "Test Barn,12,16,0,no\nTest Barn,12,20,,yes\nTest Barn,8,12,1500,yes\n");
+  ok("Z: an upload with sizes priced $0 says how many under its result, and that blank or active no hides one",
+    !!u1.ok && u1.under && u1.zero === "3 sizes in the sheet are priced $0, so they're free in your designer. To hide a size, leave its price blank or put no in the active column.",
+    JSON.stringify(u1));
+  const box = await page.evaluate(() => {
+    const lab = [...document.querySelectorAll("span")].find((s) => s.textContent === "Prefer Excel?");
+    const z = document.querySelector('[data-ss-xl-msg="zero"]');
+    if (!lab || !z) return null;
+    const a = lab.parentElement.getBoundingClientRect(), b = z.getBoundingClientRect();
+    return { x: Math.max(0, Math.floor(a.left) - 8), y: Math.max(0, Math.floor(a.top) - 8), w: Math.ceil(Math.max(a.right, b.right) - a.left) + 16, h: Math.ceil(b.bottom - a.top) + 16 };
+  });
+  if (box) await page.screenshot({ path: join(bandShots, "Z-upload-zero-note.png"), clip: { x: box.x, y: box.y, width: box.w, height: box.h } });
+  const u2 = await upload("style,width,length,price,active\nTest Barn,10,12,$0,yes\n");
+  ok("Z: one size at $0 is said in the singular", u2.zero === "1 size in the sheet is priced $0, so it's free in your designer. To hide a size, leave its price blank or put no in the active column.", JSON.stringify(u2));
+  const u3 = await upload("style,width,length,price,active\nTest Barn,10,12,1500,yes\nTest Barn,10,16,,yes\nTest Barn,12,12,0,no\n");
+  ok("Z: an upload with no size at $0 says nothing more", !!u3.ok && u3.zero === null, JSON.stringify(u3));
+  ok("Z: Sheds: no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
