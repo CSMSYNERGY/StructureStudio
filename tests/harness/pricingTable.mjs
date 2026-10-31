@@ -1,6 +1,6 @@
 // THE SIZES & PRICES TABLE (/settings/sheds-table, build plan Phase 2: the shell and the read-only
-// grid; Phase 3: editing and autosave; Phase 4a: adding sizes, Remove, refresh and the backup),
-// driven for real on the COMPILED portal. Paste, fill and clear come with Phase 4b.
+// grid; Phase 3: editing and autosave; Phase 4a: adding sizes, Remove, refresh and the backup; Phase
+// 4b: copy, paste, fill down, clear and the confirm), driven for real on the COMPILED portal.
 //
 //   A  THE SHEDS CARD: retitled "Sizes, prices & included options"; "Open sizes & prices table ↗" is a
 //      real anchor to /settings/sheds-table (target=_blank, rel=noopener); a "Prefer Excel?" row holds
@@ -73,6 +73,17 @@
 //      red box and editor text come back as "You have 2 changes from earlier…"; Save them sends them
 //      on their stored version and starting values; a colleague's change since comes back amber;
 //      Discard; 7 days; view-as offers only the viewed account's backup, ?as= none.
+//   V  COPY, PASTE, FILL DOWN, CLEAR (Phase 4b), against fakeServer, through the browser's own clipboard
+//      events (and one real Ctrl+C through the system clipboard): a range copies as TSV, as drawn; a
+//      block pasted onto two sizes asks first (an accessible modal naming the first and last size,
+//      focus on Continue and kept inside); Escape and Cancel send nothing; Continue sends one call with
+//      only those boxes and leaves the block selected. A bad cell, a block crossing a band and one
+//      skipping a folded hidden size are refused with nothing sent. Delete on a range and the
+//      toolbar's Clear ask the same question; Ctrl+D (held from the browser) and Fill down fill the top
+//      row down, one box from the size above without asking. A view-only page copies and changes
+//      nothing. A 20,000-box paste (500 sizes x 40 columns) is timed from the paste to the confirm and
+//      from Continue to the commit drawn (longest task, rows re-rendered), then saved in calls of at
+//      most 50 sizes and 2,500 boxes; 20,040 boxes are refused.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails only if an arrow key re-renders a row
 //      or a commit re-renders more than the one it changed.
@@ -2166,6 +2177,365 @@ for (const as of want("R") ? [false, true] : []) {
       banner === null && saveCalls(calls).length === 0 && keys.own === own && keys.viewed === viewed, JSON.stringify({ banner, keys: Object.keys(keys).filter((k) => keys[k]) }));
   }
   ok(`R: no page errors (view-as backup${as ? ", ?as=" : ""})`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// ── V: copy, paste, fill down, clear and the confirm (Phase 4b) ──
+// Against fakeServer. Copy and paste are the browser's own clipboard events: dispatched here with a
+// DataTransfer, which is what a Ctrl/Cmd+C or V on the grid hands the page (one real Ctrl+C and Ctrl+V
+// through the system clipboard too, when this browser lets the harness read it).
+const clip = {
+  paste: (page, text) => page.evaluate((t) => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", t);
+    const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+    (document.activeElement || document.body).dispatchEvent(ev);
+    return ev.defaultPrevented;
+  }, text),
+  copy: (page) => page.evaluate(() => {
+    const dt = new DataTransfer();
+    const ev = new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true });
+    (document.activeElement || document.body).dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented, text: dt.getData("text/plain") };
+  }),
+};
+const confirmOf = (page) => page.evaluate(() => {
+  const d = document.querySelector(".ss-pg-confirm [role=alertdialog]");
+  if (!d) return null;
+  const p = d.querySelector("p");
+  return { text: p ? p.textContent : "", modal: d.getAttribute("aria-modal"), named: !!p && d.getAttribute("aria-labelledby") === p.id,
+    focus: document.activeElement && d.contains(document.activeElement) ? document.activeElement.textContent : null };
+});
+const statusText = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "));
+const gridFocused = (page) => page.evaluate(() => document.activeElement === document.querySelector(".ss-pg-grid"));
+const rangeShown = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-pg-range")].filter((x) => x.style.display === "block").length);
+// A box's text as copying it gives it, from the fake's rows.
+const copied = (F, cat, z, col) => {
+  const s = F.size(z.id);
+  if (col === 0) return s.label;
+  if (col === 1) return s.base_price == null ? "" : String(s.base_price);
+  if (col === 2) return s.active && s.base_price != null ? "yes" : "no";
+  return String(F.cells(z.id)[OPTION_KEYS(cat)[col - 3]] || "");
+};
+const tsvOf = (rows) => rows.map((r) => r.join("\t") + "\r\n").join("");
+
+// V1: copy a range (as TSV, as drawn), paste a block (the confirm names the first and last size; Escape
+// and Cancel send nothing; Continue sends one call with only those boxes), a bad cell sends nothing, a
+// block crossing a band and one skipping a folded hidden size are refused.
+if (want("V")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const t = F.table(OWN);
+  const barn = barnOf(t);
+  const LOFT = keyCol(cat, "loft"), WB = keyCol(cat, "workbench");
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+
+  // Copy: Price, Offered and Loft of the first three sizes.
+  await page.locator(sel(barn[0].id, 1)).click();
+  for (const k of ["Shift+ArrowRight", "Shift+ArrowRight", "Shift+ArrowDown", "Shift+ArrowDown"]) await page.keyboard.press(k);
+  const want3 = tsvOf([0, 1, 2].map((i) => [1, 2, LOFT].map((c) => copied(F, cat, barn[i], c))));
+  const cp = await clip.copy(page);
+  ok("V: Ctrl/Cmd+C copies the selection as TSV, as drawn: plain numbers, yes/no, blank for nothing included",
+    cp.prevented && cp.text === want3 && /^\d/.test(cp.text), JSON.stringify(cp));
+  ok("V: …and says so", (await statusText(page)) === "Copied 9 boxes.", await statusText(page));
+  // The real keys, through the system clipboard.
+  let real = null;
+  try {
+    await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE });
+    await page.evaluate(() => navigator.clipboard.writeText("before"));
+    await page.keyboard.press("Control+C");
+    real = await page.evaluate(() => navigator.clipboard.readText());
+  } catch (e) { real = `unavailable: ${e.message}`; }
+  ok("V: a real Ctrl+C on the grid puts the same TSV on the system clipboard", real === want3, JSON.stringify(real));
+  // …and a real Ctrl+V reads it back from there: one box of one size, so it goes at once.
+  {
+    const z = barn[3], LK = OPTION_KEYS(cat)[LOFT - 3];
+    await page.locator(sel(z.id, LOFT)).click();
+    const n = saveCalls(calls).length;
+    let pasted = false;
+    try {
+      await page.evaluate(() => navigator.clipboard.writeText("33\r\n"));
+      await page.keyboard.press("Control+V");
+      pasted = await saved(page, calls, n);
+    } catch (_e) { pasted = false; }
+    ok("V: a real Ctrl+V on the grid pastes from the system clipboard", pasted && F.cells(z.id)[LK] === 33 && !(await confirmOf(page)), String(F.cells(z.id)[LK]));
+  }
+
+  // Paste a 2 x 2 block at Loft of the first size: two sizes, so the confirm asks first.
+  await page.locator(sel(barn[0].id, LOFT)).click();
+  const block = [["10", "11"], ["12", "13"]];
+  const was = [0, 1].flatMap((i) => [LOFT, WB].map((c) => copied(F, cat, barn[i], c)));
+  const changes = [0, 1].flatMap((i) => [LOFT, WB].map((c, j) => copied(F, cat, barn[i], c) !== block[i][j])).filter(Boolean).length;
+  let n0 = saveCalls(calls).length;
+  await clip.paste(page, tsvOf(block));
+  let cf = await confirmOf(page);
+  ok("V: a paste onto more than one size asks first, naming the first and last size and counting what changes",
+    !!cf && cf.text === `Change 2 sizes, ${named(barn[0])} to ${named(barn[1])}: ${changes} included options. Continue?`, JSON.stringify(cf));
+  ok("V: …an accessible modal (alertdialog, aria-modal, named by its question), the focus on Continue", !!cf && cf.modal === "true" && cf.named && cf.focus === "Continue", JSON.stringify(cf));
+  await page.keyboard.press("Tab");
+  const f1 = (await confirmOf(page)).focus;
+  await page.keyboard.press("Tab");
+  const f2 = (await confirmOf(page)).focus;
+  ok("V: …Tab goes round its two buttons and stays inside", f1 === "Cancel" && f2 === "Continue", `${f1} / ${f2}`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(1200);
+  const kept = () => Promise.all([0, 1].flatMap((i) => [LOFT, WB].map((c) => look(page, barn[i].id, c).then((x) => x.text))));
+  ok("V: Escape is Cancel: the confirm goes, the focus is back on the grid, nothing changed and nothing was sent",
+    !(await confirmOf(page)) && (await gridFocused(page)) && JSON.stringify(await kept()) === JSON.stringify(was) && saveCalls(calls).length === n0, JSON.stringify(await kept()));
+  await clip.paste(page, tsvOf(block));
+  await page.locator(".ss-pg-confirm button", { hasText: "Cancel" }).click();
+  await page.waitForTimeout(1200);
+  ok("V: …and so is the Cancel button", !(await confirmOf(page)) && saveCalls(calls).length === n0 && JSON.stringify(await kept()) === JSON.stringify(was));
+  await clip.paste(page, tsvOf(block));
+  await page.keyboard.press("Enter");   // Continue has the focus
+  ok("V: Continue: saved", await saved(page, calls, n0));
+  let sc = saveCalls(calls).slice(n0);
+  const cellsOf = (b) => b.sizes.map((s) => ({ id: s.id, from: s.from, to: s.to }));
+  const k1 = OPTION_KEYS(cat)[LOFT - 3], k2 = OPTION_KEYS(cat)[WB - 3];
+  const wantSizes = [0, 1].map((i) => {
+    const from = { cells: {} }, to = { cells: {} };
+    [k1, k2].forEach((k, j) => { const v = Number(was[i * 2 + j] || 0), b = Number(block[i][j]); if (v !== b) { from.cells[k] = v; to.cells[k] = b; } });
+    return { id: barn[i].id, from, to };
+  });
+  ok("V: …in ONE call: both sizes, only the pasted boxes, from what was on file", sc.length === 1 && JSON.stringify(cellsOf(sc[0].body)) === JSON.stringify(wantSizes), JSON.stringify(sc.map((c) => c.body.sizes)));
+  ok("V: …the server holds the block, the grid shows it, and the pasted block is selected",
+    F.cells(barn[0].id)[k1] === 10 && F.cells(barn[1].id)[k2] === 13 && JSON.stringify(await kept()) === JSON.stringify(["10", "11", "12", "13"]) && (await rangeShown(page)) === 1);
+
+  // A bad cell: nothing at all is pasted, and the status line names it.
+  await page.locator(sel(barn[0].id, LOFT)).click();
+  n0 = saveCalls(calls).length;
+  await clip.paste(page, "1\tabc\r\n");
+  await page.waitForTimeout(1200);
+  ok("V: a block with one bad cell pastes nothing and sends nothing, naming it",
+    (await statusText(page)) === `Row 1 (${named(barn[0])}), Workbench: 'abc' isn't a whole number.` && !(await confirmOf(page)) && saveCalls(calls).length === n0
+    && (await look(page, barn[0].id, LOFT)).text === "10", await statusText(page));
+  // Crossing into the next style's band.
+  const last = barn[barn.length - 1];
+  await page.locator(sel(last.id, 1)).click();
+  await clip.paste(page, "100\r\n200\r\n");
+  await page.waitForTimeout(900);
+  ok("V: a block that would cross a style's band is refused: \"Paste one style at a time.\"",
+    (await statusText(page)) === "Paste one style at a time." && saveCalls(calls).length === n0 && (await look(page, last.id, 1)).text === ssPgFmtPriceFor(last), await statusText(page));
+  // Skipping a hidden size folded away.
+  const hi = barn.findIndex((z, i) => i > 0 && i < barn.length - 1 && (z.base_price == null || !z.active));
+  await page.locator(".ss-pg-tog input").uncheck();
+  await page.waitForTimeout(300);
+  await page.locator(sel(barn[hi - 1].id, 1)).click();
+  await clip.paste(page, "100\r\n200\r\n");
+  await page.waitForTimeout(900);
+  ok("V: a block that would skip a folded hidden size is refused, counting it", hi > 0 && (await statusText(page)) === "Show hidden sizes first. This block would skip 1 hidden size." && saveCalls(calls).length === n0, `${hi}: ${await statusText(page)}`);
+  await page.locator(".ss-pg-tog input").check();
+  // A move clears what the paste said (the grid takes the keys again first: the tick box had them).
+  await page.locator(".ss-pg-grid").focus();
+  ok("V: …while it says why until then", /^Show hidden sizes first/.test(await statusText(page)), await statusText(page));
+  await page.keyboard.press("ArrowDown");
+  ok("V: the next move clears the status line", (await statusText(page)) === "", await statusText(page));
+  ok("V: no page errors (copy and paste)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+function ssPgFmtPriceFor(z) {
+  if (z.base_price == null) return "";
+  const n = Number(z.base_price);
+  const [i, d = ""] = String(n).split(".");
+  return "$" + i.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (d ? "." + (d.length === 1 ? d + "0" : d) : "");
+}
+
+// V2: Clear (Delete on a range, then the toolbar's Clear) and Fill down (Ctrl+D, the toolbar's Fill
+// down, a single box from the size above, and the first size, which has none).
+if (want("V")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const LOFT = keyCol(cat, "loft"), k1 = OPTION_KEYS(cat)[LOFT - 3];
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const three = [2, 3, 4].map((i) => barn[i]);
+  const shownBefore = three.filter((z) => z.active && z.base_price != null).length;
+  await page.locator(sel(three[0].id, 1)).click();
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Shift+ArrowDown");
+  let n0 = saveCalls(calls).length;
+  await page.keyboard.press("Delete");
+  let cf = await confirmOf(page);
+  const clearText = `Change 3 sizes, ${named(three[0])} to ${named(three[2])}: 3 prices${shownBefore ? `, ${shownBefore === 1 ? "1 size" : `${shownBefore} sizes`} hidden from your designer` : ""}. Continue?`;
+  ok("V: Delete on a range asks first (three sizes), naming them and counting the prices and the sizes leaving the designer", !!cf && cf.text === clearText, JSON.stringify(cf));
+  await page.locator(".ss-pg-confirm button", { hasText: "Cancel" }).click();
+  await page.waitForTimeout(1200);
+  ok("V: …Cancel: nothing cleared, nothing sent", saveCalls(calls).length === n0 && (await look(page, three[1].id, 1)).text === ssPgFmtPriceFor(three[1]));
+  const tb = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-tbtn")].map((b) => ({ text: b.textContent, title: b.title, disabled: b.disabled })));
+  ok("V: the toolbar has Fill down and Clear, enabled, each naming its key", JSON.stringify(tb.map((b) => b.text)) === '["Fill down","Clear"]' && tb.every((b) => !b.disabled && /\((Ctrl\+D|Delete)\)$/.test(b.title)), JSON.stringify(tb));
+  await page.locator(".ss-pg-tbtn", { hasText: "Clear" }).click();
+  cf = await confirmOf(page);
+  ok("V: the toolbar's Clear asks the same question about the same range", !!cf && cf.text === clearText, JSON.stringify(cf));
+  await page.locator(".ss-pg-confirm button", { hasText: "Continue" }).click();
+  ok("V: …Continue: saved", await saved(page, calls, n0));
+  let sc = saveCalls(calls).slice(n0);
+  ok("V: …one call, each size's price going to blank from what was on file",
+    sc.length === 1 && JSON.stringify(sc[0].body.sizes.map((s) => [s.id, s.from, s.to])) === JSON.stringify(three.map((z) => [z.id, { price: z.base_price }, { price: null }])), JSON.stringify(sc.map((c) => c.body.sizes)));
+  ok("V: …the boxes are empty and the server holds no price", (await Promise.all(three.map((z) => look(page, z.id, 1)))).every((c) => c.text === "") && three.every((z) => F.size(z.id).base_price === null));
+
+  // Fill down: Loft 77 on barn[5] (one size: no confirm), then Ctrl+D over barn[5..7].
+  await page.locator(sel(barn[5].id, LOFT)).click();
+  n0 = saveCalls(calls).length;
+  await clip.paste(page, "77\r\n");
+  ok("V: a paste onto one size never asks (as typing never does): saved", !(await confirmOf(page)) && await saved(page, calls, n0));
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Shift+ArrowDown");
+  // The D keydown as the window sees it, after the page's own handler (React's, on the root); the
+  // Control keydown before it is not the one.
+  await page.evaluate(() => {
+    window.__ssKeyHeld = null;
+    const on = (e) => { if (e.key !== "d" && e.key !== "D") return; window.removeEventListener("keydown", on); window.__ssKeyHeld = e.defaultPrevented; };
+    window.addEventListener("keydown", on);
+  });
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Control+D");
+  ok("V: Ctrl+D is the table's, held back from the browser (its own is a bookmark)", (await page.evaluate(() => window.__ssKeyHeld)) === true);
+  cf = await confirmOf(page);
+  const fills = [6, 7].filter((i) => Number(F.cells(barn[i].id)[k1] || 0) !== 77).length;
+  ok("V: Ctrl+D fills the top row down the range, asking first", !!cf && cf.text === `Change 2 sizes, ${named(barn[6])} to ${named(barn[7])}: ${fills} included options. Continue?`, JSON.stringify(cf));
+  await page.locator(".ss-pg-confirm button", { hasText: "Continue" }).click();
+  ok("V: …saved", await saved(page, calls, n0));
+  ok("V: …both sizes below now include 77, on the server and on screen", [6, 7].every((i) => F.cells(barn[i].id)[k1] === 77)
+    && (await Promise.all([6, 7].map((i) => look(page, barn[i].id, LOFT)))).every((c) => c.text === "77"));
+  // One box: the toolbar's Fill down copies the size above, at once.
+  await page.locator(sel(barn[8].id, LOFT)).click();
+  n0 = saveCalls(calls).length;
+  await page.locator(".ss-pg-tbtn", { hasText: "Fill down" }).click();
+  ok("V: Fill down on one box copies the size above it, without asking", !(await confirmOf(page)) && await saved(page, calls, n0) && F.cells(barn[8].id)[k1] === 77);
+  ok("V: …and the focus is back on the grid, so the keys go on working", await gridFocused(page));
+  await page.locator(sel(barn[0].id, 1)).click();
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Control+D");
+  await page.waitForTimeout(900);
+  ok("V: the first size has nothing above it to fill from, and says so", (await statusText(page)) === `There's no size above this one in Test Barn to fill down from.` && saveCalls(calls).length === n0, await statusText(page));
+  ok("V: no page errors (clear and fill)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// V3: a view-only page copies, and pastes, fills and clears nothing, sending nothing.
+if (want("V")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const LOFT = keyCol(cat, "loft");
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { role: "user", access: { settings_structures: "view", designs: "view" }, cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const before = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-grid tbody td")].map((td) => td.textContent).join("|"));
+  await page.locator(sel(barn[0].id, 1)).click();
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Shift+ArrowRight");
+  const cp = await clip.copy(page);
+  ok("V: view-only: copy still works", cp.prevented && cp.text === tsvOf([0, 1].map((i) => [1, 2].map((c) => copied(F, cat, barn[i], c)))), JSON.stringify(cp));
+  await clip.paste(page, "1\tyes\r\n2\tyes\r\n");
+  const afterPaste = await confirmOf(page);
+  await page.keyboard.press("Control+D");
+  await page.keyboard.press("Delete");
+  await page.locator(sel(barn[1].id, LOFT)).click();
+  await clip.paste(page, "5\r\n");
+  await page.keyboard.press("Control+D");
+  await page.waitForTimeout(1300);
+  const after = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-grid tbody td")].map((td) => td.textContent).join("|"));
+  const tb = await page.locator(".ss-pg-tbtn").count();
+  ok("V: view-only: paste, Ctrl+D and Delete on a range do nothing and send nothing; no Fill down or Clear in the toolbar",
+    !afterPaste && !(await confirmOf(page)) && before === after && saveCalls(calls).length === 0 && tb === 0 && (await state(page)).badge.startsWith("View only"), JSON.stringify({ tb, calls: saveCalls(calls).length }));
+  ok("V: no page errors (view-only)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// V4: THE 20,000-BOX PASTE (500 sizes x 40 option columns, one style): the plan and the confirm, then
+// the commit, timed, with the longest task the page ran meanwhile and the rows it re-rendered; then
+// every call it takes to save (at most 50 sizes and 2,500 boxes each). A block of 20,040 is refused.
+if (want("V")) {
+  const cat = catalogFor(OWN, { extra: 15 });
+  const W = OPTION_KEYS(cat).length;
+  const table = tableFor(OWN, cat, { styles: 1, perStyle: 510 });
+  const F = fakeServer(cat, table);
+  F.script = [{ delayMs: 1500 }];   // the first call is held a moment, so every box is still waiting when the commit is drawn
+  const barn = barnOf(F.table(OWN));
+  const ROWS = Math.floor(20000 / W);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1440, height: 900 });
+  await waitGrid(page, 60000).catch(() => {});
+  await page.waitForTimeout(800);
+  const text = tsvOf(Array.from({ length: ROWS }, (_, r) => Array.from({ length: W }, (_, c) => String(((r + c) % 9) + 1))));
+  await page.locator(sel(barn[0].id, 3)).click();
+  // Too many boxes first: refused before a value is looked at.
+  const tooMany = tsvOf(Array.from({ length: ROWS + 1 }, () => Array.from({ length: W }, () => "1")));
+  await clip.paste(page, tooMany);
+  ok(`V: a block of ${((ROWS + 1) * W).toLocaleString("en-US")} boxes is refused`,
+    (await statusText(page)) === `This block has ${((ROWS + 1) * W).toLocaleString("en-US")} boxes. Paste at most 20,000 at a time.` && !(await confirmOf(page)), await statusText(page));
+  const n0 = saveCalls(calls).length;
+  const plan = await page.evaluate(async (t) => {
+    const long = [];
+    const po = new PerformanceObserver((l) => l.getEntries().forEach((e) => long.push(e.duration)));
+    try { po.observe({ type: "longtask" }); } catch (_e) { /* no longtask */ }
+    const dt = new DataTransfer();
+    dt.setData("text/plain", t);
+    const t0 = performance.now();
+    document.activeElement.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    const handled = performance.now() - t0;
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+    const shown = performance.now() - t0;
+    await new Promise((r) => setTimeout(r, 200));
+    po.disconnect();
+    const p = document.querySelector(".ss-pg-confirm p");
+    return { handled: Math.round(handled), shown: Math.round(shown), longest: Math.round(Math.max(0, ...long)), text: p ? p.textContent : null };
+  }, text);
+  const changed = barn.slice(0, ROWS).reduce((n, z, r) => n + OPTION_KEYS(cat).filter((k, c) => Number(F.cells(z.id)[k] || 0) !== ((r + c) % 9) + 1).length, 0);
+  ok(`V: the ${(ROWS * W).toLocaleString("en-US")}-box paste asks first, naming the first and last size`,
+    plan.text === `Change ${ROWS} sizes, ${named(barn[0])} to ${named(barn[ROWS - 1])}: ${changed.toLocaleString("en-US")} included options. Continue?`, JSON.stringify(plan));
+  const commit = await page.evaluate(async (rows) => {
+    const long = [];
+    const po = new PerformanceObserver((l) => l.getEntries().forEach((e) => long.push(e.duration)));
+    try { po.observe({ type: "longtask" }); } catch (_e) { /* no longtask */ }
+    const touched = new Set();
+    const mo = new MutationObserver((ms) => ms.forEach((m) => {
+      if (m.type === "attributes" && m.attributeName === "aria-selected") return;
+      const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+      const tr = el && el.closest("tr");
+      if (tr) touched.add(tr);
+    }));
+    mo.observe(document.querySelector(".ss-pg-grid tbody"), { subtree: true, childList: true, characterData: true, attributes: true });
+    const btn = [...document.querySelectorAll(".ss-pg-confirm button")].find((b) => b.textContent === "Continue");
+    const t0 = performance.now();
+    btn.click();
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+    const painted = performance.now() - t0;
+    const marked = document.querySelectorAll(".ss-pg-grid td.ss-pg-m-p").length;
+    mo.disconnect();
+    const sizesTouched = [...touched].filter((tr) => tr.hasAttribute("data-s")).length;
+    const others = [...touched].filter((tr) => !tr.hasAttribute("data-s")).length;
+    await new Promise((r) => setTimeout(r, 300));
+    po.disconnect();
+    return { painted: Math.round(painted), marked, sizesTouched, others, longest: Math.round(Math.max(0, ...long)), rows };
+  }, ROWS);
+  ok(`V: Continue commits it at once: every changed box waits to save, and only the ${ROWS} pasted rows re-render`,
+    commit.marked >= changed - 10 && commit.sizesTouched <= ROWS && commit.others === 0, JSON.stringify(commit));
+  // The saving, watched for long tasks too: each answer redraws its 50 rows and rewrites the backup.
+  await page.evaluate(() => {
+    window.__ssLong = [];
+    window.__ssPo = new PerformanceObserver((l) => l.getEntries().forEach((e) => window.__ssLong.push(e.duration)));
+    try { window.__ssPo.observe({ type: "longtask" }); } catch (_e) { /* no longtask */ }
+  });
+  const t0 = Date.now();
+  const done = await waitBadge(page, /^All changes saved/, 120000);
+  const took = Date.now() - t0;
+  const saving = await page.evaluate(() => { window.__ssPo.disconnect(); const l = window.__ssLong; return { n: l.length, longest: Math.round(Math.max(0, ...l)) }; });
+  const sc = saveCalls(calls).slice(n0);
+  const cellsIn = (b) => b.sizes.reduce((n, s) => n + Object.keys(s.to.cells || {}).length, 0);
+  ok(`V: …and saves in calls of at most 50 sizes and 2,500 boxes, every box exactly once`,
+    done && sc.every((c) => c.body.sizes.length <= 50 && cellsIn(c.body) <= 2500) && sc.reduce((n, c) => n + cellsIn(c.body), 0) === changed && F.bad.length === 0
+    && barn.slice(0, ROWS).every((z, r) => OPTION_KEYS(cat).every((k, c) => F.cells(z.id)[k] === ((r + c) % 9) + 1)),
+    JSON.stringify({ done, calls: sc.length, bad: F.bad, perCall: sc.map((c) => [c.body.sizes.length, cellsIn(c.body)]) }));
+  const responsive = await page.evaluate(async () => { const t0 = performance.now(); await new Promise((r) => requestAnimationFrame(() => r())); return Math.round(performance.now() - t0); });
+  console.log(`TIMING V (20,000-box paste): ${ROWS} sizes x ${W} columns = ${(ROWS * W).toLocaleString("en-US")} boxes (${changed.toLocaleString("en-US")} changing); `
+    + `paste event -> planned and the confirm drawn: handler ${plan.handled} ms, next frame ${plan.shown} ms, longest task ${plan.longest} ms; `
+    + `Continue -> committed and drawn: ${commit.painted} ms, longest task ${commit.longest} ms, ${commit.sizesTouched} rows re-rendered, ${commit.marked} boxes marked waiting; `
+    + `saving: ${sc.length} calls in ${took} ms (fake server answering at once after the first, held 1.5 s), ${saving.n} long tasks, the longest ${saving.longest} ms, per call ${JSON.stringify(sc.map((c) => [c.body.sizes.length, cellsIn(c.body)]))}; a frame after it all ${responsive} ms`);
+  ok("V: the page never freezes: no single task over 1 s planning, committing or saving 20,000 boxes",
+    plan.longest < 1000 && commit.longest < 1000 && saving.longest < 1000 && plan.shown < 1500 && commit.painted < 1500, JSON.stringify({ plan, commit, saving }));
+  ok("V: no page errors (20,000 boxes)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
