@@ -315,6 +315,19 @@ Deno.test("auditNote: a refused price is not counted as written, and nothing uns
   assertEquals(note, "saved=1 created=0 removed=0 conflicts=0 refused=0 prices=0 hidden=0 cellsCleared=1 cellsSet=1 duplicates=2 exists=0 missing=0 gone=0");
 });
 
+// A first price pasted with Offered "no" goes with active false from false (the browser's
+// ssPgBuildBatch). The size was never offered, so it was hidden from nothing.
+Deno.test("auditNote: `hidden` counts Offered unticked and a price cleared, never a first price sent with Offered left unticked", () => {
+  const r = validatePayload({ creates: [], removes: [], sizes: [
+    { id: uid(7), base: V, from: { price: null, active: false }, to: { price: 900, active: false } },
+    { id: uid(8), base: V, from: { active: true }, to: { active: false } },
+    { id: uid(9), base: V, from: { price: 400 }, to: { price: null } },
+  ] });
+  if (!r.ok) throw new Error(r.error);
+  const note = auditNote(r.value, { created: [], removed: [], results: [7, 8, 9].map((k) => ({ id: uid(k), status: "saved", row: { active: false } })) });
+  assert(/ prices=2 hidden=2 /.test(note), note);
+});
+
 // ─── 4. readSizeTable / pagedRead ──────────────────────────────────────────────────────────────
 // 40 sizes x 30 options = 1,200 inclusion rows: past PostgREST's 1,000-row answer.
 const KEYS = Array.from({ length: 30 }, (_, i) => `item${String(i).padStart(2, "0")}`);

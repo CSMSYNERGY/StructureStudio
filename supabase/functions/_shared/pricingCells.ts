@@ -268,7 +268,8 @@ const removedNow = (r: any) => r?.status === "removed" && r?.gone !== true;
 
 /** The audit note: counts only. saved / created / removed / conflicts / refused first (the plan's
  *  shape), then what the saved sizes changed: prices written, sizes hidden from the designer, boxes
- *  cleared and set. */
+ *  cleared and set. Hidden means taken out by this call: Offered unticked from ticked, or a price
+ *  cleared. A first price sent with Offered left unticked (a paste's "no") was never in it. */
 export function auditNote(v: PricingCellsPayload, out: PricingCellsAnswer): string {
   const n = (list: any[], status: string) => list.filter((x) => x?.status === status).length;
   const sent = new Map(v.sizes.map((s) => [s.id, s]));
@@ -279,7 +280,9 @@ export function auditNote(v: PricingCellsPayload, out: PricingCellsAnswer): stri
     if (!s) continue;
     const errs = r.cellErrors ?? {};
     if ("price" in s.to && !("price" in errs)) prices++;
-    if (r.row?.active === false && ((("price" in s.to) && s.to.price === null) || s.to.active === false)) hidden++;
+    const unticked = s.to.active === false && s.from.active === true;
+    const priceGone = "price" in s.to && s.to.price === null && s.from.price != null;
+    if (r.row?.active === false && (unticked || priceGone)) hidden++;
     for (const [k, q] of Object.entries(s.to.cells ?? {})) {
       if (k in errs) continue;
       if (q === 0) cleared++; else set++;
