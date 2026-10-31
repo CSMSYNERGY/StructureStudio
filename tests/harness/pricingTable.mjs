@@ -28,12 +28,14 @@
 //      a count that never adds up reads twice and opens view-only "too big"; Real-Time Pricing greys
 //      every price and locks it, at 1440 and at 390 px.
 //   F  VIEW-AS: an operator's cold ?view=<builder> load says "Opening <builder>…" and reads nothing
-//      while the operator check is out, then makes every table read for that builder (targetClientId
-//      on every body) and draws the red operator strip with the builder's name; ?as= opens view-only,
-//      naming the person (or "a team member" when the people list is refused); a view-as page that is
-//      view-only for another reason says so in the strip too; a non-operator holding ?view= is told
-//      after 10 s that the account could not be opened, and no table read ever goes out; a view-only
-//      access map opens view-only; a billing lock shows the lock.
+//      while the operator check is out (no portal-settings call but the shell's own boot reads for the
+//      operator), then makes every table read for that builder and saves an edit there (targetClientId
+//      on every portal-settings body from then on) and draws the red operator strip with the builder's
+//      name; ?as= opens view-only, naming the person (or "a team member" when the people list is
+//      refused); a view-as page that is view-only for another reason says so in the strip too; a
+//      non-operator holding ?view= is told 10 s after "Opening…" (by the page's own clock) that the
+//      account could not be opened, and no table read ever goes out; a view-only access map opens
+//      view-only; a billing lock shows the lock.
 //   G  NARROW (390 px): the page does not scroll sideways, the header is at most 90 px, at least 8 rows
 //      show.
 //   P  EDITING AND AUTOSAVE (Phase 3), against a fake of save_pricing_cells answering as migration 350
@@ -50,10 +52,13 @@
 //      a lost answer resends as a duplicate; five failures stop saving with one info row, then Retry
 //      and Discard (a Discard whose call landed anyway reads the table again and says so; when that
 //      read fails the badge says it may have saved, with Reload); a 403 makes the page view-only.
-//      ?as= and a view-only access map refuse every edit path; Real-Time Pricing locks prices only.
+//      ?as= and a view-only access map refuse every edit path: every control the page draws is listed
+//      (against the same rows editable, so the list is known to catch an edit control), none of them
+//      edits, and using each, Back to Sheds last, sends nothing; Real-Time Pricing locks prices only.
 //      The leave prompt fires for an editor holding changed text and for an unsent edit, and not once
-//      saved; Back to Sheds sends first, and stays on a box that goes red (text refused, or the save
-//      changed elsewhere) or says why it stayed (saving stopped) with Leave anyway; Go to Options and
+//      saved; left anyway and reopened, the banner has the editor's text and Save them sends it; Back
+//      to Sheds sends first, and stays on a box that goes red (text refused, or the save changed
+//      elsewhere) or says why it stayed (saving stopped) with Leave anyway; Go to Options and
 //      the browser's Back send first too. The browser's Back is held while anything waits (a
 //      follow-up in the editor behind a call out, the editor's text alone), goes after it saves, and
 //      stays on a box that went red or while saving is stopped; a box typed into while Back to Sheds
@@ -68,7 +73,8 @@
 //      box is already open. Remove goes through the queue (and one the server refuses keeps its row
 //      and says why). ?style= opens with the add box focused. A save in another tab re-reads both
 //      tables after 1 s (a new column, a new style, a new number); the page's own saves and another
-//      account's do not; coming back to the tab does. An Excel upload in the Sheds tab turns a box
+//      account's do not; the same-window "ss:settings-saved" event from another source does, and so
+//      does coming back to the tab. An Excel upload in the Sheds tab turns a box
 //      waiting to save that the sheet changed amber, never sent. The backup: a closed tab's call out,
 //      red box and editor text come back as "You have 2 changes from earlier…"; Save them sends them
 //      on their stored version and starting values; a colleague's change since comes back amber;
@@ -85,8 +91,42 @@
 //      from Continue to the commit drawn (longest task, rows re-rendered), then saved in calls of at
 //      most 50 sizes and 2,500 boxes; 20,040 boxes are refused.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
-//      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails only if an arrow key re-renders a row
-//      or a commit re-renders more than the one it changed.
+//      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails if an arrow key re-renders a row or a
+//      commit re-renders more than the one it changed, and at 1x if the plan's targets are missed
+//      (first render under 500 ms, an arrow key under 16 ms).
+//
+// PLAN 8.4, CASE BY CASE: where each of its cases is checked (section, then the check's own words).
+//   Mount: a cold load renders, no React #310 ........ B "no page errors, no React #310" (and every
+//                                                        section opens the page cold)
+//   View-as: cold ?view= sends no portal-settings call before arming, then targetClientId on every
+//            body ............................................ F "before ?view= arms…", "…and after it,
+//                                                        every portal-settings body…", "an edit in view-as…"
+//   View-as: a non-operator holding ?view= is told at 10 s ... F "…and 10 s after it, not sooner…"
+//   View-as: ?as= is view-only, no save goes out ........ F "?as= opens view-only…"; P "view-only (?as=)…"
+//                                                        (every control, every key, the clipboard)
+//   Permissions: a view-only access map, controls enumerated  F "a view-only access map opens view-only";
+//                                                        P "view-only (a view-only access map): every
+//                                                        control drawn…", "…refuses every edit path",
+//                                                        "…using every control"; V "view-only: paste…"
+//   Grid 210 x 38, 46-character name, 1280 and 1440: no name cut, both axes pinned, "480"/"1200" fit
+//                                                        C38@1280, C38@1440 (and C at 25 columns)
+//   Narrow 390 px: no sideways page, header <= 90 px, >= 8 rows  G
+//   Editing: one option edit = one size with only that box ... P "an option edit sends one size…"
+//   Editing: 10 quick edits make at most 2 calls ........ P "10 quick edits make at most 2 calls…"
+//   Editing: create, then a price on the create's version  R "the price typed while it was being added…"
+//   Paste: a bad cell, a block across a band, the confirm  V "a block with one bad cell…", "…cross a
+//                                                        style's band…", "a paste onto more than one size…"
+//   Failure: hung main host -> side door, amber then green  P "a hung main host…"
+//   Failure: a conflict on another box -> one resend ..... P "a colleague's change to another box…"
+//   Failure: a conflict on the same box -> red + status .. P "a colleague's change to the same box…",
+//                                                        "'1 box needs you' jumps to it…"
+//   Failure: 5 failures -> saving stops, one info row .... P "five failures in a row…", "…one info row"
+//   Leaving: the prompt with an edit unsent, and with only the editor's text; reopened, the banner has
+//            that text ................................... P "leaving while…asks first", "…left anyway
+//                                                        and opened again…"
+//   Refresh: another source's broadcast re-reads both, a new column  R "a save in another tab…",
+//                                                        "…a new option column appears…"
+//   Timing at 1x and 3x .............................. T
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine). Every style, size,
 // option and account here is made up; this repo is public.
@@ -361,6 +401,7 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
       if (rpc[1] === "log_error") { logs.push(body); return json(route, null); }
       if (rpc[1] === "is_operator") {
         if (S.operatorDelayMs) await sleep(S.operatorDelayMs);
+        if (S.opAt == null) S.opAt = Date.now();   // the first answer: ?view= can arm only after it
         return json(route, !!S.operator);
       }
       if (rpc[1] === "is_support_operator") return json(route, false);
@@ -374,7 +415,8 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
     const fn = /\/(?:functions\/v1\/)?(portal-[a-z]+|operator-portal|support-agent)(?:[/?]|$)/.exec(new URL(url).pathname);
     const name = fn ? fn[1] : null;
     const host = new URL(url).host.includes(".functions.") ? "side" : "main";
-    calls.push({ fn: name, action: body.action, body, host, at: Date.now() });
+    // `warm`: the shell's ?warm=1 ping (ssWarmFn), which carries no body and runs no tenant code.
+    calls.push({ fn: name, action: body.action, body, host, at: Date.now(), warm: /[?&]warm=1(&|$)/.test(url) });
     if (name === "portal-billing") {
       return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], paid: [], features: { crm: true }, status: S.locked ? "past_due" : "active", locked: !!S.locked, reason: S.locked ? "unpaid" : null }, wallet: null });
     }
@@ -436,6 +478,77 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
 }
 const tableCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && (c.action === "size_table" || (c.action === "catalog" && "targetClientId" in c.body)));
 const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tbody tr", { timeout });
+
+// ── The helpers the editing sections share (P first; F, R and V too) ──
+const sel = (id, col) => `tr[data-s="${id}"] td[data-c="${col}"]`;
+const saveCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && c.action === "save_pricing_cells");
+const barnOf = (t) => t.sizes.filter((z) => z.style_id === t.styles[0].id).sort((a, b) => a.sort_order - b.sort_order);
+const keyCol = (cat, key) => 3 + OPTION_KEYS(cat).indexOf(key);
+const named = (z) => `Test Barn ${z.label}`;
+const look = (page, id, col) => page.evaluate((s) => { const td = document.querySelector(s); return td ? { text: td.textContent, cls: td.className, invalid: td.getAttribute("aria-invalid") } : null; }, sel(id, col));
+const state = (page) => page.evaluate(() => ({
+  badge: (document.querySelector(".ss-pg-badge") || {}).textContent || "",
+  readout: (document.querySelector(".ss-pg-readout") || {}).textContent || "",
+  status: [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "),
+  editor: (() => { const i = document.querySelector(".ss-pg-ed"); return i ? { value: i.value, label: i.getAttribute("aria-label"), mode: i.inputMode, focused: document.activeElement === i } : null; })(),
+  editable: (document.querySelector(".ss-pg") || { getAttribute: () => null }).getAttribute("data-ss-pg-editable"),   // null: the table is gone
+  actions: [...document.querySelectorAll(".ss-pg-bact")].map((b) => b.textContent),
+}));
+const waitBadge = (page, re, timeout = 12000) => page.waitForFunction((src) => new RegExp(src).test((document.querySelector(".ss-pg-badge") || {}).textContent || ""), re.source, { timeout }).then(() => true, () => false);
+// Every badge text in order, from now on (a MutationObserver on the toolbar).
+const watchBadge = (page) => page.evaluate(() => {
+  window.__ssBadges = [];
+  const rec = () => { const t = (document.querySelector(".ss-pg-badge") || {}).textContent || ""; if (window.__ssBadges[window.__ssBadges.length - 1] !== t) window.__ssBadges.push(t); };
+  rec();
+  new MutationObserver(rec).observe(document.querySelector(".ss-pg-bar"), { subtree: true, childList: true, characterData: true });
+});
+const badgesSeen = (page) => page.evaluate(() => window.__ssBadges || []);
+// Waits until `k` more save calls have gone out since `n0` and the badge is green again.
+const saved = async (page, calls, n0, k = 1, timeout = 15000) => {
+  const until = Date.now() + timeout;
+  while (Date.now() < until) {
+    if (saveCalls(calls).length >= n0 + k && /^All changes saved · /.test((await state(page)).badge)) return true;
+    await sleep(60);
+  }
+  return false;
+};
+const typeIn = async (page, id, col, text, key = "Enter") => {
+  await page.locator(sel(id, col)).click();
+  await page.keyboard.type(text);
+  if (key) await page.keyboard.press(key);
+};
+// A fourth style with no sizes: its placeholder is the add strip, list box open (R, and the view-only
+// control count in P, where the strip must NOT be drawn).
+const EMPTY_STYLE = uid("5", 4);
+const withEmpty = (t) => ({ ...t, styles: [...t.styles, { id: EMPTY_STYLE, key: "test-empty", label: "Test Empty Shed", code: "TE", active: true, sort_order: 3 }] });
+// The local backup (plan 4.9), keyed by user and account.
+const BACKUP_KEY = (clientId) => `ss-pg-pending:${USER.id}:${clientId}`;
+const stored = (page, clientId) => page.evaluate((k) => localStorage.getItem(k), BACKUP_KEY(clientId));
+// The browser's own clipboard events, as a Ctrl/Cmd+C or V on the grid hands them to the page.
+const clip = {
+  paste: (page, text) => page.evaluate((t) => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", t);
+    const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+    (document.activeElement || document.body).dispatchEvent(ev);
+    return ev.defaultPrevented;
+  }, text),
+  copy: (page) => page.evaluate(() => {
+    const dt = new DataTransfer();
+    const ev = new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true });
+    (document.activeElement || document.body).dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented, text: dt.getData("text/plain") };
+  }),
+};
+const confirmOf = (page) => page.evaluate(() => {
+  const d = document.querySelector(".ss-pg-confirm [role=alertdialog]");
+  if (!d) return null;
+  const p = d.querySelector("p");
+  return { text: p ? p.textContent : "", modal: d.getAttribute("aria-modal"), named: !!p && d.getAttribute("aria-labelledby") === p.id,
+    focus: document.activeElement && d.contains(document.activeElement) ? document.activeElement.textContent : null };
+});
+const statusText = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "));
+const tsvOf = (rows) => rows.map((r) => r.join("\t") + "\r\n").join("");
 
 // ── A: the Sheds card ────────────────────────────────────────────────────────────────────────
 if (want("A") || want("B")) {
@@ -660,7 +773,7 @@ for (const run of want("C") ? C_RUNS : []) {
   });
   ok(`${tag}: ${nCols} option headers plus Offered, none cut`, h.n === nCols + 1 && h.cut.length === 0, `cut: ${JSON.stringify(h.cut)}; header ${h.headH}px; ${h.twoLine} on two lines`);
   ok(`${tag}: a two-line name reads in order (first line on the right, top to bottom)`, h.twoLine > 0 && h.backwards.length === 0, JSON.stringify(h.backwards));
-  ok(`${tag}: the longest name is the 46-character door, drawn whole`, h.longest === LONG, h.longest);
+  ok(`${tag}: the longest name is the 46-character door, drawn whole`, h.longest === LONG && LONG.length === 46, `${h.longest} (${h.longest.length})`);
   ok(`${tag}: no ellipsis on the headers at this width`, !h.ellipsis);
   const fit = await page.evaluate(() => {
     const cells = [...document.querySelectorAll(".ss-pg-grid tbody td[data-c]")].filter((td) => td.textContent === "480" || td.textContent === "1200");
@@ -698,10 +811,14 @@ for (const run of want("C") ? C_RUNS : []) {
     return res;
   });
   const sideways = pin.scrollLeft > 0 && pin.sizeX[0] === pin.sizeX[1] && pin.priceX[0] === pin.priceX[1] && pin.offX[0] === pin.offX[1] && pin.optX[1] < pin.optX[0];
-  if (width === 1000) ok(`${tag}: Size, Price and Offered stay pinned while the grid scrolls sideways`, sideways, JSON.stringify(pin));
+  // At 1000 px, and on the plan's 210 x 38 at both widths (38 columns are wider than 1440), the grid
+  // MUST scroll sideways, so the pin is proved there; 25 columns may fit across 1280 and 1440.
+  const mustScroll = width === 1000 || run.big;
+  if (mustScroll) ok(`${tag}: the grid scrolls sideways, and Size, Price and Offered stay pinned while it does`, sideways, JSON.stringify(pin));
   else ok(`${tag}: the grid fits across without a sideways scroll, or stays pinned in one`, pin.scrollLeft === 0 || sideways, JSON.stringify(pin));
   // The style's name, too (plan 3.6): a band cell that is a scroll container would let it scroll away.
-  ok(`${tag}: a style's name stays at the left edge while the grid scrolls sideways`, pin.scrollLeft === 0 || pin.bandX[0] === pin.bandX[1], JSON.stringify({ scrollLeft: pin.scrollLeft, bandX: pin.bandX }));  ok(`${tag}: the header stays pinned while it scrolls down`, pin.scrollTop > 0 && pin.headTop === pin.boxTop + 22, JSON.stringify({ headTop: pin.headTop, boxTop: pin.boxTop }));
+  ok(`${tag}: a style's name stays at the left edge while the grid scrolls sideways`, mustScroll ? pin.scrollLeft > 0 && pin.bandX[0] === pin.bandX[1] : pin.scrollLeft === 0 || pin.bandX[0] === pin.bandX[1], JSON.stringify({ scrollLeft: pin.scrollLeft, bandX: pin.bandX }));
+  ok(`${tag}: the header stays pinned while it scrolls down`, pin.scrollTop > 0 && pin.headTop === pin.boxTop + 22, JSON.stringify({ headTop: pin.headTop, boxTop: pin.boxTop }));
   ok(`${tag}: the page itself never scrolls, either way`, pin.pageX && pin.pageY);
   const thead = await page.locator(".ss-pg-grid thead").boundingBox();
   if (run.shot) await page.screenshot({ path: join(headerShots, run.shot), clip: { x: 0, y: 0, width, height: Math.min(900, Math.round(thead.y + thead.height + 28 * 6)) } });
@@ -896,8 +1013,12 @@ for (const width of want("E") ? [1440, 390] : []) {
 // ── F: view-as and permissions ──
 if (want("F")) {
   // is_operator answers 2.5 s late, so the hold is long enough to see: the tab is the operator's OWN
-  // account until it answers, and nothing may be read for it.
-  const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}`, { own: OPS, operator: true, operatorDelayMs: 2500 });
+  // account until it answers, and nothing may be read for it. The viewed builder's rows are a
+  // fakeServer, so an edit made in view-as is saved and read back too.
+  const cat = catalogFor(VIEWED);
+  const F = fakeServer(cat, tableFor(VIEWED, cat));
+  const { ctx, page, calls, errors, S } = await open(`/settings/sheds-table?view=${VIEWED}`,
+    { own: OPS, operator: true, operatorDelayMs: 2500, cat: (cid) => ({ ...cat, clientId: cid }), fake: F });
   await page.waitForSelector(".ss-pg-msg", { timeout: 15000 }).catch(() => {});
   const holding = await page.locator(".ss-pg-msg").textContent().catch(() => "");
   const readsWhileHeld = tableCalls(calls).length + calls.filter((c) => c.action === "size_table").length;
@@ -913,6 +1034,28 @@ if (want("F")) {
   ok("F: …and so does the tab's title", f.title === `Sizes & prices · ${COMPANY[VIEWED]} · Structure Studio`, f.title);
   ok("F: Back to Sheds keeps ?view=", f.back === `/settings/sheds?view=${VIEWED}`, f.back);
   ok("F: an operator in view-as may edit", f.editable === "1");
+  // An edit in view-as: the save goes to the viewed builder, and the answer is checked to be theirs.
+  const zv = barnOf(F.table(VIEWED))[0];
+  const nv = saveCalls(calls).length;
+  await typeIn(page, zv.id, 1, "4321");
+  const vSaved = await saved(page, calls, nv);
+  const vs = saveCalls(calls).slice(nv);
+  ok("F: an edit in view-as saves to the viewed builder: targetClientId on the save's body, the answer theirs, the box saved",
+    vSaved && vs.length === 1 && vs[0].body.targetClientId === VIEWED && F.size(zv.id).base_price === 4321 && /^All changes saved/.test((await state(page)).badge),
+    JSON.stringify(vs.map((c) => ({ t: c.body.targetClientId, sizes: c.body.sizes }))));
+  // Plan 8.4: a cold ?view= makes no portal-settings call before arming, and every one after carries
+  // targetClientId. ?view= can arm only once is_operator has answered (S.opAt). What may go before it
+  // is the shell's own boot for the person signed in, on every portal page: `status` and
+  // `get_profile` (12-shell.jsx: issued when nothing is armed, so the answer is provably the caller's
+  // own account and never the builder's), and the bodiless ?warm=1 ping. The table sends nothing then.
+  const ps = calls.filter((c) => c.fn === "portal-settings");
+  const pre = ps.filter((c) => c.at < S.opAt), post = ps.filter((c) => c.at >= S.opAt);
+  const SHELL_BOOT = ["status", "get_profile"];
+  const what = (c) => (c.warm ? "warm" : c.action) + (c.body.targetClientId !== undefined ? `->${c.body.targetClientId}` : "");
+  ok("F: before ?view= arms, no table call and nothing for the builder goes to portal-settings: only the shell's own boot reads for the operator",
+    S.opAt != null && pre.every((c) => c.warm || (SHELL_BOOT.includes(c.action) && !c.body.targetClientId)), `before: ${pre.map(what).join(" ")}`);
+  ok("F: …and after it, every portal-settings body carries targetClientId: the viewed builder (table reads, the save, the shell's own)",
+    post.length >= 3 && post.filter((c) => !c.warm).every((c) => c.body.targetClientId === VIEWED), `after: ${post.map(what).join(" ")}`);
   await page.screenshot({ path: join(shots, "F-view-as.png") });
   ok("F: no page errors (view-as)", errors.length === 0, errors.join(" | "));
   await ctx.close();
@@ -950,15 +1093,26 @@ if (want("F")) {
   await ctx.close();
 }
 if (want("F")) {
-  const t0 = Date.now();
-  const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}`, { own: OWN, operator: false });
+  const { ctx, page, calls, errors } = await open(null, { own: OWN, operator: false });
+  // The page's own clock: when "Opening…" is first drawn and when the timeout replaces it.
+  await page.addInitScript(() => {
+    window.__ssHold = {};
+    new MutationObserver(() => {
+      const t = (document.querySelector(".ss-pg-msg") || {}).textContent || "";
+      if (/^Opening /.test(t) && window.__ssHold.opening == null) window.__ssHold.opening = performance.now();
+      if (/^Couldn't open that account here\./.test(t) && window.__ssHold.gaveUp == null) window.__ssHold.gaveUp = performance.now();
+    }).observe(document, { subtree: true, childList: true, characterData: true });   // the document: its <html> may not exist yet
+  });
+  await page.goto(`${BASE}/settings/sheds-table?view=${VIEWED}`);
   await page.waitForSelector(".ss-pg-msg", { timeout: 15000 }).catch(() => {});
   const early = await page.locator(".ss-pg-msg").textContent().catch(() => "");
   await page.waitForSelector("text=Couldn't open that account here.", { timeout: 14000 }).catch(() => {});
   const late = await page.locator(".ss-pg-msg").textContent().catch(() => "");
-  const took = Date.now() - t0;
+  const hold = await page.evaluate(() => window.__ssHold);
+  const took = hold && hold.opening != null && hold.gaveUp != null ? Math.round(hold.gaveUp - hold.opening) : null;
   ok("F: a non-operator holding ?view= sees 'Opening…'", early === `Opening ${VIEWED}…`, early);
-  ok("F: …and after 10 s 'Couldn't open that account here.'", late === "Couldn't open that account here. Close this tab and use the button on Sheds again." && took >= 9500, `${late} after ${took} ms`);
+  ok("F: …and 10 s after it, not sooner, 'Couldn't open that account here.'", late === "Couldn't open that account here. Close this tab and use the button on Sheds again."
+    && took != null && took >= 9950 && took <= 10600, `${late} ${took} ms after 'Opening…' was drawn`);
   ok("F: …and no table read ever went out (never the user's own account)", tableCalls(calls).length === 0 && !calls.some((c) => c.action === "size_table"), tableCalls(calls).map((c) => c.action).join(","));
   ok("F: no page errors (hold)", errors.length === 0, errors.join(" | "));
   await ctx.close();
@@ -1011,45 +1165,7 @@ if (want("G")) {
   await ctx.close();
 }
 
-// ── P: editing and autosave (Phase 3) ──
-const sel = (id, col) => `tr[data-s="${id}"] td[data-c="${col}"]`;
-const saveCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && c.action === "save_pricing_cells");
-const barnOf = (t) => t.sizes.filter((z) => z.style_id === t.styles[0].id).sort((a, b) => a.sort_order - b.sort_order);
-const keyCol = (cat, key) => 3 + OPTION_KEYS(cat).indexOf(key);
-const named = (z) => `Test Barn ${z.label}`;
-const look = (page, id, col) => page.evaluate((s) => { const td = document.querySelector(s); return td ? { text: td.textContent, cls: td.className, invalid: td.getAttribute("aria-invalid") } : null; }, sel(id, col));
-const state = (page) => page.evaluate(() => ({
-  badge: (document.querySelector(".ss-pg-badge") || {}).textContent || "",
-  readout: (document.querySelector(".ss-pg-readout") || {}).textContent || "",
-  status: [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "),
-  editor: (() => { const i = document.querySelector(".ss-pg-ed"); return i ? { value: i.value, label: i.getAttribute("aria-label"), mode: i.inputMode, focused: document.activeElement === i } : null; })(),
-  editable: (document.querySelector(".ss-pg") || { getAttribute: () => null }).getAttribute("data-ss-pg-editable"),   // null: the table is gone
-  actions: [...document.querySelectorAll(".ss-pg-bact")].map((b) => b.textContent),
-}));
-const waitBadge = (page, re, timeout = 12000) => page.waitForFunction((src) => new RegExp(src).test((document.querySelector(".ss-pg-badge") || {}).textContent || ""), re.source, { timeout }).then(() => true, () => false);
-// Every badge text in order, from now on (a MutationObserver on the toolbar).
-const watchBadge = (page) => page.evaluate(() => {
-  window.__ssBadges = [];
-  const rec = () => { const t = (document.querySelector(".ss-pg-badge") || {}).textContent || ""; if (window.__ssBadges[window.__ssBadges.length - 1] !== t) window.__ssBadges.push(t); };
-  rec();
-  new MutationObserver(rec).observe(document.querySelector(".ss-pg-bar"), { subtree: true, childList: true, characterData: true });
-});
-const badgesSeen = (page) => page.evaluate(() => window.__ssBadges || []);
-// Waits until `k` more save calls have gone out since `n0` and the badge is green again.
-const saved = async (page, calls, n0, k = 1, timeout = 15000) => {
-  const until = Date.now() + timeout;
-  while (Date.now() < until) {
-    if (saveCalls(calls).length >= n0 + k && /^All changes saved · /.test((await state(page)).badge)) return true;
-    await sleep(60);
-  }
-  return false;
-};
-const typeIn = async (page, id, col, text, key = "Enter") => {
-  await page.locator(sel(id, col)).click();
-  await page.keyboard.type(text);
-  if (key) await page.keyboard.press(key);
-};
-
+// ── P: editing and autosave (Phase 3) ── (its helpers are above section A: F uses them too)
 if (want("P")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, tableFor(OWN, cat));
@@ -1407,17 +1523,88 @@ if (want("P")) {
 
 // View-only refuses every edit path: an operator wearing a team member (?as=), and a view-only
 // access map. Then Real-Time Pricing, which locks the price column alone.
+//
+// Plan 8.4 (Permissions): "enumerate the controls" (memory disabled-ui-fails-silently: a control that
+// is missing or disabled raises nothing). Every control the page draws is listed, first on the same
+// rows while the page can edit, so the list is known to catch an edit control, then view-only: what
+// is left must be a subset with no edit control in it, and every one of them is then used, Back to
+// Sheds last, with no save call. The rows carry a size added by mistake (Remove is drawn for it while
+// the page can edit) and a style with no sizes (its add strip, while the page can edit).
+const REMOVABLE = uid("7", 900);
+const withRemovable = (t) => ({ ...t,
+  sizes: [...t.sizes, { id: REMOVABLE, style_id: t.styles[0].id, label: "20x40", width_ft: 20, length_ft: 40, base_price: null, active: false, sort_order: 99,
+    created_at: "2026-10-25T00:00:00.000001+00:00", updated_at: "2026-10-25T00:00:00.000001+00:00" }],
+  counts: { ...t.counts, sizes: t.counts.sizes + 1 } });
+// "<kind>:<name>" for every control drawn in the table's frame (the grid itself included: it takes the
+// keys). A name is the control's aria-label, its text, its label's text, or its placeholder.
+const controlsOf = (page) => page.evaluate(() => {
+  const root = document.querySelector(".ss-pg");
+  if (!root) return [];
+  return [...root.querySelectorAll("button, input, select, textarea, a[href], [contenteditable], [tabindex]")]
+    .filter((el) => el.getClientRects().length > 0)
+    .map((el) => {
+      const tag = el.tagName.toLowerCase();
+      // A control inside an add strip is an edit control whatever it is called (List, Add several, ✕).
+      const kind = (el.closest("tr[data-add]") ? "strip-" : "") + (tag === "input" ? `input-${el.type}` : tag === "table" ? "grid" : tag);
+      const lab = el.closest("label");
+      const name = el.getAttribute("aria-label") || (tag === "select" || tag === "table" ? "" : el.textContent)
+        || (lab ? lab.textContent : "") || el.getAttribute("placeholder") || el.title || "";
+      return `${kind}:${name.trim().replace(/\s+/g, " ").slice(0, 48)}${el.disabled ? " (disabled)" : ""}`;
+    });
+});
+const EDIT_CONTROL = /^(strip-|textarea|input-text|input-number)|:(＋ Add sizes|Remove size .+|Fill down|Clear|Save them)$/;
+let editableControls = null;
+if (want("P")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withRemovable(withEmpty(tableFor(OWN, cat))));
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.locator(sel(barnOf(F.table(OWN))[0].id, 1)).click();
+  editableControls = await controlsOf(page);
+  const edits = [...new Set(editableControls.filter((c) => EDIT_CONTROL.test(c)))];
+  ok("P: (set-up) while it can edit, the page draws its edit controls: ＋ Add sizes on every band, Remove on the size added by mistake, the empty style's list box, Fill down and Clear",
+    editableControls.filter((c) => c === "button:＋ Add sizes").length === F.table(OWN).styles.length && edits.includes("button:Remove size 20x40") && edits.some((c) => /^strip-textarea/.test(c))
+    && edits.includes("button:Fill down") && edits.includes("button:Clear"), `${editableControls.filter((c) => c === "button:＋ Add sizes").length} × Add sizes; ${JSON.stringify(edits)}`);
+  ok("P: no page errors (the editable control count)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
 for (const [what, path, S0] of want("P") ? [
   ["?as=", `/settings/sheds-table?view=${VIEWED}&as=${WEAR}`, { own: OPS, operator: true }],
   ["a view-only access map", "/settings/sheds-table", { role: "user", access: { settings_structures: "view", designs: "view" } }],
 ] : []) {
   const cat = catalogFor(OWN);
-  const F = fakeServer(cat, tableFor(OWN, cat));
+  const F = fakeServer(cat, withRemovable(withEmpty(tableFor(OWN, cat))));
   const barn = barnOf(F.table(OWN));
   const LOFT = keyCol(cat, "loft");
   const { ctx, page, calls, errors } = await open(path, { ...S0, cat: (cid) => ({ ...cat, clientId: cid }), fake: F }, { width: 1280, height: 860 });
   await waitGrid(page).catch(() => {});
   const z = barn[0];
+  await page.locator(sel(z.id, 1)).click();
+  const controls = await controlsOf(page);
+  const kinds = [...new Set(controls)];
+  ok(`P: view-only (${what}): every control drawn is one the editable page draws too, and none of them edits (no Add sizes, Remove, list box, Fill down, Clear, editor)`,
+    !!editableControls && kinds.length > 0 && kinds.every((c) => editableControls.includes(c)) && !kinds.some((c) => EDIT_CONTROL.test(c))
+    && !controls.some((c) => / \(disabled\)$/.test(c)), JSON.stringify(kinds));
+  // Each control left is then used. Back to Sheds (the link) goes last, below.
+  const used = await page.evaluate(async () => {
+    const out = [];
+    const tick = () => new Promise((r) => setTimeout(r, 120));
+    const els = [...document.querySelector(".ss-pg").querySelectorAll("button, input, select")].filter((el) => el.getClientRects().length > 0);
+    for (const el of els) {
+      const name = (el.getAttribute("aria-label") || el.textContent || (el.closest("label") || {}).textContent || el.tagName).trim();
+      if (el.tagName === "SELECT") {
+        for (const o of [...el.options].filter((x) => x.value)) { el.value = o.value; el.dispatchEvent(new Event("change", { bubbles: true })); await tick(); }
+        out.push(`select ${el.options.length}`);
+      } else if (el.isConnected) {
+        el.click(); await tick();
+        if (el.isConnected && (el.type === "checkbox" || /^\?$/.test(name))) { el.click(); await tick(); }   // put a toggle back
+        out.push(name.slice(0, 24));
+      }
+    }
+    return out;
+  });
+  const z0 = barn[0];
+  await page.locator(sel(z0.id, 1)).click();
   const before = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-grid tbody td")].map((td) => td.textContent).join("|"));
   const tries = [];
   const note = async (label) => tries.push(`${label}:${await page.locator(".ss-pg-ed").count()}`);
@@ -1435,10 +1622,22 @@ for (const [what, path, S0] of want("P") ? [
   await page.locator(sel(z.id, 2)).click();
   await page.keyboard.press("Space"); await note("Space on Offered");
   await page.locator(sel(z.id, 2)).click(); await note("click Offered again");
+  // The clipboard's and the range's ways in (section V3 tries them on a view-only access map).
+  if (what === "?as=") {
+    await page.locator(sel(z.id, 1)).click();
+    await page.keyboard.press("Shift+ArrowDown");
+    await clip.paste(page, "1\t\r\n2\t\r\n"); tries.push(`paste:${(await confirmOf(page)) ? 1 : 0}`);
+    await page.keyboard.press("Control+D"); tries.push(`Ctrl+D:${(await confirmOf(page)) ? 1 : 0}`);
+    await page.keyboard.press("Delete"); tries.push(`Delete on a range:${(await confirmOf(page)) ? 1 : 0}`);
+  }
   await page.waitForTimeout(1300);
   const after = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-grid tbody td")].map((td) => td.textContent).join("|"));
   ok(`P: view-only (${what}) refuses every edit path: no editor, no change, no save call`,
     tries.every((t) => t.endsWith(":0")) && before === after && saveCalls(calls).length === 0 && (await state(page)).badge.startsWith("View only"), tries.join(" "));
+  ok(`P: …and using every control it draws sends no save either`, used.length >= 3 && saveCalls(calls).length === 0, used.join(", "));
+  await page.locator(".ss-pg-back").click();
+  await page.waitForURL((u) => u.pathname === "/settings/sheds", { timeout: 8000 }).catch(() => {});
+  ok(`P: …Back to Sheds, last, leaves at once, sending nothing`, new URL(page.url()).pathname === "/settings/sheds" && saveCalls(calls).length === 0, page.url());
   ok(`P: no page errors (view-only, ${what})`, errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
@@ -1482,6 +1681,30 @@ for (const [what, prep, asks] of want("P") ? [
   const asked = dialogs.includes("beforeunload");
   ok(`P: leaving ${what} ${asks ? "asks first" : "does not ask"}`, asks ? asked && !page.isClosed() : !asked && page.isClosed(),
     JSON.stringify({ dialogs, badge: before.badge, editor: !!before.editor }));
+  // Plan 8.4: that page, left anyway, then opened again: the banner counts the text that was only ever
+  // in the editor, and Save them sends it from what was on file. "Left anyway" is the browser going
+  // with the page's storage kept: Chrome will not close a page here once its beforeunload was
+  // answered "stay" (page.close hangs), so the next browser starts with what this one stored.
+  if (asks && /editor holds changed text/.test(what)) {
+    const z = barn[0], loft0 = F.cells(z.id).loft || 0;
+    const left = await stored(page, OWN);
+    ok(`P: no page errors (leaving ${what})`, errors.length === 0, errors.join(" | "));
+    await ctx.close();
+    const re = await open("/settings/sheds-table", { cat: () => cat, fake: F, storage: left ? { [BACKUP_KEY(OWN)]: left } : {} }, { width: 1280, height: 860 });
+    await waitGrid(re.page).catch(() => {});
+    await re.page.waitForSelector(".ss-pg-earlier", { timeout: 8000 }).catch(() => {});
+    const banner = await re.page.locator(".ss-pg-earlier span").textContent({ timeout: 1000 }).catch(() => null);
+    await re.page.locator(".ss-pg-earlier button", { hasText: "Save them" }).click({ timeout: 3000 }).catch(() => {});
+    const went = await saved(re.page, re.calls, 0, 1, 15000);
+    const sent = (saveCalls(re.calls)[0] || { body: { sizes: [] } }).body.sizes;
+    ok("P: …left anyway and opened again: the banner offers the editor's text back, and Save them sends it from what was on file",
+      !!left && banner === "You have 1 change from earlier that wasn't saved." && went
+      && JSON.stringify(sent) === JSON.stringify([{ id: z.id, base: z.updated_at, from: { cells: { loft: loft0 } }, to: { cells: { loft: 77 } } }]) && F.cells(z.id).loft === 77,
+      JSON.stringify({ banner, sent, left: left && JSON.parse(left).draft }));
+    ok(`P: no page errors (reopened after leaving ${what})`, re.errors.length === 0, re.errors.join(" | "));
+    await re.ctx.close();
+    continue;
+  }
   ok(`P: no page errors (leaving ${what})`, errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
@@ -1760,9 +1983,7 @@ if (want("P")) {
 
 // ── R: adding sizes, Remove, the refresh and the backup (Phase 4a) ──
 // Against fakeServer, which answers creates and removes as migration 350 does. A fourth style has no
-// sizes: its placeholder is the add strip, list box open.
-const EMPTY_STYLE = uid("5", 4);
-const withEmpty = (t) => ({ ...t, styles: [...t.styles, { id: EMPTY_STYLE, key: "test-empty", label: "Test Empty Shed", code: "TE", active: true, sort_order: 3 }] });
+// sizes: its placeholder is the add strip, list box open (withEmpty, above section A).
 const UUIDV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 // The rows under a band, down to the next band: sizes ({ id, label, price, rm, wait, off, offTitle }),
 // the add strip ({ kind: "add" }) and placeholders ({ kind: "note" }).
@@ -1778,8 +1999,6 @@ const bandRows = (page, styleId) => page.evaluate((id) => {
   return out;
 }, styleId);
 const reads = (calls) => calls.filter((c) => c.fn === "portal-settings" && (c.action === "size_table" || (c.action === "catalog" && "targetClientId" in c.body)));
-const BACKUP_KEY = (clientId) => `ss-pg-pending:${USER.id}:${clientId}`;
-const stored = (page, clientId) => page.evaluate((k) => localStorage.getItem(k), BACKUP_KEY(clientId));
 // Another tab of the same browser, on the same origin (BroadcastChannel reaches it).
 async function tabOf(ctx, path) {
   const p = await ctx.newPage();
@@ -1995,6 +2214,16 @@ if (want("R")) {
   await other.evaluate(() => { const bc = new BroadcastChannel("ss-settings"); bc.postMessage({ clientId: "some-other-builder", at: Date.now(), source: "another-tab" }); bc.close(); });
   await page.waitForTimeout(1600);
   ok("R: a save for another account is ignored", reads(calls).length === r0, String(reads(calls).length - r0));
+  // The same-window event (ssSettingsSaved's other half) from another source re-reads both too.
+  await page.evaluate((cid) => window.dispatchEvent(new CustomEvent("ss:settings-saved", { detail: { clientId: cid, at: Date.now(), source: "another-page" } })), OWN);
+  let evRead = false;
+  for (const until = Date.now() + 6000; !evRead && Date.now() < until; await sleep(100)) {
+    const g = reads(calls).slice(r0);
+    evRead = g.some((c) => c.action === "catalog") && g.some((c) => c.action === "size_table");
+  }
+  ok("R: the 'ss:settings-saved' event from another source re-reads catalog and size_table too", evRead, JSON.stringify(reads(calls).slice(r0).map((c) => c.action)));
+  await page.waitForTimeout(400);
+  r0 = reads(calls).length;
   // Every return to the tab, however short the time away.
   F.poke(z.id, { cells: { workbench: 4 } });
   await hideAndShow(page);
@@ -2181,32 +2410,9 @@ for (const as of want("R") ? [false, true] : []) {
 }
 
 // ── V: copy, paste, fill down, clear and the confirm (Phase 4b) ──
-// Against fakeServer. Copy and paste are the browser's own clipboard events: dispatched here with a
-// DataTransfer, which is what a Ctrl/Cmd+C or V on the grid hands the page (one real Ctrl+C and Ctrl+V
-// through the system clipboard too, when this browser lets the harness read it).
-const clip = {
-  paste: (page, text) => page.evaluate((t) => {
-    const dt = new DataTransfer();
-    dt.setData("text/plain", t);
-    const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
-    (document.activeElement || document.body).dispatchEvent(ev);
-    return ev.defaultPrevented;
-  }, text),
-  copy: (page) => page.evaluate(() => {
-    const dt = new DataTransfer();
-    const ev = new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true });
-    (document.activeElement || document.body).dispatchEvent(ev);
-    return { prevented: ev.defaultPrevented, text: dt.getData("text/plain") };
-  }),
-};
-const confirmOf = (page) => page.evaluate(() => {
-  const d = document.querySelector(".ss-pg-confirm [role=alertdialog]");
-  if (!d) return null;
-  const p = d.querySelector("p");
-  return { text: p ? p.textContent : "", modal: d.getAttribute("aria-modal"), named: !!p && d.getAttribute("aria-labelledby") === p.id,
-    focus: document.activeElement && d.contains(document.activeElement) ? document.activeElement.textContent : null };
-});
-const statusText = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "));
+// Against fakeServer. Copy and paste are the browser's own clipboard events (clip, above section A):
+// dispatched with a DataTransfer, which is what a Ctrl/Cmd+C or V on the grid hands the page (one real
+// Ctrl+C and Ctrl+V through the system clipboard too, when this browser lets the harness read it).
 const gridFocused = (page) => page.evaluate(() => document.activeElement === document.querySelector(".ss-pg-grid"));
 const rangeShown = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-pg-range")].filter((x) => x.style.display === "block").length);
 // A box's text as copying it gives it, from the fake's rows.
@@ -2217,7 +2423,6 @@ const copied = (F, cat, z, col) => {
   if (col === 2) return s.active && s.base_price != null ? "yes" : "no";
   return String(F.cells(z.id)[OPTION_KEYS(cat)[col - 3]] || "");
 };
-const tsvOf = (rows) => rows.map((r) => r.join("\t") + "\r\n").join("");
 
 // V1: copy a range (as TSV, as drawn), paste a block (the confirm names the first and last size; Escape
 // and Cancel send nothing; Continue sends one call with only those boxes), a bad cell sends nothing, a
@@ -2643,6 +2848,14 @@ if (!process.env.SKIP_TIMING && want("T")) {
       `typing: digit -> editor open median ${typing.openMed} ms, p95 ${typing.openP95} ms; keystroke in the editor median ${typing.keyMed} ms, p95 ${typing.keyP95} ms; ` +
       `Enter -> committed and moved median ${typing.commitMed} ms, p95 ${typing.commitP95} ms, -> next frame median ${typing.frameMed} ms, p95 ${typing.frameP95} ms; rows changed per commit ${JSON.stringify(typing.rows)} (${typing.n} commits)`);
     ok(`T${tag}: the grid rendered and the arrows moved (${cells} cells)`, first.grid != null && keys.n === 100 && /· Test /.test(keys.readout), keys.readout);
+    // Plan 8.4's targets, at 1x on Ahsan's machine: first render under 500 ms (data in -> the frame after
+    // the grid is committed at its measured height), an arrow key under 16 ms (keydown -> laid out, at
+    // the 95th percentile), and so the move is on the very next frame (keydown -> next frame waits for
+    // the frame itself, so it is held under two frames, 33 ms, never one). 3x is printed, not judged.
+    if (tag === "1x") {
+      ok("T1x: first render under 500 ms (plan 8.4's target)", first.painted != null && first.painted < 500, `${first.painted} ms`);
+      ok("T1x: an arrow key under 16 ms (plan 8.4's target), drawn on the next frame", keys.syncP95 < 16 && keys.frameP95 < 33.4, `p95 ${keys.syncP95} ms; next frame p95 ${keys.frameP95} ms`);
+    }
     ok(`T${tag}: an arrow key re-renders no row`, keys.rows === 0, String(keys.rows));
     ok(`T${tag}: a commit re-renders one row (the committed one)`, !typing.broken && JSON.stringify(typing.rows) === "[1]", typing.broken || JSON.stringify(typing.rows));
     ok(`T${tag}: no page errors`, errors.length === 0, errors.join(" | "));
