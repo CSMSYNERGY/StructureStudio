@@ -8,7 +8,8 @@
 // and inclusions. The browser compares the counts with what came back and opens the table view-only
 // when they differ after one re-read (the truncation guard): a cut-short read must never become the
 // base of an edit, and must never become an Excel template either, because the importer deletes a
-// box the sheet shows as 0.
+// box the sheet shows as 0. With them, `used`: the ids of the sizes saved designs use (one rpc to
+// pricing_sizes_in_use, migration 351, a single array that no row cap cuts).
 //
 // THE WRITE (validatePayload, then savePricingCells). One call to pricing_cells_apply (migration 350),
 // which writes each size's price, Offered and included options together, after checking both the
@@ -24,6 +25,15 @@
 // caches 64 subtransaction ids per backend before every snapshot falls back to pg_subtrans. The
 // browser splits bigger work into queued calls (a 210-size paste is 5).
 //
+// DELETE (migration 351; plan _Extras/StructureStudio Pricing Table Delete Plan 2026-10-31.md §4.2).
+// A remove is a uuid, 350's Remove (only a size never priced or edited goes; tabs opened before 351
+// send these, and their answers are unchanged), or exactly { id, base }, the confirmed Delete at the
+// version the browser read. The function refuses an object remove with a code: "changed" (not at
+// that version), "bom" (a Real-Time Pricing materials list), "used" (saved designs name the size:
+// pricing_sizes_in_use) or "error"; a removed one carries the size's row and boxes as they were. The
+// answers go back as they came. size_table answers `used`, that same function's list, so the page
+// greys the ✕ the server would refuse; the server still checks in the delete's own transaction.
+//
 // RETRIES. The rpc goes through attempt() (pagedRead.ts): retried only when the database never
 // answered. A retry after a first try that did commit is safe: the function checks every size again
 // and answers duplicate (creates and sizes) or removed with gone (removes). A lock wait past the
@@ -35,7 +45,9 @@
 // or size names). Not auditStrict: the write has committed by then, and a strict failure would turn a
 // saved batch into an error and a resend. An operator's call also gets operator_save_pricing_cells
 // from portal-settings' dispatcher. A remove answered gone deleted nothing in this call (a resend of
-// one that landed), so it is counted as gone, never as removed.
+// one that landed), so it is counted as gone, never as removed. A call that carries a Delete adds
+// deleted= (object removes that landed), inUse= (refused "used") and, when any landed, deletedIds=
+// with their uuids in answer order: an id names no client and holds no label or price.
 //
 // Dependency-free (the client is passed in), so _test_stubs/pricingCells_test.ts runs it against
 // pricingImportFake.ts and a stubbed rpc.
@@ -116,7 +128,10 @@ export const sizeLabel = (w: number, l: number) => `${String(w)}x${String(l)}`;
 export type CellSide = { price?: number | null; active?: boolean; cells?: Record<string, number> };
 export type CreateEntry = { id: string; styleId: string; width: number; length: number; label: string };
 export type SizeEntry = { id: string; base: string; from: CellSide; to: CellSide };
-export type PricingCellsPayload = { creates: CreateEntry[]; removes: string[]; sizes: SizeEntry[] };
+/** A uuid (350's Remove: only a size never priced or edited goes) or { id, base } (351's Delete, at
+ *  the version the browser read). */
+export type RemoveEntry = string | { id: string; base: string };
+export type PricingCellsPayload = { creates: CreateEntry[]; removes: RemoveEntry[]; sizes: SizeEntry[] };
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -183,12 +198,18 @@ export function validatePayload(body: any): Parsed<PricingCellsPayload> {
     creates.push({ id: c.id, styleId: c.styleId, width: w.value, length: l.value, label: sizeLabel(w.value, l.value) });
   }
 
-  const removes: string[] = [];
+  // A uuid, or exactly { id, base } with base a version as size_table hands it out. once() covers
+  // both shapes, so one size sent as a string and as an object is refused like any size named twice.
+  const removes: RemoveEntry[] = [];
   for (let i = 0; i < rawRemoves.length; i++) {
-    const id = rawRemoves[i];
-    if (!isUuid(id)) return { ok: false, error: `removes[${i}] must be a uuid` };
-    if (!once(id)) return { ok: false, error: `removes[${i}]: the same size is named twice in one save` };
-    removes.push(id);
+    const r: any = rawRemoves[i];
+    let entry: RemoveEntry;
+    if (isUuid(r)) entry = r;
+    else if (isPlainObject(r) && Object.keys(r).length === 2 && isUuid(r.id) && typeof r.base === "string" && VERSION.test(r.base)) {
+      entry = { id: r.id, base: r.base };
+    } else return { ok: false, error: `removes[${i}] must be a uuid or {id, base}` };
+    if (!once(typeof entry === "string" ? entry : entry.id)) return { ok: false, error: `removes[${i}]: the same size is named twice in one save` };
+    removes.push(entry);
   }
 
   const sizes: SizeEntry[] = [];
@@ -231,6 +252,9 @@ export type SizeTable = {
   inclusions: any[];
   counts: { sizes: number; inclusions: number };
   rtpOn: boolean;
+  /** The ids of the sizes saved designs use (migration 351, pricing_sizes_in_use): the ones the
+   *  Delete refuses, so the page greys their ✕. */
+  used: string[];
 };
 
 /** Everything the table draws from the tenant's catalog, read whole. Throws the database's error;
@@ -239,7 +263,7 @@ export type SizeTable = {
 export async function readSizeTable(sb: any, clientId: string): Promise<SizeTable> {
   // Paged by each table's unique key (pagedRead.ts says why), then put in the plan's order.
   const byPlace = (rows: any[]) => sortRows(rows, ["sort_order", "id"]);
-  const [styles, sizes, inclusions, sizeCount, inclusionCount, settings] = await Promise.all([
+  const [styles, sizes, inclusions, sizeCount, inclusionCount, settings, inUse] = await Promise.all([
     readAllPaged(sb, "building_styles", "id, key, label, code, active, sort_order", ["id"], clientId).then(byPlace),
     readAllPaged(sb, "building_sizes", "id, style_id, label, width_ft, length_ft, base_price, active, sort_order, created_at, updated_at", ["id"], clientId).then(byPlace),
     // No id column on this table: its key is (size_id, item_key), which is also the order it comes in.
@@ -248,12 +272,19 @@ export async function readSizeTable(sb: any, clientId: string): Promise<SizeTabl
     countRows(sb, "building_size_inclusions", "size_id", clientId),
     // client_settings is service-role only; no row means Real-Time Pricing was never turned on.
     attempt(() => sb.from("client_settings").select("rtp_enabled").eq("client_id", clientId).maybeSingle()),
+    // One uuid[] (not a set, so db-max-rows never cuts it): the same definition the Delete checks.
+    attempt(() => sb.rpc("pricing_sizes_in_use", { p_client_id: clientId })),
   ]);
   if (settings.error) throw settings.error;
+  // A failed read throws like the others: the table opens with an error rather than with ✕s that
+  // say a size can go when the server would refuse it.
+  if (inUse.error) throw inUse.error;
+  if (!Array.isArray(inUse.data)) throw new Error("pricing_sizes_in_use gave no list");
   return {
     styles, sizes, inclusions,
     counts: { sizes: sizeCount, inclusions: inclusionCount },
     rtpOn: settings.data?.rtp_enabled === true,
+    used: inUse.data.map(String),
   };
 }
 
@@ -269,9 +300,15 @@ const removedNow = (r: any) => r?.status === "removed" && r?.gone !== true;
 /** The audit note: counts only. saved / created / removed / conflicts / refused first (the plan's
  *  shape), then what the saved sizes changed: prices written, sizes hidden from the designer, boxes
  *  cleared and set. Hidden means taken out by this call: Offered unticked from ticked, or a price
- *  cleared. A first price sent with Offered left unticked (a paste's "no") was never in it. */
+ *  cleared. A first price sent with Offered left unticked (a paste's "no") was never in it.
+ *  removed= counts string removes that landed (350's Remove). A call that carries a Delete (an object
+ *  remove) adds deleted= (object removes that landed), inUse= (those refused "used") and, when any
+ *  landed, deletedIds= with their uuids in answer order. A call without one writes exactly the note
+ *  it wrote before 351. */
 export function auditNote(v: PricingCellsPayload, out: PricingCellsAnswer): string {
   const n = (list: any[], status: string) => list.filter((x) => x?.status === status).length;
+  const asObject = new Set(v.removes.flatMap((r) => typeof r === "string" ? [] : [r.id.toLowerCase()]));
+  const isDelete = (r: any) => typeof r?.id === "string" && asObject.has(r.id.toLowerCase());
   const sent = new Map(v.sizes.map((s) => [s.id, s]));
   let prices = 0, hidden = 0, cleared = 0, set = 0;
   for (const r of out.results) {
@@ -289,13 +326,21 @@ export function auditNote(v: PricingCellsPayload, out: PricingCellsAnswer): stri
     }
   }
   const refused = n(out.results, "refused") + n(out.created, "refused") + n(out.removed, "refused");
-  return [
-    `saved=${n(out.results, "saved")}`, `created=${n(out.created, "created")}`, `removed=${out.removed.filter(removedNow).length}`,
+  const deleted = out.removed.filter((r) => removedNow(r) && isDelete(r));
+  const note = [
+    `saved=${n(out.results, "saved")}`, `created=${n(out.created, "created")}`, `removed=${out.removed.filter((r) => removedNow(r) && !isDelete(r)).length}`,
     `conflicts=${n(out.results, "conflict")}`, `refused=${refused}`,
     `prices=${prices}`, `hidden=${hidden}`, `cellsCleared=${cleared}`, `cellsSet=${set}`,
     `duplicates=${n(out.results, "duplicate") + n(out.created, "duplicate")}`, `exists=${n(out.created, "exists")}`,
     `missing=${n(out.results, "missing")}`, `gone=${out.removed.filter((r) => r?.status === "removed" && r?.gone === true).length}`,
-  ].join(" ");
+  ];
+  if (asObject.size) {
+    note.push(`deleted=${deleted.length}`, `inUse=${out.removed.filter((r) => isDelete(r) && r?.status === "refused" && r?.code === "used").length}`);
+    // Only what is a uuid goes into the note, whatever came back.
+    const ids = deleted.map((r) => r.id).filter(isUuid);
+    if (ids.length) note.push(`deletedIds=${ids.join(",")}`);
+  }
+  return note.join(" ");
 }
 
 /** One call to pricing_cells_apply for the caller's tenant, then the audit row. `clientId` is the
@@ -309,6 +354,7 @@ export async function savePricingCells(sb: any, clientId: string, v: PricingCell
   if (!data || typeof data !== "object") throw new Error("pricing_cells_apply gave no answer");
   const list = (x: unknown) => Array.isArray(x) ? x : [];
   const out: PricingCellsAnswer = { created: list(data.created), removed: list(data.removed), results: list(data.results) };
+  // Rows written: saved sizes, created sizes, and every remove that landed, a Delete's included.
   const rows = out.results.filter((r) => r?.status === "saved").length
     + out.created.filter((r) => r?.status === "created").length
     + out.removed.filter(removedNow).length;

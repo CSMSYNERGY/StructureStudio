@@ -17,6 +17,11 @@
 //   The client_settings fake refuses a column the table lacks (42703, as PostgREST does), and the
 //   one settings read is checked to filter on the resolved tenant.
 //   5. A save answers the function's three lists as they came, with one audit row of counts.
+//   6. The Delete (migration 351): size_table carries `used`, read from pricing_sizes_in_use for the
+//      resolved tenant only (the viewed one for an operator), and a refused read reads nothing; a
+//      failed in-use read is the "load your sizes" 500. A remove {id, base} reaches the function as
+//      sent beside a string one, the answer comes back whole and the audit note lists deletedIds; a
+//      malformed one is a 400 that calls nothing, and a view-only person's is a 403.
 //
 // HOW. deleteDesignWiring_test's idiom: Deno.serve is stubbed while portal-settings/index.ts is
 // imported, the import map swaps supabase-js for supabase_stub.ts, and its stubDb / stubRpc route
@@ -79,9 +84,14 @@ type World = {
   operator?: { can_write: boolean; can_bill?: boolean; support_only?: boolean } | null;
   settings?: Record<string, unknown> | null;
   rpc?: (args: any) => { data: any; error: any };
+  /** pricing_sizes_in_use's answer (migration 351); USED by default. */
+  inUse?: (args: any) => { data: any; error: any };
   readFails?: boolean;
 };
-type Trace = { rpc: { fn: string; args: any }[]; audit: any[]; faults: any[]; catalogReads: string[]; settingsReads: any[][][] };
+/** `rpc` is pricing_cells_apply's calls; `inUse` is pricing_sizes_in_use's (size_table). */
+type Trace = { rpc: { fn: string; args: any }[]; inUse: any[]; audit: any[]; faults: any[]; catalogReads: string[]; settingsReads: any[][][] };
+// The sizes saved designs use, per builder, as pricing_sizes_in_use answers them.
+const USED: Record<string, string[]> = { [OWN]: [uid(11)], [OTHER]: [uid(21)] };
 
 const eqOf = (ops: any[][], col: string) => (ops.find((o) => o[0] === "eq" && o[1] === col) ?? [])[2];
 /** client_settings' columns these two actions may name (rtp_enabled: 152). The fake refuses any
@@ -112,7 +122,7 @@ function chain(answer: (ops: any[][]) => any): any {
 }
 
 async function drive(body: Record<string, unknown>, world: World = {}) {
-  const trace: Trace = { rpc: [], audit: [], faults: [], catalogReads: [], settingsReads: [] };
+  const trace: Trace = { rpc: [], inUse: [], audit: [], faults: [], catalogReads: [], settingsReads: [] };
   const db = fakeDb({ building_styles: STYLES, building_sizes: SIZES, building_size_inclusions: INCLUSIONS }, { maxRows: 1000 });
   const caller = world.caller ?? { role: "owner", title: "owner", access: null };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
@@ -139,6 +149,16 @@ async function drive(body: Record<string, unknown>, world: World = {}) {
     });
   };
   stubRpc.rpc = (fn: string, args?: any) => {
+    if (fn === "pricing_sizes_in_use") {
+      // One argument, as the function takes (migration 351); any other name is an unknown signature.
+      trace.inUse.push(args);
+      if (world.inUse) return Promise.resolve(world.inUse(args));
+      const names = Object.keys(args ?? {});
+      if (names.length !== 1 || names[0] !== "p_client_id") {
+        return Promise.resolve({ data: null, error: { code: "42883", message: `function public.pricing_sizes_in_use(${names.join(", ")}) does not exist` } });
+      }
+      return Promise.resolve({ data: USED[args.p_client_id] ?? [], error: null });
+    }
     trace.rpc.push({ fn, args });
     if (fn !== "pricing_cells_apply") return Promise.reject(new Error(`unexpected rpc ${fn}`));
     return Promise.resolve(world.rpc ? world.rpc(args) : { data: ANSWER, error: null });
@@ -188,6 +208,8 @@ Deno.test("an owner reads the whole table, with clientId, counts and Real-Time P
   assertEquals(r.body.inclusions.map((i: any) => [i.size_id, i.item_key, i.qty]), [[uid(11), "loft", 50]]);
   assertEquals(r.body.counts, { sizes: 2, inclusions: 1 });
   assertEquals(r.body.rtpOn, true);
+  assertEquals(r.body.used, [uid(11)], "the sizes saved designs use (pricing_sizes_in_use, migration 351)");
+  assertEquals(r.trace.inUse, [{ p_client_id: OWN }], "...read once, for the tenant the token resolved to");
   assertEquals(r.body.sizes.find((z: any) => z.id === uid(11)).updated_at, V, "the version every edit sends back");
   assertEquals(r.ins, [], "no read carries a list of ids");
   // The settings fake refuses any column client_settings lacks; here, the one read names rtp_enabled
@@ -205,7 +227,7 @@ Deno.test("a view-only person reads the table and cannot save; someone without S
   for (const body of [{ action: "size_table" }, SAVE]) {
     const r = await drive(body, { caller: NOBODY });
     assertEquals(r.status, 403, `${body.action}: ${JSON.stringify(r.body)}`);
-    assertEquals([r.trace.rpc.length, r.trace.catalogReads.length], [0, 0], `${body.action} read or called something`);
+    assertEquals([r.trace.rpc.length, r.trace.inUse.length, r.trace.catalogReads.length], [0, 0, 0], `${body.action} read or called something`);
   }
 });
 
@@ -219,13 +241,14 @@ Deno.test("a body naming another builder is ignored: the rpc gets the caller's o
   const read = await drive({ action: "size_table", clientId: OTHER, client_id: OTHER });
   assertEquals(read.body.clientId, OWN);
   assert(read.body.sizes.every((z: any) => z.client_id === OWN) && !read.body.sizes.some((z: any) => z.id === uid(21)), "only the caller's sizes");
+  assertEquals([read.body.used, read.trace.inUse], [[uid(11)], [{ p_client_id: OWN }]], "...and only the caller's sizes in use");
 });
 
 Deno.test("a non-operator's targetClientId is a 403, before anything is read or called", async () => {
   for (const body of [{ ...SAVE, targetClientId: OTHER }, { action: "size_table", targetClientId: OTHER }]) {
     const r = await drive(body);
     assertEquals(r.status, 403, JSON.stringify(r.body));
-    assertEquals([r.trace.rpc.length, r.trace.catalogReads.length], [0, 0]);
+    assertEquals([r.trace.rpc.length, r.trace.inUse.length, r.trace.catalogReads.length], [0, 0, 0]);
   }
 });
 
@@ -240,6 +263,7 @@ Deno.test("an operator's view-as reaches the viewed builder, and the save is aud
   assertEquals(read.status, 200, "a read-only operator can read");
   assertEquals([read.body.clientId, read.body.sizes.map((z: any) => z.id)], [OTHER, [uid(21)]]);
   assertEquals(read.trace.settingsReads.map((ops) => eqOf(ops, "client_id")), [OTHER], "...and Real-Time Pricing is read for the viewed builder");
+  assertEquals([read.body.used, read.trace.inUse], [[uid(21)], [{ p_client_id: OTHER }]], "...and the sizes its saved designs use");
   const ro = await drive({ ...SAVE, targetClientId: OTHER }, { operator: { can_write: false } });
   assertEquals([ro.status, ro.trace.rpc.length], [403, 0], "a read-only operator cannot save");
 });
@@ -296,4 +320,53 @@ Deno.test("a database error is dbFail's sentence, logged, and not audited as a s
   const busy = await drive(SAVE, { rpc: () => ({ data: null, error: { code: "55P03", message: "canceling statement due to lock timeout" } }) });
   assertEquals([busy.status, busy.body.ref, busy.trace.rpc.length], [500, "save your table changes", 1]);
   assertEquals(audited(busy.trace, "portal_save_pricing_cells").length, 0);
+});
+
+// ─── 6. The Delete (migration 351) ─────────────────────────────────────────────────────────────
+const DELETE = { action: "save_pricing_cells", removes: [{ id: uid(12), base: V }, uid(13)] };
+const DELETE_ANSWER = {
+  created: [], results: [],
+  removed: [
+    { id: uid(12), status: "removed", row: { price: null, active: false, label: "12x24", width_ft: 12, length_ft: 24 }, cells: {} },
+    { id: uid(13), status: "refused", reason: "Only a size that was never priced or edited can be removed. Untick Offered to hide it." },
+  ],
+};
+
+Deno.test("a Delete {id, base} and a string remove reach the function as sent, and its answer comes back whole, audited with deletedIds", async () => {
+  const r = await drive(DELETE, { rpc: () => ({ data: DELETE_ANSWER, error: null }) });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.body, { ok: true, clientId: OWN, ...DELETE_ANSWER });
+  assertEquals(r.trace.rpc[0].args, { p_client_id: OWN, p_creates: [], p_removes: [{ id: uid(12), base: V }, uid(13)], p_sizes: [] });
+  const rows = audited(r.trace, "portal_save_pricing_cells");
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].row_count, 1, "one size deleted");
+  assert(rows[0].note.endsWith(` removed=0 conflicts=0 refused=1 prices=0 hidden=0 cellsCleared=0 cellsSet=0 duplicates=0 exists=0 missing=0 gone=0 deleted=1 inUse=0 deletedIds=${uid(12)}`), rows[0].note);
+});
+
+Deno.test("a malformed Delete is a 400 and calls nothing", async () => {
+  for (const removes of [
+    [{ id: uid(12) }],
+    [{ id: uid(12), base: V, price: 4800 }],
+    [{ id: uid(12), base: "yesterday" }],
+    [{ id: "nope", base: V }],
+    [uid(12), { id: uid(12), base: V }],
+  ]) {
+    const r = await drive({ action: "save_pricing_cells", removes });
+    assertEquals(r.status, 400, JSON.stringify([removes, r.body]));
+    assert(/removes\[\d\]/.test(r.body.error), r.body.error);
+    assertEquals([r.trace.rpc.length, audited(r.trace, "portal_save_pricing_cells").length], [0, 0], JSON.stringify(removes));
+  }
+});
+
+Deno.test("a Delete needs Sheds edit: a view-only person's is a 403 and calls nothing", async () => {
+  const r = await drive(DELETE, { caller: VIEWER });
+  assertEquals([r.status, r.trace.rpc.length], [403, 0], JSON.stringify(r.body));
+});
+
+Deno.test("size_table: an in-use read the database refuses is dbFail's 500, never a table without `used`", async () => {
+  const r = await drive({ action: "size_table" }, { inUse: () => ({ data: null, error: { code: "42883", message: "function public.pricing_sizes_in_use(p_client_id) does not exist" } }) });
+  assertEquals([r.status, r.body.ref], [500, "load your sizes"], JSON.stringify(r.body));
+  assert(!JSON.stringify(r.body).includes("pricing_sizes_in_use"), "the raw message stays off the screen");
+  assertEquals(r.trace.inUse.length, 1, "a SQLSTATE is not retried");
+  assert(r.trace.faults.some((f) => /load your sizes/.test(String(f?.message))), JSON.stringify(r.trace.faults));
 });
