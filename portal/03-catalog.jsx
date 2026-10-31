@@ -12047,7 +12047,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // The active cell's size folded away ("Show hidden sizes" off) or did not come back on a Reload:
   // the cursor moves to the nearest size still drawn (ssPgReanchor), before paint, so the readout
   // keeps a cell and the next arrow key starts there. While a read is out there are no rows at all,
-  // so the cursor and the order it was on are kept until the rows return. A range is dropped.
+  // so the cursor and the order it was on are kept until the rows return. A range is dropped, and so
+  // is one whose far corner went while the active cell stayed (a multi-delete that kept the size
+  // clicked first because saved designs use it): the keys and the toolbar then act on the one box
+  // still ringed, never on a range no rows hold ("Click a size first").
   React.useLayoutEffect(() => {
     if (!model) return;
     const prev = drawnRef.current;
@@ -12055,7 +12058,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const a = activeRef.current;
     if (!a || !prev || prev === order) return;
     const next = ssPgReanchor(prev, order, a, ncols);
-    if (next !== a) { setActive(next); setExtent(null); }
+    if (next !== a) { setActive(next); setExtent(null); return; }
+    const x = extentRef.current;
+    if (x && order.indexOf(x.sizeId) < 0) { extentRef.current = null; setExtent(null); }
   }, [order]);
 
   // THE SELECTION OVERLAY AND THE EDITOR (plan 3.5): placed over the active cell and the range on

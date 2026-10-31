@@ -138,8 +138,9 @@
 //      box is clicked says so; on six rows with two in use the one confirm counts them, a box in
 //      flight is counted apart, and Delete on a Size-column range asks the same; 4 deleted and 2
 //      refused "used" is one amber line and the two rows stay; none can go says so; 60 sizes go in
-//      2 calls and say "Deleted 60 sizes."; the Excel template after a delete leaves them out; an
-//      operator's confirm names the account.
+//      2 calls and say "Deleted 60 sizes."; the Excel template after a delete leaves them out; when
+//      the size clicked first is used and stays, the next Delete (key or toolbar) says why it stays,
+//      not "Click a size first"; an operator's confirm names the account.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails if an arrow key re-renders a row or a
 //      commit re-renders more than the one it changed, and at 1x if the plan's targets are missed
@@ -3923,7 +3924,8 @@ if (want("Z")) {
 // use, the confirm counts the two that stay, and one with a box in flight is counted apart; Delete on
 // a Size-column range asks the same. An answer of 4 deleted and 2 refused "used" is ONE amber line,
 // and the two rows are still there after the re-read; 60 sizes go in two calls; the Excel template
-// downloaded after a delete leaves the sizes out; an operator's confirm names the account. ──
+// downloaded after a delete leaves the sizes out; a used size clicked first stays, and the next Delete
+// on it is its own; an operator's confirm names the account. ──
 const delBtn = (page) => page.locator(".ss-pg-bar button", { hasText: "Delete sizes" });
 const pickSizes = async (page, a, z) => {
   await page.locator(sel(a.id, 0)).click();
@@ -4031,6 +4033,38 @@ if (want("X")) {
     && gone.length > 60 && !gone.some((z) => lines.some((l) => l.startsWith(`Test Barn,${z.width_ft},${z.length_ft},`))), `${lines.length} lines; ${F.table(OWN).sizes.length} sizes`);
   ok("X: no call was malformed", F.bad.length === 0, F.bad.join());
   ok("X: no page errors", errors.length === 0 && shedsErrs.length === 0, [...errors, ...shedsErrs].join(" | "));
+  await ctx.close();
+}
+// The size clicked first is used, so it stays when the range is deleted: the range's far corner went
+// with the rows, and the next Delete (key or toolbar) is that one Size box's, not "Click a size first".
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  F.used.add(b[0].id);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 50 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await pickSizes(page, b[0], b[3]);
+  await delBtn(page).click();
+  const cf = await confirmOf(page);
+  let n0 = saveCalls(calls).length;
+  await page.locator(".ss-pg-confirm button", { hasText: "Delete" }).click().catch(() => {});
+  await saved(page, calls, n0, 1);
+  await page.waitForTimeout(800);   // the re-read
+  const went = [b[1], b[2], b[3]].every((z) => !F.size(z.id)) && !!F.size(b[0].id);
+  const st0 = await statusText(page);
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(400);
+  const byKey = await statusText(page);
+  await delBtn(page).click();
+  await page.waitForTimeout(400);
+  const byBar = await statusText(page);
+  ok("X: a range whose first-clicked size is used: the other three go and it stays",
+    !!cf && /^Delete 3 sizes, /.test(cf.text) && / 1 more stays because a saved design uses it\.$/.test(cf.text) && went && st0 === "Deleted 3 sizes.", JSON.stringify({ cf: cf && cf.text, went, st0 }));
+  ok("X: …then Delete on its still-ringed Size box, and Delete sizes, say why it stays, not 'Click a size first', and send nothing",
+    byKey === UNCLR && byBar === UNCLR && saveCalls(calls).length === n0 && !(await confirmOf(page)), JSON.stringify({ byKey, byBar }));
+  ok("X: no page errors (a used first size)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 // An operator viewing a builder: the confirm names the builder's account, for one size and for several.
