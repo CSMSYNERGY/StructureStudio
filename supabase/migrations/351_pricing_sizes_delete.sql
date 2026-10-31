@@ -27,8 +27,11 @@
 -- ── WHAT IT ADDS ─────────────────────────────────────────────────────────────────────────
 --   1. public.ss_size_norm(text) returns text. IMMUTABLE, search_path ''. The re-pricing code's
 --      `norm` (_shared/attributeLines.ts, submit-estimate): lowercase, × and ✕ read as x, every
---      space stripped. So " 10 × 12 " and "10X12" are both "10x12", and NULL is ''. (Postgres's \s
---      and JavaScript's \s can differ on exotic Unicode spaces; size labels are typed "WxL".)
+--      space stripped. So " 10 × 12 " and "10X12" are both "10x12", and NULL is ''. Style keys and
+--      labels go through the same rule. JavaScript's \s takes U+FEFF and Postgres's doesn't, so
+--      U+FEFF is stripped here by name (\uFEFF): a size that `norm` matches across one is in use
+--      here too. What Postgres's \s still takes beyond JavaScript's (U+001C-001F, U+0085) can only
+--      add sizes to in use, the safe side.
 --   2. public.pricing_sizes_in_use(p_client_id text) returns uuid[]. STABLE, SECURITY DEFINER,
 --      search_path ''. The ids of this tenant's sizes that any of its saved work names:
 --        designs.selections, design_versions.selections, designs.accepted_snapshot.selections and
@@ -92,7 +95,7 @@ language sql
 immutable
 set search_path = ''
 as $norm$
-  select regexp_replace(lower(translate(coalesce($1, ''), '×✕', 'xx')), '\s', '', 'g')
+  select regexp_replace(lower(translate(coalesce($1, ''), '×✕', 'xx')), '[\s\uFEFF]', '', 'g')
 $norm$;
 
 -- ── 2. Which sizes saved designs use ─────────────────────────────────────────────────────
@@ -560,7 +563,9 @@ begin
 
   -- 2. The label rule.
   if public.ss_size_norm(' 10 × 12 ') is distinct from '10x12' or public.ss_size_norm('10X12') is distinct from '10x12'
-     or public.ss_size_norm('10✕12') is distinct from '10x12' or public.ss_size_norm(null) is distinct from '' then
+     or public.ss_size_norm('10✕12') is distinct from '10x12' or public.ss_size_norm(null) is distinct from ''
+     or public.ss_size_norm(chr(65279) || '10x12') is distinct from '10x12'
+     or public.ss_size_norm('10' || chr(65279) || 'x12') is distinct from '10x12' then
     raise exception '351: ss_size_norm does not read sizes as the re-pricing code does';
   end if;
 

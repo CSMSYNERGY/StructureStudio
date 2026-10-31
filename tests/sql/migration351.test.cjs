@@ -5,7 +5,8 @@
 // Then check what 351's header promises (plan §4.1 and §6.1):
 //   * THE RECORD and the grants: none of the three functions is executable by a browser role,
 //     service_role can execute all three, and used_check reads 'ran' on a seed with a size in use;
-//   * ss_size_norm reads " 10 × 12 ", "10X12" and NULL as the re-pricing code does;
+//   * ss_size_norm reads " 10 × 12 ", "10X12" and NULL as the re-pricing code does, and strips a
+//     U+FEFF as JavaScript's \s does (Postgres's \s keeps it), in the in-use read and the Delete too;
 //   * pricing_sizes_in_use: one uuid[] (no set, so no row cap: 1,200 sizes come back whole), '{}' for
 //     a tenant with no designs, every source counted (a design, only a version, only an accepted
 //     snapshot, only a change order, leftovers whose design row is gone), the style by key or label,
@@ -368,6 +369,25 @@ function mutant(from, to) {
       public.ss_size_norm(null) d, public.ss_size_norm('Test Barn') e, public.ss_size_norm(E'10\\tx 12') f`);
     ok(r.a === "10x12" && r.b === "10x12" && r.c === "10x12" && r.d === "" && r.e === "testbarn" && r.f === "10x12",
       "\" 10 × 12 \", \"10X12\", \"10✕12\" and a tab read 10x12; NULL is ''; a style label loses its spaces", J(r));
+    // JavaScript's \s takes U+FEFF (so `norm` drops it) and Postgres's \s doesn't, in PGlite's libc
+    // locale and in live's ICU one alike. ss_size_norm strips it by name. Compared in SQL: a text
+    // that starts with U+FEFF loses it in the client's decoder, so JavaScript can't see that one.
+    const bom = await one(db, `select public.ss_size_norm(chr(65279) || '10x12') = '10x12' a, public.ss_size_norm('10' || chr(65279) || 'x12') = '10x12' b,
+      public.ss_size_norm('Test Barn' || chr(65279)) = 'testbarn' c, regexp_replace(chr(65279), '\\s', '', 'g') = chr(65279) as plain_s_keeps_it`);
+    ok(bom.a === true && bom.b === true && bom.c === true && bom.plain_s_keeps_it === true,
+      "U+FEFF is stripped before, inside and after a name, as JavaScript's \\s strips it (Postgres's \\s alone keeps it)", J(bom));
+    // The same through the in-use read and the Delete: a design whose size, or whose style label,
+    // carries a U+FEFF still names the size, as submit-estimate's norm matches it.
+    const f = await applied(WORK + `
+insert into public.designs (short_code, client_id, selections, status) values
+  ('TA0090', '${T}', jsonb_build_object('style', 'test-barn', 'size', chr(65279) || '18x20'), 'draft'),
+  ('TA0091', '${T}', jsonb_build_object('style', 'Test Barn' || chr(65279), 'size', '16x24'), 'draft');`);
+    ok(!f.err, "(applies with designs naming a size and a style with a U+FEFF)", f.err);
+    const tf = await inUse(f.db, T);
+    ok(tf.includes(SZ_FREE) && tf.includes(SZ_STALE), "in use: a design writing U+FEFF before the size, and one writing it after the style label", J(tf));
+    const fr = await call(f.db, { removes: [await del(f.db, SZ_FREE)] });
+    ok(fr.removed[0].status === "refused" && fr.removed[0].code === "used" && await exists(f.db, SZ_FREE),
+      "...and the Delete of that size is refused as used, the row kept", J(fr.removed[0]));
   });
 
   console.log("migration 351: pricing_sizes_in_use");
