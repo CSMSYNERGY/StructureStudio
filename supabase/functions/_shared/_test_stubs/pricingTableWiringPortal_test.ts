@@ -457,6 +457,9 @@ Deno.test("the backup: keyed by person and account, written only by a page that 
   // button greyed meanwhile.
   assert(restore.includes("(qRef.current && qRef.current.flight)") && restore.includes("adoptedRef.current = [...adoptedRef.current, ...tookRef.current];"));
   assert(page.includes("<button type=\"button\" onClick={saveEarlier} disabled={!!(q && q.flight)}"), "Save them is greyed while a call is out");
+  // An editor whose size left the queue is closed with its text quoted, before the backup's write.
+  assert(page.includes("useEffect(() => { fnRef.current.dropGoneEditor(); }, [q]);\n  // THE BACKUP"), "the dropGoneEditor effect sits just above the backup's");
+  assert(between(page, "const dropGoneEditor = () => {", "\n  };", "dropGoneEditor").includes("closeEdit();"));
   // Rewritten on every change of the queue, and on every keystroke in the editor.
   assert(page.includes("useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);"));
   assert(between(page, "const onEditInput = (e) => {", "\n  };", "onEditInput").includes("saveBackup();"));

@@ -87,7 +87,8 @@
 //      Size box removes a size added by mistake; the ring stays on its box while a strip grows above
 //      it; a size being removed takes no typing. An open editor stays on its option when a read adds
 //      an option in front of it (Enter saves that option) and closes, with the columns note, when its
-//      option is archived. A save answered "changed elsewhere" reads the table again.
+//      option is archived, and closes quoting its text when its size goes (someone else added it
+//      first, or it was removed elsewhere). A save answered "changed elsewhere" reads the table again.
 //   V  COPY, PASTE, FILL DOWN, CLEAR (Phase 4b), against fakeServer, through the browser's own clipboard
 //      events (and one real Ctrl+C through the system clipboard): a range copies as TSV, as drawn; a
 //      block pasted onto two sizes asks first (an accessible modal naming the first and last size,
@@ -2411,6 +2412,51 @@ if (want("R")) {
   await ctx.close();
 }
 
+// R3d: an open editor whose size leaves the table under it. A size being added that someone else
+// added first (the create comes back `exists`), and a size removed elsewhere (a read no longer has
+// it): the editor closes, the status line quotes what was typed, the keyboard is back on the grid,
+// and nothing is sent for it.
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const t0 = tableFor(OWN, cat);
+  const F = fakeServer(cat, t0);
+  const barn = t0.styles[0];
+  const COLLEAGUE = uid("7", 4242), GONE = uid("7", 4244);
+  F.apply({ creates: [{ id: GONE, styleId: barn.id, width: 14, length: 36 }] });   // a never-priced size, on file before the page opens
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 50 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const onGrid = () => page.evaluate(() => document.activeElement === document.querySelector(".ss-pg-grid"));
+  // The page's create waits 2.5 s; just before it is applied a colleague adds the same 14x30.
+  F.script.push({ delayMs: 2500, before: (FF) => FF.apply({ creates: [{ id: COLLEAGUE, styleId: barn.id, width: 14, length: 30 }] }) });
+  await page.locator(`tr[data-band="${barn.id}"] .ss-pg-addbtn`).click();
+  await page.keyboard.type("14x30");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /Price · Test Barn 14x30/.test((document.querySelector(".ss-pg-readout") || {}).textContent || ""), null, { timeout: 4000 }).catch(() => {});
+  await page.keyboard.type("4800");
+  const ed1 = (await state(page)).editor;
+  const closed1 = await page.waitForFunction(() => !document.querySelector(".ss-pg-ed"), null, { timeout: 10000 }).then(() => true, () => false);
+  await page.waitForTimeout(600);
+  let s = await state(page);
+  ok("R: an editor open on a size whose create comes back 'someone else added it' closes, quotes what was typed, and the keyboard is back on the grid",
+    !!ed1 && ed1.value === "4800" && closed1 && s.status === `${ed1.label}: someone else just added this size, so “4800” wasn't saved. Check its numbers and type yours again.`
+    && (await onGrid()) && !F.table(OWN).sizes.some((z) => z.base_price === 4800), JSON.stringify({ ed1, closed1, s }));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 3000 }).catch(() => {});
+  await page.locator(sel(GONE, 1)).click();
+  await page.keyboard.type("3900");
+  const ed2 = (await state(page)).editor;
+  const n1 = saveCalls(calls).length;
+  F.apply({ removes: [GONE] });   // a colleague removes it (never priced, so the server takes it)
+  await tellFrom(page, OWN);
+  const closed2 = await page.waitForFunction(() => !document.querySelector(".ss-pg-ed"), null, { timeout: 8000 }).then(() => true, () => false);
+  await page.waitForTimeout(1200);
+  s = await state(page);
+  ok("R: …and one open on a size removed elsewhere closes when the read no longer has it, quoting the text; nothing is sent",
+    !!ed2 && ed2.value === "3900" && closed2 && s.status === `${ed2.label} isn't on this account any more, so “3900” wasn't saved.`
+    && (await onGrid()) && saveCalls(calls).length === n1 && /^All changes saved/.test(s.badge), JSON.stringify({ ed2, closed2, s }));
+  ok("R: no page errors (an editor whose size went)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
 // R4: an Excel upload in the Sheds tab while the table is open: the box waiting to save that the
 // sheet changed turns amber with the sheet's number and is never sent; what was out still lands.
 if (want("R")) {
@@ -2501,7 +2547,8 @@ if (want("R")) {
   await p.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 3000 }).catch(() => {});
   await p.waitForTimeout(200);
   s = await state(p);
-  ok("R: Dismiss clears the reminder", !/didn't save before you left/.test(s.status) && (await stored(p, OWN)) === null, s.status);
+  const onGrid = await p.evaluate(() => document.activeElement === document.querySelector(".ss-pg-grid"));
+  ok("R: Dismiss clears the reminder, and the keyboard is back on the grid", !/didn't save before you left/.test(s.status) && onGrid && (await stored(p, OWN)) === null, JSON.stringify({ status: s.status, onGrid }));
   ok("R: no page errors (backup, Save them)", errors.length === 0 && errs.length === 0, [...errors, ...errs].join(" | "));
   await ctx.close();
 }

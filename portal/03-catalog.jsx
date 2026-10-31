@@ -11832,6 +11832,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     };
   }, []);
 
+  // An answer or a read that takes the open editor's size out of the queue (a create answered
+  // `exists`, the size removed elsewhere) closes the editor, with its text in the status line
+  // (dropGoneEditor). Before the backup's write below, so that write no longer holds the text.
+  useEffect(() => { fnRef.current.dropGoneEditor(); }, [q]);
   // THE BACKUP (plan 4.9) is rewritten whenever the queue or the editor's text changes (the editor's
   // keystrokes write it too, from onEditInput), and when a backup from earlier is answered.
   useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);
@@ -12331,6 +12335,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       .map((id) => { const c = b.creates[id]; return { id, styleId: c.styleId, width: c.width, length: c.length, label: `${c.width}x${c.length}` }; });
     if (again.length) setAdded((list) => [...list, ...again]);
     sendNow();
+    focusGrid();
   };
   // Discard: the backup is gone, red entries and all.
   const discardEarlier = () => {
@@ -12338,9 +12343,27 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     tookRef.current = [];
     setEarlier(null);
     setEarlierRed(null);
+    focusGrid();
   };
   const dismissEarlierRed = () => {
     setEarlierRed(null);
+    focusGrid();
+  };
+  // The open editor's size left the queue under it (dropGoneEditor's effect): a create answered
+  // `exists` (someone else added these dimensions first) or a read that no longer has the size. Its
+  // text has no box to go into, so the editor closes and the status line quotes it.
+  const dropGoneEditor = () => {
+    const ed = editRef.current, cur = qRef.current;
+    if (!ed || !cur || cur.sizes[ed.sizeId]) return;
+    const t = dirtyRef.current ? draftRef.current : null;
+    const label = editing ? editing.label : "";
+    const had = !!edInputRef.current && document.activeElement === edInputRef.current;
+    closeEdit();
+    if (had) focusGrid();
+    if (t == null) return;
+    setSaid({ tone: "amber", text: cur.renamed[ed.sizeId]
+      ? `${label}: someone else just added this size, so “${t}” wasn't saved. Check its numbers and type yours again.`
+      : `${label} isn't on this account any more, so “${t}” wasn't saved.` });
   };
 
   // ── Editing (plan 3.5, 3.9, 3.10) ──
@@ -12756,7 +12779,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const leaveTo = (sub) => ssNavClick(() => leaveFor(sub));
   const toSheds = leaveTo("sheds");
   fnRef.current = { place, sendNow, flushNow, jumpRed, go, commitEdit, leaveFor,
-    refreshNow, pokeRefresh, adoptRead, addSizes, closeAdd, saveBackup, offerEarlier, copySel, pasteFrom };
+    refreshNow, pokeRefresh, adoptRead, addSizes, closeAdd, saveBackup, offerEarlier, copySel, pasteFrom, dropGoneEditor };
   // Pressing a link would blur the open editor, and the blur commits it before the click, so the
   // click would never see a box that commit turned red. Held on the editor, the click commits it.
   const holdEditor = (e) => { if (editRef.current) e.preventDefault(); };
@@ -12797,7 +12820,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const aerr = af && q && q.fields[active.sizeId] && q.fields[active.sizeId][af] ? q.fields[active.sizeId][af].error : null;
   const errLine = aerr && at ? ssPgErrorLine(`${at.style.label} ${at.size.label}`,
     { name: colName(active.col), kind: active.col === 1 ? "price" : active.col === 2 ? "active" : "qty" }, aerr) : null;
-  const dismissBtn = (fn) => <button type="button" onClick={fn}>Dismiss</button>;
+  // The button goes with the line it dismisses, so the keyboard goes back to the grid, not <body>.
+  const dismissBtn = (fn) => <button type="button" onClick={() => { fn(); focusGrid(); }}>Dismiss</button>;
   // The backup's red entries (plan 4.9), named by what is drawn now; never sent.
   let earlierLine = "";
   if (earlierRed && model) {
