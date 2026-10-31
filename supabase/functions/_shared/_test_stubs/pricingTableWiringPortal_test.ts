@@ -228,7 +228,7 @@ Deno.test("the editor and the overlay keep every hook above any return, and PgRo
   }
   const ed = fnText(CATALOG, "function PgEditor(");
   assert(ed.includes(`type="text"`) && ed.includes(`inputMode={price ? "decimal" : "numeric"}`) && ed.includes("aria-label={label}"), "plan 3.5 and 3.17");
-  assert(CATALOG.includes("const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = \"\" }) {"));
+  assert(CATALOG.includes("const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = \"\",\n  busy = \"\", removable = false }) {"));
 });
 
 // ── 4. The address, and the anchors that open it ─────────────────────────────────────────────
@@ -342,4 +342,87 @@ Deno.test("SS_PAGE_ID: one id per page load, and ssSettingsSaved stamps it on bo
   assertEquals(events[0].type, "ss:settings-saved");
   assertEquals([events[0].detail.clientId, events[0].detail.source], ["test-barns", "page-1"]);
   assertEquals([posts[0].clientId, posts[0].source], ["test-barns", "page-1"]);
+});
+
+// ── 9. Phase 4a: adding sizes, Remove, the refresh, the backup ───────────────────────────────
+Deno.test("PgAddSizes keeps every hook above its return; the bands and rows take no function, so their memos hold", () => {
+  const sig = "function PgAddSizes({ rowIndex, styleId, styleLabel, existing, ncols, empty, focusKey = 0, onAdd, onClose }) {";
+  const body = fnText(CATALOG, sig);
+  const first = body.search(/\n  (?:return\b|if \()/);
+  assert(first > 0, sig);
+  assert(hookAt(body).length >= 5, "the strip's hooks were not found: the anchor is wrong");
+  assertEquals(hookAt(body).filter((i) => i > first), [], `${sig}: a hook below the first return`);
+  assert(body.includes("ssPgParseSizeList(text, existing)") && body.includes("ssPgSizeGrid(widths, lengths, existing, off)"), "the strip checks before anything is sent");
+  // ＋ Add sizes and ✕ Remove are the grid's own clicks (data-pg-act), so PgStyleBand and PgRow stay primitive.
+  assert(CATALOG.includes("const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, total, hidden, folded, ncols, canAdd = false, open = false }) {"));
+  assert(CATALOG.includes(`data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>`), "the button's words are the FAQ's");
+  assert(CATALOG.includes(`data-pg-act="remove" data-pg-id={sizeId} tabIndex={-1}`));
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  assert(page.includes("onClick={onAct}>"), "the grid's click handles both buttons");
+  assert(page.includes("const onAddSizes = useCallback((styleId, sizes, skipped) => fnRef.current.addSizes(styleId, sizes, skipped), []);"), "a stable callback for the strip");
+  // Keys typed in a strip are the strip's, never the grid's.
+  assert(page.includes("const onKeyDown = (e) => {\n    if (e.target !== e.currentTarget) return;"), "the grid must ignore keys pressed inside an add strip");
+});
+
+Deno.test("every way to add or remove a size, or put a backup back, checks the page can still edit, and goes through the queue", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  for (const fn of ["const addSizes = (styleId, sizes, skipped) => {\n    if (!canEditNow()", "const toggleAdd = (styleId) => {\n    if (!canEditNow()",
+    "const removeSize = (id) => {\n    if (!canEditNow() || !ssPgCanRemove(qRef.current, id, byId[id] ? byId[id].size : null)) return;"]) {
+    assert(page.includes(fn), `an add/remove path without the view-only check: ${fn.split("\n")[0]}`);
+  }
+  assert(between(page, "const saveEarlier = () => {", "\n  };", "saveEarlier").includes("if (!b || !canEditNow()) return;"));
+  const add = between(page, "const addSizes = (styleId, sizes, skipped) => {", "\n  };", "addSizes");
+  assert(add.includes(`apply({ type: "create", id: a.id, styleId, width: a.width, length: a.length, at: Date.now() })`) && add.includes("sendNow();") && add.includes("backToWork();"));
+  const rm = between(page, "const removeSize = (id) => {", "\n  };", "removeSize");
+  assert(rm.includes(`apply({ type: "remove", id, at: Date.now() });`) && rm.includes("backToWork();"));
+  // The add strip and Remove are only drawn when the page can edit (plan 3.16).
+  assert(page.includes("adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds"));
+  assert(page.includes("busy={busy} removable={canEdit && ssPgCanRemove(q, z.id, z)} />"));
+  assert(page.includes("canAdd={canEdit} open={!!addOpen[r.style.id] || !r.total} />"));
+  assertEquals((page.match(/ssStyleSaveCall\(/g) || []).length, 1, "still one transport call site: adds and removes ride the save queue");
+});
+
+Deno.test("the refresh: another page's save for this account, or the tab coming back into view, re-reads both tables through the queue's rules", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  const fx = between(page, "  useEffect(() => {\n    const hear = (d) => {", "}, [clientId]);", "the refresh triggers");
+  assert(fx.includes("if (d && d.source === SS_PAGE_ID) return;"), "its own saves never refresh it");
+  assert(fx.includes("if (d && d.clientId && clientId && String(d.clientId) !== String(clientId)) return;"), "another account's save is ignored");
+  assert(fx.includes(`window.addEventListener("ss:settings-saved", onSaved);`) && fx.includes(`bc = new BroadcastChannel("ss-settings");`));
+  assert(fx.includes(`const onShown = () => { if (document.visibilityState === "visible") fnRef.current.pokeRefresh(); };`), "every return to the tab, with no minimum time away");
+  assert(fx.includes("clearTimeout(refreshTimerRef.current);"), "the wait is cleared on the way out");
+  const poke = between(page, "const pokeRefresh = () => {", "\n  };", "pokeRefresh");
+  assert(poke.includes("if (refreshTimerRef.current) return;") && poke.includes(": 1000;"), "waits 1 s and coalesces");
+  const now = between(page, "const refreshNow = async () => {", "\n  };", "refreshNow");
+  assert(now.includes("r = await ssPgFetch(target, clientId);"), "both tables, through the checked read");
+  const adopt = between(page, "const adoptRead = (m, okAt) => {", "\n  };", "adoptRead");
+  assert(adopt.includes("if (cur.oks !== okAt) { pokeRefresh(); return; }"), "a read asked for before the latest answer is dropped and asked again");
+  assert(adopt.indexOf(`apply({ type: "columns"`) > 0 && adopt.indexOf(`apply({ type: "columns"`) < adopt.indexOf(`apply({ type: "refresh"`), "columns first, then the refresh rule");
+  assert(adopt.includes("if (m.guard && !was.guard) return;"), "a read that does not add up never replaces one that did");
+  // The queue is initialised once, by the first load; every later read keeps its red boxes and edits.
+  assertEquals((page.match(/type: "init"/g) || []).length, 1);
+  assert(page.includes("const fetchAll = useCallback(async () => {\n    if (qRef.current) { fnRef.current.refreshNow(); return; }"), "Reload and Retry must not re-initialise a queue that exists");
+  assert(between(page, "const discard = () => {", "\n  };", "discard").includes("if (st.unsure) refreshNow();"));
+  // The pinned hide handler is unchanged: hiding the tab still sends what is waiting.
+  assert(page.includes(`const onVis = () => { if (document.visibilityState === "hidden") fnRef.current.flushNow(); };`));
+});
+
+Deno.test("the backup: keyed by person and account, written only by a page that can edit, offered back once, red entries listed and never sent", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  assert(page.includes("const backupKey = ssCurrentUserId && clientId ? `ss-pg-pending:${ssCurrentUserId}:${clientId}` : null;"), "plan 4.9's key: the person and the effective account");
+  const save = between(page, "const saveBackup = () => {", "\n  };", "saveBackup");
+  assert(save.includes("if (!backupKey || !editable || !qRef.current) return;"), "a view-only page never writes one");
+  assert(save.includes("try {") && save.includes("catch (_e)"), "storage can be blocked: try/catch");
+  assert(save.includes("else if (ownBackupRef.current) { localStorage.removeItem(backupKey); ownBackupRef.current = false; }"), "cleared only by the page that wrote it");
+  const offer = between(page, "const offerEarlier = (m) => {", "\n  };", "offerEarlier");
+  assert(offer.includes("if (!backupKey || viewOnly || (m && m.guard)) return;"), "a view-only page never offers (or sends) a backup");
+  assert(offer.includes("ssPgBackupLoad(raw, Date.now())") && offer.includes("localStorage.removeItem(backupKey)"), "older than 7 days or unreadable: dropped");
+  const restore = between(page, "const saveEarlier = () => {", "\n  };", "saveEarlier");
+  assert(restore.includes(`apply({ type: "restore", sizes: b.sizes, at: Date.now() });`), "Save them puts the stored edits back through the queue");
+  assert(!/red/.test(restore.replace("keepRef.current = { sizes: null, red: earlierRed };", "")), "red entries never go back into the queue");
+  // Rewritten on every change of the queue, and on every keystroke in the editor.
+  assert(page.includes("useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);"));
+  assert(between(page, "const onEditInput = (e) => {", "\n  };", "onEditInput").includes("saveBackup();"));
+  assert(page.includes("fnRef.current.offerEarlier(m);"), "the first load reads the backup before anything can write over it");
+  assert(page.includes("You have 1 change from earlier that wasn't saved.") && page.includes("`You have ${earlier.count} changes from earlier that weren't saved.`"));
+  assert(page.includes(">Save them</button>") && page.includes(">Discard</button>"));
 });

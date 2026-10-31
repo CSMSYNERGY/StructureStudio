@@ -478,6 +478,41 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-bandin{position:sticky;left:0;display:inline-flex;align-items:center;gap:10px;padding:0 10px;max-width:calc(100vw - 40px);white-space:nowrap;font-size:13px}
 .ss-pg-bandin span{font-size:12px;color:#64748B;font-weight:600}
 .ss-pg-hs button{font:inherit;font-size:12.5px;font-weight:700;color:#475569;background:none;border:none;cursor:pointer;padding:6px 0}
+/* ADDING AND REMOVING SIZES, REFRESH, THE BACKUP (Phase 4a, 2026-10-31). "＋ Add sizes" sits in a
+   style's band; its strip is a full-width row whose contents stick to the left edge like the band's
+   (so its cell is not a scroll container either). The tick-box grid is a CSS grid of labels, not a
+   nested table, so no .ss-pg-grid td rule reaches it. */
+.ss-pg-addbtn{font:inherit;font-size:12px;font-weight:700;color:#3D3672;background:#FFF;border:1px solid #CBD5E1;border-radius:7px;padding:2px 8px;cursor:pointer;white-space:nowrap}
+.ss-pg-addbtn:hover,.ss-pg-addbtn[aria-expanded="true"]{background:#EEF2FF;border-color:#3D3672}
+.ss-pg-grid .ss-pg-add-row td{height:auto;padding:0;text-align:left;white-space:normal;overflow:visible;background:#FBFCFE;border-bottom:1px solid #CBD5E1;cursor:auto}
+.ss-pg-add{position:sticky;left:0;box-sizing:border-box;display:flex;flex-direction:column;gap:7px;padding:8px 10px 10px;width:max-content;max-width:calc(100vw - 40px);font-size:12.5px;color:#334155}
+.ss-pg-addtop,.ss-pg-addline{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.ss-pg-addhint{color:#64748B;font-style:italic}
+.ss-pg-addmode{font:inherit;font-size:12px;font-weight:700;color:#475569;background:#FFF;border:1px solid #CBD5E1;border-radius:999px;padding:2px 10px;cursor:pointer}
+.ss-pg-addmode.ss-pg-on{background:#3D3672;border-color:#3D3672;color:#FFF}
+.ss-pg-addx{font:inherit;font-size:12px;color:#64748B;background:none;border:none;cursor:pointer;padding:2px 6px;margin-left:auto}
+.ss-pg-addin{font:inherit;font-size:13px;width:min(420px,calc(100vw - 140px));min-height:30px;max-height:96px;resize:vertical;box-sizing:border-box;border:1px solid #CBD5E1;border-radius:7px;padding:5px 8px;line-height:1.4}
+.ss-pg-addnum{font:inherit;font-size:13px;width:130px;box-sizing:border-box;border:1px solid #CBD5E1;border-radius:7px;padding:4px 8px;margin-left:4px}
+.ss-pg-addgo{font:inherit;font-size:12.5px;font-weight:800;color:#FFF;background:#3D3672;border:1px solid #3D3672;border-radius:7px;padding:5px 12px;cursor:pointer}
+.ss-pg-addgo:disabled{background:#CBD5E1;border-color:#CBD5E1;cursor:default}
+.ss-pg-adderr{color:#B91C1C;font-weight:600}
+.ss-pg-tick{display:grid;align-self:flex-start;gap:4px 14px;align-items:center;justify-items:start;font-variant-numeric:tabular-nums}
+.ss-pg-tickh{font-weight:800;color:#64748B;font-size:12px}
+.ss-pg-tickc{display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
+.ss-pg-there{color:#94A3B8;font-style:italic;white-space:nowrap}
+/* Remove: a small ✕ at the right of a size that was never priced or changed. Inside the frozen Size
+   box, whose sticky position makes it the ✕'s frame. */
+.ss-pg-grid td.ss-pg-rmable{padding-right:21px}
+.ss-pg-rm{position:absolute;right:2px;top:5px;width:17px;height:17px;padding:0;box-sizing:border-box;border:1px solid #E2E8F0;border-radius:4px;background:#FFF;color:#94A3B8;font:inherit;font-size:10px;line-height:15px;cursor:pointer}
+.ss-pg-rm:hover{color:#B91C1C;border-color:#FECACA;background:#FEF2F2}
+.ss-pg-wait{color:#64748B;font-style:italic;font-weight:600;font-size:12px}
+.ss-pg-grid tr.ss-pg-busy td.ss-pg-size{color:#64748B}
+/* A box a refresh moved (someone else's save, an Excel upload) flashes grey. */
+.ss-pg-grid td.ss-pg-moved{animation:ss-pg-moved .6s ease-out}
+@keyframes ss-pg-moved{from{background-color:#CBD5E1}}
+/* "You have N changes from earlier that weren't saved." */
+.ss-pg-earlier{display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:12.5px;font-weight:600;padding:6px 14px;background:#FFFBEB;color:#92400E;border-bottom:1px solid #FDE68A;flex-shrink:0}
+.ss-pg-earlier button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:4px 10px;cursor:pointer}
 /* Below 700 px (plan 3.15): only Size stays frozen, the toolbar wraps, and the header is capped at
    90 px with an ellipsis (the toolbar's readout carries the full name). */
 @media (max-width:699.98px){
@@ -543,7 +578,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
-<script defer src="/portal.app.compiled.js?v=ce21582f" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=76ba7534" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

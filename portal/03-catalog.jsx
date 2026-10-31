@@ -10950,6 +10950,12 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const [leaving, setLeaving] = useState(null);    // { to, was }: Back to Sheds or Go to Options waits for the queue to empty
   const [stuck, setStuck] = useState(null);        // { to }: that wait was called off (stopped, retrying, view only)
   const [savedAt, setSavedAt] = useState(null);    // when the last save was answered (the green badge)
+  // Phase 4a: adding sizes, the refresh and the backup.
+  const [added, setAdded] = useState([]);          // [{ id, styleId, width, length, label }]: sizes this page added, in the order typed
+  const [addOpen, setAddOpen] = useState({});      // { [styleId]: true }: that style's "＋ Add sizes" strip is open
+  const [addFocus, setAddFocus] = useState(null);  // { id, n }: the cursor goes into that style's strip (each new n)
+  const [earlier, setEarlier] = useState(null);    // a backup from earlier on offer ({ savedAt, sizes, count }) until Save them or Discard
+  const [earlierRed, setEarlierRed] = useState(null);   // its red entries, listed in the status line until dismissed
   const boxRef = useRef(null);
   const gridRef = useRef(null);
   const seqRef = useRef(0);
@@ -10979,11 +10985,35 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const dragRef = useRef(false);
   const flashRef = useRef(null);
   const fnRef = useRef({});                        // this render's handlers, for listeners added once
+  const loadRef = useRef(null);                    // `load`, for the refresh (an async read reads it after it lands)
+  const refreshTimerRef = useRef(null);            // the 1 s wait after a refresh trigger (plan 4.8), coalescing the rest
+  const refreshingRef = useRef(false);             // a refresh read is out
+  const refreshAgainRef = useRef(false);           // …and another trigger came meanwhile
+  const keepRef = useRef(null);                    // { sizes, red }: what of an earlier backup stays stored (ssPgBackup's keep)
+  const ownBackupRef = useRef(false);              // this page wrote the backup, so it clears it once nothing is left
+  const cursorToRef = useRef(null);                // a size just added: the cursor goes to its price once it is drawn
   activeRef.current = active;
   extentRef.current = extent;
+  loadRef.current = load;
 
-  const model = load.phase === "ready" ? load.model : null;
-  const rows = useMemo(() => ssPgRows(model, { showHidden, hiddenStylesOpen }), [model, showHidden, hiddenStylesOpen]);
+  // `base` is the last read; `model` is what the grid draws: that read with the sizes this page added
+  // and removed since (ssPgLocalModel). Header and columns come from the read alone.
+  const base = load.phase === "ready" ? load.model : null;
+  const model = useMemo(() => ssPgLocalModel(base, added, q ? q.sizes : null), [base, added, q && q.sizes]);
+  // Who may change what (plan 3.16): no editor, no add strip and no paste unless canEdit. RTP locks
+  // the price column alone (model.rtpOn). `readOnly` is every reason the badge says "View only", and
+  // the operator strip follows it too, so the page never says both "View only" and "Changes are live".
+  const tooBig = !!(model && model.guard);
+  const readOnly = !!viewOnly || tooBig;
+  const editable = load.phase === "ready" && !readOnly;
+  // …and once open: a 403 on a save turns the page view-only (q.viewOnly), and an answer for another
+  // account stops every save for good (stopped "tenant"). Saving stopped for any other reason still
+  // takes edits: they wait for Retry.
+  const lostEdit = !!(q && (q.viewOnly || (q.stopped && q.stopped.kind === "tenant")));
+  const canEdit = editable && !lostEdit;
+  const keepIds = useMemo(() => { const k = {}; added.forEach((a) => { k[a.id] = true; }); return k; }, [added]);
+  const rows = useMemo(() => ssPgRows(model, { showHidden, hiddenStylesOpen, adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds }),
+    [model, showHidden, hiddenStylesOpen, addOpen, canEdit, keepIds]);
   const order = useMemo(() => rows.filter((r) => r.kind === "size").map((r) => r.id), [rows]);
   const byId = useMemo(() => {
     const m = {};
@@ -11002,10 +11032,13 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // Both reads, and once more when the answer does not add up (plan 4.2): a save landing between two
   // list reads is the usual cause, and a second read settles it. "cap" cannot change by reading
   // again, so it is believed at once. Sequenced, so a Retry that overtakes a slow read wins.
-  // The save queue starts from what the read says the server holds. Only a first load, a Retry after
-  // a failed one and the "too big" Reload come here, and none has a local edit to keep; Phase 4's
-  // refresh reads go through ssPgQueue's refresh and columns rules instead.
+  // The save queue starts from what the read says the server holds: the FIRST load only (and a Retry
+  // after it failed). Once the queue exists, every read (the "too big" Reload, Reload after a
+  // Discard) is a refresh (refreshNow), through ssPgQueue's refresh and columns rules, which keep red
+  // boxes, unsent edits and the call out. Re-initialising would drop them.
+  // The first load also reads the backup from earlier (plan 4.9), before the queue can write over it.
   const fetchAll = useCallback(async () => {
+    if (qRef.current) { fnRef.current.refreshNow(); return; }
     const my = ++seqRef.current;
     setLoad({ phase: "loading" });
     let r = null, m = null;
@@ -11023,6 +11056,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     qRef.current = fresh;
     setQ(fresh);
     setLoad({ phase: "ready", model: m, at: Date.now() });
+    fnRef.current.offerEarlier(m);
   }, [target, clientId]);
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -11040,11 +11074,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // paint, so no name is ever drawn cut. Below 700 px the header is a fixed 90 px with an ellipsis
   // (portal.html), and the toolbar's readout carries the full name.
   React.useLayoutEffect(() => {
-    if (!model || narrow || !gridRef.current) return;
+    if (!base || narrow || !gridRef.current) return;
     const spans = [...gridRef.current.querySelectorAll("thead .ss-pg-vh")];
     if (!spans.length) return;
-    if (measuredRef.current !== model) {
-      measuredRef.current = model;
+    if (measuredRef.current !== base) {
+      measuredRef.current = base;
       const ctx = ssPgMeasureCtx();
       let est = SS_PG_HEAD_MIN;
       if (ctx) {
@@ -11062,7 +11096,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     }
     const cut = spans.some((sp) => sp.getBoundingClientRect().width > SS_PG_LINE_H * 2 + 1 || sp.scrollHeight > sp.clientHeight + 1);
     if (cut && headH < SS_PG_HEAD_MAX) setHeadH(Math.min(SS_PG_HEAD_MAX, headH + 8));
-  }, [model, narrow, headH]);
+  }, [base, narrow, headH]);
 
   // The active cell's size folded away ("Show hidden sizes" off) or did not come back on a Reload:
   // the cursor moves to the nearest size still drawn (ssPgReanchor), before paint, so the readout
@@ -11087,22 +11121,28 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // Where tests/harness/pricingTable.mjs stops its first-render clock: the grid committed at its
   // measured height, and the frame after that.
   React.useLayoutEffect(() => {
-    if (!model || !gridRef.current) return;
+    if (!base || !gridRef.current) return;
     try {
       performance.mark("ss-pg-grid");
       requestAnimationFrame(() => setTimeout(() => { try { performance.mark("ss-pg-painted"); } catch (_m) { /* no User Timing */ } }, 0));
     } catch (_m) { /* no User Timing */ }
-  }, [model, headH]);
+  }, [base, headH]);
 
-  // Jump to a style: ?style= once (Add style's link; Phase 4 also opens its add box), then the
-  // toolbar's picker. A hidden style opens the hidden section first and jumps on the next commit.
-  // The scroll waits a frame, so it lands below the header at its MEASURED height.
+  // Jump to a style: ?style= once (Add style's link, which also opens the style's add box with the
+  // cursor in it, plan 3.1), then the toolbar's picker. A hidden style opens the hidden section first
+  // and jumps on the next commit. The scroll waits a frame, so it lands below the header at its
+  // MEASURED height.
   React.useLayoutEffect(() => {
     if (!model) return;
     if (!styleDoneRef.current) {
       styleDoneRef.current = true;
       if (styleParam) {
         jumpRef.current = styleParam;
+        const st = [...model.styles, ...model.hiddenStyles].find((s) => s.id === styleParam);
+        if (st && canEdit) {
+          if (st.sizes.length) setAddOpen((o) => ({ ...o, [st.id]: true }));
+          setAddFocus((f) => ({ id: st.id, n: (f ? f.n : 0) + 1 }));
+        }
         // Spent: ?style= comes back out of the address, so Back to Sheds and a reload do not jump.
         try {
           const q0 = new URLSearchParams(window.location.search);
@@ -11170,22 +11210,73 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   }, [stuck, counts]);
 
   // A saved box flashes green for 600 ms (plan 3.13), on the <td> itself, so no row renders for it.
+  // A box a refresh moved (someone else's save, an Excel upload) flashes grey the same way (plan 4.6).
   React.useLayoutEffect(() => {
     const fl = q && q.flash;
     if (!fl || flashRef.current === fl || !gridRef.current) return;
     flashRef.current = fl;
     const tds = [];
-    Object.keys(fl.saved || {}).forEach((id) => {
+    const mark = (list, cls) => Object.keys(list || {}).forEach((id) => {
       const tr = gridRef.current.querySelector(`tr[data-s="${(window.CSS && CSS.escape) ? CSS.escape(String(id)) : id}"]`);
       if (!tr) return;
-      fl.saved[id].forEach((f) => {
+      list[id].forEach((f) => {
         const c = f === "price" ? 1 : f === "active" ? 2 : colAt[f.slice(2)];
         const td = c != null ? tr.children[c] : null;
-        if (td) { td.classList.add("ss-pg-ok"); tds.push(td); }
+        if (td) { td.classList.add(cls); tds.push([td, cls]); }
       });
     });
-    if (tds.length) setTimeout(() => tds.forEach((td) => td.classList.remove("ss-pg-ok")), 600);
+    mark(fl.saved, "ss-pg-ok");
+    mark(fl.changed, "ss-pg-moved");
+    if (tds.length) setTimeout(() => tds.forEach(([td, cls]) => td.classList.remove(cls)), 600);
   }, [q && q.flash]);
+
+  // A size just added (addSizes): once its row is drawn, the cursor goes to its price, so the builder
+  // types the prices straight away (plan 8.5, step 6). Before paint, like every move.
+  // The grid takes the focus first: its onFocus would otherwise put the cursor on the first price.
+  React.useLayoutEffect(() => {
+    const id = cursorToRef.current;
+    if (!id || order.indexOf(id) < 0) return;
+    cursorToRef.current = null;
+    const at = { sizeId: id, col: 1 };
+    activeRef.current = at;
+    try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+    scrollNextRef.current = "active";
+    setExtent(null);
+    setActive(at);
+  }, [order]);
+
+  // REFRESH (plan 4.8). The table reads both tables again when another page saves Settings for this
+  // account (the "ss:settings-saved" event, or the "ss-settings" BroadcastChannel from another tab of
+  // this browser: Add style, a rename, an Excel upload, a colleague's table), and EVERY time the tab
+  // comes back into view, which is how a save on another computer arrives (there is no push). Its
+  // own saves are told apart by `source` (SS_PAGE_ID, ssSettingsSaved); an event for another account
+  // is ignored, one that names none is believed (a read too many costs two reads). The read waits 1 s
+  // and coalesces whatever else arrives meanwhile (pokeRefresh), then goes through the queue's refresh
+  // and columns rules (refreshNow), never a re-initialised queue.
+  useEffect(() => {
+    const hear = (d) => {
+      if (d && d.source === SS_PAGE_ID) return;
+      if (d && d.clientId && clientId && String(d.clientId) !== String(clientId)) return;
+      fnRef.current.pokeRefresh();
+    };
+    const onSaved = (ev) => hear(ev ? ev.detail : null);
+    const onShown = () => { if (document.visibilityState === "visible") fnRef.current.pokeRefresh(); };
+    let bc = null;
+    window.addEventListener("ss:settings-saved", onSaved);
+    try { bc = new BroadcastChannel("ss-settings"); bc.onmessage = (m) => hear(m ? m.data : null); } catch (_b) { bc = null; }
+    document.addEventListener("visibilitychange", onShown);
+    return () => {
+      window.removeEventListener("ss:settings-saved", onSaved);
+      if (bc) { try { bc.close(); } catch (_c) { /* closed */ } }
+      document.removeEventListener("visibilitychange", onShown);
+      clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    };
+  }, [clientId]);
+
+  // THE BACKUP (plan 4.9) is rewritten whenever the queue or the editor's text changes (the editor's
+  // keystrokes write it too, from onEditInput), and while a backup from earlier is on offer.
+  useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);
 
   // LEAVING THE TAB (plan 4.9): the browser asks first while anything is unsent or in flight, or the
   // editor holds text that differs from its box. There is no keepalive send (the invoke wrapper has
@@ -11246,15 +11337,18 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   }, []);
   const onPeekEnd = useCallback(() => setPeek(null), []);
   const toggleHiddenStyles = useCallback(() => setHiddenStylesOpen((o) => !o), []);
-  const head = useMemo(() => (model ? (
+  const head = useMemo(() => (base ? (
     <>
       <colgroup>
         <col style={{ width: 64 }} /><col style={{ width: 76 }} /><col style={{ width: 30 }} />
-        {model.cols.map((c) => <col key={c.key} style={{ width: SS_PG_COL_W }} />)}
+        {base.cols.map((c) => <col key={c.key} style={{ width: SS_PG_COL_W }} />)}
       </colgroup>
-      <PgHeader sections={model.sections} cols={model.cols} rtpOn={model.rtpOn} onPeek={onPeek} onPeekEnd={onPeekEnd} />
+      <PgHeader sections={base.sections} cols={base.cols} rtpOn={base.rtpOn} onPeek={onPeek} onPeekEnd={onPeekEnd} />
     </>
-  ) : null), [model, onPeek, onPeekEnd]);
+  ) : null), [base, onPeek, onPeekEnd]);
+  // The add strips' two callbacks, stable so the rows' memo holds; they call this render's handlers.
+  const onAddSizes = useCallback((styleId, sizes, skipped) => fnRef.current.addSizes(styleId, sizes, skipped), []);
+  const onCloseAdd = useCallback((styleId) => fnRef.current.closeAdd(styleId), []);
   // Each size row draws the server's values with this page's edits on top (ssPgRowView). A row's
   // view is rebuilt only when its own size or its own boxes changed, and handed back as the very same
   // object when nothing it draws did, so PgRow's memo holds: an arrow key renders no row, a commit one.
@@ -11276,29 +11370,26 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
           c = views[z.id] = { z, s, fs, v: same ? was : v };
         }
         const v = c.v;
+        const busy = s && s.creating ? "adding" : q && q.removes[z.id] ? "removing" : "";
         return <PgRow key={r.id} rowIndex={ri} sizeId={z.id} label={z.label} title={z.title} priceText={v.priceText}
-          offered={v.offered} noPrice={v.noPrice} hidden={v.hidden} values={v.values} marks={v.marks} rtp={!!(model && model.rtpOn)} />;
+          offered={v.offered} noPrice={v.noPrice} hidden={v.hidden} values={v.values} marks={v.marks} rtp={!!(model && model.rtpOn)}
+          busy={busy} removable={canEdit && ssPgCanRemove(q, z.id, z)} />;
       }
       if (r.kind === "band") {
-        return <PgStyleBand key={r.id} rowIndex={ri} styleId={r.style.id} label={r.style.label} total={r.total} hidden={r.hidden} folded={r.folded} ncols={ncols} />;
+        return <PgStyleBand key={r.id} rowIndex={ri} styleId={r.style.id} label={r.style.label} total={r.total} hidden={r.hidden} folded={r.folded} ncols={ncols}
+          canAdd={canEdit} open={!!addOpen[r.style.id] || !r.total} />;
+      }
+      if (r.kind === "add") {
+        return <PgAddSizes key={r.id} rowIndex={ri} styleId={r.style.id} styleLabel={r.style.label} existing={r.style.sizes} ncols={ncols}
+          empty={r.empty} focusKey={addFocus && addFocus.id === r.style.id ? addFocus.n : 0} onAdd={onAddSizes} onClose={onCloseAdd} />;
       }
       if (r.kind === "empty") return <PgNoteRow key={r.id} rowIndex={ri} text={r.text} ncols={ncols} />;
       return <PgHiddenStylesRow key={r.id} rowIndex={ri} count={r.count} open={r.open} ncols={ncols} onToggle={toggleHiddenStyles} />;
     });
-  }, [rows, model, ncols, toggleHiddenStyles, q && q.sizes, q && q.fields]);
+  }, [rows, model, ncols, toggleHiddenStyles, q && q.sizes, q && q.fields, q && q.removes, canEdit, addOpen, addFocus, onAddSizes, onCloseAdd]);
 
   // ── Handlers and what to draw (no hooks below this line) ──
-  const tooBig = !!(model && model.guard);
-  // Phase 3: no editor, no add strip and no paste unless this is true (plan 3.16). RTP locks the
-  // price column alone (model.rtpOn). `readOnly` is every reason the badge says "View only", and
-  // the operator strip follows it too, so the page never says both "View only" and "Changes are live".
-  const readOnly = !!viewOnly || tooBig;
-  const editable = load.phase === "ready" && !readOnly;
-  // …and once open: a 403 on a save turns the page view-only (q.viewOnly), and an answer for another
-  // account stops every save for good (stopped "tenant"). Saving stopped for any other reason still
-  // takes edits: they wait for Retry.
-  const lostEdit = !!(q && (q.viewOnly || (q.stopped && q.stopped.kind === "tenant")));
-  const canEdit = editable && !lostEdit;
+  // (tooBig, readOnly, editable, lostEdit and canEdit are worked out above: the rows need them.)
   const canEditNow = () => editable && !!qRef.current && !qRef.current.viewOnly && !(qRef.current.stopped && qRef.current.stopped.kind === "tenant");
   const rtp = !!(model && model.rtpOn);
 
@@ -11349,6 +11440,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const gone = Array.isArray(data.removed) ? data.removed.filter(Boolean) : [];
     // Designers open in this browser look again (the side door skips the wrapper that says so).
     if (res.some((x) => x.status === "saved") || made.some((x) => x.status === "created") || gone.some((x) => x.status === "removed" && !x.gone)) ssSettingsSaved(clientId);
+    // `exists`: someone else added that size first, and it takes the new row's place; it may not be
+    // in this page's read yet, so the table reads again to draw it (with what was typed on it, red).
+    // A refused remove means the size changed somewhere else since this page read it: the read
+    // brings its new version, and its Remove goes.
+    if (made.some((x) => x.status === "exists") || gone.some((x) => x.status === "refused")) pokeRefresh();
     // One info row per answer that had conflicts or refusals: counts only (plan 4.7).
     const conflicts = res.filter((x) => x.status === "conflict").length;
     const refused = res.filter((x) => x.status === "refused" || x.status === "missing").length
@@ -11413,16 +11509,182 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     clearTimeout(retryTimerRef.current);
     setRetryAt(null);
     const st = apply({ type: "discard" });
-    if (st.unsure) reread();
+    if (st.unsure) refreshNow();
   };
-  // A fresh read into the queue's refresh rule: red boxes and anything typed meanwhile are kept.
-  const reread = async () => {
-    const my = seqRef.current, okAt = qRef.current ? qRef.current.oks : 0;
-    const r = await ssPgFetch(target, clientId);
-    if (!aliveRef.current || my !== seqRef.current || !r.ok) return;
-    const m = ssPgModel(r.cat, r.table);
-    if (m.guard) return;
-    apply({ type: "refresh", okAt, sizes: ssPgServerSizes(m) });
+
+  // ── The refresh (plan 4.6, 4.8) ──
+  // A trigger waits 1 s (the harness shortens it: window.__ssPgRefreshMs) and coalesces with any
+  // other that comes meanwhile; one read is out at a time, and a trigger during it reads once more
+  // after it.
+  const pokeRefresh = () => {
+    if (refreshTimerRef.current) return;
+    const w = typeof window !== "undefined" ? window.__ssPgRefreshMs : null;
+    const ms = w != null && isFinite(Number(w)) ? Number(w) : 1000;
+    refreshTimerRef.current = setTimeout(() => { refreshTimerRef.current = null; fnRef.current.refreshNow(); }, ms);
+  };
+  // Both reads, then the queue's rules (adoptRead). Like the first load, a read that does not add up
+  // is read once more. A read that fails changes nothing: the next trigger reads again.
+  const refreshNow = async () => {
+    clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = null;
+    if (refreshingRef.current) { refreshAgainRef.current = true; return; }
+    const cur = qRef.current;
+    if (!cur || !loadRef.current || loadRef.current.phase !== "ready") return;
+    refreshingRef.current = true;
+    const okAt = cur.oks, my = seqRef.current;
+    let r = null, m = null;
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        r = await ssPgFetch(target, clientId);
+        if (!aliveRef.current || my !== seqRef.current || !r.ok) break;
+        m = ssPgModel(r.cat, r.table);
+        if (!m.guard || m.guard === "cap") break;
+      }
+    } finally { refreshingRef.current = false; }
+    if (!aliveRef.current || my !== seqRef.current) return;
+    if (r && r.ok && m) fnRef.current.adoptRead(m, okAt);
+    if (refreshAgainRef.current) { refreshAgainRef.current = false; fnRef.current.pokeRefresh(); }
+  };
+  // A fresh read into the queue (never a re-initialised queue): the columns first (an option archived
+  // elsewhere drops its unsaved boxes, with the note; a new one is a new column), then the refresh
+  // rule, which keeps red boxes, unsent edits and the call out, turns an unsent box red when its
+  // starting value changed under it (an Excel upload, a colleague), and gives every other size the
+  // read's version and values. A read asked for before the latest answer landed may predate that
+  // save, so it is dropped and another is asked for. A read that does not add up (the guard) never
+  // replaces one that did; while the page is already "too big" it does, so Reload can clear it.
+  const adoptRead = (m, okAt) => {
+    const cur = qRef.current, was = loadRef.current && loadRef.current.model;
+    if (!cur || !was) return;
+    if (cur.oks !== okAt) { pokeRefresh(); return; }
+    if (m.guard && !was.guard) return;
+    const names = {};
+    was.cols.forEach((c) => { names[c.key] = c.label; });
+    apply({ type: "columns", keys: m.cols.map((c) => c.key), names });
+    const st = apply({ type: "refresh", okAt, sizes: ssPgServerSizes(m) });
+    setLoad((l) => ({ phase: "ready", model: m, at: l.at }));
+    if (st.reread) pokeRefresh();
+  };
+
+  // ── Adding and removing sizes (plan 3.7) ──
+  const byStyle = (id) => (model ? [...model.styles, ...model.hiddenStyles].find((st) => st.id === id) || null : null);
+  // A new id for a size, minted here (the server takes the browser's id: plan 4.3).
+  const newId = () => {
+    try { if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID(); } catch (_c) { /* not a secure context */ }
+    const b = new Uint8Array(16);
+    try { window.crypto.getRandomValues(b); } catch (_r) { for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256); }
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  };
+  // The strip hands over sizes it has checked (ssPgParseSizeList, ssPgSizeGrid). Each becomes a
+  // create in the queue, in the order typed, and a row at the end of its style saying "Adding…"; the
+  // queue sends creates first, at most 50 entries to a call, and edits typed on a new size wait for
+  // its answer (its version). The strip closes, unless it is a style's empty placeholder; the cursor
+  // goes to the first new price; sizes already there are named in the status line. False: nothing
+  // was taken (the page can't edit now), and the strip keeps what was typed.
+  const addSizes = (styleId, sizes, skipped) => {
+    if (!canEditNow() || !Array.isArray(sizes) || !sizes.length) return false;
+    commitEdit();
+    backToWork();
+    const made = sizes.map((z) => ({ id: newId(), styleId, width: z.width, length: z.length, label: z.label }));
+    made.forEach((a) => apply({ type: "create", id: a.id, styleId, width: a.width, length: a.length, at: Date.now() }));
+    setAdded((list) => [...list, ...made]);
+    setAddOpen((o) => { if (!o[styleId]) return o; const next = { ...o }; delete next[styleId]; return next; });
+    cursorToRef.current = made[0].id;
+    const st = byStyle(styleId);
+    const skip = Array.isArray(skipped) ? skipped : [];
+    setTip(skip.length ? `${skip.join(", ")} ${skip.length === 1 ? "is" : "are"} already in ${st ? st.label : "this style"}, so ${skip.length === 1 ? "it was" : "they were"} skipped.` : null);
+    sendNow();
+    return true;
+  };
+  const closeAdd = (styleId) => {
+    setAddOpen((o) => { if (!o[styleId]) return o; const next = { ...o }; delete next[styleId]; return next; });
+    focusGrid();
+  };
+  // "＋ Add sizes" on a band: opens the strip with the cursor in it, or closes it. On a style with no
+  // sizes the strip is the placeholder and is always open: the cursor goes into it.
+  const toggleAdd = (styleId) => {
+    if (!canEditNow()) return;
+    const st = byStyle(styleId);
+    if (st && st.sizes.length && addOpen[styleId]) { closeAdd(styleId); return; }
+    if (st && st.sizes.length) setAddOpen((o) => ({ ...o, [styleId]: true }));
+    setAddFocus((f) => ({ id: styleId, n: (f ? f.n : 0) + 1 }));
+  };
+  // Remove (plan 3.7): only a size that was never priced or edited (ssPgCanRemove; the server checks
+  // again). Through the queue, sent at once; the row goes when the answer says removed.
+  const removeSize = (id) => {
+    if (!canEditNow() || !ssPgCanRemove(qRef.current, id, byId[id] ? byId[id].size : null)) return;
+    commitEdit();
+    backToWork();
+    apply({ type: "remove", id, at: Date.now() });
+    sendNow();
+  };
+  // Clicks on the grid's own buttons ("＋ Add sizes" on a band, ✕ Remove on a size): one handler on the
+  // grid, so the bands and rows take no function and their memos hold.
+  const onAct = (e) => {
+    const b = e.target && e.target.closest ? e.target.closest("[data-pg-act]") : null;
+    if (!b || !gridRef.current || !gridRef.current.contains(b)) return;
+    const act = b.getAttribute("data-pg-act"), id = b.getAttribute("data-pg-id");
+    if (act === "add") toggleAdd(id);
+    else if (act === "remove") removeSize(id);
+  };
+
+  // ── The backup (plan 4.9) ──
+  // localStorage["ss-pg-pending:<userId>:<clientId>"]: this person, this account (the view-as target
+  // when an operator is viewing one), so a backup is only ever offered back to the account it was
+  // made on. Written only by a page that can edit, and cleared by the page that wrote it once
+  // nothing is left (another tab of the same account, with nothing of its own, never clears it).
+  // Storage can be blocked or full: then there is simply no backup, and the page works the same.
+  const backupKey = ssCurrentUserId && clientId ? `ss-pg-pending:${ssCurrentUserId}:${clientId}` : null;
+  const draftOf = () => {
+    const ed = editRef.current;
+    if (!ed || !dirtyRef.current) return null;
+    const f = fieldOf(ed.col);
+    return f && f !== "active" ? { sizeId: ed.sizeId, key: f, text: draftRef.current, seen: ed.seen } : null;
+  };
+  const saveBackup = () => {
+    if (!backupKey || !editable || !qRef.current) return;
+    const b = ssPgBackup(qRef.current, draftOf(), Date.now(), keepRef.current);
+    try {
+      if (b) { localStorage.setItem(backupKey, JSON.stringify(b)); ownBackupRef.current = true; }
+      else if (ownBackupRef.current) { localStorage.removeItem(backupKey); ownBackupRef.current = false; }
+    } catch (_e) { /* storage blocked or full: no backup */ }
+  };
+  // On open (the first load): a backup from earlier is offered back with its banner, unless this page
+  // can't edit (view-only pages never send one, and leave it stored). One older than 7 days, or one
+  // that can't be read, is dropped.
+  const offerEarlier = (m) => {
+    if (!backupKey || viewOnly || (m && m.guard)) return;
+    let raw = null;
+    try { raw = localStorage.getItem(backupKey); } catch (_e) { return; }
+    if (raw == null) return;
+    const b = ssPgBackupLoad(raw, Date.now());
+    if (!b) { try { localStorage.removeItem(backupKey); } catch (_e) { /* blocked */ } return; }
+    keepRef.current = { sizes: b.sizes, red: b.red };
+    ownBackupRef.current = true;
+    if (b.count) setEarlier({ savedAt: b.savedAt, sizes: b.sizes, count: b.count });
+    if (b.red.length) setEarlierRed(b.red);
+  };
+  // Save them: the stored edits go into the queue on their stored version and starting values
+  // (ssPgQueue "restore"), and out at once. The red entries stay listed until dismissed.
+  const saveEarlier = () => {
+    const b = earlier;
+    if (!b || !canEditNow()) return;
+    keepRef.current = { sizes: null, red: earlierRed };
+    setEarlier(null);
+    apply({ type: "restore", sizes: b.sizes, at: Date.now() });
+    sendNow();
+  };
+  // Discard: the backup is gone, red entries and all.
+  const discardEarlier = () => {
+    keepRef.current = null;
+    ownBackupRef.current = true;
+    setEarlier(null);
+    setEarlierRed(null);
+  };
+  const dismissEarlierRed = () => {
+    keepRef.current = keepRef.current ? { ...keepRef.current, red: null } : null;
+    setEarlierRed(null);
   };
 
   // ── Editing (plan 3.5, 3.9, 3.10) ──
@@ -11531,6 +11793,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     draftRef.current = e.target.value;
     const d = !!editRef.current && e.target.value !== editRef.current.text0;
     if (d !== dirtyRef.current) { dirtyRef.current = d; setDraftDirty(d); }
+    saveBackup();   // the open editor's text is part of the backup (plan 4.9), keystroke by keystroke
   };
   // Leaving the box commits it (plan 3.10: any move away commits), but not the window losing focus
   // to another app: the editor is still there when the builder comes back.
@@ -11540,7 +11803,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
 
   // ── The grid's own keys and mouse (plan 3.10) ──
+  // Only keys pressed on the grid itself: an add strip's boxes and the buttons in the bands are
+  // inside the table, and what is typed there is theirs.
   const onKeyDown = (e) => {
+    if (e.target !== e.currentTarget) return;
     const k = e.key;
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "z" || k === "Z")) { e.preventDefault(); setTip(SS_PG_NO_UNDO); return; }
     if (e.altKey || e.ctrlKey || e.metaKey) return;
@@ -11571,6 +11837,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     return { sizeId: tr.getAttribute("data-s"), col: Number(td.getAttribute("data-c")) || 0 };
   };
   const onMouseDown = (e) => {
+    // The grid's own buttons (onAct) act on the click; pressing one commits the editor and keeps
+    // the focus where it was, so the keys still drive the grid afterwards.
+    if (e.target && e.target.closest && e.target.closest("[data-pg-act]")) { e.preventDefault(); commitEdit(); return; }
     const cell = cellAt(e);
     if (!cell) return;
     e.preventDefault();   // no drag-select of text; focus is given by hand, without a scroll
@@ -11598,8 +11867,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const cell = cellAt(e);
     if (cell && cell.col !== 2) startEdit(cell, null);
   };
-  // Tabbing into the grid lands on the first price.
-  const onFocus = () => { if (!activeRef.current && order.length) setActive({ sizeId: order[0], col: Math.min(1, ncols - 1) }); };
+  // Tabbing into the grid lands on the first price (the grid itself: not a box in an add strip).
+  const onFocus = (e) => { if (e.target === e.currentTarget && !activeRef.current && order.length) setActive({ sizeId: order[0], col: Math.min(1, ncols - 1) }); };
   const toggleShowHidden = (on) => {
     setShowHidden(on);
     try { localStorage.setItem(SS_PG_SHOW_HIDDEN_KEY, on ? "1" : "0"); } catch (_e) { /* not remembered */ }
@@ -11712,7 +11981,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
   const leaveTo = (sub) => ssNavClick(() => leaveFor(sub));
   const toSheds = leaveTo("sheds");
-  fnRef.current = { place, sendNow, flushNow, jumpRed, go, commitEdit, leaveFor };
+  fnRef.current = { place, sendNow, flushNow, jumpRed, go, commitEdit, leaveFor,
+    refreshNow, pokeRefresh, adoptRead, addSizes, closeAdd, saveBackup, offerEarlier };
   // Pressing a link would blur the open editor, and the blur commits it before the click, so the
   // click would never see a box that commit turned red. Held on the editor, the click commits it.
   const holdEditor = (e) => { if (editRef.current) e.preventDefault(); };
@@ -11754,6 +12024,14 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const errLine = aerr && at ? ssPgErrorLine(`${at.style.label} ${at.size.label}`,
     { name: colName(active.col), kind: active.col === 1 ? "price" : active.col === 2 ? "active" : "qty" }, aerr) : null;
   const dismissBtn = (fn) => <button type="button" onClick={fn}>Dismiss</button>;
+  // The backup's red entries (plan 4.9), named by what is drawn now; never sent.
+  let earlierLine = "";
+  if (earlierRed && model) {
+    const where = {}, fields = { price: { name: "Price", kind: "price" }, active: { name: "Offered", kind: "active" } };
+    [...model.styles, ...model.hiddenStyles].forEach((st) => st.sizes.forEach((z) => { where[z.id] = `${st.label} ${z.label}`; }));
+    model.cols.forEach((c) => { fields["c:" + c.key] = { name: c.label, kind: "qty" }; });
+    earlierLine = ssPgEarlierText(earlierRed, where, fields);
+  }
   const tableW = SS_PG_FROZEN_W + SS_PG_COL_W * (ncols - 3);
   // Leaving was called off (`stuck`): the badge says why (stopped, retrying, view only), this says
   // the page stayed, and Leave anyway goes without what is unsent.
@@ -11795,8 +12073,17 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       )}
       {viewOnly && <PgStatusLine>{viewOnly.long}</PgStatusLine>}
       {tooBig && <PgStatusLine tone="amber" action={<button type="button" onClick={fetchAll}>Reload</button>}>{SS_PG_TOO_BIG}</PgStatusLine>}
+      {/* The backup from earlier (plan 4.9): offered back once, until Save them or Discard. */}
+      {earlier && canEdit && (
+        <div className="ss-pg-earlier" role="status">
+          <span>{earlier.count === 1 ? "You have 1 change from earlier that wasn't saved." : `You have ${earlier.count} changes from earlier that weren't saved.`}</span>
+          <button type="button" onClick={saveEarlier}>Save them</button>
+          <button type="button" onClick={discardEarlier}>Discard</button>
+        </div>
+      )}
       {stuckLine ? stuckLine
         : errLine ? <PgStatusLine tone={aerr.kind === "conflict" ? "amber" : "red"} action={dismissBtn(() => apply({ type: "dismiss", sizeId: active.sizeId, f: af }))}>{errLine}</PgStatusLine>
+        : earlierLine ? <PgStatusLine tone="amber" action={dismissBtn(dismissEarlierRed)}>{earlierLine}</PgStatusLine>
         : q && q.note ? <PgStatusLine tone="amber" action={dismissBtn(() => apply({ type: "note-off" }))}>{q.note.text}</PgStatusLine>
         : tip ? <PgStatusLine action={dismissBtn(() => setTip(null))}>{tip}</PgStatusLine> : null}
       {legendOpen && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}
@@ -11836,7 +12123,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
               <table ref={gridRef} className="ss-pg-grid" role="grid" aria-label="Sizes and prices" tabIndex={0}
                 aria-rowcount={2 + rows.length} aria-colcount={ncols} aria-readonly={canEdit ? undefined : "true"}
                 style={{ width: tableW, "--ss-pg-hh": hh + "px" }}
-                onKeyDown={onKeyDown} onMouseDown={onMouseDown} onMouseOver={onMouseOver} onDoubleClick={onDoubleClick} onFocus={onFocus}>
+                onKeyDown={onKeyDown} onMouseDown={onMouseDown} onMouseOver={onMouseOver} onDoubleClick={onDoubleClick} onFocus={onFocus}
+                onClick={onAct}>
                 {head}
                 <tbody>{body}</tbody>
               </table>
@@ -11897,7 +12185,13 @@ const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, o
 // `marks` (ssPgRowView) is one character per column, a shape as well as a colour (plan 3.13): "p"
 // waiting to save (a blue corner), "r" refused or not valid (red outline and "!"), "c" changed
 // elsewhere (amber outline and "↺"); "" when the size has nothing local. A red box is aria-invalid.
-const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = "" }) {
+// Phase 4a: `busy` is "adding" while the size's create is unanswered and "removing" while its remove
+// is, said in the empty Price box ("Adding…"); `removable` (ssPgCanRemove) puts a small ✕ Remove at
+// the right of the Size box. The ✕ is a word too narrow to fit beside the size in 64 px, so its
+// title and name say "Remove". It is handled by the grid's own click (data-pg-act), so PgRow takes
+// no function and its memo holds.
+const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = "",
+  busy = "", removable = false }) {
   const mark = (c) => {
     const m = marks ? marks.charAt(c) : "";
     return m === "p" ? "ss-pg-m-p" : m === "r" ? "ss-pg-m-r" : m === "c" ? "ss-pg-m-c" : "";
@@ -11905,11 +12199,17 @@ const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceT
   const cls = (c, base) => ([base, mark(c)].filter(Boolean).join(" ") || undefined);
   const bad = (c) => { const m = marks ? marks.charAt(c) : ""; return m === "r" || m === "c" ? "true" : undefined; };
   return (
-    <tr role="row" aria-rowindex={rowIndex} data-s={sizeId} className={hidden ? "ss-pg-hid" : undefined}>
-      <td role="gridcell" aria-colindex={1} data-c={0} className="ss-pg-f0 ss-pg-size" title={title || undefined} aria-readonly="true">{label}</td>
+    <tr role="row" aria-rowindex={rowIndex} data-s={sizeId} className={[hidden ? "ss-pg-hid" : "", busy ? "ss-pg-busy" : ""].filter(Boolean).join(" ") || undefined}>
+      <td role="gridcell" aria-colindex={1} data-c={0} className={"ss-pg-f0 ss-pg-size" + (removable ? " ss-pg-rmable" : "")} title={title || undefined} aria-readonly="true">
+        {label}
+        {removable && <button type="button" className="ss-pg-rm" data-pg-act="remove" data-pg-id={sizeId} tabIndex={-1}
+          title="Remove this size (it was never priced or changed)" aria-label={`Remove size ${label}`}>✕</button>}
+      </td>
       <td role="gridcell" aria-colindex={2} data-c={1} className={cls(1, "ss-pg-f1 ss-pg-price" + (rtp ? " ss-pg-rtp" : ""))}
         aria-invalid={bad(1)} aria-readonly={rtp ? "true" : undefined}
-        title={rtp ? (priceText ? `${priceText} · ${SS_PG_RTP}` : SS_PG_RTP) : (priceText || undefined)}>{priceText}</td>
+        title={rtp ? (priceText ? `${priceText} · ${SS_PG_RTP}` : SS_PG_RTP) : (priceText || undefined)}>
+        {busy && !priceText ? <span className="ss-pg-wait">{busy === "removing" ? "Removing…" : "Adding…"}</span> : priceText}
+      </td>
       <td role="gridcell" aria-colindex={3} data-c={2} className={cls(2, "ss-pg-f2 ss-pg-off" + (noPrice ? " ss-pg-dis" : ""))} aria-invalid={bad(2)}
         title={noPrice ? "Add a price to offer it" : offered ? "Offered in your designer" : "Not offered"}>{offered ? "✓" : ""}</td>
       {values.map((v, i) => <td key={i} role="gridcell" aria-colindex={4 + i} data-c={3 + i} className={cls(3 + i, "")} aria-invalid={bad(3 + i)}>{v}</td>)}
@@ -11953,19 +12253,142 @@ function PgEditor({ inputRef, init, label, price, onKeyDown, onInput, onBlur }) 
 }
 
 // A style's band: its name and how many sizes it has. The name sticks to the left edge while the
-// grid scrolls sideways. Phase 4 adds "＋ Add sizes" here.
-const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, total, hidden, folded, ncols }) {
+// grid scrolls sideways. "＋ Add sizes" (plan 3.7, `canAdd`: the page can edit) opens the style's add
+// strip under it, or closes it (`open`); it is handled by the grid's own click (data-pg-act), so the
+// band takes no function and its memo holds.
+const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, total, hidden, folded, ncols, canAdd = false, open = false }) {
   return (
     <tr role="row" aria-rowindex={rowIndex} className="ss-pg-band" data-band={styleId}>
       <td role="rowheader" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
         <div className="ss-pg-bandin">
           <b>{label}</b>
           <span>{total === 1 ? "1 size" : `${total} sizes`}{hidden ? ` · ${hidden} hidden${folded ? ", folded away" : ""}` : ""}</span>
+          {canAdd && <button type="button" className="ss-pg-addbtn" data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>}
         </div>
       </td>
     </tr>
   );
 });
+
+// "＋ Add sizes" (plan 3.7): the strip under a style's band, in two modes.
+//   List: type sizes like 10x12, 12x16 (commas, semicolons or new lines) and press Enter or Add.
+//   Add several: the widths and the lengths you sell, and a tick-box grid of every pair, widths down
+//   and lengths across, all ticked, the sizes already in the style greyed "already there"; untick what
+//   you don't sell, then [Add N sizes].
+// Every check runs here before anything is sent (ssPgParseSizeList, ssPgSizeGrid, the server's own
+// number rule): one bad entry refuses the whole add and is named. Under a style with no sizes this is
+// the placeholder row (`empty`), list box open. `onAdd(styleId, sizes, skipped)` hands the sizes to
+// the page (it answers false when it could not take them); `focusKey` moves the cursor into the list
+// box each time it changes. Its keys and clicks stay its own: the grid's handlers ignore anything
+// that happens inside it. Every hook is above the return.
+function PgAddSizes({ rowIndex, styleId, styleLabel, existing, ncols, empty, focusKey = 0, onAdd, onClose }) {
+  const [mode, setMode] = useState("list");
+  const [text, setText] = useState("");
+  const [widths, setWidths] = useState("");
+  const [lengths, setLengths] = useState("");
+  const [off, setOff] = useState({});
+  const [err, setErr] = useState(null);
+  const listRef = useRef(null);
+  const widthRef = useRef(null);
+  const grid = useMemo(() => (mode === "several" ? ssPgSizeGrid(widths, lengths, existing, off) : null), [mode, widths, lengths, existing, off]);
+  useEffect(() => {
+    if (!focusKey) return;
+    const el = mode === "several" ? widthRef.current : listRef.current;
+    try { if (el) el.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+  }, [focusKey]);
+  const addList = () => {
+    const p = ssPgParseSizeList(text, existing);
+    if (!p.ok) { setErr(p.error); return; }
+    if (!p.sizes.length) {
+      setErr(`${p.skipped.join(", ")} ${p.skipped.length === 1 ? "is" : "are"} already in ${styleLabel}. Nothing to add.`);
+      return;
+    }
+    if (onAdd(styleId, p.sizes, p.skipped) === false) return;
+    setErr(null);
+    setText("");
+  };
+  const n = grid ? grid.sizes.length : 0;
+  const canGo = !!grid && grid.ok && n > 0;
+  const addGrid = () => {
+    if (!canGo) return;
+    if (onAdd(styleId, grid.sizes, []) === false) return;
+    setErr(null);
+    setOff({});
+    setWidths("");
+    setLengths("");
+  };
+  const onListKey = (e) => {
+    // Enter adds (plan 3.7: "and press Enter"); Shift+Enter starts a new line; Escape closes.
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addList(); }
+    else if (e.key === "Escape" && !empty) { e.preventDefault(); onClose(styleId); }
+  };
+  const tick = (label) => setOff((o) => { const next = { ...o }; if (next[label]) delete next[label]; else next[label] = true; return next; });
+  const modeBtn = (m, label) => (
+    <button type="button" className={"ss-pg-addmode" + (mode === m ? " ss-pg-on" : "")} aria-pressed={mode === m}
+      onClick={() => { setMode(m); setErr(null); }}>{label}</button>
+  );
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-add-row" data-add={styleId}>
+      <td role="gridcell" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
+        <div className="ss-pg-add" role="group" aria-label={`Add sizes to ${styleLabel}`}>
+          <div className="ss-pg-addtop">
+            {empty && mode === "list"
+              ? <span className="ss-pg-addhint">No sizes yet. Type sizes like 10x12, 12x16 and press Enter</span>
+              : <b>Add sizes to {styleLabel}</b>}
+            {modeBtn("list", "List")}
+            {modeBtn("several", "Add several")}
+            {!empty && <button type="button" className="ss-pg-addx" aria-label="Close" title="Close" onClick={() => onClose(styleId)}>✕</button>}
+          </div>
+          {mode === "list" ? (
+            <div className="ss-pg-addline">
+              <textarea ref={listRef} className="ss-pg-addin" rows={1} value={text} placeholder="10x12, 12x16"
+                aria-label={`Sizes to add to ${styleLabel}`} spellCheck={false}
+                onChange={(e) => { setText(e.target.value); if (err) setErr(null); }} onKeyDown={onListKey} />
+              <button type="button" className="ss-pg-addgo" onClick={addList}>Add</button>
+            </div>
+          ) : (
+            <>
+              <div className="ss-pg-addline">
+                <label>Widths <input ref={widthRef} className="ss-pg-addnum" value={widths} placeholder="8, 10, 12" spellCheck={false}
+                  onChange={(e) => setWidths(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape" && !empty) onClose(styleId); }} /></label>
+                <span aria-hidden="true">×</span>
+                <label>Lengths <input className="ss-pg-addnum" value={lengths} placeholder="12, 16, 20" spellCheck={false}
+                  onChange={(e) => setLengths(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape" && !empty) onClose(styleId); }} /></label>
+                <span className="ss-pg-addhint">feet</span>
+              </div>
+              {grid && grid.rows.length > 0 && (
+                <div className="ss-pg-tick" role="group" aria-label="Sizes to add: untick the ones you don't sell"
+                  style={{ gridTemplateColumns: `auto repeat(${grid.lengths.length}, minmax(52px, auto))` }}>
+                  <span />
+                  {grid.lengths.map((l) => <span key={"l" + l} className="ss-pg-tickh">{l}</span>)}
+                  {grid.rows.map((r, i) => (
+                    <React.Fragment key={"w" + grid.widths[i]}>
+                      <span className="ss-pg-tickh">{grid.widths[i]}</span>
+                      {r.map((c) => (c.there
+                        ? <span key={c.label} className="ss-pg-there" title={`${c.label} is already in ${styleLabel}`}>already there</span>
+                        : (
+                          <label key={c.label} className="ss-pg-tickc">
+                            <input type="checkbox" checked={c.ticked} onChange={() => tick(c.label)} aria-label={c.label} />
+                            {c.label}
+                          </label>
+                        )))}
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+              {grid && !grid.blank && (
+                <div className="ss-pg-addline">
+                  <button type="button" className="ss-pg-addgo" disabled={!canGo} onClick={addGrid}>{n === 1 ? "Add 1 size" : `Add ${n} sizes`}</button>
+                </div>
+              )}
+            </>
+          )}
+          {(err || (grid && grid.error)) && <div className="ss-pg-adderr" role="alert">{err || grid.error}</div>}
+        </div>
+      </td>
+    </tr>
+  );
+}
 
 // A placeholder under a style with nothing to show. Not a cell: the cursor and a paste never land here.
 function PgNoteRow({ rowIndex, text, ncols }) {
