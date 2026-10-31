@@ -11241,6 +11241,9 @@ const SS_PG_ADD_PRICE = "Add a price first";
 const SS_PG_SIZE_FIXED = "A size's width and length can't be changed here.";
 const SS_PG_REFUSED_CALL = "This change couldn't be saved. Tell CSM Synergy if it keeps happening";
 const SS_PG_FORBIDDEN = "You can't change Sheds on this account";
+const SS_PG_REMOVING = "This size is being removed.";
+const SS_PG_REMOVE_RULE = "Only a size that was never priced or edited can be removed. Untick Offered to hide it.";
+const SS_PG_OPEN_CH = "ss-pg-open";            // the tables that are open answer here (PricingTablePage, offerEarlier)
 
 // A Settings address in THIS tab that keeps the account (?view=) and the person (?as=), and
 // nothing else: Back to Sheds, Options, Billing.
@@ -11460,7 +11463,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const [jumpTick, setJumpTick] = useState(0);     // the style picker asked for a jump (jumpRef)
   // Phase 3: the save queue and the editor.
   const [q, setQ] = useState(null);                // the save queue (ssPgQueue); qRef holds the same state, synchronously
-  const [editing, setEditing] = useState(null);    // { sizeId, col, init, label, price, frozen } while the editor is open
+  const [editing, setEditing] = useState(null);    // { sizeId, f, init, label, price, frozen } while the editor is open
   const [draftDirty, setDraftDirty] = useState(false);   // the open editor's text differs from its box
   const [tip, setTip] = useState(null);            // a one-off line under the toolbar (undo, a locked price)
   const [retryAt, setRetryAt] = useState(null);    // when a failed call goes again (the amber badge counts down)
@@ -11489,7 +11492,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const measuredRef = useRef(null);
   const drawnRef = useRef(null);                   // the size order last drawn (ssPgReanchor)
   const qRef = useRef(null);
-  const editRef = useRef(null);                    // the open editor: { sizeId, col, text0, replace }
+  const editRef = useRef(null);                    // the open editor: { sizeId, f, text0, replace, seen }, on its FIELD (a read can move columns)
   const draftRef = useRef("");                     // its text, out of React state: typing re-renders nothing
   const dirtyRef = useRef(false);
   const edInputRef = useRef(null);
@@ -11512,6 +11515,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const refreshAgainRef = useRef(false);           // …and another trigger came meanwhile
   const keepRef = useRef(null);                    // { sizes, red }: what of an earlier backup stays stored (ssPgBackup's keep)
   const ownBackupRef = useRef(false);              // this page wrote the backup, so it clears it once nothing is left
+  const offeredRef = useRef(false);                // a backup from earlier was looked for (once, on the first read that can edit)
+  const adoptedRef = useRef([]);                   // the keys of closed tables' backups this page took over (offerEarlier)
+  // This table's own name for its backup and the "who's open?" answer (plan 4.9 with two tabs): one
+  // per mount, so the same tab opening the table again finds what the last one left.
+  const [mountId] = useState(() => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`);
   const cursorToRef = useRef(null);                // a size just added: the cursor goes to its price once it is drawn
   activeRef.current = active;
   extentRef.current = extent;
@@ -11685,6 +11693,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       if (!band || !box) return;
       box.scrollTop = Math.max(0, band.offsetTop - (thead ? thead.offsetHeight : 0));
       if (first) { setActive({ sizeId: first.id, col: Math.min(1, ncols - 1) }); setExtent(null); }
+      // A style with no sizes has no box to land on: the cursor goes into its add strip (the
+      // placeholder), the keyboard's way to it.
+      else if (canEdit) setAddFocus((f) => ({ id: want, n: (f ? f.n : 0) + 1 }));
     });
   }, [model, rows, hiddenStylesOpen, jumpTick]);
 
@@ -11813,6 +11824,29 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // THE BACKUP (plan 4.9) is rewritten whenever the queue or the editor's text changes (the editor's
   // keystrokes write it too, from onEditInput), and while a backup from earlier is on offer.
   useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);
+  // TWO TABS OF ONE ACCOUNT (plan 8.5 step 10): each table keeps its backup under its own key and,
+  // while it is open, answers "who's open?" on this channel with its mountId, so a table opening
+  // beside it never offers its live edits back as "from earlier", and never clears or replaces them
+  // (offerEarlier). A table that closed, crashed or unmounted answers nothing.
+  useEffect(() => {
+    let ch = null;
+    try {
+      ch = new BroadcastChannel(SS_PG_OPEN_CH);
+      ch.onmessage = (m) => { if (m && m.data && m.data.ask) { try { ch.postMessage({ open: mountId }); } catch (_p) { /* closed */ } } };
+    } catch (_b) { ch = null; }
+    return () => { if (ch) { try { ch.close(); } catch (_c) { /* closed */ } } };
+  }, [mountId]);
+
+  // The overlay is placed on every move (place, above); the rows also move when the grid's own height
+  // changes with nothing else changing: an add strip switching to Add several, its tick-box grid
+  // appearing, its error line, its list box dragged taller. The ring then stays on its box.
+  useEffect(() => {
+    const g = gridRef.current;
+    if (!g || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(() => fnRef.current.place());
+    ro.observe(g);
+    return () => ro.disconnect();
+  }, [load.phase]);
 
   // LEAVING THE TAB (plan 4.9): the browser asks first while anything is unsent or in flight, or the
   // editor holds text that differs from its box. There is no keepalive send (the invoke wrapper has
@@ -11944,6 +11978,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const x = cur && cur.fields[sizeId] && cur.fields[sizeId][f];
     return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f);
   };
+  // A size whose Remove is waiting or out takes no edit: its boxes would go with it, unsaid.
+  const removing = (sizeId) => !!(qRef.current && qRef.current.removes[sizeId]);
   const focusGrid = () => { try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ } };
   const colName = (c) => (c === 0 ? "Size" : c === 1 ? "Price" : c === 2 ? "Offered" : (model && model.cols[c - 3] ? model.cols[c - 3].label : ""));
   const whereOf = (sizeId) => { const r = byId[sizeId]; return r ? `${r.style.label} ${r.size.label}` : ""; };
@@ -11979,8 +12015,12 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     // `exists`: someone else added that size first, and it takes the new row's place; it may not be
     // in this page's read yet, so the table reads again to draw it (with what was typed on it, red).
     // A refused remove means the size changed somewhere else since this page read it: the read
-    // brings its new version, and its Remove goes.
-    if (made.some((x) => x.status === "exists") || gone.some((x) => x.status === "refused")) pokeRefresh();
+    // brings its new version, and its Remove goes. A conflict or a duplicate says someone else saved
+    // that size meanwhile, and its answer carries only the boxes this call named (and the price and
+    // Offered): the read brings the rest of the size (plan 4.6's refresh rule, through the queue), so
+    // no box goes on showing a number that is no longer on file.
+    if (made.some((x) => x.status === "exists") || gone.some((x) => x.status === "refused")
+      || res.some((x) => x.status === "conflict" || x.status === "duplicate")) pokeRefresh();
     // One info row per answer that had conflicts or refusals: counts only (plan 4.7).
     const conflicts = res.filter((x) => x.status === "conflict").length;
     const refused = res.filter((x) => x.status === "refused" || x.status === "missing").length
@@ -12087,7 +12127,14 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // starting value changed under it (an Excel upload, a colleague), and gives every other size the
   // read's version and values. A read asked for before the latest answer landed may predate that
   // save, so it is dropped and another is asked for. A read that does not add up (the guard) never
-  // replaces one that did; while the page is already "too big" it does, so Reload can clear it.
+  // replaces one that did; while the page is already "too big" it does, so Reload can clear it, and
+  // the backup from earlier, which the guarded first read could not offer, is offered then (before
+  // the first edit could write over it).
+  //
+  // The columns can move under the cursor (an option added or archived in Options, in another tab).
+  // The open editor is on its FIELD (editRef.f), so it still saves into its own option, wherever that
+  // column now is; the cursor and a range move with their options too (ssPgRekeyCell). An editor
+  // whose option went away is closed, and its changed text is counted in the columns note.
   const adoptRead = (m, okAt) => {
     const cur = qRef.current, was = loadRef.current && loadRef.current.model;
     if (!cur || !was) return;
@@ -12095,10 +12142,23 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (m.guard && !was.guard) return;
     const names = {};
     was.cols.forEach((c) => { names[c.key] = c.label; });
-    apply({ type: "columns", keys: m.cols.map((c) => c.key), names });
+    const ed = editRef.current;
+    const edKey = ed && ed.f.slice(0, 2) === "c:" ? ed.f.slice(2) : null;
+    const edGone = edKey != null && !m.cols.some((c) => c.key === edKey);
+    apply({ type: "columns", keys: m.cols.map((c) => c.key), names, drafts: edGone && dirtyRef.current ? [edKey] : [] });
     const st = apply({ type: "refresh", okAt, sizes: ssPgServerSizes(m) });
+    const a = activeRef.current, x = extentRef.current;
+    const na = ssPgRekeyCell(a, was.cols, m.cols), nx = ssPgRekeyCell(x, was.cols, m.cols);
+    if (na !== a) { activeRef.current = na; setActive(na); }
+    if (nx !== x) { extentRef.current = nx; setExtent(nx); }
+    if (edGone) {
+      const had = !!edInputRef.current && document.activeElement === edInputRef.current;
+      closeEdit();
+      if (had) focusGrid();
+    }
     setLoad((l) => ({ phase: "ready", model: m, at: l.at }));
     if (st.reread) pokeRefresh();
+    if (was.guard && !m.guard) offerEarlier(m);
   };
 
   // ── Adding and removing sizes (plan 3.7) ──
@@ -12166,40 +12226,79 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
 
   // ── The backup (plan 4.9) ──
-  // localStorage["ss-pg-pending:<userId>:<clientId>"]: this person, this account (the view-as target
-  // when an operator is viewing one), so a backup is only ever offered back to the account it was
-  // made on. Written only by a page that can edit, and cleared by the page that wrote it once
-  // nothing is left (another tab of the same account, with nothing of its own, never clears it).
-  // Storage can be blocked or full: then there is simply no backup, and the page works the same.
+  // Under "ss-pg-pending:<userId>:<clientId>": this person, this account (the view-as target when an
+  // operator is viewing one), so a backup is only ever offered back to the account it was made on.
+  // Each table writes its own key under that, ":<mountId>" after it, so two tabs of one account never
+  // write over each other's (one tab's empty queue used to clear the other's draft); a backup under
+  // the plain key is one no open table owns. Written only by a page that can edit, and cleared by the
+  // page that wrote it once nothing is left. Storage can be blocked or full: then there is simply no
+  // backup, and the page works the same.
   const backupKey = ssCurrentUserId && clientId ? `ss-pg-pending:${ssCurrentUserId}:${clientId}` : null;
+  const ownKey = backupKey ? `${backupKey}:${mountId}` : null;
   const draftOf = () => {
     const ed = editRef.current;
     if (!ed || !dirtyRef.current) return null;
-    const f = fieldOf(ed.col);
-    return f && f !== "active" ? { sizeId: ed.sizeId, key: f, text: draftRef.current, seen: ed.seen } : null;
+    return ed.f !== "active" ? { sizeId: ed.sizeId, key: ed.f, text: draftRef.current, seen: ed.seen } : null;
   };
+  // Backups this table took over (offerEarlier) go once what they hold is under its own key, or the
+  // builder discarded them; a write that fails keeps them where they are.
   const saveBackup = () => {
     if (!backupKey || !editable || !qRef.current) return;
     const b = ssPgBackup(qRef.current, draftOf(), Date.now(), keepRef.current);
     try {
-      if (b) { localStorage.setItem(backupKey, JSON.stringify(b)); ownBackupRef.current = true; }
-      else if (ownBackupRef.current) { localStorage.removeItem(backupKey); ownBackupRef.current = false; }
+      if (b) { localStorage.setItem(ownKey, JSON.stringify(b)); ownBackupRef.current = true; }
+      else if (ownBackupRef.current) { localStorage.removeItem(ownKey); ownBackupRef.current = false; }
+      if (adoptedRef.current.length) { adoptedRef.current.forEach((k) => localStorage.removeItem(k)); adoptedRef.current = []; }
     } catch (_e) { /* storage blocked or full: no backup */ }
   };
-  // On open (the first load): a backup from earlier is offered back with its banner, unless this page
-  // can't edit (view-only pages never send one, and leave it stored). One older than 7 days, or one
-  // that can't be read, is dropped.
+  // Who else is open (SS_PG_OPEN_CH): `done` gets { mountId: true } for every table that answers
+  // within a moment. Without the channel nobody answers, and every backup is from earlier.
+  const whoIsOpen = (done) => {
+    let ch = null;
+    const open = {};
+    try { ch = new BroadcastChannel(SS_PG_OPEN_CH); } catch (_b) { done(open); return; }
+    ch.onmessage = (m) => { if (m && m.data && m.data.open) open[String(m.data.open)] = true; };
+    try { ch.postMessage({ ask: true }); } catch (_p) { /* closed */ }
+    setTimeout(() => { try { ch.close(); } catch (_c) { /* closed */ } done(open); }, 300);
+  };
+  // On open (the first read that can edit, once): the backups from earlier, every one under this
+  // person and account that no open table answers for (a tab closed, a crash, a sign-out), merged
+  // (ssPgBackupMerge) and offered back with the banner, unless this page can't edit (view-only pages
+  // never send one, and leave them stored). One older than 7 days, or one that can't be read, is
+  // dropped. What is offered is kept under this table's own key until Save them or Discard.
   const offerEarlier = (m) => {
     if (!backupKey || viewOnly || (m && m.guard)) return;
-    let raw = null;
-    try { raw = localStorage.getItem(backupKey); } catch (_e) { return; }
-    if (raw == null) return;
-    const b = ssPgBackupLoad(raw, Date.now());
-    if (!b) { try { localStorage.removeItem(backupKey); } catch (_e) { /* blocked */ } return; }
-    keepRef.current = { sizes: b.sizes, red: b.red };
-    ownBackupRef.current = true;
-    if (b.count) setEarlier({ savedAt: b.savedAt, sizes: b.sizes, count: b.count });
-    if (b.red.length) setEarlierRed(b.red);
+    if (offeredRef.current) return;
+    offeredRef.current = true;
+    const keys = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k !== ownKey && (k === backupKey || k.indexOf(backupKey + ":") === 0)) keys.push(k);
+      }
+    } catch (_e) { return; }
+    if (!keys.length) return;
+    whoIsOpen((open) => {
+      if (!aliveRef.current) return;
+      const found = [], took = [];
+      keys.forEach((k) => {
+        if (k !== backupKey && open[k.slice(backupKey.length + 1)]) return;   // another tab's own, live
+        let raw = null;
+        try { raw = localStorage.getItem(k); } catch (_e) { return; }
+        if (raw == null) return;
+        const b = ssPgBackupLoad(raw, Date.now());
+        if (!b) { try { localStorage.removeItem(k); } catch (_e) { /* blocked */ } return; }
+        found.push(b);
+        took.push(k);
+      });
+      const b = ssPgBackupMerge(found);
+      if (!b) return;
+      keepRef.current = { sizes: b.sizes, red: b.red, creates: b.creates || null };
+      adoptedRef.current = took;
+      ownBackupRef.current = true;
+      if (b.count) setEarlier({ savedAt: b.savedAt, sizes: b.sizes, creates: b.creates || null, count: b.count });
+      if (b.red.length) setEarlierRed(b.red);
+    });
   };
   // Save them: the stored edits go into the queue on their stored version and starting values
   // (ssPgQueue "restore"), and out at once. The red entries stay listed until dismissed.
@@ -12208,7 +12307,12 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!b || !canEditNow()) return;
     keepRef.current = { sizes: null, red: earlierRed };
     setEarlier(null);
-    apply({ type: "restore", sizes: b.sizes, at: Date.now() });
+    const had = qRef.current.sizes;
+    const st = apply({ type: "restore", sizes: b.sizes, creates: b.creates, at: Date.now() });
+    // A size added again (its create never landed) is drawn at the end of its style, "Adding…".
+    const again = Object.keys(b.creates || {}).filter((id) => !had[id] && st.sizes[id] && st.sizes[id].creating)
+      .map((id) => { const c = b.creates[id]; return { id, styleId: c.styleId, width: c.width, length: c.length, label: `${c.width}x${c.length}` }; });
+    if (again.length) setAdded((list) => [...list, ...again]);
     sendNow();
   };
   // Discard: the backup is gone, red entries and all.
@@ -12229,14 +12333,15 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const v = shownOf(sizeId, f);
     return f === "price" ? (v == null ? "" : String(v)) : (Number(v) > 0 ? String(Number(v)) : "");
   };
-  // Typed text into the queue: refused right here when it breaks the rules (red, never sent), else a
-  // commit. "A value equal to what is stored is always accepted" is the parsers' `stored`. `extra`
-  // is the editor's { seen }. False when the box is red after it (refused text, or the box moved
-  // under the open editor): the caller keeps the cursor there.
-  const commitText = (sizeId, col, text, extra = null) => {
-    const f = fieldOf(col);
+  // Typed text into the queue, for one box by its FIELD (`f`: "price" or "c:<key>"): refused right
+  // here when it breaks the rules (red, never sent), else a commit. "A value equal to what is stored
+  // is always accepted" is the parsers' `stored`. `extra` is the editor's { seen }. False when the box
+  // is red after it (refused text, or the box moved under the open editor): the caller keeps the
+  // cursor there. An option no longer drawn takes nothing (the editor on one is closed first, with
+  // the columns note: adoptRead).
+  const commitText = (sizeId, f, text, extra = null) => {
     const s = qRef.current && qRef.current.sizes[sizeId];
-    if (!f || !s || f === "active") return true;
+    if (!f || !s || f === "active" || colOf(f) == null) return true;
     const p = f === "price" ? ssPgParsePrice(text, ssPgVal(s, f)) : ssPgParseQty(text, ssPgVal(s, f));
     if (!p.ok) { apply({ type: "invalid", sizeId, f, typed: text, reason: p.error, at: Date.now() }); return false; }
     const st = apply({ type: "commit", sizeId, f, value: p.value, at: Date.now(), ...(extra || {}) });
@@ -12253,19 +12358,21 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
     const f = fieldOf(cell.col);
     if (!f || !qRef.current.sizes[cell.sizeId]) return;
+    if (removing(cell.sizeId)) { setTip(SS_PG_REMOVING); return; }
     backToWork();
     const text0 = editText(cell.sizeId, f);
     const init = key != null ? key : text0;
     // `seen`: the value the builder is typing over, for the queue's check that nothing moved it
-    // while the editor was open.
-    editRef.current = { sizeId: cell.sizeId, col: cell.col, text0, replace: key != null, seen: shownOf(cell.sizeId, f) };
+    // while the editor was open. The editor is on the FIELD, never on the column number: a read
+    // that adds or archives an option moves the columns while it is open (adoptRead).
+    editRef.current = { sizeId: cell.sizeId, f, text0, replace: key != null, seen: shownOf(cell.sizeId, f) };
     draftRef.current = init;
     dirtyRef.current = init !== text0;
     setDraftDirty(dirtyRef.current);
     setTip(null);
     setSaid(null);
     setExtent(null);
-    setEditing({ sizeId: cell.sizeId, col: cell.col, init, price: cell.col === 1, frozen: ssPgColBox(cell.col, narrow).frozen,
+    setEditing({ sizeId: cell.sizeId, f, init, price: cell.col === 1, frozen: ssPgColBox(cell.col, narrow).frozen,
       label: `${whereOf(cell.sizeId)}, ${colName(cell.col)}` });
   };
   // Close the editor without a word (Escape, or the page went view-only).
@@ -12284,10 +12391,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!ed) return true;
     const text = draftRef.current;
     closeEdit();
-    return ed.replace || text !== ed.text0 ? commitText(ed.sizeId, ed.col, text, { seen: ed.seen }) : true;
+    return ed.replace || text !== ed.text0 ? commitText(ed.sizeId, ed.f, text, { seen: ed.seen }) : true;
   };
   const toggleOffered = (cell) => {
     if (!canEditNow() || !qRef.current.sizes[cell.sizeId]) return;
+    if (removing(cell.sizeId)) { setTip(SS_PG_REMOVING); return; }
     // Offered needs a price on file (the server ticks it with the first one): plan 3.9.
     if (qRef.current.sizes[cell.sizeId].price == null || shownOf(cell.sizeId, "price") == null) { setTip(SS_PG_ADD_PRICE + "."); return; }
     backToWork();
@@ -12295,12 +12403,20 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
   // Delete or Backspace on one box (plan 3.10): a blank price, an empty option, Offered unticked.
   // Never asks: only a change to more than one size does (plan 3.12: a range goes through clearSel).
+  // On the Size box it is the keyboard's Remove (the ✕ is out of Tab's reach): a size added by
+  // mistake goes (ssPgCanRemove, plan 3.7); any other says why it can't.
   const clearCell = (cell) => {
-    if (!canEditNow() || !cell || cell.col === 0) return;
+    if (!canEditNow() || !cell) return;
+    if (cell.col === 0) {
+      if (ssPgCanRemove(qRef.current, cell.sizeId, byId[cell.sizeId] ? byId[cell.sizeId].size : null)) removeSize(cell.sizeId);
+      else setTip(removing(cell.sizeId) ? SS_PG_REMOVING : SS_PG_REMOVE_RULE);
+      return;
+    }
+    if (removing(cell.sizeId)) { setTip(SS_PG_REMOVING); return; }
     if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
     if (cell.col === 2) { if (shownOf(cell.sizeId, "active")) toggleOffered(cell); return; }
     backToWork();
-    commitText(cell.sizeId, cell.col, "");
+    commitText(cell.sizeId, fieldOf(cell.col), "");
   };
   const moveTo = (next, which = "active") => {
     if (!next) return;
@@ -12320,7 +12436,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     e.preventDefault();
     const ed = editRef.current;
     if (!ed) return;
-    const at = { sizeId: ed.sizeId, col: ed.col };
+    const at = { sizeId: ed.sizeId, col: colOf(ed.f) };
     const took = commitEdit();
     focusGrid();
     if (!took) return;
@@ -12432,6 +12548,15 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     // Ctrl/Cmd+D fills down (held back from the browser, whose own is "bookmark this page"). Ctrl/Cmd+C
     // and V go on to the browser, whose copy and paste events land in copySel and pasteFrom.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "d" || k === "D")) { e.preventDefault(); fillDown(); return; }
+    // Alt+Enter opens (or closes) "＋ Add sizes" for the active size's style: the band's button is
+    // inside the grid, past every box Tab moves through, so the keyboard gets there this way (and
+    // Delete on a Size box is its Remove: clearCell).
+    if (e.altKey && !e.ctrlKey && !e.metaKey && k === "Enter") {
+      e.preventDefault();
+      const r = activeRef.current ? byId[activeRef.current.sizeId] : null;
+      if (r) toggleAdd(r.style.id);
+      return;
+    }
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     const a = activeRef.current;
     if (e.shiftKey && k.indexOf("Arrow") === 0) {
@@ -12545,8 +12670,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const y0 = g.offsetTop;
     const ca = ssPgColBox(a.col, narrow);
     show(ca.frozen ? ringFRef.current : ringBRef.current, ca.x, y0 + tr.offsetTop, ca.w, tr.offsetHeight);
-    if (edInputRef.current && editRef.current) {
-      const cb = ssPgColBox(editRef.current.col, narrow);
+    // The editor sits over its own field's column, wherever a read has moved it.
+    const ec = edInputRef.current && editRef.current ? colOf(editRef.current.f) : null;
+    if (ec != null) {
+      const cb = ssPgColBox(ec, narrow);
       const et = editRef.current.sizeId === a.sizeId ? tr : g.querySelector(`tr[data-s="${esc(editRef.current.sizeId)}"]`);
       if (et) show(edInputRef.current, cb.x, y0 + et.offsetTop, cb.w, et.offsetHeight);
     }
@@ -12754,7 +12881,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
           ) : (noStyles && !model.hiddenStyles.length) ? null : (
             <div className="ss-pg-sheet" style={{ width: tableW }}>
               <PgSelectionOverlay lane ringRef={ringFRef} rangeRef={rangeFRef}>
-                {editing && editing.frozen && <PgEditor key={editing.sizeId + "|" + editing.col} inputRef={edInputRef} init={editing.init} label={editing.label}
+                {editing && editing.frozen && <PgEditor key={editing.sizeId + "|" + editing.f} inputRef={edInputRef} init={editing.init} label={editing.label}
                   price={editing.price} onKeyDown={onEditKey} onInput={onEditInput} onBlur={onEditBlur} />}
               </PgSelectionOverlay>
               <table ref={gridRef} className="ss-pg-grid" role="grid" aria-label="Sizes and prices" tabIndex={0}
@@ -12766,7 +12893,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
                 <tbody>{body}</tbody>
               </table>
               <PgSelectionOverlay ringRef={ringBRef} rangeRef={rangeBRef}>
-                {editing && !editing.frozen && <PgEditor key={editing.sizeId + "|" + editing.col} inputRef={edInputRef} init={editing.init} label={editing.label}
+                {editing && !editing.frozen && <PgEditor key={editing.sizeId + "|" + editing.f} inputRef={edInputRef} init={editing.init} label={editing.label}
                   price={editing.price} onKeyDown={onEditKey} onInput={onEditInput} onBlur={onEditBlur} />}
               </PgSelectionOverlay>
             </div>
@@ -12875,7 +13002,7 @@ const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceT
       <td role="gridcell" aria-colindex={1} data-c={0} className={"ss-pg-f0 ss-pg-size" + (removable ? " ss-pg-rmable" : "")} title={title || undefined} aria-readonly="true">
         {label}
         {removable && <button type="button" className="ss-pg-rm" data-pg-act="remove" data-pg-id={sizeId} tabIndex={-1}
-          title="Remove this size (it was never priced or changed)" aria-label={`Remove size ${label}`}>✕</button>}
+          title="Remove this size (it was never priced or changed). Delete on its Size box does the same." aria-label={`Remove size ${label}`}>✕</button>}
       </td>
       <td role="gridcell" aria-colindex={2} data-c={1} className={cls(1, "ss-pg-f1 ss-pg-price" + (rtp ? " ss-pg-rtp" : ""))}
         aria-invalid={bad(1)} aria-readonly={rtp ? "true" : undefined}
@@ -12935,7 +13062,7 @@ const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, 
         <div className="ss-pg-bandin">
           <b>{label}</b>
           <span>{total === 1 ? "1 size" : `${total} sizes`}{hidden ? ` · ${hidden} hidden${folded ? ", folded away" : ""}` : ""}</span>
-          {canAdd && <button type="button" className="ss-pg-addbtn" data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>}
+          {canAdd && <button type="button" className="ss-pg-addbtn" title="Add sizes to this style (Alt+Enter on any of its sizes)" data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>}
         </div>
       </td>
     </tr>

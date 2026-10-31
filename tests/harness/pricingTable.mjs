@@ -78,7 +78,15 @@
 //      waiting to save that the sheet changed amber, never sent. The backup: a closed tab's call out,
 //      red box and editor text come back as "You have 2 changes from earlier…"; Save them sends them
 //      on their stored version and starting values; a colleague's change since comes back amber;
-//      Discard; 7 days; view-as offers only the viewed account's backup, ?as= none.
+//      Discard; 7 days; view-as offers only the viewed account's backup, ?as= none. Two tabs of one
+//      account: the second offers nothing of the open first one's and its save leaves the first one's
+//      draft stored; once the first is gone, the next tab offers it. A price typed on a size still
+//      being added comes back with that size, which Save them adds again first. A "too big" first read offers
+//      no backup; the Reload that clears it does. Alt+Enter opens a size's add strip and Delete on a
+//      Size box removes a size added by mistake; the ring stays on its box while a strip grows above
+//      it; a size being removed takes no typing. An open editor stays on its option when a read adds
+//      an option in front of it (Enter saves that option) and closes, with the columns note, when its
+//      option is archived. A save answered "changed elsewhere" reads the table again.
 //   V  COPY, PASTE, FILL DOWN, CLEAR (Phase 4b), against fakeServer, through the browser's own clipboard
 //      events (and one real Ctrl+C through the system clipboard): a range copies as TSV, as drawn; a
 //      block pasted onto two sizes asks first (an accessible modal naming the first and last size,
@@ -86,7 +94,9 @@
 //      only those boxes and leaves the block selected. A bad cell, a block crossing a band and one
 //      skipping a folded hidden size are refused with nothing sent. Delete on a range and the
 //      toolbar's Clear ask the same question; Ctrl+D (held from the browser) and Fill down fill the top
-//      row down, one box from the size above without asking. A view-only page copies and changes
+//      row down, one box from the size above without asking. A first price pasted with Offered "no"
+//      goes with Offered unticked and the size stays out of the designer; with "yes" the server ticks
+//      it. A view-only page copies and changes
 //      nothing. A 20,000-box paste (500 sizes x 40 columns) is timed from the paste to the confirm and
 //      from Continue to the commit drawn (longest task, rows re-rendered), then saved in calls of at
 //      most 50 sizes and 2,500 boxes; 20,040 boxes are refused.
@@ -101,6 +111,11 @@
 //   View-as: cold ?view= sends no portal-settings call before arming, then targetClientId on every
 //            body ............................................ F "before ?view= arms…", "…and after it,
 //                                                        every portal-settings body…", "an edit in view-as…"
+//            NOT AS WORDED: the plan says "no portal-settings call"; F lets the shell's own boot reads
+//            through (status and get_profile for the operator, with no targetClientId, and the ?warm=1
+//            ping), which every portal page makes before any account can arm. What F holds to is that
+//            no table read and nothing for the builder goes before arming. The plan's 8.4 wants a Build
+//            note saying so.
 //   View-as: a non-operator holding ?view= is told at 10 s ... F "…and 10 s after it, not sooner…"
 //   View-as: ?as= is view-only, no save goes out ........ F "?as= opens view-only…"; P "view-only (?as=)…"
 //                                                        (every control, every key, the clipboard)
@@ -521,9 +536,22 @@ const typeIn = async (page, id, col, text, key = "Enter") => {
 // control count in P, where the strip must NOT be drawn).
 const EMPTY_STYLE = uid("5", 4);
 const withEmpty = (t) => ({ ...t, styles: [...t.styles, { id: EMPTY_STYLE, key: "test-empty", label: "Test Empty Shed", code: "TE", active: true, sort_order: 3 }] });
-// The local backup (plan 4.9), keyed by user and account.
+// The local backup (plan 4.9), keyed by user and account: each table writes its own key under that
+// (`:<its mount id>`), and one under the plain key is a backup no open table owns (the fixtures seed
+// those). `stored` is the newest of them as stored (null when there is none); `storedAll` every one,
+// { key: value }.
 const BACKUP_KEY = (clientId) => `ss-pg-pending:${USER.id}:${clientId}`;
-const stored = (page, clientId) => page.evaluate((k) => localStorage.getItem(k), BACKUP_KEY(clientId));
+const storedAll = (page, clientId) => page.evaluate((p) => {
+  const out = {};
+  for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k === p || k.startsWith(p + ":")) out[k] = localStorage.getItem(k); }
+  return out;
+}, BACKUP_KEY(clientId));
+const stored = async (page, clientId) => {
+  const all = Object.values(await storedAll(page, clientId));
+  if (!all.length) return null;
+  const at = (v) => { try { return Number(JSON.parse(v).savedAt) || 0; } catch (_e) { return 0; } };
+  return all.sort((a, b) => at(b) - at(a))[0];
+};
 // The browser's own clipboard events, as a Ctrl/Cmd+C or V on the grid hands them to the page.
 const clip = {
   paste: (page, text) => page.evaluate((t) => {
@@ -2171,6 +2199,77 @@ for (const which of want("R") ? ["empty", "sized"] : []) {
   await ctx.close();
 }
 
+// R1b: the keyboard's ways to "＋ Add sizes" and to Remove (the band's button and the ✕ sit past every
+// box Tab moves through): Alt+Enter on a size opens its style's strip, Delete on a Size box removes a
+// size added by mistake. The ring stays on its box while the strip above it grows (Add several, its
+// tick-box grid). A size whose Remove is out takes no edit, and says why.
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const t0 = tableFor(OWN, cat);
+  const F = fakeServer(cat, t0);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const barn = t0.styles[0];
+  const z1 = barnOf(F.table(OWN))[1];
+  const strip = `tr[data-add="${barn.id}"]`;
+  const ringOn = (a) => page.evaluate((s0) => {
+    const r = [...document.querySelectorAll(".ss-pg-ring")].find((x) => x.style.display === "block");
+    const td = document.querySelector(s0);
+    return r && td ? [r.getBoundingClientRect(), td.getBoundingClientRect()].map((b) => [b.left, b.top, b.width, b.height].map(Math.round).join()) : null;
+  }, a);
+  await page.locator(sel(z1.id, 1)).click();
+  await page.keyboard.press("Alt+Enter");
+  const opened = await page.waitForFunction((sx) => { const row = document.querySelector(sx), a = document.activeElement; return !!row && !!a && row.contains(a) && a.tagName === "TEXTAREA"; }, strip, { timeout: 4000 }).then(() => true, () => false);
+  ok("R: Alt+Enter on a size opens its style's '＋ Add sizes', the cursor in the list box", opened);
+  // The strip opened by its button from here on, so a failure above does not hide what follows.
+  if (!(await page.$(strip))) await page.locator(`tr[data-band="${barn.id}"] .ss-pg-addbtn`).click();
+  const r0 = await ringOn(sel(z1.id, 1));
+  await page.locator(`${strip} button`, { hasText: "Add several" }).click();
+  await page.locator(`${strip} input.ss-pg-addnum`).nth(0).fill("8, 10, 12, 14");
+  await page.locator(`${strip} input.ss-pg-addnum`).nth(1).fill("30, 40");
+  await page.waitForSelector(`${strip} .ss-pg-tick`, { timeout: 4000 }).catch(() => {});
+  await page.waitForTimeout(150);
+  const r1 = await ringOn(sel(z1.id, 1));
+  ok("R: the ring stays on its box while the add strip above it grows (Add several, its tick-box grid)",
+    !!r0 && !!r1 && r0[0] === r0[1] && r1[0] === r1[1] && r1[1] !== r0[1], JSON.stringify({ r0, r1 }));
+  await page.keyboard.press("Escape");
+  ok("R: …Escape closes it", !(await page.$(strip)));
+  await page.keyboard.press("Alt+Enter");
+  await page.waitForSelector(`${strip} textarea`, { timeout: 4000 }).catch(() => {});
+  if (!(await page.$(strip))) await page.locator(`tr[data-band="${barn.id}"] .ss-pg-addbtn`).click();
+  await page.locator(`${strip} textarea`).fill("16x44");
+  let n0 = saveCalls(calls).length;
+  await page.keyboard.press("Enter");
+  await saved(page, calls, n0, 1);
+  const added = (await bandRows(page, barn.id)).find((r) => r.label === "16x44") || { id: "missing" };
+  ok("R: (set-up) a size added by mistake, with its Remove", added.rm, JSON.stringify(added));
+  // Delete on its Size box: the keyboard's Remove, held a moment on the way so its row says Removing….
+  F.script.push({ delayMs: 1500 });
+  await page.locator(sel(added.id, 0)).click({ timeout: 3000 }).catch(() => {});
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Delete");
+  const out = await page.waitForFunction((id) => /Removing/.test((document.querySelector(`tr[data-s="${id}"]`) || {}).textContent || ""), added.id, { timeout: 4000 }).then(() => true, () => false);
+  // (Without the keyboard's Remove, the ✕ starts it, so the check below still runs.)
+  if (!out) await page.locator(`tr[data-s="${added.id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
+  await page.locator(sel(added.id, 1)).click({ timeout: 3000 }).catch(() => {});
+  await page.keyboard.type("5");
+  const s = await state(page);
+  ok("R: a size being removed takes no typing: no editor, and the status line says why", !s.editor && s.status === "This size is being removed.", JSON.stringify(s));
+  const gone = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), added.id, { timeout: 10000 }).then(() => true, () => false);
+  const rc = saveCalls(calls).slice(n0);
+  ok("R: Delete on a Size box removes a size added by mistake, through the queue; nothing else went for it",
+    out && gone && rc.length === 1 && JSON.stringify(rc[0].body.removes) === JSON.stringify([added.id]) && !rc[0].body.sizes.length && !F.size(added.id), JSON.stringify(rc.map((c) => c.body)));
+  // Delete on a priced size's Size box removes nothing, and says why.
+  await page.locator(sel(z1.id, 0)).click();
+  n0 = saveCalls(calls).length;
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(1200);
+  ok("R: …on a size that was priced or changed, it removes nothing and says why",
+    (await state(page)).status === "Only a size that was never priced or edited can be removed. Untick Offered to hide it." && saveCalls(calls).length === n0 && !!F.size(z1.id));
+  ok("R: no page errors (the keyboard's Add sizes and Remove)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
 // R3: the refresh. Another tab's save (BroadcastChannel) re-reads both tables after a 1 s wait: a new
 // option column appears, a new style appears, a box changed elsewhere shows its new number (grey
 // flash). This page's own saves, and another account's, do not refresh it. Every return to the tab
@@ -2232,6 +2331,80 @@ if (want("R")) {
   ok("R: coming back to the tab re-reads both tables and shows what changed meanwhile",
     vis && vr.some((c) => c.action === "catalog") && vr.some((c) => c.action === "size_table"), JSON.stringify(vr.map((c) => c.action)));
   ok("R: no page errors (refresh)", errors.length === 0 && otherErrs.length === 0, [...errors, ...otherErrs].join(" | "));
+  await ctx.close();
+}
+
+// R3b: an open editor across a column change (plan 4.6). A new built-in option sorted first moves every
+// option column one to the right while the editor holds 7 in Workbench: the editor, the cursor and
+// the readout stay on Workbench, and Enter saves Workbench, never the option now standing where it
+// was. An editor whose option is archived meanwhile closes, its text counted in the columns note, and
+// nothing is sent.
+const tellFrom = (page, cid) => page.evaluate((c) => window.dispatchEvent(new CustomEvent("ss:settings-saved", { detail: { clientId: c, at: Date.now(), source: "another-page" } })), cid);
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 100 } }, { width: 1440, height: 900 });
+  await waitGrid(page).catch(() => {});
+  const [z, z2] = barnOf(F.table(OWN));
+  const WB = keyCol(cat, "workbench");
+  const wb0 = F.cells(z.id).workbench || 0;
+  await page.locator(sel(z.id, WB)).click();
+  await page.keyboard.type("7");
+  const before = (await state(page)).editor;
+  cat.items.unshift({ key: "atticFan", label: "Attic Fan" });
+  let n0 = saveCalls(calls).length;
+  await tellFrom(page, OWN);
+  const moved = await page.waitForFunction(() => [...document.querySelectorAll(".ss-pg-names th")].some((th) => th.getAttribute("aria-label") === "Attic Fan"), null, { timeout: 8000 }).then(() => true, () => false);
+  await page.waitForTimeout(150);
+  const geo = await page.evaluate((a) => {
+    const td = document.querySelector(a), ed = document.querySelector(".ss-pg-ed");
+    if (!td || !ed) return null;
+    const t = td.getBoundingClientRect(), e = ed.getBoundingClientRect();
+    return { box: [t.left, t.top, t.width, t.height].map(Math.round).join(), ed: [e.left, e.top, e.width, e.height].map(Math.round).join(), value: ed.value, focused: document.activeElement === ed };
+  }, sel(z.id, WB + 1));
+  let s = await state(page);
+  ok("R: a read that puts a new option in front of the open editor leaves it on its own option: its name, over the Workbench box one column on, its text and the focus kept; the readout says Workbench",
+    moved && !!s.editor && !!before && s.editor.label === before.label && /, Workbench$/.test(s.editor.label) && !!geo && geo.box === geo.ed && geo.value === "7" && geo.focused
+    && s.readout.startsWith("Workbench · ") && saveCalls(calls).length === n0, JSON.stringify({ moved, before, s, geo }));
+  await page.keyboard.press("Enter");
+  ok("R: …Enter saves it", await saved(page, calls, n0, 1));
+  const sent = (saveCalls(calls).slice(n0)[0] || { body: { sizes: [] } }).body.sizes;
+  ok("R: …into Workbench, from what was on file; the new option is untouched",
+    sent.length === 1 && sent[0].id === z.id && JSON.stringify(sent[0].from) === JSON.stringify({ cells: { workbench: wb0 } }) && JSON.stringify(sent[0].to) === JSON.stringify({ cells: { workbench: 7 } })
+    && F.cells(z.id).workbench === 7 && !("atticFan" in F.cells(z.id)), JSON.stringify(sent));
+  // Archived while the editor holds text in it: closed, counted in the note, nothing sent.
+  await page.locator(sel(z2.id, WB + 1)).click();
+  await page.keyboard.type("5");
+  cat.items.find((x) => x.key === "workbench").archived = true;
+  n0 = saveCalls(calls).length;
+  await tellFrom(page, OWN);
+  const closed = await page.waitForFunction(() => !document.querySelector(".ss-pg-ed"), null, { timeout: 8000 }).then(() => true, () => false);
+  await page.waitForTimeout(1200);
+  s = await state(page);
+  ok("R: an editor whose option is archived meanwhile closes, says so in the status line, and sends nothing",
+    closed && s.status === "Workbench was archived in Options; 1 unsaved box in that column was dropped." && saveCalls(calls).length === n0 && /^All changes saved/.test(s.badge), JSON.stringify(s));
+  ok("R: no page errors (an editor across a column change)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// R3c: a save answered "changed elsewhere" carries back only the boxes that call named; the table
+// reads again, so the size's other boxes show what the colleague saved too.
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 100 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const z = barnOf(F.table(OWN))[0];
+  const LOFT = keyCol(cat, "loft"), WB = keyCol(cat, "workbench");
+  F.script.push({ before: (FF) => FF.poke(z.id, { cells: { loft: 30, workbench: 2 } }) });   // a colleague, just before this save lands
+  const r0 = reads(calls).length, n0 = saveCalls(calls).length;
+  await typeIn(page, z.id, LOFT, "60");
+  const amber = await page.waitForFunction((sx) => /ss-pg-m-c/.test((document.querySelector(sx) || {}).className || ""), sel(z.id, LOFT), { timeout: 10000 }).then(() => true, () => false);
+  const wb = await page.waitForFunction((sx) => (document.querySelector(sx) || {}).textContent === "2", sel(z.id, WB), { timeout: 8000 }).then(() => true, () => false);
+  ok("R: a save that comes back changed elsewhere re-reads the table, so the size's other boxes show what the colleague saved too",
+    amber && wb && reads(calls).slice(r0).some((c) => c.action === "size_table") && saveCalls(calls).length === n0 + 1 && F.cells(z.id).loft === 30,
+    JSON.stringify({ amber, wb, reads: reads(calls).slice(r0).map((c) => c.action) }));
+  ok("R: no page errors (a conflict, then the read)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
@@ -2327,6 +2500,89 @@ if (want("R")) {
   await ctx.close();
 }
 
+// R5b: two tabs of one account (plan 8.5 step 10). Each table keeps its backup under its own key: a
+// second tab opened beside the first offers nothing of the first one's (it is open, and answers for
+// it), and its own save, which empties its own queue, leaves the first one's draft where it is. Once
+// the first tab is gone, the next one opened offers that draft back.
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const barn = barnOf(F.table(OWN));
+  const za = barn[3], zb = barn[4];
+  await page.locator(sel(za.id, 1)).click();
+  await page.keyboard.type("4800");                // tab A: the editor holds 4800 and is never left
+  await page.waitForTimeout(200);
+  const a0 = await storedAll(page, OWN);
+  const aKey = Object.keys(a0).find((k) => (JSON.parse(a0[k]).draft || {}).text === "4800");
+  const { p: b, errs: bErrs } = await tabOf(ctx, "/settings/sheds-table");
+  await waitGrid(b).catch(() => {});
+  await b.waitForTimeout(1200);                     // past the "who's open?" wait
+  const bannerB = !!(await b.$(".ss-pg-earlier"));
+  const n0 = saveCalls(calls).length;
+  await typeIn(b, zb.id, 1, "2500");
+  const bSaved = await saved(b, calls, n0, 1);
+  await b.waitForTimeout(400);
+  const after = await storedAll(b, OWN);
+  const draftNow = aKey && after[aKey] ? JSON.parse(after[aKey]).draft : null;
+  ok("R: a second tab of the same account offers nothing of the first one's while it is open, and its own save leaves the first one's draft where it is",
+    !!aKey && !bannerB && bSaved && F.size(zb.id).base_price === 2500 && !!draftNow && draftNow.text === "4800" && draftNow.sizeId === za.id && Object.keys(after).length === 1,
+    JSON.stringify({ aKey, keys: Object.keys(after), bannerB, draftNow }));
+  ok("R: …and the first tab's editor still holds it", (await state(page)).editor && (await state(page)).editor.value === "4800");
+  await page.close({ runBeforeUnload: false });     // the first tab goes (closed, or the browser dies)
+  const { p: c, errs: cErrs } = await tabOf(ctx, "/settings/sheds-table");
+  await waitGrid(c).catch(() => {});
+  await c.waitForSelector(".ss-pg-earlier", { timeout: 8000 }).catch(() => {});
+  const bannerC = await c.locator(".ss-pg-earlier span").textContent({ timeout: 1000 }).catch(() => null);
+  const n1 = saveCalls(calls).length;
+  await c.locator(".ss-pg-earlier button", { hasText: "Save them" }).click({ timeout: 3000 }).catch(() => {});
+  const cSaved = await saved(c, calls, n1, 1);
+  ok("R: …once the first tab is gone, the next one opened offers its draft back, and Save them sends it",
+    bannerC === "You have 1 change from earlier that wasn't saved." && cSaved && F.size(za.id).base_price === 4800 && Object.keys(await storedAll(c, OWN)).length === 0, String(bannerC));
+  ok("R: no page errors (two tabs)", errors.length === 0 && bErrs.length === 0 && cErrs.length === 0, [...errors, ...bErrs, ...cErrs].join(" | "));
+  await ctx.close();
+}
+
+// R5c: a price typed on a size still being added ("Adding…", its create never answered), then the tab
+// closed: the backup keeps the size with it; Save them adds it again, then the price goes.
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = F.table(OWN).styles[0];
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  F.script.push({ hang: true });                    // the create is never answered
+  await page.locator(`tr[data-band="${barn.id}"] .ss-pg-addbtn`).click();
+  await page.locator(`tr[data-add="${barn.id}"] textarea`).fill("16x48");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /Price · Test Barn 16x48/.test((document.querySelector(".ss-pg-readout") || {}).textContent || ""), null, { timeout: 4000 }).catch(() => {});
+  await page.keyboard.type("3300");
+  await page.keyboard.press("Enter");                // waits for the create's answer
+  await page.waitForTimeout(300);
+  const b = JSON.parse((await stored(page, OWN)) || "null");
+  const id = b && b.creates ? Object.keys(b.creates)[0] : null;
+  ok("R: the backup keeps a size still being added, with the price typed on it",
+    !!id && b.creates[id].styleId === barn.id && b.creates[id].width === 16 && b.creates[id].length === 48 && JSON.stringify(b.creates[id].fields) === JSON.stringify({ price: { to: 3300, from: null } }) && !F.size(id),
+    JSON.stringify(b));
+  await page.close({ runBeforeUnload: false });
+  const { p, errs } = await tabOf(ctx, "/settings/sheds-table");
+  await waitGrid(p).catch(() => {});
+  await p.waitForSelector(".ss-pg-earlier", { timeout: 8000 }).catch(() => {});
+  const banner = await p.locator(".ss-pg-earlier span").textContent({ timeout: 1000 }).catch(() => null);
+  const n0 = saveCalls(calls).length;
+  await p.locator(".ss-pg-earlier button", { hasText: "Save them" }).click({ timeout: 3000 }).catch(() => {});
+  const went = await saved(p, calls, n0, 2, 20000);
+  const sc = saveCalls(calls).slice(n0).map((c) => c.body);
+  const row = id ? (await bandRows(p, barn.id)).find((r) => r.id === id) : null;
+  ok("R: …reopened, the banner offers it; Save them adds the size again, then its price goes on the create's version",
+    banner === "You have 1 change from earlier that wasn't saved." && went && sc.length === 2 && sc[0].creates.length === 1 && sc[0].creates[0].id === id && !sc[0].sizes.length
+    && sc[1].sizes.length === 1 && sc[1].sizes[0].id === id && sc[1].sizes[0].base === (F.size(id) || {}).created_at && F.size(id).base_price === 3300 && !!row && row.price === "$3,300",
+    JSON.stringify({ banner, sc, row }));
+  ok("R: no page errors (a size being added, through a closed tab)", errors.length === 0 && errs.length === 0, [...errors, ...errs].join(" | "));
+  await ctx.close();
+}
+
 // R6: Save them after a colleague changed the same box: conflict, amber with their number, never
 // overwritten. Discard sends nothing and clears it. Older than 7 days: dropped. View-as: a backup is
 // offered only to the account it was made on, and a view-only page never offers or sends one.
@@ -2406,6 +2662,30 @@ for (const as of want("R") ? [false, true] : []) {
       banner === null && saveCalls(calls).length === 0 && keys.own === own && keys.viewed === viewed, JSON.stringify({ banner, keys: Object.keys(keys).filter((k) => keys[k]) }));
   }
   ok(`R: no page errors (view-as backup${as ? ", ?as=" : ""})`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// R6b: a first read that trips the "too big" guard opens view-only and cannot offer the backup; the
+// Reload that clears the guard offers it, before the first edit could write over it.
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const z = barnOf(F.table(OWN))[3];
+  const { ctx, page, calls, errors, S } = await open("/settings/sheds-table", { cat: () => cat, fake: F, countSkew: true, storage: { [BACKUP_KEY(OWN)]: backupOf(Date.now() - 60e3, z, 5555) } });
+  await waitGrid(page).catch(() => {});
+  const big = await page.waitForFunction((t) => (document.body.textContent || "").includes(t), "This catalog is too big for the table right now.", { timeout: 8000 }).then(() => true, () => false);
+  await page.waitForTimeout(800);
+  const early = !!(await page.$(".ss-pg-earlier"));
+  S.countSkew = false;
+  await page.locator(".ss-pg-status button", { hasText: "Reload" }).click({ timeout: 3000 }).catch(() => {});
+  await page.waitForSelector(".ss-pg-earlier", { timeout: 8000 }).catch(() => {});
+  const text = await page.locator(".ss-pg-earlier span").textContent({ timeout: 1000 }).catch(() => null);
+  await page.waitForTimeout(300);
+  const kept = await stored(page, OWN);
+  ok("R: no backup is offered while the catalog reads 'too big'; the Reload that clears it offers it, and it stays stored until answered",
+    big && !early && text === "You have 1 change from earlier that wasn't saved." && !!kept && JSON.parse(kept).sizes[z.id].fields.price.to === 5555 && saveCalls(calls).length === 0,
+    JSON.stringify({ big, early, text, kept }));
+  ok("R: no page errors (too big, then Reload)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
@@ -2544,6 +2824,41 @@ function ssPgFmtPriceFor(z) {
   const n = Number(z.base_price);
   const [i, d = ""] = String(n).split(".");
   return "$" + i.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (d ? "." + (d.length === 1 ? d + "0" : d) : "");
+}
+
+// V1b: the round trip through a sheet. An unpriced size's Offered copies as "no"; pasted back with a
+// first price, it stays out of the designer (plan 4.11: Excel's own rule, and plan 3.11: each box
+// takes what was pasted), where "yes" lets the server tick it with the price.
+if (want("V")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const t = F.table(OWN);
+  const barn = barnOf(t), lofted = t.sizes.filter((z) => z.style_id === t.styles[1].id).sort((a, b) => a.sort_order - b.sort_order);
+  const za = barn[9], zb = barn[10], zc = lofted.find((z) => z.base_price == null);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  ok("V: (set-up) a priced size above an unpriced one, and another unpriced one", za.base_price != null && zb.base_price == null && !!zc, JSON.stringify([za.base_price, zb.base_price, !!zc]));
+  await page.locator(sel(za.id, 1)).click();
+  let n0 = saveCalls(calls).length;
+  await clip.paste(page, tsvOf([["1000", "yes"], ["900", "no"]]));
+  const cf = await confirmOf(page);
+  ok("V: a block giving an unpriced size its first price with Offered 'no' does not count it as joining the designer",
+    !!cf && cf.text === `Change 2 sizes, ${named(za)} to ${named(zb)}: 2 prices. Continue?`, JSON.stringify(cf));
+  await page.keyboard.press("Enter");
+  await saved(page, calls, n0);
+  const sent = (saveCalls(calls).slice(n0)[0] || { body: { sizes: [] } }).body.sizes.find((x) => x.id === zb.id);
+  ok("V: …its price goes with Offered unticked beside it, and the size stays out of the designer",
+    !!sent && JSON.stringify(sent.from) === JSON.stringify({ price: null, active: false }) && JSON.stringify(sent.to) === JSON.stringify({ price: 900, active: false })
+    && F.size(zb.id).base_price === 900 && F.size(zb.id).active === false && (await look(page, zb.id, 2)).text === "" && F.bad.length === 0, JSON.stringify({ sent, z: F.size(zb.id) }));
+  await page.locator(sel(zc.id, 1)).click();
+  n0 = saveCalls(calls).length;
+  await clip.paste(page, tsvOf([["800", "yes"]]));
+  await saved(page, calls, n0);
+  const yes = (saveCalls(calls).slice(n0)[0] || { body: { sizes: [] } }).body.sizes[0];
+  ok("V: …with 'yes', the price goes alone and the server ticks Offered",
+    !!yes && JSON.stringify(yes.to) === JSON.stringify({ price: 800 }) && F.size(zc.id).active === true && (await look(page, zc.id, 2)).text === "✓", JSON.stringify(yes));
+  ok("V: no page errors (a first price with Offered)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
 }
 
 // V2: Clear (Delete on a range, then the toolbar's Clear) and Fill down (Ctrl+D, the toolbar's Fill

@@ -221,7 +221,12 @@ Deno.test("leaving asks first while anything is unsent or in flight, or the edit
     assert(between(page, fn, "\n  };", fn).includes("backToWork();"), `${fn} must call a waiting leave off`);
   }
   // The editor's commit carries what the box showed when typing began (the queue's `seen` check).
-  assert(page.includes("seen: shownOf(cell.sizeId, f) };") && page.includes("commitText(ed.sizeId, ed.col, text, { seen: ed.seen })"));
+  assert(page.includes("seen: shownOf(cell.sizeId, f) };") && page.includes("commitText(ed.sizeId, ed.f, text, { seen: ed.seen })"));
+  // The editor is on its FIELD, never its column number: a refresh that adds or archives an option
+  // moves the columns while it is open, and the text must still save into the option it was typed in.
+  assert(page.includes("editRef.current = { sizeId: cell.sizeId, f, text0, replace: key != null, seen: shownOf(cell.sizeId, f) };"), "the editor keeps its field");
+  assert(!/editRef\.current\.col|\bed\.col\b|editing\.col/.test(page), "something still reads the editor's column number");
+  assert(between(page, "const draftOf = () => {", "\n  };", "draftOf").includes("key: ed.f"), "the backup's draft names the editor's own field");
 });
 
 Deno.test("the editor and the overlay keep every hook above any return, and PgRow takes primitive marks", () => {
@@ -403,6 +408,12 @@ Deno.test("the refresh: another page's save for this account, or the tab coming 
   assert(adopt.includes("if (cur.oks !== okAt) { pokeRefresh(); return; }"), "a read asked for before the latest answer is dropped and asked again");
   assert(adopt.indexOf(`apply({ type: "columns"`) > 0 && adopt.indexOf(`apply({ type: "columns"`) < adopt.indexOf(`apply({ type: "refresh"`), "columns first, then the refresh rule");
   assert(adopt.includes("if (m.guard && !was.guard) return;"), "a read that does not add up never replaces one that did");
+  // The cursor, a range and the open editor stay on their options when the columns move.
+  assert(adopt.includes("const na = ssPgRekeyCell(a, was.cols, m.cols), nx = ssPgRekeyCell(x, was.cols, m.cols);"));
+  assert(adopt.includes(`apply({ type: "columns", keys: m.cols.map((c) => c.key), names, drafts: edGone && dirtyRef.current ? [edKey] : [] });`) && adopt.includes("closeEdit();"),
+    "an editor whose option went away is closed, its text counted in the columns note");
+  // A conflict or a duplicate brings back only the boxes the call named: the read brings the rest.
+  assert(between(page, "const landed = (flight, data) => {", "\n  };", "landed").includes(`|| res.some((x) => x.status === "conflict" || x.status === "duplicate")) pokeRefresh();`));
   // The queue is initialised once, by the first load; every later read keeps its red boxes and edits.
   assertEquals((page.match(/type: "init"/g) || []).length, 1);
   assert(page.includes("const fetchAll = useCallback(async () => {\n    if (qRef.current) { fnRef.current.refreshNow(); return; }"), "Reload and Retry must not re-initialise a queue that exists");
@@ -417,12 +428,25 @@ Deno.test("the backup: keyed by person and account, written only by a page that 
   const save = between(page, "const saveBackup = () => {", "\n  };", "saveBackup");
   assert(save.includes("if (!backupKey || !editable || !qRef.current) return;"), "a view-only page never writes one");
   assert(save.includes("try {") && save.includes("catch (_e)"), "storage can be blocked: try/catch");
-  assert(save.includes("else if (ownBackupRef.current) { localStorage.removeItem(backupKey); ownBackupRef.current = false; }"), "cleared only by the page that wrote it");
+  assert(save.includes("else if (ownBackupRef.current) { localStorage.removeItem(ownKey); ownBackupRef.current = false; }"), "cleared only by the page that wrote it");
+  // One key per table under the plan's (two tabs of one account never write over each other's), and
+  // a closed table's backup is let go only once what it holds is under this one's key (or discarded).
+  assert(page.includes("const ownKey = backupKey ? `${backupKey}:${mountId}` : null;"));
+  assert(save.includes("localStorage.setItem(ownKey, JSON.stringify(b))") && !save.includes("setItem(backupKey"), "each table writes its own key");
+  assert(save.indexOf("adoptedRef.current.forEach((k) => localStorage.removeItem(k))") > save.indexOf("localStorage.setItem(ownKey"), "taken-over backups go after this table's own write");
   const offer = between(page, "const offerEarlier = (m) => {", "\n  };", "offerEarlier");
   assert(offer.includes("if (!backupKey || viewOnly || (m && m.guard)) return;"), "a view-only page never offers (or sends) a backup");
-  assert(offer.includes("ssPgBackupLoad(raw, Date.now())") && offer.includes("localStorage.removeItem(backupKey)"), "older than 7 days or unreadable: dropped");
+  assert(offer.includes("if (offeredRef.current) return;\n    offeredRef.current = true;"), "offered once");
+  assert(offer.includes("ssPgBackupLoad(raw, Date.now())") && offer.includes("localStorage.removeItem(k)"), "older than 7 days or unreadable: dropped");
+  assert(offer.includes("if (k !== backupKey && open[k.slice(backupKey.length + 1)]) return;"), "a table still open in another tab keeps its own backup: never offered, never taken");
+  assert(offer.includes("whoIsOpen((open) => {") && offer.includes("ssPgBackupMerge(found)"));
+  assert(page.includes("ch.onmessage = (m) => { if (m && m.data && m.data.ask) { try { ch.postMessage({ open: mountId }); }"), "an open table answers who's open");
+  // The guarded first read could not offer it; the read that clears the guard does, before the first
+  // edit can write over it.
+  assert(between(page, "const adoptRead = (m, okAt) => {", "\n  };", "adoptRead").includes("if (was.guard && !m.guard) offerEarlier(m);"));
   const restore = between(page, "const saveEarlier = () => {", "\n  };", "saveEarlier");
-  assert(restore.includes(`apply({ type: "restore", sizes: b.sizes, at: Date.now() });`), "Save them puts the stored edits back through the queue");
+  assert(restore.includes(`const st = apply({ type: "restore", sizes: b.sizes, creates: b.creates, at: Date.now() });`), "Save them puts the stored edits back through the queue");
+  assert(restore.includes("if (again.length) setAdded((list) => [...list, ...again]);"), "a size added again is drawn");
   assert(!/red/.test(restore.replace("keepRef.current = { sizes: null, red: earlierRed };", "")), "red entries never go back into the queue");
   // Rewritten on every change of the queue, and on every keystroke in the editor.
   assert(page.includes("useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);"));
