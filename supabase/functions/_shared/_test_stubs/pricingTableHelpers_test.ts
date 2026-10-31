@@ -1300,3 +1300,265 @@ Deno.test("ssPgEarlierText: the backup's red entries, named for the status line"
     "These didn't save before you left: Test Barn 10x12 · Loft (sq ft) (“abc”); Test Barn 12x24 · Offered (ticked); Test Barn 12x24 · Price (cleared); and 1 more. Type them again if they're right.");
   assertEquals([G.ssPgEarlierText([], where, fields), G.ssPgEarlierText(null, where, fields)], ["", ""]);
 });
+
+// ─── Phase 4b: copy, paste, fill down, clear and the confirm (2026-10-31) ──────────────────────
+// Lifted the same way, from the shipped text. The VIEW is what the page hands them: the drawn rows
+// (ssPgRows), the drawn size ids, the option columns, Real-Time Pricing, and the save queue.
+const P4B = ["function ssPgParseTsv(text) {", "function ssPgToTsv(rows) {", "function ssPgParseOffered(text) {",
+  "function ssPgSelectionBlock(view, ids, c0, c1) {", "function ssPgPlanCells(view, targets, opts) {", "function ssPgPastePlan(view, at, block, opts) {",
+  "function ssPgFillPlan(view, sel, opts) {", "function ssPgClearPlan(view, sel, opts) {", "function ssPgChangeSummary(sizes) {"].map(lift).join("\n");
+const K = new Function(`${PURE}\n${SAVE}\n${P4}\n${P4B}; return { ssPgParseTsv, ssPgToTsv, ssPgParseOffered, ssPgSelectionBlock, ssPgPlanCells, ssPgPastePlan,
+  ssPgFillPlan, ssPgClearPlan, ssPgChangeSummary };`)() as Record<string, (...a: Any[]) => Any>;
+// The page's view of a model: rows as drawn with `opts` (ssPgRows), and a queue that starts from the
+// read unless one is given.
+const viewOf = (m: Any, opts: Any = {}, q: Any = null) => {
+  const rows = H.ssPgRows(m, opts);
+  return { rows, order: rows.filter((r: Any) => r.kind === "size").map((r: Any) => r.id), cols: m.cols, rtp: !!opts.rtp,
+    q: q || S.ssPgQueue(null, { type: "init", sizes: S.ssPgServerSizes(m), cols: m.cols.map((c: Any) => c.key) }) };
+};
+const M4 = () => H.ssPgModel(TCAT, TABLE);
+// Columns: 0 Size, 1 Price, 2 Offered, 3 Loft (sq ft), 4 Workbench, 5 the Single Door. Drawn sizes:
+// Test Barn 10x12 ($0, Workbench 1), 10x16 (no price, hidden), 12x24 ($4,800, Loft 50, door 2);
+// Test Utility 8x10 ($2,100.50, unticked), 8x12; Test Empty (none); Test Old Style 6x8 (hidden style).
+const [Z1, Z2, Z3, Z4, Z5, Z6] = [1, 2, 3, 4, 5, 6].map(zid);
+const onlyEdits = (p: Any) => p.edits.map((d: Any) => `${d.sizeId.slice(-2)} ${d.f}=${JSON.stringify(d.value)} (seen ${JSON.stringify(d.seen)})`);
+
+Deno.test("ssPgParseTsv: CRLF, LF and CR; the trailing newline; tabs; quoted cells holding tabs, newlines and quotes; ragged rows", () => {
+  assertEquals(K.ssPgParseTsv("a\tb\r\nc\td\r\n"), [["a", "b"], ["c", "d"]], "Excel: CRLF and a trailing CRLF");
+  assertEquals(K.ssPgParseTsv("1\t2\n3\t4"), [["1", "2"], ["3", "4"]], "Google Sheets: LF and none at the end");
+  assertEquals(K.ssPgParseTsv("a\nb\rc\r\n"), [["a"], ["b"], ["c"]]);
+  assertEquals([K.ssPgParseTsv("480\r\n"), K.ssPgParseTsv("480"), K.ssPgParseTsv("\r\n"), K.ssPgParseTsv(""), K.ssPgParseTsv(null)],
+    [[["480"]], [["480"]], [[""]], [], []], "one box; one EMPTY box (it clears); nothing at all");
+  assertEquals(K.ssPgParseTsv('"a\tb"\t"c\r\nd"\te\r\n'), [["a\tb", "c\r\nd", "e"]], "a quoted tab and a quoted line break stay in their cell");
+  assertEquals(K.ssPgParseTsv('"say ""hi"""\tx'), [['say "hi"', "x"]], "a doubled quote is one quote");
+  assertEquals(K.ssPgParseTsv('"ab"c\td'), [["abc", "d"]], "what follows the closing quote is kept");
+  assertEquals(K.ssPgParseTsv('"12\t5\r\n6'), [['"12', "5"], ["6"]], "a quote that never closes is a character, not the rest of the block");
+  assertEquals(K.ssPgParseTsv("6'4\"\t2"), [["6'4\"", "2"]], "a quote inside a cell is a character");
+  assertEquals(K.ssPgParseTsv("1\t2\t3\r\n4\r\n5\t6\r\n"), [["1", "2", "3"], ["4"], ["5", "6"]], "ragged rows keep their own length");
+  assertEquals(K.ssPgParseTsv("1\t\t3\r\n\t\r\n1\t"), [["1", "", "3"], ["", ""], ["1", ""]], "empty cells inside a row are cells");
+  assertEquals(K.ssPgParseTsv("1\r\n\r\n3\r\n"), [["1"], [""], ["3"]], "an empty line in the middle is a row with one empty cell");
+});
+
+Deno.test("ssPgToTsv: Excel's own shape, and anything it writes reads back the same", () => {
+  assertEquals(K.ssPgToTsv([["a", "b"], ["", "c"]]), "a\tb\r\n\tc\r\n");
+  assertEquals(K.ssPgToTsv([[""]]), "\r\n", "an empty box copies as one empty box");
+  assertEquals([K.ssPgToTsv([]), K.ssPgToTsv(null)], ["", ""]);
+  assertEquals(K.ssPgToTsv([["a\tb", 'say "hi"', "x\ny", 4800]]), '"a\tb"\t"say ""hi"""\t"x\ny"\t4800\r\n');
+  for (const rows of [[["10x12", "4800.5", "yes", "", "1"]], [[""], ["", ""], ["a\r\nb", '"', "\t"]], [["6'4\"", "1"]]]) {
+    assertEquals(K.ssPgParseTsv(K.ssPgToTsv(rows)), rows, JSON.stringify(rows));
+  }
+});
+
+Deno.test("ssPgParseOffered: yes or no in a sheet's words; blank is no", () => {
+  for (const t of ["yes", "Y", " TRUE ", "1", "x", "✓", "on", "Offered"]) assertEquals(K.ssPgParseOffered(t), { ok: true, value: true }, t);
+  for (const t of ["", "no", "N", "false", "0", "off", "not offered", null]) assertEquals(K.ssPgParseOffered(t), { ok: true, value: false }, String(t));
+  assertEquals(K.ssPgParseOffered("maybe").ok, false);
+});
+
+Deno.test("copy (ssPgSelectionBlock): the selected boxes as drawn, plain numbers, yes/no, blanks; an unsent edit is what is drawn", () => {
+  const m = M4();
+  const v = viewOf(m);
+  assertEquals(K.ssPgSelectionBlock(v, [Z1, Z2, Z3], 0, 5), [
+    ["10x12", "0", "yes", "", "1", ""],
+    ["10x16", "", "no", "", "", ""],
+    ["12x24", "4800", "yes", "50", "", "2"],
+  ]);
+  assertEquals(K.ssPgToTsv(K.ssPgSelectionBlock(v, [Z4, Z5], 1, 3)), "2100.5\tno\t\r\n2350.555\tyes\t\r\n", "an unticked size copies as no; three decimals as stored");
+  const q = Q(v.q, commit(Z3, "price", 4900), commit(Z3, "c:loft", 0));
+  assertEquals(K.ssPgSelectionBlock({ ...v, q }, [Z3], 1, 3), [["4900", "yes", ""]]);
+});
+
+Deno.test("paste: a block lands at its top-left box over the drawn rows and columns; only boxes that change are edits, each with what it showed", () => {
+  const m = M4();
+  const v = viewOf(m);
+  const p = K.ssPgPastePlan(v, { sizeId: Z1, col: 1 }, K.ssPgParseTsv("4900\tyes\r\n5000\r\n"));
+  assertEquals(p.ok, true, p.error);
+  assertEquals(onlyEdits(p), ["01 price=4900 (seen 0)", "02 price=5000 (seen null)"], "row 2 is short: its Offered box is left as it is");
+  assertEquals(p.area, { first: Z1, last: Z2, c0: 1, c1: 2 });
+  assertEquals(K.ssPgChangeSummary(p.sizes).text, "Change 2 sizes, Test Barn 10x12 to Test Barn 10x16: 2 prices, 1 size now offered in your designer. Continue?",
+    "a first price puts 10x16 in the designer (the server ticks Offered with it)");
+  // An empty cell INSIDE a row clears its box; a cell missing from the END of a short row is untouched.
+  const c = K.ssPgPastePlan(v, { sizeId: Z3, col: 3 }, [["", "", "3"]]);
+  assertEquals(onlyEdits(c), ["03 c:loft=0 (seen 50)", "03 c:11=3 (seen 2)"]);
+  const r = K.ssPgPastePlan(v, { sizeId: Z1, col: 3 }, [["7", "8", "9"], ["4"]]);
+  assertEquals(onlyEdits(r), ["01 c:loft=7 (seen 0)", "01 c:workbench=8 (seen 1)", "01 c:11=9 (seen 0)", "02 c:loft=4 (seen 0)"]);
+  // What is drawn already: nothing to do.
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z3, col: 1 }, [["$4,800", "yes", "50"]]).edits, []);
+  // An unsent edit is what is drawn: pasting the server's own value over it is an edit (it drops the edit).
+  const q = Q(v.q, commit(Z3, "price", 4900));
+  assertEquals(onlyEdits(K.ssPgPastePlan({ ...v, q }, { sizeId: Z3, col: 1 }, [["4800"]])), ["03 price=4800 (seen 4900)"]);
+});
+
+Deno.test("paste is ALL OR NOTHING: the first problem named, the rest counted, nothing planned", () => {
+  const v = viewOf(M4());
+  const p = K.ssPgPastePlan(v, { sizeId: Z1, col: 3 }, [["5", "2"], ["6"], ["abc", "x", "-1"]]);
+  assertEquals(p, { ok: false, error: "Row 3 (Test Barn 12x24), Loft (sq ft): 'abc' isn't a whole number. 2 more problems.", problems: 3 }, "the plan's own example");
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z1, col: 3 }, [["2.5"]]).error, "Row 1 (Test Barn 10x12), Loft (sq ft): '2.5' isn't a whole number.");
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z1, col: 3 }, [["1"], ["1,000,000"]]).error, "Row 2 (Test Barn 10x16), Loft (sq ft): '1,000,000' is more than 999,999.");
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z1, col: 1 }, [["-5"], ["4.8k"]]).error, "Row 1 (Test Barn 10x12), Price: '-5' isn't a number of 0 or more. 1 more problem.");
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z1, col: 2 }, [["maybe"]]).error, "Row 1 (Test Barn 10x12), Offered: 'maybe' isn't yes or no.");
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z1, col: 3 }, [["a very long piece of text that goes on and on"]]).error,
+    "Row 1 (Test Barn 10x12), Loft (sq ft): 'a very long piece of text tha…' isn't a whole number.");
+});
+
+Deno.test("paste: a value equal to what is stored is always accepted, even one the rules would refuse if typed new", () => {
+  const t = { ...TABLE, sizes: SIZES.map((z) => (z.id === Z3 ? { ...z, base_price: -5 } : z)),
+    inclusions: [...INCS.filter((x) => !(x.size_id === Z3 && x.item_key === "loft")), { size_id: Z3, item_key: "loft", included: true, qty: 1200000 }] };
+  const v = viewOf(H.ssPgModel(TCAT, t));
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z3, col: 1 }, [["-5", "yes", "1,200,000"]]), { ok: true, edits: [], sizes: [], area: { first: Z3, last: Z3, c0: 1, c1: 3 } });
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z3, col: 1 }, [["-6"]]).ok, false);
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z3, col: 3 }, [["1200001"]]).error, "Row 1 (Test Barn 12x24), Loft (sq ft): '1200001' is more than 999,999.");
+});
+
+Deno.test("paste: Offered and a Real-Time Pricing price follow the rules typing does", () => {
+  const v = viewOf(M4());
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z2, col: 2 }, [["yes"]]).error, "Row 1 (Test Barn 10x16), Offered: Add a price first.", "no price on file, none pasted");
+  assertEquals(onlyEdits(K.ssPgPastePlan(v, { sizeId: Z2, col: 1 }, [["900", "yes"]])), ["02 price=900 (seen null)"],
+    "a first price in the same row: accepted, and nothing goes for Offered (the server ticks it with the price)");
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z3, col: 1 }, [["", "yes"]]).sizes[0].nowShown, false, "a cleared price hides the size whatever Offered says");
+  assertEquals(K.ssPgPastePlan(v, { sizeId: Z2, col: 1 }, [["", "yes"]]).error, "Row 1 (Test Barn 10x16), Offered: Add a price first.");
+  const off = K.ssPgPastePlan(v, { sizeId: Z3, col: 2 }, [["no"]]);
+  assertEquals([onlyEdits(off), off.sizes[0].wasShown, off.sizes[0].nowShown], [["03 active=false (seen true)"], true, false]);
+  assertEquals(onlyEdits(K.ssPgPastePlan(v, { sizeId: Z4, col: 2 }, [["yes"]])), ["04 active=true (seen false)"], "a priced, unticked size can be ticked");
+  // Real-Time Pricing locks the prices; the price on file is still accepted, and the other boxes paste.
+  const rtp = { ...v, rtp: true };
+  assertEquals(K.ssPgPastePlan(rtp, { sizeId: Z3, col: 1 }, [["4900", "yes", "7"]]).error, "Row 1 (Test Barn 12x24), Price: Real-Time Pricing sets prices on this account.");
+  assertEquals(onlyEdits(K.ssPgPastePlan(rtp, { sizeId: Z3, col: 1 }, [["4800", "no", "7"]])), ["03 active=false (seen true)", "03 c:loft=7 (seen 50)"]);
+});
+
+Deno.test("paste is refused BEFORE any value is checked: a band or placeholder, a folded hidden size, past the last row or column, the Size column, over 20,000 boxes", () => {
+  const m = M4();
+  const v = viewOf(m);
+  const at = (sizeId: string, col = 1) => ({ sizeId, col });
+  assertEquals(K.ssPgPastePlan(v, at(Z3), [["abc"], ["abc"]]).error, "Paste one style at a time.", "12x24 is Test Barn's last size; the next row is a band");
+  assertEquals(K.ssPgPastePlan(v, at(Z5), [["1"], ["1"]]).error, "Paste one style at a time.", "into Test Empty's band and placeholder");
+  // A placeholder or an add strip never lands a box, wherever it is drawn.
+  for (const kind of ["empty", "add"]) {
+    const rows = [...v.rows];
+    rows.splice(rows.findIndex((r: Any) => r.id === Z1) + 1, 0, { kind, id: "x-" + sid(1), style: rows[0].style, text: "No sizes yet." });
+    assertEquals(K.ssPgPastePlan({ ...v, rows }, at(Z1), [["1"], ["1"]]).error, "Paste one style at a time.", kind);
+  }
+  // Folded hidden sizes.
+  const fold = { ...TABLE, sizes: [size(11, 1, 10, 10, 100, true, 0), size(12, 1, 10, 12, null, false, 1), size(13, 1, 10, 14, 120, false, 2),
+    size(14, 1, 10, 16, 140, true, 3), size(15, 1, 10, 18, 160, true, 4)], inclusions: [], counts: { sizes: 5, inclusions: 0 } };
+  const fm = H.ssPgModel(TCAT, fold);
+  const folded = viewOf(fm, { showHidden: false });
+  assertEquals(folded.order, [zid(11), zid(14), zid(15)]);
+  assertEquals(K.ssPgPastePlan(folded, at(zid(11)), [["abc"], ["1"]]).error, "Show hidden sizes first. This block would skip 2 hidden sizes.");
+  assertEquals(K.ssPgPastePlan(folded, at(zid(14)), [["1"], ["2"]]).ok, true, "two sizes drawn side by side");
+  assertEquals(K.ssPgPastePlan(viewOf(m, { showHidden: false }), at(Z1), [["1"], ["2"]]).error, "Show hidden sizes first. This block would skip 1 hidden size.");
+  assertEquals(K.ssPgPastePlan(viewOf(fm), at(zid(11)), [["1"], ["2"]]).ok, true, "shown, they are rows like any other");
+  // The edges.
+  assertEquals(K.ssPgPastePlan(viewOf(m, { hiddenStylesOpen: true }), at(Z6), [["1"], ["1"]]).error, "This block runs past the last size.");
+  assertEquals(K.ssPgPastePlan(v, at(Z1, 5), [["1", "abc"]]).error, "This block runs past the last column.");
+  assertEquals(K.ssPgPastePlan(v, at(Z1, 0), [["10x12", "1"]]).error, "The Size column can't be pasted into. Start on a price or an option box.");
+  assertEquals(K.ssPgPastePlan(v, at(Z1, 3), [["1", "2", "abc"], ["4", "5", "6"]], { max: 5 }).error, "This block has 6 boxes. Paste at most 5 at a time.");
+  assertEquals(K.ssPgPastePlan(v, at(Z1, 3), []).error, "There's nothing to paste.");
+  assertEquals(K.ssPgPastePlan(v, null, [["1"]]).error, "Click the box where the paste should start.");
+});
+
+Deno.test("fill down: the top row copied into the rows under it; one row tall takes the size above; the same band, fold and all-or-nothing rules", () => {
+  const m = M4();
+  const v = viewOf(m);
+  // Rows 10x12 to 12x24, Price to Loft: $0, yes, blank.
+  const f = K.ssPgFillPlan(v, { r0: 0, r1: 2, c0: 1, c1: 3 });
+  assertEquals(onlyEdits(f), ["02 price=0 (seen null)", "03 price=0 (seen 4800)", "03 c:loft=0 (seen 50)"], "10x16 takes its first price, and Offered with it");
+  assertEquals(K.ssPgChangeSummary(f.sizes).text, "Change 2 sizes, Test Barn 10x16 to Test Barn 12x24: 2 prices, 1 size now offered in your designer, 1 included option. Continue?");
+  // One row: from the size drawn right above it. One size: no confirm.
+  const one = K.ssPgFillPlan(v, { r0: 1, r1: 1, c0: 1, c1: 1 });
+  assertEquals([onlyEdits(one), K.ssPgChangeSummary(one.sizes).ask], [["02 price=0 (seen null)"], false]);
+  assertEquals(K.ssPgFillPlan(v, { r0: 0, r1: 0, c0: 1, c1: 1 }).error, "There's no size above this one in Test Barn to fill down from.");
+  assertEquals(K.ssPgFillPlan(v, { r0: 3, r1: 3, c0: 1, c1: 1 }).error, "There's no size above this one in Test Utility to fill down from.", "the row above is a band");
+  assertEquals(K.ssPgFillPlan(v, { r0: 2, r1: 3, c0: 1, c1: 1 }).error, "Fill down one style at a time.");
+  assertEquals(K.ssPgFillPlan(viewOf(m, { showHidden: false }), { r0: 1, r1: 1, c0: 3, c1: 3 }).error, "Show hidden sizes first. Filling down would skip 1 hidden size.");
+  // The Size column is never filled.
+  assertEquals(onlyEdits(K.ssPgFillPlan(v, { r0: 0, r1: 1, c0: 0, c1: 1 })), ["02 price=0 (seen null)"]);
+  assertEquals(K.ssPgFillPlan(v, { r0: 0, r1: 1, c0: 0, c1: 0 }).error, "A size's width and length can't be changed here.");
+  // Real-Time Pricing: a price can't be filled; all or nothing, named by size.
+  assertEquals(K.ssPgFillPlan({ ...v, rtp: true }, { r0: 0, r1: 2, c0: 1, c1: 1 }).error, "Test Barn 10x16, Price: Real-Time Pricing sets prices on this account. 1 more problem.");
+  assertEquals(K.ssPgFillPlan(v, { r0: 0, r1: 2, c0: 1, c1: 5 }, { max: 10 }).error, "That's 15 boxes. Fill down at most 10 at a time.");
+  assertEquals(K.ssPgFillPlan(v, null).error, "Click a box first.");
+});
+
+Deno.test("clear: every selected box emptied, across styles; the Size column never; Real-Time Pricing locks prices, all or nothing", () => {
+  const m = M4();
+  const v = viewOf(m);
+  // 12x24 to 8x12, Price to the door: 12x24 and 8x12 leave the designer; 8x10 was not in it.
+  const c = K.ssPgClearPlan(v, { r0: 2, r1: 4, c0: 1, c1: 5 });
+  assertEquals(onlyEdits(c), ["03 price=null (seen 4800)", "03 active=false (seen true)", "03 c:loft=0 (seen 50)", "03 c:11=0 (seen 2)",
+    "04 price=null (seen 2100.5)", "05 price=null (seen 2350.555)", "05 active=false (seen true)"]);
+  assertEquals(K.ssPgChangeSummary(c.sizes).text, "Change 3 sizes, Test Barn 12x24 to Test Utility 8x12: 3 prices, 2 sizes hidden from your designer, 2 included options. Continue?");
+  assertEquals(onlyEdits(K.ssPgClearPlan(v, { r0: 0, r1: 0, c0: 0, c1: 4 })), ["01 price=null (seen 0)", "01 active=false (seen true)", "01 c:workbench=0 (seen 1)"],
+    "the Size column is skipped");
+  assertEquals(K.ssPgClearPlan(v, { r0: 0, r1: 2, c0: 0, c1: 0 }).error, "A size's width and length can't be changed here.");
+  assertEquals(K.ssPgClearPlan(v, { r0: 1, r1: 1, c0: 1, c1: 5 }).edits, [], "nothing there: nothing to clear");
+  assertEquals(K.ssPgClearPlan({ ...v, rtp: true }, { r0: 2, r1: 4, c0: 1, c1: 3 }).error, "Test Barn 12x24, Price: Real-Time Pricing sets prices on this account. 2 more problems.");
+  assertEquals(onlyEdits(K.ssPgClearPlan({ ...v, rtp: true }, { r0: 2, r1: 2, c0: 3, c1: 5 })), ["03 c:loft=0 (seen 50)", "03 c:11=0 (seen 2)"], "the option boxes still clear");
+  assertEquals(K.ssPgClearPlan(v, { r0: 0, r1: 4, c0: 1, c1: 5 }, { max: 20 }).error, "That's 25 boxes. Clear at most 20 at a time.");
+});
+
+Deno.test("ssPgChangeSummary: names the first and last size, counts prices, sizes leaving or joining the designer, options; one size never asks", () => {
+  const z = (name: string, prices: number, options: number, wasShown = true, nowShown = true) => ({ id: name, name, prices, options, offered: 0, wasShown, nowShown });
+  const six = [z("Barn 10x12", 1, 3), z("Barn 10x16", 1, 3, true, false), z("Barn 10x20", 1, 2), z("Barn 12x16", 1, 2, true, false), z("Barn 12x20", 1, 2), z("Barn 12x24", 1, 2)];
+  assertEquals(K.ssPgChangeSummary(six), { ask: true, sizes: 6, prices: 6, hidden: 2, shown: 0, options: 14,
+    text: "Change 6 sizes, Barn 10x12 to Barn 12x24: 6 prices, 2 sizes hidden from your designer, 14 included options. Continue?" }, "the plan's own example");
+  assertEquals(K.ssPgChangeSummary([z("A 1x1", 1, 0, true, false), z("A 1x2", 0, 1, false, true)]).text,
+    "Change 2 sizes, A 1x1 to A 1x2: 1 price, 1 size hidden from your designer, 1 size now offered in your designer, 1 included option. Continue?");
+  assertEquals(K.ssPgChangeSummary([z("A 1x1", 1, 40)]), { ask: false, sizes: 1, prices: 1, hidden: 0, shown: 0, options: 40, text: "" }, "one size: typing never asks, nor does this");
+  assertEquals([K.ssPgChangeSummary([]).ask, K.ssPgChangeSummary(null).ask], [false, false]);
+});
+
+Deno.test("queue commits: many boxes in one event, each by the commit rule and its seen check, flushed; the same as committing them one by one", () => {
+  const edits = [{ sizeId: A, f: "price", value: 480 }, { sizeId: A, f: "c:loft", value: 0 }, { sizeId: B, f: "price", value: 2100 }, { sizeId: E, f: "price", value: 1 }];
+  const many = Q(start(DB()), { type: "commits", edits, at: 5 });
+  const oneByOne = Q(start(DB()), ...edits.map((d) => commit(d.sizeId, d.f, d.value, 5)));
+  assertEquals(many.fields, oneByOne.fields, "an equal value sends nothing; a size not on the account is ignored");
+  assertEquals([many.seq, many.flush, S.ssPgDueIn(many, 5)], [2, true, 0], "a paste goes at once");
+  const s0 = start(DB());
+  const none = Q(s0, { type: "commits", edits: [{ sizeId: B, f: "price", value: 2100 }], at: 0 });
+  assertEquals([none.flush, S.ssPgDueIn(none, 0)], [false, null], "nothing changed: nothing due");
+  assertEquals(s0.fields, {}, "the input state is never touched");
+  // `seen`: a box that moved since the paste was checked (an answer while the confirm was open) turns
+  // red with both values and is never sent; the boxes beside it go.
+  const db = DB();
+  let q = Q(start(db), commit(A, "price", 500));
+  q = Q(q, { type: "commits", edits: [{ sizeId: A, f: "price", value: 600, seen: 400 }, { sizeId: A, f: "c:loft", value: 7, seen: 50 }], at: 0 });
+  assertEquals(field(q, A, "price"), { error: { kind: "conflict", typed: 600, server: 400, reason: null } });
+  assertEquals(field(q, A, "c:loft").pending, { to: 7, from: 50, seq: 2 });
+  const [q2, body] = roundTrip(q, db);
+  assertEquals(body.sizes, [{ id: A, base: V0, from: { cells: { loft: 50 } }, to: { cells: { loft: 7 } } }]);
+  assertEquals(S.ssPgCount(q2).red, 1);
+});
+
+Deno.test("a paste of 20,000 boxes: planned, committed in one event, sent in calls of at most 50 sizes and 2,500 boxes, every box once", () => {
+  const N = 500, W = 40;
+  const cat = { clientId: "test-barns", items: Array.from({ length: W }, (_, i) => ({ key: `opt${i}`, label: `Test Option ${i}` })), fixtures: [] };
+  const big = Array.from({ length: N }, (_, i) => ({ id: `20000000-0000-4000-8000-${String(i).padStart(12, "0")}`, style_id: sid(1), label: `10x${i + 1}`,
+    width_ft: 10, length_ft: i + 1, base_price: 1000 + i, active: true, sort_order: i, created_at: V0, updated_at: V0 }));
+  const m = H.ssPgModel(cat, { clientId: "test-barns", rtpOn: false, styles: [STYLES[1]], sizes: big, inclusions: [], counts: { sizes: N, inclusions: 0 } });
+  const v = viewOf(m);
+  const text = K.ssPgToTsv(Array.from({ length: N }, (_, r) => Array.from({ length: W }, (_, c) => String(((r + c) % 9) + 1))));
+  const block = K.ssPgParseTsv(text);
+  const plan = K.ssPgPastePlan(v, { sizeId: big[0].id, col: 3 }, block);
+  assertEquals([plan.ok, plan.edits.length, plan.sizes.length], [true, N * W, N]);
+  assertEquals(K.ssPgChangeSummary(plan.sizes).text, `Change ${N} sizes, Test Barn 10x1 to Test Barn 10x${N}: 20,000 included options. Continue?`);
+  let q = Q(v.q, { type: "commits", edits: plan.edits, at: 0 });
+  assertEquals(S.ssPgCount(q).pending, N * W);
+  assertEquals(K.ssPgPastePlan(v, { sizeId: big[0].id, col: 3 }, [...block, ["1"]]).error, "This block runs past the last size.");
+  const wider = block.map((r: string[]) => [...r, "1"]);
+  assertEquals(K.ssPgPastePlan({ ...v, cols: [...v.cols, { key: "x", label: "X" }] }, { sizeId: big[0].id, col: 3 }, wider).error,
+    "This block has 20,500 boxes. Paste at most 20,000 at a time.");
+  const db = copy(S.ssPgServerSizes(m) as Record<string, Row>);
+  const bodies: Any[] = [];
+  for (let i = 0; i < 40 && (S.ssPgCount(q).pending || q.flight); i++) {
+    let body;
+    [q, body] = roundTrip(q, db);
+    if (body) bodies.push(body);
+  }
+  const cells = (b: Any) => b.sizes.reduce((n: number, s: Any) => n + Object.keys(s.to.cells || {}).length, 0);
+  assertEquals(bodies.length, 10, "50 sizes x 40 boxes a call");
+  assert(bodies.every((b) => b.sizes.length <= MAX_CALL_ENTRIES && cells(b) <= MAX_CALL_CELLS), JSON.stringify(bodies.map((b) => [b.sizes.length, cells(b)])));
+  assertEquals(bodies.reduce((n, b) => n + cells(b), 0), N * W, "every box went exactly once");
+  assertEquals(S.ssPgCount(q), { pending: 0, inflight: 0, red: 0, creating: 0, removing: 0 });
+  assert(big.every((z, r) => Array.from({ length: W }, (_, c) => db[z.id].cells[`opt${c}`] === ((r + c) % 9) + 1).every(Boolean)), "the server holds the block");
+});

@@ -3385,8 +3385,9 @@ function ssPgRebase(sent, server, again) {
 // line, and `unsure`: { [id]: true } for sizes a discarded call may have changed all the same,
 // until a fresh read says what is on file.
 //
-// EVENTS: init, commit, invalid, dismiss, create, remove, flush, send, ok, fail, resume, discard,
-// refresh, columns, restore, note-off. Times come in on the event (`at`), never from a clock in here.
+// EVENTS: init, commit, commits (a paste, fill or clear), invalid, dismiss, create, remove, flush,
+// send, ok, fail, resume, discard, refresh, columns, restore, note-off. Times come in on the event
+// (`at`), never from a clock in here.
 //
 // THE COMMIT RULE. A field's baseline is its in-flight `to` when it has one, otherwise what the
 // server confirmed. A value equal to the baseline drops any unsent edit (nothing to send);
@@ -3394,7 +3395,7 @@ function ssPgRebase(sent, server, again) {
 // out queues { to: 400, from: 480 }, which goes after the answer: it is never thrown away. The
 // editor's commit also carries `seen`, what the box showed when typing began: if an answer moved
 // the box under the open editor, the text was typed against a value that is gone, and the box goes
-// red instead (see "commit").
+// red instead (see commitBox).
 function ssPgQueue(q, ev) {
   const e = ev || {};
   const at = e.at == null ? 0 : Number(e.at);
@@ -3464,31 +3465,56 @@ function ssPgQueue(q, ev) {
     return { ...st, firstAt: st.firstAt == null ? at : st.firstAt, lastAt: at };
   };
 
+  // THE COMMIT RULE for one box ({ sizeId, f, value, seen? }), into `mine`: that size's own copy of
+  // its field map, written in place. Returns the next seq (moved when the box now waits to be sent).
+  //
+  // `seen` (the editor's, and every box of a paste, fill or clear): what the box showed when the
+  // typing began, or when the paste was checked. An answer that landed meanwhile moved this box: a
+  // colleague's value adopted from a conflict on another box of the size, or the box's own flight
+  // in conflict. Committed as usual, its `from` would be that new value, and the server's from-check
+  // would let it overwrite the colleague's. So it goes red as changed elsewhere, with both values,
+  // and nothing is sent (plan 1: never quietly replaces theirs). A box the server refused keeps its
+  // reason. Typing exactly what is there now is no change at all.
+  const commitBox = (mine, d, seq) => {
+    const x = mine[d.f] || {};
+    const base = x.inflight ? x.inflight.to : ssPgVal(q.sizes[d.sizeId], d.f);
+    const y = { ...x };
+    delete y.error;
+    delete y.pending;
+    let next = seq;
+    if ("seen" in d) {
+      const shown = x.pending ? x.pending.to : base;
+      if (!ssPgSame(shown, d.seen) && !ssPgSame(d.value, shown)) {
+        y.error = x.error && x.error.kind === "refused" ? { ...x.error, typed: d.value }
+          : { kind: "conflict", typed: d.value, server: ssPgVal(q.sizes[d.sizeId], d.f), reason: null };
+      }
+    }
+    if (!y.error && !ssPgSame(d.value, base)) y.pending = { to: d.value, from: base, seq: ++next };
+    if (y.pending || y.inflight || y.error) mine[d.f] = y; else delete mine[d.f];
+    return next;
+  };
+
   switch (e.type) {
     case "commit": {
       if (!q.sizes[e.sizeId]) return q;
-      const x = (q.fields[e.sizeId] || {})[e.f] || {};
-      const base = x.inflight ? x.inflight.to : ssPgVal(q.sizes[e.sizeId], e.f);
-      const y = { ...x };
-      delete y.error;
-      delete y.pending;
-      // The editor's `seen`. An answer that landed while it was open moved this box: a colleague's
-      // value adopted from a conflict on another box of the size, or the box's own flight in
-      // conflict. Committed as usual, its `from` would be that new value, and the server's from-check
-      // would let it overwrite the colleague's. So it goes red as changed elsewhere, with both values,
-      // and nothing is sent (plan 1: never quietly replaces theirs). A box the server refused keeps
-      // its reason. Typing exactly what is there now is no change at all.
-      if ("seen" in e) {
-        const shown = x.pending ? x.pending.to : base;
-        if (!ssPgSame(shown, e.seen) && !ssPgSame(e.value, shown)) {
-          y.error = x.error && x.error.kind === "refused" ? { ...x.error, typed: e.value }
-            : { kind: "conflict", typed: e.value, server: ssPgVal(q.sizes[e.sizeId], e.f), reason: null };
-          return timed({ ...q, fields: put(q.fields, e.sizeId, e.f, y) }, false);
-        }
-      }
+      const mine = { ...(q.fields[e.sizeId] || {}) };
+      const seq = commitBox(mine, e, q.seq);
+      return timed({ ...q, seq, fields: setSize(q.fields, e.sizeId, mine) }, seq !== q.seq);
+    }
+    case "commits": {
+      // A paste, a fill or a clear (plan 3.11): many boxes at once, each by the commit rule and its
+      // `seen` check, in ONE copy of the state (20,000 boxes must not copy it 20,000 times), then sent
+      // at once (plan 4.6: a paste flushes). The batches respect the call caps (ssPgBuildBatch).
+      const fields = { ...q.fields };
+      const touched = {};
       let seq = q.seq;
-      if (!ssPgSame(e.value, base)) y.pending = { to: e.value, from: base, seq: ++seq };
-      return timed({ ...q, seq, fields: put(q.fields, e.sizeId, e.f, y) }, !!y.pending);
+      (Array.isArray(e.edits) ? e.edits : []).forEach((d) => {
+        if (!d || !q.sizes[d.sizeId]) return;
+        seq = commitBox(touched[d.sizeId] || (touched[d.sizeId] = { ...(fields[d.sizeId] || {}) }), d, seq);
+      });
+      Object.keys(touched).forEach((id) => { if (Object.keys(touched[id]).length) fields[id] = touched[id]; else delete fields[id]; });
+      const any = seq !== q.seq;
+      return timed({ ...q, seq, fields, flush: any || q.flush }, any);
     }
     case "invalid": {
       // Typed, refused, not sent (plan 3.9): the box goes red with the reason, and any earlier unsent
@@ -4226,6 +4252,295 @@ function ssPgEarlierText(red, where, fields) {
   const one = items.length === 1;
   const more = items.length > 3 ? `; and ${items.length - 3} more` : "";
   return `${one ? "This didn't" : "These didn't"} save before you left: ${items.slice(0, 3).join("; ")}${more}. Type ${one ? "it" : "them"} again if ${one ? "it's" : "they're"} right.`;
+}
+
+// ─── Sizes & prices table: copy, paste, fill down and clear, the pure half (Phase 4b, 2026-10-31) ───
+// Lifted and run by pricingTableHelpers_test.ts like the helpers above. The plan's sections 3.10-3.12.
+//
+// A BLOCK is rows of cells, each the text of one box (ssPgParseTsv). The page hands these helpers its
+// VIEW: { rows (ssPgRows, as drawn), order (the drawn size ids, top to bottom), cols (the option
+// columns), rtp (Real-Time Pricing locks the prices), q (the save queue: what the server confirmed,
+// and this page's edits) }. A box's value AS DRAWN is this page's newest edit, else the server's;
+// what is STORED is the server's. A SELECTION is { r0, r1, c0, c1 }: rows as indexes into `order`,
+// columns as the grid's (0 Size, 1 Price, 2 Offered, 3… the options).
+
+// Text copied from Excel or Google Sheets → rows of cells (plan 3.11). A row ends at CRLF, LF or CR;
+// cells are split by tabs; the one line break both apps put at the very end is not a row of its own,
+// so "480\r\n" is one box and "\r\n" (an empty box copied) one empty box. A cell that STARTS with a
+// double quote is quoted, the way both apps write a cell holding a tab, a line break or a quote: up
+// to the closing quote, `""` being one quote, tabs and line breaks inside kept; what follows the
+// closing quote is kept as typed. A quote that never closes is just a character, so one stray quote
+// can't swallow the rest of the block. Rows may be ragged (shorter than the widest). "" → no rows.
+function ssPgParseTsv(text) {
+  const s = String(text == null ? "" : text);
+  const rows = [];
+  if (!s) return rows;
+  let row = [], cell = "", i = 0, start = true;   // start: at a cell's first character
+  while (i < s.length) {
+    const ch = s[i];
+    if (start && ch === '"') {
+      let j = i + 1, out = "", closed = false;
+      while (j < s.length) {
+        if (s[j] === '"') {
+          if (s[j + 1] === '"') { out += '"'; j += 2; continue; }
+          closed = true;
+          j++;
+          break;
+        }
+        out += s[j];
+        j++;
+      }
+      if (closed) { cell += out; i = j; start = false; continue; }
+    }
+    start = false;
+    if (ch === "\t") { row.push(cell); cell = ""; start = true; i++; continue; }
+    if (ch === "\r" || ch === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = []; cell = ""; start = true;
+      i += ch === "\r" && s[i + 1] === "\n" ? 2 : 1;
+      continue;
+    }
+    cell += ch;
+    i++;
+  }
+  if (row.length || !start) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// Rows of cells → the text Ctrl/Cmd+C puts on the clipboard (plan 3.10): Excel's own shape, tabs
+// between cells and CRLF after every row, the last one too, so a copied empty box pastes back as one
+// empty box. A cell holding a tab, a line break or a quote is quoted, `"` doubled.
+function ssPgToTsv(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "";
+  return rows.map((r) => (r || []).map((c) => {
+    const t = String(c == null ? "" : c);
+    return /[\t\r\n"]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  }).join("\t") + "\r\n").join("");
+}
+
+// An Offered box in a paste: yes or no in the words a sheet uses (the Excel template's `active`
+// column says yes/no, and copying from this table writes the same). Blank is no: an empty cell
+// clears its box, and a cleared Offered box is unticked.
+function ssPgParseOffered(text) {
+  const s = String(text == null ? "" : text).trim().toLowerCase();
+  if (["yes", "y", "true", "1", "x", "✓", "✔", "on", "offered"].indexOf(s) >= 0) return { ok: true, value: true };
+  if (["", "no", "n", "false", "0", "off", "not offered"].indexOf(s) >= 0) return { ok: true, value: false };
+  return { ok: false, error: "Yes or no" };
+}
+
+// The selected boxes as text, as drawn (plan 3.10, Ctrl/Cmd+C; and the top row a fill copies down):
+// the size's label, the price as a plain number ("4800.5", never "$4,800.50", so a sheet reads it as
+// a number), Offered as yes/no, an option's included quantity, and "" for a blank price or an option
+// not included. `ids` are size ids in drawn order; c0..c1 the columns, Size included.
+function ssPgSelectionBlock(view, ids, c0, c1) {
+  const v = view || {}, q = v.q || {}, cols = v.cols || [];
+  const label = {};
+  (v.rows || []).forEach((r) => { if (r.kind === "size") label[r.id] = r.size.label; });
+  return (ids || []).map((id) => {
+    const s = q.sizes ? q.sizes[id] : null, fs = q.fields ? q.fields[id] : null;
+    const shown = (f) => { const x = fs && fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
+    const out = [];
+    for (let c = c0; c <= c1; c++) {
+      if (c === 0) out.push(label[id] == null ? "" : String(label[id]));
+      else if (c === 1) { const p = shown("price"); out.push(p == null ? "" : String(p)); }
+      else if (c === 2) out.push(shown("active") && shown("price") != null ? "yes" : "no");
+      else { const col = cols[c - 3]; const n = col ? Number(shown("c:" + col.key)) || 0 : 0; out.push(n > 0 ? String(n) : ""); }
+    }
+    return out;
+  });
+}
+
+// THE VALUE CHECK of a paste, a fill or a clear (plan 3.9, 3.11): every target box is judged before
+// anything changes, ALL OR NOTHING. `targets`: [{ id, n (its row in the block, from 1), cells:
+// [{ col, text }] in column order }]. Each box follows the rules typing does:
+//   Price     the importer's number rule (ssPgParsePrice); under Real-Time Pricing the box is locked.
+//   Offered   yes/no (ssPgParseOffered). It can be ticked only on a size with a price: one with none
+//             on file that gets its first price in this very block is accepted and nothing is sent
+//             for it, because the server ticks Offered with a first price (plan 3.9); one left with no
+//             price is "Add a price first."
+//   An option a whole number from 0 to 999,999; blank is 0 (not included).
+//   A value equal to what is STORED is always accepted, and a box whose value as drawn already says
+//   it is no change at all.
+// One failure refuses everything, naming the first problem in reading order and counting the rest:
+// "Row 3 (Test Barn 10x16), Loft: 'abc' isn't a whole number. 2 more problems." (opts.byRow; a fill
+// or a clear names the size alone: "Test Barn 10x16, Loft: …"). → { ok: true, edits: [{ sizeId, f,
+// value, seen }], sizes } or { ok: false, error, problems }. `seen` is the box as drawn now, for the
+// queue's check that nothing moved it before the edit lands (a confirm can be open meanwhile).
+// `sizes` is one entry per size that changes, in drawn order, for the confirm (ssPgChangeSummary):
+// { id, name, prices, options, offered, wasShown, nowShown }; shown = offered in the designer.
+function ssPgPlanCells(view, targets, opts) {
+  const v = view || {}, o = opts || {}, q = v.q || {}, cols = v.cols || [];
+  const byId = {};
+  (v.rows || []).forEach((r) => { if (r.kind === "size") byId[r.id] = r; });
+  const quote = (t) => { const s = String(t == null ? "" : t); return "'" + (s.length > 30 ? s.slice(0, 29) + "…" : s) + "'"; };
+  const colName = (c) => (c === 1 ? "Price" : c === 2 ? "Offered" : cols[c - 3] ? cols[c - 3].label : "");
+  const edits = [], sizes = [];
+  let first = null, problems = 0;
+  (targets || []).forEach((t) => {
+    const r = byId[t.id], s = q.sizes ? q.sizes[t.id] : null, fs = q.fields ? q.fields[t.id] : null;
+    const where = r ? `${r.style.label} ${r.size.label}` : "A size";
+    const bad = (c, what) => {
+      problems++;
+      if (!first) first = `${o.byRow ? `Row ${t.n} (${where})` : where}${c != null ? `, ${colName(c)}` : ""}: ${what}`;
+    };
+    if (!r || !s) { bad(null, "that size isn't on this account any more."); return; }
+    const shown = (f) => { const x = fs && fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
+    const before = { price: shown("price"), active: !!shown("active") };
+    let price = before.price, activeTo;
+    let prices = 0, options = 0, offered = 0;
+    const mine = [];
+    (t.cells || []).forEach((cell) => {
+      const c = cell.col, text = cell.text;
+      if (c === 1) {
+        const stored = ssPgVal(s, "price");
+        const p = ssPgParsePrice(text, stored);
+        if (v.rtp && !(p.ok && ssPgSame(p.value, stored))) { bad(c, "Real-Time Pricing sets prices on this account."); return; }
+        if (!p.ok) { bad(c, `${quote(text)} isn't a number of 0 or more.`); return; }
+        price = p.value;
+        if (!ssPgSame(p.value, before.price)) { mine.push({ sizeId: t.id, f: "price", value: p.value, seen: before.price }); prices++; }
+      } else if (c === 2) {
+        const p = ssPgParseOffered(text);
+        if (!p.ok) { bad(c, `${quote(text)} isn't yes or no.`); return; }
+        // Ticked with no price after this row: the server would refuse it (and untick it anyway).
+        if (p.value && price == null && !ssPgSame(p.value, before.active)) { bad(c, "Add a price first."); return; }
+        // A first price ticks Offered on the server: nothing to send for it.
+        if (p.value && !ssPgSame(p.value, ssPgVal(s, "active")) && s.price == null) return;
+        if (!ssPgSame(p.value, before.active)) { mine.push({ sizeId: t.id, f: "active", value: p.value, seen: before.active }); activeTo = p.value; offered++; }
+      } else if (c >= 3) {
+        const col = cols[c - 3];
+        if (!col) { bad(c, "there's no box there."); return; }
+        const f = "c:" + col.key;
+        const p = ssPgParseQty(text, ssPgVal(s, f));
+        if (!p.ok) {
+          bad(c, /^\d+$/.test(String(text == null ? "" : text).replace(/[$,\s]/g, "")) ? `${quote(text)} is more than 999,999.` : `${quote(text)} isn't a whole number.`);
+          return;
+        }
+        const was = Number(shown(f)) || 0;
+        if (!ssPgSame(p.value, was)) { mine.push({ sizeId: t.id, f, value: p.value, seen: was }); options++; }
+      }
+    });
+    if (!mine.length) return;
+    mine.forEach((d) => edits.push(d));
+    // Offered in the designer before and after: the server ticks Offered when a size with no price on
+    // file gets one, unless Offered itself was sent.
+    let active = activeTo !== undefined ? activeTo : before.active;
+    if (activeTo === undefined && s.price == null && price != null) active = true;
+    sizes.push({ id: t.id, name: where, prices, options, offered, wasShown: before.active && before.price != null, nowShown: active && price != null });
+  });
+  if (problems) return { ok: false, error: `${first}${problems > 1 ? ` ${problems - 1} more ${problems === 2 ? "problem" : "problems"}.` : ""}`, problems };
+  return { ok: true, edits, sizes };
+}
+
+// PASTE (plan 3.11): `block` (ssPgParseTsv) laid over the drawn rows and columns, its top-left box at
+// `at` ({ sizeId, col }). Refused BEFORE ANY VALUE IS CHECKED when its rows cross a style's band or a
+// placeholder row ("Paste one style at a time."), skip a size folded away by "Show hidden sizes"
+// (counted), run past the last row or column, start on the Size column, or hold more than `max`
+// (20,000) boxes. Then every box goes through ssPgPlanCells, all or nothing; a box missing from the
+// end of a short row is left as it is, and an empty cell inside a row clears its box. `opts.verb`:
+// "paste", or "fill" (ssPgFillPlan, whose block starts on the row it copies). → ssPgPlanCells' answer
+// plus `area` ({ first, last, c0, c1 }: the sizes and columns it covers), or { ok: false, error }.
+function ssPgPastePlan(view, at, block, opts) {
+  const v = view || {}, o = opts || {};
+  const rows = v.rows || [], b = Array.isArray(block) ? block : [];
+  const fill = o.verb === "fill";
+  const ncols = 3 + (v.cols || []).length;
+  const max = Number(o.max) > 0 ? Number(o.max) : 20000;
+  const fmt = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const no = (error) => ({ ok: false, error });
+  if (!b.length) return no("There's nothing to paste.");
+  const start = at ? rows.findIndex((r) => r.kind === "size" && r.id === at.sizeId) : -1;
+  if (start < 0) return no("Click the box where the paste should start.");
+  const style = rows[start].style;
+  const pos = {};
+  (style.sizes || []).forEach((z, i) => { pos[z.id] = i; });
+  const ids = [];
+  let folded = 0, past = false;
+  for (let i = 0; i < b.length; i++) {
+    const r = rows[start + i];
+    if (!r) { past = true; break; }
+    if (r.kind !== "size" || r.style.id !== style.id) return no(fill ? "Fill down one style at a time." : "Paste one style at a time.");
+    if (ids.length && pos[r.id] != null && pos[ids[ids.length - 1]] != null) folded += Math.max(0, pos[r.id] - pos[ids[ids.length - 1]] - 1);
+    ids.push(r.id);
+  }
+  if (folded) return no(`Show hidden sizes first. ${fill ? "Filling down" : "This block"} would skip ${folded === 1 ? "1 hidden size" : `${folded} hidden sizes`}.`);
+  if (past) return no("This block runs past the last size.");
+  const width = b.reduce((w, r) => Math.max(w, r.length), 0);
+  const col = Number(at.col) || 0;
+  if (col + width > ncols) return no("This block runs past the last column.");
+  if (col === 0) return no("The Size column can't be pasted into. Start on a price or an option box.");
+  const cells = b.reduce((n, r) => n + r.length, 0);
+  if (cells > max) return no(fill ? `That's ${fmt(cells)} boxes. Fill down at most ${fmt(max)} at a time.` : `This block has ${fmt(cells)} boxes. Paste at most ${fmt(max)} at a time.`);
+  const targets = ids.map((id, i) => ({ id, n: i + 1, cells: b[i].map((text, j) => ({ col: col + j, text })) }));
+  const plan = ssPgPlanCells(v, targets, { byRow: !fill });
+  return plan.ok ? { ...plan, area: { first: ids[0], last: ids[ids.length - 1], c0: col, c1: col + width - 1 } } : plan;
+}
+
+// FILL DOWN (plan 3.10-3.11, Ctrl/Cmd+D and the toolbar's Fill down): the selection's top row copied
+// into the rows under it, the way a sheet does it; a selection one row tall takes the size drawn
+// right above it. The Size column is never filled. Same rules as a paste (ssPgPastePlan, verb
+// "fill"): one style at a time, never across a folded hidden size, all or nothing.
+function ssPgFillPlan(view, sel, opts) {
+  const v = view || {}, order = v.order || [], rows = v.rows || [];
+  if (!sel || !order[sel.r0]) return { ok: false, error: "Click a box first." };
+  const c0 = Math.max(1, sel.c0), c1 = sel.c1;
+  if (c1 < c0) return { ok: false, error: "A size's width and length can't be changed here." };
+  const one = sel.r1 <= sel.r0;
+  const src = one ? sel.r0 - 1 : sel.r0;
+  if (one) {
+    const at = rows.findIndex((r) => r.kind === "size" && r.id === order[sel.r0]);
+    const above = at > 0 ? rows[at - 1] : null;
+    if (src < 0 || at < 0 || !above || above.kind !== "size" || above.style.id !== rows[at].style.id) {
+      return { ok: false, error: `There's no size above this one in ${at >= 0 ? rows[at].style.label : "this style"} to fill down from.` };
+    }
+  }
+  const top = ssPgSelectionBlock(v, [order[src]], c0, c1)[0];
+  const block = [];
+  for (let i = src; i <= Math.max(sel.r0, sel.r1); i++) block.push(top);
+  return ssPgPastePlan(v, { sizeId: order[src], col: c0 }, block, { verb: "fill", max: opts && opts.max });
+}
+
+// CLEAR (plan 3.10, Delete or Backspace on a range, and the toolbar's Clear): every selected box
+// emptied: a blank price (the size is then hidden), Offered unticked, an option not included. Across
+// styles too (only the drawn rows are selected, so a folded size is never touched); the Size column
+// is never cleared. All or nothing like a paste: under Real-Time Pricing a price on file is locked.
+function ssPgClearPlan(view, sel, opts) {
+  const v = view || {}, order = v.order || [];
+  if (!sel || !order[sel.r0]) return { ok: false, error: "Click a box first." };
+  const c0 = Math.max(1, sel.c0), c1 = sel.c1;
+  if (c1 < c0) return { ok: false, error: "A size's width and length can't be changed here." };
+  const max = opts && Number(opts.max) > 0 ? Number(opts.max) : 20000;
+  const n = (sel.r1 - sel.r0 + 1) * (c1 - c0 + 1);
+  if (n > max) return { ok: false, error: `That's ${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} boxes. Clear at most ${String(max).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} at a time.` };
+  const targets = [];
+  for (let i = sel.r0; i <= sel.r1; i++) {
+    const cells = [];
+    for (let c = c0; c <= c1; c++) cells.push({ col: c, text: "" });
+    targets.push({ id: order[i], n: i - sel.r0 + 1, cells });
+  }
+  return ssPgPlanCells(v, targets, { byRow: false });
+}
+
+// THE CONFIRM'S QUESTION (plan 3.12), from ssPgPlanCells' `sizes`: any paste, fill or clear that
+// changes boxes on MORE THAN ONE size asks first, naming the first and last size and counting what
+// changes: "Change 6 sizes, Test Barn 10x12 to Test Barn 12x24: 6 prices, 2 sizes hidden from your
+// designer, 14 included options. Continue?" A size that a first price puts in the designer is counted
+// too. One size never asks (`ask` false, `text` ""), as typing in a box never does.
+function ssPgChangeSummary(sizes) {
+  const list = (Array.isArray(sizes) ? sizes : []).filter(Boolean);
+  const sum = (k) => list.reduce((n, z) => n + (Number(z[k]) || 0), 0);
+  const prices = sum("prices"), options = sum("options");
+  const hidden = list.filter((z) => z.wasShown && !z.nowShown).length;
+  const shown = list.filter((z) => !z.wasShown && z.nowShown).length;
+  const n = (k, one, many) => (k === 1 ? `1 ${one}` : `${String(k).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} ${many}`);
+  const parts = [];
+  if (prices) parts.push(n(prices, "price", "prices"));
+  if (hidden) parts.push(n(hidden, "size hidden from your designer", "sizes hidden from your designer"));
+  if (shown) parts.push(n(shown, "size now offered in your designer", "sizes now offered in your designer"));
+  if (options) parts.push(n(options, "included option", "included options"));
+  const ask = list.length > 1;
+  const text = ask ? `Change ${n(list.length, "size", "sizes")}, ${list[0].name} to ${list[list.length - 1].name}${parts.length ? ": " + parts.join(", ") : ""}. Continue?` : "";
+  return { ask, sizes: list.length, prices, hidden, shown, options, text };
 }
 
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
