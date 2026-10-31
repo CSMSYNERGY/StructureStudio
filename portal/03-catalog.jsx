@@ -5709,7 +5709,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
           and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
           included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
           (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
-          A price of <b>0</b> doesn't hide a size: it shows in your designer as free. {SS_PG_SHEET_ROW}
+          A price of <b>0</b> doesn't hide a size: it shows in your designer as free. {SS_PG_SHEET_ROW}{" "}
           The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
           built-in items — so you can set how many of a specific catalog item come included with each size.
           {" "}<b>Changed numbers in the table? Download a fresh template before you use Excel again.</b>

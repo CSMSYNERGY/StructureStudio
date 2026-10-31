@@ -3852,7 +3852,7 @@ if (want("Z")) {
   await page.waitForSelector("text=Open sizes & prices table", { timeout: 20000 });
   const steps = await page.evaluate(() => [...document.querySelectorAll("p")].map((p) => p.textContent).find((x) => /Using Excel:/.test(x)) || "");
   ok("Z: the Excel instructions say $0 is free, and that deleting a row in the sheet doesn't delete the size",
-    steps.includes(`A blank price — or active = no — hides that size from your designer. A price of 0 doesn't hide a size: it shows in your designer as free. ${SHEET_ROW}`),
+    steps.includes(`A blank price — or active = no — hides that size from your designer. A price of 0 doesn't hide a size: it shows in your designer as free. ${SHEET_ROW} The option columns include`),
     steps.slice(steps.indexOf("A blank price"), steps.indexOf("A blank price") + 260));
   const upload = async (csv) => {
     const from = calls.length;

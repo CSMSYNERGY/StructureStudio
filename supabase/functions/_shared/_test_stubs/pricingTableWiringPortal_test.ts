@@ -611,7 +611,8 @@ Deno.test("the $0 note on Sheds: the upload counts the sheet's $0 sizes from the
   assert(up.includes(`free in your designer. \``) && up.includes(`"To hide a size, leave its price blank or put no in the active column. " + SS_PG_SHEET_ROW });`));
   assert(csv.includes(`{xlMsg && xlMsg.ok && xlMsg.zero && <div data-ss-xl-msg="zero" style={{ ...warnStyle, marginTop: 8, marginBottom: 0 }}>{xlMsg.zero}</div>}`),
     "only under a result that went through");
-  assert(csv.includes("A price of <b>0</b> doesn't hide a size: it shows in your designer as free. {SS_PG_SHEET_ROW}"), "the Excel instructions say it too, and how to delete a size");
+  assert(csv.includes(`A price of <b>0</b> doesn't hide a size: it shows in your designer as free. {SS_PG_SHEET_ROW}{" "}\n          The option columns include`),
+    "the Excel instructions say it too, and how to delete a size, with a space before the next sentence (JSX drops a line break after {…})");
 });
 
 Deno.test("the delete on Sheds: a sheet that adds sizes not in the table asks before it is sent, counted against a fresh read; the importer is untouched", () => {
