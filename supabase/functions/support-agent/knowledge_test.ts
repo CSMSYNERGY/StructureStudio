@@ -46,13 +46,21 @@ Deno.test("the prices answer fits in six lines of faq.md", async () => {
   assert(n >= 2 && n <= 6, `the prices answer is ${n} lines: keep it to 2-6`);
 });
 
-// The table (Pricing Table 2026-10-30) adds no sizes until its "＋ Add sizes" ships, so a new row in
-// the Excel template is how a size is added, and the answer must say how to write one. Real-Time
-// Pricing locks the table's Price column (PgHeader in portal/03-catalog.jsx) and migration 350
-// refuses a price while it is on, so the answer must not leave "type each size's price" unqualified.
-Deno.test("the prices answer says how to add a size, and that RealTime Pricing locks the Price column", async () => {
+// The table adds sizes itself now (Pricing Table phase 4a, 2026-10-31): its band button, quoted exactly
+// as PgStyleBand in portal/03-catalog.jsx draws it, is the first way the answer gives, and a new row in
+// the Excel template the alternative, after both Excel buttons. Real-Time Pricing locks the table's
+// Price column (PgHeader) and migration 350 refuses a price while it is on, so the answer must not
+// leave "type each size's price" unqualified.
+Deno.test("the prices answer adds a size with the table's button first, Excel's new row after it, and says RealTime Pricing locks the Price column", async () => {
   const a = await faqAnswer("How do I set my prices?");
-  assert(/add a row to the template with its width and length/i.test(a), "how to add a size through Excel");
+  const portal = await Deno.readTextFile(new URL("../../../portal/03-catalog.jsx", import.meta.url));
+  assert(portal.includes(`aria-expanded={open}>＋ Add sizes</button>`), "the button the answer quotes is drawn with these exact words");
+  const button = a.indexOf(`press "＋ Add sizes" on the style`);
+  const excel = a.indexOf("Prefer Excel?");
+  const row = a.search(/a row with a new width and length \(in feet\) adds a size/);
+  assert(button > 0, "how to add a size in the table, quoting its button");
+  assert(excel > button && row > excel, "the Excel row comes after the table, as the alternative");
+  assert(a.includes(`"⬇ Download Excel template"`) && a.includes(`"⬆ Upload filled sheet"`), "both Excel buttons, as drawn");
   assert(/RealTime Pricing live, the Price column is locked/.test(a), "the Real-Time Pricing lock");
 });
 
