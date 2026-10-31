@@ -74,8 +74,17 @@
 //      in the order typed, saying "Adding…", the size already there named; a price typed meanwhile
 //      goes after the create's answer on its version; Offered greyed until priced. Add several: a
 //      tick-box grid, the sizes already there greyed, one unticked. A style with no sizes: the list
-//      box is already open. Remove goes through the queue (and one the server refuses keeps its row
-//      and says why). ?style= opens with the add box focused. A save in another tab re-reads both
+//      box is already open. Every size has a ✕ (the delete plan, 10-31): on a size never priced or
+//      edited it sends its id at once through the queue (one the server refuses keeps its row and
+//      says it was changed elsewhere, never migration 350's sentence; its next ✕ asks first); on a
+//      priced size it asks first (the exact question, Cancel focused and sending nothing, a red
+//      Delete; Enter cancels, Tab then Enter deletes, Escape cancels) and sends one { id, base }, the
+//      row reading "Deleting…" over its price, then gone, the status line "Deleted …". A size saved
+//      designs use has a greyed ✕ (opacity .35, no red under the pointer) whose title and click say
+//      how to hide it (offered; already hidden with Show hidden sizes on; with it off), sending
+//      nothing, and replacing an earlier "Deleted …" line. A red box goes with its size; a size saved
+//      designs start using meanwhile stays, says so, and is greyed by the re-read.
+//      ?style= opens with the add box focused. A save in another tab re-reads both
 //      tables after 1 s (a new column, a new style, a new number); the page's own saves and another
 //      account's do not; the same-window "ss:settings-saved" event from another source does, and so
 //      does coming back to the tab. An Excel upload in the Sheds tab turns a box
@@ -122,7 +131,15 @@
 //      counts them; a one-row fill names its size. A view-only page never shows it. On Sheds, an
 //      upload whose sheet prices sizes at $0 ("$0", "0.00", "$0.00"; not "0" with active no, not a
 //      blank) says how many under the result, one without says nothing, and the Excel instructions
-//      say $0 is free.
+//      say $0 is free. The $0 note and both Excel texts also say how to delete a size (✕), and a sheet
+//      that adds sizes not in the table (counted against a fresh read, so a size deleted in the
+//      table since Sheds loaded counts) asks first: dismissed, nothing is sent.
+//   X  SEVERAL SIZES AT ONCE (the delete plan, 10-31), against fakeServer: Delete sizes before any
+//      box is clicked says so; on six rows with two in use the one confirm counts them, a box in
+//      flight is counted apart, and Delete on a Size-column range asks the same; 4 deleted and 2
+//      refused "used" is one amber line and the two rows stay; none can go says so; 60 sizes go in
+//      2 calls and say "Deleted 60 sizes."; the Excel template after a delete leaves them out; an
+//      operator's confirm names the account.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails if an arrow key re-renders a row or a
 //      commit re-renders more than the one it changed, and at 1x if the plan's targets are missed
@@ -313,6 +330,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // another → exists with existingId); otherwise inserted unpriced, not offered, at the end of its style
 // (max sort_order + 1), with updated_at = created_at. A remove takes only a size never priced or
 // edited with no inclusion row; one that exists nowhere is removed with gone.
+// The delete (migration 351, the delete plan 10-31): a remove is an id (350's rule word for word, its
+// refusal with no `code`) or { id, base }, checked in order: gone → removed + gone; updated_at not
+// `base` → refused "changed"; a Real-Time Pricing list (F.bom) → "bom"; saved designs use it (F.used,
+// the fake's designs) → "used"; else deleted, its row and boxes in the answer as they were. The
+// answer's id is the uuid for both. size_table carries `used`: the ids in F.used still on file.
 function fakeServer(cat, table) {
   let clock = 0;
   const ver = () => `2026-10-31T00:00:00.${String(++clock).padStart(6, "0")}+00:00`;
@@ -321,10 +343,11 @@ function fakeServer(cat, table) {
   table.inclusions.forEach((x) => { if (x.included) { if (!inc.has(x.size_id)) inc.set(x.size_id, {}); inc.get(x.size_id)[x.item_key] = Number(x.qty) || 1; } });
   const priceOf = (z) => (z.base_price == null ? null : Number(z.base_price));
   const F = {
-    script: [], refuse: [], delayMs: 0, rtp: !!table.rtpOn, bad: [], made: [],
+    script: [], refuse: [], delayMs: 0, rtp: !!table.rtpOn, bad: [], made: [], used: new Set(), bom: new Set(),
     table: (clientId) => ({ ok: true, clientId, rtpOn: F.rtp, styles: table.styles, sizes: [...sizes.values()].map((z) => ({ ...z })),
       inclusions: [...inc.entries()].flatMap(([id, c]) => Object.entries(c).map(([k, q]) => ({ size_id: id, item_key: k, included: true, qty: q }))),
-      counts: { sizes: sizes.size, inclusions: [...inc.values()].reduce((n, c) => n + Object.keys(c).length, 0) } }),
+      counts: { sizes: sizes.size, inclusions: [...inc.values()].reduce((n, c) => n + Object.keys(c).length, 0) },
+      used: [...F.used].filter((id) => sizes.has(id)) }),
     size: (id) => sizes.get(id),
     cells: (id) => ({ ...(inc.get(id) || {}) }),
     poke: (id, change) => {
@@ -338,6 +361,16 @@ function fakeServer(cat, table) {
     malformed: (body) => {
       const list = [...(body.creates || []), ...(body.removes || []), ...(body.sizes || [])];
       if (!list.length || list.length > 50) return "entries";
+      // removes[i] is a uuid or exactly { id: <uuid>, base: <version> }, each size named once.
+      const UU = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const seen = new Set();
+      for (const r of body.removes || []) {
+        const id = typeof r === "string" ? r : r && typeof r === "object" ? r.id : null;
+        if (!UU.test(String(id))) return "removes";
+        if (typeof r === "object" && (Object.keys(r).sort().join() !== "base,id" || typeof r.base !== "string" || !r.base)) return "removes";
+        if (seen.has(id)) return "removes";
+        seen.add(id);
+      }
       for (const s of body.sizes || []) {
         if (typeof s.base !== "string" || !s.from || !s.to) return "shape";
         if (("price" in s.to) !== ("price" in s.from) || ("active" in s.to) !== ("active" in s.from)) return "from/to";
@@ -362,11 +395,21 @@ function fakeServer(cat, table) {
         F.made.push(z.id);
         return { id: c.id, status: "created", version: v, row: rowOf(z), cells: {} };
       });
-      const removed = (body.removes || []).map((id) => {
+      const removed = (body.removes || []).map((e) => {
+        const id = typeof e === "string" ? e : e.id;
         const z = sizes.get(id);
         if (!z) return { id, status: "removed", gone: true };
-        if (z.base_price == null && z.updated_at === z.created_at && !Object.keys(inc.get(id) || {}).length) { sizes.delete(id); inc.delete(id); return { id, status: "removed" }; }
-        return { id, status: "refused", reason: "Only a size that was never priced or edited can be removed. Untick Offered to hide it." };
+        if (typeof e === "string") {
+          if (z.base_price == null && z.updated_at === z.created_at && !Object.keys(inc.get(id) || {}).length) { sizes.delete(id); inc.delete(id); return { id, status: "removed" }; }
+          return { id, status: "refused", reason: "Only a size that was never priced or edited can be removed. Untick Offered to hide it." };
+        }
+        if (z.updated_at !== e.base) return { id, status: "refused", code: "changed", reason: "This size was changed since it was read." };
+        if (F.bom.has(id)) return { id, status: "refused", code: "bom", reason: "This size has a Real-Time Pricing materials list." };
+        if (F.used.has(id)) return { id, status: "refused", code: "used", reason: "Saved designs use this size." };
+        const out = { id, status: "removed", row: rowOf(z), cells: F.cells(id) };
+        sizes.delete(id);
+        inc.delete(id);
+        return out;
       });
       const results = (body.sizes || []).map((e) => {
         const z = sizes.get(e.id);
@@ -430,6 +473,7 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
   const errors = [];
   const logs = [];      // every log_error row the page wrote (the stub keeps them here)
   const dialogs = [];   // the type of every dialog the page raised (beforeunload included), each dismissed
+  const asked = [];     // the Excel upload's own ask ("This sheet adds N sizes…"): accepted, unless S.sheetAsk is "dismiss"
   await ctx.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
   const handler = async (route) => {
     const req = route.request();
@@ -513,9 +557,20 @@ async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
   const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
   page.on("console", (m) => { if (m.type() === "error" && /Minified React error|#310|Rendered more hooks/.test(m.text())) errors.push(m.text()); });
-  page.on("dialog", (d) => { dialogs.push(d.type()); d.dismiss().catch(() => {}); });
+  // Every dialog is dismissed, except the Sheds card's pre-send ask for a sheet that adds sizes (the
+  // delete plan, 10-31), which is answered by its text: accepted, so the upload cases that add sizes
+  // still upload, or dismissed when S.sheetAsk says so.
+  page.on("dialog", (d) => {
+    if (d.type() === "confirm" && /^This sheet adds \d+ sizes? that (isn't|aren't) in your table/.test(d.message())) {
+      asked.push(d.message());
+      (S.sheetAsk === "dismiss" ? d.dismiss() : d.accept()).catch(() => {});
+      return;
+    }
+    dialogs.push(d.type());
+    d.dismiss().catch(() => {});
+  });
   if (path) await page.goto(`${BASE}${path}`);
-  return { ctx, page, calls, errors, S, logs, dialogs };
+  return { ctx, page, calls, errors, S, logs, dialogs, asked };
 }
 const tableCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && (c.action === "size_table" || (c.action === "catalog" && "targetClientId" in c.body)));
 const waitGrid = (page, timeout = 20000) => page.waitForSelector(".ss-pg-grid tbody tr", { timeout });
@@ -1639,8 +1694,9 @@ if (want("P")) {
 // is missing or disabled raises nothing). Every control the page draws is listed, first on the same
 // rows while the page can edit, so the list is known to catch an edit control, then view-only: what
 // is left must be a subset with no edit control in it, and every one of them is then used, Back to
-// Sheds last, with no save call. The rows carry a size added by mistake (Remove is drawn for it while
-// the page can edit) and a style with no sizes (its add strip, while the page can edit).
+// Sheds last, with no save call. The rows carry a size added by mistake (a ✕ is drawn for it, as for
+// every size, while the page can edit), Delete sizes on the toolbar, and a style with no sizes (its
+// add strip, while the page can edit).
 const REMOVABLE = uid("7", 900);
 const withRemovable = (t) => ({ ...t,
   sizes: [...t.sizes, { id: REMOVABLE, style_id: t.styles[0].id, label: "20x40", width_ft: 20, length_ft: 40, base_price: null, active: false, sort_order: 99,
@@ -1663,7 +1719,7 @@ const controlsOf = (page) => page.evaluate(() => {
       return `${kind}:${name.trim().replace(/\s+/g, " ").slice(0, 48)}${el.disabled ? " (disabled)" : ""}`;
     });
 });
-const EDIT_CONTROL = /^(strip-|textarea|input-text|input-number)|:(＋ Add sizes|Remove size .+|Fill down|Clear|Save them)$/;
+const EDIT_CONTROL = /^(strip-|textarea|input-text|input-number)|:(＋ Add sizes|Delete size .+|Delete sizes|Fill down|Clear|Save them)$/;
 let editableControls = null;
 if (want("P")) {
   const cat = catalogFor(OWN);
@@ -1673,9 +1729,11 @@ if (want("P")) {
   await page.locator(sel(barnOf(F.table(OWN))[0].id, 1)).click();
   editableControls = await controlsOf(page);
   const edits = [...new Set(editableControls.filter((c) => EDIT_CONTROL.test(c)))];
-  ok("P: (set-up) while it can edit, the page draws its edit controls: ＋ Add sizes on every band, Remove on the size added by mistake, the empty style's list box, Fill down and Clear",
-    editableControls.filter((c) => c === "button:＋ Add sizes").length === F.table(OWN).styles.length && edits.includes("button:Remove size 20x40") && edits.some((c) => /^strip-textarea/.test(c))
-    && edits.includes("button:Fill down") && edits.includes("button:Clear"), `${editableControls.filter((c) => c === "button:＋ Add sizes").length} × Add sizes; ${JSON.stringify(edits)}`);
+  ok("P: (set-up) while it can edit, the page draws its edit controls: ＋ Add sizes on every band, a ✕ on every size drawn (the size added by mistake too), the empty style's list box, Fill down, Clear and Delete sizes",
+    editableControls.filter((c) => c === "button:＋ Add sizes").length === F.table(OWN).styles.length && edits.includes("button:Delete size 20x40") && edits.some((c) => /^strip-textarea/.test(c))
+    && edits.includes("button:Fill down") && edits.includes("button:Clear") && edits.includes("button:Delete sizes")
+    && editableControls.filter((c) => /^button:Delete size \d/.test(c)).length === await page.evaluate(() => document.querySelectorAll(".ss-pg-grid tr[data-s]").length),
+    `${editableControls.filter((c) => c === "button:＋ Add sizes").length} × Add sizes; ${JSON.stringify(edits.filter((c) => !/^button:Delete size \d/.test(c)))}`);
   ok("P: no page errors (the editable control count)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
@@ -1693,7 +1751,7 @@ for (const [what, path, S0] of want("P") ? [
   await page.locator(sel(z.id, 1)).click();
   const controls = await controlsOf(page);
   const kinds = [...new Set(controls)];
-  ok(`P: view-only (${what}): every control drawn is one the editable page draws too, and none of them edits (no Add sizes, Remove, list box, Fill down, Clear, editor)`,
+  ok(`P: view-only (${what}): every control drawn is one the editable page draws too, and none of them edits (no Add sizes, ✕, list box, Fill down, Clear, Delete sizes, editor)`,
     !!editableControls && kinds.length > 0 && kinds.every((c) => editableControls.includes(c)) && !kinds.some((c) => EDIT_CONTROL.test(c))
     && !controls.some((c) => / \(disabled\)$/.test(c)), JSON.stringify(kinds));
   // Each control left is then used. Back to Sheds (the link) goes last, below.
@@ -1733,6 +1791,12 @@ for (const [what, path, S0] of want("P") ? [
   await page.locator(sel(z.id, 2)).click();
   await page.keyboard.press("Space"); await note("Space on Offered");
   await page.locator(sel(z.id, 2)).click(); await note("click Offered again");
+  // The delete's keys: Delete on a Size box, and on a range wholly in the Size column. No confirm.
+  await page.locator(sel(z.id, 0)).click();
+  await page.keyboard.press("Delete"); tries.push(`Delete on a Size box:${(await confirmOf(page)) ? 1 : 0}`);
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Delete"); tries.push(`Delete on a Size range:${(await confirmOf(page)) ? 1 : 0}`);
+  await page.keyboard.press("Escape");
   // The clipboard's and the range's ways in (section V3 tries them on a view-only access map).
   if (what === "?as=") {
     await page.locator(sel(z.id, 1)).click();
@@ -2116,7 +2180,8 @@ async function tabOf(ctx, path) {
   const errs = [];
   p.on("pageerror", (e) => errs.push(e.message));
   p.on("console", (m) => { if (m.type() === "error" && /Minified React error|#310|Rendered more hooks/.test(m.text())) errs.push(m.text()); });
-  p.on("dialog", (d) => d.dismiss().catch(() => {}));
+  // As open(): the Sheds card's ask for a sheet that adds sizes is accepted, every other dialog dismissed.
+  p.on("dialog", (d) => ((d.type() === "confirm" && /^This sheet adds \d+ sizes? that/.test(d.message())) ? d.accept() : d.dismiss()).catch(() => {}));
   await p.goto(`${BASE}${path}`);
   return { p, errs };
 }
@@ -2187,22 +2252,27 @@ if (want("R")) {
     !!z20 && !!z24 && z20.sort_order === maxSort + 1 && z24.sort_order === maxSort + 2 && z20.base_price === 3000 && z20.active === true && z24.label === "14x24", JSON.stringify([z20, z24]));
   rows = await bandRows(page, barn.id);
   const r20 = rows.find((r) => r.id === (z20 || {}).id), r24 = rows.find((r) => r.id === (z24 || {}).id);
-  ok("R: answered: no more 'Adding…'; the unpriced new size has Offered greyed ('Add a price to offer it') and a Remove",
+  ok("R: answered: no more 'Adding…'; the unpriced new size has Offered greyed ('Add a price to offer it') and a ✕",
     !!r24 && !r24.wait && /ss-pg-dis/.test(r24.off) && r24.offTitle === "Add a price to offer it" && r24.rm, JSON.stringify(r24));
-  ok("R: …the priced one has none, nor does any size the server had already (edited since it was added)",
-    !!r20 && !r20.rm && rows.filter((r) => r.id && before.some((z) => z.id === r.id)).every((r) => !r.rm), JSON.stringify(rows.map((r) => [r.label, r.rm])));
+  ok("R: …and so does every other size on the page that can edit: the priced one, and every size the server had already",
+    !!r20 && r20.rm && rows.filter((r) => r.id).every((r) => r.rm) && (await page.evaluate(() => [...document.querySelectorAll(".ss-pg-grid tr[data-s]")].every((tr) => !!tr.querySelector(".ss-pg-rm")))),
+    JSON.stringify(rows.map((r) => [r.label, r.rm])));
   await page.screenshot({ path: join(shots, "R-added.png") });
 
-  // Remove: through the queue, sent at once; the row goes with the answer.
+  // The ✕ on a size added by mistake (never priced or edited): no confirm, its id through the queue, sent
+  // at once; the row goes with the answer, and the status line says so.
   n0 = saveCalls(calls).length;
   await page.locator(`tr[data-s="${z24.id}"] .ss-pg-rm`).click();
+  const noAsk = !(await confirmOf(page));
   const went = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), z24.id, { timeout: 10000 }).then(() => true, () => false);
   const rc = saveCalls(calls).slice(n0);
-  ok("R: Remove sends one remove, and the row goes once it is answered; the size is gone from the server",
-    went && rc.length === 1 && JSON.stringify(rc[0].body.removes) === JSON.stringify([z24.id]) && !rc[0].body.creates.length && !rc[0].body.sizes.length && !F.size(z24.id),
+  ok("R: the ✕ on a size never priced or edited asks nothing, sends its id alone, and the row goes once it is answered; the size is gone from the server",
+    noAsk && went && rc.length === 1 && JSON.stringify(rc[0].body.removes) === JSON.stringify([z24.id]) && !rc[0].body.creates.length && !rc[0].body.sizes.length && !F.size(z24.id),
     JSON.stringify(rc.map((c) => c.body)));
-  // A remove the server refuses (the size was changed elsewhere since): the row stays, the status line
-  // says why, and a fresh read takes its Remove away.
+  ok("R: …and the status line says it went", (await statusText(page)) === "Deleted Test Barn 14x24.", await statusText(page));
+  // A plain id the server refuses (the size was changed elsewhere since this page read it): the row
+  // stays, the status line says it was changed elsewhere (never migration 350's sentence, which
+  // contradicts the ✕), and after the re-read its ✕ asks first and sends { id, base }.
   await page.locator(`tr[data-band="${barn.id}"] .ss-pg-addbtn`).click();
   await page.locator(`${strip} textarea`).fill("16x40");
   n0 = saveCalls(calls).length;
@@ -2210,13 +2280,20 @@ if (want("R")) {
   await saved(page, calls, n0, 1);
   const r40 = (await bandRows(page, barn.id)).find((r) => r.label === "16x40");
   F.script.push({ before: (FF) => FF.poke(r40.id, {}) });
+  n0 = saveCalls(calls).length;
   await page.locator(`tr[data-s="${r40.id}"] .ss-pg-rm`).click();
-  await page.waitForFunction(() => /Only a size that was never priced or edited can be removed/.test([...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" ")), null, { timeout: 10000 }).catch(() => {});
+  await page.waitForFunction(() => /changed elsewhere/.test([...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" ")), null, { timeout: 10000 }).catch(() => {});
   s = await state(page);
   const stays = !!(await page.$(`tr[data-s="${r40.id}"]`));
-  const rmGone = await page.waitForFunction((id) => { const tr = document.querySelector(`tr[data-s="${id}"]`); return !!tr && !tr.querySelector(".ss-pg-rm"); }, r40.id, { timeout: 8000 }).then(() => true, () => false);
-  ok("R: a remove the server refuses keeps the row and says why; the re-read then takes its Remove away",
-    stays && s.status.includes("Only a size that was never priced or edited can be removed. Untick Offered to hide it.") && rmGone && !!F.size(r40.id), s.status);
+  const sentId = (saveCalls(calls).slice(n0)[0] || { body: {} }).body.removes;
+  ok("R: a plain id the server refuses keeps the row and says it was changed elsewhere, never the 350 sentence",
+    stays && JSON.stringify(sentId) === JSON.stringify([r40.id]) && s.status === "Test Barn 16x40 was changed elsewhere, so it wasn't deleted. Check it, then delete it again."
+    && !/never priced or edited/.test(s.status) && !!F.size(r40.id), JSON.stringify({ status: s.status, sentId }));
+  await page.waitForTimeout(1500);   // the re-read brings its new version
+  await page.locator(`tr[data-s="${r40.id}"] .ss-pg-rm`).click();
+  const cf40 = await confirmOf(page);
+  ok("R: …after the re-read its ✕ asks first", !!cf40 && /^Delete Test Barn 16x40\?/.test(cf40.text), JSON.stringify(cf40));
+  await page.keyboard.press("Escape");
   await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 3000 }).catch(() => {});
 
   // Add several: widths × lengths, a tick-box grid, sizes already there greyed, one unticked.
@@ -2282,10 +2359,11 @@ for (const which of want("R") ? ["empty", "sized"] : []) {
   await ctx.close();
 }
 
-// R1b: the keyboard's ways to "＋ Add sizes" and to Remove (the band's button and the ✕ sit past every
-// box Tab moves through): Alt+Enter on a size opens its style's strip, Delete on a Size box removes a
-// size added by mistake. The ring stays on its box while the strip above it grows (Add several, its
-// tick-box grid). A size whose Remove is out takes no edit, and says why.
+// R1b: the keyboard's ways to "＋ Add sizes" and to the ✕ (the band's button and the ✕ sit past every
+// box Tab moves through): Alt+Enter on a size opens its style's strip, Delete on a Size box deletes a
+// size added by mistake at once, and asks first for a priced one (the focus on Cancel: Enter cancels,
+// Escape cancels, Tab then Enter deletes). The ring stays on its box while the strip above it grows
+// (Add several, its tick-box grid). A size being deleted takes no edit, and says why.
 if (want("R")) {
   const cat = catalogFor(OWN);
   const t0 = tableFor(OWN, cat);
@@ -2325,31 +2403,189 @@ if (want("R")) {
   await page.keyboard.press("Enter");
   await saved(page, calls, n0, 1);
   const added = (await bandRows(page, barn.id)).find((r) => r.label === "16x44") || { id: "missing" };
-  ok("R: (set-up) a size added by mistake, with its Remove", added.rm, JSON.stringify(added));
-  // Delete on its Size box: the keyboard's Remove, held a moment on the way so its row says Removing….
+  ok("R: (set-up) a size added by mistake, with its ✕", added.rm, JSON.stringify(added));
+  // Delete on its Size box: the keyboard's ✕, held a moment on the way so its row says Deleting….
   F.script.push({ delayMs: 1500 });
   await page.locator(sel(added.id, 0)).click({ timeout: 3000 }).catch(() => {});
   n0 = saveCalls(calls).length;
   await page.keyboard.press("Delete");
-  const out = await page.waitForFunction((id) => /Removing/.test((document.querySelector(`tr[data-s="${id}"]`) || {}).textContent || ""), added.id, { timeout: 4000 }).then(() => true, () => false);
-  // (Without the keyboard's Remove, the ✕ starts it, so the check below still runs.)
+  const out = await page.waitForFunction((id) => /Deleting…/.test((document.querySelector(`tr[data-s="${id}"]`) || {}).textContent || ""), added.id, { timeout: 4000 }).then(() => true, () => false);
+  // (Without the keyboard's ✕, the ✕ starts it, so the check below still runs.)
   if (!out) await page.locator(`tr[data-s="${added.id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
   await page.locator(sel(added.id, 1)).click({ timeout: 3000 }).catch(() => {});
   await page.keyboard.type("5");
-  const s = await state(page);
-  ok("R: a size being removed takes no typing: no editor, and the status line says why", !s.editor && s.status === "This size is being removed.", JSON.stringify(s));
+  let s = await state(page);
+  ok("R: a size being deleted takes no typing: no editor, and the status line says why", !s.editor && s.status === "This size is being deleted.", JSON.stringify(s));
   const gone = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), added.id, { timeout: 10000 }).then(() => true, () => false);
   const rc = saveCalls(calls).slice(n0);
-  ok("R: Delete on a Size box removes a size added by mistake, through the queue; nothing else went for it",
+  ok("R: Delete on a Size box deletes a size added by mistake at once, its id through the queue; nothing else went for it",
     out && gone && rc.length === 1 && JSON.stringify(rc[0].body.removes) === JSON.stringify([added.id]) && !rc[0].body.sizes.length && !F.size(added.id), JSON.stringify(rc.map((c) => c.body)));
-  // Delete on a priced size's Size box removes nothing, and says why.
+  // Delete on a priced size's Size box asks first, with the focus on CANCEL: Enter cancels, so Delete
+  // then Enter out of habit deletes nothing. Delete again, Tab, Enter deletes. Escape cancels too.
+  const name1 = `Test Barn ${z1.label}`;
+  const ask1 = `Delete ${name1}? Its price and included options go too, and you can't undo this. To sell it again later, add it with ＋ Add sizes.`;
   await page.locator(sel(z1.id, 0)).click();
   n0 = saveCalls(calls).length;
   await page.keyboard.press("Delete");
+  const cfA = await confirmOf(page);
+  const colours = await page.evaluate(() => {
+    const y = document.querySelector(".ss-pg-confirm .ss-pg-confirm-yes");
+    return y ? { text: y.textContent, bg: getComputedStyle(y).backgroundColor, del: y.classList.contains("ss-pg-confirm-del") } : null;
+  });
+  ok("R: Delete on a priced Size box asks first: the exact question, Cancel focused, a red Delete",
+    !!cfA && cfA.text === ask1 && cfA.focus === "Cancel" && cfA.modal === "true" && !!colours && colours.text === "Delete" && colours.del && colours.bg === "rgb(185, 28, 28)",
+    JSON.stringify({ cfA, colours }));
+  if (cfA) await page.locator(".ss-pg-confirm [role=alertdialog]").screenshot({ path: join(shots, "R-delete-confirm.png") }).catch(() => {});
+  await page.keyboard.press("Enter");
   await page.waitForTimeout(1200);
-  ok("R: …on a size that was priced or changed, it removes nothing and says why",
-    (await state(page)).status === "Only a size that was never priced or edited can be removed. Untick Offered to hide it." && saveCalls(calls).length === n0 && !!F.size(z1.id));
-  ok("R: no page errors (the keyboard's Add sizes and Remove)", errors.length === 0, errors.join(" | "));
+  ok("R: …Enter on it cancels: nothing is sent, the size stays", !(await confirmOf(page)) && saveCalls(calls).length === n0 && !!F.size(z1.id) && !!(await page.$(`tr[data-s="${z1.id}"]`)),
+    `${saveCalls(calls).length - n0} sent`);
+  await page.locator(sel(z1.id, 0)).click();
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+  ok("R: …Escape cancels as well", !(await confirmOf(page)) && saveCalls(calls).length === n0);
+  await page.locator(sel(z1.id, 0)).click();
+  await page.keyboard.press("Delete");
+  await page.keyboard.press("Tab");
+  const tabbed = await confirmOf(page);
+  const v1 = F.size(z1.id).updated_at;
+  await page.keyboard.press("Enter");
+  const gone1 = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), z1.id, { timeout: 10000 }).then(() => true, () => false);
+  const rd = saveCalls(calls).slice(n0);
+  s = await state(page);
+  ok("R: …Tab then Enter deletes: one call with exactly { id, base: its version }, the row goes, the status line says so",
+    !!tabbed && tabbed.focus === "Delete" && gone1 && rd.length === 1 && JSON.stringify(rd[0].body.removes) === JSON.stringify([{ id: z1.id, base: v1 }])
+    && !rd[0].body.sizes.length && !rd[0].body.creates.length && !F.size(z1.id) && s.status === `Deleted ${name1}.`, JSON.stringify({ tabbed, bodies: rd.map((c) => c.body), status: s.status }));
+  ok("R: no call was malformed (the keyboard's Add sizes and deletes)", F.bad.length === 0, F.bad.join());
+  ok("R: no page errors (the keyboard's Add sizes and deletes)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// R6: deleting a priced size (the delete plan, 10-31), against fakeServer as migration 351 answers.
+// A size saved designs use has a greyed ✕ (opacity .35, no red under the pointer) whose title and click
+// say how to hide it, in three ways: offered, already hidden with Show hidden sizes on, already hidden
+// with it off; nothing is sent. Any other priced size asks first (Cancel sends nothing), then sends one
+// { id, base }; its row reads "Deleting…" over the price and goes, and the status line says so. A
+// later click on a used ✕ replaces that line. A red box goes with its size. Saved designs that start
+// using a size meanwhile keep its row, say so, and the re-read greys its ✕.
+const UNCLR = "Saved designs use this size, so it can't be deleted. Untick Offered to hide it from your designer.";
+const UHID_ON = "It's already hidden from your designer. Saved designs use it, so it stays here. Turn off Show hidden sizes to fold it away.";
+const UHID_OFF = "It's already hidden from your designer. Saved designs use it, so it stays here. It folds away the next time you open this page.";
+const rmLook = (page, id, hover = false) => page.evaluate(async ([s, h]) => {
+  const b = document.querySelector(`tr[data-s="${s}"] .ss-pg-rm`);
+  if (!b) return null;
+  const cs = getComputedStyle(b);
+  return { off: b.getAttribute("aria-disabled"), title: b.title, label: b.getAttribute("aria-label"), opacity: cs.opacity, color: cs.color, bg: cs.backgroundColor, cursor: cs.cursor, hover: h };
+}, [id, hover]);
+const askDel = (z, rest = "") => `Delete Test Barn ${z.label}${rest}? Its price and included options go too, and you can't undo this. To sell it again later, add it with ＋ Add sizes.`;
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const t0 = tableFor(OWN, cat);
+  const F = fakeServer(cat, t0);
+  const b = barnOf(t0);
+  const [P, U, V, Rd, X, W] = [b[0], b[3], b[4], b[5], b[7], b[8]];
+  [U, V, W].forEach((z) => F.used.add(z.id));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 50 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  ok("R: (set-up) three offered, priced sizes saved designs use, and others nobody uses", [P, U, V, Rd, X, W].every((z) => z.base_price != null && z.active && z.base_price !== WIDE_PRICE),
+    JSON.stringify([P, U, V, Rd, X, W].map((z) => [z.label, z.base_price, z.active])));
+  // The greyed ✕: its look, its title, no red under the pointer.
+  const live = await rmLook(page, P.id);
+  let u = await rmLook(page, U.id);
+  await page.locator(`tr[data-s="${U.id}"] .ss-pg-rm`).hover();
+  const uh = await rmLook(page, U.id, true);
+  await page.locator(`tr[data-s="${P.id}"] .ss-pg-rm`).hover();
+  const ph = await rmLook(page, P.id, true);
+  ok("R: a used size's ✕ is greyed (aria-disabled, opacity 0.35, not-allowed) with the offered text as its title; a live ✕ is not",
+    !!u && u.off === "true" && u.opacity === "0.35" && u.cursor === "not-allowed" && u.title === UNCLR && u.label === `Delete size ${U.label}`
+    && !!live && live.off === null && live.opacity === "1" && live.title === "Delete this size. Delete on its Size box does the same.", JSON.stringify({ u, live }));
+  ok("R: …under the pointer it keeps its grey; a live one turns red", !!uh && uh.color === "rgb(148, 163, 184)" && uh.bg === "rgb(255, 255, 255)" && !!ph && ph.color === "rgb(185, 28, 28)",
+    JSON.stringify({ uh, ph }));
+  await page.locator(`tr[data-s="${U.id}"]`).screenshot({ path: join(shots, "R-used-x.png") }).catch(() => {});
+  // A greyed ✕ is aria-disabled, which Playwright won't click unless forced; a real click reaches it.
+  const clickGrey = (id) => page.locator(`tr[data-s="${id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
+  let n0 = saveCalls(calls).length;
+  await clickGrey(U.id);
+  await page.waitForTimeout(900);
+  ok("R: …its click says how to hide it instead, asks nothing and sends nothing", (await statusText(page)) === UNCLR && !(await confirmOf(page)) && saveCalls(calls).length === n0,
+    await statusText(page));
+  // Untick Offered on it as told, then ✕ again: it says it is already hidden, and how it folds away.
+  await page.locator(sel(U.id, 2)).click();
+  await page.keyboard.press("Space");
+  await saved(page, calls, n0);
+  await clickGrey(U.id);
+  await page.waitForTimeout(300);
+  u = await rmLook(page, U.id);
+  ok("R: unticked as told, its ✕ says it is already hidden: turn off Show hidden sizes to fold it away (title and status line)",
+    (await statusText(page)) === UHID_ON && !!u && u.title === UHID_ON && F.size(U.id).active === false, JSON.stringify({ st: await statusText(page), u }));
+  // A priced size nobody uses: the confirm, Cancel sends nothing.
+  n0 = saveCalls(calls).length;
+  await page.locator(`tr[data-s="${P.id}"] .ss-pg-rm`).click();
+  const cf = await confirmOf(page);
+  ok("R: a priced size's ✕ asks first: the exact question, the focus on Cancel", !!cf && cf.text === askDel(P) && cf.focus === "Cancel", JSON.stringify(cf));
+  await page.locator(".ss-pg-confirm button", { hasText: "Cancel" }).click();
+  await page.waitForTimeout(900);
+  ok("R: …Cancel sends nothing and the size stays", !(await confirmOf(page)) && saveCalls(calls).length === n0 && !!F.size(P.id));
+  // Delete: one { id, base }; "Deleting…" over the price while it is out; the row goes; the line says so.
+  F.script.push({ delayMs: 1500 });
+  const vP = F.size(P.id).updated_at;
+  await page.locator(`tr[data-s="${P.id}"] .ss-pg-rm`).click();
+  await page.locator(".ss-pg-confirm button", { hasText: "Delete" }).click();
+  const wait = await page.waitForFunction((id) => { const tr = document.querySelector(`tr[data-s="${id}"]`); return !!tr && tr.children[1].textContent === "Deleting…"; }, P.id, { timeout: 4000 }).then(() => true, () => false);
+  const noX = !(await page.$(`tr[data-s="${P.id}"] .ss-pg-rm`));
+  const goneP = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), P.id, { timeout: 10000 }).then(() => true, () => false);
+  let sc = saveCalls(calls).slice(n0);
+  ok("R: …Delete sends exactly one { id, base: its version }; the Price box reads 'Deleting…' over the price, with no ✕; then the row goes",
+    wait && noX && goneP && sc.length === 1 && JSON.stringify(sc[0].body.removes) === JSON.stringify([{ id: P.id, base: vP }]) && !sc[0].body.sizes.length && !F.size(P.id),
+    JSON.stringify({ wait, noX, goneP, bodies: sc.map((c) => c.body) }));
+  ok("R: …and the status line says 'Deleted Test Barn …'", (await statusText(page)) === `Deleted Test Barn ${P.label}.`, await statusText(page));
+  // A used size's ✕ now: its own line replaces "Deleted …".
+  await clickGrey(V.id);
+  await page.waitForTimeout(300);
+  ok("R: after a delete, a used size's ✕ reads its text exactly, not 'Deleted …'", (await statusText(page)) === UNCLR, await statusText(page));
+  // A size with a red box: its ✕ asks, and the delete takes the red box with it.
+  const LOFT = keyCol(cat, "loft");
+  await typeIn(page, Rd.id, LOFT, "abc");
+  ok("R: (set-up) a red box on a size", (await look(page, Rd.id, LOFT)).invalid === "true");
+  await page.keyboard.press("Escape");
+  n0 = saveCalls(calls).length;
+  await page.locator(`tr[data-s="${Rd.id}"] .ss-pg-rm`).click();
+  const cfR = await confirmOf(page);
+  await page.locator(".ss-pg-confirm button", { hasText: "Delete" }).click().catch(() => {});
+  const goneR = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), Rd.id, { timeout: 10000 }).then(() => true, () => false);
+  sc = saveCalls(calls).slice(n0);
+  const st = await state(page);
+  ok("R: a size with a red box: its ✕ asks, Delete sends one { id, base } and no box of it, the row goes, and nothing is left red",
+    !!cfR && cfR.text === askDel(Rd) && goneR && sc.length === 1 && sc[0].body.removes.length === 1 && sc[0].body.removes[0].id === Rd.id && !sc[0].body.sizes.length
+    && !/need/.test(st.badge) && !F.size(Rd.id), JSON.stringify({ cfR, bodies: sc.map((c) => c.body), badge: st.badge }));
+  // Saved designs start using a size between the read and the delete: refused `used`, the row stays,
+  // the line says so, and the re-read greys its ✕.
+  F.script.push({ before: (FF) => FF.used.add(X.id) });
+  n0 = saveCalls(calls).length;
+  await page.locator(`tr[data-s="${X.id}"] .ss-pg-rm`).click();
+  await page.locator(".ss-pg-confirm button", { hasText: "Delete" }).click().catch(() => {});
+  await page.waitForFunction(() => /stays:/.test([...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" ")), null, { timeout: 10000 }).catch(() => {});
+  const raceSt = await page.evaluate(() => { const d = document.querySelector(".ss-pg-status"); return d ? { text: d.querySelector("span").textContent, amber: d.classList.contains("ss-pg-status-amber") } : null; });
+  const greyed = await page.waitForFunction((id) => { const x = document.querySelector(`tr[data-s="${id}"] .ss-pg-rm`); return !!x && x.getAttribute("aria-disabled") === "true"; }, X.id, { timeout: 8000 }).then(() => true, () => false);
+  ok("R: a size saved designs started using meanwhile stays, the status line says so (amber), and the re-read greys its ✕",
+    !!raceSt && raceSt.amber && raceSt.text === `Test Barn ${X.label} stays: a saved design started using it. Untick Offered to hide it.` && greyed && !!F.size(X.id)
+    && !!(await page.$(`tr[data-s="${X.id}"]`)), JSON.stringify({ raceSt, greyed }));
+  // Show hidden sizes off: a used size unticked while drawn stays drawn, and its ✕ says it folds away
+  // on the next open.
+  await page.locator(".ss-pg-tog input").uncheck();
+  await page.waitForTimeout(200);
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(W.id, 2)).click();
+  await page.keyboard.press("Space");
+  await saved(page, calls, n0);
+  await clickGrey(W.id);
+  await page.waitForTimeout(300);
+  const w = await rmLook(page, W.id);
+  ok("R: with Show hidden sizes off, a used size unticked while drawn stays drawn and says it folds away the next time the page opens",
+    (await statusText(page)) === UHID_OFF && !!w && w.title === UHID_OFF, JSON.stringify({ st: await statusText(page), w }));
+  ok("R: no call was malformed (deleting priced sizes)", F.bad.length === 0, F.bad.join());
+  ok("R: no page errors (deleting priced sizes)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
@@ -3156,7 +3392,12 @@ if (want("V")) {
   await page.waitForTimeout(1200);
   ok("V: …Cancel: nothing cleared, nothing sent", saveCalls(calls).length === n0 && (await look(page, three[1].id, 1)).text === ssPgFmtPriceFor(three[1]));
   const tb = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-tbtn")].map((b) => ({ text: b.textContent, title: b.title, disabled: b.disabled })));
-  ok("V: the toolbar has Fill down and Clear, enabled, each naming its key", JSON.stringify(tb.map((b) => b.text)) === '["Fill down","Clear"]' && tb.every((b) => !b.disabled && /\((Ctrl\+D|Delete)\)$/.test(b.title)), JSON.stringify(tb));
+  // Delete sizes sits beside them (the delete plan, 10-31); Clear's title says it empties price and
+  // option boxes, since Delete on a Size-only range now deletes sizes.
+  ok("V: the toolbar has Fill down, Clear and Delete sizes, enabled; Fill down and Clear name their keys",
+    JSON.stringify(tb.map((b) => b.text)) === '["Fill down","Clear","Delete sizes"]' && tb.every((b) => !b.disabled)
+    && tb[0].title === "Copy the top row of the selected boxes into the rows under it (Ctrl+D)" && tb[1].title === "Empty the selected price and option boxes (Delete)"
+    && tb[2].title === "Delete the sizes in the selected rows", JSON.stringify(tb));
   await page.locator(".ss-pg-tbtn", { hasText: "Clear" }).click();
   cf = await confirmOf(page);
   ok("V: the toolbar's Clear asks the same question about the same range", !!cf && cf.text === clearText, JSON.stringify(cf));
@@ -3443,7 +3684,8 @@ if (want("Z")) {
   const barn = barnOf(t);
   const first = barn.find((z) => z.base_price == null);
   const offered = (z) => z.base_price != null && z.active && z.base_price !== WIDE_PRICE;
-  const one = (z) => `${named(z)}: $0 means this size is free in your designer. To stop offering it, untick Offered or clear the price.`;
+  const one = (z) => `${named(z)}: $0 means this size is free in your designer. To stop offering it, untick Offered, clear the price, or delete it with ✕.`;
+  const two = "2 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered, clear its price, or delete it with ✕.";
   const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
   await waitGrid(page).catch(() => {});
   const z1 = barn[0], z2 = barn[2], [z3, z4, z5] = [barn[3], barn[4], barn[5]];
@@ -3515,7 +3757,7 @@ if (want("Z")) {
   const sv5 = await saved(page, calls, n0);
   const st5 = await statusText(page);
   ok("Z: …Continue saves both, and one note counts them", sv5 && F.size(z3.id).base_price === 0 && F.size(z4.id).base_price === 0
-    && st5 === "2 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.", st5);
+    && st5 === two, st5);
   await page.screenshot({ path: join(bandShots, "Z-5-paste-zero-note.png"), clip: { x: 0, y: 0, width: 1000, height: 260 } });
   // 6. Fill down one row (Ctrl+D) from that $0 size: one size, at once, and the note names it.
   n0 = saveCalls(calls).length;
@@ -3544,7 +3786,7 @@ if (want("Z")) {
   const sv7 = await saved(page, calls, n0);
   const st7 = await statusText(page);
   ok("Z: …and after Continue the note counts the same two", sv7 && [first, under].every((z) => F.size(z.id).base_price === 0 && F.size(z.id).active === true)
-    && st7 === "2 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.", JSON.stringify({ st7, sizes: [F.size(first.id), F.size(under.id)] }));
+    && st7 === two, JSON.stringify({ st7, sizes: [F.size(first.id), F.size(under.id)] }));
   await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click();
   // 8. A hidden style isn't in the designer at all: a 0 typed or pasted on its sizes saves and says
   // nothing about $0, and the confirm counts nothing as leaving or joining the designer.
@@ -3591,13 +3833,18 @@ if (want("Z")) {
   ok("Z: view-only: no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-// On Sheds: the Excel upload's $0 sizes, counted from the sheet by the importer's own rules.
+// On Sheds: the Excel upload's $0 sizes, counted from the sheet by the importer's own rules; and
+// (the delete plan, 10-31) the two sentences on deleting a size, and the ask before a sheet that adds
+// sizes not in the table is sent.
+const SHEET_ROW = "Deleting a row in the sheet doesn't delete the size. To delete one, open the sizes table and press ✕ on it.";
 if (want("Z")) {
-  const { ctx, page, calls, errors } = await open("/settings/sheds", { table: (cid) => tableFor(cid, catalogFor(cid), { hiddenStyle: true }) });
+  const plain = (cid) => tableFor(cid, catalogFor(cid), { hiddenStyle: true });
+  const { ctx, page, calls, errors, S, asked } = await open("/settings/sheds", { table: plain });
   await page.waitForSelector("text=Open sizes & prices table", { timeout: 20000 });
   const steps = await page.evaluate(() => [...document.querySelectorAll("p")].map((p) => p.textContent).find((x) => /Using Excel:/.test(x)) || "");
-  ok("Z: the Excel instructions say $0 is free", steps.includes("A blank price — or active = no — hides that size from your designer. A price of 0 doesn't hide a size: it shows in your designer as free."),
-    steps.slice(steps.indexOf("A blank price"), steps.indexOf("A blank price") + 160));
+  ok("Z: the Excel instructions say $0 is free, and that deleting a row in the sheet doesn't delete the size",
+    steps.includes(`A blank price — or active = no — hides that size from your designer. A price of 0 doesn't hide a size: it shows in your designer as free. ${SHEET_ROW}`),
+    steps.slice(steps.indexOf("A blank price"), steps.indexOf("A blank price") + 260));
   const upload = async (csv) => {
     const from = calls.length;
     await page.locator('input[type="file"][accept*=".xlsx"]').setInputFiles({ name: "sheet.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
@@ -3614,9 +3861,10 @@ if (want("Z")) {
   // 1500 is a price, and a 0 in a hidden style isn't in the designer: none of those count.
   const u1 = await upload("style,width,length,price,active\nTest Barn,10,12,$0,yes\nTest Barn,10,16,0.00,\nTest Barn,12,12,$0.00,yes\n"
     + "Test Barn,12,16,0,no\nTest Barn,12,20,,yes\nTest Barn,8,12,1500,yes\nTest Retired Style,8,12,0,yes\n");
-  ok("Z: an upload with sizes priced $0 says how many under its result, and that blank or active no hides one",
-    !!u1.ok && u1.under && u1.zero === "3 sizes in the sheet are priced $0, so they're free in your designer. To hide a size, leave its price blank or put no in the active column.",
+  ok("Z: an upload with sizes priced $0 says how many under its result, that blank or active no hides one, and that deleting a row doesn't delete the size",
+    !!u1.ok && u1.under && u1.zero === `3 sizes in the sheet are priced $0, so they're free in your designer. To hide a size, leave its price blank or put no in the active column. ${SHEET_ROW}`,
     JSON.stringify(u1));
+  ok("Z: …a sheet whose sizes are all in the table uploads without asking", asked.length === 0, JSON.stringify(asked));
   const box = await page.evaluate(() => {
     const lab = [...document.querySelectorAll("span")].find((s) => s.textContent === "Prefer Excel?");
     const z = document.querySelector('[data-ss-xl-msg="zero"]');
@@ -3626,10 +3874,180 @@ if (want("Z")) {
   });
   if (box) await page.screenshot({ path: join(bandShots, "Z-upload-zero-note.png"), clip: { x: box.x, y: box.y, width: box.w, height: box.h } });
   const u2 = await upload("style,width,length,price,active\nTest Barn,10,12,$0,yes\n");
-  ok("Z: one size at $0 is said in the singular", u2.zero === "1 size in the sheet is priced $0, so it's free in your designer. To hide a size, leave its price blank or put no in the active column.", JSON.stringify(u2));
+  ok("Z: one size at $0 is said in the singular", u2.zero === `1 size in the sheet is priced $0, so it's free in your designer. To hide a size, leave its price blank or put no in the active column. ${SHEET_ROW}`, JSON.stringify(u2));
   const u3 = await upload("style,width,length,price,active\nTest Barn,10,12,1500,yes\nTest Barn,10,16,,yes\nTest Barn,12,12,0,no\n");
   ok("Z: an upload with no size at $0 says nothing more", !!u3.ok && u3.zero === null, JSON.stringify(u3));
+  // THE ASK: a sheet that adds 2 sizes not in the table, 1 of them at $0. Dismissed, nothing is sent.
+  const tryUpload = async (csv) => {
+    const from = calls.length, a0 = asked.length;
+    await page.locator('input[type="file"][accept*=".xlsx"]').setInputFiles({ name: "sheet.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
+    const until = Date.now() + 8000;
+    while (Date.now() < until && asked.length === a0 && !calls.slice(from).some((c) => c.action === "import_pricing_csv")) await sleep(50);
+    await page.waitForTimeout(800);
+    return { ask: asked.slice(a0), sent: calls.slice(from).some((c) => c.action === "import_pricing_csv"), fresh: calls.slice(from).some((c) => c.action === "size_table") };
+  };
+  const adds2 = "style,width,length,price,active\nTest Barn,14,30,0,yes\nTest Barn,14,34,1500,yes\nTest Barn,10,12,1500,yes\nTest Barn,14,30,$0,\n";
+  const ask2 = "This sheet adds 2 sizes that aren't in your table (1 of them at $0, so free in your designer). Upload it?";
+  S.sheetAsk = "dismiss";
+  const d1 = await tryUpload(adds2);
+  ok("Z: a sheet that adds 2 sizes, 1 at $0, asks first with the exact words; dismissed, no import_pricing_csv goes",
+    d1.ask.length === 1 && d1.ask[0] === ask2 && !d1.sent && d1.fresh, JSON.stringify(d1));
+  ok("Z: …and the card is ready again", !(await page.locator("text=Importing…").count()), "still Importing…");
+  S.sheetAsk = undefined;
+  const d2 = await tryUpload(adds2);
+  ok("Z: …accepted, it uploads as before", d2.ask.length === 1 && d2.ask[0] === ask2 && d2.sent, JSON.stringify(d2));
+  const d3 = await tryUpload("style,width,length,price,active\nTest Barn,14,38,1500,yes\n");
+  ok("Z: one size, not at $0, in the singular", d3.ask[0] === "This sheet adds 1 size that isn't in your table. Upload it?" && d3.sent, JSON.stringify(d3));
+  // Counted against a fresh read: a size deleted in the table's own tab since Sheds loaded comes back
+  // as a new one, so the old sheet's row for it asks.
+  const deleted = plain(OWN).sizes.find((z) => z.style_id === uid("5", 1) && Number(z.width_ft) === 10 && Number(z.length_ft) === 12);
+  S.table = (cid) => { const tt = plain(cid); const sizes = tt.sizes.filter((z) => z.id !== (deleted || {}).id); return { ...tt, sizes, counts: { ...tt.counts, sizes: sizes.length } }; };
+  const d4 = await tryUpload("style,width,length,price,active\nTest Barn,10,12,0,yes\n");
+  ok("Z: a size deleted in the table after Sheds loaded counts as new: its old row at 0 asks first",
+    !!deleted && d4.ask[0] === "This sheet adds 1 size that isn't in your table (at $0, so free in your designer). Upload it?" && d4.sent, JSON.stringify(d4));
+  S.table = plain;
   ok("Z: Sheds: no page errors", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// ── X: deleting several sizes at once (the delete plan, 10-31), against fakeServer as migration 351
+// answers. Delete sizes before any box is clicked says so and sends nothing; on six rows with two in
+// use, the confirm counts the two that stay, and one with a box in flight is counted apart; Delete on
+// a Size-column range asks the same. An answer of 4 deleted and 2 refused "used" is ONE amber line,
+// and the two rows are still there after the re-read; 60 sizes go in two calls; the Excel template
+// downloaded after a delete leaves the sizes out; an operator's confirm names the account. ──
+const delBtn = (page) => page.locator(".ss-pg-bar button", { hasText: "Delete sizes" });
+const pickSizes = async (page, a, z) => {
+  await page.locator(sel(a.id, 0)).click();
+  await page.locator(sel(z.id, 0)).click({ modifiers: ["Shift"] });
+};
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  // Test Barn: its 12 sizes and 68 more, every width x length its own, so 80 rows.
+  const t00 = tableFor(OWN, cat);
+  const more = Array.from({ length: 68 }, (_, i) => ({ id: uid("7", 5000 + i), style_id: t00.styles[0].id, label: `${20 + Math.floor(i / 10)}x${30 + (i % 10)}`,
+    width_ft: 20 + Math.floor(i / 10), length_ft: 30 + (i % 10), base_price: 4000 + i, active: true, sort_order: 100 + i,
+    created_at: "2026-10-01T00:00:00.000001+00:00", updated_at: `2026-10-20T00:00:00.${String(300000 + i)}+00:00` }));
+  const t0 = { ...t00, sizes: [...t00.sizes, ...more], counts: { ...t00.counts, sizes: t00.counts.sizes + more.length } };
+  const F = fakeServer(cat, t0);
+  const b = barnOf(t0);
+  F.used.add(b[1].id);
+  F.used.add(b[3].id);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 50 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const nm = (z) => `Test Barn ${z.label}`;
+  const ok6 = b.length === 80 && new Set(b.map((z) => z.label)).size === 80;
+  ok("X: (set-up) Test Barn has 80 sizes, each its own; two of its first six are used by saved designs", ok6 && F.table(OWN).used.length === 2, JSON.stringify(F.table(OWN).used));
+  // Before any box is clicked.
+  let n0 = saveCalls(calls).length;
+  await delBtn(page).click();
+  await page.waitForTimeout(600);
+  ok("X: Delete sizes before any box is clicked: 'Click a size first, then press Delete sizes.', and nothing is sent",
+    (await statusText(page)) === "Click a size first, then press Delete sizes." && !(await confirmOf(page)) && saveCalls(calls).length === n0, await statusText(page));
+  // Six rows, two in use: the confirm counts them.
+  const six = `Delete 4 sizes, ${nm(b[0])} to ${nm(b[5])}? Their prices and included options go too, and you can't undo this. 2 more stay because saved designs use them.`;
+  await pickSizes(page, b[0], b[5]);
+  await delBtn(page).click();
+  let cf = await confirmOf(page);
+  ok("X: Delete sizes on six rows with two in use asks once, counting the two that stay; the focus on Cancel", !!cf && cf.text === six && cf.focus === "Cancel", JSON.stringify(cf));
+  await page.keyboard.press("Escape");
+  await pickSizes(page, b[0], b[5]);
+  await page.keyboard.press("Delete");
+  cf = await confirmOf(page);
+  ok("X: …Delete on that Size-column range asks the same", !!cf && cf.text === six, JSON.stringify(cf));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  ok("X: …and neither sent anything", saveCalls(calls).length === n0);
+  // A box in flight is counted apart.
+  F.script.push({ delayMs: 3000 });
+  await typeIn(page, b[2].id, 1, "5555");
+  await waitBadge(page, /^Saving 1 change…$/, 4000);
+  await pickSizes(page, b[0], b[5]);
+  await delBtn(page).click();
+  cf = await confirmOf(page);
+  ok("X: one row with a box in flight is counted as '1 more is still saving'",
+    !!cf && cf.text === `Delete 3 sizes, ${nm(b[0])} to ${nm(b[5])}? Their prices and included options go too, and you can't undo this. 2 more stay because saved designs use them. 1 more is still saving.`,
+    JSON.stringify(cf));
+  await page.keyboard.press("Escape");
+  await saved(page, calls, n0, 1);
+  // 4 deleted, 2 refused "used" by the server: ONE amber line, and the two rows stay after the re-read.
+  F.script.push({ before: (FF) => { FF.used.add(b[7].id); FF.used.add(b[9].id); } });
+  n0 = saveCalls(calls).length;
+  await pickSizes(page, b[6], b[11]);
+  await delBtn(page).click();
+  cf = await confirmOf(page);
+  const base = Object.fromEntries(b.slice(6, 12).map((z) => [z.id, F.size(z.id).updated_at]));
+  await page.locator(".ss-pg-confirm button", { hasText: "Delete" }).click().catch(() => {});
+  await page.waitForFunction(() => /^Deleted /.test([...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" ")), null, { timeout: 10000 }).catch(() => {});
+  const line = await page.evaluate(() => { const d = document.querySelector(".ss-pg-status"); return d ? { text: d.querySelector("span").textContent, amber: d.classList.contains("ss-pg-status-amber"), n: document.querySelectorAll(".ss-pg-status").length } : null; });
+  await page.waitForTimeout(1200);   // the re-read
+  let sc = saveCalls(calls).slice(n0);
+  const stayed = [b[7], b[9]].every((z) => !!F.size(z.id)) && (await page.evaluate((ids) => ids.every((id) => { const x = document.querySelector(`tr[data-s="${id}"] .ss-pg-rm`); return !!x && x.getAttribute("aria-disabled") === "true"; }), [b[7].id, b[9].id]));
+  ok("X: six deletable rows: one confirm, one call of six { id, base }",
+    !!cf && cf.text === `Delete 6 sizes, ${nm(b[6])} to ${nm(b[11])}? Their prices and included options go too, and you can't undo this.` && sc.length === 1
+    && JSON.stringify(sc[0].body.removes) === JSON.stringify(b.slice(6, 12).map((z) => ({ id: z.id, base: base[z.id] }))), JSON.stringify({ cf, bodies: sc.map((c) => c.body.removes) }));
+  ok("X: an answer of 4 deleted and 2 refused 'used' is one amber line, and the two rows are still there after the re-read, their ✕ greyed",
+    !!line && line.n === 1 && line.amber && line.text === "Deleted 4 sizes. 2 stay: saved designs started using them. Untick Offered to hide them." && stayed
+    && [b[6], b[8], b[10], b[11]].every((z) => !F.size(z.id)), JSON.stringify({ line, stayed }));
+  await page.screenshot({ path: join(shots, "X-mixed-answer.png"), clip: { x: 0, y: 0, width: 1100, height: 240 } }).catch(() => {});
+  // Two used rows alone: none can go.
+  n0 = saveCalls(calls).length;
+  await pickSizes(page, b[7], b[9]);
+  // b[8] went above, so b[7]..b[9] is now two rows, both used.
+  await delBtn(page).click();
+  await page.waitForTimeout(600);
+  ok("X: a range where none can go says so and sends nothing", (await statusText(page)) === "None of these sizes can be deleted: saved designs use them. Untick Offered to hide them."
+    && !(await confirmOf(page)) && saveCalls(calls).length === n0, await statusText(page));
+  // 60 sizes: two calls, 50 then 10.
+  n0 = saveCalls(calls).length;
+  await pickSizes(page, b[12], b[71]);
+  await delBtn(page).click();
+  cf = await confirmOf(page);
+  await page.locator(".ss-pg-confirm button", { hasText: "Delete" }).click().catch(() => {});
+  const all60 = await (async () => { const until = Date.now() + 20000; while (Date.now() < until) { if (b.slice(12, 72).every((z) => !F.size(z.id))) return true; await sleep(100); } return false; })();
+  await saved(page, calls, n0, 2);
+  sc = saveCalls(calls).slice(n0);
+  ok("X: 60 sizes go out in 2 calls of 50 and 10, and all 60 go", !!cf && cf.text.startsWith(`Delete 60 sizes, ${nm(b[12])} to ${nm(b[71])}?`) && all60
+    && sc.map((c) => c.body.removes.length).join() === "50,10" && (await statusText(page)) === "Deleted 60 sizes.", JSON.stringify({ cf: cf && cf.text, calls: sc.map((c) => c.body.removes.length), st: await statusText(page) }));
+  // The Excel template downloaded after a delete leaves the deleted sizes out.
+  const { p: sheds, errs: shedsErrs } = await tabOf(ctx, "/settings/sheds");
+  await sheds.waitForSelector("text=Download Excel template", { timeout: 20000 }).catch(() => {});
+  const dlP = sheds.waitForEvent("download", { timeout: 15000 }).catch(() => null);
+  await sheds.getByRole("button", { name: /Download Excel template/ }).click().catch(() => {});
+  const dl = await dlP;
+  let csv = "";
+  if (dl) { try { csv = readFileSync(await dl.path(), "utf8"); } catch (_e) { /* no file */ } }
+  const lines = csv.trim().split(/\r?\n/);
+  const gone = [b[0], ...b.slice(12, 72), b[6]].filter((z) => !F.size(z.id));
+  ok("X: the Excel template downloaded after a delete leaves the deleted sizes out", lines.length === 1 + F.table(OWN).sizes.length
+    && gone.length > 60 && !gone.some((z) => lines.some((l) => l.startsWith(`Test Barn,${z.width_ft},${z.length_ft},`))), `${lines.length} lines; ${F.table(OWN).sizes.length} sizes`);
+  ok("X: no call was malformed", F.bad.length === 0, F.bad.join());
+  ok("X: no page errors", errors.length === 0 && shedsErrs.length === 0, [...errors, ...shedsErrs].join(" | "));
+  await ctx.close();
+}
+// An operator viewing a builder: the confirm names the builder's account, for one size and for several.
+if (want("X")) {
+  const cat = catalogFor(VIEWED);
+  const F = fakeServer(cat, tableFor(VIEWED, cat));
+  const b = barnOf(F.table(VIEWED));
+  const { ctx, page, calls, errors } = await open(`/settings/sheds-table?view=${VIEWED}`, { own: OPS, operator: true, cat: (cid) => ({ ...cat, clientId: cid }), fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForFunction((name) => (document.querySelector(".ss-pg-op") || {}).textContent === `Editing ${name} as operator. Changes are live.`, COMPANY[VIEWED], { timeout: 10000 }).catch(() => {});
+  await page.locator(`tr[data-s="${b[0].id}"] .ss-pg-rm`).click();
+  const one = await confirmOf(page);
+  await page.keyboard.press("Escape");
+  await pickSizes(page, b[0], b[2]);
+  await delBtn(page).click();
+  const many = await confirmOf(page);
+  const n0 = saveCalls(calls).length;
+  await page.locator(".ss-pg-confirm button", { hasText: "Delete" }).click().catch(() => {});
+  await saved(page, calls, n0, 1);
+  const sc = saveCalls(calls).slice(n0);
+  ok("X: an operator's confirm names the account: one size", !!one && one.text === askDel(b[0], ` from ${COMPANY[VIEWED]}'s account`), JSON.stringify(one));
+  ok("X: …and several, and the delete goes for that account (targetClientId on the body)",
+    !!many && many.text === `Delete 3 sizes, Test Barn ${b[0].label} to Test Barn ${b[2].label} from ${COMPANY[VIEWED]}'s account? Their prices and included options go too, and you can't undo this.`
+    && sc.length === 1 && sc[0].body.targetClientId === VIEWED && sc[0].body.removes.length === 3 && b.slice(0, 3).every((z) => !F.size(z.id)), JSON.stringify({ many, body: sc[0] && sc[0].body }));
+  ok("X: no page errors (operator)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
