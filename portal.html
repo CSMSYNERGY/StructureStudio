@@ -513,6 +513,16 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 /* "You have N changes from earlier that weren't saved." */
 .ss-pg-earlier{display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:12.5px;font-weight:600;padding:6px 14px;background:#FFFBEB;color:#92400E;border-bottom:1px solid #FDE68A;flex-shrink:0}
 .ss-pg-earlier button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:4px 10px;cursor:pointer}
+/* COPY, PASTE, FILL DOWN AND CLEAR (Phase 4b, 2026-10-31): the toolbar's Fill down and Clear, and the
+   confirm before a change to more than one size, a modal over the whole page. */
+.ss-pg-tbtn{font:inherit;font-size:12.5px;font-weight:700;color:#334155;border:1px solid #CBD5E1;background:#FFF;border-radius:7px;padding:5px 9px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.ss-pg-tbtn:hover{background:#F1F5F9}
+.ss-pg-confirm{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(15,23,42,.35)}
+.ss-pg-confirm-box{box-sizing:border-box;width:100%;max-width:460px;background:#FFF;border-radius:12px;box-shadow:0 12px 40px rgba(15,23,42,.25);padding:18px 20px}
+.ss-pg-confirm-box p{margin:0 0 14px;font-size:14px;line-height:1.5;color:#1E293B}
+.ss-pg-confirm-acts{display:flex;justify-content:flex-end;gap:8px}
+.ss-pg-confirm-acts button{font:inherit;font-size:13px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:8px;padding:7px 14px;cursor:pointer}
+.ss-pg-confirm-acts .ss-pg-confirm-yes{background:#3D3672;border-color:#3D3672;color:#FFF}
 /* Below 700 px (plan 3.15): only Size stays frozen, the toolbar wraps, and the header is capped at
    90 px with an ellipsis (the toolbar's readout carries the full name). */
 @media (max-width:699.98px){
@@ -578,7 +588,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
-<script defer src="/portal.app.compiled.js?v=a5ad335c" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=7698076c" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

@@ -25,6 +25,11 @@
 //      is unsent or the editor holds changed text, and Back to Sheds sends first, as does the browser's
 //      Back or Forward, which the page holds while anything is unsent; the editor and the overlay keep
 //      their hooks above any return.
+//   9. Phase 4a: adding and removing sizes, the refresh and the backup check the page can still edit
+//      and go through the queue; the strip and the rows keep their memos.
+//  10. Phase 4b: paste, fill down and clear check the page can still edit and go into the queue in
+//      one event; copy works on a view-only page; Ctrl/Cmd+D is held from the browser; the confirm is
+//      an accessible modal.
 //
 // Lifted with the xlsxCellText_test anchor idiom: the text between a signature and the next "\n}\n".
 // No network, no DOM: the lifted functions get stubs for exactly the names they use.
@@ -425,4 +430,60 @@ Deno.test("the backup: keyed by person and account, written only by a page that 
   assert(page.includes("fnRef.current.offerEarlier(m);"), "the first load reads the backup before anything can write over it");
   assert(page.includes("You have 1 change from earlier that wasn't saved.") && page.includes("`You have ${earlier.count} changes from earlier that weren't saved.`"));
   assert(page.includes(">Save them</button>") && page.includes(">Discard</button>"));
+});
+
+// ── 10. Phase 4b: copy, paste, fill down, clear and the confirm ──────────────────────────────
+Deno.test("paste, fill down and clear check the page can still edit and go through the queue in one event; copy works on a view-only page", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  // Every way to change boxes in bulk refuses on a view-only page (?as=, no edit access, a 403, another
+  // account's answer) and sends nothing.
+  for (const fn of ["const pasteFrom = (e) => {\n    e.preventDefault();\n    if (!canEditNow()) return;", "const fillDown = () => {\n    if (!canEditNow()) return;",
+    "const clearSel = () => {\n    if (!canEditNow()) return;", "const applyChange = (edits, area) => {\n    if (!canEditNow()) return;"]) {
+    assert(page.includes(fn), `a bulk edit path without the view-only check: ${fn.split("\n")[0]}`);
+  }
+  const copy = between(page, "const copySel = (e) => {", "\n  };", "copySel");
+  assert(!copy.includes("canEditNow"), "copy works on a view-only page too");
+  assert(copy.includes(`e.clipboardData.setData("text/plain", ssPgToTsv(ssPgSelectionBlock(`), "the selection goes out as TSV, as drawn");
+  const change = between(page, "const applyChange = (edits, area) => {", "\n  };", "applyChange");
+  assert(change.includes(`apply({ type: "commits", edits, at: Date.now() });`) && change.includes("sendNow();") && change.includes("backToWork();"),
+    "one queue event, sent at once, and a waiting leave is called off");
+  assertEquals((page.match(/type: "commits"/g) || []).length, 1, "the only way in for a paste, a fill or a clear");
+  // The planners decide; more than one size asks first.
+  const propose = between(page, "const propose = (plan) => {", "\n  };", "propose");
+  assert(propose.includes("if (!plan.ok) { setSaid({ tone: \"amber\", text: plan.error }); return; }"), "a refusal changes nothing and says why");
+  assert(propose.includes("if (sum.ask) { setConfirm({ text: sum.text, edits: plan.edits, area: plan.area || null }); return; }"));
+  assert(between(page, "const pasteFrom = (e) => {", "\n  };", "pasteFrom").includes("ssPgPastePlan(viewOf(), { sizeId: order[sel.r0], col: sel.c0 }, ssPgParseTsv(text))"));
+  assert(between(page, "const fillDown = () => {", "\n  };", "fillDown").includes("ssPgFillPlan(viewOf(), selRect())"));
+  assert(between(page, "const clearSel = () => {", "\n  };", "clearSel").includes("ssPgClearPlan(viewOf(), selRect())"));
+  // Cancel changes nothing.
+  assert(page.includes("const confirmNo = () => { setConfirm(null); focusGrid(); };"));
+  assert(page.includes("{confirm && canEdit && <PgConfirm text={confirm.text} onYes={confirmYes} onNo={confirmNo} />}"), "the confirm goes if the page stops being able to edit");
+});
+
+Deno.test("the keys: Ctrl/Cmd+D fills down, held from the browser; Delete on a range clears; copy and paste are the browser's own events while the grid has the focus", () => {
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  const keys = between(page, "const onKeyDown = (e) => {", "\n  };", "onKeyDown");
+  const d = keys.indexOf(`if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "d" || k === "D")) { e.preventDefault(); fillDown(); return; }`);
+  assert(d > 0 && d < keys.indexOf("if (e.altKey || e.ctrlKey || e.metaKey) return;"), "Ctrl+D must be handled before the modifier keys are let go (else it bookmarks the page)");
+  assert(keys.includes(`if (k === "Delete" || k === "Backspace") { e.preventDefault(); if (!extentRef.current) clearCell(a); else clearSel(); return; }`));
+  const fx = between(page, "  useEffect(() => {\n    const mine = () =>", "}, []);", "the copy and paste listeners");
+  assert(fx.includes("const mine = () => !!gridRef.current && document.activeElement === gridRef.current;"), "only while the grid itself has the focus: the editor and the add strips paste their own way");
+  assert(fx.includes(`document.addEventListener("copy", onCopy);`) && fx.includes(`document.addEventListener("paste", onPaste);`));
+  assert(fx.includes(`document.removeEventListener("copy", onCopy);`) && fx.includes(`document.removeEventListener("paste", onPaste);`));
+  // The toolbar's buttons are drawn only while the page can edit.
+  const bar = between(page, "{canEdit && (\n          <>", "</>", "the toolbar's buttons");
+  assert(bar.includes(">Fill down</button>") && bar.includes(">Clear</button>"));
+});
+
+Deno.test("PgConfirm: an accessible modal: every hook above its return, focus on Continue and kept inside, Escape cancels", () => {
+  const sig = "function PgConfirm({ text, onYes, onNo }) {";
+  const body = fnText(CATALOG, sig);
+  const first = body.search(/\n  (?:return\b|if \()/);
+  assert(first > 0 && hookAt(body).length >= 3, sig);
+  assertEquals(hookAt(body).filter((i) => i > first), [], `${sig}: a hook below the first return`);
+  assert(body.includes(`role="alertdialog" aria-modal="true" aria-labelledby="ss-pg-confirm-q"`) && body.includes(`<p id="ss-pg-confirm-q">{text}</p>`), "named by its own question");
+  assert(body.includes("yesRef.current.focus({ preventScroll: true })"), "the focus goes into it");
+  assert(body.includes(`if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onNo(); return; }`), "Escape is Cancel");
+  assert(body.includes(`if (e.key === "Tab") {`), "Tab stays inside");
+  assert(body.includes(">Cancel</button>") && body.includes(">Continue</button>"));
 });

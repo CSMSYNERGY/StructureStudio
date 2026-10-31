@@ -11271,6 +11271,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const [addFocus, setAddFocus] = useState(null);  // { id, n }: the cursor goes into that style's strip (each new n)
   const [earlier, setEarlier] = useState(null);    // a backup from earlier on offer ({ savedAt, sizes, count }) until Save them or Discard
   const [earlierRed, setEarlierRed] = useState(null);   // its red entries, listed in the status line until dismissed
+  // Phase 4b: copy, paste, fill down and clear.
+  const [confirm, setConfirm] = useState(null);    // { text, edits, area }: a change to more than one size, waiting for Continue
+  const [said, setSaid] = useState(null);          // { tone, text }: what the last copy, paste, fill or clear said (a refusal, "Copied 6 boxes.")
   const boxRef = useRef(null);
   const gridRef = useRef(null);
   const seqRef = useRef(0);
@@ -11588,6 +11591,21 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       refreshTimerRef.current = null;
     };
   }, [clientId]);
+
+  // COPY AND PASTE (plan 3.10-3.11): the browser's own copy and paste events, Ctrl/Cmd+C and V, while
+  // the grid itself has the focus (the editor, an add strip and the toolbar keep theirs). No clipboard
+  // permission is asked for: the events carry the text. Added once; they call this render's handlers.
+  useEffect(() => {
+    const mine = () => !!gridRef.current && document.activeElement === gridRef.current;
+    const onCopy = (e) => { if (mine()) fnRef.current.copySel(e); };
+    const onPaste = (e) => { if (mine()) fnRef.current.pasteFrom(e); };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("paste", onPaste);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("paste", onPaste);
+    };
+  }, []);
 
   // THE BACKUP (plan 4.9) is rewritten whenever the queue or the editor's text changes (the editor's
   // keystrokes write it too, from onEditInput), and while a backup from earlier is on offer.
@@ -12042,6 +12060,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     dirtyRef.current = init !== text0;
     setDraftDirty(dirtyRef.current);
     setTip(null);
+    setSaid(null);
     setExtent(null);
     setEditing({ sizeId: cell.sizeId, col: cell.col, init, price: cell.col === 1, frozen: ssPgColBox(cell.col, narrow).frozen,
       label: `${whereOf(cell.sizeId)}, ${colName(cell.col)}` });
@@ -12072,7 +12091,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     apply({ type: "commit", sizeId: cell.sizeId, f: "active", value: !shownOf(cell.sizeId, "active"), at: Date.now() });
   };
   // Delete or Backspace on one box (plan 3.10): a blank price, an empty option, Offered unticked.
-  // Never asks: only a change to more than one size does (plan 3.12, with Clear, in Phase 4).
+  // Never asks: only a change to more than one size does (plan 3.12: a range goes through clearSel).
   const clearCell = (cell) => {
     if (!canEditNow() || !cell || cell.col === 0) return;
     if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
@@ -12117,6 +12136,89 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     commitEdit();
   };
 
+  // ── Copy, paste, fill down and clear (plan 3.10-3.12, Phase 4b) ──
+  // The selection as rows of the drawn sizes (`order`) and grid columns: the active cell and the far
+  // corner of a range (ssPgFillPlan's `sel`). null when no box is active or its size isn't drawn.
+  const selRect = () => {
+    const a = activeRef.current;
+    if (!a) return null;
+    const x = extentRef.current || a;
+    const i = order.indexOf(a.sizeId), j = order.indexOf(x.sizeId);
+    if (i < 0 || j < 0) return null;
+    return { r0: Math.min(i, j), r1: Math.max(i, j), c0: Math.min(a.col, x.col), c1: Math.max(a.col, x.col) };
+  };
+  // What the planners read: the rows as drawn now, and the queue as it is now (qRef, so an editor
+  // committed a moment ago is in it).
+  const viewOf = () => ({ rows, order, cols: model ? model.cols : [], rtp, q: qRef.current });
+  // Ctrl/Cmd+C: the selection as TSV (ssPgToTsv), as drawn. A view-only page copies too.
+  const copySel = (e) => {
+    const sel = selRect();
+    if (!sel || !e.clipboardData) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", ssPgToTsv(ssPgSelectionBlock(viewOf(), order.slice(sel.r0, sel.r1 + 1), sel.c0, sel.c1)));
+    const k = (sel.r1 - sel.r0 + 1) * (sel.c1 - sel.c0 + 1);
+    setSaid({ tone: "grey", text: k === 1 ? "Copied 1 box." : `Copied ${k} boxes.` });
+  };
+  // Ctrl/Cmd+V: the clipboard's block, its top-left box on the selection's top-left box. A view-only
+  // page pastes nothing and sends nothing.
+  const pasteFrom = (e) => {
+    e.preventDefault();
+    if (!canEditNow()) return;
+    const sel = selRect();
+    if (!sel) { setSaid({ tone: "grey", text: "Click the box where the paste should start." }); return; }
+    const text = e.clipboardData ? e.clipboardData.getData("text/plain") : "";
+    propose(ssPgPastePlan(viewOf(), { sizeId: order[sel.r0], col: sel.c0 }, ssPgParseTsv(text)));
+  };
+  // Ctrl/Cmd+D or Fill down; Delete or Backspace on a range, or Clear. An open editor is committed
+  // first (any move away commits), and a box it turns red stops it there, with its reason on show.
+  const fillDown = () => {
+    if (!canEditNow()) return;
+    if (!commitEdit()) { focusGrid(); return; }
+    propose(ssPgFillPlan(viewOf(), selRect()));
+  };
+  const clearSel = () => {
+    if (!canEditNow()) return;
+    if (!commitEdit()) { focusGrid(); return; }
+    propose(ssPgClearPlan(viewOf(), selRect()));
+  };
+  // A checked paste, fill or clear (plan 3.11-3.12). Refused: the status line says why, and nothing
+  // changes. Nothing different: it says so. One size: done at once, as typing in a box is. More than
+  // one: the confirm first (PgConfirm), naming the range and counting the changes; Cancel changes
+  // nothing.
+  const propose = (plan) => {
+    if (!plan.ok) { setSaid({ tone: "amber", text: plan.error }); return; }
+    if (!plan.edits.length) { setSaid({ tone: "grey", text: "Nothing to change: those boxes already say that." }); return; }
+    const sum = ssPgChangeSummary(plan.sizes);
+    setSaid(null);
+    if (sum.ask) { setConfirm({ text: sum.text, edits: plan.edits, area: plan.area || null }); return; }
+    applyChange(plan.edits, plan.area || null);
+  };
+  // Into the queue in ONE event (ssPgQueue "commits": every box by the commit rule, against what it
+  // showed when it was checked, so a box an answer moved while the confirm was open turns red instead
+  // of overwriting a colleague's number), and sent at once in calls the server takes (plan 4.6). A
+  // pasted block stays selected, the way a sheet shows what it pasted.
+  const applyChange = (edits, area) => {
+    if (!canEditNow()) return;
+    backToWork();
+    setTip(null);
+    apply({ type: "commits", edits, at: Date.now() });
+    sendNow();
+    if (area) {
+      setActive({ sizeId: area.first, col: area.c0 });
+      setExtent(area.first === area.last && area.c0 === area.c1 ? null : { sizeId: area.last, col: area.c1 });
+    }
+  };
+  const confirmYes = () => {
+    const c = confirm;
+    setConfirm(null);
+    focusGrid();
+    if (c) applyChange(c.edits, c.area);
+  };
+  const confirmNo = () => { setConfirm(null); focusGrid(); };
+  // The toolbar's buttons keep the focus where it was (the grid, or the open editor, which their
+  // click then commits).
+  const keepFocus = (e) => { e.preventDefault(); };
+
   // ── The grid's own keys and mouse (plan 3.10) ──
   // Only keys pressed on the grid itself: an add strip's boxes and the buttons in the bands are
   // inside the table, and what is typed there is theirs.
@@ -12124,6 +12226,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (e.target !== e.currentTarget) return;
     const k = e.key;
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "z" || k === "Z")) { e.preventDefault(); setTip(SS_PG_NO_UNDO); return; }
+    // Ctrl/Cmd+D fills down (held back from the browser, whose own is "bookmark this page"). Ctrl/Cmd+C
+    // and V go on to the browser, whose copy and paste events land in copySel and pasteFrom.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "d" || k === "D")) { e.preventDefault(); fillDown(); return; }
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     const a = activeRef.current;
     if (e.shiftKey && k.indexOf("Arrow") === 0) {
@@ -12135,11 +12240,13 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       return;
     }
     const next = ssPgMove(order, ncols, a, k, e.shiftKey);
-    if (next) { e.preventDefault(); setTip(null); moveTo(next); return; }
+    if (next) { e.preventDefault(); setTip(null); setSaid(null); moveTo(next); return; }
     if (!a) return;
     if (k === "Enter" || k === "F2") { e.preventDefault(); startEdit(a, null); return; }
     if (k === " ") { e.preventDefault(); if (a.col === 2 && !extentRef.current) toggleOffered(a); return; }
-    if (k === "Delete" || k === "Backspace") { e.preventDefault(); if (!extentRef.current) clearCell(a); return; }
+    // Delete or Backspace: one box clears at once (clearCell); a range goes through Clear and, when it
+    // changes more than one size, the confirm (plan 3.12).
+    if (k === "Delete" || k === "Backspace") { e.preventDefault(); if (!extentRef.current) clearCell(a); else clearSel(); return; }
     if (k === "Escape") { setExtent(null); return; }
     // A digit, `$` or any other character starts typing over the box (plan 3.10); the editor opens
     // holding it, so nothing typed is lost.
@@ -12166,6 +12273,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     setActive(cell);
     setExtent(null);
     setTip(null);
+    setSaid(null);
     if (e.button === 0) dragRef.current = true;
     // A click on an Offered box that is already selected ticks or unticks it.
     if (again && cell.col === 2 && e.button === 0 && e.detail === 1) toggleOffered(cell);
@@ -12297,7 +12405,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const leaveTo = (sub) => ssNavClick(() => leaveFor(sub));
   const toSheds = leaveTo("sheds");
   fnRef.current = { place, sendNow, flushNow, jumpRed, go, commitEdit, leaveFor,
-    refreshNow, pokeRefresh, adoptRead, addSizes, closeAdd, saveBackup, offerEarlier };
+    refreshNow, pokeRefresh, adoptRead, addSizes, closeAdd, saveBackup, offerEarlier, copySel, pasteFrom };
   // Pressing a link would blur the open editor, and the blur commits it before the click, so the
   // click would never see a box that commit turned red. Held on the editor, the click commits it.
   const holdEditor = (e) => { if (editRef.current) e.preventDefault(); };
@@ -12373,6 +12481,16 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
           <input type="checkbox" checked={showHidden} onChange={(e) => toggleShowHidden(e.target.checked)} />
           Show hidden sizes
         </label>
+        {/* Fill down and Clear (plan 3.10), for builders who don't know the keys. Drawn only while the
+            page can edit, as the editor and the add strips are (plan 3.16). */}
+        {canEdit && (
+          <>
+            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { fillDown(); focusGrid(); }}
+              title="Copy the top row of the selected boxes into the rows under it (Ctrl+D)">Fill down</button>
+            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { clearSel(); focusGrid(); }}
+              title="Empty the selected boxes (Delete)">Clear</button>
+          </>
+        )}
         <span className="ss-pg-readout" title={readout || undefined}>{readout}</span>
         <PgBadge {...badge} />
         <button type="button" className="ss-pg-q" aria-expanded={legendOpen} aria-controls="ss-pg-legend"
@@ -12397,6 +12515,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
         </div>
       )}
       {stuckLine ? stuckLine
+        : said ? <PgStatusLine tone={said.tone} action={dismissBtn(() => setSaid(null))}>{said.text}</PgStatusLine>
         : errLine ? <PgStatusLine tone={aerr.kind === "conflict" ? "amber" : "red"} action={dismissBtn(() => apply({ type: "dismiss", sizeId: active.sizeId, f: af }))}>{errLine}</PgStatusLine>
         : earlierLine ? <PgStatusLine tone="amber" action={dismissBtn(dismissEarlierRed)}>{earlierLine}</PgStatusLine>
         : q && q.note ? <PgStatusLine tone="amber" action={dismissBtn(() => apply({ type: "note-off" }))}>{q.note.text}</PgStatusLine>
@@ -12449,6 +12568,41 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
               </PgSelectionOverlay>
             </div>
           )}
+      </div>
+      {/* The confirm before a change to more than one size (plan 3.12). Gone if the page stops being
+          able to edit meanwhile (a 403 on a save already out). */}
+      {confirm && canEdit && <PgConfirm text={confirm.text} onYes={confirmYes} onNo={confirmNo} />}
+    </div>
+  );
+}
+
+// THE CONFIRM (plan 3.12): before a paste, fill or clear that changes boxes on more than one size.
+// A modal alertdialog named by its own question ("Change 6 sizes, Test Barn 10x12 to Test Barn 12x24:
+// 6 prices, … Continue?"). The focus goes to Continue and stays inside (Tab and Shift+Tab go round
+// the two buttons); Escape, Cancel or a click outside it cancel, and Cancel changes nothing. The page
+// gives the focus back to the grid either way. Every hook is above the return.
+function PgConfirm({ text, onYes, onNo }) {
+  const yesRef = useRef(null);
+  const noRef = useRef(null);
+  React.useLayoutEffect(() => {
+    try { yesRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+  }, []);
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onNo(); return; }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const next = document.activeElement === yesRef.current ? noRef.current : yesRef.current;
+      try { next.focus(); } catch (_f) { /* gone */ }
+    }
+  };
+  return (
+    <div className="ss-pg-confirm" onMouseDown={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); onNo(); } }}>
+      <div className="ss-pg-confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="ss-pg-confirm-q" onKeyDown={onKey}>
+        <p id="ss-pg-confirm-q">{text}</p>
+        <div className="ss-pg-confirm-acts">
+          <button type="button" ref={noRef} onClick={onNo}>Cancel</button>
+          <button type="button" ref={yesRef} className="ss-pg-confirm-yes" onClick={onYes}>Continue</button>
+        </div>
       </div>
     </div>
   );
