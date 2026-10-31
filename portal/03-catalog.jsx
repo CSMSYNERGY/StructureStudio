@@ -2994,7 +2994,11 @@ function ssPgModel(cat, table) {
   else if (sizes.some((z) => !styleIds.has(z.style_id))) guard = "orphan_size";
 
   const inc = {};
-  incs.forEach((x) => { if (x.included) (inc[x.size_id] = inc[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
+  const onFile = {};   // inclusion rows per size, included or not: the server's Remove needs none (ssPgCanRemove)
+  incs.forEach((x) => {
+    onFile[x.size_id] = (onFile[x.size_id] || 0) + 1;
+    if (x.included) (inc[x.size_id] = inc[x.size_id] || {})[x.item_key] = Number(x.qty) || 1;
+  });
   // sort_order, then id: the server's own order (nulls last, as Postgres sorts them ascending).
   const ord = (a, b) => {
     const sa = a.sort_order == null ? Infinity : Number(a.sort_order);
@@ -3015,6 +3019,7 @@ function ssPgModel(cat, table) {
       width: w, length: l, price, priceText: ssPgFmtPrice(price), active: !!z.active, offered, hidden: !offered,
       values: cols.map((c) => (mine[c.key] != null ? String(mine[c.key]) : "")),
       version: z.updated_at == null ? null : z.updated_at, created: z.created_at == null ? null : z.created_at,
+      onFile: onFile[z.id] || 0,
     });
   });
   const band = (s) => ({ id: s.id, key: s.key, label: String(s.label || s.key || "Style"), code: s.code || null, active: !!s.active, sizes: sizesBy[s.id] || [] });
@@ -3031,17 +3036,29 @@ function ssPgModel(cat, table) {
 // under a style with nothing to show; then the folded "Hidden styles" section, and the hidden styles
 // themselves when it is open. `showHidden: false` folds away sizes the designer does not offer.
 // Only "size" rows are cells; bands and placeholders are never a place the cursor or a paste lands.
+//
+// Phase 4 ("＋ Add sizes", plan 3.7): `adding` ({ [styleId]: true }) opens a style's add strip, an
+// "add" row right under its band; `addEmpty` (the page can edit) turns a style's "No sizes yet." into
+// that strip with its list box open (empty: true); `keep` ({ [sizeId]: true }, the sizes this page
+// added) are never folded away, so a new size, unpriced and so hidden, stays in view to be priced.
+// An "add" row is not a cell either.
 function ssPgRows(model, opts) {
   const o = opts || {};
   const showHidden = o.showHidden !== false;
+  const keep = o.keep || {};
   const out = [];
   if (!model) return out;
   const add = (s) => {
     const hidden = s.sizes.filter((z) => z.hidden).length;
-    const shown = showHidden ? s.sizes : s.sizes.filter((z) => !z.hidden);
-    out.push({ kind: "band", id: "b-" + s.id, style: s, total: s.sizes.length, hidden, folded: showHidden ? 0 : hidden });
-    if (!s.sizes.length) out.push({ kind: "empty", id: "e-" + s.id, style: s, text: "No sizes yet." });
-    else if (!shown.length) out.push({ kind: "empty", id: "e-" + s.id, style: s, text: hidden === 1 ? "1 hidden size, folded away." : `${hidden} hidden sizes, folded away.` });
+    const shown = showHidden ? s.sizes : s.sizes.filter((z) => !z.hidden || keep[z.id]);
+    const folded = s.sizes.length - shown.length;
+    out.push({ kind: "band", id: "b-" + s.id, style: s, total: s.sizes.length, hidden, folded });
+    if (!s.sizes.length) {
+      out.push(o.addEmpty ? { kind: "add", id: "a-" + s.id, style: s, empty: true } : { kind: "empty", id: "e-" + s.id, style: s, text: "No sizes yet." });
+      return;
+    }
+    if (o.adding && o.adding[s.id]) out.push({ kind: "add", id: "a-" + s.id, style: s, empty: false });
+    if (!shown.length) out.push({ kind: "empty", id: "e-" + s.id, style: s, text: folded === 1 ? "1 hidden size, folded away." : `${folded} hidden sizes, folded away.` });
     shown.forEach((z) => out.push({ kind: "size", id: z.id, size: z, style: s }));
   };
   model.styles.forEach(add);
@@ -3216,14 +3233,19 @@ function ssPgSame(a, b) {
 }
 
 // What the server held when the table was read, per size, in the queue's shape: the version
-// (updated_at, verbatim) and every value the grid draws. Hidden styles' sizes too.
+// (updated_at, verbatim) and every value the grid draws. Hidden styles' sizes too. `created`
+// (created_at, verbatim) is for Remove: a size whose version is still its created_at was never
+// edited since it was added (ssPgCanRemove). Sizes this page added (ssPgLocalModel) are not here:
+// they are read only once the server has them.
 function ssPgServerSizes(model) {
   const out = {};
   if (!model) return out;
   [...(model.styles || []), ...(model.hiddenStyles || [])].forEach((st) => (st.sizes || []).forEach((z) => {
+    if (z.local) return;
     const cells = {};
     (model.cols || []).forEach((c, i) => { const v = z.values ? z.values[i] : ""; if (v !== "" && v != null) cells[c.key] = Number(v); });
-    out[z.id] = { version: z.version == null ? null : z.version, price: z.price == null ? null : Number(z.price), active: !!z.active, cells };
+    out[z.id] = { version: z.version == null ? null : z.version, price: z.price == null ? null : Number(z.price), active: !!z.active, cells,
+      created: z.created == null ? null : z.created };
   }));
   return out;
 }
@@ -3364,7 +3386,7 @@ function ssPgRebase(sent, server, again) {
 // until a fresh read says what is on file.
 //
 // EVENTS: init, commit, invalid, dismiss, create, remove, flush, send, ok, fail, resume, discard,
-// refresh, columns, note-off. Times come in on the event (`at`), never from a clock in here.
+// refresh, columns, restore, note-off. Times come in on the event (`at`), never from a clock in here.
 //
 // THE COMMIT RULE. A field's baseline is its in-flight `to` when it has one, otherwise what the
 // server confirmed. A value equal to the baseline drops any unsent edit (nothing to send);
@@ -3544,8 +3566,10 @@ function ssPgQueue(q, ev) {
       let fields = q.fields;
       let flush = q.flush;
       const cellsOf = (c) => { const o = {}; Object.keys(c || {}).forEach((k) => { o[k] = Number(c[k]) || 0; }); return o; };
+      // created_at rides along where the answer has it (Remove reads it: ssPgCanRemove).
+      const bornOf = (r, prev) => (r.row && r.row.created_at != null ? { created: r.row.created_at } : prev && prev.created != null ? { created: prev.created } : {});
       const rowOf = (r, prev) => ({ version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price),
-        active: !!r.row.active, cells: { ...((prev && prev.cells) || {}), ...cellsOf(r.cells) } });
+        active: !!r.row.active, cells: { ...((prev && prev.cells) || {}), ...cellsOf(r.cells) }, ...bornOf(r, prev) });
       const gone = (f) => f.slice(0, 2) === "c:" && !!q.cols && !q.cols[f.slice(2)];
       const dot = (s) => { const t = String(s || "").trim(); return !t || /[.!?]$/.test(t) ? t : t + "."; };
 
@@ -3557,11 +3581,11 @@ function ssPgQueue(q, ev) {
         if (!r || fl.creates.indexOf(r.id) < 0) return;
         const minted = q.sizes[r.id];
         if ((r.status === "created" || r.status === "duplicate") && r.row) {
-          sizes[r.id] = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells) };
+          sizes[r.id] = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells), ...bornOf(r, null) };
           if (fields[r.id]) flush = true;
         } else if (r.status === "exists" && r.existingId && r.row) {
           const into = String(r.existingId);
-          const theirs = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells) };
+          const theirs = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells), ...bornOf(r, null) };
           const mine = fields[r.id] || {};
           const moved = { ...(fields[into] || {}) };
           Object.keys(mine).forEach((f) => {
@@ -3798,7 +3822,11 @@ function ssPgQueue(q, ev) {
         Object.keys(cells).forEach((k) => { if (flying("c:" + k) && !(k in (was.cells || {}))) delete cells[k]; });
         sizes[id] = { ...was, price: flying("price") ? was.price : t.price, active: flying("active") ? was.active : t.active, cells };
         if (!mine) return;
-        fields = setSize(fields, id, settle(mine, t));
+        const left = settle(mine, t);
+        fields = setSize(fields, id, left);
+        // Every unsent box already said what is on file (an Excel upload or a colleague typed the
+        // same): nothing local is left, so the size takes the read's version too, like any other.
+        if (!Object.keys(left).length && !was.creating && !q.removes[id]) sizes[id] = t;
       });
       // A size the read no longer has keeps its place only while something local hangs on it.
       Object.keys(q.sizes).forEach((id) => { if (!(id in sizes) && (q.fields[id] || q.sizes[id].creating || q.removes[id])) sizes[id] = q.sizes[id]; });
@@ -3832,6 +3860,41 @@ function ssPgQueue(q, ev) {
       });
       const text = Object.keys(dropped).map((k) => `${names[k] || "An option"} was archived in Options; ${dropped[k] === 1 ? "1 unsaved box in that column was dropped" : `${dropped[k]} unsaved boxes in that column were dropped`}.`).join(" ");
       return timed({ ...q, fields, cols: keep, note: text ? { text } : q.note }, false);
+    }
+    case "restore": {
+      // "Save them" on the backup's banner (plan 4.9): each stored edit goes back in unsent, ON THE
+      // VERSION (base) AND FROM THE VALUE (from) IT WAS MADE AGAINST, never on what was read just now.
+      // So the server's two checks judge it against what is on file: a colleague's change since comes
+      // back conflict, and the rebase sends only the boxes nobody touched; the rest turn red. The size
+      // takes the stored version (the refresh rule keeps a size with local edits on the version they
+      // were made against). Left out: a box typed into or marked here since (the newer edit wins), a
+      // size with a call out (its version is the answer's to set), one being added or removed, a
+      // column that went away, and a size no longer on the account (the status line counts those).
+      // Red entries never come here: they are listed, never sent (the page).
+      let fields = q.fields, seq = q.seq, n = 0, gone = 0;
+      const sizes = { ...q.sizes };
+      Object.keys(e.sizes || {}).forEach((id) => {
+        const b = e.sizes[id], s = sizes[id];
+        const fs = Object.keys((b && b.fields) || {});
+        if (!s) { gone += fs.length; return; }
+        if (s.creating || q.removes[id] || !b || b.base == null) return;
+        const mine = { ...(fields[id] || {}) };
+        if (Object.keys(mine).some((f) => mine[f].inflight)) return;
+        let any = false;
+        fs.forEach((f) => {
+          const x = b.fields[f];
+          if (!x || mine[f] || (f.slice(0, 2) === "c:" && q.cols && !q.cols[f.slice(2)]) || ssPgSame(x.to, x.from)) return;
+          mine[f] = { pending: { to: x.to, from: x.from, seq: ++seq } };
+          any = true;
+          n++;
+        });
+        if (!any) return;
+        sizes[id] = { ...s, version: b.base };
+        fields = setSize(fields, id, mine);
+      });
+      const note = gone ? { text: `${gone === 1 ? "1 change" : `${gone} changes`} from earlier ${gone === 1 ? "was" : "were"} for a size that isn't on this account any more.` } : q.note;
+      if (!n) return gone ? { ...q, note } : q;
+      return timed({ ...q, sizes, fields, seq, note, flush: true }, true);
     }
     default:
       return q;
@@ -3912,6 +3975,257 @@ function ssPgErrorLine(where, field, err) {
 function ssPgColBox(col, narrow) {
   const c = Math.max(0, Number(col) || 0);
   return { x: c < 3 ? [0, 64, 140][c] : 170 + (c - 3) * 44, w: c < 3 ? [64, 76, 30][c] : 44, frozen: c < (narrow ? 1 : 3) };
+}
+
+// ─── Sizes & prices table: adding sizes, refresh and the backup, the pure half (Phase 4a, 2026-10-31) ───
+// Lifted and run by pricingTableHelpers_test.ts like the helpers above. The plan's sections 3.7, 4.6,
+// 4.8 and 4.9.
+
+// "＋ Add sizes", List (plan 3.7): "10x12, 12x16" → the sizes to add, in the order typed. A size is a
+// width and a length in feet with x, X, × or "by" between them, spaces or not ("10x12", "10 x 12",
+// "10X12", "10 by 12", "10.5x12"); sizes are split by commas, semicolons or new lines. Each number is
+// judged by ssPgParseDim, the server's own rule (pricingCells.ts parseDim, in validatePayload), so a
+// list the browser takes is never a 400. ONE BAD ENTRY REFUSES THE WHOLE ADD, and is named. A size
+// already in the style (`existing`: [{ width, length }]) is skipped and named; a repeat in the list
+// collapses; at most `max` (100) sizes go in one add. Labels are the server's `${w}x${l}` (10.5x12,
+// never 10.50x12). → { ok: true, sizes: [{ width, length, label }], skipped: [label], repeats } or
+// { ok: false, error }.
+function ssPgParseSizeList(text, existing, max) {
+  const cap = Number(max) > 0 ? Number(max) : 100;
+  const tokens = String(text == null ? "" : text).split(/[,;\r\n]+/).map((t) => t.trim()).filter(Boolean);
+  if (!tokens.length) return { ok: false, error: "Type sizes like 10x12, 12x16." };
+  const have = {};
+  (existing || []).forEach((z) => { if (z && z.width != null && z.length != null) have[String(Number(z.width)) + "x" + String(Number(z.length))] = true; });
+  const sizes = [], skipped = [], seen = {}, bad = [];
+  let repeats = 0;
+  tokens.forEach((t) => {
+    const m = /^(.+?)\s*(?:x|×|by)\s*(.+)$/i.exec(t);
+    const w = m ? ssPgParseDim(m[1]) : null, l = m ? ssPgParseDim(m[2]) : null;
+    if (!w || !l || !w.ok || !l.ok) { bad.push({ t, sized: !!m && /^[\d.\s]+$/.test(m[1]) && /^[\d.\s]+$/.test(m[2]) }); return; }
+    const label = String(w.value) + "x" + String(l.value);
+    if (seen[label]) { repeats++; return; }
+    seen[label] = true;
+    if (have[label]) skipped.push(label);
+    else sizes.push({ width: w.value, length: l.value, label });
+  });
+  if (bad.length) {
+    const b = bad[0];
+    const why = b.sized ? `“${b.t}”: a width or length is above 0, at most 500, with at most 2 decimals.` : `“${b.t}” isn't a size like 10x12.`;
+    return { ok: false, error: `Nothing added. ${why}${bad.length > 1 ? ` ${bad.length - 1} more ${bad.length === 2 ? "entry isn't" : "entries aren't"} right either.` : ""}` };
+  }
+  if (sizes.length > cap) return { ok: false, error: `Nothing added. At most ${cap} sizes go in one add; this list has ${sizes.length}.` };
+  return { ok: true, sizes, skipped, repeats };
+}
+
+// "＋ Add sizes", Add several (plan 3.7): widths × lengths as a tick-box grid, widths down and lengths
+// across. Widths and lengths are typed as lists ("8, 10, 12" or "8 10 12"), each number judged by
+// ssPgParseDim, a repeat dropped, in the order typed. Every pair starts ticked; one already in the
+// style (`existing`) is "already there" (greyed, never added); `unticked` ({ label: true }) are the
+// pairs the builder unticked. `sizes` is what [Add N sizes] adds: the ticked new pairs, row by row
+// (each width's lengths in turn), which is the order they go in. More than `max` (100) is refused
+// (`error`), and so is a bad number, which is named. `blank`: a box is still empty (no grid yet, no
+// complaint). → { ok, blank?, error?, widths, lengths, rows: [[{ width, length, label, there,
+// ticked }]], sizes }.
+function ssPgSizeGrid(widthsText, lengthsText, existing, unticked, max) {
+  const cap = Number(max) > 0 ? Number(max) : 100;
+  const off = unticked || {};
+  const list = (text, what) => {
+    const out = [], seen = {};
+    const toks = String(text == null ? "" : text).split(/[\s,;]+/).filter(Boolean);
+    for (const t of toks) {
+      const p = ssPgParseDim(t);
+      if (!p.ok) return { error: `“${t}” isn't a ${what}: a number of feet above 0, at most 500, with at most 2 decimals.` };
+      if (!seen[p.value]) { seen[p.value] = true; out.push(p.value); }
+    }
+    return { values: out };
+  };
+  const ws = list(widthsText, "width"), ls = list(lengthsText, "length");
+  const none = { widths: [], lengths: [], rows: [], sizes: [] };
+  if (ws.error || ls.error) return { ok: false, error: ws.error || ls.error, ...none };
+  if (!ws.values.length || !ls.values.length) return { ok: false, blank: true, error: null, ...none };
+  const have = {};
+  (existing || []).forEach((z) => { if (z && z.width != null && z.length != null) have[String(Number(z.width)) + "x" + String(Number(z.length))] = true; });
+  const rows = ws.values.map((w) => ls.values.map((l) => {
+    const label = String(w) + "x" + String(l);
+    const there = !!have[label];
+    return { width: w, length: l, label, there, ticked: !there && !off[label] };
+  }));
+  const sizes = [];
+  rows.forEach((r) => r.forEach((c) => { if (c.ticked) sizes.push({ width: c.width, length: c.length, label: c.label }); }));
+  const error = sizes.length > cap ? `At most ${cap} sizes go in one add; ${sizes.length} are ticked. Untick some, or add them in two goes.` : null;
+  return { ok: !error, error, widths: ws.values, lengths: ls.values, rows, sizes };
+}
+
+// The model the grid draws (plan 3.7): the last read, with this page's own changes to its rows that
+// no read has shown yet. Sizes this page added (`added`: [{ id, styleId, width, length, label }], in
+// the order typed) go after their style's last size, which is where the server puts them (max
+// sort_order + 1), for as long as the queue knows them (`sizes`, ssPgQueue's): while their create is
+// unanswered ("Adding…"), and once created, until a read has them. A size the queue no longer has is
+// gone from the grid: removed here, or an add the server refused, or answered `exists` for (the
+// existing size takes its place). The same model object comes back when nothing changes, so the
+// grid's memos hold; `sections` and `cols` are always the read's own.
+function ssPgLocalModel(model, added, sizes) {
+  if (!model || !sizes) return model;
+  const known = {};
+  [...model.styles, ...model.hiddenStyles].forEach((st) => st.sizes.forEach((z) => { known[z.id] = true; }));
+  const extra = {};
+  (Array.isArray(added) ? added : []).forEach((a) => { if (a && sizes[a.id] && !known[a.id]) (extra[a.styleId] = extra[a.styleId] || []).push(a); });
+  const blank = (model.cols || []).map(() => "");
+  let changed = false;
+  const fix = (st) => {
+    const keep = st.sizes.filter((z) => !!sizes[z.id]);
+    const more = (extra[st.id] || []).map((a) => ({
+      id: a.id, styleId: st.id, label: String(a.label), title: `${a.width} ft × ${a.length} ft`, width: a.width, length: a.length,
+      price: null, priceText: "", active: false, offered: false, hidden: true, values: blank, version: null, created: null, onFile: 0, local: true,
+    }));
+    if (keep.length === st.sizes.length && !more.length) return st;
+    changed = true;
+    return { ...st, sizes: [...keep, ...more] };
+  };
+  const styles = model.styles.map(fix), hiddenStyles = model.hiddenStyles.map(fix);
+  return changed ? { ...model, styles, hiddenStyles } : model;
+}
+
+// Whether a size shows Remove (plan 3.7; the function's rule 2 in migration 350): it was never priced
+// or edited since it was added (its version is still its created_at, both verbatim), nothing is
+// included and no inclusion row is on file (`z`, the model's row: onFile), and nothing of it is local
+// here (an unsent, in-flight or red box, an unanswered create, a remove already on its way). The
+// server checks it all again and answers anything else refused.
+function ssPgCanRemove(q, id, z) {
+  const s = q && q.sizes ? q.sizes[id] : null;
+  if (!s || s.creating || s.version == null || s.created == null || String(s.version) !== String(s.created)) return false;
+  if (s.price != null || Object.keys(s.cells || {}).some((k) => Number(s.cells[k]) > 0)) return false;
+  if (z && Number(z.onFile) > 0) return false;
+  return !(q.fields && q.fields[id]) && !(q.removes && q.removes[id]);
+}
+
+// THE LOCAL BACKUP (plan 4.9): what to keep in this browser so a closed tab, a crash or a sign-out
+// loses nothing typed. Stored by the page under ss-pg-pending:<userId>:<clientId>, rewritten on every
+// change of the queue and every keystroke in the editor, cleared when nothing is left. Shape:
+//   { savedAt, sizes: { <id>: { base, fields: { <field>: { to, from } } } }, red: [...], draft }
+// `base` is the size's version the edits were made against and `from` each box's value at that
+// version: the in-flight value's starting point when a box is in flight (with a follow-up, `to` is the
+// follow-up: the newest value), else the unsent edit's. Sizes still being added have no version and
+// are not kept. `red`: every red box, { sizeId, key, kind, typed, reason, server? }; listed on open,
+// never sent. `draft`: the open editor's changed text (`draft` in: { sizeId, key, text, seen }), on
+// the size's version and from the box's own starting value, or what the editor opened on. `keep` is
+// an earlier backup still on offer (its banner unanswered): what it holds stays in, except a box this
+// page has since edited or marked (that is newer), so a second crash before the builder answers
+// loses neither. null when there is nothing to keep.
+function ssPgBackup(q, draft, at, keep) {
+  const sizes = {}, red = [], marked = {};
+  const put = (id, base, f, to, from) => {
+    const s = sizes[id] || (sizes[id] = { base, fields: {} });
+    s.fields[f] = { to, from };
+  };
+  const fieldsOf = (q && q.fields) || {};
+  Object.keys(fieldsOf).forEach((id) => {
+    const s = q.sizes ? q.sizes[id] : null;
+    Object.keys(fieldsOf[id]).forEach((f) => {
+      const x = fieldsOf[id][f];
+      if (x.error) {
+        const r = { sizeId: id, key: f, kind: x.error.kind, typed: x.error.typed === undefined ? null : x.error.typed, reason: x.error.reason || null };
+        if (x.error.kind === "conflict") r.server = x.error.server === undefined ? null : x.error.server;
+        red.push(r);
+        marked[id + "|" + f] = true;
+      }
+      if (!(x.pending || x.inflight) || !s || s.creating || s.version == null) return;
+      const to = x.pending ? x.pending.to : x.inflight.to;
+      const from = x.inflight ? x.inflight.from : x.pending.from;
+      if (!ssPgSame(to, from)) put(id, s.version, f, to, from);
+    });
+  });
+  let d = null;
+  const ds = draft && q && q.sizes ? q.sizes[draft.sizeId] : null;
+  if (ds && !ds.creating && ds.version != null && draft.key && draft.key !== "active") {
+    const x = (fieldsOf[draft.sizeId] || {})[draft.key];
+    const from = x && x.inflight ? x.inflight.from : x && x.pending ? x.pending.from : draft.seen;
+    d = { sizeId: draft.sizeId, key: draft.key, text: String(draft.text == null ? "" : draft.text), base: ds.version, from: from === undefined ? null : from };
+  }
+  if (keep) {
+    Object.keys(keep.sizes || {}).forEach((id) => {
+      const k = keep.sizes[id];
+      Object.keys((k && k.fields) || {}).forEach((f) => {
+        if ((fieldsOf[id] && fieldsOf[id][f]) || (sizes[id] && (sizes[id].fields[f] || sizes[id].base !== k.base))) return;
+        put(id, k.base, f, k.fields[f].to, k.fields[f].from);
+      });
+    });
+    (keep.red || []).forEach((r) => { if (r && !marked[r.sizeId + "|" + r.key] && !(fieldsOf[r.sizeId] && fieldsOf[r.sizeId][r.key])) red.push(r); });
+  }
+  if (!Object.keys(sizes).length && !red.length && !d) return null;
+  return { savedAt: at, sizes, red, draft: d };
+}
+
+// A stored backup, read back for the banner (plan 4.9): null when there is none, it cannot be read,
+// or it was saved more than 7 days before `now` (`maxAge`, ms). Anything the server would refuse
+// whole (a malformed id, version, field or value: one bad entry is a 400 for the call) is dropped
+// here, so Save them never sends it. The editor's draft becomes an ordinary edit: its text parsed by
+// the box's own rule (a value equal to its starting one always taken), or, when the rules refuse it,
+// a red entry ("invalid"), listed, never sent. → { savedAt, sizes, red, count }, `count` the edits
+// Save them would send.
+function ssPgBackupLoad(raw, now, maxAge) {
+  let b = null;
+  try { b = typeof raw === "string" ? JSON.parse(raw) : raw; } catch (_e) { return null; }
+  if (!b || typeof b !== "object") return null;
+  const savedAt = Number(b.savedAt);
+  const age = Number(maxAge) > 0 ? Number(maxAge) : 7 * 24 * 3600 * 1000;
+  if (!isFinite(savedAt) || Number(now) - savedAt > age) return null;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const VERSION = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2})?)$/;
+  const isField = (f) => f === "price" || f === "active" || (typeof f === "string" && f.slice(0, 2) === "c:" && f.length > 2 && f.length <= 66);
+  const isVal = (f, v) => (f === "price" ? v === null || (typeof v === "number" && isFinite(v))
+    : f === "active" ? typeof v === "boolean" : typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 2147483647);
+  const sizes = {}, red = [];
+  let count = 0;
+  const src = b.sizes && typeof b.sizes === "object" ? b.sizes : {};
+  Object.keys(src).forEach((id) => {
+    const s = src[id];
+    if (!UUID.test(id) || !s || typeof s.base !== "string" || !VERSION.test(s.base) || !s.fields || typeof s.fields !== "object") return;
+    Object.keys(s.fields).forEach((f) => {
+      const x = s.fields[f];
+      if (!isField(f) || !x || !isVal(f, x.to) || !isVal(f, x.from) || ssPgSame(x.to, x.from)) return;
+      (sizes[id] = sizes[id] || { base: s.base, fields: {} }).fields[f] = { to: x.to, from: x.from };
+      count++;
+    });
+  });
+  const d = b.draft;
+  if (d && UUID.test(String(d.sizeId)) && typeof d.base === "string" && VERSION.test(d.base) && isField(d.key) && d.key !== "active" && isVal(d.key, d.from)) {
+    const p = d.key === "price" ? ssPgParsePrice(d.text, d.from) : ssPgParseQty(d.text, d.from);
+    const into = sizes[d.sizeId];
+    if (!p.ok) red.push({ sizeId: d.sizeId, key: d.key, kind: "invalid", typed: String(d.text == null ? "" : d.text), reason: p.error });
+    else if (!ssPgSame(p.value, d.from) && (!into || into.base === d.base)) {
+      if (!into || !into.fields[d.key]) count++;
+      (sizes[d.sizeId] = into || { base: d.base, fields: {} }).fields[d.key] = { to: p.value, from: into && into.fields[d.key] ? into.fields[d.key].from : d.from };
+    }
+  }
+  (Array.isArray(b.red) ? b.red : []).forEach((r) => {
+    if (r && UUID.test(String(r.sizeId)) && isField(r.key) && ["invalid", "refused", "conflict"].indexOf(r.kind) >= 0) red.push(r);
+  });
+  if (!count && !red.length) return null;
+  return { savedAt, sizes, red, count };
+}
+
+// The status line for a backup's red entries (plan 4.9: listed for the builder to type again, never
+// sent): "These didn't save before you left: Test Barn 12x24 · Price ($4,800); …. Type them again if
+// they're right." `where` names each size ({ id: "Test Barn 12x24" }) and `fields` each box ({ field:
+// { name, kind } }); an entry for a size or a column that is no longer drawn is left out. "" when none.
+function ssPgEarlierText(red, where, fields) {
+  const items = [];
+  (red || []).forEach((r) => {
+    const w = r && where ? where[r.sizeId] : null;
+    const f = r && fields ? fields[r.key] : null;
+    if (!w || !f) return;
+    const v = r.typed;
+    const shown = r.kind === "invalid" ? `“${v == null ? "" : v}”`
+      : f.kind === "active" ? (v ? "ticked" : "unticked")
+      : v == null || v === "" || (f.kind !== "price" && !(Number(v) > 0)) ? "cleared"
+      : f.kind === "price" ? ssPgFmtPrice(v) : String(v);
+    items.push(`${w} · ${f.name} (${shown})`);
+  });
+  if (!items.length) return "";
+  const one = items.length === 1;
+  const more = items.length > 3 ? `; and ${items.length - 3} more` : "";
+  return `${one ? "This didn't" : "These didn't"} save before you left: ${items.slice(0, 3).join("; ")}${more}. Type ${one ? "it" : "them"} again if ${one ? "it's" : "they're"} right.`;
 }
 
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {

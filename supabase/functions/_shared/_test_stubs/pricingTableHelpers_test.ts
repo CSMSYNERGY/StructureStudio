@@ -4,7 +4,7 @@
 // every builder's saved sheet stops matching on re-upload (columns are matched by exact label).
 
 import { assert, assertEquals } from "jsr:@std/assert";
-import { MAX_CALL_CELLS, MAX_CALL_ENTRIES, parseDim, parsePrice, parseQty, validatePayload } from "../pricingCells.ts";
+import { MAX_CALL_CELLS, MAX_CALL_ENTRIES, parseDim, parsePrice, parseQty, sizeLabel, validatePayload } from "../pricingCells.ts";
 import { DIM_CASES, PRICE_CASES, QTY_CASES } from "./pricingParseCases.ts";
 
 const src = (await Deno.readTextFile(new URL("../../../../portal/03-catalog.jsx", import.meta.url))).replace(/\r\n/g, "\n");
@@ -940,7 +940,7 @@ Deno.test("ssPgRowView: the server's values with this page's edits on top, and o
   const m = H.ssPgModel(TCAT, TABLE);
   const z = m.styles[0].sizes.find((x: Any) => x.id === zid(3));   // 12x24: $4,800, loft 50, door 2
   const s = S.ssPgServerSizes(m)[zid(3)];
-  assertEquals(s, { version: "2026-10-04T00:00:00.123456+00:00", price: 4800, active: true, cells: { loft: 50, "11": 2 } });
+  assertEquals(s, { version: "2026-10-04T00:00:00.123456+00:00", price: 4800, active: true, cells: { loft: 50, "11": 2 }, created: "2026-10-01T00:00:00.000001+00:00" });
   assertEquals(S.ssPgRowView(z, null, null, m.cols).values, z.values, "before the queue exists: the model's own");
   const plain = S.ssPgRowView(z, s, null, m.cols);
   assertEquals([plain.priceText, plain.values, plain.marks, plain.offered], ["$4,800", ["50", "", "2"], "", true]);
@@ -958,4 +958,345 @@ Deno.test("ssPgColBox: the overlay's columns; Size, Price and Offered frozen, Si
   assertEquals([0, 1, 2, 3, 4].map((c) => S.ssPgColBox(c, false)), [
     { x: 0, w: 64, frozen: true }, { x: 64, w: 76, frozen: true }, { x: 140, w: 30, frozen: true }, { x: 170, w: 44, frozen: false }, { x: 214, w: 44, frozen: false }]);
   assertEquals([0, 1, 2].map((c) => S.ssPgColBox(c, true).frozen), [true, false, false]);
+});
+
+// ─── Phase 4a: adding sizes, Remove, the refresh and the backup (2026-10-31) ───────────────────
+// Lifted the same way, from the shipped text. Each is a top-level `function x(…) {` whose only free
+// names are the helpers above it.
+const P4 = ["function ssPgParseSizeList(text, existing, max) {", "function ssPgSizeGrid(widthsText, lengthsText, existing, unticked, max) {",
+  "function ssPgLocalModel(model, added, sizes) {", "function ssPgCanRemove(q, id, z) {", "function ssPgBackup(q, draft, at, keep) {",
+  "function ssPgBackupLoad(raw, now, maxAge) {", "function ssPgEarlierText(red, where, fields) {"].map(lift).join("\n");
+const G = new Function(`${PURE}\n${SAVE}\n${P4}; return { ssPgParseSizeList, ssPgSizeGrid, ssPgLocalModel, ssPgCanRemove, ssPgBackup, ssPgBackupLoad, ssPgEarlierText };`)() as Record<string, (...a: Any[]) => Any>;
+const labels = (list: Any[]) => list.map((z: Any) => z.label);
+
+Deno.test("ssPgParseSizeList: every way of writing a size, split by commas, semicolons or new lines, in the order typed", () => {
+  const r = G.ssPgParseSizeList("10x12, 10 x 14; 10X16\n10 by 18\r\n10.5x12, 12×24 ,  ", []);
+  assertEquals(r.ok, true);
+  assertEquals(labels(r.sizes), ["10x12", "10x14", "10x16", "10x18", "10.5x12", "12x24"]);
+  assertEquals(r.sizes[4], { width: 10.5, length: 12, label: "10.5x12" });
+  assertEquals([r.skipped, r.repeats], [[], 0]);
+  assertEquals(G.ssPgParseSizeList("10.50 x 12.00", []).sizes, [{ width: 10.5, length: 12, label: "10.5x12" }], "the server's label: 10.5x12, never 10.50x12");
+  assertEquals(G.ssPgParseSizeList("10 BY 12", []).sizes[0].label, "10x12");
+});
+
+Deno.test("ssPgParseSizeList: one bad entry refuses the whole add and is named; repeats collapse; sizes already there are skipped and named; at most 100", () => {
+  assertEquals(G.ssPgParseSizeList("10x12, 10y12, 12x16", []), { ok: false, error: "Nothing added. “10y12” isn't a size like 10x12." });
+  assertEquals(G.ssPgParseSizeList("10x12, 600x12", []).error, "Nothing added. “600x12”: a width or length is above 0, at most 500, with at most 2 decimals.");
+  assertEquals(G.ssPgParseSizeList("abc, 10.125x12, 0x8", []).error, "Nothing added. “abc” isn't a size like 10x12. 2 more entries aren't right either.");
+  assertEquals(G.ssPgParseSizeList("10x12x14, 12x16, -1x8", []).error, "Nothing added. “10x12x14” isn't a size like 10x12. 1 more entry isn't right either.");
+  assertEquals(G.ssPgParseSizeList(" , ;\n", []), { ok: false, error: "Type sizes like 10x12, 12x16." });
+  const have = [{ width: 12, length: 16 }, { width: 10.5, length: 12 }];
+  const r = G.ssPgParseSizeList("12x16, 14x20, 14 x 20, 10.50x12, 14X20", have);
+  assertEquals([r.ok, labels(r.sizes), r.skipped, r.repeats], [true, ["14x20"], ["12x16", "10.5x12"], 2]);
+  const all = G.ssPgParseSizeList("12x16", have);
+  assertEquals([all.ok, all.sizes, all.skipped], [true, [], ["12x16"]], "all already there: nothing to add, and it says which");
+  const list = (n: number) => Array.from({ length: n }, (_, i) => `10x${i + 1}`).join(", ");
+  assertEquals(G.ssPgParseSizeList(list(100), []).sizes.length, 100);
+  assertEquals(G.ssPgParseSizeList(list(101), []), { ok: false, error: "Nothing added. At most 100 sizes go in one add; this list has 101." });
+  assertEquals(G.ssPgParseSizeList(list(101), [{ width: 10, length: 1 }]).sizes.length, 100, "a size already there does not count");
+});
+
+Deno.test("ssPgParseSizeList: the width and length rule is the server's own (parse parity), and 100 new sizes go as two calls the server takes", () => {
+  for (const [text] of DIM_CASES) {
+    for (const tok of [`${text}x12`, `12 x ${text}`]) {
+      const b = G.ssPgParseSizeList(tok, []), s = parseDim(text);
+      assertEquals(b.ok, s.ok, `${JSON.stringify(tok)}: browser ${JSON.stringify(b)}, server ${JSON.stringify(s)}`);
+      if (!s.ok) continue;
+      const z = b.sizes[0];
+      assertEquals(tok.startsWith("12 x") ? z.length : z.width, s.value);
+      assertEquals(z.label, sizeLabel(z.width, z.length), "the label the server writes");
+    }
+  }
+  // One add of 100: creates count toward the 50 entries a call may carry, so two calls, in order.
+  const r = G.ssPgParseSizeList(Array.from({ length: 100 }, (_, i) => `10.5x${i + 1}`).join("\n"), []);
+  const nid = (i: number) => `20000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+  let q = Q(start(DB()), ...r.sizes.map((z: Any, i: number) => ({ type: "create", id: nid(i), styleId: sid(1), width: z.width, length: z.length, at: 0 })));
+  const got: string[] = [];
+  for (let call = 0; call < 2; call++) {
+    q = Q(q, { type: "send" });
+    const v = validatePayload(q.flight.body);
+    assert(v.ok, JSON.stringify(v));
+    assertEquals(q.flight.body.creates.length, 50);
+    got.push(...v.value.creates.map((c: Any) => c.label));
+    q = Q(q, { type: "ok", n: q.flight.n, answer: { ok: true, created: q.flight.body.creates.map((c: Any) => ({ id: c.id, status: "created", version: V0, row: { price: null, active: false, created_at: V0 }, cells: {} })), removed: [], results: [] } });
+  }
+  assertEquals(got, labels(r.sizes), "typed order, so the server's max + 1 puts them in that order");
+  assertEquals(S.ssPgBuildBatch(q), null);
+});
+
+Deno.test("ssPgSizeGrid: widths down, lengths across, all ticked; sizes already there greyed; unticked ones left out; added row by row", () => {
+  const g = G.ssPgSizeGrid("8, 10, 12", "12 16 20", [{ width: 10, length: 16 }], {});
+  assertEquals([g.ok, g.widths, g.lengths, g.error], [true, [8, 10, 12], [12, 16, 20], null]);
+  assertEquals(g.rows.map((r: Any[]) => r.map((c: Any) => (c.there ? "there" : c.ticked ? "x" : "-"))), [["x", "x", "x"], ["x", "there", "x"], ["x", "x", "x"]]);
+  assertEquals(g.sizes.length, 8);
+  const off = G.ssPgSizeGrid("8, 10, 12", "12, 16, 20", [{ width: 10, length: 16 }], { "12x12": true, "8x20": true });
+  assertEquals(labels(off.sizes), ["8x12", "8x16", "10x12", "10x20", "12x16", "12x20"]);
+  assertEquals(off.rows[2][0], { width: 12, length: 12, label: "12x12", there: false, ticked: false });
+  assertEquals(labels(G.ssPgSizeGrid("10, 10, 12", "16;16", [], {}).sizes), ["10x16", "12x16"], "repeats drop");
+  assertEquals(G.ssPgSizeGrid("8, ten", "12", [], {}).error, "“ten” isn't a width: a number of feet above 0, at most 500, with at most 2 decimals.");
+  assertEquals(G.ssPgSizeGrid("8", "12.125", [], {}).error, "“12.125” isn't a length: a number of feet above 0, at most 500, with at most 2 decimals.");
+  const blank = G.ssPgSizeGrid("8, 10", "  ", [], {});
+  assertEquals([blank.ok, blank.blank, blank.error, blank.sizes], [false, true, null, []], "an empty box is no grid yet, and no complaint");
+  const nums = (n: number) => Array.from({ length: n }, (_, i) => i + 1).join(",");
+  const big = G.ssPgSizeGrid(nums(11), nums(10), [], {});
+  assertEquals([big.ok, big.sizes.length, big.error], [false, 110, "At most 100 sizes go in one add; 110 are ticked. Untick some, or add them in two goes."]);
+  const ten: Record<string, boolean> = {};
+  for (let l = 1; l <= 10; l++) ten[`11x${l}`] = true;
+  const trimmed = G.ssPgSizeGrid(nums(11), nums(10), [], ten);
+  assertEquals([trimmed.ok, trimmed.sizes.length], [true, 100]);
+  // The same number rule as the server: each pair is a create the server's shape check takes.
+  const sizes = G.ssPgSizeGrid("10.25, 500", "0.5", [], {}).sizes;
+  assert(validatePayload({ creates: sizes.map((z: Any, i: number) => ({ id: zid(60 + i), styleId: sid(1), width: z.width, length: z.length })) }).ok);
+});
+
+Deno.test("ssPgRows: the add strip goes under its band; an empty style's placeholder is the strip when the page can edit; sizes added here never fold away", () => {
+  const m = H.ssPgModel(TCAT, TABLE);
+  const shape = (rows: Any[]) => rows.map((r) => r.kind === "size" ? r.size.label : r.kind === "band" ? `[${r.style.label} ${r.total}/${r.hidden}/${r.folded}]`
+    : r.kind === "add" ? `<add ${r.style.label}${r.empty ? " empty" : ""}>` : r.kind === "empty" ? `(${r.text})` : `{hidden ${r.count} ${r.open}}`);
+  assertEquals(shape(H.ssPgRows(m, { addEmpty: true, adding: { [sid(1)]: true } })), ["[Test Barn 3/1/0]", "<add Test Barn>", "10x12", "10x16", "12x24",
+    "[Test Utility 2/1/0]", "8x10", "8x12", "[Test Empty 0/0/0]", "<add Test Empty empty>", "{hidden 1 false}"]);
+  assertEquals(shape(H.ssPgRows(m, {})).slice(-3, -1), ["[Test Empty 0/0/0]", "(No sizes yet.)"], "a page that can't edit keeps the plain placeholder");
+  // 10x16 is hidden (no price): folded away, unless this page added it.
+  assertEquals(shape(H.ssPgRows(m, { showHidden: false, keep: { [zid(2)]: true } })).slice(0, 4), ["[Test Barn 3/1/0]", "10x12", "10x16", "12x24"]);
+  assertEquals(shape(H.ssPgRows(m, { showHidden: false, adding: { [sid(1)]: true } })).slice(0, 4), ["[Test Barn 3/1/1]", "<add Test Barn>", "10x12", "12x24"]);
+});
+
+Deno.test("ssPgLocalModel: new sizes go after their style's last size in the order typed while the queue knows them; removed ones go; nothing changed, the same model", () => {
+  const m = H.ssPgModel(TCAT, TABLE);
+  const sizes = S.ssPgServerSizes(m);
+  assertEquals(G.ssPgLocalModel(m, [], sizes), m, "nothing to change: the very same object, so the grid's memos hold");
+  assert(G.ssPgLocalModel(m, [], sizes) === m);
+  assert(G.ssPgLocalModel(m, [{ id: zid(41), styleId: sid(1), width: 1, length: 1, label: "1x1" }], null) === m, "no queue yet: the read");
+  const N1 = zid(41), N2 = zid(42), N3 = zid(43);
+  const added = [{ id: N2, styleId: sid(1), width: 14, length: 20, label: "14x20" }, { id: N1, styleId: sid(1), width: 10.5, length: 12, label: "10.5x12" },
+    { id: N3, styleId: sid(4), width: 8, length: 8, label: "8x8" }];
+  const q = Q(S.ssPgQueue(null, { type: "init", sizes, cols: ["loft", "workbench", "11"] }),
+    ...added.map((a) => ({ type: "create", id: a.id, styleId: a.styleId, width: a.width, length: a.length, at: 0 })));
+  const lm = G.ssPgLocalModel(m, added, q.sizes);
+  assertEquals(labels(lm.styles[0].sizes), ["10x12", "10x16", "12x24", "14x20", "10.5x12"]);
+  assertEquals(labels(lm.styles[2].sizes), ["8x8"], "an empty style's first size");
+  const n = lm.styles[0].sizes[3];
+  assertEquals([n.price, n.hidden, n.values, n.local, n.title, n.version], [null, true, ["", "", ""], true, "14 ft × 20 ft", null]);
+  assert(lm.cols === m.cols && lm.sections === m.sections && lm.styles[1] === m.styles[1], "the columns are the read's, and an untouched style is the same object");
+  const v = S.ssPgRowView(n, q.sizes[N2], q.fields[N2], lm.cols);
+  assertEquals([v.priceText, v.noPrice, v.offered], ["", true, false], "Offered off and greyed until a price is on file");
+  // Gone from the queue (removed, refused, or `exists` put another size in its place): gone from the grid.
+  const gone = { ...q.sizes };
+  delete gone[N2];
+  delete gone[zid(1)];
+  assertEquals(labels(G.ssPgLocalModel(m, added, gone).styles[0].sizes), ["10x16", "12x24", "10.5x12"]);
+  // Once a read has it, it is drawn from the read, and only once.
+  const t2 = { ...TABLE, sizes: [...SIZES, size(42, 1, 14, 20, null, false, 3)], counts: { sizes: SIZES.length + 1, inclusions: INCS.length } };
+  const read = H.ssPgModel(TCAT, t2);
+  const lr = G.ssPgLocalModel(read, added, { ...S.ssPgServerSizes(read), [N1]: q.sizes[N1], [N3]: q.sizes[N3] });
+  assertEquals(labels(lr.styles[0].sizes), ["10x12", "10x16", "12x24", "14x20", "10.5x12"]);
+  assertEquals([lr.styles[0].sizes[3].local, lr.styles[0].sizes[4].local], [undefined, true]);
+  assertEquals(S.ssPgServerSizes(lm)[N2], undefined, "a size this page added is never read back as the server's");
+});
+
+Deno.test("ssPgCanRemove: only a size never priced or edited since it was added, with nothing included and nothing local", () => {
+  const T = "2026-10-31T00:00:00.000001+00:00";
+  const fresh = { version: T, created: T, price: null, active: false, cells: {} };
+  const q0 = (s: Any, extra: Any = {}) => ({ sizes: { [Z]: s }, fields: {}, removes: {}, ...extra });
+  assertEquals(G.ssPgCanRemove(q0(fresh), Z), true);
+  assertEquals(G.ssPgCanRemove(q0(fresh), Z, { onFile: 0 }), true);
+  assertEquals(G.ssPgCanRemove(q0({ ...fresh, cells: { loft: 0 } }), Z), true, "a box at 0 is nothing included");
+  const no: [string, Any, Any?][] = [
+    ["priced, even at $0", q0({ ...fresh, price: 0 })],
+    ["edited since it was added", q0({ ...fresh, version: "2026-10-31T00:00:00.000002+00:00" })],
+    ["something included", q0({ ...fresh, cells: { loft: 50 } })],
+    ["an inclusion row on file, even one not included", q0(fresh), { onFile: 1 }],
+    ["a box typed and not saved yet", q0(fresh, { fields: { [Z]: { price: { pending: { to: 1, from: null, seq: 1 } } } } })],
+    ["a red box", q0(fresh, { fields: { [Z]: { price: { error: { kind: "invalid", typed: "x", reason: "" } } } } })],
+    ["still being added", q0({ ...fresh, version: null, creating: "inflight" })],
+    ["a remove already on its way", q0(fresh, { removes: { [Z]: "inflight" } })],
+    ["no created_at known", q0({ version: T, price: null, active: false, cells: {} })],
+    ["not on the account", { sizes: {}, fields: {}, removes: {} }],
+  ];
+  for (const [why, q, z] of no) assertEquals(G.ssPgCanRemove(q, Z, z), false, why);
+  assertEquals(G.ssPgCanRemove(null, Z), false);
+});
+
+Deno.test("queue: a size added here can be removed once it is created, until it is changed; Remove goes through the queue and the size goes with the answer", () => {
+  const db = DB();
+  let q = Q(start(db), { type: "create", id: Z, styleId: sid(1), width: 14, length: 20, at: 0 });
+  assertEquals(G.ssPgCanRemove(q, Z), false, "not while Adding…");
+  q = Q(q, { type: "send" });
+  const T = nextV();
+  const row = { price: null, active: false, label: "14x20", width_ft: 14, length_ft: 20, style_id: sid(1), sort_order: 9, created_at: T };
+  q = Q(q, { type: "ok", n: q.flight.n, answer: { ok: true, created: [{ id: Z, status: "created", version: T, row, cells: {} }], removed: [], results: [] } });
+  assertEquals([q.sizes[Z].version, q.sizes[Z].created], [T, T], "created_at rides along from the answer");
+  assertEquals(G.ssPgCanRemove(q, Z), true);
+  assertEquals(G.ssPgCanRemove(Q(q, commit(Z, "price", 900)), Z), false, "a price typed: no Remove");
+  q = Q(q, { type: "remove", id: Z, at: 0 });
+  assertEquals([G.ssPgCanRemove(q, Z), q.removes[Z], q.flush, S.ssPgCount(q).removing], [false, "pending", true, 1]);
+  q = Q(q, { type: "send" });
+  assertEquals(q.flight.body, { creates: [], removes: [Z], sizes: [] });
+  assert(validatePayload(q.flight.body).ok);
+  const why = "Only a size that was never priced or edited can be removed. Untick Offered to hide it.";
+  const refused = Q(q, { type: "ok", n: q.flight.n, answer: { ok: true, created: [], removed: [{ id: Z, status: "refused", reason: why }], results: [] } });
+  assertEquals([!!refused.sizes[Z], refused.removes[Z], refused.note], [true, undefined, { text: why }]);
+  q = Q(q, { type: "ok", n: q.flight.n, answer: { ok: true, created: [], removed: [{ id: Z, status: "removed" }], results: [] } });
+  assertEquals([q.sizes[Z], q.removes[Z], q.fields[Z]], [undefined, undefined, undefined]);
+  // A size read from the server whose two stamps are equal is removable as well.
+  const one = { ...SIZES[2], updated_at: SIZES[2].created_at };
+  const m = H.ssPgModel(TCAT, { ...TABLE, sizes: [one], inclusions: [], counts: { sizes: 1, inclusions: 0 } });
+  const q2 = S.ssPgQueue(null, { type: "init", sizes: S.ssPgServerSizes(m), cols: [] });
+  assertEquals(G.ssPgCanRemove(q2, zid(2), m.styles[0].sizes[0]), true);
+});
+
+Deno.test("refresh through the queue: red boxes, unsent and in-flight work kept; an Excel upload that changed an unsent box turns it red; the rest takes the read", () => {
+  const db = DB();
+  const V9 = "2026-10-30T00:00:00.000009+00:00";
+  let q = Q(start(db), commit(B, "price", 2200), { type: "send" });          // B's price is out
+  q = Q(q, commit(A, "c:loft", 60), commit(C, "price", 700));                 // these wait behind it
+  q = Q(q, { type: "invalid", sizeId: A, f: "price", typed: "abc", reason: "A price is a number, 0 or more" });
+  // An Excel upload in another tab: A's loft 50 → 55 and its price 400 → 410; C's price set to 700, as
+  // this page had typed; B's price too (in flight: left to its answer).
+  const sheet = { [A]: { version: V9, price: 410, active: true, cells: { loft: 55 } }, [B]: { version: V9, price: 2150, active: true, cells: { loft: 3 } },
+    [C]: { version: V9, price: 700, active: true, cells: {} } };
+  const r = Q(q, { type: "refresh", okAt: q.oks, sizes: sheet });
+  assertEquals(field(r, A, "c:loft").error, { kind: "conflict", typed: 60, server: 55, reason: null }, "its starting value changed: red, never sent");
+  assertEquals(field(r, A, "price").error.kind, "invalid", "a red box stays red");
+  assertEquals([r.sizes[A].version, r.sizes[A].price, r.sizes[A].cells.loft], [V0, 410, 55], "local work keeps the version; the boxes show what is on file");
+  assertEquals([field(r, B, "price").inflight.to, r.sizes[B].price, r.sizes[B].cells.loft, r.sizes[B].version], [2200, 2100, 3, V0],
+    "in flight: left to its answer; its other boxes take the read");
+  assertEquals([field(r, C, "price"), r.sizes[C]], [undefined, sheet[C]], "the sheet already says what C's box wanted: nothing left, so C takes the read whole");
+  assertEquals(r.flight, q.flight, "the call out is kept");
+  // After a conflict, a size has the new version but the boxes that call never named are stale until
+  // a refresh replaces the whole size.
+  const db2 = DB();
+  let p = Q(start(db2), commit(A, "price", 480), { type: "send" });
+  db2[A].price = 450; db2[A].cells.loft = 70; db2[A].version = nextV();
+  p = Q(p, { type: "ok", n: p.flight.n, answer: serve(db2, p.flight.body) });
+  assertEquals([field(p, A, "price").error.kind, p.sizes[A].price, p.sizes[A].cells.loft], ["conflict", 450, 50], "loft was never sent: still the old 50");
+  p = Q(p, { type: "refresh", okAt: p.oks, sizes: copy(db2) });
+  assertEquals([p.sizes[A].cells.loft, field(p, A, "price").error.kind, p.sizes[A].version], [70, "conflict", db2[A].version], "replaced whole; the red box stays");
+});
+
+Deno.test("refresh: an option archived elsewhere drops its unsaved boxes with the note; a new option is a new column the read fills", () => {
+  const db = DB();
+  let q = Q(start(db), commit(A, "c:101", 2), commit(B, "c:loft", 5));
+  q = Q(q, { type: "columns", keys: ["loft", "202"], names: { loft: "Loft (sq ft)", "101": "Single Door (3'x6'4\")" } });
+  q = Q(q, { type: "refresh", okAt: q.oks, sizes: { ...copy(db), [C]: { ...db[C], cells: { "202": 1 } } } });
+  assertEquals(field(q, A, "c:101"), undefined);
+  assertEquals(q.note, { text: "Single Door (3'x6'4\") was archived in Options; 1 unsaved box in that column was dropped." });
+  assertEquals(field(q, B, "c:loft").pending.to, 5, "a column still there keeps its edits");
+  assertEquals(S.ssPgRowView({}, q.sizes[C], q.fields[C], [{ key: "loft" }, { key: "202" }]).values, ["", "1"], "the new column's box shows what is on file");
+  const b = S.ssPgBuildBatch(Q(q, commit(C, "c:202", 3)));
+  assert(b.body.sizes.some((s: Any) => s.id === C && s.to.cells["202"] === 3 && s.from.cells["202"] === 1), JSON.stringify(b.body.sizes));
+});
+
+Deno.test("ssPgBackup: unsent and in-flight edits on the version and from the value they were made against; red boxes listed; the editor's text; nothing left, nothing kept", () => {
+  const db = DB();
+  assertEquals(G.ssPgBackup(start(db), null, 1000, null), null);
+  let q = Q(start(db), commit(A, "price", 480), { type: "send" }, commit(A, "price", 500), commit(B, "c:loft", 7));
+  q = Q(q, { type: "invalid", sizeId: C, f: "price", typed: "abc", reason: "A price is a number, 0 or more" });
+  q = Q(q, { type: "create", id: Z, styleId: sid(1), width: 10, length: 16, at: 0 }, commit(Z, "price", 3000));
+  assertEquals(G.ssPgBackup(q, { sizeId: B, key: "price", text: "2,250", seen: 2100 }, 1234, null), {
+    savedAt: 1234,
+    sizes: { [A]: { base: V0, fields: { price: { to: 500, from: 400 } } }, [B]: { base: V0, fields: { "c:loft": { to: 7, from: 0 } } } },
+    red: [{ sizeId: C, key: "price", kind: "invalid", typed: "abc", reason: "A price is a number, 0 or more" }],
+    draft: { sizeId: B, key: "price", text: "2,250", base: V0, from: 2100 },
+  }, "in flight with a follow-up: the newest value, from where the flight started; a size still being added has no version, so it is not kept");
+  assertEquals(G.ssPgBackup(q, { sizeId: A, key: "price", text: "520", seen: 500 }, 1, null).draft, { sizeId: A, key: "price", text: "520", base: V0, from: 400 },
+    "the editor over a box with an edit of its own starts from that edit's starting value");
+  assertEquals(G.ssPgBackup(Q(start(db), { type: "create", id: Z, styleId: sid(1), width: 10, length: 16, at: 0 }), { sizeId: Z, key: "price", text: "1", seen: null }, 1, null), null);
+  // A conflict keeps the colleague's number with it.
+  const c = Q(start(db), commit(A, "price", 480), { type: "refresh", okAt: 0, sizes: { ...copy(db), [A]: { ...db[A], version: nextV(), price: 450 } } });
+  assertEquals(G.ssPgBackup(c, null, 2, null).red, [{ sizeId: A, key: "price", kind: "conflict", typed: 480, reason: null, server: 450 }]);
+  // What it writes, ssPgBackupLoad reads back.
+  const back = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(q, { sizeId: B, key: "price", text: "2,250", seen: 2100 }, 1234, null)), 1234);
+  assertEquals([back.count, back.sizes[B].fields.price, back.red.length], [3, { to: 2250, from: 2100 }, 1]);
+});
+
+Deno.test("ssPgBackup: an earlier backup still on offer stays stored until it is answered, except where this page has a newer edit", () => {
+  const db = DB();
+  const keep = { sizes: { [A]: { base: V0, fields: { price: { to: 500, from: 400 }, "c:loft": { to: 60, from: 50 } } }, [C]: { base: V0, fields: { price: { to: 9, from: null } } } },
+    red: [{ sizeId: B, key: "price", kind: "conflict", typed: 1, server: 2, reason: null }] };
+  assertEquals(G.ssPgBackup(start(db), null, 7, keep), { savedAt: 7, sizes: keep.sizes, red: keep.red, draft: null }, "nothing local yet: as it was");
+  const b = G.ssPgBackup(Q(start(db), commit(A, "price", 450)), null, 8, keep);
+  assertEquals(b.sizes[A].fields, { price: { to: 450, from: 400 }, "c:loft": { to: 60, from: 50 } }, "this page's newer price wins; the rest of the earlier edit stays");
+  assertEquals([b.sizes[C], b.red], [keep.sizes[C], keep.red]);
+  assertEquals(G.ssPgBackup(start(db), null, 9, { sizes: null, red: null }), null, "answered and dismissed: nothing kept");
+});
+
+Deno.test("ssPgBackupLoad: the editor's draft becomes an edit; older than 7 days is dropped; anything the server would refuse whole is dropped", () => {
+  const DAY = 24 * 3600 * 1000;
+  const red0 = { sizeId: C, key: "price", kind: "invalid", typed: "abc", reason: "A price is a number, 0 or more" };
+  const stored = { savedAt: 10 * DAY, sizes: { [A]: { base: V0, fields: { price: { to: 500, from: 400 } } } }, red: [red0],
+    draft: { sizeId: B, key: "c:loft", text: "12", base: V0, from: 0 } };
+  assertEquals(G.ssPgBackupLoad(JSON.stringify(stored), 10 * DAY + 1000), {
+    savedAt: 10 * DAY, sizes: { [A]: { base: V0, fields: { price: { to: 500, from: 400 } } }, [B]: { base: V0, fields: { "c:loft": { to: 12, from: 0 } } } }, red: [red0], count: 2 });
+  assertEquals(G.ssPgBackupLoad(JSON.stringify(stored), 17 * DAY + 1), null, "older than 7 days");
+  assert(G.ssPgBackupLoad(JSON.stringify(stored), 17 * DAY) !== null, "7 days to the millisecond is still kept");
+  for (const raw of ["not json", null, "", "42", "{}"]) assertEquals(G.ssPgBackupLoad(raw, 0), null, String(raw));
+  // A draft the rules refuse is a red entry, listed, never sent.
+  const bad = G.ssPgBackupLoad(JSON.stringify({ ...stored, draft: { ...stored.draft, text: "2.5" } }), 10 * DAY);
+  assertEquals([bad.count, bad.red[0]], [1, { sizeId: B, key: "c:loft", kind: "invalid", typed: "2.5", reason: "Whole numbers only, 0 or more" }]);
+  // A draft over a box already in the backup takes its place, from that box's own starting value.
+  const over = G.ssPgBackupLoad(JSON.stringify({ ...stored, draft: { sizeId: A, key: "price", text: "$520", base: V0, from: 500 } }), 10 * DAY);
+  assertEquals([over.count, over.sizes[A].fields.price], [1, { to: 520, from: 400 }]);
+  // Malformed: a bad id or version, a field or value the server would refuse, a no-change, an unknown red kind.
+  const junk = { savedAt: 1, sizes: {
+    "not-a-uuid": { base: V0, fields: { price: { to: 1, from: 2 } } },
+    [A]: { base: "yesterday", fields: { price: { to: 1, from: 2 } } },
+    [B]: { base: V0, fields: { colour: { to: 1, from: 0 }, price: { to: "500", from: 400 }, "c:loft": { to: 2.5, from: 0 }, active: { to: true, from: true }, "c:workbench": { to: 1, from: 0 } } },
+  }, red: [{ sizeId: "x", key: "price", kind: "invalid" }, { sizeId: C, key: "price", kind: "weird" }, null] };
+  assertEquals(G.ssPgBackupLoad(JSON.stringify(junk), 2), { savedAt: 1, sizes: { [B]: { base: V0, fields: { "c:workbench": { to: 1, from: 0 } } } }, red: [], count: 1 });
+});
+
+Deno.test("restore (Save them): the stored base and from go out; a colleague's change since comes back conflict and turns red; untouched boxes save; red entries never replay", () => {
+  const db = DB();
+  // Stored on V0: A's price 400 → 500 and loft 50 → 60, B's price 2100 → 2200. Since then a colleague
+  // changed A's price, and this page's first read has that.
+  const backup = { [A]: { base: V0, fields: { price: { to: 500, from: 400 }, "c:loft": { to: 60, from: 50 } } }, [B]: { base: V0, fields: { price: { to: 2200, from: 2100 } } } };
+  db[A].price = 450; db[A].version = nextV();
+  let q = Q(start(db), { type: "restore", sizes: backup, at: 5 });
+  assertEquals([q.sizes[A].version, q.sizes[B].version, q.flush, S.ssPgCount(q).pending], [V0, V0, true, 3], "each size on the version its edits were made against; out at once");
+  let body;
+  [q, body] = roundTrip(q, db);
+  assertEquals(body.sizes, [{ id: A, base: V0, from: { price: 400, cells: { loft: 50 } }, to: { price: 500, cells: { loft: 60 } } },
+    { id: B, base: V0, from: { price: 2100 }, to: { price: 2200 } }], "the STORED base and from, never what was read just now");
+  assertEquals(field(q, A, "price").error, { kind: "conflict", typed: 500, server: 450, reason: null });
+  assertEquals([field(q, A, "c:loft").pending.to, field(q, A, "c:loft").pending.from], [60, 50], "nobody touched loft: it goes again");
+  assertEquals([db[B].price, field(q, B, "price")], [2200, undefined]);
+  const v1 = db[A].version;
+  [q, body] = roundTrip(q, db);
+  assertEquals(body.sizes, [{ id: A, base: v1, from: { cells: { loft: 50 } }, to: { cells: { loft: 60 } } }]);
+  assertEquals([db[A].cells.loft, db[A].price], [60, 450], "the colleague's price is never overwritten");
+  // The editor's draft is restored as an ordinary edit; a red entry is listed, never put back.
+  const loaded = G.ssPgBackupLoad(JSON.stringify({ savedAt: 0, sizes: {}, red: [{ sizeId: A, key: "price", kind: "conflict", typed: 999, server: 1, reason: null }],
+    draft: { sizeId: C, key: "price", text: "$1,250", base: V0, from: null } }), 0);
+  const r2 = Q(start(DB()), { type: "restore", sizes: loaded.sizes, at: 0 });
+  assertEquals(field(r2, C, "price").pending, { to: 1250, from: null, seq: 1 });
+  assertEquals([field(r2, A, "price"), S.ssPgCount(r2).red], [undefined, 0]);
+});
+
+Deno.test("restore: a box typed since keeps the newer edit; a size with a call out, a column gone and a size not on the account are left out", () => {
+  const db = DB();
+  let q = Q(start(db), commit(B, "price", 2300), { type: "send" }, commit(A, "price", 777));
+  q = Q(q, { type: "restore", at: 0, sizes: {
+    [A]: { base: V0, fields: { price: { to: 500, from: 400 }, "c:loft": { to: 60, from: 50 }, "c:999": { to: 1, from: 0 } } },
+    [B]: { base: V0, fields: { "c:loft": { to: 9, from: 0 } } },
+    [Z]: { base: V0, fields: { price: { to: 1, from: null }, active: { to: true, from: false } } },
+  } });
+  assertEquals([field(q, A, "price").pending.to, field(q, A, "c:loft").pending.to, field(q, A, "c:999")], [777, 60, undefined]);
+  assertEquals(field(q, B, "c:loft"), undefined, "a size with a call out: its version is the answer's to set");
+  assertEquals(q.note, { text: "2 changes from earlier were for a size that isn't on this account any more." });
+  const s0 = start(db);
+  assert(Q(s0, { type: "restore", at: 0, sizes: {} }) === s0, "nothing to put back: the same state");
+});
+
+Deno.test("ssPgEarlierText: the backup's red entries, named for the status line", () => {
+  const where = { [A]: "Test Barn 10x12", [B]: "Test Barn 12x24" };
+  const fields = { price: { name: "Price", kind: "price" }, active: { name: "Offered", kind: "active" }, "c:loft": { name: "Loft (sq ft)", kind: "qty" } };
+  assertEquals(G.ssPgEarlierText([{ sizeId: A, key: "price", kind: "conflict", typed: 4800, server: 4950 }], where, fields),
+    "This didn't save before you left: Test Barn 10x12 · Price ($4,800). Type it again if it's right.");
+  assertEquals(G.ssPgEarlierText([
+    { sizeId: A, key: "c:loft", kind: "invalid", typed: "abc" }, { sizeId: B, key: "active", kind: "refused", typed: true },
+    { sizeId: B, key: "price", kind: "conflict", typed: null }, { sizeId: A, key: "c:loft", kind: "refused", typed: 0 },
+    { sizeId: Z, key: "price", kind: "refused", typed: 1 }, { sizeId: A, key: "c:gone", kind: "refused", typed: 1 }], where, fields),
+    "These didn't save before you left: Test Barn 10x12 · Loft (sq ft) (“abc”); Test Barn 12x24 · Offered (ticked); Test Barn 12x24 · Price (cleared); and 1 more. Type them again if they're right.");
+  assertEquals([G.ssPgEarlierText([], where, fields), G.ssPgEarlierText(null, where, fields)], ["", ""]);
 });
