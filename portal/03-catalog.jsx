@@ -5161,8 +5161,8 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       <div style={S.card}>
         <div style={S.h2}>Building styles</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-          Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
-          style in the sizes &amp; prices table below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          Add each building style you sell — give it a name and a photo. Then press “Open sizes &amp; prices
+          table ↗” below to set each style’s sizes &amp; prices. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
           design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
           sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
           use it only when you’re sure you won’t need that style again.

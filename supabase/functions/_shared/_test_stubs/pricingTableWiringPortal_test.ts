@@ -264,6 +264,8 @@ Deno.test("the Sheds card and Add style's answer open the table as real anchors 
   assert(card.includes("setMsg({ added: { name: added, styleId: (data && data.styleId) || null } });"), "create_style answers styleId");
   for (const line of card.split("\n").filter((l) => l.includes("ssPricingTableHref("))) assert(!line.includes("ssNavClick"), line);
   assert(card.includes("Sizes, prices &amp; included options"), "the card's new title");
+  // The Building styles card above it sends builders to that card's button: no table is drawn below.
+  assert(/Then press “Open sizes &amp; prices\s+table ↗” below/.test(CATALOG) && !/prices table below/.test(CATALOG), "the Building styles text names the button");
   assert(card.includes(">Prefer Excel?</span>"), "the Excel row");
   assert(card.includes("Changed numbers in the table? Download a fresh template before you use Excel again."), "the warning sentence");
   // The template is built from fresh reads with the guard, never from the `cat` Sheds mounted with.
