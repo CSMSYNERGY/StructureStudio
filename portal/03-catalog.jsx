@@ -4044,7 +4044,7 @@ function ssPgQueue(q, ev) {
       // since may be this very edit landing (the closed tab's call) and then being set back elsewhere
       // (A→B→A), which the rebase's value check can't tell from "nobody touched it", so a restored box
       // is never resent. Left out, and counted in the status line: a box with an unsent, in-flight or
-      // red edit here, one on a size being added or removed here, one in a column that went away, and
+      // red edit here, one on a size being added or deleted here, one in a column that went away, and
       // one on a size no longer on the account. Red entries never come here: they are listed, never
       // sent (the page). Never while a call is out (the page greys Save them): then no box here is in
       // flight, and every restored one goes on its own stored version.
@@ -4104,7 +4104,7 @@ function ssPgQueue(q, ev) {
       if (gone) said.push(`${gone === 1 ? "1 change" : `${gone} changes`} from earlier ${gone === 1 ? "was" : "were"} for a size that isn't on this account any more.`);
       if (skipped) {
         said.push(`${skipped === 1 ? "1 change" : `${skipped} changes`} from earlier ${skipped === 1 ? "wasn't" : "weren't"} sent: the option was archived, `
-          + "the size is being added or removed here, or the box has a newer change here.");
+          + "the size is being added or deleted here, or the box has a newer change here.");
       }
       const note = said.length ? { text: said.join(" ") } : q.note;
       if (!n) return said.length ? { ...q, note } : q;

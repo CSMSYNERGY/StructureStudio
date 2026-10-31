@@ -1857,7 +1857,7 @@ Deno.test("restore (Save them): the stored base and from go out; a size changed 
   assert(Q(s0, { type: "restore", sizes: loaded.sizes, at: 0 }) === s0);
 });
 
-Deno.test("restore: a box with an edit here, a column gone, a size being removed and a size not on the account are left out, and the status line counts them", () => {
+Deno.test("restore: a box with an edit here, a column gone, a size being deleted and a size not on the account are left out, and the status line counts them", () => {
   const db = DB();
   let q = Q(start(db), commit(A, "price", 777), { type: "invalid", sizeId: B, f: "c:loft", typed: "x", reason: "Whole numbers only, 0 or more" });
   q = Q(q, { type: "remove", id: C, at: 0 });
@@ -1869,17 +1869,17 @@ Deno.test("restore: a box with an edit here, a column gone, a size being removed
   } });
   assertEquals([field(q, A, "price").pending.to, field(q, A, "c:loft").pending.to, field(q, A, "c:999"), field(q, C, "price")], [777, 60, undefined, undefined]);
   assertEquals([field(q, B, "c:loft").error.kind, field(q, B, "price").pending.to], ["invalid", 1], "a red box here is the newer edit too");
-  assertEquals(q.note, { text: "2 changes from earlier were for a size that isn't on this account any more. 4 changes from earlier weren't sent: the option was archived, the size is being added or removed here, or the box has a newer change here." });
+  assertEquals(q.note, { text: "2 changes from earlier were for a size that isn't on this account any more. 4 changes from earlier weren't sent: the option was archived, the size is being added or deleted here, or the box has a newer change here." });
   const s0 = start(db);
   assert(Q(s0, { type: "restore", at: 0, sizes: {} }) === s0, "nothing to put back: the same state");
 });
 
 // r3 (round 4): restore left these out without a word, though the banner had counted them.
-Deno.test("restore counts what it leaves out when nothing else goes: an option archived since, a size being added here", () => {
+Deno.test("restore counts what it leaves out when nothing else goes: an option archived since, a size being added or deleted here", () => {
   const db = DB();
   const b = G.ssPgBackupLoad(JSON.stringify(G.ssPgBackup(Q(start(db), commit(A, "c:loft", 60), commit(A, "c:101", 2)), null, 1)), 2);
   assertEquals(b.count, 2);
-  const one = "1 change from earlier wasn't sent: the option was archived, the size is being added or removed here, or the box has a newer change here.";
+  const one = "1 change from earlier wasn't sent: the option was archived, the size is being added or deleted here, or the box has a newer change here.";
   const q = Q(start(db), { type: "columns", keys: ["101"], names: { loft: "Loft" } }, { type: "restore", sizes: b.sizes, at: 3 });
   assertEquals([field(q, A, "c:101").pending.to, field(q, A, "c:loft"), q.note], [2, undefined, { text: one }], "the archived option's box: counted");
   const gone = Q(start(db), { type: "columns", keys: [], names: {} }, { type: "restore", sizes: { [A]: { base: V0, fields: { "c:loft": { to: 60, from: 50 } } } }, at: 3 });
@@ -1888,8 +1888,15 @@ Deno.test("restore counts what it leaves out when nothing else goes: an option a
   const r = Q(adding, { type: "restore", at: 4, sizes: { [Z]: { base: V0, fields: { price: { to: 1, from: null } } } },
     creates: { [Z]: { styleId: sid(1), width: 10, length: 16, fields: { "c:loft": { to: 3, from: 0 } } } } });
   assertEquals([field(r, Z, "price"), field(r, Z, "c:loft"), r.note], [undefined, undefined,
-    { text: "2 changes from earlier weren't sent: the option was archived, the size is being added or removed here, or the box has a newer change here." }],
+    { text: "2 changes from earlier weren't sent: the option was archived, the size is being added or deleted here, or the box has a newer change here." }],
     "a size being added here, in either list: counted");
+  // A confirmed Delete of a priced size, sent, then a 401: saving stops, the delete waits again, and
+  // Save them (enabled: nothing is out) says the size is being deleted, the word the ✕ uses.
+  const sent = Q(start(db), { type: "removes", ids: [B], at: 0 }, { type: "send" });
+  const stopped = Q(sent, { type: "fail", n: sent.flight.n, kind: "auth", reason: "you were signed out" });
+  assertEquals([stopped.stopped.kind, !!stopped.flight, stopped.removes[B]], ["auth", false, "pending"]);
+  const del = Q(stopped, { type: "restore", at: 5, sizes: { [B]: { base: V0, fields: { price: { to: 2200, from: 2100 } } } } });
+  assertEquals([field(del, B, "price"), del.note], [undefined, { text: one }], "a size being deleted here: counted, in the delete's own word");
 });
 
 // The flying branch (round 1) let stored edits wait behind a call out for their size and go on the
