@@ -1085,11 +1085,13 @@ Deno.test("ssPgColBox: the overlay's columns; Size, Price and Offered frozen, Si
 // Lifted the same way, from the shipped text. Each is a top-level `function x(…) {` whose only free
 // names are the helpers above it.
 const P4 = ["function ssPgParseSizeList(text, existing, max) {", "function ssPgSizeGrid(widthsText, lengthsText, existing, unticked, max) {",
-  "function ssPgLocalModel(model, added, sizes) {", "function ssPgCanRemove(q, id, z) {", "function ssPgRekeyCell(cell, before, after) {",
+  "function ssPgLocalModel(model, added, sizes) {", "function ssPgNeverEdited(q, id, z) {", "function ssPgCanDelete(q, id, z) {",
+  "function ssPgDeleteWhy(why, opts) {", "function ssPgDeleteText(ids, nameOf, counts, company) {", "function ssPgDeleteResult(removed, nameOf) {",
+  "function ssPgRekeyCell(cell, before, after) {",
   "function ssPgBackup(q, draft, at) {", "function ssPgBackupLoad(raw, now, maxAge) {", "function ssPgBackupMerge(list) {",
   "function ssPgEarlierText(red, where, fields) {"].map(lift).join("\n");
-const G = new Function(`${PURE}\n${SAVE}\n${P4}; return { ssPgParseSizeList, ssPgSizeGrid, ssPgLocalModel, ssPgCanRemove, ssPgRekeyCell, ssPgBackup,
-  ssPgBackupLoad, ssPgBackupMerge, ssPgEarlierText };`)() as Record<string, (...a: Any[]) => Any>;
+const G = new Function(`${PURE}\n${SAVE}\n${P4}; return { ssPgParseSizeList, ssPgSizeGrid, ssPgLocalModel, ssPgNeverEdited, ssPgCanDelete, ssPgDeleteWhy,
+  ssPgDeleteText, ssPgDeleteResult, ssPgRekeyCell, ssPgBackup, ssPgBackupLoad, ssPgBackupMerge, ssPgEarlierText };`)() as Record<string, (...a: Any[]) => Any>;
 const labels = (list: Any[]) => list.map((z: Any) => z.label);
 
 Deno.test("ssPgParseSizeList: every way of writing a size, split by commas, semicolons or new lines, in the order typed", () => {
@@ -1217,13 +1219,13 @@ Deno.test("ssPgLocalModel: new sizes go after their style's last size in the ord
   assertEquals(S.ssPgServerSizes(lm)[N2], undefined, "a size this page added is never read back as the server's");
 });
 
-Deno.test("ssPgCanRemove: only a size never priced or edited since it was added, with nothing included and nothing local", () => {
+Deno.test("ssPgNeverEdited: only a size never priced or edited since it was added, with nothing included and nothing local", () => {
   const T = "2026-10-31T00:00:00.000001+00:00";
   const fresh = { version: T, created: T, price: null, active: false, cells: {} };
   const q0 = (s: Any, extra: Any = {}) => ({ sizes: { [Z]: s }, fields: {}, removes: {}, ...extra });
-  assertEquals(G.ssPgCanRemove(q0(fresh), Z), true);
-  assertEquals(G.ssPgCanRemove(q0(fresh), Z, { onFile: 0 }), true);
-  assertEquals(G.ssPgCanRemove(q0({ ...fresh, cells: { loft: 0 } }), Z), true, "a box at 0 is nothing included");
+  assertEquals(G.ssPgNeverEdited(q0(fresh), Z), true);
+  assertEquals(G.ssPgNeverEdited(q0(fresh), Z, { onFile: 0 }), true);
+  assertEquals(G.ssPgNeverEdited(q0({ ...fresh, cells: { loft: 0 } }), Z), true, "a box at 0 is nothing included");
   const no: [string, Any, Any?][] = [
     ["priced, even at $0", q0({ ...fresh, price: 0 })],
     ["edited since it was added", q0({ ...fresh, version: "2026-10-31T00:00:00.000002+00:00" })],
@@ -1236,40 +1238,256 @@ Deno.test("ssPgCanRemove: only a size never priced or edited since it was added,
     ["no created_at known", q0({ version: T, price: null, active: false, cells: {} })],
     ["not on the account", { sizes: {}, fields: {}, removes: {} }],
   ];
-  for (const [why, q, z] of no) assertEquals(G.ssPgCanRemove(q, Z, z), false, why);
-  assertEquals(G.ssPgCanRemove(null, Z), false);
+  for (const [why, q, z] of no) assertEquals(G.ssPgNeverEdited(q, Z, z), false, why);
+  assertEquals(G.ssPgNeverEdited(null, Z), false);
 });
 
-Deno.test("queue: a size added here can be removed once it is created, until it is changed; Remove goes through the queue and the size goes with the answer", () => {
+Deno.test("queue: a size added here goes with no confirm once it is created, until it is changed; its ✕ sends its id through the queue and the size goes with the answer", () => {
   const db = DB();
   let q = Q(start(db), { type: "create", id: Z, styleId: sid(1), width: 14, length: 20, at: 0 });
-  assertEquals(G.ssPgCanRemove(q, Z), false, "not while Adding…");
+  assertEquals(G.ssPgNeverEdited(q, Z), false, "not while Adding…");
   q = Q(q, { type: "send" });
   const T = nextV();
   const row = { price: null, active: false, label: "14x20", width_ft: 14, length_ft: 20, style_id: sid(1), sort_order: 9, created_at: T };
   q = Q(q, { type: "ok", n: q.flight.n, answer: { ok: true, created: [{ id: Z, status: "created", version: T, row, cells: {} }], removed: [], results: [] } });
   assertEquals([q.sizes[Z].version, q.sizes[Z].created], [T, T], "created_at rides along from the answer");
-  assertEquals(G.ssPgCanRemove(q, Z), true);
-  assertEquals(G.ssPgCanRemove(Q(q, commit(Z, "price", 900)), Z), false, "a price typed: no Remove");
+  assertEquals(G.ssPgNeverEdited(q, Z), true);
+  assertEquals(G.ssPgNeverEdited(Q(q, commit(Z, "price", 900)), Z), false, "a price typed: the confirm instead");
   q = Q(q, { type: "remove", id: Z, at: 0 });
-  assertEquals([G.ssPgCanRemove(q, Z), q.removes[Z], q.flush, S.ssPgCount(q).removing], [false, "pending", true, 1]);
+  assertEquals([G.ssPgNeverEdited(q, Z), q.removes[Z], q.flush, S.ssPgCount(q).removing], [false, "pending", true, 1]);
   q = Q(q, { type: "send" });
-  assertEquals(q.flight.body, { creates: [], removes: [Z], sizes: [] });
+  assertEquals(q.flight.body, { creates: [], removes: [Z], sizes: [] }, "the plain ✕ sends the id (migration 350's rule)");
   assert(validatePayload(q.flight.body).ok);
+  // A refused remove keeps its row and adds no note: the page says it, in one line (ssPgDeleteResult).
   const why = "Only a size that was never priced or edited can be removed. Untick Offered to hide it.";
   const refused = Q(q, { type: "ok", n: q.flight.n, answer: { ok: true, created: [], removed: [{ id: Z, status: "refused", reason: why }], results: [] } });
-  assertEquals([!!refused.sizes[Z], refused.removes[Z], refused.note], [true, undefined, { text: why }]);
+  assertEquals([!!refused.sizes[Z], refused.removes[Z], refused.note], [true, undefined, null]);
   // A size being removed takes no edit: typed, pasted or marked, it would go with the size unsaid.
   assert(Q(q, commit(Z, "price", 4800)) === q && Q(q, { type: "commits", edits: [{ sizeId: Z, f: "price", value: 4800, seen: null }], at: 0 }).fields[Z] === undefined
     && Q(q, { type: "invalid", sizeId: Z, f: "price", typed: "x", reason: "r" }) === q, "while its remove is out");
   assert(Q(refused, commit(Z, "price", 4800)).fields[Z].price.pending.to === 4800, "a remove the server refused gives the size back");
   q = Q(q, { type: "ok", n: q.flight.n, answer: { ok: true, created: [], removed: [{ id: Z, status: "removed" }], results: [] } });
   assertEquals([q.sizes[Z], q.removes[Z], q.fields[Z]], [undefined, undefined, undefined]);
-  // A size read from the server whose two stamps are equal is removable as well.
+  // A size read from the server whose two stamps are equal goes with no confirm as well.
   const one = { ...SIZES[2], updated_at: SIZES[2].created_at };
   const m = H.ssPgModel(TCAT, { ...TABLE, sizes: [one], inclusions: [], counts: { sizes: 1, inclusions: 0 } });
   const q2 = S.ssPgQueue(null, { type: "init", sizes: S.ssPgServerSizes(m), cols: [] });
-  assertEquals(G.ssPgCanRemove(q2, zid(2), m.styles[0].sizes[0]), true);
+  assertEquals(G.ssPgNeverEdited(q2, zid(2), m.styles[0].sizes[0]), true);
+});
+
+// ─── Delete for priced sizes (the delete plan, 2026-10-31) ───────────────────────────────────────
+// A fake of migration 351's removes arm: a plain id keeps 350's rule word for word (refused with no
+// code); an object { id, base } is deleted at its version only, refused `changed` on another version,
+// `bom` with a Real-Time Pricing list, `used` when saved designs name it; a removed object carries
+// the size's row and boxes. The answer's id is the uuid either way.
+function serveDel(db: Record<string, Row>, body: Any, opts: { used?: string[]; bom?: string[]; error?: Record<string, string> } = {}) {
+  const rowOf = (r: Row) => ({ price: r.price, active: r.active, label: "10x12", width_ft: 10, length_ft: 12, style_id: sid(1), sort_order: 0, created_at: V0 });
+  const removed = (body.removes || []).map((e: Any) => {
+    const id = typeof e === "string" ? e : e.id;
+    const r = db[id];
+    if (!r) return { id, status: "removed", gone: true };
+    if (typeof e === "string") {
+      if (r.price == null && !Object.keys(r.cells).length) { delete db[id]; return { id, status: "removed" }; }
+      return { id, status: "refused", reason: "Only a size that was never priced or edited can be removed. Untick Offered to hide it." };
+    }
+    if (r.version !== e.base) return { id, status: "refused", code: "changed", reason: "changed elsewhere" };
+    if ((opts.bom || []).includes(id)) return { id, status: "refused", code: "bom", reason: "materials list" };
+    if ((opts.used || []).includes(id)) return { id, status: "refused", code: "used", reason: "in use" };
+    if (opts.error && opts.error[id]) return { id, status: "refused", code: "error", reason: opts.error[id] };
+    const out = { id, status: "removed", row: rowOf(r), cells: { ...r.cells } };
+    delete db[id];
+    return out;
+  });
+  return { ok: true, clientId: "test-barns", created: [], removed, results: [] };
+}
+// The server's shape check takes { id, base } removes once the edge half of the delete is in
+// (_shared/pricingCells.ts validatePayload, 351). From then on every delete body is held to it.
+const OBJECT_REMOVES = validatePayload({ creates: [], removes: [{ id: A, base: V0 }], sizes: [] }).ok;
+const sendDel = (q: Any, db: Record<string, Row>, opts = {}): [Any, Any] => {
+  const s1 = S.ssPgQueue(q, { type: "send" });
+  if (!s1.flight || s1.flight === q.flight) return [s1, null];
+  if (OBJECT_REMOVES) assert(validatePayload(s1.flight.body).ok, `the server's validatePayload refuses what the browser built: ${JSON.stringify(validatePayload(s1.flight.body))}`);
+  return [S.ssPgQueue(s1, { type: "ok", n: s1.flight.n, answer: serveDel(db, s1.flight.body, opts) }), s1.flight.body];
+};
+
+Deno.test({
+  name: "parity: every delete body the browser builds (ids, { id, base }, mixed, 50 a call) passes the server's validatePayload",
+  ignore: !OBJECT_REMOVES,   // the edge half (351) is not on this branch yet: this runs once it is
+  fn: () => {
+    const db = DB();
+    let q = Q(start(db), { type: "remove", id: C, at: 0 }, { type: "removes", ids: [A, B], at: 0 });
+    const v = validatePayload(S.ssPgBuildBatch(q).body);
+    assert(v.ok, JSON.stringify(v));
+    assertEquals(v.value.removes, [C, { id: A, base: V0 }, { id: B, base: V0 }]);
+    // Named twice (a plain id and the same size as an object) is refused whole: the queue never builds it.
+    assertEquals(validatePayload({ creates: [], removes: [A, { id: A, base: V0 }], sizes: [] }).ok, false);
+    q = Q(start(db), commit(B, "price", 9), { type: "removes", ids: [A], at: 0 });
+    assert(validatePayload(S.ssPgBuildBatch(q).body).ok, "a delete beside a price on another size");
+  },
+});
+
+Deno.test("ssPgModel: size_table's `used` marks the sizes saved designs use; a read without it marks none", () => {
+  const m = H.ssPgModel(TCAT, { ...TABLE, used: [zid(3), zid(6), "not-a-size"] });
+  const all = [...m.styles, ...m.hiddenStyles].flatMap((s: Any) => s.sizes);
+  assertEquals(all.filter((z: Any) => z.used).map((z: Any) => z.id).sort(), [zid(3), zid(6)].sort(), "a hidden style's size too");
+  assert(H.ssPgModel(TCAT, TABLE).styles.flatMap((s: Any) => s.sizes).every((z: Any) => z.used === false), "no list: nothing is in use");
+  assert(H.ssPgModel(TCAT, { ...TABLE, used: null }).styles.flatMap((s: Any) => s.sizes).every((z: Any) => z.used === false));
+});
+
+Deno.test("ssPgCanDelete: adding, deleting, saving (a box in flight) and used say why; an unsent box or a red box does not block", () => {
+  const db = DB();
+  const q0 = start(db);
+  assertEquals(G.ssPgCanDelete(q0, A, { used: false }), { ok: true, why: null });
+  assertEquals(G.ssPgCanDelete(q0, A), { ok: true, why: null }, "no model row: judged on the queue alone");
+  assertEquals(G.ssPgCanDelete(q0, A, { used: true }), { ok: false, why: "used" });
+  assertEquals(G.ssPgCanDelete(Q(q0, commit(A, "price", 480)), A), { ok: true, why: null }, "an unsent box goes with the size");
+  const red = Q(q0, { type: "invalid", sizeId: A, f: "c:loft", typed: "x", reason: "Whole numbers only, 0 or more" });
+  assertEquals(G.ssPgCanDelete(red, A), { ok: true, why: null }, "a red box goes with the size");
+  assertEquals(G.ssPgCanDelete(Q(q0, commit(A, "price", 480), { type: "send" }), A), { ok: false, why: "saving" });
+  assertEquals(G.ssPgCanDelete(Q(q0, commit(A, "price", 480), { type: "send" }), A, { used: true }), { ok: false, why: "saving" }, "saving is said first");
+  assertEquals(G.ssPgCanDelete(Q(q0, { type: "create", id: Z, styleId: sid(1), width: 14, length: 20, at: 0 }), Z), { ok: false, why: "adding" });
+  assertEquals(G.ssPgCanDelete(Q(q0, { type: "removes", ids: [A], at: 0 }), A), { ok: false, why: "deleting" });
+  assertEquals(G.ssPgCanDelete(Q(q0, { type: "remove", id: C, at: 0 }), C), { ok: false, why: "deleting" });
+  assertEquals([G.ssPgCanDelete(q0, Z), G.ssPgCanDelete(null, A)], [{ ok: false, why: "gone" }, { ok: false, why: "gone" }]);
+});
+
+Deno.test("ssPgDeleteWhy: the three used texts, saving, adding, deleting, and nothing when it can go", () => {
+  assertEquals(G.ssPgDeleteWhy("used", { offered: true, showHidden: true }),
+    "Saved designs use this size, so it can't be deleted. Untick Offered to hide it from your designer.");
+  assertEquals(G.ssPgDeleteWhy("used", { offered: true, showHidden: false }),
+    "Saved designs use this size, so it can't be deleted. Untick Offered to hide it from your designer.");
+  assertEquals(G.ssPgDeleteWhy("used", { offered: false, showHidden: true }),
+    "It's already hidden from your designer. Saved designs use it, so it stays here. Turn off Show hidden sizes to fold it away.");
+  assertEquals(G.ssPgDeleteWhy("used", { offered: false, showHidden: false }),
+    "It's already hidden from your designer. Saved designs use it, so it stays here. It folds away the next time you open this page.");
+  assertEquals(G.ssPgDeleteWhy("saving"), "A change on this size is saving. Try again in a second.");
+  assertEquals(G.ssPgDeleteWhy("adding"), "This size is still being added. Try again in a second.");
+  assertEquals(G.ssPgDeleteWhy("deleting"), "This size is being deleted.");
+  assertEquals([G.ssPgDeleteWhy(null), G.ssPgDeleteWhy("whatever")], ["", ""]);
+});
+
+Deno.test("ssPgBuildBatch: the plain ✕ sends an id, a confirmed delete sends { id, base: its version }; 60 deletes go as 50 and 10", () => {
+  const db = DB();
+  let q = Q(start(db), { type: "remove", id: C, at: 0 }, { type: "removes", ids: [A], at: 0 });
+  assertEquals(S.ssPgBuildBatch(q).body.removes, [C, { id: A, base: V0 }]);
+  assertEquals(S.ssPgBuildBatch(q).removes, [C, A], "the flight's removes are ids either way");
+  // 60 sizes, mixed: the cap counts both shapes, and every size goes exactly once.
+  const many: Record<string, Row> = {};
+  const nid = (i: number) => `30000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+  for (let i = 0; i < 60; i++) many[nid(i)] = { version: V0, price: i < 5 ? null : 100 + i, active: i >= 5, cells: {} };
+  q = start(many);
+  q = Q(q, ...Array.from({ length: 5 }, (_, i) => ({ type: "remove", id: nid(i), at: 0 })), { type: "removes", ids: Array.from({ length: 55 }, (_, i) => nid(i + 5)), at: 0 });
+  const sent: Any[] = [];
+  for (let call = 0; call < 3; call++) {
+    const [next, body] = sendDel(q, many);
+    q = next;
+    if (body) sent.push(body.removes);
+  }
+  assertEquals(sent.map((r) => r.length), [50, 10]);
+  assertEquals(sent[0].slice(0, 6), [nid(0), nid(1), nid(2), nid(3), nid(4), { id: nid(5), base: V0 }]);
+  assertEquals(sent.flat().map((e: Any) => (typeof e === "string" ? e : e.id)).sort(), Array.from({ length: 60 }, (_, i) => nid(i)).sort());
+  assertEquals([Object.keys(many).length, Object.keys(q.sizes).length, S.ssPgCount(q).removing], [0, 0, 0]);
+});
+
+Deno.test("queue removes: all or nothing; each size's unsent and red boxes go with it in the same step; a box in flight refuses the whole step", () => {
+  const db = DB();
+  let q = Q(start(db), commit(A, "price", 480), { type: "invalid", sizeId: B, f: "c:loft", typed: "x", reason: "Whole numbers only, 0 or more" });
+  q = Q(q, { type: "removes", ids: [A, B], at: 5 });
+  assertEquals([q.removes, q.dels, q.fields[A], q.fields[B], q.flush, S.ssPgCount(q)], [{ [A]: "pending", [B]: "pending" }, { [A]: true, [B]: true }, undefined, undefined, true,
+    { pending: 0, inflight: 0, red: 0, creating: 0, removing: 2 }], "nothing of them lingers or shows red");
+  let body;
+  [q, body] = sendDel(q, db);
+  assertEquals(body, { creates: [], removes: [{ id: A, base: V0 }, { id: B, base: V0 }], sizes: [] }, "no `sizes` entry for a size being deleted");
+  assertEquals([q.sizes[A], q.sizes[B], db[A], db[B], q.note], [undefined, undefined, undefined, undefined, null]);
+  // A box in flight on any of them refuses the whole step: nothing changes.
+  const out = Q(start(DB()), commit(A, "price", 480), { type: "send" });
+  assert(Q(out, { type: "removes", ids: [B, A], at: 0 }) === out, "A's price is in flight");
+  // …and so does a size still being added, one already going, one not here, or no ids at all.
+  const q0 = Q(start(DB()), { type: "create", id: Z, styleId: sid(1), width: 14, length: 20, at: 0 }, { type: "remove", id: C, at: 0 });
+  for (const ids of [[A, Z], [A, C], [A, E], []]) assert(Q(q0, { type: "removes", ids, at: 0 }) === q0, JSON.stringify(ids));
+  // A size being deleted takes no edit, and a refresh keeps it as it was (its version is what goes).
+  const d = Q(start(DB()), { type: "removes", ids: [A], at: 0 });
+  assert(Q(d, commit(A, "price", 1)) === d);
+  const r = Q(d, { type: "refresh", okAt: 0, sizes: { ...copy(DB()), [A]: { ...DB()[A], version: nextV(), price: 999 } } });
+  assertEquals([r.sizes[A].version, S.ssPgBuildBatch(r).body.removes], [V0, [{ id: A, base: V0 }]]);
+  // Discard drops the delete with every other unsent change.
+  assertEquals([Q(d, { type: "discard" }).removes, Q(d, { type: "discard" }).dels], [{}, {}]);
+});
+
+Deno.test("queue: a refused remove adds no note, string or object; a removed object takes its row away; the answer's ids are uuids", () => {
+  const db = DB();
+  db[B].version = nextV();   // changed elsewhere since this page read it
+  let q = Q(start(DB()), { type: "removes", ids: [A, B], at: 0 }, { type: "remove", id: C, at: 0 });
+  [q] = sendDel(q, db, { used: [A] });
+  assertEquals([!!q.sizes[A], !!q.sizes[B], q.sizes[C], q.note, q.removes, q.dels], [true, true, undefined, null, {}, {}]);
+  // An answer naming a remove by its whole object (350's `#>> '{}'` on an object entry) still matches.
+  const q1 = Q(start(DB()), { type: "removes", ids: [A], at: 0 }, { type: "send" });
+  const a1 = Q(q1, { type: "ok", n: q1.flight.n, answer: { ok: true, created: [], removed: [{ id: { id: A, base: V0 }, status: "removed" }], results: [] } });
+  assertEquals([a1.sizes[A], a1.removes[A], a1.note], [undefined, undefined, null]);
+});
+
+Deno.test("queue: deletes the answer left out are counted, not named: one, and several", () => {
+  for (const [ids, text] of [[[A], "A size couldn't be deleted: the server didn't answer. Delete it again."],
+    [[A, B, C], "3 sizes couldn't be deleted: the server didn't answer. Delete them again."]] as [string[], string][]) {
+    const q1 = Q(start(DB()), { type: "removes", ids, at: 0 }, { type: "send" });
+    const q2 = Q(q1, { type: "ok", n: q1.flight.n, answer: { ok: true, created: [], removed: [], results: [] } });
+    assertEquals([q2.note, q2.removes, q2.dels, ids.every((id) => !!q2.sizes[id])], [{ text }, {}, {}, true]);
+  }
+  // A 400 for a call deleting sizes: they stay, and the status line says so.
+  const q3 = Q(start(DB()), { type: "removes", ids: [A, B], at: 0 }, { type: "send" });
+  const q4 = Q(q3, { type: "fail", n: q3.flight.n, kind: "refused", reason: "This change couldn't be saved. Tell CSM Synergy if it keeps happening" });
+  assertEquals([q4.note, q4.removes, !!q4.sizes[A]], [{ text: "2 sizes couldn't be deleted: This change couldn't be saved. Tell CSM Synergy if it keeps happening." }, {}, true]);
+});
+
+Deno.test("ssPgDeleteText: one, several, some in use, some saving, the three none-can-go lines, the operator's account, no selection", () => {
+  const names: Record<string, string> = { [A]: "Test Barn 10x12", [B]: "Test Barn 10x16", [C]: "Test Barn 12x24" };
+  const nameOf = (id: string) => names[id] || "";
+  const none = { used: 0, saving: 0 };
+  assertEquals(G.ssPgDeleteText([A], nameOf, none, null),
+    "Delete Test Barn 10x12? Its price and included options go too, and you can't undo this. To sell it again later, add it with ＋ Add sizes.");
+  assertEquals(G.ssPgDeleteText([A, B, C], nameOf, none, null),
+    "Delete 3 sizes, Test Barn 10x12 to Test Barn 12x24? Their prices and included options go too, and you can't undo this.");
+  assertEquals(G.ssPgDeleteText([A, B, C], nameOf, { used: 2, saving: 0 }, null),
+    "Delete 3 sizes, Test Barn 10x12 to Test Barn 12x24? Their prices and included options go too, and you can't undo this. 2 more stay because saved designs use them.");
+  assertEquals(G.ssPgDeleteText([A, B], nameOf, { used: 1, saving: 1 }, null),
+    "Delete 2 sizes, Test Barn 10x12 to Test Barn 10x16? Their prices and included options go too, and you can't undo this. 1 more stays because a saved design uses it. 1 more is still saving.");
+  assertEquals(G.ssPgDeleteText([A, B], nameOf, { used: 0, saving: 3 }, null).endsWith(" 3 more are still saving."), true);
+  assertEquals(G.ssPgDeleteText([], nameOf, { used: 2, saving: 0 }, null), "None of these sizes can be deleted: saved designs use them. Untick Offered to hide them.");
+  assertEquals(G.ssPgDeleteText([], nameOf, { used: 0, saving: 2 }, null), "None of these sizes can be deleted yet: a change on them is saving. Try again in a second.");
+  assertEquals(G.ssPgDeleteText([], nameOf, { used: 2, saving: 1 }, null), "None of these sizes can be deleted now: saved designs use 2, and 1 is still saving.");
+  assertEquals(G.ssPgDeleteText([A], nameOf, none, "Test Viewed Sheds"),
+    "Delete Test Barn 10x12 from Test Viewed Sheds's account? Its price and included options go too, and you can't undo this. To sell it again later, add it with ＋ Add sizes.");
+  assertEquals(G.ssPgDeleteText([A, C], nameOf, none, "Test Viewed Sheds"),
+    "Delete 2 sizes, Test Barn 10x12 to Test Barn 12x24 from Test Viewed Sheds's account? Their prices and included options go too, and you can't undo this.");
+  assertEquals([G.ssPgDeleteText(null), G.ssPgDeleteText(undefined, nameOf, none, null)], ["Click a size first, then press Delete sizes.", "Click a size first, then press Delete sizes."]);
+});
+
+Deno.test("ssPgDeleteResult: one line per answer; grey when all went, amber with the refusals after what went; a refusal with no code reads as changed elsewhere", () => {
+  const names: Record<string, string> = { [A]: "Test Barn 10x12", [B]: "Test Barn 10x16", [C]: "Test Barn 12x24" };
+  const nameOf = (id: string) => names[id] || "";
+  const went = (id: string) => ({ id, status: "removed" });
+  const no = (id: string, code?: string, reason = "") => ({ id, status: "refused", ...(code ? { code } : {}), reason });
+  assertEquals(G.ssPgDeleteResult([went(A)], nameOf), { tone: "grey", text: "Deleted Test Barn 10x12." });
+  assertEquals(G.ssPgDeleteResult([went(A), went(B), went(C), went(E)], nameOf), { tone: "grey", text: "Deleted 4 sizes." });
+  assertEquals(G.ssPgDeleteResult([{ ...went(A), gone: true }], nameOf).text, "Deleted Test Barn 10x12.", "a resend that already landed");
+  assertEquals(G.ssPgDeleteResult([went(Z)], () => ""), { tone: "grey", text: "Deleted 1 size." });
+  const four = [went(zid(41)), went(zid(42)), went(zid(43)), went(zid(44))];
+  assertEquals(G.ssPgDeleteResult([...four, no(A, "used"), no(B, "used")], nameOf),
+    { tone: "amber", text: "Deleted 4 sizes. 2 stay: saved designs started using them. Untick Offered to hide them." });
+  assertEquals(G.ssPgDeleteResult([no(A, "used")], nameOf), { tone: "amber", text: "Test Barn 10x12 stays: a saved design started using it. Untick Offered to hide it." });
+  assertEquals(G.ssPgDeleteResult([no(A, "used"), no(B, "used")], nameOf).text, "2 sizes stay: saved designs started using them. Untick Offered to hide them.");
+  assertEquals(G.ssPgDeleteResult([no(A, "changed")], nameOf).text, "Test Barn 10x12 was changed elsewhere, so it wasn't deleted. Check it, then delete it again.");
+  // A plain id refused by migration 350's rule: never its sentence, which contradicts the ✕.
+  const stale = G.ssPgDeleteResult([no(A, undefined, "Only a size that was never priced or edited can be removed. Untick Offered to hide it.")], nameOf);
+  assertEquals(stale, { tone: "amber", text: "Test Barn 10x12 was changed elsewhere, so it wasn't deleted. Check it, then delete it again." });
+  assertEquals(G.ssPgDeleteResult([no(A, "bom")], nameOf).text, "Test Barn 10x12 has a Real-Time Pricing materials list, so it wasn't deleted. Remove that list first.");
+  assertEquals(G.ssPgDeleteResult([no(A, "error", "the database could not be reached just then")], nameOf).text,
+    "Couldn't delete Test Barn 10x12: the database could not be reached just then.");
+  assertEquals(G.ssPgDeleteResult([went(C), no(A, "used"), no(B)], nameOf).text,
+    "Deleted Test Barn 12x24. Test Barn 10x12 stays: a saved design started using it. Untick Offered to hide it. Test Barn 10x16 was changed elsewhere, so it wasn't deleted. Check it, then delete it again.");
+  assertEquals(G.ssPgDeleteResult([went(C), no(A), no(B)], nameOf).text,
+    "Deleted Test Barn 12x24. 2 were changed elsewhere, so they weren't deleted. Check them, then delete them again.");
+  assertEquals([G.ssPgDeleteResult([], nameOf), G.ssPgDeleteResult(null, nameOf), G.ssPgDeleteResult([{ id: A, status: "odd" }], nameOf)], [null, null, null]);
 });
 
 Deno.test("refresh through the queue: red boxes, unsent and in-flight work kept; an Excel upload that changed an unsent box turns it red; the rest takes the read", () => {
@@ -2012,12 +2230,12 @@ Deno.test("ssPgOffLost: a paste's Offered holds while its first price is unsent;
     K.ssPgOffLost(q1, { ...pe, sizeId: zid(77) }), K.ssPgOffLost(null, pe)], [false, false, false, false]);
 });
 
-Deno.test("paste, fill and clear take nothing on a size being removed: refused, named", () => {
+Deno.test("paste, fill and clear take nothing on a size being deleted: refused, named", () => {
   const m = M4();
   const v = viewOf(m);
   const q = { ...v.q, removes: { [Z2]: "inflight" } };
-  assertEquals(K.ssPgPastePlan({ ...v, q }, { sizeId: Z1, col: 3 }, [["5"], ["6"]]).error, "Row 2 (Test Barn 10x16): this size is being removed.");
-  assertEquals(K.ssPgClearPlan({ ...v, q }, { r0: 1, r1: 1, c0: 3, c1: 3 }).error, "Test Barn 10x16: this size is being removed.");
+  assertEquals(K.ssPgPastePlan({ ...v, q }, { sizeId: Z1, col: 3 }, [["5"], ["6"]]).error, "Row 2 (Test Barn 10x16): this size is being deleted.");
+  assertEquals(K.ssPgClearPlan({ ...v, q }, { r0: 1, r1: 1, c0: 3, c1: 3 }).error, "Test Barn 10x16: this size is being deleted.");
 });
 
 Deno.test("paste is refused BEFORE any value is checked: a band or placeholder, a folded hidden size, past the last row or column, the Size column, over 20,000 boxes", () => {
@@ -2113,8 +2331,8 @@ Deno.test("ssPgChangeSummary: names the first and last size, counts prices, size
 // ─── The $0 note (Ahsan, after Carolyn's call on 10-30: a builder typed 0 on the sizes he didn't
 // sell, meaning "take these away"; $0 is a real price, and the designer offers such a size free) ───
 const ZERO = ["function ssPgFreeAt(q, id) {", "function ssPgZeroNew(before, after, ids, hidden) {", "function ssPgHiddenStyleSizes(model) {",
-  "function ssPgZeroText(ids, nameOf) {", "function ssPricingSheetZeros(rows, styles) {"].map(lift).join("\n");
-const ZN = new Function(`${PURE}\n${SAVE}\n${ZERO}; return { ssPgFreeAt, ssPgZeroNew, ssPgHiddenStyleSizes, ssPgZeroText, ssPricingSheetZeros };`)() as Record<string, (...a: Any[]) => Any>;
+  "function ssPgZeroText(ids, nameOf) {", "function ssPricingSheetZeros(rows, styles) {", "function ssPricingSheetNew(rows, styles, sizes) {"].map(lift).join("\n");
+const ZN = new Function(`${PURE}\n${SAVE}\n${ZERO}; return { ssPgFreeAt, ssPgZeroNew, ssPgHiddenStyleSizes, ssPgZeroText, ssPricingSheetZeros, ssPricingSheetNew };`)() as Record<string, (...a: Any[]) => Any>;
 
 Deno.test("ssPgFreeAt: at $0 as drawn and offered, or offered once that first price saves; a paste's Offered \"no\" or a size being removed is not", () => {
   const db = DB();
@@ -2219,13 +2437,13 @@ Deno.test("ssPgHiddenStyleSizes: the sizes of the hidden styles, as the grid dra
   assertEquals([ZN.ssPgHiddenStyleSizes(null), ZN.ssPgHiddenStyleSizes({ styles: [] })], [{}, {}]);
 });
 
-Deno.test("ssPgZeroText: one size named, more counted; plain words; nothing for none", () => {
+Deno.test("ssPgZeroText: one size named, more counted; plain words; each ends with the ✕; nothing for none", () => {
   const names: Record<string, string> = { [A]: "Test Barn 10x12" };
   assertEquals(ZN.ssPgZeroText([A], (id: string) => names[id] || ""),
-    "Test Barn 10x12: $0 means this size is free in your designer. To stop offering it, untick Offered or clear the price.");
+    "Test Barn 10x12: $0 means this size is free in your designer. To stop offering it, untick Offered, clear the price, or delete it with ✕.");
   assertEquals(ZN.ssPgZeroText([A, B, C], (id: string) => names[id] || ""),
-    "3 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.");
-  assertEquals(ZN.ssPgZeroText([B], () => ""), "A size is now $0, which means it's free in your designer. To stop offering it, untick Offered or clear the price.");
+    "3 sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered, clear its price, or delete it with ✕.");
+  assertEquals(ZN.ssPgZeroText([B], () => ""), "A size is now $0, which means it's free in your designer. To stop offering it, untick Offered, clear the price, or delete it with ✕.");
   assertEquals(ZN.ssPgZeroText(Array.from({ length: 1200 }, (_, i) => String(i)), null).slice(0, 22), "1,200 sizes are now $0");
   assertEquals([ZN.ssPgZeroText([], () => "x"), ZN.ssPgZeroText(null, null)], ["", ""]);
 });
@@ -2323,6 +2541,31 @@ Deno.test("ssPricingSheetZeros: the sheet's sizes left at $0 in the designer, by
   assertEquals(ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "4800"), row("test-barn", 10, 12, "$0")], styles), 1);
   assertEquals(ZN.ssPricingSheetZeros([row("Test Barn", 10, 12, "0"), row("Test Barn", 10, 12, "abc")], styles), 1, "a refused later row changes nothing");
   assertEquals([ZN.ssPricingSheetZeros([], styles), ZN.ssPricingSheetZeros(null, styles)], [0, 0]);
+});
+
+Deno.test("ssPricingSheetNew: the sizes a sheet adds that aren't in the table, and how many of them at $0, by the importer's own match", () => {
+  const styles = [{ id: "s1", label: "Test Barn", key: "test-barn" }, { id: "s2", label: "Test Utility", key: "test-utility" },
+    { id: "s3", label: "Test Old Style", key: "test-old", active: false }];
+  const sizes = [{ style_id: "s1", width_ft: 10, length_ft: 12 }, { style_id: "s1", width_ft: "12", length_ft: "24" }, { style_id: "s2", width_ft: 8, length_ft: 10 }];
+  const row = (style: Any, width: Any, length: Any, price: Any, active: Any = "") => ({ style, width, length, price, active, inclusions: {} });
+  // Already in the table (by style label or key, any case, and width x length as numbers): not added.
+  assertEquals(ZN.ssPricingSheetNew([row("Test Barn", 10, 12, "0"), row("test-barn", "12.0", "24", "4800"), row("TEST UTILITY", 8, 10, "$0")], styles, sizes),
+    { added: 0, zeros: 0 });
+  // Added: 10x14 at $0, 10x16 at 4800, 8x12 at "0.00", and 14x20 blank (added, hidden, so not at $0).
+  assertEquals(ZN.ssPricingSheetNew([row("Test Barn", 10, 14, "$0"), row("Test Barn", 10, 16, "4800"), row("test-utility", 8, 12, "0.00"), row("Test Barn", 14, 20, "")], styles, sizes),
+    { added: 4, zeros: 2 });
+  // Two rows for one size count once; the later row wins, as the importer's.
+  assertEquals(ZN.ssPricingSheetNew([row("Test Barn", 10, 14, "0"), row("test-barn", "10", "14.0", "4800")], styles, sizes), { added: 1, zeros: 0 });
+  assertEquals(ZN.ssPricingSheetNew([row("Test Barn", 10, 14, "4800"), row("Test Barn", 10, 14, "0")], styles, sizes), { added: 1, zeros: 1 });
+  // An unknown style, a bad width or length, or a refused price is skipped, as the importer skips it.
+  assertEquals(ZN.ssPricingSheetNew([row("Test Shed", 10, 14, "0"), row("Test Barn", 0, 14, "0"), row("Test Barn", "ten", 14, "0"), row("Test Barn", 10, 14, "-5"),
+    row("Test Barn", 10, 14, "abc"), row("", 10, 14, "0")], styles, sizes), { added: 0, zeros: 0 });
+  // Active "no" (or n, 0, false, inactive) at 0 is added, but not at $0 in the designer; nor is a hidden style's size.
+  assertEquals(ZN.ssPricingSheetNew(["no", "N", "0", "false", " Inactive "].map((a, i) => row("Test Barn", 16, 10 + i, "0", a)), styles, sizes), { added: 5, zeros: 0 });
+  assertEquals(ZN.ssPricingSheetNew([row("Test Old Style", 6, 8, "0"), row("Test Barn", 16, 20, "0", "yes")], styles, sizes), { added: 2, zeros: 1 });
+  // No table yet: every good row adds; no styles: nothing does.
+  assertEquals(ZN.ssPricingSheetNew([row("Test Barn", 10, 12, "0")], styles, null), { added: 1, zeros: 1 });
+  assertEquals([ZN.ssPricingSheetNew([row("Test Barn", 10, 14, "0")], null, sizes), ZN.ssPricingSheetNew(null, styles, sizes)], [{ added: 0, zeros: 0 }, { added: 0, zeros: 0 }]);
 });
 
 Deno.test("queue commits: many boxes in one event, each by the commit rule and its seen check, flushed; the same as committing them one by one", () => {

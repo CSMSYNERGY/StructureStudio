@@ -505,11 +505,13 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-tickh{font-weight:800;color:#64748B;font-size:12px}
 .ss-pg-tickc{display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
 .ss-pg-there{color:#94A3B8;font-style:italic;white-space:nowrap}
-/* Remove: a small ✕ at the right of a size that was never priced or changed. Inside the frozen Size
-   box, whose sticky position makes it the ✕'s frame. */
+/* Delete: a small ✕ at the right of every size on a page that can edit (the delete plan, 10-31).
+   Inside the frozen Size box, whose sticky position makes it the ✕'s frame. A size saved designs use
+   keeps a greyed ✕ (aria-disabled, its reason in its title) that never turns red under the pointer. */
 .ss-pg-grid td.ss-pg-rmable{padding-right:21px}
 .ss-pg-rm{position:absolute;right:2px;top:5px;width:17px;height:17px;padding:0;box-sizing:border-box;border:1px solid #E2E8F0;border-radius:4px;background:#FFF;color:#94A3B8;font:inherit;font-size:10px;line-height:15px;cursor:pointer}
-.ss-pg-rm:hover{color:#B91C1C;border-color:#FECACA;background:#FEF2F2}
+.ss-pg-rm:not([aria-disabled="true"]):hover{color:#B91C1C;border-color:#FECACA;background:#FEF2F2}
+.ss-pg-rm[aria-disabled="true"]{opacity:.35;cursor:not-allowed}
 .ss-pg-wait{color:#64748B;font-style:italic;font-weight:600;font-size:12px}
 .ss-pg-grid tr.ss-pg-busy td.ss-pg-size{color:#64748B}
 /* A box a refresh moved (someone else's save, an Excel upload) flashes grey. */
@@ -528,6 +530,8 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-confirm-acts{display:flex;justify-content:flex-end;gap:8px}
 .ss-pg-confirm-acts button{font:inherit;font-size:13px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:8px;padding:7px 14px;cursor:pointer}
 .ss-pg-confirm-acts .ss-pg-confirm-yes{background:#3D3672;border-color:#3D3672;color:#FFF}
+/* The delete confirm's Delete: the ✕'s hover red, not the brand purple (its focus starts on Cancel). */
+.ss-pg-confirm-acts .ss-pg-confirm-del{background:#B91C1C;border-color:#B91C1C;color:#FFF}
 /* Below 700 px (plan 3.15): only Size stays frozen, the toolbar wraps, and the header is capped at
    90 px with an ellipsis (the toolbar's readout carries the full name). */
 @media (max-width:699.98px){
@@ -593,7 +597,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
-<script defer src="/portal.app.compiled.js?v=7daafede" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=ba0549b5" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

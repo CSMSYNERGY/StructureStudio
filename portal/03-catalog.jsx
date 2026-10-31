@@ -2994,7 +2994,13 @@ function ssPgModel(cat, table) {
   else if (sizes.some((z) => !styleIds.has(z.style_id))) guard = "orphan_size";
 
   const inc = {};
-  const onFile = {};   // inclusion rows per size, included or not: the server's Remove needs none (ssPgCanRemove)
+  const onFile = {};   // inclusion rows per size, included or not: the server's Remove needs none (ssPgNeverEdited)
+  // The sizes saved designs use (size_table's `used`, migration 351's pricing_sizes_in_use: a quote, an
+  // order, a draft, a version, a lot building, or what a deleted design left behind). Such a size is
+  // never deleted, so its ✕ is greyed (ssPgCanDelete); the server judges it again in the delete's own
+  // transaction. A read without the list (an older server) marks none.
+  const used = {};
+  (Array.isArray(t.used) ? t.used : []).forEach((id) => { if (id != null) used[String(id)] = true; });
   incs.forEach((x) => {
     onFile[x.size_id] = (onFile[x.size_id] || 0) + 1;
     if (x.included) (inc[x.size_id] = inc[x.size_id] || {})[x.item_key] = Number(x.qty) || 1;
@@ -3019,7 +3025,7 @@ function ssPgModel(cat, table) {
       width: w, length: l, price, priceText: ssPgFmtPrice(price), active: !!z.active, offered, hidden: !offered,
       values: cols.map((c) => (mine[c.key] != null ? String(mine[c.key]) : "")),
       version: z.updated_at == null ? null : z.updated_at, created: z.created_at == null ? null : z.created_at,
-      onFile: onFile[z.id] || 0,
+      onFile: onFile[z.id] || 0, used: !!used[String(z.id)],
     });
   });
   const band = (s) => ({ id: s.id, key: s.key, label: String(s.label || s.key || "Style"), code: s.code || null, active: !!s.active, sizes: sizesBy[s.id] || [] });
@@ -3269,8 +3275,8 @@ function ssPgSame(a, b) {
 
 // What the server held when the table was read, per size, in the queue's shape: the version
 // (updated_at, verbatim) and every value the grid draws. Hidden styles' sizes too. `created`
-// (created_at, verbatim) is for Remove: a size whose version is still its created_at was never
-// edited since it was added (ssPgCanRemove). Sizes this page added (ssPgLocalModel) are not here:
+// (created_at, verbatim) is for the ✕: a size whose version is still its created_at was never
+// edited since it was added (ssPgNeverEdited). Sizes this page added (ssPgLocalModel) are not here:
 // they are read only once the server has them.
 function ssPgServerSizes(model) {
   const out = {};
@@ -3364,6 +3370,11 @@ function ssPgCount(q) {
 // caps.cells): the rest waits for the next call. Returns { body: { creates, removes, sizes }, sent:
 // { [sizeId]: { base, fields: { [field]: { to, from, seq } } } }, creates: [ids], removes: [ids],
 // changes, cells }.
+// A remove goes in the shape it was queued in (the delete plan, 10-31): the plain ✕ on a size never
+// priced or edited (the queue's "remove") sends its id, judged by migration 350's rule; every
+// confirmed delete (the queue's "removes", `q.dels`) sends { id, base: its version }, which the
+// server deletes only at that version, with no Real-Time Pricing list, and when no saved design uses
+// it. `removes` in the answer is ids either way, so the refresh rules never see the shape.
 function ssPgBuildBatch(q, caps) {
   if (!q) return null;
   const maxEntries = (caps && caps.entries) || 50;
@@ -3380,7 +3391,8 @@ function ssPgBuildBatch(q, caps) {
   });
   Object.keys(q.removes || {}).forEach((id) => {
     if (q.removes[id] !== "pending" || entries >= maxEntries) return;
-    removes.push(id);
+    const s = q.sizes ? q.sizes[id] : null;
+    removes.push(q.dels && q.dels[id] ? { id, base: s && s.version != null ? s.version : null } : id);
     removeIds.push(id);
     entries++; changes++;
   });
@@ -3442,15 +3454,16 @@ function ssPgRebase(sent, server, again) {
 // confirmed (creating: "pending" | "inflight" while a new size's create is unanswered). fields:
 // { [id]: { [field]: { pending?, inflight?, error? } } } for boxes with something local only, where
 // pending and inflight are { to, from, seq } and error is { kind: "invalid" | "refused" | "conflict",
-// typed, reason, server? }. removes: { [id]: "pending" | "inflight" }. flight: the one call out, with
-// what it sent. Plus the clock marks for the send timing, the failure count, why saving stopped or
-// the page went view-only, the count of answers (oks, for the refresh rule), a note for the status
-// line, and `unsure`: { [id]: true } for sizes a discarded call may have changed all the same,
-// until a fresh read says what is on file.
+// typed, reason, server? }. removes: { [id]: "pending" | "inflight" }; dels: { [id]: true } for the
+// removes that are confirmed deletes (sent as { id, base }: ssPgBuildBatch). flight: the one call
+// out, with what it sent. Plus the clock marks for the send timing, the failure count, why saving
+// stopped or the page went view-only, the count of answers (oks, for the refresh rule), a note for
+// the status line, and `unsure`: { [id]: true } for sizes a discarded call may have changed all the
+// same, until a fresh read says what is on file.
 //
-// EVENTS: init, commit, commits (a paste, fill or clear), invalid, dismiss, create, remove, flush,
-// send, ok, fail, resume, discard, refresh, columns, restore, note-off. Times come in on the event
-// (`at`), never from a clock in here.
+// EVENTS: init, commit, commits (a paste, fill or clear), invalid, dismiss, create, remove, removes
+// (a confirmed delete), flush, send, ok, fail, resume, discard, refresh, columns, restore, note-off.
+// Times come in on the event (`at`), never from a clock in here.
 //
 // THE COMMIT RULE. A field's baseline is its in-flight `to` when it has one, otherwise what the
 // server confirmed. A value equal to the baseline drops any unsent edit (nothing to send);
@@ -3465,7 +3478,7 @@ function ssPgQueue(q, ev) {
   if (e.type === "init") {
     let cols = null;
     if (Array.isArray(e.cols)) { cols = {}; e.cols.forEach((k) => { cols[k] = true; }); }
-    return { sizes: { ...(e.sizes || {}) }, fields: {}, removes: {}, cols, seq: 0, n: 0, flight: null, failures: 0,
+    return { sizes: { ...(e.sizes || {}) }, fields: {}, removes: {}, dels: {}, cols, seq: 0, n: 0, flight: null, failures: 0,
       stopped: null, viewOnly: null, oks: 0, firstAt: null, lastAt: null, flush: false, retried: {}, note: null,
       flash: null, reread: false, renamed: {}, unsure: null };
   }
@@ -3624,6 +3637,23 @@ function ssPgQueue(q, ev) {
       }
       return timed({ ...q, removes: { ...q.removes, [e.id]: "pending" }, flush: true }, true);
     }
+    case "removes": {
+      // A CONFIRMED DELETE (the delete plan, 10-31), of one size or several, ALL OR NOTHING: every id
+      // must be on the account here, created, not already going, with no box of it in flight (that
+      // box's answer would land on a size the next call deletes). Each one's unsent and red boxes go
+      // with it in this same step: the confirm said its price and options go, those boxes are not on
+      // the server, so the version the delete is sent on stays right, and nothing of it is left red.
+      // Sent at once, as { id, base } (ssPgBuildBatch). Whether saved designs use a size is the
+      // page's check (the model's `used`) and the server's; the queue knows no designs.
+      const ids = Array.isArray(e.ids) ? e.ids : [];
+      if (!ids.length) return q;
+      const flying = (id) => Object.keys(q.fields[id] || {}).some((f) => q.fields[id][f].inflight);
+      if (ids.some((id) => !q.sizes[id] || q.sizes[id].creating || q.sizes[id].version == null || q.removes[id] || flying(id))) return q;
+      const removes = { ...q.removes }, dels = { ...(q.dels || {}) };
+      let fields = q.fields;
+      ids.forEach((id) => { removes[id] = "pending"; dels[id] = true; fields = setSize(fields, id, {}); });
+      return timed({ ...q, removes, dels, fields, flush: true }, true);
+    }
     case "flush":
       return q.flush ? q : { ...q, flush: true };
     case "note-off":
@@ -3660,6 +3690,7 @@ function ssPgQueue(q, ev) {
       const a = e.answer || {};
       const sizes = { ...q.sizes };
       const removes = { ...q.removes };
+      const dels = { ...(q.dels || {}) };
       const retried = { ...q.retried };
       const renamed = { ...q.renamed };
       const saved = {};
@@ -3667,7 +3698,7 @@ function ssPgQueue(q, ev) {
       let fields = q.fields;
       let flush = q.flush;
       const cellsOf = (c) => { const o = {}; Object.keys(c || {}).forEach((k) => { o[k] = Number(c[k]) || 0; }); return o; };
-      // created_at rides along where the answer has it (Remove reads it: ssPgCanRemove).
+      // created_at rides along where the answer has it (the ✕ reads it: ssPgNeverEdited).
       const bornOf = (r, prev) => (r.row && r.row.created_at != null ? { created: r.row.created_at } : prev && prev.created != null ? { created: prev.created } : {});
       const rowOf = (r, prev) => ({ version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price),
         active: !!r.row.active, cells: { ...((prev && prev.cells) || {}), ...cellsOf(r.cells) }, ...bornOf(r, prev) });
@@ -3705,12 +3736,16 @@ function ssPgQueue(q, ev) {
           notes.push(`Couldn't add ${what}: ${dot(r.reason || "the server refused it")}`);
         }
       });
-      // Removes. `removed` (gone: true too: a resend of one that already landed) takes the row away.
+      // Removes. `removed` (gone: true too: a resend of one that already landed) takes the row away. A
+      // refused one keeps its row and says nothing here: the page turns the whole answer's removes
+      // into one status line (ssPgDeleteResult), so a refusal never hides under a "Deleted" line.
+      // The answer names each by its id; an object's own id is read too.
       (Array.isArray(a.removed) ? a.removed : []).forEach((r) => {
-        if (!r || fl.removes.indexOf(r.id) < 0) return;
-        delete removes[r.id];
-        if (r.status === "removed") { delete sizes[r.id]; fields = setSize(fields, r.id, {}); }
-        else notes.push(dot(r.reason || "That size couldn't be removed"));
+        const id = r && r.id && typeof r.id === "object" ? r.id.id : r ? r.id : null;
+        if (id == null || fl.removes.indexOf(id) < 0) return;
+        delete removes[id];
+        delete dels[id];
+        if (r.status === "removed") { delete sizes[id]; fields = setSize(fields, id, {}); }
       });
       // Sizes.
       const answered = {};
@@ -3814,8 +3849,14 @@ function ssPgQueue(q, ev) {
         fields = setSize(fields, id, {});
         notes.push(`Couldn't add ${c ? `${c.width}x${c.length}` : "a size"}: the server didn't answer. Add it again.`);
       });
-      fl.removes.forEach((id) => { if (removes[id] === "inflight") { delete removes[id]; notes.push("A size couldn't be removed: the server didn't answer. Remove it again."); } });
-      const next = { ...q, sizes, fields, removes, retried, renamed, flight: null, failures: 0, oks: q.oks + 1, flush,
+      // A remove the answer left out (it never should): counted, not named (the queue keeps no labels).
+      const unanswered = fl.removes.filter((id) => removes[id] === "inflight");
+      unanswered.forEach((id) => { delete removes[id]; delete dels[id]; });
+      if (unanswered.length) {
+        notes.push(unanswered.length === 1 ? "A size couldn't be deleted: the server didn't answer. Delete it again."
+          : `${unanswered.length} sizes couldn't be deleted: the server didn't answer. Delete them again.`);
+      }
+      const next = { ...q, sizes, fields, removes, dels, retried, renamed, flight: null, failures: 0, oks: q.oks + 1, flush,
         note: notes.length ? { text: notes.join(" ") } : q.note, flash: { n: q.oks + 1, saved } };
       return timed(next, false);
     }
@@ -3861,15 +3902,19 @@ function ssPgQueue(q, ev) {
           delete sizes[id];
           fields = setSize(fields, id, {});
         });
-        const removes = { ...q.removes };
-        q.flight.removes.forEach((id) => { delete removes[id]; });
-        let note = q.note;
+        const removes = { ...q.removes }, dels = { ...(q.dels || {}) };
+        q.flight.removes.forEach((id) => { delete removes[id]; delete dels[id]; });
+        const why = String(reason || "the server refused it").trim();
+        const said = [];
         if (lost.length) {
-          const why = String(reason || "the server refused it").trim();
           const names = lost.length > 3 ? `${lost.slice(0, 3).join(", ")} and ${lost.length - 3} more` : lost.join(", ");
-          note = { text: `Couldn't add ${names}: ${/[.!?]$/.test(why) ? why : why + "."}${typed ? ` What was typed on ${lost.length === 1 ? "it" : "them"} wasn't saved either.` : ""}` };
+          said.push(`Couldn't add ${names}: ${/[.!?]$/.test(why) ? why : why + "."}${typed ? ` What was typed on ${lost.length === 1 ? "it" : "them"} wasn't saved either.` : ""}`);
         }
-        return timed({ ...q, fields, sizes, removes, flight: null, failures: 0, note }, false);
+        // The sizes this call was deleting stay, with no box to show it: the status line says so.
+        const kept = q.flight.removes.length;
+        if (kept) said.push(`${kept === 1 ? "A size" : `${kept} sizes`} couldn't be deleted: ${/[.!?]$/.test(why) ? why : why + "."}`);
+        const note = said.length ? { text: said.join(" ") } : q.note;
+        return timed({ ...q, fields, sizes, removes, dels, flight: null, failures: 0, note }, false);
       }
       // 403 (forbidden), 401 (auth) or an answer for another account (tenant): nothing more goes
       // from this page. What was in flight is unsent again, so the badge and the leave prompt still
@@ -3909,7 +3954,7 @@ function ssPgQueue(q, ev) {
         unsure = { ...(q.unsure || {}) };
         [...Object.keys(q.flight.sent), ...q.flight.creates, ...q.flight.removes].forEach((id) => { unsure[id] = true; });
       }
-      return { ...q, fields, sizes, removes: {}, flight: null, failures: 0, retried: {}, unsure,
+      return { ...q, fields, sizes, removes: {}, dels: {}, flight: null, failures: 0, retried: {}, unsure,
         stopped: q.stopped && q.stopped.kind === "tenant" ? q.stopped : null, flush: false, firstAt: null, lastAt: null };
     }
     case "refresh": {
@@ -4245,7 +4290,7 @@ function ssPgLocalModel(model, added, sizes) {
     const keep = st.sizes.filter((z) => !!sizes[z.id]);
     const more = (extra[st.id] || []).map((a) => ({
       id: a.id, styleId: st.id, label: String(a.label), title: `${a.width} ft × ${a.length} ft`, width: a.width, length: a.length,
-      price: null, priceText: "", active: false, offered: false, hidden: true, values: blank, version: null, created: null, onFile: 0, local: true,
+      price: null, priceText: "", active: false, offered: false, hidden: true, values: blank, version: null, created: null, onFile: 0, used: false, local: true,
     }));
     if (keep.length === st.sizes.length && !more.length) return st;
     changed = true;
@@ -4255,17 +4300,130 @@ function ssPgLocalModel(model, added, sizes) {
   return changed ? { ...model, styles, hiddenStyles } : model;
 }
 
-// Whether a size shows Remove (plan 3.7; the function's rule 2 in migration 350): it was never priced
-// or edited since it was added (its version is still its created_at, both verbatim), nothing is
-// included and no inclusion row is on file (`z`, the model's row: onFile), and nothing of it is local
-// here (an unsent, in-flight or red box, an unanswered create, a remove already on its way). The
-// server checks it all again and answers anything else refused.
-function ssPgCanRemove(q, id, z) {
+// A size added by mistake (plan 3.7; the function's rule 2 in migration 350): its ✕ deletes it at
+// once, with no confirm, and sends its id (the queue's "remove"). It was never priced or edited since
+// it was added (its version is still its created_at, both verbatim), nothing is included and no
+// inclusion row is on file (`z`, the model's row: onFile), and nothing of it is local here (an unsent,
+// in-flight or red box, an unanswered create, a remove already on its way). The server checks it all
+// again and answers anything else refused. Every other size goes through the confirm (ssPgCanDelete).
+function ssPgNeverEdited(q, id, z) {
   const s = q && q.sizes ? q.sizes[id] : null;
   if (!s || s.creating || s.version == null || s.created == null || String(s.version) !== String(s.created)) return false;
   if (s.price != null || Object.keys(s.cells || {}).some((k) => Number(s.cells[k]) > 0)) return false;
   if (z && Number(z.onFile) > 0) return false;
   return !(q.fields && q.fields[id]) && !(q.removes && q.removes[id]);
+}
+
+// Whether size `id` can be deleted now (the delete plan, 10-31), through the confirm. → { ok, why }:
+//   adding    its create is unanswered (there is no version to delete it on yet);
+//   deleting  its remove is already queued or on its way;
+//   saving    a box of it is in flight (its answer would land on a size being deleted);
+//   used      saved designs use it (`z.used`, size_table's list): it is never deleted;
+//   gone      it isn't on the account here any more.
+// Unsent and red boxes don't block: they go with the size (the queue's "removes"). A red box waits
+// for the builder, not for time, so blocking on one would be a dead end.
+function ssPgCanDelete(q, id, z) {
+  const s = q && q.sizes ? q.sizes[id] : null;
+  if (!s) return { ok: false, why: "gone" };
+  if (s.creating || s.version == null) return { ok: false, why: "adding" };
+  if (q.removes && q.removes[id]) return { ok: false, why: "deleting" };
+  const fs = (q.fields && q.fields[id]) || {};
+  if (Object.keys(fs).some((f) => fs[f] && fs[f].inflight)) return { ok: false, why: "saving" };
+  if (z && z.used) return { ok: false, why: "used" };
+  return { ok: true, why: null };
+}
+
+// Why a size can't be deleted (ssPgCanDelete's `why`), in the status line's words and the greyed ✕'s
+// title. A size saved designs use is hidden by unticking Offered; once it is (`offered` false), it
+// says it already is, and how it folds away: "Show hidden sizes" off, or, when that is off already
+// (`showHidden` false: it turned hidden while drawn, so it stays drawn until the page is opened
+// again), the next open. "" when it can go.
+function ssPgDeleteWhy(why, opts) {
+  const o = opts || {};
+  if (why === "used") {
+    if (o.offered) return "Saved designs use this size, so it can't be deleted. Untick Offered to hide it from your designer.";
+    return o.showHidden === false
+      ? "It's already hidden from your designer. Saved designs use it, so it stays here. It folds away the next time you open this page."
+      : "It's already hidden from your designer. Saved designs use it, so it stays here. Turn off Show hidden sizes to fold it away.";
+  }
+  if (why === "saving") return "A change on this size is saving. Try again in a second.";
+  if (why === "adding") return "This size is still being added. Try again in a second.";
+  if (why === "deleting") return "This size is being deleted.";
+  if (why === "gone") return "That size isn't on this account any more.";
+  return "";
+}
+
+// THE DELETE CONFIRM'S QUESTION, and the line when none can go (the delete plan, 10-31). `ids`: the
+// sizes that can go, in drawn order; `nameOf(id)` is "Test Barn 10x12"; `counts` { used, saving }:
+// the others the selection touched (saving counts a box in flight, a size still being added and one
+// already being deleted); `company`: the account an operator is viewing as, or null. `ids` null: no
+// box is active (the toolbar's Delete sizes before any click). More than one size always asks; a
+// size never priced or edited is counted with the rest.
+function ssPgDeleteText(ids, nameOf, counts, company) {
+  if (!Array.isArray(ids)) return "Click a size first, then press Delete sizes.";
+  const c = counts || {};
+  const used = Number(c.used) || 0, saving = Number(c.saving) || 0;
+  const name = (id) => (typeof nameOf === "function" && nameOf(id)) || "this size";
+  if (!ids.length) {
+    if (used && saving) return `None of these sizes can be deleted now: saved designs use ${used}, and ${saving} ${saving === 1 ? "is" : "are"} still saving.`;
+    if (saving) return "None of these sizes can be deleted yet: a change on them is saving. Try again in a second.";
+    return "None of these sizes can be deleted: saved designs use them. Untick Offered to hide them.";
+  }
+  const from = company ? ` from ${company}'s account` : "";
+  const more = [];
+  if (used) more.push(used === 1 ? "1 more stays because a saved design uses it." : `${used} more stay because saved designs use them.`);
+  if (saving) more.push(saving === 1 ? "1 more is still saving." : `${saving} more are still saving.`);
+  const head = ids.length === 1
+    ? `Delete ${name(ids[0])}${from}? Its price and included options go too, and you can't undo this. To sell it again later, add it with ＋ Add sizes.`
+    : `Delete ${ids.length} sizes, ${name(ids[0])} to ${name(ids[ids.length - 1])}${from}? Their prices and included options go too, and you can't undo this.`;
+  return [head, ...more].join(" ");
+}
+
+// ONE STATUS LINE FOR ONE ANSWER'S REMOVES (the delete plan, 10-31): `removed` is the answer's
+// entries for the sizes that call was deleting, `nameOf(id)` "Test Barn 10x12" (or ""). What went
+// first, then what stayed, each reason in one counted sentence: grey when everything went, amber
+// when anything was refused. A refusal with no `code` (a plain id from a tab opened before the
+// delete, or one that read the size as never priced) reads as changed elsewhere: the re-read then
+// sends its next ✕ through the confirm. → { tone, text } or null when there is nothing to say.
+function ssPgDeleteResult(removed, nameOf) {
+  const list = (Array.isArray(removed) ? removed : []).filter((r) => r && (r.status === "removed" || r.status === "refused"));
+  if (!list.length) return null;
+  const idOf = (r) => (r.id && typeof r.id === "object" ? r.id.id : r.id);
+  const nm = (r) => (typeof nameOf === "function" && nameOf(idOf(r))) || "";
+  const dot = (s) => { const t = String(s || "").trim(); return !t || /[.!?]$/.test(t) ? t : t + "."; };
+  const went = list.filter((r) => r.status === "removed");
+  const refused = list.filter((r) => r.status === "refused");
+  const parts = [];
+  if (went.length) parts.push(went.length === 1 && nm(went[0]) ? `Deleted ${nm(went[0])}.` : `Deleted ${went.length === 1 ? "1 size" : `${went.length} sizes`}.`);
+  // After "Deleted 4 sizes." a count reads "2 stay"; on its own, "2 sizes stay".
+  const many = (k) => (went.length ? String(k) : `${k} sizes`);
+  const by = { used: [], changed: [], bom: [], error: [] };
+  refused.forEach((r) => {
+    const code = r.code === "used" || r.code === "bom" || r.code === "error" ? r.code : "changed";
+    by[code].push(r);
+  });
+  const one = (g) => g.length === 1 && nm(g[0]) ? nm(g[0]) : null;
+  if (by.used.length) {
+    parts.push(one(by.used) ? `${one(by.used)} stays: a saved design started using it. Untick Offered to hide it.`
+      : by.used.length === 1 ? "A size stays: a saved design started using it. Untick Offered to hide it."
+      : `${many(by.used.length)} stay: saved designs started using them. Untick Offered to hide them.`);
+  }
+  if (by.changed.length) {
+    parts.push(one(by.changed) ? `${one(by.changed)} was changed elsewhere, so it wasn't deleted. Check it, then delete it again.`
+      : by.changed.length === 1 ? "A size was changed elsewhere, so it wasn't deleted. Check it, then delete it again."
+      : `${many(by.changed.length)} were changed elsewhere, so they weren't deleted. Check them, then delete them again.`);
+  }
+  if (by.bom.length) {
+    parts.push(one(by.bom) ? `${one(by.bom)} has a Real-Time Pricing materials list, so it wasn't deleted. Remove that list first.`
+      : by.bom.length === 1 ? "A size has a Real-Time Pricing materials list, so it wasn't deleted. Remove that list first."
+      : `${many(by.bom.length)} have a Real-Time Pricing materials list, so they weren't deleted. Remove those lists first.`);
+  }
+  if (by.error.length) {
+    const why = dot(by.error[0].reason || "the server refused it");
+    parts.push(one(by.error) ? `Couldn't delete ${one(by.error)}: ${why}`
+      : by.error.length === 1 ? `Couldn't delete a size: ${why}` : `Couldn't delete ${by.error.length} sizes: ${why}`);
+  }
+  return { tone: refused.length ? "amber" : "grey", text: parts.join(" ") };
 }
 
 // The active cell, or a range's far corner ({ sizeId, col }), after a read changed the option columns
@@ -4615,7 +4773,7 @@ function ssPgOffLost(q, d) {
 //             what was pasted, as the Excel importer does (plan 4.11: a "no" row stays unoffered).
 //             A first price already on its way has said Offered: a different answer is refused,
 //             "its first price is still saving" (ssPgOffLost).
-//   A size being removed takes nothing: "this size is being removed."
+//   A size being deleted takes nothing: "this size is being deleted."
 //   An option a whole number from 0 to 999,999; blank is 0 (not included).
 //   A value equal to what is STORED is always accepted, and a box whose value as drawn already says
 //   it is no change at all.
@@ -4643,7 +4801,7 @@ function ssPgPlanCells(view, targets, opts) {
       if (!first) first = `${o.byRow ? `Row ${t.n} (${where})` : where}${c != null ? `, ${colName(c)}` : ""}: ${what}`;
     };
     if (!r || !s) { bad(null, "that size isn't on this account any more."); return; }
-    if (q.removes && q.removes[t.id]) { bad(null, "this size is being removed."); return; }
+    if (q.removes && q.removes[t.id]) { bad(null, "this size is being deleted."); return; }
     const shown = (f) => { const x = fs && fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
     const before = { price: shown("price"), active: !!shown("active") };
     // A first price waiting to be sent already says whether Offered goes with it unticked, and so
@@ -4880,14 +5038,15 @@ function ssPgHiddenStyleSizes(model) {
 
 // The $0 note's words (the status line, plan 3.14), for the sizes still at $0 in the designer
 // (`ids`; `nameOf(id)` is "Test Barn 10x12"). One size is named; more are counted, the way the
-// confirm counts. "" when there are none.
+// confirm counts. Each ends with the ✕ (the delete plan, 10-31): deleting the size is what a builder
+// typing 0 on a size he doesn't sell means. "" when there are none.
 function ssPgZeroText(ids, nameOf) {
   const list = Array.isArray(ids) ? ids : [];
   if (!list.length) return "";
   const name = list.length === 1 && typeof nameOf === "function" ? nameOf(list[0]) : "";
-  if (name) return `${name}: $0 means this size is free in your designer. To stop offering it, untick Offered or clear the price.`;
-  if (list.length === 1) return "A size is now $0, which means it's free in your designer. To stop offering it, untick Offered or clear the price.";
-  return `${String(list.length).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered or clear its price.`;
+  if (name) return `${name}: $0 means this size is free in your designer. To stop offering it, untick Offered, clear the price, or delete it with ✕.`;
+  if (list.length === 1) return "A size is now $0, which means it's free in your designer. To stop offering it, untick Offered, clear the price, or delete it with ✕.";
+  return `${String(list.length).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered, clear its price, or delete it with ✕.`;
 }
 
 // The Excel upload's $0 sizes (Settings > Sheds, "⬆ Upload filled sheet"), counted in the browser
@@ -4919,6 +5078,45 @@ function ssPricingSheetZeros(rows, styles) {
     last[`${id}|${w.n}|${l.n}`] = !hidden[id] && !p.blank && p.n === 0 && !off(r.active);
   });
   return Object.keys(last).filter((k) => last[k]).length;
+}
+
+// The Excel side of the delete (Settings > Sheds: the upload's $0 line and the "Using Excel" steps).
+const SS_PG_SHEET_ROW = "Deleting a row in the sheet doesn't delete the size. To delete one, open the sizes table and press ✕ on it.";
+
+// The sizes an Excel upload would ADD (the delete plan, 10-31): the importer never deletes a size, and
+// a row for one that isn't in the table is a create, offered at its price, so an old sheet brings a
+// deleted size back, and a row priced 0 brings it back free in the designer. Counted by
+// ssPricingSheetZeros' rules (a style the account knows by label or key, a width and length above 0,
+// a price blank or 0 or more, the later row for a size wins) and the importer's match by style and
+// width x length (pricingImport.ts dimKeyOf). `sizes` are the table's ({ style_id, width_ft,
+// length_ft }). → { added, zeros }: the new sizes, and how many of them land at $0 in the designer
+// (not "no" in the active column, not in a hidden style).
+function ssPricingSheetNew(rows, styles, sizes) {
+  const byName = {}, hidden = {};
+  (Array.isArray(styles) ? styles : []).forEach((st) => [st && st.label, st && st.key].forEach((t) => {
+    const k = String(t == null ? "" : t).trim().toLowerCase();
+    if (!k) return;
+    byName[k] = st.id == null ? k : st.id;
+    if (st.active === false) hidden[byName[k]] = true;
+  }));
+  const have = {};
+  (Array.isArray(sizes) ? sizes : []).forEach((z) => { if (z) have[`${z.style_id}|${Number(z.width_ft)}|${Number(z.length_ft)}`] = true; });
+  const num = (v) => (v === "" || v == null ? { blank: true, n: NaN } : { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) });
+  const off = (v) => ["no", "n", "0", "false", "inactive"].includes(String(v == null ? "" : v).trim().toLowerCase());
+  const last = {};
+  (Array.isArray(rows) ? rows : []).forEach((r) => {
+    const name = String(r && r.style != null ? r.style : "").trim().toLowerCase();
+    if (!name || byName[name] == null) return;
+    const w = num(r.width), l = num(r.length), p = num(r.price);
+    if (w.blank || l.blank || !Number.isFinite(w.n) || !Number.isFinite(l.n) || w.n <= 0 || l.n <= 0) return;
+    if (!p.blank && (!Number.isFinite(p.n) || p.n < 0)) return;
+    const id = byName[name];
+    const key = `${id}|${w.n}|${l.n}`;
+    if (have[key]) return;
+    last[key] = !hidden[id] && !p.blank && p.n === 0 && !off(r.active);
+  });
+  const keys = Object.keys(last);
+  return { added: keys.length, zeros: keys.filter((k) => last[k]).length };
 }
 
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
@@ -5181,6 +5379,8 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   };
   const onUpload = async (file) => {
     if (!file) return;
+    // The view-as target is read in the click's tick, like every other write path here.
+    const target = ssTargetClientId;
     setBusy(true); setMsg(null); setXlMsg(null); setResult(null);
     try {
       if (file.size > 5_000_000) throw new Error("File too large (max 5MB).");
@@ -5241,13 +5441,27 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       // $0 is a real price, so the designer offers them free (Carolyn's call, 10-30: a builder put 0 on
       // the sizes he didn't sell). Said under the result; the upload goes ahead as it is.
       const zeros = ssPricingSheetZeros(rows, allStyles());
+      // THE SIZES THIS SHEET ADDS (the delete plan, 10-31): the importer never deletes a size, so an old
+      // sheet that still has a deleted size's row brings it back as a new one, offered at the sheet's
+      // price, and a 0 there brings it back free in the designer. Counted (ssPricingSheetNew) against
+      // a fresh read of the table: a size deleted in the table's own tab since Sheds loaded is still in
+      // `cat`, and counting against that would miss the very case this asks about. When that read
+      // fails, `cat` is the best there is. Asked before anything is sent; Cancel sends nothing.
+      const now = await ssPgFetch(target, cat.clientId || null);
+      const adds = now.ok ? ssPricingSheetNew(rows, now.table.styles, now.table.sizes) : ssPricingSheetNew(rows, allStyles(), cat.sizes);
+      if (adds.added && !window.confirm(adds.added === 1
+        ? `This sheet adds 1 size that isn't in your table${adds.zeros ? " (at $0, so free in your designer)" : ""}. Upload it?`
+        : `This sheet adds ${adds.added} sizes that aren't in your table${adds.zeros ? ` (${adds.zeros} of them at $0, so free in your designer)` : ""}. Upload it?`)) {
+        setBusy(false); setFileKey((k) => k + 1);
+        return;
+      }
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       setResult(data); await load();
       const parts = []; if (data.created) parts.push(`${data.created} added`); if (data.updated) parts.push(`${data.updated} updated`);
       setXlMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : ""),
         zero: !zeros ? "" : `${zeros === 1 ? "1 size in the sheet is priced $0, so it's" : `${zeros} sizes in the sheet are priced $0, so they're`} free in your designer. `
-          + "To hide a size, leave its price blank or put no in the active column." });
+          + "To hide a size, leave its price blank or put no in the active column. " + SS_PG_SHEET_ROW });
     } catch (e) { setXlMsg({ err: e.message }); }
     setBusy(false); setFileKey((k) => k + 1);
   };
@@ -5495,7 +5709,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
           and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
           included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
           (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
-          A price of <b>0</b> doesn't hide a size: it shows in your designer as free.
+          A price of <b>0</b> doesn't hide a size: it shows in your designer as free. {SS_PG_SHEET_ROW}
           The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
           built-in items — so you can set how many of a specific catalog item come included with each size.
           {" "}<b>Changed numbers in the table? Download a fresh template before you use Excel again.</b>
@@ -11426,8 +11640,7 @@ const SS_PG_ADD_PRICE = "Add a price first";
 const SS_PG_SIZE_FIXED = "A size's width and length can't be changed here.";
 const SS_PG_REFUSED_CALL = "This change couldn't be saved. Tell CSM Synergy if it keeps happening";
 const SS_PG_FORBIDDEN = "You can't change Sheds on this account";
-const SS_PG_REMOVING = "This size is being removed.";
-const SS_PG_REMOVE_RULE = "Only a size that was never priced or edited can be removed. Untick Offered to hide it.";
+const SS_PG_REMOVING = "This size is being deleted.";
 const SS_PG_OPEN_CH = "ss-pg-open";            // the tables that are open answer here (PricingTablePage, offerEarlier)
 
 // A Settings address in THIS tab that keeps the account (?view=) and the person (?as=), and
@@ -11709,6 +11922,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // per mount, so the same tab opening the table again finds what the last one left.
   const [mountId] = useState(() => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`);
   const cursorToRef = useRef(null);                // a size just added: the cursor goes to its price once it is drawn
+  const delNameRef = useRef({});                   // size id → "Test Barn 10x12", for the sizes sent to be deleted (the answer's line)
+  const delRunRef = useRef([]);                    // the answers' removes so far, while a delete of more than one call is still going
   activeRef.current = active;
   extentRef.current = extent;
   loadRef.current = load;
@@ -12147,9 +12362,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
         }
         const v = c.v;
         const busy = s && s.creating ? "adding" : q && q.removes[z.id] ? "removing" : "";
+        // The ✕ on every size of an editable page (the delete plan, 10-31), greyed with its reason as
+        // its title when saved designs use the size (`delOff`, a string, so the memo holds).
         return <PgRow key={r.id} rowIndex={ri} sizeId={z.id} label={z.label} title={z.title} priceText={v.priceText}
           offered={v.offered} noPrice={v.noPrice} hidden={v.hidden} values={v.values} marks={v.marks} rtp={!!(model && model.rtpOn)}
-          busy={busy} removable={canEdit && ssPgCanRemove(q, z.id, z)} />;
+          busy={busy} deletable={canEdit && !busy} delOff={z.used ? ssPgDeleteWhy("used", { offered: v.offered, showHidden }) : ""} />;
       }
       if (r.kind === "band") {
         return <PgStyleBand key={r.id} rowIndex={ri} styleId={r.style.id} label={r.style.label} total={r.total} hidden={r.hidden} folded={r.folded} ncols={ncols}
@@ -12162,7 +12379,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       if (r.kind === "empty") return <PgNoteRow key={r.id} rowIndex={ri} text={r.text} ncols={ncols} />;
       return <PgHiddenStylesRow key={r.id} rowIndex={ri} count={r.count} open={r.open} ncols={ncols} onToggle={toggleHiddenStyles} />;
     });
-  }, [rows, model, ncols, toggleHiddenStyles, q && q.sizes, q && q.fields, q && q.removes, canEdit, addOpen, addFocus, onAddSizes, onCloseAdd]);
+  }, [rows, model, ncols, toggleHiddenStyles, q && q.sizes, q && q.fields, q && q.removes, canEdit, addOpen, addFocus, onAddSizes, onCloseAdd, showHidden]);
 
   // ── Handlers and what to draw (no hooks below this line) ──
   // (tooBig, readOnly, editable, lostEdit and canEdit are worked out above: the rows need them.)
@@ -12193,7 +12410,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const x = cur && cur.fields[sizeId] && cur.fields[sizeId][f];
     return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f);
   };
-  // A size whose Remove is waiting or out takes no edit: its boxes would go with it, unsaid.
+  // A size whose delete is waiting or out takes no edit: its boxes would go with it, unsaid.
   const removing = (sizeId) => !!(qRef.current && qRef.current.removes[sizeId]);
   const focusGrid = () => { try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ } };
   const colName = (c) => (c === 0 ? "Size" : c === 1 ? "Price" : c === 2 ? "Offered" : (model && model.cols[c - 3] ? model.cols[c - 3].label : ""));
@@ -12229,13 +12446,28 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (res.some((x) => x.status === "saved") || made.some((x) => x.status === "created") || gone.some((x) => x.status === "removed" && !x.gone)) ssSettingsSaved(clientId);
     // `exists`: someone else added that size first, and it takes the new row's place; it may not be
     // in this page's read yet, so the table reads again to draw it (with what was typed on it, red).
-    // A refused remove means the size changed somewhere else since this page read it: the read
-    // brings its new version, and its Remove goes. A conflict or a duplicate says someone else saved
+    // A refused remove means the size changed somewhere else since this page read it, or saved
+    // designs started using it: the read brings its new version and its `used` mark, so its next ✕
+    // goes through the confirm on that version, or is greyed. A conflict or a duplicate says someone else saved
     // that size meanwhile, and its answer carries only the boxes this call named (and the price and
     // Offered): the read brings the rest of the size (plan 4.6's refresh rule, through the queue), so
     // no box goes on showing a number that is no longer on file.
     if (made.some((x) => x.status === "exists") || gone.some((x) => x.status === "refused")
       || res.some((x) => x.status === "conflict" || x.status === "duplicate")) pokeRefresh();
+    // ONE LINE FOR THE DELETE (ssPgDeleteResult): what went, then what stayed and why, set once, on
+    // `said`, so a refusal can never sit under an earlier "Deleted …" line. A delete of more than 50
+    // sizes takes more than one call: its answers are gathered until no delete is left queued, so 60
+    // sizes say "Deleted 60 sizes.", not the last call's 10.
+    const mine = gone.filter((x) => flight.removes.indexOf(x.id && typeof x.id === "object" ? x.id.id : x.id) >= 0);
+    if (mine.length) {
+      delRunRef.current = [...delRunRef.current, ...mine];
+      const cur = qRef.current;
+      if (!cur || !Object.keys(cur.removes || {}).length) {
+        const line = ssPgDeleteResult(delRunRef.current, (id) => delNameRef.current[id] || "");
+        delRunRef.current = [];
+        if (line) { setSaid(line); setTip(null); }
+      }
+    }
     // One info row per answer that had conflicts or refusals: counts only (plan 4.7).
     const conflicts = res.filter((x) => x.status === "conflict").length;
     const refused = res.filter((x) => x.status === "refused" || x.status === "missing").length
@@ -12421,23 +12653,87 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (st && st.sizes.length) setAddOpen((o) => ({ ...o, [styleId]: true }));
     setAddFocus((f) => ({ id: styleId, n: (f ? f.n : 0) + 1 }));
   };
-  // Remove (plan 3.7): only a size that was never priced or edited (ssPgCanRemove; the server checks
-  // again). Through the queue, sent at once; the row goes when the answer says removed.
-  const removeSize = (id) => {
-    if (!canEditNow() || !ssPgCanRemove(qRef.current, id, byId[id] ? byId[id].size : null)) return;
+  // DELETE (the delete plan, 10-31): the ✕ on a size, Delete on its Size box, and Delete sizes on one
+  // row. A size added by mistake (never priced or edited: ssPgNeverEdited) goes at once, as Remove
+  // always did; one that can't go (ssPgCanDelete: saved designs use it, a box of it is saving, it is
+  // still being added or already being deleted) says why on the status line and sends nothing; any
+  // other asks first (the confirm, Cancel focused). Every line goes on `said`, amber, which the status
+  // line draws ahead of a tip and a note, so it replaces an earlier "Deleted …" line instead of
+  // hiding under it.
+  const delSay = (text) => { setSaid({ tone: "amber", text }); setTip(null); };
+  // Names the sizes a delete sends, and starts its line afresh when no other delete is still going
+  // (one dropped by Discard or a failed call leaves nothing behind in it).
+  const delStart = (ids) => {
+    if (!Object.keys((qRef.current && qRef.current.removes) || {}).length) delRunRef.current = [];
+    ids.forEach((id) => { delNameRef.current[id] = whereOf(id); });
+  };
+  const offeredNow = (id) => !!shownOf(id, "active") && shownOf(id, "price") != null;
+  const company = operatorView ? companyName || null : null;
+  const deleteSize = (id) => {
+    if (!canEditNow()) return;
+    const z = byId[id] ? byId[id].size : null;
+    if (ssPgNeverEdited(qRef.current, id, z) && !(z && z.used)) {
+      commitEdit();
+      backToWork();
+      delStart([id]);
+      apply({ type: "remove", id, at: Date.now() });
+      sendNow();
+      return;
+    }
+    const c = ssPgCanDelete(qRef.current, id, z);
+    if (!c.ok) { delSay(ssPgDeleteWhy(c.why, { offered: offeredNow(id), showHidden })); return; }
+    commitEdit();
+    setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });
+  };
+  // Delete sizes on the toolbar, and Delete or Backspace on a range that lies wholly in the Size
+  // column: every row the selection touches (the active box's row when there is no range). One row is
+  // its ✕. More rows are split into those that can go, those saved designs use and those still
+  // saving; none can go: the status line says which; else ONE confirm, counting the rest.
+  const deleteSel = () => {
+    if (!canEditNow()) return;
+    const sel = selRect();
+    if (!sel) { delSay(ssPgDeleteText(null)); return; }
+    const ids = order.slice(sel.r0, sel.r1 + 1);
+    if (ids.length === 1) { deleteSize(ids[0]); return; }
+    const go = [], counts = { used: 0, saving: 0 };
+    ids.forEach((id) => {
+      const c = ssPgCanDelete(qRef.current, id, byId[id] ? byId[id].size : null);
+      if (c.ok) go.push(id); else if (c.why === "used") counts.used++; else counts.saving++;
+    });
+    if (!go.length) { delSay(ssPgDeleteText([], whereOf, counts, company)); return; }
+    commitEdit();
+    setConfirm({ text: ssPgDeleteText(go, whereOf, counts, company), del: go, danger: true });
+  };
+  // Delete on the confirm: each size is checked again first. One that left the queue or changed state
+  // while the confirm was open (a box went out to save, a read marked it used) stops the whole
+  // delete, all or nothing, as a paste does (applyChange), and the status line says why. Then one
+  // queue event for all of them, their unsent and red boxes with them, sent at once.
+  const deleteNow = (ids) => {
+    if (!canEditNow()) return;
+    const cur = qRef.current;
+    const stop = ids.map((id) => ({ id, c: ssPgCanDelete(cur, id, byId[id] ? byId[id].size : null) })).find((x) => !x.c.ok);
+    if (stop) {
+      const why = ssPgDeleteWhy(stop.c.why, { offered: offeredNow(stop.id), showHidden });
+      delSay(ids.length === 1 ? why : `${whereOf(stop.id) || "One of those sizes"}: ${why} Nothing was deleted.`);
+      return;
+    }
     commitEdit();
     backToWork();
-    apply({ type: "remove", id, at: Date.now() });
+    setTip(null);
+    setSaid(null);
+    delStart(ids);
+    apply({ type: "removes", ids, at: Date.now() });
     sendNow();
   };
-  // Clicks on the grid's own buttons ("＋ Add sizes" on a band, ✕ Remove on a size): one handler on the
-  // grid, so the bands and rows take no function and their memos hold.
+  // Clicks on the grid's own buttons ("＋ Add sizes" on a band, ✕ on a size): one handler on the grid,
+  // so the bands and rows take no function and their memos hold. A greyed ✕ (aria-disabled) is still
+  // a button: its click says why.
   const onAct = (e) => {
     const b = e.target && e.target.closest ? e.target.closest("[data-pg-act]") : null;
     if (!b || !gridRef.current || !gridRef.current.contains(b)) return;
     const act = b.getAttribute("data-pg-act"), id = b.getAttribute("data-pg-id");
     if (act === "add") toggleAdd(id);
-    else if (act === "remove") removeSize(id);
+    else if (act === "delete") deleteSize(id);
   };
 
   // ── The backup (plan 4.9) ──
@@ -12647,15 +12943,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
   // Delete or Backspace on one box (plan 3.10): a blank price, an empty option, Offered unticked.
   // Never asks: only a change to more than one size does (plan 3.12: a range goes through clearSel).
-  // On the Size box it is the keyboard's Remove (the ✕ is out of Tab's reach): a size added by
-  // mistake goes (ssPgCanRemove, plan 3.7); any other says why it can't.
+  // On the Size box it is the keyboard's ✕ (the ✕ is out of Tab's reach): deleteSize.
   const clearCell = (cell) => {
     if (!canEditNow() || !cell) return;
-    if (cell.col === 0) {
-      if (ssPgCanRemove(qRef.current, cell.sizeId, byId[cell.sizeId] ? byId[cell.sizeId].size : null)) removeSize(cell.sizeId);
-      else setTip(removing(cell.sizeId) ? SS_PG_REMOVING : SS_PG_REMOVE_RULE);
-      return;
-    }
+    if (cell.col === 0) { deleteSize(cell.sizeId); return; }
     if (removing(cell.sizeId)) { setTip(SS_PG_REMOVING); return; }
     if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
     if (cell.col === 2) { if (shownOf(cell.sizeId, "active")) toggleOffered(cell); return; }
@@ -12789,11 +13080,14 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       setExtent(area.first === area.last && area.c0 === area.c1 ? null : { sizeId: area.last, col: area.c1 });
     }
   };
+  // Continue (a paste, fill or clear) or Delete (`del`: the sizes to delete, deleteNow checking each
+  // again before anything is queued).
   const confirmYes = () => {
     const c = confirm;
     setConfirm(null);
     focusGrid();
-    if (c) applyChange(c.edits, c.area);
+    if (c && c.del) deleteNow(c.del);
+    else if (c) applyChange(c.edits, c.area);
   };
   const confirmNo = () => { setConfirm(null); focusGrid(); };
   // The toolbar's buttons keep the focus where it was (the grid, or the open editor, which their
@@ -12812,7 +13106,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "d" || k === "D")) { e.preventDefault(); fillDown(); return; }
     // Alt+Enter opens (or closes) "＋ Add sizes" for the active size's style: the band's button is
     // inside the grid, past every box Tab moves through, so the keyboard gets there this way (and
-    // Delete on a Size box is its Remove: clearCell).
+    // Delete on a Size box is its ✕: clearCell).
     if (e.altKey && !e.ctrlKey && !e.metaKey && k === "Enter") {
       e.preventDefault();
       const r = activeRef.current ? byId[activeRef.current.sizeId] : null;
@@ -12835,8 +13129,14 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (k === "Enter" || k === "F2") { e.preventDefault(); startEdit(a, null); return; }
     if (k === " ") { e.preventDefault(); if (a.col === 2 && !extentRef.current) toggleOffered(a); return; }
     // Delete or Backspace: one box clears at once (clearCell); a range goes through Clear and, when it
-    // changes more than one size, the confirm (plan 3.12).
-    if (k === "Delete" || k === "Backspace") { e.preventDefault(); if (!extentRef.current) clearCell(a); else clearSel(); return; }
+    // changes more than one size, the confirm (plan 3.12). A range wholly in the Size column, which
+    // Clear never empties, deletes its sizes (deleteSel, the delete plan).
+    if (k === "Delete" || k === "Backspace") {
+      e.preventDefault();
+      const x = extentRef.current;
+      if (!x) clearCell(a); else if (a.col === 0 && x.col === 0) deleteSel(); else clearSel();
+      return;
+    }
     if (k === "Escape") { setExtent(null); return; }
     // A digit, `$` or any other character starts typing over the box (plan 3.10); the editor opens
     // holding it, so nothing typed is lost.
@@ -13089,14 +13389,17 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
           <input type="checkbox" checked={showHidden} onChange={(e) => toggleShowHidden(e.target.checked)} />
           Show hidden sizes
         </label>
-        {/* Fill down and Clear (plan 3.10), for builders who don't know the keys. Drawn only while the
-            page can edit, as the editor and the add strips are (plan 3.16). */}
+        {/* Fill down, Clear and Delete sizes (plan 3.10; the delete plan, 10-31), for builders who don't
+            know the keys. Drawn only while the page can edit, as the editor and the add strips are
+            (plan 3.16). */}
         {canEdit && (
           <>
             <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { fillDown(); focusGrid(); }}
               title="Copy the top row of the selected boxes into the rows under it (Ctrl+D)">Fill down</button>
             <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { clearSel(); focusGrid(); }}
-              title="Empty the selected boxes (Delete)">Clear</button>
+              title="Empty the selected price and option boxes (Delete)">Clear</button>
+            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { deleteSel(); focusGrid(); }}
+              title="Delete the sizes in the selected rows">Delete sizes</button>
           </>
         )}
         <span className="ss-pg-readout" title={readout || undefined}>{readout}</span>
@@ -13181,9 +13484,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
             </div>
           )}
       </div>
-      {/* The confirm before a change to more than one size (plan 3.12). Gone if the page stops being
-          able to edit meanwhile (a 403 on a save already out). */}
-      {confirm && canEdit && <PgConfirm text={confirm.text} onYes={confirmYes} onNo={confirmNo} />}
+      {/* The confirm before a change to more than one size (plan 3.12), and before a delete (`del`:
+          Cancel and a red Delete, the focus on Cancel). Gone if the page stops being able to edit
+          meanwhile (a 403 on a save already out). */}
+      {confirm && canEdit && <PgConfirm text={confirm.text} onYes={confirmYes} onNo={confirmNo}
+        yesLabel={confirm.del ? "Delete" : "Continue"} danger={!!confirm.danger} />}
     </div>
   );
 }
@@ -13193,11 +13498,14 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
 // 6 prices, … Continue?"). The focus goes to Continue and stays inside (Tab and Shift+Tab go round
 // the two buttons); Escape, Cancel or a click outside it cancel, and Cancel changes nothing. The page
 // gives the focus back to the grid either way. Every hook is above the return.
-function PgConfirm({ text, onYes, onNo }) {
+// A DELETE (`danger`, the delete plan, 10-31): the yes button says `yesLabel` ("Delete") in red, and
+// the focus starts on CANCEL, so Enter on a freshly opened delete confirm cancels: a builder from
+// Excel who presses Delete then Enter out of habit deletes nothing. Tab then Enter, or a click, deletes.
+function PgConfirm({ text, onYes, onNo, yesLabel = "Continue", danger = false }) {
   const yesRef = useRef(null);
   const noRef = useRef(null);
   React.useLayoutEffect(() => {
-    try { yesRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+    try { (danger ? noRef : yesRef).current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
   }, []);
   const onKey = (e) => {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onNo(); return; }
@@ -13213,7 +13521,7 @@ function PgConfirm({ text, onYes, onNo }) {
         <p id="ss-pg-confirm-q">{text}</p>
         <div className="ss-pg-confirm-acts">
           <button type="button" ref={noRef} onClick={onNo}>Cancel</button>
-          <button type="button" ref={yesRef} className="ss-pg-confirm-yes" onClick={onYes}>Continue</button>
+          <button type="button" ref={yesRef} className={danger ? "ss-pg-confirm-yes ss-pg-confirm-del" : "ss-pg-confirm-yes"} onClick={onYes}>{yesLabel}</button>
         </div>
       </div>
     </div>
@@ -13281,13 +13589,15 @@ const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, o
 // `marks` (ssPgRowView) is one character per column, a shape as well as a colour (plan 3.13): "p"
 // waiting to save (a blue corner), "r" refused or not valid (red outline and "!"), "c" changed
 // elsewhere (amber outline and "↺"); "" when the size has nothing local. A red box is aria-invalid.
-// Phase 4a: `busy` is "adding" while the size's create is unanswered and "removing" while its remove
-// is, said in the empty Price box ("Adding…"); `removable` (ssPgCanRemove) puts a small ✕ Remove at
-// the right of the Size box. The ✕ is a word too narrow to fit beside the size in 64 px, so its
-// title and name say "Remove". It is handled by the grid's own click (data-pg-act), so PgRow takes
-// no function and its memo holds.
+// Phase 4a: `busy` is "adding" while the size's create is unanswered, said in the empty Price box
+// ("Adding…"), and "removing" while its delete is queued or out, said over the price ("Deleting…").
+// `deletable` (the delete plan, 10-31: every size of a page that can edit, unless busy) puts a small
+// ✕ at the right of the Size box. A word is too wide to fit beside the size in 64 px, so its title
+// and name say "Delete". `delOff` (ssPgDeleteWhy) greys it, aria-disabled with that reason as its
+// title, when saved designs use the size; a click then says the same on the status line. It is
+// handled by the grid's own click (data-pg-act), so PgRow takes no function and its memo holds.
 const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = "",
-  busy = "", removable = false }) {
+  busy = "", deletable = false, delOff = "" }) {
   const mark = (c) => {
     const m = marks ? marks.charAt(c) : "";
     return m === "p" ? "ss-pg-m-p" : m === "r" ? "ss-pg-m-r" : m === "c" ? "ss-pg-m-c" : "";
@@ -13296,15 +13606,15 @@ const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceT
   const bad = (c) => { const m = marks ? marks.charAt(c) : ""; return m === "r" || m === "c" ? "true" : undefined; };
   return (
     <tr role="row" aria-rowindex={rowIndex} data-s={sizeId} className={[hidden ? "ss-pg-hid" : "", busy ? "ss-pg-busy" : ""].filter(Boolean).join(" ") || undefined}>
-      <td role="gridcell" aria-colindex={1} data-c={0} className={"ss-pg-f0 ss-pg-size" + (removable ? " ss-pg-rmable" : "")} title={title || undefined} aria-readonly="true">
+      <td role="gridcell" aria-colindex={1} data-c={0} className={"ss-pg-f0 ss-pg-size" + (deletable ? " ss-pg-rmable" : "")} title={title || undefined} aria-readonly="true">
         {label}
-        {removable && <button type="button" className="ss-pg-rm" data-pg-act="remove" data-pg-id={sizeId} tabIndex={-1}
-          title="Remove this size (it was never priced or changed). Delete on its Size box does the same." aria-label={`Remove size ${label}`}>✕</button>}
+        {deletable && <button type="button" className="ss-pg-rm" data-pg-act="delete" data-pg-id={sizeId} tabIndex={-1} aria-disabled={delOff ? "true" : undefined}
+          title={delOff || "Delete this size. Delete on its Size box does the same."} aria-label={`Delete size ${label}`}>✕</button>}
       </td>
       <td role="gridcell" aria-colindex={2} data-c={1} className={cls(1, "ss-pg-f1 ss-pg-price" + (rtp ? " ss-pg-rtp" : ""))}
         aria-invalid={bad(1)} aria-readonly={rtp ? "true" : undefined}
         title={rtp ? (priceText ? `${priceText} · ${SS_PG_RTP}` : SS_PG_RTP) : (priceText || undefined)}>
-        {busy && !priceText ? <span className="ss-pg-wait">{busy === "removing" ? "Removing…" : "Adding…"}</span> : priceText}
+        {busy === "removing" ? <span className="ss-pg-wait">Deleting…</span> : busy && !priceText ? <span className="ss-pg-wait">Adding…</span> : priceText}
       </td>
       <td role="gridcell" aria-colindex={3} data-c={2} className={cls(2, "ss-pg-f2 ss-pg-off" + (noPrice ? " ss-pg-dis" : ""))} aria-invalid={bad(2)}
         title={noPrice ? "Add a price to offer it" : offered ? "Offered in your designer" : "Not offered"}>{offered ? "✓" : ""}</td>

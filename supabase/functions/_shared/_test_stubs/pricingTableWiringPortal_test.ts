@@ -242,7 +242,7 @@ Deno.test("the editor and the overlay keep every hook above any return, and PgRo
   }
   const ed = fnText(CATALOG, "function PgEditor(");
   assert(ed.includes(`type="text"`) && ed.includes(`inputMode={price ? "decimal" : "numeric"}`) && ed.includes("aria-label={label}"), "plan 3.5 and 3.17");
-  assert(CATALOG.includes("const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = \"\",\n  busy = \"\", removable = false }) {"));
+  assert(CATALOG.includes("const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = \"\",\n  busy = \"\", deletable = false, delOff = \"\" }) {"));
 });
 
 // ── 4. The address, and the anchors that open it ─────────────────────────────────────────────
@@ -369,10 +369,15 @@ Deno.test("PgAddSizes keeps every hook above its return; the bands and rows take
   assert(hookAt(body).length >= 5, "the strip's hooks were not found: the anchor is wrong");
   assertEquals(hookAt(body).filter((i) => i > first), [], `${sig}: a hook below the first return`);
   assert(body.includes("ssPgParseSizeList(text, existing)") && body.includes("ssPgSizeGrid(widths, lengths, existing, off)"), "the strip checks before anything is sent");
-  // ＋ Add sizes and ✕ Remove are the grid's own clicks (data-pg-act), so PgStyleBand and PgRow stay primitive.
+  // ＋ Add sizes and the ✕ are the grid's own clicks (data-pg-act), so PgStyleBand and PgRow stay primitive.
   assert(CATALOG.includes("const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, total, hidden, folded, ncols, canAdd = false, open = false }) {"));
   assert(CATALOG.includes(`data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>`), "the button's words are the FAQ's");
-  assert(CATALOG.includes(`data-pg-act="remove" data-pg-id={sizeId} tabIndex={-1}`));
+  // The ✕ on every size (the delete plan, 10-31): greyed, never `disabled` (its click says why), with
+  // the reason as its title when saved designs use the size.
+  assert(CATALOG.includes(`{deletable && <button type="button" className="ss-pg-rm" data-pg-act="delete" data-pg-id={sizeId} tabIndex={-1} aria-disabled={delOff ? "true" : undefined}`));
+  assert(CATALOG.includes(`title={delOff || "Delete this size. Delete on its Size box does the same."} aria-label={\`Delete size \${label}\`}>✕</button>}`));
+  assert(CATALOG.includes(`{busy === "removing" ? <span className="ss-pg-wait">Deleting…</span> : busy && !priceText ? <span className="ss-pg-wait">Adding…</span> : priceText}`),
+    "Deleting… over the price, whatever it is");
   const page = fnText(CATALOG, "function PricingTablePage(");
   assert(page.includes("onClick={onAct}>"), "the grid's click handles both buttons");
   assert(page.includes("const onAddSizes = useCallback((styleId, sizes, skipped) => fnRef.current.addSizes(styleId, sizes, skipped), []);"), "a stable callback for the strip");
@@ -380,22 +385,50 @@ Deno.test("PgAddSizes keeps every hook above its return; the bands and rows take
   assert(page.includes("const onKeyDown = (e) => {\n    if (e.target !== e.currentTarget) return;"), "the grid must ignore keys pressed inside an add strip");
 });
 
-Deno.test("every way to add or remove a size, or put a backup back, checks the page can still edit, and goes through the queue", () => {
+Deno.test("every way to add or delete a size, or put a backup back, checks the page can still edit, and goes through the queue", () => {
   const page = fnText(CATALOG, "function PricingTablePage(");
   for (const fn of ["const addSizes = (styleId, sizes, skipped) => {\n    if (!canEditNow()", "const toggleAdd = (styleId) => {\n    if (!canEditNow()",
-    "const removeSize = (id) => {\n    if (!canEditNow() || !ssPgCanRemove(qRef.current, id, byId[id] ? byId[id].size : null)) return;"]) {
-    assert(page.includes(fn), `an add/remove path without the view-only check: ${fn.split("\n")[0]}`);
+    "const deleteSize = (id) => {\n    if (!canEditNow()) return;", "const deleteSel = () => {\n    if (!canEditNow()) return;", "const deleteNow = (ids) => {\n    if (!canEditNow()) return;"]) {
+    assert(page.includes(fn), `an add/delete path without the view-only check: ${fn.split("\n")[0]}`);
   }
   assert(between(page, "const saveEarlier = () => {", "\n  };", "saveEarlier").includes("if (!b || !canEditNow() || (qRef.current && qRef.current.flight)) return;"));
   const add = between(page, "const addSizes = (styleId, sizes, skipped) => {", "\n  };", "addSizes");
   assert(add.includes(`apply({ type: "create", id: a.id, styleId, width: a.width, length: a.length, at: Date.now() })`) && add.includes("sendNow();") && add.includes("backToWork();"));
-  const rm = between(page, "const removeSize = (id) => {", "\n  };", "removeSize");
-  assert(rm.includes(`apply({ type: "remove", id, at: Date.now() });`) && rm.includes("backToWork();"));
-  // The add strip and Remove are only drawn when the page can edit (plan 3.16).
+  // A size never priced or edited goes at once, as its id; any other only through the confirm, as
+  // { id, base } (the queue's "removes"); one that can't go says why on `said`, never on `tip`.
+  const del = between(page, "const deleteSize = (id) => {", "\n  };", "deleteSize");
+  assert(del.includes("if (ssPgNeverEdited(qRef.current, id, z) && !(z && z.used)) {") && del.includes(`apply({ type: "remove", id, at: Date.now() });`) && del.includes("backToWork();"));
+  assert(del.includes("if (!c.ok) { delSay(ssPgDeleteWhy(c.why, { offered: offeredNow(id), showHidden })); return; }"));
+  assert(del.includes("setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });"), "a priced size asks first");
+  assert(page.includes(`const delSay = (text) => { setSaid({ tone: "amber", text }); setTip(null); };`), "delete refusals go through said, amber, and clear the tip");
+  for (const fn of ["deleteSize", "deleteSel", "deleteNow"]) {
+    const body = between(page, `const ${fn} = (`, "\n  };", fn);
+    assert(!body.includes("setTip(SS_") && !/setTip\(ssPg/.test(body), `${fn} puts a refusal on the tip, under an earlier "Deleted" line`);
+  }
+  const sel = between(page, "const deleteSel = () => {", "\n  };", "deleteSel");
+  assert(sel.includes("if (!sel) { delSay(ssPgDeleteText(null)); return; }") && sel.includes("if (ids.length === 1) { deleteSize(ids[0]); return; }"));
+  assert(sel.includes("setConfirm({ text: ssPgDeleteText(go, whereOf, counts, company), del: go, danger: true });"), "several sizes: one confirm, counting the rest");
+  // Delete on the confirm checks each size again before anything is queued, all or nothing.
+  const now = between(page, "const deleteNow = (ids) => {", "\n  };", "deleteNow");
+  const check = now.indexOf("ssPgCanDelete(cur, id, byId[id] ? byId[id].size : null)");
+  const queue = now.indexOf(`apply({ type: "removes", ids, at: Date.now() });`);
+  assert(check > 0 && queue > check && now.indexOf("if (stop) {") > check && now.indexOf("if (stop) {") < queue && now.includes("sendNow();"), "the re-check comes before the queue");
+  const yes = between(page, "const confirmYes = () => {", "\n  };", "confirmYes");
+  assert(yes.includes("if (c && c.del) deleteNow(c.del);") && yes.includes("else if (c) applyChange(c.edits, c.area);"));
+  assert(page.includes(`else if (act === "delete") deleteSize(id);`), "the ✕ is the grid's own click");
+  assert(between(page, "const clearCell = (cell) => {", "\n  };", "clearCell").includes("if (cell.col === 0) { deleteSize(cell.sizeId); return; }"), "Delete on a Size box is its ✕");
+  // The add strip and the ✕ are only drawn when the page can edit (plan 3.16).
   assert(page.includes("adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds"));
-  assert(page.includes("busy={busy} removable={canEdit && ssPgCanRemove(q, z.id, z)} />"));
+  assert(page.includes(`busy={busy} deletable={canEdit && !busy} delOff={z.used ? ssPgDeleteWhy("used", { offered: v.offered, showHidden }) : ""} />`));
   assert(page.includes("canAdd={canEdit} open={!!addOpen[r.style.id] || !r.total} />"));
-  assertEquals((page.match(/ssStyleSaveCall\(/g) || []).length, 1, "still one transport call site: adds and removes ride the save queue");
+  assert(between(page, "const body = useMemo(() => {", "\n  // ── Handlers", "the rows' memo").includes("onAddSizes, onCloseAdd, showHidden]);"), "the greyed ✕'s title follows Show hidden sizes");
+  assertEquals((page.match(/ssStyleSaveCall\(/g) || []).length, 1, "still one transport call site: adds and deletes ride the save queue");
+  // The delete's answers are one line on `said` (ssPgDeleteResult), named from what was sent, once no
+  // delete is left queued (more than 50 sizes take more than one call).
+  const landed = between(page, "const landed = (flight, data) => {", "\n  };", "landed");
+  assert(landed.includes(`const line = ssPgDeleteResult(delRunRef.current, (id) => delNameRef.current[id] || "");`) && landed.includes("if (line) { setSaid(line); setTip(null); }"));
+  assert(landed.includes("if (!cur || !Object.keys(cur.removes || {}).length) {"), "the line waits for the delete's last call");
+  for (const fn of ["deleteSize", "deleteNow"]) assert(between(page, `const ${fn} = (`, "\n  };", fn).includes("delStart("), `${fn} names what it sends`);
 });
 
 Deno.test("the refresh: another page's save for this account, or the tab coming back into view, re-reads both tables through the queue's rules", () => {
@@ -508,7 +541,8 @@ Deno.test("paste, fill down and clear check the page can still edit and go throu
   assert(between(page, "const clearSel = () => {", "\n  };", "clearSel").includes("ssPgClearPlan(viewOf(), selRect())"));
   // Cancel changes nothing.
   assert(page.includes("const confirmNo = () => { setConfirm(null); focusGrid(); };"));
-  assert(page.includes("{confirm && canEdit && <PgConfirm text={confirm.text} onYes={confirmYes} onNo={confirmNo} />}"), "the confirm goes if the page stops being able to edit");
+  assert(page.includes("{confirm && canEdit && <PgConfirm text={confirm.text} onYes={confirmYes} onNo={confirmNo}\n        yesLabel={confirm.del ? \"Delete\" : \"Continue\"} danger={!!confirm.danger} />}"),
+    "the confirm goes if the page stops being able to edit; a delete says Delete and passes danger");
 });
 
 Deno.test("the keys: Ctrl/Cmd+D fills down, held from the browser; Delete on a range clears; copy and paste are the browser's own events while the grid has the focus", () => {
@@ -516,27 +550,32 @@ Deno.test("the keys: Ctrl/Cmd+D fills down, held from the browser; Delete on a r
   const keys = between(page, "const onKeyDown = (e) => {", "\n  };", "onKeyDown");
   const d = keys.indexOf(`if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "d" || k === "D")) { e.preventDefault(); fillDown(); return; }`);
   assert(d > 0 && d < keys.indexOf("if (e.altKey || e.ctrlKey || e.metaKey) return;"), "Ctrl+D must be handled before the modifier keys are let go (else it bookmarks the page)");
-  assert(keys.includes(`if (k === "Delete" || k === "Backspace") { e.preventDefault(); if (!extentRef.current) clearCell(a); else clearSel(); return; }`));
+  // One box clears (a Size box deletes its size); a range clears, unless it lies wholly in the Size
+  // column, which Clear never empties: then it deletes those sizes (the delete plan, 10-31).
+  assert(keys.includes(`if (k === "Delete" || k === "Backspace") {\n      e.preventDefault();\n      const x = extentRef.current;\n      if (!x) clearCell(a); else if (a.col === 0 && x.col === 0) deleteSel(); else clearSel();\n      return;\n    }`));
   const fx = between(page, "  useEffect(() => {\n    const mine = () =>", "}, []);", "the copy and paste listeners");
   assert(fx.includes("const mine = () => !!gridRef.current && document.activeElement === gridRef.current;"), "only while the grid itself has the focus: the editor and the add strips paste their own way");
   assert(fx.includes(`document.addEventListener("copy", onCopy);`) && fx.includes(`document.addEventListener("paste", onPaste);`));
   assert(fx.includes(`document.removeEventListener("copy", onCopy);`) && fx.includes(`document.removeEventListener("paste", onPaste);`));
-  // The toolbar's buttons are drawn only while the page can edit.
+  // The toolbar's buttons are drawn only while the page can edit: Delete sizes too.
   const bar = between(page, "{canEdit && (\n          <>", "</>", "the toolbar's buttons");
-  assert(bar.includes(">Fill down</button>") && bar.includes(">Clear</button>"));
+  assert(bar.includes(">Fill down</button>") && bar.includes(">Clear</button>") && bar.includes(">Delete sizes</button>"));
+  assert(bar.includes(`title="Empty the selected price and option boxes (Delete)">Clear</button>`), "Clear's title: the Delete key on a Size-only range deletes sizes now");
+  assert(bar.includes(`onMouseDown={keepFocus} onClick={() => { deleteSel(); focusGrid(); }}\n              title="Delete the sizes in the selected rows">Delete sizes</button>`));
 });
 
-Deno.test("PgConfirm: an accessible modal: every hook above its return, focus on Continue and kept inside, Escape cancels", () => {
-  const sig = "function PgConfirm({ text, onYes, onNo }) {";
+Deno.test("PgConfirm: an accessible modal: every hook above its return, focus on Continue (Cancel for a delete) and kept inside, Escape cancels", () => {
+  const sig = `function PgConfirm({ text, onYes, onNo, yesLabel = "Continue", danger = false }) {`;
   const body = fnText(CATALOG, sig);
   const first = body.search(/\n  (?:return\b|if \()/);
   assert(first > 0 && hookAt(body).length >= 3, sig);
   assertEquals(hookAt(body).filter((i) => i > first), [], `${sig}: a hook below the first return`);
   assert(body.includes(`role="alertdialog" aria-modal="true" aria-labelledby="ss-pg-confirm-q"`) && body.includes(`<p id="ss-pg-confirm-q">{text}</p>`), "named by its own question");
-  assert(body.includes("yesRef.current.focus({ preventScroll: true })"), "the focus goes into it");
+  assert(body.includes("(danger ? noRef : yesRef).current.focus({ preventScroll: true })"), "the focus goes into it: on Cancel for a delete, so Enter cancels");
   assert(body.includes(`if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onNo(); return; }`), "Escape is Cancel");
   assert(body.includes(`if (e.key === "Tab") {`), "Tab stays inside");
-  assert(body.includes(">Cancel</button>") && body.includes(">Continue</button>"));
+  assert(body.includes(">Cancel</button>") && body.includes(`className={danger ? "ss-pg-confirm-yes ss-pg-confirm-del" : "ss-pg-confirm-yes"} onClick={onYes}>{yesLabel}</button>`),
+    "the yes button says yesLabel, red for a delete");
 });
 
 // ── 11. The $0 note (Ahsan, after Carolyn's call on 10-30) ───────────────────────────────────
@@ -569,8 +608,23 @@ Deno.test("the $0 note on Sheds: the upload counts the sheet's $0 sizes from the
   const up = between(csv, "const onUpload = async (file) => {", "\n  };", "onUpload");
   const z = up.indexOf("const zeros = ssPricingSheetZeros(rows, allStyles());");
   assert(z > 0 && z < up.indexOf(`sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } })`), "counted from exactly the rows that are sent");
-  assert(up.includes(`free in your designer. \``) && up.includes(`"To hide a size, leave its price blank or put no in the active column."`));
+  assert(up.includes(`free in your designer. \``) && up.includes(`"To hide a size, leave its price blank or put no in the active column. " + SS_PG_SHEET_ROW });`));
   assert(csv.includes(`{xlMsg && xlMsg.ok && xlMsg.zero && <div data-ss-xl-msg="zero" style={{ ...warnStyle, marginTop: 8, marginBottom: 0 }}>{xlMsg.zero}</div>}`),
     "only under a result that went through");
-  assert(csv.includes("A price of <b>0</b> doesn't hide a size: it shows in your designer as free."), "the Excel instructions say it too");
+  assert(csv.includes("A price of <b>0</b> doesn't hide a size: it shows in your designer as free. {SS_PG_SHEET_ROW}"), "the Excel instructions say it too, and how to delete a size");
+});
+
+Deno.test("the delete on Sheds: a sheet that adds sizes not in the table asks before it is sent, counted against a fresh read; the importer is untouched", () => {
+  assert(CATALOG.includes(`const SS_PG_SHEET_ROW = "Deleting a row in the sheet doesn't delete the size. To delete one, open the sizes table and press ✕ on it.";`));
+  const csv = fnText(CATALOG, "function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {");
+  const up = between(csv, "const onUpload = async (file) => {", "\n  };", "onUpload");
+  assert(up.includes("const target = ssTargetClientId;") && up.indexOf("const target = ssTargetClientId;") < up.indexOf("setBusy(true);"), "the view-as target is read in the click's tick");
+  const read = up.indexOf("const now = await ssPgFetch(target, cat.clientId || null);");
+  const count = up.indexOf("const adds = now.ok ? ssPricingSheetNew(rows, now.table.styles, now.table.sizes) : ssPricingSheetNew(rows, allStyles(), cat.sizes);");
+  const ask = up.indexOf("if (adds.added && !window.confirm(adds.added === 1");
+  const send = up.indexOf(`sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } })`);
+  assert(read > up.indexOf("const rows = matrix.slice(1)") && count > read && ask > count && send > ask, "rows, then a fresh read, the count, the ask, and only then the send");
+  assert(up.includes("`This sheet adds ${adds.added} sizes that aren't in your table${adds.zeros ? ` (${adds.zeros} of them at $0, so free in your designer)` : \"\"}. Upload it?`"));
+  assert(up.includes("`This sheet adds 1 size that isn't in your table${adds.zeros ? \" (at $0, so free in your designer)\" : \"\"}. Upload it?`"));
+  assert(between(up, "if (adds.added && !window.confirm(", "const { data, error }", "the ask").includes("setBusy(false); setFileKey((k) => k + 1);\n        return;"), "Cancel sends nothing and resets the picker");
 });
