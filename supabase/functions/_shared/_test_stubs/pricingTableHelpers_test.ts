@@ -1300,20 +1300,20 @@ function serveDel(db: Record<string, Row>, body: Any, opts: { used?: string[]; b
   });
   return { ok: true, clientId: "test-barns", created: [], removed, results: [] };
 }
-// The server's shape check takes { id, base } removes once the edge half of the delete is in
-// (_shared/pricingCells.ts validatePayload, 351). From then on every delete body is held to it.
-const OBJECT_REMOVES = validatePayload({ creates: [], removes: [{ id: A, base: V0 }], sizes: [] }).ok;
+// Every delete body is held to the server's own shape check (_shared/pricingCells.ts validatePayload,
+// which takes { id, base } removes since 351), always: a validatePayload that stopped taking them
+// fails here instead of skipping the check.
 const sendDel = (q: Any, db: Record<string, Row>, opts = {}): [Any, Any] => {
   const s1 = S.ssPgQueue(q, { type: "send" });
   if (!s1.flight || s1.flight === q.flight) return [s1, null];
-  if (OBJECT_REMOVES) assert(validatePayload(s1.flight.body).ok, `the server's validatePayload refuses what the browser built: ${JSON.stringify(validatePayload(s1.flight.body))}`);
+  assert(validatePayload(s1.flight.body).ok, `the server's validatePayload refuses what the browser built: ${JSON.stringify(validatePayload(s1.flight.body))}`);
   return [S.ssPgQueue(s1, { type: "ok", n: s1.flight.n, answer: serveDel(db, s1.flight.body, opts) }), s1.flight.body];
 };
 
 Deno.test({
   name: "parity: every delete body the browser builds (ids, { id, base }, mixed, 50 a call) passes the server's validatePayload",
-  ignore: !OBJECT_REMOVES,   // the edge half (351) is not on this branch yet: this runs once it is
   fn: () => {
+    assert(validatePayload({ creates: [], removes: [{ id: A, base: V0 }], sizes: [] }).ok, "the server takes a { id, base } remove");
     const db = DB();
     let q = Q(start(db), { type: "remove", id: C, at: 0 }, { type: "removes", ids: [A, B], at: 0 });
     const v = validatePayload(S.ssPgBuildBatch(q).body);
