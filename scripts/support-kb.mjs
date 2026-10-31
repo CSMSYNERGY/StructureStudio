@@ -61,12 +61,15 @@ const NAV_NEEDS = new Map([
  *  setup_template_items, seeded by migration 160, and its words for these steps no longer match the
  *  app: business details and branding are two tabs, serial numbers moved to Business Details, Structure
  *  Studio issues paperwork by default (217/280), starting numbers are optional (283), tax is never looked
- *  up on a submit, and a verified domain needs its "send from my domain" box ticked. Keyed by the step's
- *  title; the build fails if a title stops matching, so a later migration that fixes the live text is
- *  noticed and this map can go. */
+ *  up on a submit, a verified domain needs its "send from my domain" box ticked, and prices are set in the
+ *  sizes & prices table, with the Excel round trip as the alternative (Pricing Table 2026-10-30). Keyed by
+ *  the step's title; the build fails if a title stops matching, so a later migration that fixes the live
+ *  text is noticed and this map can go. */
 const CHECKLIST_FIXES = {
   "Add your business details and logo":
     "Two tabs on Settings > Company. Business Details holds what prints on every estimate: business name, phone, website, the estimate logo, address, estimate terms and how many days an estimate is good for. Branding holds your customer link's look: company name, tagline, colors and logo.",
+  "Set your prices":
+    "On Settings > Sheds, press \"Open sizes & prices table ↗\": every size of every building style, in its own tab. Type a base price for each size you sell, and how many of each door, window, ramp and add-on come included. A size without a price is not offered to customers, so this step is what turns your designer on. Prefer Excel? \"⬇ Download Excel template\" and \"⬆ Upload filled sheet\" are on the same card.",
   "Connect your CRM (if you use GoHighLevel)":
     "Optional, and separate from who issues paperwork. If you use GoHighLevel, paste your Location ID and API key in Settings > GHL Connection and pick the pipelines and stages where new contacts and opportunities should land. Structure Studio still issues your estimates and invoices; without a connection, contacts stay in Structure Studio.",
   "Choose how quotes & invoices go out":

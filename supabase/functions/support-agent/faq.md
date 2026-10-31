@@ -15,10 +15,12 @@ quotes, email and your team. Each step has a "Take me there" link. Steps for add
 show a padlock.
 
 ### How do I set my prices?
-Settings > Sheds. Download the Excel template (one row per building style), add a row for every size you
-offer with the width and length in feet and the price, then upload the filled sheet. Re-upload any time:
-rows are matched by style and size, so nothing duplicates. Set up doors, windows, ramps and add-ons
-first, because the template's option columns come from that catalog.
+Settings > Sheds, in the "Sizes, prices & included options" card: press "Open sizes & prices table ↗". In
+its own tab, type each size's price and how many of each door, window, ramp or add-on come included (for a
+loft, square feet; empty means none), and untick Offered to hide a size. With RealTime Pricing live, the
+Price column is locked: your build sheets set the prices. Prefer Excel? "⬇ Download Excel template", then
+"⬆ Upload filled sheet"; rows match by style and size. To add a size, add a row to the template with its
+width and length in feet and its price. After table edits, download a fresh template.
 
 ### What is the difference between a blank price and a price of 0?
 A blank price means "not priced yet": that size is hidden from your designer and customers cannot pick

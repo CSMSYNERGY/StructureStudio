@@ -17,7 +17,7 @@ or explains the add-on; it doesn't get its own padlock. A padlock in the sidebar
 account's subscription itself isn't active. Pages marked "coming soon" are not available yet.
 
 - **Shed Designer** (/designer): Design a building and build an estimate
-- **Contacts** (/contacts): Everyone who has enquired, their designs, and your pipelines
+- **Customer Hub** (/contacts): Everyone who has enquired, their designs, and your pipelines
 - **Conversations** (/conversations): Every email, text and call with your customers, newest first (only appears on accounts with the built-in CRM; without it the item is hidden)
 - **Orders** (/orders): Track accepted estimates from sale to payment and delivery
 - **Support** (/support): Get set up, report a problem, request a feature, and see what's new
@@ -147,7 +147,7 @@ The account tool get_account_overview says which steps THIS builder still has op
 - **Check your building styles and sizes**: Your catalog may already have starter styles and sizes — keep what you sell, remove what you don't, and add anything missing. Every quote starts from this list.
 - **Set up doors, windows, ramps and add-ons**: Prices, sizes and photos for everything customers place on a building. Ramps have a choice: one simple auto-sized ramp, or a full catalog. Window colors live under Windows. Do this BEFORE pricing — the pricing spreadsheet builds its columns from this catalog.
 - **Set your colors**: Paint, shingle and metal palettes, with the names your customers know them by. Mark your defaults and set any upcharges.
-- **Set your prices**: Download the pricing spreadsheet, fill in a base price per size, and upload it back. A size without a price is not offered to customers — so this step is what turns your designer on.
+- **Set your prices**: On Settings > Sheds, press "Open sizes & prices table ↗": every size of every building style, in its own tab. Type a base price for each size you sell, and how many of each door, window, ramp and add-on come included. A size without a price is not offered to customers, so this step is what turns your designer on. Prefer Excel? "⬇ Download Excel template" and "⬆ Upload filled sheet" are on the same card.
 - **Decide if customers see prices**: One switch on the Branding page: show live pricing to customers as they design, or keep numbers private until you send the quote.
 ### Quotes, invoices & email
 - **Connect your CRM (if you use GoHighLevel)**: Optional, and separate from who issues paperwork. If you use GoHighLevel, paste your Location ID and API key in Settings > GHL Connection and pick the pipelines and stages where new contacts and opportunities should land. Structure Studio still issues your estimates and invoices; without a connection, contacts stay in Structure Studio.
@@ -182,10 +182,12 @@ quotes, email and your team. Each step has a "Take me there" link. Steps for add
 show a padlock.
 
 ### How do I set my prices?
-Settings > Sheds. Download the Excel template (one row per building style), add a row for every size you
-offer with the width and length in feet and the price, then upload the filled sheet. Re-upload any time:
-rows are matched by style and size, so nothing duplicates. Set up doors, windows, ramps and add-ons
-first, because the template's option columns come from that catalog.
+Settings > Sheds, in the "Sizes, prices & included options" card: press "Open sizes & prices table ↗". In
+its own tab, type each size's price and how many of each door, window, ramp or add-on come included (for a
+loft, square feet; empty means none), and untick Offered to hide a size. With RealTime Pricing live, the
+Price column is locked: your build sheets set the prices. Prefer Excel? "⬇ Download Excel template", then
+"⬆ Upload filled sheet"; rows match by style and size. To add a size, add a row to the template with its
+width and length in feet and its price. After table edits, download a fresh template.
 
 ### What is the difference between a blank price and a price of 0?
 A blank price means "not priced yet": that size is hidden from your designer and customers cannot pick
