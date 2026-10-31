@@ -78,9 +78,10 @@
 //      waiting to save that the sheet changed amber, never sent. The backup: a closed tab's call out,
 //      red box and editor text come back as "You have 2 changes from earlier…"; Save them sends them
 //      on their stored version and starting values; a colleague's change since comes back amber;
-//      Discard; 7 days; view-as offers only the viewed account's backup, ?as= none. Two tabs of one
-//      account: the second offers nothing of the open first one's and its save leaves the first one's
-//      draft stored; once the first is gone, the next tab offers it. A price typed on a size still
+//      Discard; Save them greyed while a save is out; 7 days; view-as offers only the viewed
+//      account's backup, ?as= none. Two tabs of one account: the second offers nothing of the open
+//      first one's and its save leaves the first one's editor text stored; once the first is gone,
+//      the next tab offers it. A price typed on a size still
 //      being added comes back with that size, which Save them adds again first. A "too big" first read offers
 //      no backup; the Reload that clears it does. Alt+Enter opens a size's add strip and Delete on a
 //      Size box removes a size added by mistake; the ring stays on its box while a strip grows above
@@ -1730,7 +1731,7 @@ for (const [what, prep, asks] of want("P") ? [
     ok("P: …left anyway and opened again: the banner offers the editor's text back, and Save them sends it from what was on file",
       !!left && banner === "You have 1 change from earlier that wasn't saved." && went
       && JSON.stringify(sent) === JSON.stringify([{ id: z.id, base: z.updated_at, from: { cells: { loft: loft0 } }, to: { cells: { loft: 77 } } }]) && F.cells(z.id).loft === 77,
-      JSON.stringify({ banner, sent, left: left && JSON.parse(left).draft }));
+      JSON.stringify({ banner, sent, left: left && JSON.parse(left).sizes }));
     ok(`P: no page errors (reopened after leaving ${what})`, re.errors.length === 0, re.errors.join(" | "));
     await re.ctx.close();
     continue;
@@ -2450,7 +2451,7 @@ if (want("R")) {
 
 // R5: the backup. A tab closed with a call out, a red box and an editor holding text: reopened, the
 // banner offers them back; Save them sends them on their stored version and starting values; the red
-// box is listed, never sent; Dismiss lets the backup go.
+// box is listed, never sent, and no longer stored once they saved; Dismiss clears the reminder.
 if (want("R")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, tableFor(OWN, cat));
@@ -2469,10 +2470,10 @@ if (want("R")) {
   await page.locator(sel(z2.id, LOFT)).click();
   await page.keyboard.type("42");             // the editor holds 42 and is never left
   const b = JSON.parse((await stored(page, OWN)) || "null");
-  ok("R: the backup holds the edit out (on its version, from what was on file), the red box and the editor's text",
-    !!b && JSON.stringify(b.sizes) === JSON.stringify({ [z1.id]: { base: z1.updated_at, fields: { price: { to: 5555, from: z1.base_price } } } })
-    && b.red.length === 1 && b.red[0].sizeId === z3.id && b.red[0].kind === "invalid" && b.red[0].typed === "abc"
-    && JSON.stringify(b.draft) === JSON.stringify({ sizeId: z2.id, key: "c:loft", text: "42", base: z2.updated_at, from: loft2 }), JSON.stringify(b));
+  ok("R: the backup holds the edit out (on its version, from what was on file), the red box and the editor's text (as the edit Enter would make)",
+    !!b && JSON.stringify(b.sizes[z1.id]) === JSON.stringify({ base: z1.updated_at, fields: { price: { to: 5555, from: z1.base_price } } })
+    && JSON.stringify(b.sizes[z2.id]) === JSON.stringify({ base: z2.updated_at, fields: { "c:loft": { to: 42, from: loft2 } } }) && Object.keys(b.sizes).length === 2
+    && b.red.length === 1 && b.red[0].sizeId === z3.id && b.red[0].kind === "invalid" && b.red[0].typed === "abc" && b.draft === null, JSON.stringify(b));
   await page.close({ runBeforeUnload: false });   // the tab closes (or the browser dies) with all of that unsaved
   n0 = saveCalls(calls).length;
   const { p, errs } = await tabOf(ctx, "/settings/sheds-table");
@@ -2491,13 +2492,16 @@ if (want("R")) {
   ok("R: …on their STORED version and from the values they were made against (the editor's text as an ordinary edit)", JSON.stringify(sent) === JSON.stringify([
     { id: z1.id, base: z1.updated_at, from: { price: z1.base_price }, to: { price: 5555 } },
     { id: z2.id, base: z2.updated_at, from: { cells: { loft: loft2 } }, to: { cells: { loft: 42 } } }]), JSON.stringify(sent));
-  const left = JSON.parse((await stored(p, OWN)) || "null");
-  ok("R: …they landed; the banner is gone; the red entry is never sent, and is all the backup still holds",
+  await p.waitForTimeout(200);
+  const left = await stored(p, OWN);
+  s = await state(p);
+  ok("R: …they landed; the banner is gone; the red entry is never sent, and nothing is stored once they saved (the reminder stays on screen)",
     F.size(z1.id).base_price === 5555 && F.cells(z2.id).loft === 42 && !(await p.$(".ss-pg-earlier")) && !saveCalls(calls).some((c) => c.body.sizes.some((x) => x.id === z3.id))
-    && !!left && Object.keys(left.sizes).length === 0 && left.red.length === 1 && !left.draft, JSON.stringify(left));
+    && left === null && s.status === `This didn't save before you left: ${named(z3)} · Price (“abc”). Type it again if it's right.`, JSON.stringify({ left, status: s.status }));
   await p.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 3000 }).catch(() => {});
   await p.waitForTimeout(200);
-  ok("R: Dismiss lets the backup go", (await stored(p, OWN)) === null);
+  s = await state(p);
+  ok("R: Dismiss clears the reminder", !/didn't save before you left/.test(s.status) && (await stored(p, OWN)) === null, s.status);
   ok("R: no page errors (backup, Save them)", errors.length === 0 && errs.length === 0, [...errors, ...errs].join(" | "));
   await ctx.close();
 }
@@ -2517,7 +2521,9 @@ if (want("R")) {
   await page.keyboard.type("4800");                // tab A: the editor holds 4800 and is never left
   await page.waitForTimeout(200);
   const a0 = await storedAll(page, OWN);
-  const aKey = Object.keys(a0).find((k) => (JSON.parse(a0[k]).draft || {}).text === "4800");
+  // The editor's text is stored as the edit Enter would make (draft is always null).
+  const held = (v) => { const x = v ? JSON.parse(v) : null; return x && x.draft === null && x.sizes[za.id] ? (x.sizes[za.id].fields.price || {}).to : null; };
+  const aKey = Object.keys(a0).find((k) => held(a0[k]) === 4800);
   const { p: b, errs: bErrs } = await tabOf(ctx, "/settings/sheds-table");
   await waitGrid(b).catch(() => {});
   await b.waitForTimeout(1200);                     // past the "who's open?" wait
@@ -2527,9 +2533,9 @@ if (want("R")) {
   const bSaved = await saved(b, calls, n0, 1);
   await b.waitForTimeout(400);
   const after = await storedAll(b, OWN);
-  const draftNow = aKey && after[aKey] ? JSON.parse(after[aKey]).draft : null;
+  const draftNow = aKey ? held(after[aKey]) : null;
   ok("R: a second tab of the same account offers nothing of the first one's while it is open, and its own save leaves the first one's draft where it is",
-    !!aKey && !bannerB && bSaved && F.size(zb.id).base_price === 2500 && !!draftNow && draftNow.text === "4800" && draftNow.sizeId === za.id && Object.keys(after).length === 1,
+    !!aKey && !bannerB && bSaved && F.size(zb.id).base_price === 2500 && draftNow === 4800 && Object.keys(after).length === 1,
     JSON.stringify({ aKey, keys: Object.keys(after), bannerB, draftNow }));
   ok("R: …and the first tab's editor still holds it", (await state(page)).editor && (await state(page)).editor.value === "4800");
   await page.close({ runBeforeUnload: false });     // the first tab goes (closed, or the browser dies)
@@ -2623,6 +2629,35 @@ if (want("R")) {
   ok("R: Discard sends nothing, the banner goes, and so does the backup",
     saveCalls(calls).length === 0 && !(await page.$(".ss-pg-earlier")) && (await stored(page, OWN)) === null && F.size(z.id).base_price === z.base_price);
   ok("R: no page errors (Discard)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+// R6a: Save them is greyed while a save is out, saying why (it goes on the stored versions only with
+// nothing in flight); clicked then, it does nothing; once the save is answered it works.
+if (want("R")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const z = barn[3], other = barn[2];
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, storage: { [BACKUP_KEY(OWN)]: backupOf(Date.now() - 60e3, z, 5555) } });
+  await waitGrid(page).catch(() => {});
+  await page.waitForSelector(".ss-pg-earlier", { timeout: 8000 }).catch(() => {});
+  const btn = () => page.evaluate(() => { const b = [...document.querySelectorAll(".ss-pg-earlier button")].find((x) => x.textContent === "Save them"); return b ? { disabled: b.disabled, title: b.title } : null; });
+  F.delayMs = 1500;
+  await typeIn(page, other.id, 1, "1234");
+  await waitBadge(page, /^Saving /, 5000);
+  const busy = await btn();
+  await page.locator(".ss-pg-earlier button", { hasText: "Save them" }).click({ timeout: 500, force: true }).catch(() => {});
+  F.delayMs = 0;
+  await waitBadge(page, /^All changes saved/, 10000);
+  const n1 = saveCalls(calls).length;
+  const idle = await btn();
+  ok("R: Save them is greyed while a save is out, saying why, and a click then sends nothing; it is back once the save is answered",
+    !!busy && busy.disabled && busy.title === "Wait a moment: a save is going out." && !!idle && !idle.disabled && !idle.title && n1 === 1
+    && F.size(z.id).base_price === z.base_price, JSON.stringify({ busy, idle, n1 }));
+  await page.locator(".ss-pg-earlier button", { hasText: "Save them" }).click().catch(() => {});
+  const went = await saved(page, calls, n1, 1);
+  ok("R: …then Save them sends it", went && F.size(z.id).base_price === 5555 && F.size(other.id).base_price === 1234, JSON.stringify(saveCalls(calls).map((c) => c.body.sizes)));
+  ok("R: no page errors (Save them while a save is out)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 if (want("R")) {

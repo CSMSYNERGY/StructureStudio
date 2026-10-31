@@ -3768,9 +3768,16 @@ function ssPgQueue(q, ev) {
         // A timeout, a dropped connection, a 5xx: the SAME call goes again after a backoff (the
         // page's timer). The function answers a resend that already landed `duplicate`, so it is
         // safe. The fifth failure in a row stops saving until the builder says Retry.
+        //
+        // The first copy may have landed all the same (its answer lost), and a colleague may have set
+        // a box back since (A→B→A): the rebase's value check can't tell that from "nobody touched
+        // it". So a conflict on the retry is final for each size in it (retried): landed or red,
+        // never resent.
         const failures = q.failures + 1;
         const flight = { ...q.flight, tries: q.flight.tries + 1 };
-        return { ...q, flight, failures, stopped: failures >= (e.max || 5) ? { kind: "transport", reason: reason || "couldn't reach the server" } : null };
+        const retried = { ...q.retried };
+        Object.keys(q.flight.sent).forEach((id) => { retried[id] = true; });
+        return { ...q, flight, failures, retried, stopped: failures >= (e.max || 5) ? { kind: "transport", reason: reason || "couldn't reach the server" } : null };
       }
       if (e.kind === "refused") {
         // The server refused the whole call (a 400): the browser let through something it should not
@@ -3927,49 +3934,43 @@ function ssPgQueue(q, ev) {
     case "restore": {
       // "Save them" on the backup's banner (plan 4.9): each stored edit goes back in unsent, ON THE
       // VERSION (base) AND FROM THE VALUE (from) IT WAS MADE AGAINST, never on what was read just now.
-      // So the server's two checks judge it against what is on file: a colleague's change since comes
-      // back conflict, and the rebase sends only the boxes nobody touched; the rest turn red. The size
-      // takes the stored version (the refresh rule keeps a size with local edits on the version they
-      // were made against). Left out: a box typed into or marked here since (the newer edit wins), one
-      // being added or removed, a column that went away, and a size no longer on the account (the
-      // status line counts those). Red entries never come here: they are listed, never sent (the page).
-      //
-      // A size with a call out keeps the version that call was sent on, for its answer to set: its
-      // stored edits wait behind the call, from their stored values, and go on the version the answer
-      // brings. That judges them exactly as the stored version would: a stale version only ever comes
-      // back conflict, and the rebase then sends on the answer's version precisely the boxes that
-      // still hold their stored `from` (and turns the rest red), which is what the server's from-check
-      // does on that version at once.
-      //
-      // `before` (ssPgBackup): an edit typed while its box was in flight, made against the in-flight
-      // value (`from`), when the in-flight one may never have landed (`before`, the value under it).
-      // It goes from `before` only while the size is still on the stored version: then nothing has
-      // been written to it since, so the in-flight value never landed. On any other version it goes
-      // from `from` and the server judges it, because `before` on file then can be a colleague's
-      // change made after the in-flight value landed (480 landed, then set back to 400 elsewhere),
-      // which must turn red rather than be written over. `off` goes with whichever leg is blank.
-      let fields = q.fields, seq = q.seq, n = 0, gone = 0;
+      // So the server's two checks judge it against what is on file: anything saved to the size since
+      // comes back conflict. The size takes the stored version (the refresh rule keeps a size with
+      // local edits on the version they were made against), and a conflict on it is final (retried):
+      // a box already on file is done, every other turns red, and nothing is resent. Something written
+      // since may be this very edit landing (the closed tab's call) and then being set back elsewhere
+      // (A→B→A), which the rebase's value check can't tell from "nobody touched it", so a restored box
+      // is never resent. Left out, and counted in the status line: a box with an unsent, in-flight or
+      // red edit here, one on a size being added or removed here, one in a column that went away, and
+      // one on a size no longer on the account. Red entries never come here: they are listed, never
+      // sent (the page). Never while a call is out (the page greys Save them): then no box here is in
+      // flight, and every restored one goes on its own stored version.
+      if (q.flight) return q;
+      let fields = q.fields, seq = q.seq, n = 0, gone = 0, skipped = 0;
       const sizes = { ...q.sizes };
+      const retried = { ...q.retried };
+      const colGone = (f) => f.slice(0, 2) === "c:" && !!q.cols && !q.cols[f.slice(2)];
       Object.keys(e.sizes || {}).forEach((id) => {
         const b = e.sizes[id], s = sizes[id];
         const fs = Object.keys((b && b.fields) || {});
         if (!s) { gone += fs.length; return; }
-        if (s.creating || q.removes[id] || !b || b.base == null) return;
+        if (!b || b.base == null) return;
+        if (s.creating || q.removes[id]) { skipped += fs.length; return; }
         const mine = { ...(fields[id] || {}) };
-        const flying = Object.keys(mine).some((f) => mine[f].inflight);
         let any = false;
         fs.forEach((f) => {
           const x = b.fields[f];
-          if (!x || mine[f] || (f.slice(0, 2) === "c:" && q.cols && !q.cols[f.slice(2)])) return;
-          const now = ssPgVal(s, f);
-          const from = x.before !== undefined && s.version === b.base && ssPgSame(now, x.before) && !ssPgSame(now, x.from) ? x.before : x.from;
+          if (!x) return;
+          if (mine[f] || colGone(f)) { skipped++; return; }
+          const from = x.from;
           if (ssPgSame(x.to, from)) return;
           mine[f] = { pending: { to: x.to, from, seq: ++seq, ...(f === "price" && x.off && from == null && x.to != null ? { off: true } : {}) } };
           any = true;
           n++;
         });
         if (!any) return;
-        if (!flying) sizes[id] = { ...s, version: b.base };
+        sizes[id] = { ...s, version: b.base };
+        retried[id] = true;
         fields = setSize(fields, id, mine);
       });
       // `creates` (ssPgBackup): boxes typed on a size whose create was never answered. One on file now
@@ -3979,13 +3980,15 @@ function ssPgQueue(q, ev) {
       Object.keys(e.creates || {}).forEach((id) => {
         const c = e.creates[id];
         const fs = Object.keys((c && c.fields) || {});
-        if (!fs.length || q.removes[id] || (sizes[id] && sizes[id].creating)) return;
+        if (!fs.length) return;
+        if (q.removes[id] || (sizes[id] && sizes[id].creating)) { skipped += fs.length; return; }
         const isNew = !sizes[id];
         const mine = { ...(fields[id] || {}) };
         let any = false;
         fs.forEach((f) => {
           const x = c.fields[f];
-          if (!x || mine[f] || (f.slice(0, 2) === "c:" && q.cols && !q.cols[f.slice(2)]) || ssPgSame(x.to, x.from)) return;
+          if (!x || ssPgSame(x.to, x.from)) return;
+          if (mine[f] || colGone(f)) { skipped++; return; }
           mine[f] = { pending: { to: x.to, from: x.from, seq: ++seq, ...(f === "price" && x.off && x.from == null && x.to != null ? { off: true } : {}) } };
           any = true;
           n++;
@@ -3994,9 +3997,15 @@ function ssPgQueue(q, ev) {
         if (isNew) sizes[id] = { version: null, price: null, active: false, cells: {}, creating: "pending", create: { styleId: c.styleId, width: c.width, length: c.length } };
         fields = setSize(fields, id, mine);
       });
-      const note = gone ? { text: `${gone === 1 ? "1 change" : `${gone} changes`} from earlier ${gone === 1 ? "was" : "were"} for a size that isn't on this account any more.` } : q.note;
-      if (!n) return gone ? { ...q, note } : q;
-      return timed({ ...q, sizes, fields, seq, note, flush: true }, true);
+      const said = [];
+      if (gone) said.push(`${gone === 1 ? "1 change" : `${gone} changes`} from earlier ${gone === 1 ? "was" : "were"} for a size that isn't on this account any more.`);
+      if (skipped) {
+        said.push(`${skipped === 1 ? "1 change" : `${skipped} changes`} from earlier ${skipped === 1 ? "wasn't" : "weren't"} sent: the option was archived, `
+          + "the size is being added or removed here, or the box has a newer change here.");
+      }
+      const note = said.length ? { text: said.join(" ") } : q.note;
+      if (!n) return said.length ? { ...q, note } : q;
+      return timed({ ...q, sizes, fields, seq, retried, note, flush: true }, true);
     }
     default:
       return q;
@@ -4215,53 +4224,50 @@ function ssPgRekeyCell(cell, before, after) {
   return col === cell.col ? cell : { ...cell, col };
 }
 
-// THE LOCAL BACKUP (plan 4.9): what to keep in this browser so a closed tab, a crash or a sign-out
-// loses nothing typed. Stored by the page under ss-pg-pending:<userId>:<clientId>, rewritten on every
-// change of the queue and every keystroke in the editor, cleared when nothing is left. Shape:
-//   { savedAt, sizes: { <id>: { base, fields: { <field>: { to, from } } } }, red: [...], draft }
-// `base` is the size's version the edits were made against and `from` each box's value at that
-// version: an unsent edit's own, or an in-flight one's starting point. A box typed again while its
-// value was in flight keeps both legs (plan 4.6's "480, then 400 again" through a closed tab): `to`
-// is the newest value, `from` the in-flight value it was typed over, and `before` the value under
-// that, for when the in-flight one never landed (the restore goes from whichever is on file). Merged
-// into one edit from where the flight started, 400 → 480 → 400 would say nothing at all, and 400 →
-// 480 → 500 would come back "changed elsewhere to $480" once the 480 had landed. A size still being
-// added has no version yet: what was typed on it goes under `creates` ({ <id>: { styleId, width,
-// length, fields } }), with the size, so Save them can add it again first (or find it on file, if its
-// create landed after all) and the boxes go after it. `off`: a first price pasted with Offered "no"
-// (ssPgPlanCells), on whichever leg is blank (`from`, or `before` under an in-flight first price).
-// `red`: every red box, { sizeId, key, kind, typed, reason, server? }; listed on open, never sent.
-// `draft`: the open editor's changed text (`draft` in: { sizeId, key, text, seen }), on the size's
-// version, from the value it was typed over (with `before` too while that value is in flight), or
-// from an unsent edit's own starting value, with that box's `off`; text back at that starting value
-// takes the unsent edit out (plan 3.10: the editor's text counts as typed). `keep` is an earlier
-// backup still on offer (its banner unanswered): what it holds stays in, except a box this page has
-// since edited or marked (that is newer), so a second crash before the builder answers loses
-// neither. A size this page holds on another version (its own edits or the editor's text are on
-// it) takes the kept boxes onto that version (ssPgBackupMove): one size is stored on one version.
-// Each kept entry carries its own `at` (ssPgBackupLoad stamps them), so rewriting it here never
-// makes it younger: plan 4.9's 7 days run from when it was typed. null when there is nothing to keep.
-function ssPgBackup(q, draft, at, keep) {
-  const sizes = {}, creates = {}, red = [], marked = {};
+/// THE LOCAL BACKUP (plan 4.9): what to keep in this browser so a closed tab, a crash or a sign-out
+// loses nothing typed. Stored by the page under ss-pg-pending:<userId>:<clientId> (each table under
+// its own key below that), rewritten on every change of the queue and every keystroke in the editor,
+// cleared when nothing is left. Shape:
+//   { savedAt, sizes: { <id>: { base, fields: { <field>: { to, from } } } }, red: [...], draft: null }
+// `base` is the size's version the edits were made against and `from` the value each box was typed
+// over: an unsent edit's own starting value, an in-flight one's, or, for a box typed again while its
+// value was in flight, that in-flight value (plan 4.6: 480 out, then 500 typed, is { to: 500, from:
+// 480 }). Save them goes on the stored base and never resends (ssPgQueue's restore), so the server's
+// checks judge every box: one whose in-flight value never landed comes back red, and nothing is ever
+// written over a colleague's change. `off`: a first price pasted with Offered "no" (ssPgPlanCells),
+// kept only while its `from` is blank. A size still being added has no version yet: what was typed on
+// it goes under `creates` ({ <id>: { styleId, width, length, fields } }), with the size, so Save them
+// can add it again first (or find it on file, if its create landed after all) and the boxes go after
+// it. `red`: every red box, { sizeId, key, kind, typed, reason, server? }; listed on open, never sent.
+// The open editor's changed text (`draft` in: { sizeId, key, text, seen }; plan 3.10: it counts as
+// typed) is stored as the edit committing it would make: put through the queue's own commit, parsed
+// as commitText parses it, or its invalid event when the rules refuse it. So the stored `draft` is
+// always null. null when there is nothing to keep.
+function ssPgBackup(q, draft, at) {
+  let st = q;
+  if (draft && q && q.sizes && q.sizes[draft.sizeId] && draft.key && draft.key !== "active") {
+    const text = String(draft.text == null ? "" : draft.text);
+    const p = (draft.key === "price" ? ssPgParsePrice : ssPgParseQty)(text, ssPgVal(q.sizes[draft.sizeId], draft.key));
+    st = p.ok ? ssPgQueue(q, { type: "commit", sizeId: draft.sizeId, f: draft.key, value: p.value, seen: draft.seen, at })
+      : ssPgQueue(q, { type: "invalid", sizeId: draft.sizeId, f: draft.key, typed: text, reason: p.error, at });
+  }
+  const sizes = {}, creates = {}, red = [];
   const entryOf = (f, v) => {
     const e = { to: v.to, from: v.from };
-    if (v.before !== undefined) e.before = v.before;
-    if (f === "price" && v.off && v.to != null && (v.from == null || v.before === null)) e.off = true;
-    if (v.at != null) e.at = v.at;
+    if (f === "price" && v.off && v.to != null && v.from == null) e.off = true;
     return e;
   };
   const put = (id, base, f, v) => { (sizes[id] || (sizes[id] = { base, fields: {} })).fields[f] = entryOf(f, v); };
   const newOne = (id, c) => creates[id] || (creates[id] = { styleId: c.styleId, width: c.width, length: c.length, fields: {} });
-  const fieldsOf = (q && q.fields) || {};
+  const fieldsOf = (st && st.fields) || {};
   Object.keys(fieldsOf).forEach((id) => {
-    const s = q.sizes ? q.sizes[id] : null;
+    const s = st.sizes ? st.sizes[id] : null;
     Object.keys(fieldsOf[id]).forEach((f) => {
       const x = fieldsOf[id][f];
       if (x.error) {
         const r = { sizeId: id, key: f, kind: x.error.kind, typed: x.error.typed === undefined ? null : x.error.typed, reason: x.error.reason || null };
         if (x.error.kind === "conflict") r.server = x.error.server === undefined ? null : x.error.server;
         red.push(r);
-        marked[id + "|" + f] = true;
       }
       if (!(x.pending || x.inflight) || !s) return;
       if (s.creating) {
@@ -4270,87 +4276,25 @@ function ssPgBackup(q, draft, at, keep) {
         return;
       }
       if (s.version == null) return;
-      if (x.pending && x.inflight) put(id, s.version, f, { to: x.pending.to, from: x.inflight.to, before: x.inflight.from, off: x.pending.off || x.inflight.off });
+      if (x.pending && x.inflight) put(id, s.version, f, { to: x.pending.to, from: x.inflight.to, off: x.pending.off });
       else {
         const p = x.pending || x.inflight;
         if (!ssPgSame(p.to, p.from)) put(id, s.version, f, p);
       }
     });
   });
-  let d = null;
-  const ds = draft && q && q.sizes ? q.sizes[draft.sizeId] : null;
-  if (ds && (ds.creating ? !!ds.create : ds.version != null) && draft.key && draft.key !== "active") {
-    const x = (fieldsOf[draft.sizeId] || {})[draft.key];
-    const from = x && x.inflight ? x.inflight.to : x && x.pending ? x.pending.from : draft.seen;
-    d = { sizeId: draft.sizeId, key: draft.key, text: String(draft.text == null ? "" : draft.text), base: ds.creating ? null : ds.version, from: from === undefined ? null : from };
-    if (x && x.inflight) d.before = x.inflight.from;
-    // Over a first price pasted with Offered "no" (unsent, or in flight), the text keeps that `off`,
-    // as committing it would (commitBox; ssPgQueue's offOf when a flight goes back unsent).
-    if (draft.key === "price" && ((x && x.pending && x.pending.off && d.from == null) || (x && x.inflight && x.inflight.off && d.before === null))) d.off = true;
-    if (ds.creating) newOne(draft.sizeId, ds.create);   // the draft goes with its size's create (base null)
-    // Text that puts the box back where its unsent edit started takes that edit away, as committing
-    // it would (commitBox drops an edit equal to its baseline): what is in flight stays, and nothing
-    // else goes for the box. ssPgBackupLoad skips a draft equal to its `from`, so the edit itself
-    // must not be stored either, or Save them would send the value the builder had typed back over.
-    const p = x && x.pending ? (draft.key === "price" ? ssPgParsePrice(d.text, d.from) : ssPgParseQty(d.text, d.from)) : null;
-    if (p && p.ok && ssPgSame(p.value, d.from)) {
-      const own = ds.creating ? creates[draft.sizeId] : sizes[draft.sizeId];
-      if (x.inflight) put(draft.sizeId, ds.version, draft.key, x.inflight);
-      else if (own) {
-        delete own.fields[draft.key];
-        if (!ds.creating && !Object.keys(own.fields).length) delete sizes[draft.sizeId];
-      }
-    }
-  }
-  if (keep) {
-    Object.keys(keep.sizes || {}).forEach((id) => {
-      const k = keep.sizes[id];
-      Object.keys((k && k.fields) || {}).forEach((f) => {
-        if ((fieldsOf[id] && fieldsOf[id][f]) || (sizes[id] && sizes[id].fields[f])) return;
-        const base = sizes[id] ? sizes[id].base : d && d.sizeId === id && d.base != null ? d.base : k.base;
-        put(id, base, f, base === k.base ? k.fields[f] : ssPgBackupMove(k.fields[f]));
-      });
-    });
-    Object.keys(keep.creates || {}).forEach((id) => {
-      const k = keep.creates[id];
-      Object.keys((k && k.fields) || {}).forEach((f) => {
-        if ((fieldsOf[id] && fieldsOf[id][f]) || (creates[id] && creates[id].fields[f])) return;
-        newOne(id, k).fields[f] = entryOf(f, k.fields[f]);
-      });
-    });
-    (keep.red || []).forEach((r) => { if (r && !marked[r.sizeId + "|" + r.key] && !(fieldsOf[r.sizeId] && fieldsOf[r.sizeId][r.key])) red.push(r); });
-  }
   const anyNew = Object.keys(creates).length > 0;
-  if (!Object.keys(sizes).length && !anyNew && !red.length && !d) return null;
-  return { savedAt: at, sizes, red, draft: d, ...(anyNew ? { creates } : {}) };
-}
-
-// One stored box moved onto another version of its size (plan 4.9): an earlier backup kept while
-// this page holds the size on a newer read (ssPgBackup's `keep`), or an older table's backup merged
-// with a newer one's (ssPgBackupMerge). A size goes out on one version, so the box rides on that one
-// with its own `from`, and the server's from-check (or, on a stale version, the rebase) judges it by
-// value like any other box: a colleague's change since turns it red, nothing is written over. Its
-// `before` is dropped: it says what was on file under an in-flight value at the box's OWN version,
-// and restore trusts it while the size is still on the stored version, which is now the other one,
-// so kept it could write over a colleague's change. `off` stays only while `from` is blank.
-function ssPgBackupMove(x) {
-  const e = { ...x };
-  delete e.before;
-  if (e.off && e.from != null) delete e.off;
-  return e;
+  if (!Object.keys(sizes).length && !anyNew && !red.length) return null;
+  return { savedAt: at, sizes, red, draft: null, ...(anyNew ? { creates } : {}) };
 }
 
 // A stored backup, read back for the banner (plan 4.9): null when there is none, it cannot be read,
-// or it was saved more than 7 days before `now` (`maxAge`, ms). An entry kept from an older backup
-// (ssPgBackup's `keep`) carries its own `at` and ages out by it; every entry read back is stamped
-// with its `at` (the backup's savedAt when it has none), so it keeps its age when it is kept again.
-// Anything the server would refuse whole (a malformed id, version, field or value: one bad entry is
-// a 400 for the call) is dropped here, so Save them never sends it. The editor's draft becomes an
-// ordinary edit: its text parsed by the box's own rule (a value equal to its starting one always
-// taken), or, when the rules refuse it, a red entry ("invalid"), listed, never sent. `creates` (sizes
-// still being added, ssPgBackup) need an id, a style id and the server's own width and length rule;
-// a draft on one has base null. → { savedAt, sizes, red, count, creates? }, `count` the edits Save
-// them would send.
+// or it was saved more than 7 days before `now` (`maxAge`, ms): each table's key ages by its own
+// savedAt. Anything the server would refuse whole (a malformed id, version, field or value: one bad
+// entry is a 400 for the call) is dropped here, so Save them never sends it. `creates` (sizes still
+// being added, ssPgBackup) need an id, a style id and the server's own width and length rule. A
+// stored `draft` is ignored: ssPgBackup stores the editor's text as the edit it would make. →
+// { savedAt, sizes, red, count, creates? }, `count` the edits Save them would send.
 function ssPgBackupLoad(raw, now, maxAge) {
   let b = null;
   try { b = typeof raw === "string" ? JSON.parse(raw) : raw; } catch (_e) { return null; }
@@ -4358,19 +4302,15 @@ function ssPgBackupLoad(raw, now, maxAge) {
   const savedAt = Number(b.savedAt);
   const age = Number(maxAge) > 0 ? Number(maxAge) : 7 * 24 * 3600 * 1000;
   if (!isFinite(savedAt) || Number(now) - savedAt > age) return null;
-  const atOf = (x) => (x && x.at != null && isFinite(Number(x.at)) ? Math.min(Number(x.at), savedAt) : savedAt);
-  const young = (x) => Number(now) - atOf(x) <= age;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const VERSION = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2})?)$/;
   const isField = (f) => f === "price" || f === "active" || (typeof f === "string" && f.slice(0, 2) === "c:" && f.length > 2 && f.length <= 66);
   const isVal = (f, v) => (f === "price" ? v === null || (typeof v === "number" && isFinite(v))
     : f === "active" ? typeof v === "boolean" : typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 2147483647);
-  const legs = (f, x) => isVal(f, x.from) && (x.before === undefined || isVal(f, x.before));
-  const entry = (f, to, x, when) => {
-    const e = { to, from: x.from };
-    if (x.before !== undefined) e.before = x.before;
-    if (f === "price" && x.off === true && to !== null && (x.from === null || x.before === null)) e.off = true;
-    e.at = when;
+  const ok = (f, x) => isField(f) && !!x && isVal(f, x.to) && isVal(f, x.from) && !ssPgSame(x.to, x.from);
+  const entry = (f, x) => {
+    const e = { to: x.to, from: x.from };
+    if (f === "price" && x.off === true && x.to !== null && x.from === null) e.off = true;
     return e;
   };
   const sizes = {}, red = [];
@@ -4381,8 +4321,8 @@ function ssPgBackupLoad(raw, now, maxAge) {
     if (!UUID.test(id) || !s || typeof s.base !== "string" || !VERSION.test(s.base) || !s.fields || typeof s.fields !== "object") return;
     Object.keys(s.fields).forEach((f) => {
       const x = s.fields[f];
-      if (!isField(f) || !x || !isVal(f, x.to) || !legs(f, x) || ssPgSame(x.to, x.from) || !young(x)) return;
-      (sizes[id] = sizes[id] || { base: s.base, fields: {} }).fields[f] = entry(f, x.to, x, atOf(x));
+      if (!ok(f, x)) return;
+      (sizes[id] = sizes[id] || { base: s.base, fields: {} }).fields[f] = entry(f, x);
       count++;
     });
   });
@@ -4392,61 +4332,64 @@ function ssPgBackupLoad(raw, now, maxAge) {
   Object.keys(csrc).forEach((id) => {
     const c = csrc[id];
     if (!UUID.test(id) || !c || !UUID.test(String(c.styleId)) || !dim(c.width) || !dim(c.length) || !c.fields || typeof c.fields !== "object") return;
-    const out = creates[id] = { styleId: String(c.styleId), width: c.width, length: c.length, fields: {} };
+    const fields = {};
     Object.keys(c.fields).forEach((f) => {
       const x = c.fields[f];
-      if (!isField(f) || !x || !isVal(f, x.to) || !isVal(f, x.from) || x.before !== undefined || ssPgSame(x.to, x.from) || !young(x)) return;
-      out.fields[f] = entry(f, x.to, x, atOf(x));
+      if (!ok(f, x)) return;
+      fields[f] = entry(f, x);
       count++;
     });
+    if (Object.keys(fields).length) creates[id] = { styleId: String(c.styleId), width: c.width, length: c.length, fields };
   });
-  const d = b.draft;
-  const onNew = !!d && d.base === null && !!creates[String(d.sizeId)];
-  if (d && UUID.test(String(d.sizeId)) && (onNew || (typeof d.base === "string" && VERSION.test(d.base))) && isField(d.key) && d.key !== "active" && legs(d.key, d)) {
-    const p = d.key === "price" ? ssPgParsePrice(d.text, d.from) : ssPgParseQty(d.text, d.from);
-    const into = onNew ? creates[d.sizeId] : sizes[d.sizeId];
-    if (!p.ok) red.push({ sizeId: d.sizeId, key: d.key, kind: "invalid", typed: String(d.text == null ? "" : d.text), reason: p.error, at: savedAt });
-    else if (!ssPgSame(p.value, d.from) && (onNew || !into || into.base === d.base)) {
-      // The draft is the newest thing typed in its box: it takes the place of the box's own entry,
-      // from the same starting values (ssPgBackup works both out from the same queue).
-      if (!into || !into.fields[d.key]) count++;
-      (onNew ? into : (sizes[d.sizeId] = into || { base: d.base, fields: {} })).fields[d.key] = entry(d.key, p.value, d, savedAt);
-    }
-  }
-  Object.keys(creates).forEach((id) => { if (!Object.keys(creates[id].fields).length) delete creates[id]; });
   (Array.isArray(b.red) ? b.red : []).forEach((r) => {
-    if (r && UUID.test(String(r.sizeId)) && isField(r.key) && ["invalid", "refused", "conflict"].indexOf(r.kind) >= 0 && young(r)) red.push({ ...r, at: atOf(r) });
+    if (r && UUID.test(String(r.sizeId)) && isField(r.key) && ["invalid", "refused", "conflict"].indexOf(r.kind) >= 0) red.push(r);
   });
   if (!count && !red.length) return null;
   return { savedAt, sizes, red, count, ...(Object.keys(creates).length ? { creates } : {}) };
 }
 
 // Every other table's backup this page may offer (plan 4.9; one per table, so two tabs of one
-// account never write over each other's), read back by ssPgBackupLoad and merged into one offer,
-// oldest first: a box in a newer one wins. A size a newer one holds on another version goes on that
-// version, and the older boxes go with it (ssPgBackupMove: each from its own value, judged by the
-// server like any other), so no box typed in either tab is dropped. Red entries once per box, the
-// newest. Sizes still being added (`creates`) the same way, box by box. → { savedAt (the newest),
-// sizes, red, count, creates? } or null.
+// account never write over each other's), read back by ssPgBackupLoad and merged into one offer: a
+// plain union, oldest first. Box by box, a newer backup's wins, and an older one that says something
+// else is listed red (a conflict with nothing on file to show: "type it again", never sent). A size a
+// newer backup holds on another version (another read) takes that backup's boxes whole, and every
+// older box of it that the newer one doesn't also hold with the same value is listed red: Save them
+// goes on one stored version per size and never resends. Sizes still being added (`creates`) box by
+// box the same way. Red entries once per box, the newest. → { savedAt (the newest), sizes, red,
+// count, creates? } or null, `count` the boxes Save them would send.
 function ssPgBackupMerge(list) {
   const all = (Array.isArray(list) ? list : []).filter((b) => b && typeof b === "object").sort((a, b) => Number(a.savedAt) - Number(b.savedAt));
   if (!all.length) return null;
   const sizes = {}, creates = {}, red = {}, order = [];
   all.forEach((b) => {
+    const lost = [];
+    const lose = (id, f, x) => { lost.push({ sizeId: id, key: f, kind: "conflict", typed: x.to, server: null, reason: null }); };
+    // One size's boxes, newer over older: the older box goes red when the newer says something else.
+    const union = (id, was, now) => {
+      const fields = { ...was };
+      Object.keys(now).forEach((f) => {
+        if (fields[f] && !ssPgSame(fields[f].to, now[f].to)) lose(id, f, fields[f]);
+        fields[f] = now[f];
+      });
+      return fields;
+    };
     Object.keys(b.sizes || {}).forEach((id) => {
       const s = b.sizes[id];
       if (!s || !s.fields) return;
-      const was = sizes[id], fields = {};
-      if (was) Object.keys(was.fields).forEach((f) => { fields[f] = was.base === s.base ? was.fields[f] : ssPgBackupMove(was.fields[f]); });
-      Object.keys(s.fields).forEach((f) => { fields[f] = s.fields[f]; });
-      sizes[id] = { base: s.base, fields };
+      const was = sizes[id];
+      if (was && was.base !== s.base) {
+        Object.keys(was.fields).forEach((f) => { if (!s.fields[f] || !ssPgSame(s.fields[f].to, was.fields[f].to)) lose(id, f, was.fields[f]); });
+        sizes[id] = { base: s.base, fields: { ...s.fields } };
+        return;
+      }
+      sizes[id] = { base: s.base, fields: union(id, (was && was.fields) || {}, s.fields) };
     });
     Object.keys(b.creates || {}).forEach((id) => {
       const c = b.creates[id];
       if (!c || !c.fields) return;
-      creates[id] = { styleId: c.styleId, width: c.width, length: c.length, fields: { ...((creates[id] && creates[id].fields) || {}), ...c.fields } };
+      creates[id] = { styleId: c.styleId, width: c.width, length: c.length, fields: union(id, (creates[id] && creates[id].fields) || {}, c.fields) };
     });
-    (b.red || []).forEach((r) => {
+    [...lost, ...(b.red || [])].forEach((r) => {
       if (!r) return;
       const k = r.sizeId + "|" + r.key;
       if (!(k in red)) order.push(k);
@@ -11581,10 +11524,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const refreshTimerRef = useRef(null);            // the 1 s wait after a refresh trigger (plan 4.8), coalescing the rest
   const refreshingRef = useRef(false);             // a refresh read is out
   const refreshAgainRef = useRef(false);           // …and another trigger came meanwhile
-  const keepRef = useRef(null);                    // { sizes, red }: what of an earlier backup stays stored (ssPgBackup's keep)
   const ownBackupRef = useRef(false);              // this page wrote the backup, so it clears it once nothing is left
   const offeredRef = useRef(false);                // a backup from earlier was looked for (once, on the first read that can edit)
-  const adoptedRef = useRef([]);                   // the keys of closed tables' backups this page took over (offerEarlier)
+  const tookRef = useRef([]);                      // the keys of the backups on offer (offerEarlier), left in place until answered
+  const adoptedRef = useRef([]);                   // keys to remove after this table's next successful own write (filled by Save them)
   // This table's own name for its backup and the "who's open?" answer (plan 4.9 with two tabs): one
   // per mount, so the same tab opening the table again finds what the last one left.
   const [mountId] = useState(() => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`);
@@ -11890,7 +11833,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   }, []);
 
   // THE BACKUP (plan 4.9) is rewritten whenever the queue or the editor's text changes (the editor's
-  // keystrokes write it too, from onEditInput), and while a backup from earlier is on offer.
+  // keystrokes write it too, from onEditInput), and when a backup from earlier is answered.
   useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);
   // TWO TABS OF ONE ACCOUNT (plan 8.5 step 10): each table keeps its backup under its own key and,
   // while it is open, answers "who's open?" on this channel with its mountId, so a table opening
@@ -12308,11 +12251,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!ed || !dirtyRef.current) return null;
     return ed.f !== "active" ? { sizeId: ed.sizeId, key: ed.f, text: draftRef.current, seen: ed.seen } : null;
   };
-  // Backups this table took over (offerEarlier) go once what they hold is under its own key, or the
-  // builder discarded them; a write that fails keeps them where they are.
+  // The backups Save them put into the queue (adoptedRef) go after this table's next own write, once
+  // the queue (and so this table's key) holds what they held; a write that fails keeps them in place.
   const saveBackup = () => {
     if (!backupKey || !editable || !qRef.current) return;
-    const b = ssPgBackup(qRef.current, draftOf(), Date.now(), keepRef.current);
+    const b = ssPgBackup(qRef.current, draftOf(), Date.now());
     try {
       if (b) { localStorage.setItem(ownKey, JSON.stringify(b)); ownBackupRef.current = true; }
       else if (ownBackupRef.current) { localStorage.removeItem(ownKey); ownBackupRef.current = false; }
@@ -12333,7 +12276,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // person and account that no open table answers for (a tab closed, a crash, a sign-out), merged
   // (ssPgBackupMerge) and offered back with the banner, unless this page can't edit (view-only pages
   // never send one, and leave them stored). One older than 7 days, or one that can't be read, is
-  // dropped. What is offered is kept under this table's own key until Save them or Discard.
+  // dropped. What is offered stays under its own keys (tookRef) until Save them or Discard, so a
+  // second crash before the builder answers loses nothing; red entries alone are shown once and go.
   const offerEarlier = (m) => {
     if (!backupKey || viewOnly || (m && m.guard)) return;
     if (offeredRef.current) return;
@@ -12361,20 +12305,25 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       });
       const b = ssPgBackupMerge(found);
       if (!b) return;
-      keepRef.current = { sizes: b.sizes, red: b.red, creates: b.creates || null };
-      adoptedRef.current = took;
-      ownBackupRef.current = true;
+      tookRef.current = took;
+      if (!b.count) {
+        try { took.forEach((k) => localStorage.removeItem(k)); } catch (_e) { /* blocked */ }
+        tookRef.current = [];
+      }
       if (b.count) setEarlier({ savedAt: b.savedAt, sizes: b.sizes, creates: b.creates || null, count: b.count });
       if (b.red.length) setEarlierRed(b.red);
     });
   };
   // Save them: the stored edits go into the queue on their stored version and starting values
-  // (ssPgQueue "restore"), and out at once. The red entries stay listed until dismissed.
+  // (ssPgQueue "restore"), and out at once. The red entries stay listed until dismissed, and are no
+  // longer stored. Not while a call is out (the button is greyed): restore goes on stored versions
+  // only when nothing is in flight.
   const saveEarlier = () => {
     const b = earlier;
-    if (!b || !canEditNow()) return;
-    keepRef.current = { sizes: null, red: earlierRed };
+    if (!b || !canEditNow() || (qRef.current && qRef.current.flight)) return;
     setEarlier(null);
+    adoptedRef.current = [...adoptedRef.current, ...tookRef.current];
+    tookRef.current = [];
     const had = qRef.current.sizes;
     const st = apply({ type: "restore", sizes: b.sizes, creates: b.creates, at: Date.now() });
     // A size added again (its create never landed) is drawn at the end of its style, "Adding…".
@@ -12385,13 +12334,12 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
   // Discard: the backup is gone, red entries and all.
   const discardEarlier = () => {
-    keepRef.current = null;
-    ownBackupRef.current = true;
+    try { tookRef.current.forEach((k) => localStorage.removeItem(k)); } catch (_e) { /* blocked */ }
+    tookRef.current = [];
     setEarlier(null);
     setEarlierRed(null);
   };
   const dismissEarlierRed = () => {
-    keepRef.current = keepRef.current ? { ...keepRef.current, red: null } : null;
     setEarlierRed(null);
   };
 
@@ -12913,7 +12861,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       {earlier && canEdit && (
         <div className="ss-pg-earlier" role="status">
           <span>{earlier.count === 1 ? "You have 1 change from earlier that wasn't saved." : `You have ${earlier.count} changes from earlier that weren't saved.`}</span>
-          <button type="button" onClick={saveEarlier}>Save them</button>
+          {/* Greyed while a call is out (about a second, or while saving is stopped): Save them goes on
+              the stored versions only when nothing is in flight (ssPgQueue's restore). */}
+          <button type="button" onClick={saveEarlier} disabled={!!(q && q.flight)}
+            title={q && q.flight ? "Wait a moment: a save is going out." : undefined}>Save them</button>
           <button type="button" onClick={discardEarlier}>Discard</button>
         </div>
       )}
