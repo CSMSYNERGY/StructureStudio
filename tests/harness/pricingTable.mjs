@@ -707,7 +707,7 @@ if (want("A") || want("B")) {
 
   // ── B: the new tab ──
   const popupP = ctx.waitForEvent("page", { timeout: 10000 }).catch(() => null);
-  await page.getByText("Open sizes & prices table").click();
+  await page.locator("a", { hasText: "Open sizes & prices table" }).click();   // the anchor: the Building styles text names it too
   const tab = await popupP;
   ok("B: the link opens a new tab", !!tab);
   if (tab) {
