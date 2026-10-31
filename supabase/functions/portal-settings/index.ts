@@ -2864,15 +2864,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   // ── The sizes table (Settings → Sheds → "Open sizes & prices table", 2026-10-30) ──────────────
-  // _shared/pricingCells.ts has the rules; migration 350 has the save. clientId is JWT-resolved
+  // _shared/pricingCells.ts has the rules; migration 350 has the save, 351 its Delete (an object
+  // remove {id, base}; a size saved designs use is refused). clientId is JWT-resolved
   // and every answer carries it: the page sends both calls through the side door (a raw fetch that
   // skips the invoke wrapper's tenant tripwire), so it checks clientId against the tenant it opened
   // for itself and stops saving on a mismatch.
   //
   // The whole read, paged by client_id: styles, sizes (with created_at/updated_at, the version every
   // edit sends back), inclusions, exact counts of sizes and inclusions (the browser's truncation
-  // guard), and whether Real-Time Pricing owns the price column. The option COLUMNS come from the
-  // catalog action, as for the Excel template.
+  // guard), whether Real-Time Pricing owns the price column, and `used`, the sizes saved designs use
+  // (pricing_sizes_in_use, 351: the page greys their ✕). The option COLUMNS come from the catalog
+  // action, as for the Excel template.
   if (action === "size_table") {
     try {
       return json({ ok: true, clientId, ...(await readSizeTable(admin, clientId)) });

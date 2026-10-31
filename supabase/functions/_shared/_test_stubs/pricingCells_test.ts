@@ -17,6 +17,13 @@
 //      read; the counts match; no read carries a list of ids; sizes and styles come back in list
 //      order (sort_order by value, then id); Real-Time Pricing reads off without a settings row, and
 //      the settings read names real columns and this builder (the fake refuses any other column).
+//   4b. The Delete (migration 351): a remove is a uuid or exactly {id, base} (base a version), copied
+//      out as sent; extra keys, a bad base or id, and one size named as a string and as an object are
+//      refused; 51 mixed removes are refused. A 350-shaped body validates as before. The answers go
+//      back as they came; the audit note adds deleted=, inUse= and deletedIds= (uuids of landed
+//      object removes, in answer order) only when the call carries a Delete, and removed= keeps
+//      counting string removes. readSizeTable's `used` is pricing_sizes_in_use's list from one rpc
+//      naming only p_client_id (the fake refuses any other signature), and a failed read throws.
 //   5. pagedRead pages by KEY: a save deleting a row the first page read and adding one further down
 //      between two pages costs no row that was there throughout (the offset paging it replaced loses
 //      one, with a length that still matches the count), and one size with more than a page of boxes
@@ -162,6 +169,57 @@ Deno.test("validatePayload: one size named twice in a save is refused; nothing a
   }
   const r = validatePayload({ sizes: "everything" });
   assert(!r.ok && /lists/.test(r.error));
+});
+
+// The Delete (migration 351): a remove is a uuid (350's Remove) or exactly { id, base }.
+Deno.test("validatePayload: a remove is a uuid or exactly {id, base}, copied out as sent", () => {
+  const r = validatePayload({ removes: [uid(1), { id: uid(2), base: V }, { base: "2026-10-30 14:41:07+00", id: uid(3) }] });
+  assert(r.ok, JSON.stringify(r));
+  assertEquals(r.value.removes, [uid(1), { id: uid(2), base: V }, { id: uid(3), base: "2026-10-30 14:41:07+00" }], "strings stay strings, objects carry only id and base");
+  const bad = (x: unknown) => validatePayload({ removes: [uid(9), x] });
+  for (const x of [
+    { id: uid(2) },                                   // no base
+    { base: V },                                      // no id
+    { id: uid(2), base: V, price: 400 },              // an extra key
+    { id: uid(2), base: V, label: "10x12" },
+    { id: "not-a-uuid", base: V },
+    { id: uid(2), base: "yesterday" },                // not a version
+    { id: uid(2), base: "2026-10-30" },
+    { id: uid(2), base: 1730000000 },
+    { id: uid(2), base: null },
+    [uid(2), V],
+    null,
+    42,
+  ]) {
+    const v = bad(x);
+    assert(!v.ok && v.error === "removes[1] must be a uuid or {id, base}", JSON.stringify([x, v]));
+  }
+});
+
+Deno.test("validatePayload: one size named as a string and as an object is refused; 51 mixed removes are refused, 50 pass", () => {
+  for (const removes of [
+    [uid(1), { id: uid(1), base: V }],
+    [{ id: uid(1), base: V }, uid(1).toUpperCase()],
+    [{ id: uid(1), base: V }, { id: uid(1), base: "2026-10-30T14:41:07+00:00" }],
+  ]) {
+    const r = validatePayload({ removes });
+    assert(!r.ok && /removes\[1\]: the same size is named twice/.test(r.error), JSON.stringify([removes, r]));
+  }
+  const objectAndEdit = validatePayload({ removes: [{ id: uid(1), base: V }], sizes: [edit(1)] });
+  assert(!objectAndEdit.ok && /twice/.test(objectAndEdit.error), "a size deleted and edited in one save is refused too");
+  const mixed = (n: number) => Array.from({ length: n }, (_, i) => i % 2 ? uid(100 + i) : { id: uid(100 + i), base: V });
+  assert(validatePayload({ removes: mixed(50) }).ok);
+  const r = validatePayload({ removes: mixed(51) });
+  assert(!r.ok && /At most 50/.test(r.error), JSON.stringify(r));
+});
+
+Deno.test("validatePayload: a body of 350's shape (string removes) validates exactly as before", () => {
+  const body = { creates: [], removes: [uid(1), uid(2)], sizes: [edit(3)] };
+  const r = validatePayload(body);
+  assert(r.ok);
+  assertEquals(r.value, { creates: [], removes: [uid(1), uid(2)], sizes: [edit(3)] });
+  const bad = validatePayload({ removes: ["nope"] });
+  assert(!bad.ok && /uuid/.test(bad.error), "a malformed string is still refused");
 });
 
 Deno.test("validatePayload: a new size's width and length follow the dimension rule", () => {
@@ -328,6 +386,69 @@ Deno.test("auditNote: `hidden` counts Offered unticked and a price cleared, neve
   assert(/ prices=2 hidden=2 /.test(note), note);
 });
 
+// ─── 3b. The Delete's answers and audit (migration 351) ────────────────────────────────────────
+const DEL_PAYLOAD = (() => {
+  const r = validatePayload({
+    removes: [uid(71), { id: uid(72), base: V }, { id: uid(73), base: V }, { id: uid(74), base: V }, uid(75), { id: uid(76), base: V }, { id: uid(77), base: V }],
+  });
+  if (!r.ok) throw new Error(r.error);
+  return r.value;
+})();
+const DEL_ANSWER = {
+  created: [], results: [],
+  removed: [
+    { id: uid(71), status: "removed" },                                         // a string remove that landed
+    { id: uid(72), status: "removed", row: { price: 400, active: true, label: "10x12" }, cells: { loft: 50 } },
+    { id: uid(73), status: "refused", code: "used", reason: "Saved designs use this size, so it can't be deleted. Untick Offered to hide it." },
+    { id: uid(74), status: "removed", gone: true },                             // a resend of a Delete that landed
+    { id: uid(75), status: "refused", reason: "Only a size that was never priced or edited can be removed. Untick Offered to hide it." },
+    { id: uid(76), status: "refused", code: "changed", reason: "This size was changed since it was read, so it wasn't deleted." },
+    { id: uid(77), status: "removed", row: { price: 0, active: false, label: "12x24" }, cells: {} },
+  ],
+};
+
+Deno.test("savePricingCells: object removes reach the function as sent, and its answers come back as they came", async () => {
+  const { sb, calls } = rpcStub([{ data: DEL_ANSWER, error: null }]);
+  const out = await savePricingCells(sb, T, DEL_PAYLOAD, auditStub().audit);
+  assertEquals(calls[0].args.p_removes, [uid(71), { id: uid(72), base: V }, { id: uid(73), base: V }, { id: uid(74), base: V }, uid(75), { id: uid(76), base: V }, { id: uid(77), base: V }]);
+  assertEquals(out, DEL_ANSWER, "codes, row and cells pass through untouched");
+});
+
+Deno.test("auditNote: a Delete adds deleted=, inUse= and deletedIds= (landed objects only, in answer order); removed= stays the strings", async () => {
+  const { sb } = rpcStub([{ data: DEL_ANSWER, error: null }]);
+  const { audit, rows } = auditStub();
+  await savePricingCells(sb, T, DEL_PAYLOAD, audit);
+  assertEquals(rows[0].note,
+    "saved=0 created=0 removed=1 conflicts=0 refused=3 prices=0 hidden=0 cellsCleared=0 cellsSet=0 duplicates=0 exists=0 missing=0 gone=1"
+      + ` deleted=2 inUse=1 deletedIds=${uid(72)},${uid(77)}`);
+  assertEquals(rows[0].rowCount, 3, "a string remove and two deletes landed: three rows written");
+  const note = String(rows[0].note);
+  // (prices= is the old count of prices written; a deleted size's own price never appears.)
+  for (const leak of [T, "10x12", "12x24", "price:", "label", "loft", "Test Barn"]) assert(!note.includes(leak), `the note carries ${leak}`);
+  assert(/^(\w+=\d+)( \w+=\d+)* deletedIds=[0-9a-f-]{36}(,[0-9a-f-]{36})*$/.test(note), note);
+});
+
+Deno.test("auditNote: deletedIds is left out when no Delete landed, and holds only uuids", () => {
+  const none = auditNote(DEL_PAYLOAD, { created: [], results: [], removed: [{ id: uid(73), status: "refused", code: "used" }, { id: uid(74), status: "removed", gone: true }] });
+  assert(/ gone=1 deleted=0 inUse=1$/.test(none), none);
+  // Only an id this call sent as a Delete is listed: an answer under any other id (here a label, as
+  // a broken answer might carry) is counted as a string remove and never written into the note.
+  const forged = auditNote(DEL_PAYLOAD, { created: [], results: [], removed: [{ id: uid(72), status: "removed" }, { id: "Test Barn 10x12", status: "removed" }] });
+  assert(forged.endsWith(` deleted=1 inUse=0 deletedIds=${uid(72)}`), forged);
+  // An id sent in capitals is still recognised as a Delete.
+  const upper = validatePayload({ removes: [{ id: uid(72).toUpperCase(), base: V }] });
+  if (!upper.ok) throw new Error(upper.error);
+  assert(auditNote(upper.value, { created: [], results: [], removed: [{ id: uid(72).toUpperCase(), status: "removed" }] }).includes(" removed=0 ")
+    && auditNote(upper.value, { created: [], results: [], removed: [{ id: uid(72).toUpperCase(), status: "removed" }] }).includes(" deleted=1 "));
+});
+
+Deno.test("auditNote: a call without a Delete writes exactly the note it wrote before 351", () => {
+  // The fixtures above (ANSWER / PAYLOAD) carry string removes only; their exact notes are pinned
+  // there. Here: a string remove that landed is removed=, and nothing about deletes is added.
+  const note = auditNote(PAYLOAD, { created: [], results: [], removed: [{ id: uid(3), status: "removed" }] });
+  assertEquals(note, "saved=0 created=0 removed=1 conflicts=0 refused=0 prices=0 hidden=0 cellsCleared=0 cellsSet=0 duplicates=0 exists=0 missing=0 gone=0");
+});
+
 // ─── 4. readSizeTable / pagedRead ──────────────────────────────────────────────────────────────
 // 40 sizes x 30 options = 1,200 inclusion rows: past PostgREST's 1,000-row answer.
 const KEYS = Array.from({ length: 30 }, (_, i) => `item${String(i).padStart(2, "0")}`);
@@ -370,12 +491,34 @@ function settingsTable(settings: Record<string, any> | null, reads: any[][][]) {
   return q;
 }
 
-/** The fake's three tables, plus client_settings. */
-function world(settings: Record<string, any> | null) {
+/** pricing_sizes_in_use (migration 351) as PostgREST serves it: one argument, p_client_id, and one
+ *  uuid[] back (an array, whatever its length: no row cap). Any other function or argument name is
+ *  refused as Postgres refuses an unknown signature, so a misnamed call fails here instead of
+ *  turning every size_table call into a 500 live. Every call is kept. */
+function inUseRpc(used: Record<string, string[]>, calls: { fn: string; args: any }[], answer?: () => any) {
+  return (fn: string, args: any) => {
+    calls.push({ fn, args });
+    if (answer) return Promise.resolve(answer());
+    const names = Object.keys(args ?? {});
+    if (fn !== "pricing_sizes_in_use" || names.length !== 1 || names[0] !== "p_client_id") {
+      return Promise.resolve({ data: null, error: { code: "42883", message: `function public.${fn}(${names.join(", ")}) does not exist` } });
+    }
+    return Promise.resolve({ data: used[args.p_client_id] ?? [], error: null });
+  };
+}
+// This builder's sizes saved designs use, and the other builder's.
+const USED = { [T]: [uid(1003), uid(1001)], [OTHER]: [uid(2000)] };
+
+/** The fake's three tables, plus client_settings and pricing_sizes_in_use. */
+function world(settings: Record<string, any> | null, answer?: () => any) {
   const db = fakeDb({ building_styles: STYLES, building_sizes: SIZES, building_size_inclusions: INCLUSIONS }, { maxRows: 1000 });
   const settingsReads: any[][][] = [];
-  const sb = { from: (table: string) => table === "client_settings" ? settingsTable(settings, settingsReads) : db.sb.from(table) };
-  return { ...db, sb, settingsReads };
+  const rpcCalls: { fn: string; args: any }[] = [];
+  const sb = {
+    from: (table: string) => table === "client_settings" ? settingsTable(settings, settingsReads) : db.sb.from(table),
+    rpc: inUseRpc(USED, rpcCalls, answer),
+  };
+  return { ...db, sb, settingsReads, rpcCalls };
 }
 
 Deno.test("the fake answers 1,000 rows a read, as PostgREST does, and still refuses a column the table lacks", async () => {
@@ -448,9 +591,48 @@ Deno.test("readSizeTable: a read the database refuses is thrown, not answered wi
       if (table === "client_settings") return settingsTable(null, []);
       return db.sb.from(table);
     },
+    rpc: inUseRpc(USED, []),
   };
   const e: any = await assertRejects(() => readSizeTable(sb, T));
   assertEquals(e.code, "57014");
+});
+
+// ─── 4b. readSizeTable: the sizes saved designs use (migration 351) ──────────────────────────────
+Deno.test("readSizeTable: `used` is pricing_sizes_in_use's list for this builder, from one rpc naming only p_client_id", async () => {
+  const w = world(null);
+  const t = await readSizeTable(w.sb, T);
+  assertEquals(t.used, USED[T], "the list as the function answered it");
+  assertEquals(w.rpcCalls, [{ fn: "pricing_sizes_in_use", args: { p_client_id: T } }], "one call, for the tenant it was given");
+  assertEquals((await readSizeTable(world(null).sb, OTHER)).used, USED[OTHER], "another builder reads their own");
+  assertEquals((await readSizeTable(world(null).sb, "nobody-here")).used, [], "a builder no design names: an empty list");
+  const misnamed: any = await inUseRpc(USED, [])("pricing_sizes_in_use", { client_id: T });
+  assertEquals(misnamed.error?.code, "42883", "(the fake refuses an argument the function lacks)");
+  // 1,500 ids in one array: an rpc returning one value is not cut at db-max-rows, so all come back.
+  const many = Array.from({ length: 1500 }, (_, i) => uid(5000 + i));
+  assertEquals((await readSizeTable(world(null, () => ({ data: many, error: null })).sb, T)).used.length, 1500);
+});
+
+Deno.test("readSizeTable: a failed in-use read is thrown, so the table opens with an error, never with wrong ✕s", async () => {
+  {
+    const w = world(null, () => ({ data: null, error: { code: "42883", message: "function public.pricing_sizes_in_use(p_client_id) does not exist" } }));
+    const e: any = await assertRejects(() => readSizeTable(w.sb, T));
+    assertEquals([e.code, w.rpcCalls.length], ["42883", 1], "a SQLSTATE is the database's answer: thrown, never retried");
+  }
+  {
+    const w = world(null, () => ({ data: null, error: null }));
+    await assertRejects(() => readSizeTable(w.sb, T), Error, "gave no list");
+  }
+  {
+    const w = world(null, () => ({ data: "{}", error: null }));
+    await assertRejects(() => readSizeTable(w.sb, T), Error, "gave no list");
+  }
+  {
+    // A gateway blip (no SQLSTATE) is retried, as every read here is.
+    let n = 0;
+    const w = world(null, () => (++n === 1 ? { data: null, error: { message: "<html>502 Bad Gateway</html>" } } : { data: USED[T], error: null }));
+    assertEquals((await readSizeTable(w.sb, T)).used, USED[T]);
+    assertEquals(w.rpcCalls.length, 2, "retried once, then answered");
+  }
 });
 
 Deno.test("pagedRead: a full last page takes one more, empty, look; countRows throws on a refused count", async () => {
