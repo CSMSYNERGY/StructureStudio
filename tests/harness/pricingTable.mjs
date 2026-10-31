@@ -96,7 +96,9 @@
 //      toolbar's Clear ask the same question; Ctrl+D (held from the browser) and Fill down fill the top
 //      row down, one box from the size above without asking. A first price pasted with Offered "no"
 //      goes with Offered unticked and the size stays out of the designer; with "yes" the server ticks
-//      it. A view-only page copies and changes
+//      it. While that first price is still saving, a "no" is refused by name (pasted again once it
+//      has saved, it unticks the size); one checked before the price went out changes nothing at
+//      Continue, and says why. A view-only page copies and changes
 //      nothing. A 20,000-box paste (500 sizes x 40 columns) is timed from the paste to the confirm and
 //      from Continue to the commit drawn (longest task, rows re-rendered), then saved in calls of at
 //      most 50 sizes and 2,500 boxes; 20,040 boxes are refused.
@@ -2858,6 +2860,80 @@ if (want("V")) {
   ok("V: …with 'yes', the price goes alone and the server ticks Offered",
     !!yes && JSON.stringify(yes.to) === JSON.stringify({ price: 800 }) && F.size(zc.id).active === true && (await look(page, zc.id, 2)).text === "✓", JSON.stringify(yes));
   ok("V: no page errors (a first price with Offered)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// V1c: the same round trip while that first price is still saving. Its call has already said Offered
+// (none here, so the server ticks it with the price), and nothing more can go with it. A "no" pasted
+// then is refused, naming the size, rather than dropped while the confirm says the size stays out;
+// once the price has saved, the same paste unticks it. A block checked while the price was still
+// unsent, whose confirm is still open when the price goes out, changes nothing at Continue and says why.
+if (want("V")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const za = barn[9], zb = barn[10];
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  ok("V: (set-up) a priced, offered size above an unpriced one", za.base_price != null && za.base_price !== 1000 && za.active && zb.base_price == null, JSON.stringify([za.base_price, zb.base_price]));
+  F.script.push({ delayMs: 3000 });   // the first price stays out a while
+  let n0 = saveCalls(calls).length;
+  await typeIn(page, zb.id, 1, "900");
+  ok("V: (set-up) its first price is on its way", (await waitBadge(page, /^Saving 1 change…$/, 4000)) && saveCalls(calls).length === n0 + 1, (await state(page)).badge);
+  await page.locator(sel(za.id, 1)).click();
+  await clip.paste(page, tsvOf([["1000", "yes"], ["900", "no"]]));
+  await page.waitForTimeout(300);
+  ok("V: a 'no' pasted while that size's first price is still saving is refused, naming it; nothing changes and nothing more goes",
+    (await statusText(page)) === `Row 2 (${named(zb)}), Offered: its first price is still saving. Try again once it's saved.` && !(await confirmOf(page))
+    && saveCalls(calls).length === n0 + 1 && (await look(page, za.id, 1)).text !== "$1,000", await statusText(page));
+  if (await confirmOf(page)) await page.keyboard.press("Escape");   // (a page that asked instead: the checks below still run)
+  const first = await saved(page, calls, n0);
+  ok("V: …the price saves, and the server ticks Offered with it (its call carried none)",
+    first && F.size(zb.id).base_price === 900 && F.size(zb.id).active === true && F.size(za.id).base_price === za.base_price && (await look(page, zb.id, 2)).text === "✓", JSON.stringify(F.size(zb.id)));
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(za.id, 1)).click();
+  await clip.paste(page, tsvOf([["1000", "yes"], ["900", "no"]]));
+  const cf = await confirmOf(page);
+  ok("V: …pasted again once it has saved, the confirm counts the size leaving the designer",
+    !!cf && cf.text === `Change 2 sizes, ${named(za)} to ${named(zb)}: 1 price, 1 size hidden from your designer. Continue?`, JSON.stringify(cf));
+  await page.keyboard.press("Enter");
+  await saved(page, calls, n0);
+  ok("V: …and the size ends unoffered, as pasted", F.size(zb.id).active === false && F.size(za.id).base_price === 1000 && (await look(page, zb.id, 2)).text === "", JSON.stringify(F.size(zb.id)));
+  ok("V: no page errors (a first price still saving)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+if (want("V")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const barn = barnOf(F.table(OWN));
+  const z0 = barn[0], za = barn[9], zb = barn[10];
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  F.script.push({ delayMs: 2500 }, { delayMs: 2500 });
+  const n0 = saveCalls(calls).length;
+  await typeIn(page, z0.id, 1, "4321");
+  await waitBadge(page, /^Saving 1 change…$/, 4000);
+  await typeIn(page, zb.id, 1, "900");   // waits behind the call out
+  await page.locator(sel(za.id, 1)).click();
+  await clip.paste(page, tsvOf([["1000", "yes"], ["900", "no"]]));
+  const cf = await confirmOf(page);
+  ok("V: (set-up) a block checked while a first price waits to be sent: the confirm says the size stays out",
+    !!cf && cf.text === `Change 2 sizes, ${named(za)} to ${named(zb)}: 1 price. Continue?` && saveCalls(calls).length === n0 + 1, JSON.stringify(cf));
+  const until = Date.now() + 8000;
+  while (Date.now() < until && saveCalls(calls).length < n0 + 2) await sleep(60);
+  const went = saveCalls(calls)[n0 + 1];
+  ok("V: (set-up) that price goes out on its own while the confirm is open, without Offered",
+    !!went && !!(await confirmOf(page)) && JSON.stringify((went.body.sizes.find((s) => s.id === zb.id) || {}).to) === JSON.stringify({ price: 900 }), JSON.stringify(went && went.body.sizes));
+  await page.keyboard.press("Enter");   // Continue
+  await page.waitForTimeout(300);
+  ok("V: Continue then changes nothing and says why (the 'no' can't go with a price already on its way)",
+    (await statusText(page)) === `${named(zb)}, Offered: its first price went out to save while you were deciding. Nothing was changed. Try again.`
+    && !(await confirmOf(page)) && (await look(page, za.id, 1)).text !== "$1,000", await statusText(page));
+  await saved(page, calls, n0, 2);
+  await page.waitForTimeout(1200);
+  ok("V: …nothing more was sent: the price saved and the server ticked Offered, as the status line warned",
+    saveCalls(calls).length === n0 + 2 && F.size(zb.id).base_price === 900 && F.size(zb.id).active === true && F.size(za.id).base_price === za.base_price, JSON.stringify(F.size(zb.id)));
+  ok("V: no page errors (a first price sent under the confirm)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 

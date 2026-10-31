@@ -472,6 +472,11 @@ Deno.test("paste, fill down and clear check the page can still edit and go throu
   assert(change.includes(`apply({ type: "commits", edits, at: Date.now() });`) && change.includes("sendNow();") && change.includes("backToWork();"),
     "one queue event, sent at once, and a waiting leave is called off");
   assertEquals((page.match(/type: "commits"/g) || []).length, 1, "the only way in for a paste, a fill or a clear");
+  // A first price sent or saved while the confirm was open has said Offered: a block saying otherwise
+  // changes nothing (its Offered box would be dropped), checked before anything goes into the queue.
+  const late = change.indexOf("const late = edits.find((d) => ssPgOffLost(qRef.current, d));");
+  assert(late > 0 && late < change.indexOf("backToWork();") && change.includes("if (late) { setSaid({ tone: \"amber\", text: `${whereOf(late.sizeId)}, Offered: "),
+    "an Offered a first price can no longer carry refuses the whole change, before the queue");
   // The planners decide; more than one size asks first.
   const propose = between(page, "const propose = (plan) => {", "\n  };", "propose");
   assert(propose.includes("if (!plan.ok) { setSaid({ tone: \"amber\", text: plan.error }); return; }"), "a refusal changes nothing and says why");

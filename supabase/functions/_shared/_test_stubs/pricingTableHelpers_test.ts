@@ -1549,10 +1549,11 @@ Deno.test("ssPgEarlierText: the backup's red entries, named for the status line"
 // Lifted the same way, from the shipped text. The VIEW is what the page hands them: the drawn rows
 // (ssPgRows), the drawn size ids, the option columns, Real-Time Pricing, and the save queue.
 const P4B = ["function ssPgParseTsv(text) {", "function ssPgToTsv(rows) {", "function ssPgParseOffered(text) {",
-  "function ssPgSelectionBlock(view, ids, c0, c1) {", "function ssPgPlanCells(view, targets, opts) {", "function ssPgPastePlan(view, at, block, opts) {",
-  "function ssPgFillPlan(view, sel, opts) {", "function ssPgClearPlan(view, sel, opts) {", "function ssPgChangeSummary(sizes) {"].map(lift).join("\n");
-const K = new Function(`${PURE}\n${SAVE}\n${P4}\n${P4B}; return { ssPgParseTsv, ssPgToTsv, ssPgParseOffered, ssPgSelectionBlock, ssPgPlanCells, ssPgPastePlan,
-  ssPgFillPlan, ssPgClearPlan, ssPgChangeSummary };`)() as Record<string, (...a: Any[]) => Any>;
+  "function ssPgSelectionBlock(view, ids, c0, c1) {", "function ssPgOffLost(q, d) {", "function ssPgPlanCells(view, targets, opts) {",
+  "function ssPgPastePlan(view, at, block, opts) {", "function ssPgFillPlan(view, sel, opts) {", "function ssPgClearPlan(view, sel, opts) {",
+  "function ssPgChangeSummary(sizes) {"].map(lift).join("\n");
+const K = new Function(`${PURE}\n${SAVE}\n${P4}\n${P4B}; return { ssPgParseTsv, ssPgToTsv, ssPgParseOffered, ssPgSelectionBlock, ssPgOffLost, ssPgPlanCells,
+  ssPgPastePlan, ssPgFillPlan, ssPgClearPlan, ssPgChangeSummary };`)() as Record<string, (...a: Any[]) => Any>;
 // The page's view of a model: rows as drawn with `opts` (ssPgRows), and a queue that starts from the
 // read unless one is given.
 const viewOf = (m: Any, opts: Any = {}, q: Any = null) => {
@@ -1717,6 +1718,73 @@ Deno.test("paste: a first price with Offered 'no' goes with Offered unticked; wi
   const fill = K.ssPgFillPlan(viewOf(m, { showHidden: true }), { r0: 0, r1: 1, c0: 1, c1: 2 });
   assertEquals(onlyEdits(fill), ["02 price=0 (seen null)"]);
   assertEquals([fill.edits[0].off, fill.sizes[0].nowShown], [false, true], "copied from an offered size: offered");
+});
+
+// A first price already on its way has said Offered: its call carried Offered unticked or left it to
+// the server's tick. A paste saying otherwise used to plan the price again with `off`, and the queue
+// dropped it as no change to the price: the size went into the designer while the confirm said it
+// stayed out. A transport failure keeps a price in flight for minutes, so a paste then hit it every time.
+Deno.test("paste: Offered on a size whose first price is already on its way is refused when it says otherwise; it never vanishes, and the confirm counts what happens", () => {
+  const v = viewOf(M4());
+  const STILL = "Row 1 (Test Barn 10x16), Offered: its first price is still saving. Try again once it's saved.";
+  // 10x16 has no price on file; $5,000 typed and sent, the answer not back yet.
+  const out = Q(v.q, commit(Z2, "price", 5000), { type: "send" });
+  assertEquals(out.flight.body.sizes[0].to, { price: 5000 }, "the call carries no Offered: the server ticks it with the price");
+  const vo = { ...v, q: out };
+  // The reviewer's case, a block with 12x24 under it: refused whole, before anything changes.
+  assertEquals(K.ssPgPastePlan(vo, { sizeId: Z2, col: 1 }, [["5000", "no"], ["4900", "no"]]), { ok: false, error: STILL, problems: 1 });
+  assertEquals(K.ssPgPastePlan(vo, { sizeId: Z2, col: 1 }, [["6000", "no"]]).error, STILL, "with another price too (that one would go after the first, and Offered not with it)");
+  assertEquals(K.ssPgPastePlan(vo, { sizeId: Z2, col: 2 }, [["no"]]).error, STILL);
+  // Fill down names the size alone.
+  const rows = viewOf(M4(), { showHidden: true }, out);
+  assertEquals(K.ssPgFillPlan({ ...rows, q: Q(out, commit(Z1, "active", false)) }, { r0: 0, r1: 1, c0: 1, c1: 2 }).error,
+    "Test Barn 10x16, Offered: its first price is still saving. Try again once it's saved.");
+  // "yes" is what that call does: nothing more to send for Offered, and the confirm counts it as joining.
+  assertEquals(K.ssPgPastePlan(vo, { sizeId: Z2, col: 1 }, [["5000", "yes"]]).edits, []);
+  const yes = K.ssPgPastePlan(vo, { sizeId: Z2, col: 1 }, [["6000", "yes"]]);
+  assertEquals([onlyEdits(yes), yes.sizes[0].nowShown], [["02 price=6000 (seen 5000)"], true]);
+  // A call that carried Offered unticked (a "no" pasted while the price was unsent): "no" again is no
+  // change, "yes" is refused, and a price pasted alone over it leaves the size out, as that call does.
+  const offOut = Q(v.q, { type: "commits", edits: K.ssPgPastePlan(v, { sizeId: Z2, col: 1 }, [["5000", "no"]]).edits, at: 0 }, { type: "send" });
+  assertEquals(offOut.flight.body.sizes[0].to, { price: 5000, active: false });
+  const vf = { ...v, q: offOut };
+  assertEquals(K.ssPgPastePlan(vf, { sizeId: Z2, col: 1 }, [["5000", "no"]]).edits, []);
+  assertEquals(K.ssPgPastePlan(vf, { sizeId: Z2, col: 2 }, [["yes"]]).error, STILL);
+  const alone = K.ssPgPastePlan(vf, { sizeId: Z1, col: 1 }, [["10"], ["5100"]]);
+  assertEquals(K.ssPgChangeSummary(alone.sizes).text, "Change 2 sizes, Test Barn 10x12 to Test Barn 10x16: 2 prices. Continue?", "not counted as joining the designer");
+  // Once it has saved (the server ticked Offered), "no" is an ordinary Offered edit, and the size ends unoffered.
+  const db: Record<string, Row> = { [Z2]: { version: SIZES[2].updated_at, price: null, active: false, cells: {} } };
+  let q = Q(out, { type: "ok", n: out.flight.n, answer: serve(db, out.flight.body) });
+  assertEquals([db[Z2].price, db[Z2].active], [5000, true]);
+  const after = K.ssPgPastePlan({ ...v, q }, { sizeId: Z2, col: 1 }, [["5000", "no"]]);
+  assertEquals(onlyEdits(after), ["02 active=false (seen true)"]);
+  [q] = roundTrip(Q(q, { type: "commits", edits: after.edits, at: 0 }), db);
+  assertEquals([db[Z2].price, db[Z2].active, S.ssPgCount(q).red], [5000, false, 0], "unoffered, as the paste said");
+});
+
+// The same thing a moment later: the price was unsent when the block was checked, and went out on its
+// own while the confirm was open (the send clock runs under it). The page asks ssPgOffLost at Continue.
+Deno.test("ssPgOffLost: a paste's Offered holds while its first price is unsent; one sent or saved since would lose it", () => {
+  const v = viewOf(M4());
+  const q0 = Q(v.q, commit(Z2, "price", 5000));
+  const plan = K.ssPgPastePlan({ ...v, q: q0 }, { sizeId: Z1, col: 1 }, [["10", "yes"], ["5000", "no"]]);
+  const pe = plan.edits.find((d: Any) => d.sizeId === Z2);
+  assertEquals(pe, { sizeId: Z2, f: "price", value: 5000, seen: 5000, off: true });
+  assertEquals(K.ssPgChangeSummary(plan.sizes).text, "Change 2 sizes, Test Barn 10x12 to Test Barn 10x16: 1 price. Continue?");
+  assertEquals(plan.edits.map((d: Any) => K.ssPgOffLost(q0, d)), [false, false], "unsent: the 'no' goes with the price");
+  const q1 = Q(q0, { type: "send" });
+  assertEquals(q1.flight.body.sizes[0].to, { price: 5000 }, "sent without it");
+  assertEquals(K.ssPgOffLost(q1, pe), true, "on its way: committing it now would drop the 'no'…");
+  assertEquals(Q(q1, { type: "commits", edits: [pe], at: 0 }).fields[Z2].price, q1.fields[Z2].price, "…as the queue shows: nothing of it is kept");
+  const db: Record<string, Row> = { [Z2]: { version: SIZES[2].updated_at, price: null, active: false, cells: {} } };
+  const q2 = Q(q1, { type: "ok", n: q1.flight.n, answer: serve(db, q1.flight.body) });
+  assertEquals([q2.sizes[Z2].price, q2.sizes[Z2].active, K.ssPgOffLost(q2, pe)], [5000, true, true], "saved, and the server ticked it");
+  // What the server does anyway is never lost: "yes" either way, "no" once Offered is unticked on file.
+  assertEquals([K.ssPgOffLost(q1, { ...pe, off: false }), K.ssPgOffLost(q2, { ...pe, off: false })], [false, false]);
+  assertEquals(K.ssPgOffLost(Q(q2, commit(Z2, "active", false)), pe), false);
+  // Nothing else is ever judged: a price with no `off`, an Offered edit, a size that went.
+  assertEquals([K.ssPgOffLost(q1, { sizeId: Z2, f: "price", value: 5000, seen: 5000 }), K.ssPgOffLost(q1, { sizeId: Z2, f: "active", value: false, seen: false, off: true }),
+    K.ssPgOffLost(q1, { ...pe, sizeId: zid(77) }), K.ssPgOffLost(null, pe)], [false, false, false, false]);
 });
 
 Deno.test("paste, fill and clear take nothing on a size being removed: refused, named", () => {

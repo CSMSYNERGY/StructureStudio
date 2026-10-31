@@ -4555,6 +4555,26 @@ function ssPgSelectionBlock(view, ids, c0, c1) {
   });
 }
 
+// Whether a price edit's Offered (`off`, ssPgPlanCells: a paste or fill giving a size its first
+// price says Offered unticked, or ticked by the server) would be lost if it went into the queue
+// now (`q`). It rides on the call that sends the first price, so it holds while that price is
+// unsent. Once the price is on its way, that call has said Offered (unticked when it carried
+// `off`, ticked by the server when not), and once it is on file the server holds Offered: an edit
+// asking otherwise would be dropped as no change to the price, and the size would end up the other
+// way from what the paste said and the confirm counted (plan 3.11, 4.11). False with no `off`.
+function ssPgOffLost(q, d) {
+  if (!d || d.f !== "price" || !("off" in d) || d.value == null) return false;
+  const s = q && q.sizes ? q.sizes[d.sizeId] : null;
+  const fs = (q && q.fields && q.fields[d.sizeId]) || {};
+  if (!s) return false;
+  const a = fs.active, x = fs.price;
+  if (s.price != null) {
+    const now = a && a.pending ? a.pending.to : a && a.inflight ? a.inflight.to : !!s.active;
+    return !!now !== !d.off;
+  }
+  return !!(x && x.inflight) && !!x.inflight.off !== !!d.off;
+}
+
 // THE VALUE CHECK of a paste, a fill or a clear (plan 3.9, 3.11): every target box is judged before
 // anything changes, ALL OR NOTHING. `targets`: [{ id, n (its row in the block, from 1), cells:
 // [{ col, text }] in column order }]. Each box follows the rules typing does:
@@ -4565,6 +4585,8 @@ function ssPgSelectionBlock(view, ids, c0, c1) {
 //             ticks Offered with a first price (plan 3.9), so "yes" sends nothing more, and "no" marks
 //             the price `off`, which sends Offered unticked with it (ssPgBuildBatch). Each box takes
 //             what was pasted, as the Excel importer does (plan 4.11: a "no" row stays unoffered).
+//             A first price already on its way has said Offered: a different answer is refused,
+//             "its first price is still saving" (ssPgOffLost).
 //   A size being removed takes nothing: "this size is being removed."
 //   An option a whole number from 0 to 999,999; blank is 0 (not included).
 //   A value equal to what is STORED is always accepted, and a box whose value as drawn already says
@@ -4595,8 +4617,10 @@ function ssPgPlanCells(view, targets, opts) {
     if (q.removes && q.removes[t.id]) { bad(null, "this size is being removed."); return; }
     const shown = (f) => { const x = fs && fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
     const before = { price: shown("price"), active: !!shown("active") };
-    // A first price waiting to be sent already says whether Offered goes with it unticked.
-    const waitOff = !!(fs && fs.price && fs.price.pending && fs.price.pending.off);
+    // A first price waiting to be sent already says whether Offered goes with it unticked, and so
+    // does one on its way (what its call carried).
+    const px = fs && fs.price;
+    const waitOff = !!(px && (px.inflight ? px.inflight.off : px.pending && px.pending.off));
     let price = before.price, activeTo, offTo;
     let prices = 0, options = 0, offered = 0;
     const mine = [];
@@ -4615,12 +4639,15 @@ function ssPgPlanCells(view, targets, opts) {
         // Ticked with no price after this row: the server would refuse it (and untick it anyway).
         if (p.value && price == null && !ssPgSame(p.value, before.active)) { bad(c, "Add a price first."); return; }
         // A first price: Offered rides on it. "yes" is the server's own tick; "no" goes with the
-        // price as unticked. A price that is already waiting is put in again to say which.
+        // price as unticked. A price that is already waiting is put in again to say which. One
+        // already on its way has said it, and nothing more can go with it: a different answer is
+        // refused, as the Offered box itself is disabled until that price is on file (plan 3.9).
         if (s.price == null && price != null) {
           offTo = !p.value;
           let pe = mine.find((d) => d.f === "price");
           if (!pe && offTo !== waitOff) { pe = { sizeId: t.id, f: "price", value: price, seen: before.price }; mine.push(pe); offered++; }
           if (pe) pe.off = offTo;
+          if (pe && ssPgOffLost(q, pe)) bad(c, "its first price is still saving. Try again once it's saved.");
           return;
         }
         if (!ssPgSame(p.value, before.active)) { mine.push({ sizeId: t.id, f: "active", value: p.value, seen: before.active }); activeTo = p.value; offered++; }
@@ -12532,6 +12559,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // pasted block stays selected, the way a sheet shows what it pasted.
   const applyChange = (edits, area) => {
     if (!canEditNow()) return;
+    // A first price sent (or saved) while the confirm was open has said Offered already: a paste
+    // saying otherwise would lose that box, so nothing changes (all or nothing, as when the paste
+    // was checked: ssPgPlanCells) and the status line says why.
+    const late = edits.find((d) => ssPgOffLost(qRef.current, d));
+    if (late) { setSaid({ tone: "amber", text: `${whereOf(late.sizeId)}, Offered: its first price went out to save while you were deciding. Nothing was changed. Try again.` }); return; }
     backToWork();
     setTip(null);
     apply({ type: "commits", edits, at: Date.now() });
