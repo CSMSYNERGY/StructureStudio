@@ -423,6 +423,11 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 /* Layers (plan 3.6): corner 7, header 6, the selection over a frozen column 5, frozen body 4, the
    selection over an option column 2. Section band at top 0, names at 22px. */
 .ss-pg-sec th{position:sticky;top:0;z-index:6;height:22px;padding:0 6px;font-size:10.5px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;text-overflow:ellipsis;text-align:left}
+/* A section narrower than its name (ssPgSecNarrow; one 44 px column fits none of them in capitals):
+   the name in its own case at 9.5 px, centred on up to two 9.5 px lines inside the same 22 px band,
+   a long word breaking only at its soft hyphen (ssPgSecText). Never cut, and the band never grows.
+   Measured (10-31): two 10 px lines put the second line's text box half a pixel past the band. */
+.ss-pg-sec th.ss-pg-secn{padding:0 1px;font-size:9.5px;line-height:9.5px;letter-spacing:0;text-transform:none;white-space:normal;text-align:center;-webkit-hyphens:manual;hyphens:manual}
 /* height = the measured --ss-pg-hh exactly: 8 px of padding top and bottom, no bottom border (the
    divider is a shadow), so a name's box is the height less 16 px, which is what .ss-pg-vh allows. */
 .ss-pg-names th{position:sticky;top:22px;z-index:6;height:var(--ss-pg-hh,64px);padding:8px 4px;vertical-align:top;text-align:center;border-bottom:0;box-shadow:inset 0 -2px 0 #CBD5E1}
@@ -588,7 +593,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
-<script defer src="/portal.app.compiled.js?v=0edba5fd" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=2d551dfd" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

@@ -3042,15 +3042,28 @@ function ssPgModel(cat, table) {
 // that strip with its list box open (empty: true); `keep` ({ [sizeId]: true }, the sizes this page
 // added) are never folded away, so a new size, unpriced and so hidden, stays in view to be priced.
 // An "add" row is not a cell either.
+//
+// What is hidden NOW (2026-10-31): `live` ({ [sizeId]: hidden }, ssPgHiddenNow) overrides the read's
+// `z.hidden` with what the rows themselves draw, this page's edits and save answers included, so a
+// band's "N hidden" moves with its rows (a first price saved, Offered unticked, a price cleared) and
+// not only with the next read. `stay` ({ [sizeId]: true }, the sizes drawn last time while "Show
+// hidden sizes" was off) are never folded away either: a size that turns hidden under the builder,
+// by their own save or by a read, stays where it is, greyed, until the toggle is turned off again
+// or the page is opened again, so no row jumps out from under the cursor or an open editor. A
+// folded size that becomes offered unfolds at once: an offered size is never folded away. So a
+// band's `folded` (the sizes not drawn) is at most its `hidden`.
 function ssPgRows(model, opts) {
   const o = opts || {};
   const showHidden = o.showHidden !== false;
   const keep = o.keep || {};
+  const live = o.live || {};
+  const stay = o.stay || {};
   const out = [];
   if (!model) return out;
+  const hid = (z) => (live[z.id] != null ? !!live[z.id] : !!z.hidden);
   const add = (s) => {
-    const hidden = s.sizes.filter((z) => z.hidden).length;
-    const shown = showHidden ? s.sizes : s.sizes.filter((z) => !z.hidden || keep[z.id]);
+    const hidden = s.sizes.filter(hid).length;
+    const shown = showHidden ? s.sizes : s.sizes.filter((z) => !hid(z) || keep[z.id] || stay[z.id]);
     const folded = s.sizes.length - shown.length;
     out.push({ kind: "band", id: "b-" + s.id, style: s, total: s.sizes.length, hidden, folded });
     if (!s.sizes.length) {
@@ -3130,6 +3143,28 @@ function ssPgHeaderHeight(labels, measure, pad) {
     need = Math.max(need, best);
   });
   return Math.ceil(need) + (Number(pad) || 0);
+}
+
+// Which sections' names need the band's narrow style (plan 3.3's section band; portal.html
+// .ss-pg-secn). In the band's own style (capitals at 10.5 px, 6 px padding each side, a 1 px divider)
+// a name wider than its section ends in "…", and in one 44 px column (`colW`) none of the six names
+// ssPricingColumns gives fits: "VENTS" read "VE…" on beta. `measure(text)` is a name's drawn width in
+// that style; with nothing to measure with, a one-column section is the narrow one. → one true or
+// false per section.
+function ssPgSecNarrow(sections, measure, colW) {
+  return (sections || []).map((s) => {
+    const n = s && Array.isArray(s.cols) ? s.cols.length : 0;
+    if (typeof measure !== "function") return n <= 1;
+    return measure(String((s && s.name) || "")) + 13 > n * (Number(colW) || 44);
+  });
+}
+
+// A section's name as the narrow style draws it: in its own case, on up to two lines of the same
+// 22 px band, and a word of seven letters or more may break once, after its third letter, with a
+// hyphen. The hyphen is a soft one, drawn only when the line breaks there: "Windows" is wider than
+// one column even at 9.5 px, and "Win-" over "dows" is not. The header's title keeps the plain name.
+function ssPgSecText(name) {
+  return String(name == null ? "" : name).replace(/[A-Za-z]{7,}/g, (w) => w.slice(0, 3) + "\u00AD" + w.slice(3));
 }
 
 // The Excel template's header and rows, built from a FRESH catalog (columns) and size_table (styles,
@@ -3279,6 +3314,29 @@ function ssPgRowView(z, s, fs, cols) {
   // Offered cannot be ticked before the size HAS a price on file (the server ticks it with the
   // first price), so the box stays disabled while that first price is still on its way.
   return { priceText: ssPgFmtPrice(price), offered, noPrice: price == null || s.price == null, hidden: !offered, values, marks };
+}
+
+// The sizes whose rows are drawn hidden from the designer NOW where the read (`z.hidden`, ssPgModel)
+// says otherwise: a save answer here does not read the table again, so a first price that saved
+// (the server ticks Offered with it), Offered unticked or a price cleared is in the queue (`sizes`,
+// `fields`: ssPgQueue's) long before any read has it. Judged exactly as each row is drawn
+// (ssPgRowView), so a style's band ("12 sizes · 3 hidden", ssPgRows' `live`) says what its rows
+// show. → { [sizeId]: hidden }, only the sizes that differ from the read. `prev` (the last answer)
+// comes back as the very same object when nothing differs from it, so a commit that hides or shows
+// nothing leaves the rows' memo alone (plan 3.5: a commit re-renders one row).
+function ssPgHiddenNow(model, sizes, fields, prev) {
+  const out = {};
+  if (model && sizes) {
+    [...(model.styles || []), ...(model.hiddenStyles || [])].forEach((st) => (st.sizes || []).forEach((z) => {
+      const s = sizes[z.id];
+      if (!s) return;
+      const h = ssPgRowView(z, s, fields ? fields[z.id] : null, null).hidden;
+      if (h !== !!z.hidden) out[z.id] = h;
+    }));
+  }
+  const keys = Object.keys(out);
+  if (prev && Object.keys(prev).length === keys.length && keys.every((k) => prev[k] === out[k])) return prev;
+  return out;
 }
 
 // How many boxes are waiting, saving and red, and sizes being added or removed. The badge and the
@@ -11517,6 +11575,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const addrRef = useRef(null);                    // this page's own address, for putting it back over a held Back
   const passRef = useRef(false);                   // the popstate this page sends itself on its way out (go)
   const viewsRef = useRef({});                     // size id → its last row view (ssPgRowView), so PgRow's memo holds
+  const hidNowRef = useRef(null);                  // the last ssPgHiddenNow answer, handed back while nothing differs
+  const stayRef = useRef(null);                    // sizes drawn while "Show hidden sizes" is off: they stay drawn (ssPgRows' `stay`)
   const dragRef = useRef(false);
   const flashRef = useRef(null);
   const fnRef = useRef({});                        // this render's handlers, for listeners added once
@@ -11552,8 +11612,22 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const lostEdit = !!(q && (q.viewOnly || (q.stopped && q.stopped.kind === "tenant")));
   const canEdit = editable && !lostEdit;
   const keepIds = useMemo(() => { const k = {}; added.forEach((a) => { k[a.id] = true; }); return k; }, [added]);
-  const rows = useMemo(() => ssPgRows(model, { showHidden, hiddenStylesOpen, adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds }),
-    [model, showHidden, hiddenStylesOpen, addOpen, canEdit, keepIds]);
+  // Hidden NOW, as the rows draw it (ssPgHiddenNow): the same object until some size's hidden state
+  // moves, so a commit that hides or shows nothing leaves `rows` alone; one that does redraws its
+  // style's band, never another row.
+  const hidNow = useMemo(() => (hidNowRef.current = ssPgHiddenNow(model, q ? q.sizes : null, q ? q.fields : null, hidNowRef.current)),
+    [model, q && q.sizes, q && q.fields]);
+  // With "Show hidden sizes" off, the sizes drawn last time stay drawn (ssPgRows' `stay`): only
+  // turning the toggle off, or opening the page, folds what is hidden then. While it is on, or while
+  // there is no table yet, nothing is kept, so the next fold starts fresh.
+  const rows = useMemo(() => {
+    const out = ssPgRows(model, { showHidden, hiddenStylesOpen, adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds, live: hidNow,
+      stay: showHidden ? null : stayRef.current });
+    const drawn = {};
+    if (!showHidden && model) out.forEach((r) => { if (r.kind === "size") drawn[r.id] = true; });
+    stayRef.current = showHidden || !model ? null : drawn;
+    return out;
+  }, [model, showHidden, hiddenStylesOpen, addOpen, canEdit, keepIds, hidNow]);
   const order = useMemo(() => rows.filter((r) => r.kind === "size").map((r) => r.id), [rows]);
   const byId = useMemo(() => {
     const m = {};
@@ -12698,7 +12772,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const a = activeRef.current;
     const ai = a ? all.findIndex((r) => r.id === a.sizeId) : -1;
     const next = reds.find((x) => x.i > ai || (x.i === ai && x.col > a.col)) || reds[0];
-    if (next.r.size.hidden && !showHidden) toggleShowHidden(true);
+    // Folded away (ssPgRows): not drawn, hidden now and not added here. A size in the collapsed
+    // Hidden styles section is not drawn either, and opening it draws it unless it is that too.
+    const hidNowOf = (z) => (hidNow[z.id] != null ? !!hidNow[z.id] : !!z.hidden);
+    if (!showHidden && !byId[next.r.id] && hidNowOf(next.r.size) && !keepIds[next.r.id]) toggleShowHidden(true);
     if (!next.r.style.active && !hiddenStylesOpen) setHiddenStylesOpen(true);
     focusGrid();
     moveTo({ sizeId: next.r.id, col: next.col });
@@ -13002,17 +13079,32 @@ function PgConfirm({ text, onYes, onNo }) {
 // second line inside the column rather than being cut; the full name is also each header's title
 // and aria-label, and the toolbar's readout while it is pointed at.
 const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, onPeekEnd }) {
+  // A section too narrow for its name (ssPgSecNarrow) draws it in the narrow style instead of
+  // cutting it. Measured in the band's own style (portal.html .ss-pg-sec th: weight 800, 10.5 px,
+  // capitals, 0.4 px letter spacing) in the page's font; the harness's C1 holds the two together.
+  const narrowSecs = useMemo(() => {
+    const ctx = ssPgMeasureCtx();
+    let measure = null;
+    if (ctx) {
+      try {
+        ctx.font = `800 10.5px ${getComputedStyle(document.body).fontFamily}`;
+        measure = (t) => ctx.measureText(t.toUpperCase()).width + 0.4 * t.length + 1;
+      } catch (_e) { measure = null; }
+    }
+    return ssPgSecNarrow(sections, measure, SS_PG_COL_W);
+  }, [sections]);
   let from = 4;
   return (
     <thead onMouseOver={onPeek} onMouseLeave={onPeekEnd}>
       <tr role="row" aria-rowindex={1} className="ss-pg-sec">
         <th className="ss-pg-corner" colSpan={3} role="columnheader" aria-colindex={1} aria-colspan={3} aria-label="Size, price and offered" />
-        {sections.map((s) => {
+        {sections.map((s, i) => {
           const at = from;
           from += s.cols.length;
           return (
             <th key={s.name} colSpan={s.cols.length} role="columnheader" aria-colindex={at} aria-colspan={s.cols.length}
-              title={s.name} style={{ background: "#" + String(s.argb || "FFF1F5F9").slice(2) }}>{s.name}</th>
+              title={s.name} className={narrowSecs[i] ? "ss-pg-secn" : undefined}
+              style={{ background: "#" + String(s.argb || "FFF1F5F9").slice(2) }}>{narrowSecs[i] ? ssPgSecText(s.name) : s.name}</th>
           );
         })}
       </tr>
@@ -13113,14 +13205,16 @@ function PgEditor({ inputRef, init, label, price, onKeyDown, onInput, onBlur }) 
 // A style's band: its name and how many sizes it has. The name sticks to the left edge while the
 // grid scrolls sideways. "＋ Add sizes" (plan 3.7, `canAdd`: the page can edit) opens the style's add
 // strip under it, or closes it (`open`); it is handled by the grid's own click (data-pg-act), so the
-// band takes no function and its memo holds.
+// band takes no function and its memo holds. `hidden` is what its rows show now (ssPgRows' `live`),
+// and `folded` how many of them are not drawn: all of them ("3 hidden, folded away"), or some, when
+// sizes added here or hidden under the builder stay drawn ("3 hidden, 2 folded away").
 const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, total, hidden, folded, ncols, canAdd = false, open = false }) {
   return (
     <tr role="row" aria-rowindex={rowIndex} className="ss-pg-band" data-band={styleId}>
       <td role="rowheader" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
         <div className="ss-pg-bandin">
           <b>{label}</b>
-          <span>{total === 1 ? "1 size" : `${total} sizes`}{hidden ? ` · ${hidden} hidden${folded ? ", folded away" : ""}` : ""}</span>
+          <span>{total === 1 ? "1 size" : `${total} sizes`}{hidden ? ` · ${hidden} hidden${folded ? (folded < hidden ? `, ${folded} folded away` : ", folded away") : ""}` : ""}</span>
           {canAdd && <button type="button" className="ss-pg-addbtn" title="Add sizes to this style (Alt+Enter on any of its sizes)" data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>}
         </div>
       </td>

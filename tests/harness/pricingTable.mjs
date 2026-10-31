@@ -19,7 +19,11 @@
 //      than its box reads whole in its title; the header, the frozen Size/Price/Offered and a style's
 //      name stay pinned on both scroll axes; the page itself never scrolls. Run on the 25-column
 //      fixture and again on the plan's 210 sizes x 38 columns. A header screenshot is kept at each
-//      width (SS_PG_HEADER_SHOTS names a folder for them).
+//      width (SS_PG_HEADER_SHOTS names a folder for them). No section's name is cut in its band. C1:
+//      a section only one column wide (beta, 10-31: Vents read "VE…"): with one option in each of the
+//      six sections, and again with Built-in options at two, every name reads whole in its band at
+//      1280 and 1440 (its box as wide as its text, its title the name), the band stays 22 px and the
+//      header no taller.
 //   D  THE GRID: the active-column readout follows a click and the arrows; aria-selected moves;
 //      "Show hidden sizes" folds hidden rows and is remembered, and a cursor on a folded size moves to
 //      the next size still drawn; Jump to style scrolls the band under the header; ARIA roles and counts.
@@ -104,6 +108,11 @@
 //      open. A view-only page copies and changes nothing. A 20,000-box paste (500 sizes x 40 columns) is timed from the paste to the confirm and
 //      from Continue to the commit drawn (longest task, rows re-rendered), then saved in calls of at
 //      most 50 sizes and 2,500 boxes; 20,040 boxes are refused.
+//   H  THE BAND'S "N HIDDEN" (beta, 10-31: "3 sizes · 3 hidden" after all three were priced and
+//      offered, until a reload), against fakeServer: a first price saved, Offered unticked and a
+//      price cleared each move the style's count at once, with no read; with "Show hidden sizes" off,
+//      a size hidden under the cursor stays drawn (the band says how many are folded away), and stays
+//      across a read that lands with the editor open on it, which then saves there; a reload agrees.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails if an arrow key re-renders a row or a
 //      commit re-renders more than the one it changed, and at 1x if the plan's targets are missed
@@ -168,6 +177,9 @@ const { ok, failed } = reporter();
 const shots = shotsDir("pricing-table");
 const headerShots = process.env.SS_PG_HEADER_SHOTS || shots;
 mkdirSync(headerShots, { recursive: true });
+// C1's section bands and H's style band, pictured (SS_PG_BAND_SHOTS names a folder for them).
+const bandShots = process.env.SS_PG_BAND_SHOTS || shots;
+mkdirSync(bandShots, { recursive: true });
 // PG_ONLY=C,T runs those sections alone (the server check always runs).
 const ONLY = (process.env.PG_ONLY || "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
 const want = (s) => !ONLY.length || ONLY.includes(s);
@@ -580,6 +592,24 @@ const confirmOf = (page) => page.evaluate(() => {
     focus: document.activeElement && d.contains(document.activeElement) ? document.activeElement.textContent : null };
 });
 const statusText = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" | "));
+// The section band over the option names (C, C1): each section's name as drawn (soft hyphens
+// dropped), its title, its columns and whether it is cut (wider or taller than its box, or not the
+// whole name), plus the band's height, how far below it the names row starts, and the header's.
+const secBand = (page) => page.evaluate(() => {
+  const labels = [...document.querySelectorAll(".ss-pg-grid tr.ss-pg-sec th[title]")].map((th) => {
+    const r = th.getBoundingClientRect();
+    return { title: th.title, text: th.textContent.replace(/\u00AD/g, ""), cols: Number(th.getAttribute("aria-colspan")), sw: th.scrollWidth, cw: th.clientWidth,
+      sh: th.scrollHeight, ch: th.clientHeight, h: Math.round(r.height * 10) / 10, narrow: th.classList.contains("ss-pg-secn") };
+  });
+  const sec = document.querySelector(".ss-pg-grid tr.ss-pg-sec").getBoundingClientRect();
+  const names = document.querySelector(".ss-pg-names th.ss-pg-oh").getBoundingClientRect();
+  const thead = document.querySelector(".ss-pg-grid thead").getBoundingClientRect();
+  return { labels, cut: labels.filter((l) => l.text !== l.title || l.sw > l.cw || l.sh > l.ch || l.h !== 22).map((l) => l.title),
+    secH: Math.round(sec.height * 10) / 10, namesTop: Math.round((names.top - sec.top) * 10) / 10, namesH: Math.round(names.height * 10) / 10,
+    theadH: Math.round(thead.height * 10) / 10, theadY: Math.round(thead.top) };
+});
+// The text in a style's band ("12 sizes · 1 hidden"), by its style id (H).
+const bandText = (page, styleId) => page.evaluate((id) => { const s = document.querySelector(`tr[data-band="${id}"] .ss-pg-bandin span`); return s ? s.textContent : null; }, styleId);
 const tsvOf = (rows) => rows.map((r) => r.join("\t") + "\r\n").join("");
 
 // ── A: the Sheds card ────────────────────────────────────────────────────────────────────────
@@ -807,6 +837,8 @@ for (const run of want("C") ? C_RUNS : []) {
   ok(`${tag}: a two-line name reads in order (first line on the right, top to bottom)`, h.twoLine > 0 && h.backwards.length === 0, JSON.stringify(h.backwards));
   ok(`${tag}: the longest name is the 46-character door, drawn whole`, h.longest === LONG && LONG.length === 46, `${h.longest} (${h.longest.length})`);
   ok(`${tag}: no ellipsis on the headers at this width`, !h.ellipsis);
+  const secs = await secBand(page);
+  ok(`${tag}: no section's name is cut in its band, which stays 22 px`, secs.labels.length > 0 && secs.cut.length === 0 && secs.secH === 22, JSON.stringify({ cut: secs.cut, secH: secs.secH }));
   const fit = await page.evaluate(() => {
     const cells = [...document.querySelectorAll(".ss-pg-grid tbody td[data-c]")].filter((td) => td.textContent === "480" || td.textContent === "1200");
     return { n: cells.length, over: cells.filter((td) => td.scrollWidth > td.clientWidth).map((td) => td.textContent), w: cells[0] ? Math.round(cells[0].getBoundingClientRect().width) : 0 };
@@ -857,6 +889,43 @@ for (const run of want("C") ? C_RUNS : []) {
   await page.screenshot({ path: join(shots, `${tag.replace("@", "-")}-full.png`) });
   ok(`${tag}: no page errors`, errors.length === 0, errors.join(" | "));
   await ctx.close();
+}
+
+// ── C1: a section only one column wide (beta, 10-31: Vents read "VE…", its name only in the title).
+// One option in each of the six sections (Other is a skylight, a category with no section of its
+// own), then Built-in options at two columns, which cut its name too. At 1280 and 1440 every name
+// reads whole in its band: drawn as the title says, its box as wide as its text and no taller, the
+// band 22 px, the names row right under it, and the header no taller than the band plus the names. ──
+if (want("C")) {
+  const fx = (id, name, category, w, h) => ({ id, name, category, width_in: w, height_in: h, active: true, archived: false });
+  const ONE = [fx(201, "Single Door", "door", 36, 76), fx(202, "Window", "window", 24, 36), fx(203, "Gable Vent", "vent", 12, 12),
+    fx(204, "Ramp Kit", "ramp", 48, 6), fx(205, "Skylight", "skylight", 24, 24)];
+  const C1_RUNS = [
+    { tag: "one column each", slug: "one-column-each", items: [{ key: "loft", label: "Loft (sq ft)" }],
+      want: [["Built-in options", 1], ["Doors", 1], ["Windows", 1], ["Vents", 1], ["Ramps", 1], ["Other", 1]] },
+    { tag: "Built-in options at two", slug: "built-in-two", items: [{ key: "loft", label: "Loft (sq ft)" }, { key: "workbench", label: "Workbench" }],
+      want: [["Built-in options", 2], ["Doors", 1], ["Windows", 1], ["Vents", 1], ["Ramps", 1], ["Other", 1]] },
+  ];
+  for (const run of C1_RUNS) {
+    for (const width of [1280, 1440]) {
+      const tag = `C1@${width} (${run.tag})`;
+      const cat = { ...catalogFor(OWN), items: run.items, fixtures: ONE };
+      const table = tableFor(OWN, cat);
+      const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, table: () => table }, { width, height: 900 });
+      await waitGrid(page).catch(() => {});
+      await page.waitForTimeout(300);
+      const b = await secBand(page);
+      const got = b.labels.map((l) => [l.title, l.cols]);
+      ok(`${tag}: the six sections, one column each but as set`, JSON.stringify(got) === JSON.stringify(run.want), JSON.stringify(got));
+      ok(`${tag}: every section's full name reads in its band, none cut, the title kept`, b.labels.length === run.want.length && b.cut.length === 0,
+        JSON.stringify(b.labels.map((l) => `${l.title}: "${l.text}" ${l.sw}/${l.cw} x ${l.sh}/${l.ch} h${l.h}${l.narrow ? " narrow" : ""}`)));
+      ok(`${tag}: the band stays 22 px, the names row starts right under it, and the header is no taller`,
+        b.secH === 22 && b.namesTop === 22 && b.theadH === Math.round((22 + b.namesH) * 10) / 10, JSON.stringify({ secH: b.secH, namesTop: b.namesTop, namesH: b.namesH, theadH: b.theadH }));
+      await page.screenshot({ path: join(bandShots, `C1-section-band-${run.slug}-${width}.png`), clip: { x: 0, y: Math.max(0, b.theadY - 8), width: Math.min(width, 520), height: 64 } });
+      ok(`${tag}: no page errors`, errors.length === 0, errors.join(" | "));
+      await ctx.close();
+    }
+  }
 }
 
 // ── D: the grid's moves, readout, folding, jump, ARIA ──
@@ -3249,6 +3318,109 @@ if (want("V")) {
   ok("V: the page never freezes: no single task over 1 s planning, committing or saving 20,000 boxes",
     plan.longest < 1000 && commit.longest < 1000 && saving.longest < 1000 && plan.shown < 1500 && commit.painted < 1500, JSON.stringify({ plan, commit, saving }));
   ok("V: no page errors (20,000 boxes)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// ── H: the style band's "N hidden" follows what its rows show, with no read (beta, 10-31: "3 sizes · 3
+// hidden" after all three had a price saved and were offered, until a reload). A save answer reads
+// nothing, so each step below checks that no table read went out. Then, with "Show hidden sizes" off,
+// a size hidden under the cursor stays where it is (greyed, counted, "N folded away" for the rest),
+// even when a read lands with the editor open on it, and Enter saves there. A reload agrees. ──
+if (want("H")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const t = F.table(OWN);
+  const STYLE = t.styles[0].id;
+  const barn = barnOf(t);
+  const N = barn.length;
+  const isHid = (z) => z.base_price == null || !z.active;
+  const h0 = barn.filter(isHid).length;
+  const first = barn.find((z) => z.base_price == null);
+  const [o1, o2, o3] = barn.filter((z) => !isHid(z) && z.base_price !== WIDE_PRICE);
+  const LOFT = keyCol(cat, "loft");
+  // What the band should say: "12 sizes · 2 hidden", "…, folded away" when all of them are, "…, 1 folded away" when some.
+  const says = (h, f = 0) => `${N} sizes${h ? ` · ${h} hidden${f ? (f < h ? `, ${f} folded away` : ", folded away") : ""}` : ""}`;
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 100 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const shot = (name) => page.evaluate((id) => { const tr = document.querySelector(`tr[data-band="${id}"]`); const r = tr.getBoundingClientRect(); return { y: r.top }; }, STYLE)
+    .then((r) => page.screenshot({ path: join(bandShots, name), clip: { x: 0, y: Math.max(0, r.y - 4), width: 640, height: 30 * 6 } }));
+  const b0 = await bandText(page, STYLE);
+  ok("H: the band starts from the read's hidden sizes", h0 > 0 && !!first && !!o3 && b0 === says(h0), JSON.stringify({ b0, h0 }));
+  const reads0 = tableCalls(calls).length;
+  // The count goes up, up, then down, so no step can pass on a count that never moved.
+  // 1. Offered unticked: hidden the moment it is, and still once saved.
+  let n0 = saveCalls(calls).length;
+  await page.locator(sel(o1.id, 2)).click();
+  await page.keyboard.press("Space");
+  const b1a = await bandText(page, STYLE);
+  const sv1 = await saved(page, calls, n0);
+  const b1 = await bandText(page, STYLE);
+  ok("H: Offered unticked: one more hidden at once, and still once saved, with no read", b1a === says(h0 + 1) && sv1 && b1 === says(h0 + 1) && tableCalls(calls).length === reads0,
+    JSON.stringify({ b1a, b1, want: says(h0 + 1), reads: tableCalls(calls).length - reads0 }));
+  // 2. A price cleared (Delete on the Price box): one more.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(o2.id, 1)).click();
+  await page.keyboard.press("Delete");
+  const sv2 = await saved(page, calls, n0);
+  const b2 = await bandText(page, STYLE);
+  await shot("H-2-offered-unticked-and-price-cleared.png");
+  ok("H: a price cleared: one more hidden, with no read", sv2 && b2 === says(h0 + 2) && (await look(page, o2.id, 1)).text === "" && tableCalls(calls).length === reads0,
+    JSON.stringify({ b2, want: says(h0 + 2), reads: tableCalls(calls).length - reads0 }));
+  // 3. A first price on a size never priced: saved, the server ticks Offered with it, and the band says so.
+  n0 = saveCalls(calls).length;
+  await typeIn(page, first.id, 1, "2500");
+  const sv3 = await saved(page, calls, n0);
+  const b3 = await bandText(page, STYLE);
+  await shot("H-3-first-price-saved.png");
+  ok("H: a first price saved: one fewer hidden at once, with no read", sv3 && b3 === says(h0 + 1) && (await look(page, first.id, 2)).text === "✓" && tableCalls(calls).length === reads0,
+    JSON.stringify({ b3, want: says(h0 + 1), reads: tableCalls(calls).length - reads0 }));
+  // 4. "Show hidden sizes" off: every hidden size folds, and the band says so.
+  const k = h0 + 1;
+  await page.locator(".ss-pg-tog input").uncheck();
+  await page.waitForTimeout(150);
+  const b4 = await bandText(page, STYLE);
+  const drawn4 = await page.evaluate((ids) => ids.filter((id) => !!document.querySelector(`tr[data-s="${id}"]`)).length, barn.map((z) => z.id));
+  ok("H: Show hidden sizes off folds them all, and the band says so", b4 === says(k, k) && drawn4 === N - k, JSON.stringify({ b4, want: says(k, k), drawn4 }));
+  // 5. Offered unticked on a size under the cursor: counted at once, and the row stays where it is.
+  n0 = saveCalls(calls).length;
+  await page.locator(sel(o3.id, 2)).click();
+  await page.keyboard.press("Space");
+  const b5a = await bandText(page, STYLE);
+  const sv5 = await saved(page, calls, n0);
+  const s5 = await state(page);
+  const kept5 = await page.locator(`tr[data-s="${o3.id}"].ss-pg-hid`).count();
+  await shot("H-5-hidden-under-the-cursor-stays.png");
+  ok("H: a size hidden under the cursor with Show hidden sizes off is counted, stays drawn (greyed) and keeps the cursor",
+    b5a === says(k + 1, k) && sv5 && (await bandText(page, STYLE)) === says(k + 1, k) && kept5 === 1 && s5.readout === `Offered · ${named(o3)}`,
+    JSON.stringify({ b5a, want: says(k + 1, k), kept5, readout: s5.readout }));
+  // 6. A read lands (another tab saved) with the editor open on that size: the row, the editor and its
+  // text stay put, and Enter saves into that size.
+  await page.locator(sel(o3.id, LOFT)).click();
+  await page.keyboard.type("7");
+  const reads6 = tableCalls(calls).length;
+  n0 = saveCalls(calls).length;
+  await tellFrom(page, OWN);
+  const until = Date.now() + 8000;
+  while (Date.now() < until && tableCalls(calls).length < reads6 + 2) await sleep(50);
+  await page.waitForTimeout(400);
+  const geo = await page.evaluate((a) => {
+    const td = document.querySelector(a), ed = document.querySelector(".ss-pg-ed");
+    if (!td || !ed) return { td: !!td, ed: !!ed };
+    const r = td.getBoundingClientRect(), e = ed.getBoundingClientRect();
+    return { td: true, ed: true, same: [r.left, r.top, r.width, r.height].map(Math.round).join() === [e.left, e.top, e.width, e.height].map(Math.round).join(), value: ed.value };
+  }, sel(o3.id, LOFT));
+  const b6 = await bandText(page, STYLE);
+  ok("H: a read with the editor open on that size: the row, the editor over its box and the text all stay (the band unchanged)",
+    tableCalls(calls).length >= reads6 + 2 && geo.td && geo.ed && geo.same && geo.value === "7" && b6 === says(k + 1, k), JSON.stringify({ reads: tableCalls(calls).length - reads6, geo, b6 }));
+  await page.keyboard.press("Enter");
+  ok("H: …and Enter saves into that size", (await saved(page, calls, n0)) && F.cells(o3.id).loft === 7, JSON.stringify(F.cells(o3.id)));
+  // 7. Opened again: the read agrees, and everything hidden folds.
+  await page.reload();
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(300);
+  const b7 = await bandText(page, STYLE);
+  ok("H: a reload agrees, and folds every hidden size", b7 === says(k + 1, k + 1) && (await page.locator(`tr[data-s="${o3.id}"]`).count()) === 0, JSON.stringify({ b7, want: says(k + 1, k + 1) }));
+  ok("H: no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 

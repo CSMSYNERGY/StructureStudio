@@ -84,10 +84,12 @@ Deno.test("ssPricingColumns: empty sections drop out, and a missing catalog give
 const PURE = ["function fmtFtIn(inches) {", "function ssPricingColumns(cat) {", "function ssPgFmtPrice(v) {",
   "function ssPgModel(cat, table) {", "function ssPgRows(model, opts) {", "function ssPgMove(order, ncols, at, key, shift) {",
   "function ssPgReanchor(prev, order, at, ncols) {",
-  "function ssPgHeaderHeight(labels, measure, pad) {", "function ssPgTemplate(cat, table) {"].map(lift).join("\n");
+  "function ssPgHeaderHeight(labels, measure, pad) {", "function ssPgSecNarrow(sections, measure, colW) {", "function ssPgSecText(name) {",
+  "function ssPgTemplate(cat, table) {"].map(lift).join("\n");
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const H = new Function(`${PURE}; return { ssPgFmtPrice, ssPgModel, ssPgRows, ssPgMove, ssPgReanchor, ssPgHeaderHeight, ssPgTemplate };`)() as Record<string, (...a: Any[]) => Any>;
+const H = new Function(`${PURE}; return { ssPgFmtPrice, ssPgModel, ssPgRows, ssPgMove, ssPgReanchor, ssPgHeaderHeight, ssPgSecNarrow, ssPgSecText,
+  ssPgTemplate };`)() as Record<string, (...a: Any[]) => Any>;
 
 // Made-up ids and names only: this repo is public.
 const sid = (n: number) => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, "0")}`;
@@ -262,6 +264,34 @@ Deno.test("ssPgHeaderHeight: the longer half at the best split, the longest name
   assertEquals(H.ssPgHeaderHeight(["", null], px, 16), 16);
 });
 
+Deno.test("ssPgSecNarrow: a section name wider than its band (padding and divider included) takes the narrow style; one column fits none of the six", () => {
+  // Capitals at 10.5 px in the band's own style, measured in Chrome on Windows (Segoe UI) on 10-31:
+  // BUILT-IN OPTIONS 104.7, DOORS 39.2, WINDOWS 59.1, VENTS 36.4, RAMPS 40.3, OTHER 38.1.
+  const W: Record<string, number> = { "Built-in options": 104.7, Doors: 39.2, Windows: 59.1, Vents: 36.4, Ramps: 40.3, Other: 38.1 };
+  const px = (t: string) => W[t] ?? t.length * 7;
+  const one = Object.keys(W).map((name) => ({ name, cols: [{ key: name }] }));
+  assertEquals(H.ssPgSecNarrow(one, px, 44), [true, true, true, true, true, true], "\"VENTS\" read \"VE…\" on beta: at 44 px none of them fits");
+  const two = Object.keys(W).map((name) => ({ name, cols: [{ key: "a" }, { key: "b" }] }));
+  assertEquals(H.ssPgSecNarrow(two, px, 44), [true, false, false, false, false, false], "at two columns only BUILT-IN OPTIONS is still too wide");
+  assertEquals(H.ssPgSecNarrow([{ name: "Built-in options", cols: [1, 2, 3] }], px, 44), [false]);
+  // 31 px of text fits one column exactly (44 - 12 padding - 1 divider); 32 does not.
+  assertEquals(H.ssPgSecNarrow([{ name: "x", cols: [1] }, { name: "y", cols: [1] }], (t: string) => (t === "x" ? 31 : 32), 44), [false, true]);
+  // Nothing to measure with: the one-column sections are the narrow ones.
+  assertEquals(H.ssPgSecNarrow([{ name: "Doors", cols: [1] }, { name: "Windows", cols: [1, 2] }], null, 44), [true, false]);
+  assertEquals(H.ssPgSecNarrow(null, px, 44), []);
+  // The real sections, in ssPricingColumns' own order.
+  assertEquals(H.ssPgSecNarrow(ssPricingColumns(CAT), px, 44), [true, false, true, true, true, false],
+    "CAT: Built-in options (two columns), Windows, Vents and Ramps (one each) are narrow; Doors and Other (two each) are not");
+});
+
+Deno.test("ssPgSecText: a word of seven letters or more may break once after its third letter, at a soft hyphen; nothing else changes", () => {
+  assertEquals(H.ssPgSecText("Windows"), "Win\u00ADdows");
+  assertEquals(H.ssPgSecText("Built-in options"), "Built-in opt\u00ADions");
+  for (const n of ["Doors", "Vents", "Ramps", "Other"]) assertEquals(H.ssPgSecText(n), n);
+  assertEquals(H.ssPgSecText(null), "");
+  for (const n of ssPricingColumns(CAT).map((s) => s.name)) assertEquals(H.ssPgSecText(n).replace(/\u00AD/g, ""), n, "the name itself is untouched");
+});
+
 Deno.test("ssPgHeaderHeight: a browser filling lines greedily never needs a third line at that height", () => {
   // Greedy line filling over spaces, the way a browser wraps white-space:normal text.
   const px = (s: string) => s.length * 7 + (s.match(/[MW]/g) || []).length * 3;
@@ -321,10 +351,10 @@ Deno.test("SS_SETTINGS_WRITE_RE: the table's save, Add style and a rename reach 
 // edge would answer 400.
 const SAVE = ["function ssPgParsePrice(text, stored) {", "function ssPgParseQty(text, stored) {", "function ssPgParseDim(text) {",
   "function ssPgVal(s, f) {", "function ssPgSame(a, b) {", "function ssPgServerSizes(model) {", "function ssPgRowView(z, s, fs, cols) {",
-  "function ssPgCount(q) {", "function ssPgBuildBatch(q, caps) {", "function ssPgRebase(sent, server, again) {", "function ssPgQueue(q, ev) {",
+  "function ssPgHiddenNow(model, sizes, fields, prev) {", "function ssPgCount(q) {", "function ssPgBuildBatch(q, caps) {", "function ssPgRebase(sent, server, again) {", "function ssPgQueue(q, ev) {",
   "function ssPgDueIn(q, now) {", "function ssPgBackoff(failures, schedule) {", "function ssPgAnswerKind(r, expect) {",
   "function ssPgErrorLine(where, field, err) {", "function ssPgColBox(col, narrow) {"].map(lift).join("\n");
-const S = new Function(`${PURE}\n${SAVE}; return { ssPgParsePrice, ssPgParseQty, ssPgParseDim, ssPgVal, ssPgSame, ssPgServerSizes, ssPgRowView, ssPgCount,
+const S = new Function(`${PURE}\n${SAVE}; return { ssPgParsePrice, ssPgParseQty, ssPgParseDim, ssPgVal, ssPgSame, ssPgServerSizes, ssPgRowView, ssPgHiddenNow, ssPgCount,
   ssPgBuildBatch, ssPgRebase, ssPgQueue, ssPgDueIn, ssPgBackoff, ssPgAnswerKind, ssPgErrorLine, ssPgColBox };`)() as Record<string, (...a: Any[]) => Any>;
 
 Deno.test("parse parity: the browser's parsers answer the shared table exactly as the server's do", () => {
@@ -971,6 +1001,78 @@ Deno.test("ssPgRowView: the server's values with this page's edits on top, and o
   const unpriced = S.ssPgRowView(m.styles[0].sizes.find((x: Any) => x.id === zid(2)), { version: "v", price: null, active: false, cells: {} },
     { price: { pending: { to: 900, from: null, seq: 1 } } }, m.cols);
   assertEquals([unpriced.priceText, unpriced.noPrice], ["$900", true], "Offered stays disabled until the first price is on file");
+});
+
+// The style band's "N hidden" (beta, 10-31: "3 sizes · 3 hidden" after all three had a price saved
+// and were offered, until a reload). A save answer reads nothing, so the count has to come from what
+// the rows draw: the queue's sizes and boxes, not the read.
+Deno.test("ssPgHiddenNow: what the rows draw as hidden where the read says otherwise; the same object while nothing moves", () => {
+  const m = H.ssPgModel(TCAT, TABLE);
+  const db = copy(S.ssPgServerSizes(m) as Record<string, Row>);
+  const band = (live: Any, opts: Any = {}) => H.ssPgRows(m, { ...opts, live }).filter((r: Any) => r.kind === "band").map((r: Any) => `${r.style.label} ${r.total}/${r.hidden}/${r.folded}`);
+  let q = S.ssPgQueue(null, { type: "init", sizes: copy(db), cols: ["loft", "workbench", "11"] });
+  const h0 = S.ssPgHiddenNow(m, q.sizes, q.fields, null);
+  assertEquals(h0, {});
+  assert(S.ssPgHiddenNow(m, q.sizes, q.fields, h0) === h0, "nothing differs: the very same object, so the rows' memo holds");
+  assertEquals(band(h0), ["Test Barn 3/1/0", "Test Utility 2/1/0", "Test Empty 0/0/0"]);
+  // A first price on 10x16 (never priced): typed, it is still hidden, because the server ticks
+  // Offered only with the price on file. An option typed meanwhile moves nothing either.
+  q = Q(q, commit(zid(2), "price", 1500), commit(zid(1), "c:loft", 30));
+  assert(S.ssPgHiddenNow(m, q.sizes, q.fields, h0) === h0, "a commit that hides or shows nothing hands back the same object");
+  // Saved: the answer ticks Offered, and the band says so with no read.
+  [q] = roundTrip(q, db);
+  assertEquals([q.sizes[zid(2)].price, q.sizes[zid(2)].active], [1500, true]);
+  const h1 = S.ssPgHiddenNow(m, q.sizes, q.fields, h0);
+  assertEquals(h1, { [zid(2)]: false });
+  assertEquals(band(h1), ["Test Barn 3/0/0", "Test Utility 2/1/0", "Test Empty 0/0/0"]);
+  // Offered unticked on 12x24: hidden the moment it is committed, and still once saved.
+  q = Q(q, commit(zid(3), "active", false));
+  const h2 = S.ssPgHiddenNow(m, q.sizes, q.fields, h1);
+  assertEquals(h2, { [zid(2)]: false, [zid(3)]: true });
+  assertEquals(band(h2)[0], "Test Barn 3/1/0");
+  [q] = roundTrip(q, db);
+  const h3 = S.ssPgHiddenNow(m, q.sizes, q.fields, h2);
+  assert(h3 === h2, "saved as it was drawn: nothing moved, the same object");
+  // A price cleared on 10x12 ($0, offered): hidden too.
+  q = Q(q, commit(zid(1), "price", null));
+  [q] = roundTrip(q, db);
+  const h4 = S.ssPgHiddenNow(m, q.sizes, q.fields, h3);
+  assertEquals(h4, { [zid(1)]: true, [zid(2)]: false, [zid(3)]: true });
+  assertEquals(band(h4)[0], "Test Barn 3/2/0");
+  // Offered ticked again on 8x10 (priced, unticked) in Test Utility: shown.
+  q = Q(q, commit(zid(4), "active", true));
+  assertEquals(band(S.ssPgHiddenNow(m, q.sizes, q.fields, h4))[1], "Test Utility 2/0/0");
+  // Once a read says the same, nothing differs any more.
+  const read = H.ssPgModel(TCAT, { ...TABLE, sizes: SIZES.map((z) => z.id === zid(1) ? { ...z, base_price: null, active: false }
+    : z.id === zid(2) ? { ...z, base_price: 1500, active: true } : z.id === zid(3) ? { ...z, active: false } : z.id === zid(4) ? { ...z, active: true } : z) });
+  assertEquals(S.ssPgHiddenNow(read, q.sizes, q.fields, h4), {});
+  // No queue yet, or no model: nothing to say.
+  assertEquals(S.ssPgHiddenNow(m, null, null, null), {});
+  assertEquals(S.ssPgHiddenNow(null, q.sizes, q.fields, null), {});
+});
+
+Deno.test("ssPgRows: the band counts what the rows show (live); with Show hidden sizes off, a size drawn last time stays drawn (stay); an offered size never folds", () => {
+  const m = H.ssPgModel(TCAT, TABLE);
+  const shape = (rows: Any[]) => rows.map((r) => r.kind === "size" ? r.size.label : r.kind === "band" ? `[${r.style.label} ${r.total}/${r.hidden}/${r.folded}]` : r.kind === "empty" ? `(${r.text})` : `{hidden ${r.count} ${r.open}}`);
+  const barn = (opts: Any) => shape(H.ssPgRows(m, opts)).slice(0, 4);
+  // Off, from the read: 10x16 (never priced) folds away.
+  assertEquals(barn({ showHidden: false }), ["[Test Barn 3/1/1]", "10x12", "12x24", "[Test Utility 2/1/1]"]);
+  // Offered unticked here on 12x24, drawn last time: it stays drawn, greyed, and is counted.
+  const drawn = { [zid(1)]: true, [zid(3)]: true };
+  assertEquals(barn({ showHidden: false, live: { [zid(3)]: true }, stay: drawn }), ["[Test Barn 3/2/1]", "10x12", "12x24", "[Test Utility 2/1/1]"]);
+  // Turned off again (nothing kept): now it folds with the other.
+  assertEquals(barn({ showHidden: false, live: { [zid(3)]: true } }), ["[Test Barn 3/2/2]", "10x12", "[Test Utility 2/1/1]", "8x12"]);
+  // A read that says 12x24 is hidden does not fold it either while it is kept.
+  const read = H.ssPgModel(TCAT, { ...TABLE, sizes: SIZES.map((z) => z.id === zid(3) ? { ...z, active: false } : z) });
+  assertEquals(shape(H.ssPgRows(read, { showHidden: false, stay: drawn })).slice(0, 3), ["[Test Barn 3/2/1]", "10x12", "12x24"]);
+  // A folded size that becomes offered (a first price saved) unfolds at once, in its place.
+  assertEquals(barn({ showHidden: false, live: { [zid(2)]: false }, stay: drawn }), ["[Test Barn 3/0/0]", "10x12", "10x16", "12x24"]);
+  // Every size folded: the placeholder counts them.
+  assertEquals(shape(H.ssPgRows(m, { showHidden: false, live: { [zid(1)]: true, [zid(3)]: true } })).slice(0, 2), ["[Test Barn 3/3/3]", "(3 hidden sizes, folded away.)"]);
+  // Shown: everything drawn, the count still live; `stay` and `keep` change nothing there.
+  assertEquals(barn({ live: { [zid(3)]: true, [zid(2)]: false }, stay: drawn }), ["[Test Barn 3/1/0]", "10x12", "10x16", "12x24"]);
+  // Hidden styles count the same way.
+  assertEquals(shape(H.ssPgRows(m, { hiddenStylesOpen: true, live: { [zid(6)]: true } })).slice(-2), ["[Test Old Style 1/1/0]", "6x8"]);
 });
 
 Deno.test("ssPgColBox: the overlay's columns; Size, Price and Offered frozen, Size alone below 700 px", () => {
