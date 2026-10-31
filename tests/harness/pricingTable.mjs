@@ -100,8 +100,8 @@
 //      goes with Offered unticked and the size stays out of the designer; with "yes" the server ticks
 //      it. While that first price is still saving, a "no" is refused by name (pasted again once it
 //      has saved, it unticks the size); one checked before the price went out changes nothing at
-//      Continue, and says why. A view-only page copies and changes
-//      nothing. A 20,000-box paste (500 sizes x 40 columns) is timed from the paste to the confirm and
+//      Continue, and says why, as does one onto a new size someone else added while the confirm was
+//      open. A view-only page copies and changes nothing. A 20,000-box paste (500 sizes x 40 columns) is timed from the paste to the confirm and
 //      from Continue to the commit drawn (longest task, rows re-rendered), then saved in calls of at
 //      most 50 sizes and 2,500 boxes; 20,040 boxes are refused.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
@@ -3016,6 +3016,41 @@ if (want("V")) {
   ok("V: …nothing more was sent: the price saved and the server ticked Offered, as the status line warned",
     saveCalls(calls).length === n0 + 2 && F.size(zb.id).base_price === 900 && F.size(zb.id).active === true && F.size(za.id).base_price === za.base_price, JSON.stringify(F.size(zb.id)));
   ok("V: no page errors (a first price sent under the confirm)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// V1d: a paste onto a size still being added, its confirm open while someone else adds the same
+// dimensions (the create comes back `exists`): Continue changes nothing, all or nothing, and the
+// status line says why, rather than the other size's boxes going and the new one's vanishing.
+if (want("V")) {
+  const cat = catalogFor(OWN);
+  const t0 = tableFor(OWN, cat);
+  const F = fakeServer(cat, t0);
+  const barn = t0.styles[0];
+  const last = barnOf(F.table(OWN)).pop();
+  const COLLEAGUE = uid("7", 4250);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 50 } }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  // The page's create waits 2.5 s; just before it is applied a colleague adds the same 14x30.
+  F.script.push({ delayMs: 2500, before: (FF) => FF.apply({ creates: [{ id: COLLEAGUE, styleId: barn.id, width: 14, length: 30 }] }) });
+  await page.locator(`tr[data-band="${barn.id}"] .ss-pg-addbtn`).click();
+  await page.keyboard.type("14x30");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /Price · Test Barn 14x30/.test((document.querySelector(".ss-pg-readout") || {}).textContent || ""), null, { timeout: 4000 }).catch(() => {});
+  await page.locator(sel(last.id, 1)).click();
+  await clip.paste(page, tsvOf([["1111"], ["2222"]]));
+  const cf = await confirmOf(page);
+  const n0 = saveCalls(calls).length;
+  await page.waitForFunction(() => !document.querySelector(".ss-pg-wait"), null, { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(400);
+  await page.keyboard.press("Enter");   // Continue has the focus
+  await page.waitForTimeout(1200);
+  const s = await state(page);
+  ok("V: a paste whose new size was added by someone else while the confirm was open changes nothing at Continue, and says why",
+    !!cf && /^Change 2 sizes, /.test(cf.text) && s.status === "Someone else just added one of those sizes while you were deciding. Nothing was changed. Check its numbers and try again."
+    && !saveCalls(calls).slice(n0).some((c) => (c.body.sizes || []).length) && F.size(last.id).base_price === last.base_price && !F.table(OWN).sizes.some((z) => z.base_price === 2222),
+    JSON.stringify({ cf, s, sent: saveCalls(calls).slice(n0).map((c) => c.body.sizes) }));
+  ok("V: no page errors (a paste onto a size someone else added)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 

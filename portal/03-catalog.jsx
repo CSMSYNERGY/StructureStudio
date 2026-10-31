@@ -12557,6 +12557,17 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // pasted block stays selected, the way a sheet shows what it pasted.
   const applyChange = (edits, area) => {
     if (!canEditNow()) return;
+    // A size that left the queue while the confirm was open (someone else added the same dimensions
+    // first, or a read no longer has it) can take none of its boxes, so nothing changes (all or
+    // nothing) and the status line says why, instead of the rest going without a word.
+    const cur = qRef.current;
+    const gone = edits.find((d) => !cur.sizes[d.sizeId]);
+    if (gone) {
+      setSaid({ tone: "amber", text: cur.renamed[gone.sizeId]
+        ? "Someone else just added one of those sizes while you were deciding. Nothing was changed. Check its numbers and try again."
+        : "One of those sizes isn't on this account any more. Nothing was changed. Try again." });
+      return;
+    }
     // A first price sent (or saved) while the confirm was open has said Offered already: a paste
     // saying otherwise would lose that box, so nothing changes (all or nothing, as when the paste
     // was checked: ssPgPlanCells) and the status line says why.

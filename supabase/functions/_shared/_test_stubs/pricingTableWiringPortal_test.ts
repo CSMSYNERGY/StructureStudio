@@ -489,6 +489,10 @@ Deno.test("paste, fill down and clear check the page can still edit and go throu
   const late = change.indexOf("const late = edits.find((d) => ssPgOffLost(qRef.current, d));");
   assert(late > 0 && late < change.indexOf("backToWork();") && change.includes("if (late) { setSaid({ tone: \"amber\", text: `${whereOf(late.sizeId)}, Offered: "),
     "an Offered a first price can no longer carry refuses the whole change, before the queue");
+  // A size that left the queue while the confirm was open (added by someone else first, or gone from
+  // a read) refuses the whole change too: its boxes would be dropped without a word.
+  const gone = change.indexOf("const gone = edits.find((d) => !cur.sizes[d.sizeId]);");
+  assert(gone > 0 && gone < change.indexOf("backToWork();") && change.includes("cur.renamed[gone.sizeId]"), "a size gone since the paste was checked refuses the whole change, before the queue");
   // The planners decide; more than one size asks first.
   const propose = between(page, "const propose = (plan) => {", "\n  };", "propose");
   assert(propose.includes("if (!plan.ok) { setSaid({ tone: \"amber\", text: plan.error }); return; }"), "a refusal changes nothing and says why");
