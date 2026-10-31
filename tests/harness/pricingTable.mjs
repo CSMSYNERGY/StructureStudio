@@ -275,9 +275,10 @@ const OPTION_KEYS = (cat) => {
   return [...layout, ...by("door"), ...by("window"), ...by("vent"), ...by("ramp")];
 };
 
-// Styles and sizes. `scale` multiplies the sizes per style (the timing fixtures).
+// Styles and sizes. `scale` multiplies the sizes per style (the timing fixtures). `used` is size_table's
+// list of the sizes saved designs use (migration 351): none here; fakeServer's F.used marks some.
 function tableFor(clientId, cat, { styles = 3, perStyle = null, hiddenStyle = false, noStyles = false, rtpOn = false } = {}) {
-  if (noStyles) return { ok: true, clientId, rtpOn: false, styles: [], sizes: [], inclusions: [], counts: { sizes: 0, inclusions: 0 } };
+  if (noStyles) return { ok: true, clientId, rtpOn: false, styles: [], sizes: [], inclusions: [], counts: { sizes: 0, inclusions: 0 }, used: [] };
   const NAMES = ["Test Barn", "Test Lofted Barn", "Test Utility Shed"];
   const st = [];
   for (let i = 0; i < styles; i++) st.push({ id: uid("5", i + 1), key: `test-${i + 1}`, label: NAMES[i] || `Test Style ${i + 1}`, code: `T${i + 1}`, active: true, sort_order: i });
@@ -304,7 +305,7 @@ function tableFor(clientId, cat, { styles = 3, perStyle = null, hiddenStyle = fa
       if (n % 7 === 0) incs.push({ size_id: id, item_key: "workbench", included: false, qty: 2 });
     }
   });
-  return { ok: true, clientId, rtpOn, styles: st, sizes, inclusions: incs, counts: { sizes: sizes.length, inclusions: incs.length } };
+  return { ok: true, clientId, rtpOn, styles: st, sizes, inclusions: incs, counts: { sizes: sizes.length, inclusions: incs.length }, used: [] };
 }
 
 // ── The fake backend ─────────────────────────────────────────────────────────────────────────
@@ -347,7 +348,8 @@ function fakeServer(cat, table) {
     table: (clientId) => ({ ok: true, clientId, rtpOn: F.rtp, styles: table.styles, sizes: [...sizes.values()].map((z) => ({ ...z })),
       inclusions: [...inc.entries()].flatMap(([id, c]) => Object.entries(c).map(([k, q]) => ({ size_id: id, item_key: k, included: true, qty: q }))),
       counts: { sizes: sizes.size, inclusions: [...inc.values()].reduce((n, c) => n + Object.keys(c).length, 0) },
-      used: [...F.used].filter((id) => sizes.has(id)) }),
+      // Sorted by uuid, as pricing_sizes_in_use's array_agg(distinct) hands it out.
+      used: [...F.used].filter((id) => sizes.has(id)).sort() }),
     size: (id) => sizes.get(id),
     cells: (id) => ({ ...(inc.get(id) || {}) }),
     poke: (id, change) => {
@@ -361,16 +363,21 @@ function fakeServer(cat, table) {
     malformed: (body) => {
       const list = [...(body.creates || []), ...(body.removes || []), ...(body.sizes || [])];
       if (!list.length || list.length > 50) return "entries";
-      // removes[i] is a uuid or exactly { id: <uuid>, base: <version> }, each size named once.
+      // removes[i] is a uuid or exactly { id: <uuid>, base: <version> }, base shaped as a version
+      // (validatePayload's VERSION), and no size is named twice anywhere in the call, in any case
+      // (its once(): creates, removes and sizes together).
       const UU = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const VERSION = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2})?)$/;
       const seen = new Set();
+      const once = (id) => { const k = String(id).toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; };
+      for (const c of body.creates || []) if (!c || !once(c.id)) return c ? "twice" : "shape";
       for (const r of body.removes || []) {
         const id = typeof r === "string" ? r : r && typeof r === "object" ? r.id : null;
         if (!UU.test(String(id))) return "removes";
-        if (typeof r === "object" && (Object.keys(r).sort().join() !== "base,id" || typeof r.base !== "string" || !r.base)) return "removes";
-        if (seen.has(id)) return "removes";
-        seen.add(id);
+        if (typeof r === "object" && (Object.keys(r).sort().join() !== "base,id" || typeof r.base !== "string" || !VERSION.test(r.base))) return "removes";
+        if (!once(id)) return "twice";
       }
+      for (const s of body.sizes || []) if (!s || !once(s.id)) return s ? "twice" : "shape";
       for (const s of body.sizes || []) {
         if (typeof s.base !== "string" || !s.from || !s.to) return "shape";
         if (("price" in s.to) !== ("price" in s.from) || ("active" in s.to) !== ("active" in s.from)) return "from/to";
@@ -403,9 +410,10 @@ function fakeServer(cat, table) {
           if (z.base_price == null && z.updated_at === z.created_at && !Object.keys(inc.get(id) || {}).length) { sizes.delete(id); inc.delete(id); return { id, status: "removed" }; }
           return { id, status: "refused", reason: "Only a size that was never priced or edited can be removed. Untick Offered to hide it." };
         }
-        if (z.updated_at !== e.base) return { id, status: "refused", code: "changed", reason: "This size was changed since it was read." };
-        if (F.bom.has(id)) return { id, status: "refused", code: "bom", reason: "This size has a Real-Time Pricing materials list." };
-        if (F.used.has(id)) return { id, status: "refused", code: "used", reason: "Saved designs use this size." };
+        // 351's own fallback words (the browser writes its own from `code`).
+        if (z.updated_at !== e.base) return { id, status: "refused", code: "changed", reason: "This size was changed since it was read, so it wasn't deleted." };
+        if (F.bom.has(id)) return { id, status: "refused", code: "bom", reason: "This size has a Real-Time Pricing materials list, so it wasn't deleted." };
+        if (F.used.has(id)) return { id, status: "refused", code: "used", reason: "Saved designs use this size, so it can't be deleted. Untick Offered to hide it." };
         const out = { id, status: "removed", row: rowOf(z), cells: F.cells(id) };
         sizes.delete(id);
         inc.delete(id);
