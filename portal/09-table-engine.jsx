@@ -141,6 +141,18 @@ const PM_TYPES = {
 const pmType = (col) => PM_TYPES[col.type] || PM_TYPES.text;
 const pmGroupable = (col, ctx) => pmType(col).groupsFor(col, ctx) != null;
 
+// ── Static columns ────────────────────────────────────────────────────────────
+// A column the SERVER derives from the row and serves on every board: Created and Requestor
+// (_shared/pmSystemColumns.ts, Carolyn 2026-11-01 — "this should be a static field and not
+// changeable"). They arrive as ordinary `date`/`text` columns carrying `system` + `readOnly`,
+// so everything below — rendering, sorting, search, the WHEN date filter, hiding — treats them
+// like any other column, and only these two tests say what cannot be done to them: no cell
+// editor opens, the header does not drag, and Board settings offers no rename or delete.
+// The ids are the same on every board, which is why they can be named as constants at all.
+const PM_SYSTEM_COL_IDS = new Set(["sys_created", "sys_requestor"]);
+const pmIsSystemCol = (col) => (typeof col === "string" ? PM_SYSTEM_COL_IDS.has(col) : !!(col && (col.system || PM_SYSTEM_COL_IDS.has(col.id))));
+const pmReadOnlyCol = (col) => !!(col && (col.readOnly || pmIsSystemCol(col)));
+
 // ── Inline cell editing ──────────────────────────────────────────────────
 // EVERY field is edited in its own cell (Carolyn 2026-08-27: "like in Monday and excel").
 // The item modal owns notes only — it is never a form, and nothing here opens it.
@@ -377,7 +389,7 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
   const cellFor = (r, col) => {
     const key = r.id + ":" + col.id;
     const v = r.values ? r.values[col.id] : null;
-    const open = editCell === key && canEdit;
+    const open = editCell === key && canEdit && !pmReadOnlyCol(col);
     const commit = (nv) => onCellCommit(r, col, nv);
     if (open && !CHOICE.has(col.type)) {
       return <PMCellInput col={col} value={v} onCommit={commit} onClose={() => setEditCell(null)} />;
@@ -393,6 +405,9 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
   };
   const cellClick = (r, col) => (e) => {
     if (!canEdit) return;
+    // A derived column is the row, read back — there is nothing to open. Swallowing the click
+    // rather than letting it fall through keeps it from opening the item drawer behind.
+    if (pmReadOnlyCol(col)) { e.stopPropagation(); return; }
     e.stopPropagation();
     const v = r.values ? r.values[col.id] : null;
     // Checkbox needs no editor at all — one click IS the change.
@@ -434,7 +449,7 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
             {visCols.map((c) => (
               <SortTh key={c.id} label={c.name} col={c.id} sortKey={sortKey} sortDir={sortDir} onSort={onSort}
                 style={{ ...PM_STICKY_TH, ...(c.width ? { width: c.width } : {}) }}
-                thProps={canEdit && onReorderCols ? {
+                thProps={canEdit && onReorderCols && !pmIsSystemCol(c) ? {
                   draggable: true,
                   onDragStart: (e) => { setDragColId(c.id); e.dataTransfer.effectAllowed = "move"; },
                   onDragEnd: () => { setDragColId(null); setColDropTarget(null); },
@@ -501,7 +516,12 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
                   </td>
                   {visCols.map((c) => (
                     <td key={c.id} onClick={cellClick(r, c)}
-                      style={{ ...S.td, verticalAlign: "middle", position: "relative", cursor: canEdit ? "pointer" : "default" }}>
+                      title={pmReadOnlyCol(c) ? c.name + " is filled in automatically and cannot be changed" : undefined}
+                      style={{ ...S.td, verticalAlign: "middle", position: "relative",
+                        cursor: canEdit && !pmReadOnlyCol(c) ? "pointer" : "default",
+                        // Muted, so a static cell reads as a fact about the row rather than
+                        // something that was left blank by whoever last edited it.
+                        ...(pmReadOnlyCol(c) ? { color: "#64748B", background: "#FCFCFD" } : {}) }}>
                       {cellFor(r, c)}
                     </td>
                   ))}

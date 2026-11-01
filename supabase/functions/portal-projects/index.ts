@@ -8,6 +8,7 @@ import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
 import { buildOverlayItems, choiceIdMap, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
+import { pmDecorateItems, pmSystemColumns, pmWithSystemValues } from "../_shared/pmSystemColumns.ts";
 import { boardsForAction, loadBoardPrivacy, projectsAudience } from "../_shared/pmBoardPrivacy.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
@@ -83,7 +84,9 @@ const APP_LABELS_ORIGIN: Record<string, string> = {
 };
 // deno-lint-ignore no-explicit-any
 function originOf(item: any, sub: any): { createdAt: string | null; label: string } {
-  const createdAt = item?.created_at ?? null;
+  // The same date the static Created column shows, so the drawer and the cell can never
+  // disagree: an imported row's ORIGINAL creation date (migration 352), else the row's own.
+  const createdAt = item?.source_created_at ?? item?.created_at ?? null;
   const by = String(item?.created_by_email || "");
   const who = (e: string) => (e.includes("@") ? e.split("@")[0] : e);
 
@@ -110,6 +113,10 @@ function originOf(item: any, sub: any): { createdAt: string | null; label: strin
 function str(v: unknown, max: number): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
 }
+// Every pm_* primary key is a uuid, so a filter built from a caller's id has to look like one
+// before it reaches `eq()` — Postgres answers a malformed uuid with 22P02, which arrives here
+// as a thrown error and leaves as a 500.
+const PM_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function cssColor(v: unknown): string | undefined {
   const s = str(v, 40);
   return /^[#a-zA-Z0-9(),.% -]+$/.test(s) && s ? s : undefined;
@@ -266,6 +273,10 @@ function defaultValues(columns: any[], already: Record<string, unknown>): Record
       const opt = (c.settings?.options || []).find((o: any) => o.label === HOME_APP_LABEL);
       if (opt) out[c.id] = [opt.id];
     } else if (c.type === "date" && c.name === "Created") {
+      // ⚠️ DEAD on every board since migration 352 retired the editable "Created" columns —
+      // the Created cell is now derived from the row (_shared/pmSystemColumns.ts) and no
+      // default can reach it. Kept so a board that hand-adds a date column called "Created"
+      // for some other purpose still gets today's date, which is what it would expect.
       out[c.id] = new Date().toISOString().slice(0, 10);
     }
   }
@@ -459,6 +470,59 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     if (error) throw error;
     return data || [];
   };
+  // ── Created / Requestor: served on every board, stored on none ──────────────────────────
+  // The two columns Carolyn asked to make static (2026-11-01) are SYNTHETIC: derived on read in
+  // _shared/pmSystemColumns.ts and merged into each item's `values` under reserved `sys_` ids.
+  //
+  // ⚠️ They are added to RESPONSES ONLY, never to `boardColumns`. sanitizeValues walks the
+  // column list it is given and keeps any key it finds for a column it recognises — so handing
+  // it a synthetic column is all it would take for a crafted payload to store a `sys_created`
+  // cell that then shadows nothing, lies in the jsonb, and confuses the next reader. Writes see
+  // the board's real pm_columns and drop the reserved ids before the database hears about them.
+  const withSystemColumns = (cols: unknown[]) => [...pmSystemColumns(), ...cols];
+
+  // Email → roster name, so a card Ahsan added reads "Ahsan" rather than "ahsan". pm_people is
+  // one global list; an operator with no roster row degrades to their email's local part.
+  let rosterNamesCache: Map<string, string> | null = null;
+  const rosterNames = async (): Promise<Map<string, string>> => {
+    if (rosterNamesCache) return rosterNamesCache;
+    const { data } = await admin.from("pm_people").select("name, email");
+    const m = new Map<string, string>();
+    for (const p of (data || []) as Array<{ name?: string; email?: string }>) {
+      if (p.email && p.name) m.set(String(p.email).toLowerCase(), String(p.name));
+    }
+    rosterNamesCache = m;
+    return m;
+  };
+
+  // The linked submissions for a whole list, in ONE read per 200 ids — a per-item lookup would
+  // be 47 round trips on the Feature Requests board.
+  // deno-lint-ignore no-explicit-any
+  const submissionsFor = async (items: any[]): Promise<Map<string, any>> => {
+    // deno-lint-ignore no-explicit-any
+    const out = new Map<string, any>();
+    const ids = [...new Set((items || [])
+      .map((i) => i?.feedback_submission_id).filter(Boolean).map(String))];
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await admin.from("feedback_submissions")
+        .select("id, client_id, source_app, submitter_name, submitter_email")
+        .in("id", ids.slice(i, i + 200));
+      if (error) throw error;
+      for (const r of data || []) out.set(String(r.id), r);
+    }
+    return out;
+  };
+
+  // One item, on its way back from a create/update — the browser replaces the row it is holding
+  // with this object, so without the derived cells an edit would blank its own Created column.
+  // deno-lint-ignore no-explicit-any
+  const decorateItem = async (item: any) => {
+    if (!item) return item;
+    const [subs, names] = await Promise.all([submissionsFor([item]), rosterNames()]);
+    const sub = item.feedback_submission_id ? subs.get(String(item.feedback_submission_id)) || null : null;
+    return pmWithSystemValues(item, sub, names);
+  };
+
   // Assignable people (pm_people, migration 148) — NOT the operator roster. Someone can
   // be assigned work without any access to builders' accounts, which is the whole point
   // of the split; the two are joined only by pm_people.user_id.
@@ -684,7 +748,9 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         // you change the board dropdown. Keyed by board id; `people` is one global list
         // (pm_people has no client_id — see _shared/pmRoster.ts).
         const colsByBoard: Record<string, unknown[]> = {};
-        for (const b of boards) { if (!b.locked) colsByBoard[b.id] = await boardColumns(b.id); }
+        // Created / Requestor ride along too, so the quick-add form and the board strip see
+        // the same column list the board itself serves. Nothing can be typed into them.
+        for (const b of boards) { if (!b.locked) colsByBoard[b.id] = withSystemColumns(await boardColumns(b.id)); }
         const { data: people, error: pErr } = await admin.from("pm_people")
           .select("id, name, email, user_id, active").eq("active", true).order("position");
         if (pErr) throw pErr;
@@ -775,8 +841,15 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           outItems = outItems.concat(foreign.map((f) => ({ ...f, group_id: "overlay:" + f.home_board_slug })));
         }
 
+        // Created / Requestor last of all, over the board's own items AND the overlay's foreign
+        // ones: an overlay row keeps its real row (`...it` in buildOverlayItems), so it derives
+        // from the same fields its home board would. The remap above never sees these ids —
+        // they are identical on every board, which is the one place pmOverlay's per-board uuid
+        // translation has nothing to do.
+        const [subsById, names] = await Promise.all([submissionsFor(outItems), rosterNames()]);
         return json({
-          board, columns, groups: outGroups, items: outItems,
+          board, columns: withSystemColumns(columns), groups: outGroups,
+          items: pmDecorateItems(outItems, subsById, names),
           people: opsRes.data, views: viewsRes.data, canWrite,
         });
       }
@@ -815,7 +888,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             submission = { ...sub, attachmentUrl };
           }
         }
-        return json({ item, updates, activity: actRes.data, submission, canWrite, origin: originOf(item, submission) });
+        return json({
+          item: pmWithSystemValues(item, submission, await rosterNames()),
+          updates, activity: actRes.data, submission, canWrite, origin: originOf(item, submission),
+        });
       }
 
       case "sign_attachment": {
@@ -1176,6 +1252,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const ids = Array.isArray(payload.orderedIds) ? payload.orderedIds.map((x: unknown) => str(x, 40)) : [];
         let pos = 1024;
         for (const id of ids) {
+          // `id` goes into `eq("id", …)` on a uuid column, so anything else is a 22P02 from
+          // Postgres and a 500 from here. The synthetic Created / Requestor ids are exactly
+          // that shape of non-uuid, and the browser already leaves them out — this is the
+          // second lock, so a stale tab reordering a board cannot take the save down.
+          if (!PM_UUID.test(id)) continue;
           const { error } = await admin.from("pm_columns").update({ position: pos }).eq("id", id).eq("board_id", boardId);
           if (error) throw error;
           pos += 1024;
@@ -1302,7 +1383,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         }
         await act(boardId, item.id, "create_item", note ? { name, via: "quick_add" } : { name });
         await propagateStatus(item, columns, values, {});
-        return json({ item, update });
+        return json({ item: await decorateItem(item), update });
       }
 
       case "update_item": {
@@ -1415,7 +1496,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (error) throw error;
         if (newValues) await propagateStatus(item, columns, newValues, item.values || {});
         else await act(item.board_id, item.id, "rename_item", {});
-        return json({ item: updated });
+        return json({ item: await decorateItem(updated) });
       }
 
       case "move_items": {
@@ -1694,7 +1775,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (!name) return json({ error: "Give this view a name." }, 400);
         const columns = await boardColumns(boardId);
         if (!columns.length) return json({ error: "Board not found." }, 404);
-        const snap = sanitizeSnap(payload.snap, new Set(columns.map((c) => c.id)));
+        // The synthetic Created / Requestor ids are legal in a view (sort by Created, hide
+        // Requestor, filter a date range on Created) even though they are in no pm_columns row
+        // — the length check above stays on the REAL columns, which is what says "board not
+        // found" rather than "this board has only the two built-ins".
+        const snap = sanitizeSnap(payload.snap, new Set(withSystemColumns(columns).map((c) => (c as { id: string }).id)));
         const { data: maxRow } = await admin.from("pm_views").select("position")
           .eq("board_id", boardId).order("position", { ascending: false }).limit(1).maybeSingle();
         // Upsert on (board_id, name): saving over a name replaces that view, which is what
