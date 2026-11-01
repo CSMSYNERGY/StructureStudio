@@ -401,9 +401,9 @@ Deno.test("every way to add or delete a size, or put a backup back, checks the p
   // An open editor commits before the rule reads the queue (Delete sizes keeps it open, where the ✕'s
   // mouse down has closed it), and once, so a typed price makes the size one that asks.
   assert(del.indexOf("commitEdit();") > 0 && del.indexOf("commitEdit();") < del.indexOf("ssPgNeverEdited(") && del.indexOf("commitEdit();") === del.lastIndexOf("commitEdit();"), "deleteSize reads the rule before it commits the editor");
-  // The plain ✕ clears the status line too, as deleteNow does: said outranks a refused call's note
-  // and the "being deleted" tip, so an earlier line would hide both.
-  assert(del.includes("setTip(null);\n      setSaid(null);\n      delStart([id]);"), "the plain ✕ leaves an earlier status line up");
+  // The plain ✕ leaves an earlier status line up: clearing it jumps the grid under the pointer. A
+  // refused call clears it instead (failed), so the note still shows at once.
+  assert(del.includes("backToWork();\n      delStart([id]);"), "the plain ✕ touches no status line");
   assert(del.includes("if (!c.ok) { delSay(delWhy(id, c.why)); return; }"));
   // Every "why" knows a hidden style's size: its tick is no way to hide it (the row's title, the ✕,
   // the confirm's re-check and several at once).
@@ -426,7 +426,7 @@ Deno.test("every way to add or delete a size, or put a backup back, checks the p
   assert(check > 0 && queue > check && now.indexOf("if (stop) {") > check && now.indexOf("if (stop) {") < queue && now.includes("sendNow();"), "the re-check comes before the queue");
   const yes = between(page, "const confirmYes = () => {", "\n  };", "confirmYes");
   assert(yes.includes("if (c && c.del) deleteNow(c.del);") && yes.includes("else if (c) applyChange(c.edits, c.area);"));
-  assert(page.includes(`else if (act === "delete") deleteSize(id);`), "the ✕ is the grid's own click");
+  assert(page.includes(`else if (act === "delete" && e.detail < 2) deleteSize(id);`), "the ✕ is the grid's own click");
   assert(between(page, "const clearCell = (cell) => {", "\n  };", "clearCell").includes("if (cell.col === 0) { deleteSize(cell.sizeId); return; }"), "Delete on a Size box is its ✕");
   // The add strip and the ✕ are only drawn when the page can edit (plan 3.16).
   assert(page.includes("adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds"));
@@ -563,7 +563,7 @@ Deno.test("the keys: Ctrl/Cmd+D fills down, held from the browser; Delete on a r
   assert(d > 0 && d < keys.indexOf("if (e.altKey || e.ctrlKey || e.metaKey) return;"), "Ctrl+D must be handled before the modifier keys are let go (else it bookmarks the page)");
   // One box clears (a Size box deletes its size); a range clears, unless it lies wholly in the Size
   // column, which Clear never empties: then it deletes those sizes (the delete plan, 10-31).
-  assert(keys.includes(`if (k === "Delete" || k === "Backspace") {\n      e.preventDefault();\n      const x = extentRef.current;\n      if (!x) clearCell(a); else if (a.col === 0 && x.col === 0) deleteSel(); else clearSel();\n      return;\n    }`));
+  assert(keys.includes(`if (k === "Delete" || k === "Backspace") {\n      e.preventDefault();\n      // A held key acts once: the ring moves on after each delete, so each repeat would be another size.\n      if (e.repeat) return;\n      const x = extentRef.current;\n      if (!x) clearCell(a); else if (a.col === 0 && x.col === 0) deleteSel(); else clearSel();\n      return;\n    }`));
   const fx = between(page, "  useEffect(() => {\n    const mine = () =>", "}, []);", "the copy and paste listeners");
   assert(fx.includes("const mine = () => !!gridRef.current && document.activeElement === gridRef.current;"), "only while the grid itself has the focus: the editor and the add strips paste their own way");
   assert(fx.includes(`document.addEventListener("copy", onCopy);`) && fx.includes(`document.addEventListener("paste", onPaste);`));
@@ -572,7 +572,7 @@ Deno.test("the keys: Ctrl/Cmd+D fills down, held from the browser; Delete on a r
   const bar = between(page, "{canEdit && (\n          <>", "</>", "the toolbar's buttons");
   assert(bar.includes(">Fill down</button>") && bar.includes(">Clear</button>") && bar.includes(">Delete sizes</button>"));
   assert(bar.includes(`title="Empty the selected price and option boxes (Delete)">Clear</button>`), "Clear's title: the Delete key on a Size-only range deletes sizes now");
-  assert(bar.includes(`onMouseDown={keepFocus} onClick={() => { deleteSel(); focusGrid(); }}\n              title="Delete the sizes in the selected rows">Delete sizes</button>`));
+  assert(bar.includes(`onMouseDown={keepFocus} onClick={(e) => { if (e.detail < 2) deleteSel(); focusGrid(); }}\n              title="Delete the sizes in the selected rows">Delete sizes</button>`));
 });
 
 Deno.test("PgConfirm: an accessible modal: every hook above its return, focus on Continue (Cancel for a delete) and kept inside, Escape cancels", () => {
@@ -655,4 +655,20 @@ Deno.test("one click is one box: a range starts only once the held pointer has m
   assert(p.includes("if (!dragRef.current || !dragStarted(e)) return;"), "a mouse over counts only after that");
   assert(p.includes("const onMouseMove = (e) => { if (dragRef.current && pressRef.current && dragStarted(e)) onMouseOver(e); };"), "and the move that starts the drag counts the box it is in");
   assert(p.includes("onMouseOver={onMouseOver} onMouseMove={onMouseMove}"), "both reach the grid");
+});
+
+Deno.test("a double click and a held key act once, on what was aimed at: the grid or the rows can move under a still pointer", () => {
+  const p = fnText(CATALOG, "function PricingTablePage(");
+  assert(p.includes(`else if (act === "delete" && e.detail < 2) deleteSize(id);`), "the ✕");
+  assert(p.includes("onClick={(e) => { if (e.detail < 2) deleteSel(); focusGrid(); }}"), "Delete sizes");
+  assert(p.includes("if (e.repeat) return;\n      const x = extentRef.current;"), "a held Delete");
+  assert(p.includes("if (e.detail > 1 && activeRef.current) return;"), "a double click's second press keeps the first's box");
+  assert(p.includes("const cell = cellAt(e) ? activeRef.current : null;"), "and the double click opens that box");
+  assert(p.includes("if (flight.removes && flight.removes.length) setSaid(null);"), "a refused delete's note shows at once");
+});
+
+Deno.test("only Tab picks the first price for the grid: focus given back after a button picks no box, so Delete sizes keeps saying to click one", () => {
+  const p = fnText(CATALOG, "function PricingTablePage(");
+  assert(p.includes("handFocusRef.current = true;\n    try { gridRef.current.focus({ preventScroll: true }); }"));
+  assert(p.includes("e.target === e.currentTarget && !handFocusRef.current && !activeRef.current && order.length"));
 });

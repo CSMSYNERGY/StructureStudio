@@ -11914,6 +11914,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const hidNowRef = useRef(null);                  // the last ssPgHiddenNow answer, handed back while nothing differs
   const stayRef = useRef(null);                    // sizes drawn while "Show hidden sizes" is off: they stay drawn (ssPgRows' `stay`)
   const dragRef = useRef(false);
+  const handFocusRef = useRef(false);              // focusGrid is giving the grid the focus, so no box is picked for it
   const pressRef = useRef(null);                   // where the button went down, until the pointer has moved SS_PG_DRAG_PX from it
   const flashRef = useRef(null);
   const fnRef = useRef({});                        // this render's handlers, for listeners added once
@@ -12424,7 +12425,11 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
   // A size whose delete is waiting or out takes no edit: its boxes would go with it, unsaid.
   const removing = (sizeId) => !!(qRef.current && qRef.current.removes[sizeId]);
-  const focusGrid = () => { try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ } };
+  const focusGrid = () => {
+    handFocusRef.current = true;
+    try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+    handFocusRef.current = false;
+  };
   const colName = (c) => (c === 0 ? "Size" : c === 1 ? "Price" : c === 2 ? "Offered" : (model && model.cols[c - 3] ? model.cols[c - 3].label : ""));
   const whereOf = (sizeId) => { const r = byId[sizeId]; return r ? `${r.style.label} ${r.size.label}` : ""; };
 
@@ -12511,6 +12516,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       ssLogError("portal", `pricing table: the server refused a save the page let through: ${String(v.reason || "").slice(0, 300)}`,
         "pricing_table_save_refused", { status: v.status || null });
       apply({ type: "fail", n: flight.n, kind: "refused", reason: SS_PG_REFUSED_CALL });
+      // A delete's note goes on the line at once: `said` outranks it, and the plain ✕ leaves an earlier
+      // line up, because clearing it would jump the grid under the pointer.
+      if (flight.removes && flight.removes.length) setSaid(null);
       return;
     }
     if (v.kind === "forbidden") { apply({ type: "fail", n: flight.n, kind: "forbidden", reason: SS_PG_FORBIDDEN }); closeEdit(); return; }
@@ -12691,8 +12699,6 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const z = byId[id] ? byId[id].size : null;
     if (ssPgNeverEdited(qRef.current, id, z) && !(z && z.used)) {
       backToWork();
-      setTip(null);
-      setSaid(null);
       delStart([id]);
       apply({ type: "remove", id, at: Date.now() });
       sendNow();
@@ -12752,7 +12758,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!b || !gridRef.current || !gridRef.current.contains(b)) return;
     const act = b.getAttribute("data-pg-act"), id = b.getAttribute("data-pg-id");
     if (act === "add") toggleAdd(id);
-    else if (act === "delete") deleteSize(id);
+    // Not the second click of a double click: the first can move the grid under the still pointer (a
+    // line comes up, a delete lands and the next row slides up), so another size's ✕ may be there now.
+    else if (act === "delete" && e.detail < 2) deleteSize(id);
   };
 
   // ── The backup (plan 4.9) ──
@@ -13152,6 +13160,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     // Clear never empties, deletes its sizes (deleteSel, the delete plan).
     if (k === "Delete" || k === "Backspace") {
       e.preventDefault();
+      // A held key acts once: the ring moves on after each delete, so each repeat would be another size.
+      if (e.repeat) return;
       const x = extentRef.current;
       if (!x) clearCell(a); else if (a.col === 0 && x.col === 0) deleteSel(); else clearSel();
       return;
@@ -13174,6 +13184,9 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const cell = cellAt(e);
     if (!cell) return;
     e.preventDefault();   // no drag-select of text; focus is given by hand, without a scroll
+    // The second press of a double click stays on the first's box: that press can clear the status
+    // line, and the grid then moves up, so the row under the pointer is another size now.
+    if (e.detail > 1 && activeRef.current) return;
     commitEdit();
     focusGrid();
     const a = activeRef.current;
@@ -13209,11 +13222,13 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // comes: the move that starts the drag counts the box it is in.
   const onMouseMove = (e) => { if (dragRef.current && pressRef.current && dragStarted(e)) onMouseOver(e); };
   const onDoubleClick = (e) => {
-    const cell = cellAt(e);
+    const cell = cellAt(e) ? activeRef.current : null;
     if (cell && cell.col !== 2) startEdit(cell, null);
   };
-  // Tabbing into the grid lands on the first price (the grid itself: not a box in an add strip).
-  const onFocus = (e) => { if (e.target === e.currentTarget && !activeRef.current && order.length) setActive({ sizeId: order[0], col: Math.min(1, ncols - 1) }); };
+  // Tabbing into the grid lands on the first price (the grid itself: not a box in an add strip). Only
+  // Tab: focus given back after a button would pick a size nobody clicked, and Delete sizes would then
+  // act on it just after saying "Click a size first".
+  const onFocus = (e) => { if (e.target === e.currentTarget && !handFocusRef.current && !activeRef.current && order.length) setActive({ sizeId: order[0], col: Math.min(1, ncols - 1) }); };
   const toggleShowHidden = (on) => {
     setShowHidden(on);
     try { localStorage.setItem(SS_PG_SHOW_HIDDEN_KEY, on ? "1" : "0"); } catch (_e) { /* not remembered */ }
@@ -13430,7 +13445,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
               title="Copy the top row of the selected boxes into the rows under it (Ctrl+D)">Fill down</button>
             <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { clearSel(); focusGrid(); }}
               title="Empty the selected price and option boxes (Delete)">Clear</button>
-            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { deleteSel(); focusGrid(); }}
+            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={(e) => { if (e.detail < 2) deleteSel(); focusGrid(); }}
               title="Delete the sizes in the selected rows">Delete sizes</button>
           </>
         )}

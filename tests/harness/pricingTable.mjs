@@ -4137,9 +4137,9 @@ if (want("X")) {
   ok("X: no page errors (an open editor)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-// The ✕ on a size added by mistake replaces whatever the status line said, as the confirmed delete
-// does, so nothing about this delete sits under an earlier line: not "being deleted" while it is
-// out, and not a refused call's note.
+// The ✕ on a size added by mistake leaves the status line up, so the grid doesn't jump under the
+// pointer, and the delete's own answer replaces it. A call refused whole clears it, so its note shows
+// at once.
 if (want("X")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44"]));
@@ -4156,13 +4156,12 @@ if (want("X")) {
   };
   const up1 = await greyLine();
   F.script.push({ delayMs: 1500 });
+  const y0 = (await page.locator(sel(slow.id, 0)).boundingBox()).y;
   await page.locator(`tr[data-s="${slow.id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
   const after = await statusText(page);
-  await page.locator(sel(slow.id, 1)).click({ timeout: 3000 }).catch(() => {});
-  await page.keyboard.type("5");
-  const typing = await statusText(page);
-  ok("X: the ✕ on a size added by mistake clears an earlier status line, and typing on it then says it is being deleted",
-    up1 && after === "" && typing === "This size is being deleted.", JSON.stringify({ up1, after, typing }));
+  const y1 = (await page.locator(sel(slow.id, 0)).boundingBox()).y;
+  ok("X: the ✕ on a size added by mistake leaves an earlier status line up, so the grid doesn't move under the pointer",
+    up1 && after === UNCLR && y1 === y0, JSON.stringify({ up1, after, y0, y1 }));
   const goneS = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), slow.id, { timeout: 10000 }).then(() => true, () => false);
   ok("X: …then the line says it went", goneS && (await statusText(page)) === `Deleted Test Barn ${slow.label}.`, await statusText(page));
   const up2 = await greyLine();
@@ -4171,8 +4170,8 @@ if (want("X")) {
   const noted = await page.waitForFunction(() => /couldn't be deleted/.test([...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" ")), null, { timeout: 8000 }).then(() => true, () => false);
   ok("X: a whole call refused shows its note at once, not under the earlier line, and the row stays",
     up2 && noted && (await statusText(page)) === "A size couldn't be deleted: This change couldn't be saved. Tell CSM Synergy if it keeps happening." && !!F.size(refused.id) && !!(await page.$(`tr[data-s="${refused.id}"]`)), JSON.stringify({ up2, noted, st: await statusText(page) }));
-  ok("X: no call was malformed (the ✕ clears the line)", F.bad.length === 0, F.bad.join());
-  ok("X: no page errors (the ✕ clears the line)", errors.length === 0, errors.join(" | "));
+  ok("X: no call was malformed (the ✕ and the line)", F.bad.length === 0, F.bad.join());
+  ok("X: no page errors (the ✕ and the line)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 // The Size box with its ✕: every label that fit the box before each row had a ✕ still fits beside it
@@ -4352,6 +4351,127 @@ if (want("X")) {
   ok("X: a real drag with a line up still makes a range", up4 && /^Delete \d sizes/.test(String(t5)), JSON.stringify({ up4, t5 }));
   ok("X: no call was malformed (one click, one box)", F.bad.length === 0, F.bad.join());
   ok("X: no page errors (one click, one box)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// A double click acts on what was aimed at, and a held Delete acts once. A first click can move the
+// grid under the still pointer (a line comes or goes, a delete lands and the next row slides up), so
+// the second click's ✕ or box may be another size's. page.mouse here: each pixel row of a ✕ lands
+// somewhere different, and only a real press has a click count.
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44", "20x48", "20x52", "20x56", "20x60", "20x64", "20x68"]));
+  const b = barnOf(F.table(OWN));
+  const U = b[3];
+  const n = b.slice(-8);
+  F.used.add(U.id);
+  F.used.add(n[5].id);
+  F.delayMs = 150;
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const rmBox = async (id) => { await page.locator(`tr[data-s="${id}"]`).scrollIntoViewIfNeeded().catch(() => {}); return page.locator(`tr[data-s="${id}"] .ss-pg-rm`).boundingBox(); };
+  const sentNow = () => saveCalls(calls).flatMap((c) => c.body.removes);
+  const lineUp = async () => {
+    await page.locator(`tr[data-s="${U.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(150);
+    return (await statusText(page)) === UNCLR;
+  };
+  const dbl = async (id, dy) => {
+    const r = await rmBox(id);
+    await page.mouse.dblclick(r.x + r.width / 2, r.y + dy, { delay: 30 });
+    await page.waitForTimeout(600);
+  };
+  // With a line up, at the ✕'s top and bottom pixel rows.
+  const up1 = await lineUp();
+  await dbl(n[0].id, 2);
+  const s1 = sentNow();
+  ok("X: a double click on a ✕ with a line up, near its top, deletes that size and no other",
+    up1 && JSON.stringify(s1) === JSON.stringify([n[0].id]) && !F.size(n[0].id) && !!F.size(n[1].id), JSON.stringify({ up1, s1 }));
+  await lineUp();
+  await dbl(n[1].id, 16);
+  const s2 = sentNow();
+  ok("X: …near its bottom too", JSON.stringify(s2) === JSON.stringify([n[0].id, n[1].id]) && !!F.size(n[2].id) && !!F.size(n[3].id), JSON.stringify(s2));
+  // With a fast answer, the next row slides up under the pointer before the second click.
+  F.delayMs = 0;
+  const r3 = await rmBox(n[2].id);
+  const [x3, y3] = [r3.x + r3.width / 2, r3.y + r3.height / 2];
+  await page.mouse.move(x3, y3);
+  await page.mouse.down({ clickCount: 1 });
+  await page.mouse.up({ clickCount: 1 });
+  await page.waitForTimeout(300);
+  await page.mouse.down({ clickCount: 2 });
+  await page.mouse.up({ clickCount: 2 });
+  await page.waitForTimeout(400);
+  ok("X: …and with an answer fast enough to slide the next row under the pointer", !F.size(n[2].id) && !!F.size(n[3].id), JSON.stringify(sentNow()));
+  // A greyed ✕ brings the line up, so the grid moves down: the size above it stays.
+  const dis = page.locator(".ss-pg-status button", { hasText: "Dismiss" });
+  await dis.click({ timeout: 1000 }).catch(() => {});
+  const nBefore = sentNow().length;
+  await dbl(n[5].id, 14);
+  ok("X: a double click on a greyed ✕ says why and deletes nothing, not the size above it", (await statusText(page)) === UHID_ON && sentNow().length === nBefore && !!F.size(n[4].id),
+    JSON.stringify({ st: await statusText(page), sent: sentNow().slice(nBefore) }));
+  // A held Delete on a size that goes at once: one size, not a walk down the list.
+  await page.locator(sel(n[3].id, 0)).click();
+  const nHold = sentNow().length;
+  await page.keyboard.down("Delete");
+  for (let i = 0; i < 8; i++) { await page.waitForTimeout(90); await page.keyboard.down("Delete"); }
+  await page.keyboard.up("Delete");
+  await page.waitForTimeout(400);
+  ok("X: a held Delete takes the one size and walks no further", JSON.stringify(sentNow().slice(nHold)) === JSON.stringify([n[3].id]) && !!F.size(n[4].id) && !(await confirmOf(page)),
+    JSON.stringify(sentNow().slice(nHold)));
+  // A double click on a box with a line up is that box: Size says it can't be edited, and Delete then
+  // names it; Price opens on it. The line going moves the grid before the second press.
+  await lineUp();
+  const box = await page.locator(sel(b[1].id, 0)).boundingBox();
+  await page.mouse.dblclick(box.x + 12, box.y + box.height / 2, { delay: 30 });
+  await page.waitForTimeout(150);
+  const rd = (await state(page)).readout;
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(100);
+  const cf = await confirmOf(page);
+  await page.locator(".ss-pg-confirm button", { hasText: "Cancel" }).click({ timeout: 3000 }).catch(() => {});
+  ok("X: a double click on a Size box with a line up keeps the ring there, and Delete names that size", !!cf && cf.text === askDel(b[1]), JSON.stringify({ rd, cf }));
+  await lineUp();
+  const pb = await page.locator(sel(b[2].id, 1)).boundingBox();
+  await page.mouse.dblclick(pb.x + pb.width / 2, pb.y + pb.height / 2, { delay: 30 });
+  await page.waitForTimeout(150);
+  const st2 = await state(page);
+  ok("X: a double click on a Price box with a line up opens that size's price, not the next one's", !!st2.editor && st2.readout === `Price · Test Barn ${b[2].label}`, JSON.stringify(st2));
+  await page.keyboard.press("Escape");
+  ok("X: no call was malformed (double clicks)", F.bad.length === 0, F.bad.join());
+  ok("X: no page errors (double clicks)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+// Delete sizes with nothing clicked says so, and stays true: the focus it gives back picks no box, so
+// a second press says it again and a double click does nothing else. Cancel on a ✕ leaves no ring on
+// the first size either. Tab into the grid still lands on the first price.
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const CLICK1 = "Click a size first, then press Delete sizes.";
+  await delBtn(page).click();
+  await page.waitForTimeout(100);
+  const t1 = await statusText(page), cf1 = await confirmOf(page);
+  await delBtn(page).click();
+  await page.waitForTimeout(100);
+  const t2 = await statusText(page), cf2 = await confirmOf(page);
+  ok("X: Delete sizes twice with nothing clicked says to click a size both times, and asks about nothing", t1 === CLICK1 && t2 === CLICK1 && !cf1 && !cf2, JSON.stringify({ t1, t2, cf1, cf2 }));
+  await page.locator(`tr[data-s="${b[4].id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
+  await page.locator(".ss-pg-confirm button", { hasText: "Cancel" }).click({ timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(100);
+  await delBtn(page).click();
+  await page.waitForTimeout(100);
+  const t3 = await statusText(page), cf3 = await confirmOf(page);
+  ok("X: …and after Cancel on a ✕, Delete sizes asks about no size nobody clicked", t3 === CLICK1 && !cf3, JSON.stringify({ t3, cf3 }));
+  await page.evaluate(() => { document.activeElement && document.activeElement.blur(); document.querySelector(".ss-pg-grid").focus(); });
+  await page.waitForTimeout(100);
+  const rd = (await state(page)).readout;
+  ok("X: focus coming into the grid from outside, as Tab does, lands on the first price", rd === `Price · Test Barn ${b[0].label}`, String(rd));
+  ok("X: nothing was sent (nothing clicked)", saveCalls(calls).length === 0);
+  ok("X: no page errors (nothing clicked)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
