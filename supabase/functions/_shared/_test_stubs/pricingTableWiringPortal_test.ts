@@ -635,3 +635,11 @@ Deno.test("the delete on Sheds: a sheet that adds sizes not in the table asks be
   assert(up.includes("`This sheet adds 1 size that isn't in your table${adds.zeros ? \" (at $0, so free in your designer)\" : \"\"}. Upload it?`"));
   assert(between(up, "if (adds.added && !window.confirm(", "const { data, error }", "the ask").includes("setBusy(false); setFileKey((k) => k + 1);\n        return;"), "Cancel sends nothing and resets the picker");
 });
+
+Deno.test("Size's width is one number: the colgroup, the frozen total, the scroll padding and the sticky offsets (ssPgColBox holds the overlay's)", async () => {
+  const html = await Deno.readTextFile(new URL("../../../../portal.html", import.meta.url));
+  assert(CATALOG.includes("<col style={{ width: 82 }} /><col style={{ width: 76 }} /><col style={{ width: 30 }} />"), "the colgroup");
+  assert(CATALOG.includes("const SS_PG_FROZEN_W = 188;"), "Size + Price + Offered");
+  assert(CATALOG.includes("scrollPaddingLeft: narrow ? 82 : SS_PG_FROZEN_W"), "below 700 px only Size is frozen");
+  assert(html.includes(".ss-pg-grid .ss-pg-f1{position:sticky;left:82px;") && html.includes(".ss-pg-grid .ss-pg-f2{position:sticky;left:158px;"), "the sticky offsets");
+});

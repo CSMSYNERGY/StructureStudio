@@ -1077,7 +1077,7 @@ Deno.test("ssPgRows: the band counts what the rows show (live); with Show hidden
 
 Deno.test("ssPgColBox: the overlay's columns; Size, Price and Offered frozen, Size alone below 700 px", () => {
   assertEquals([0, 1, 2, 3, 4].map((c) => S.ssPgColBox(c, false)), [
-    { x: 0, w: 64, frozen: true }, { x: 64, w: 76, frozen: true }, { x: 140, w: 30, frozen: true }, { x: 170, w: 44, frozen: false }, { x: 214, w: 44, frozen: false }]);
+    { x: 0, w: 82, frozen: true }, { x: 82, w: 76, frozen: true }, { x: 158, w: 30, frozen: true }, { x: 188, w: 44, frozen: false }, { x: 232, w: 44, frozen: false }]);
   assertEquals([0, 1, 2].map((c) => S.ssPgColBox(c, true).frozen), [true, false, false]);
 });
 

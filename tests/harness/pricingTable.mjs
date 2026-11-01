@@ -4175,6 +4175,63 @@ if (want("X")) {
   ok("X: no page errors (the ✕ clears the line)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
+// The Size box with its ✕: every label that fit the box before each row had a ✕ still fits beside it
+// (the widest of those, 100x100, and the 6-character sizes), and a 5-character label, the usual one,
+// has room to spare for a wider system font than this machine's. The frozen columns still meet edge
+// to edge, sideways scrolled or not, and the selection ring still sits on its box: Size's width is in
+// the colgroup, the sticky offsets and the overlay's ssPgColBox alike.
+for (const width of want("X") ? [1440, 390] : []) {
+  const cat = catalogFor(OWN);
+  const wide = ["12x100", "10.5x12", "100x100"];
+  const labels = ["12x12", ...wide];   // 12x12 is one of the fixture's own
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), wide, 3000));
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const fit = await page.evaluate((want2) => [...document.querySelectorAll(".ss-pg-grid tbody td.ss-pg-rmable")].map((td) => {
+    const t = td.firstChild, rg = document.createRange();
+    rg.selectNodeContents(t);
+    const cs = getComputedStyle(td);
+    return { label: t.textContent, w: rg.getBoundingClientRect().width, room: td.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) };
+  }).filter((x) => want2.includes(x.label)), labels);
+  ok(`X@${width}: every label that fit the Size box before the ✕ fits beside it`, fit.length === labels.length && fit.every((x) => x.w <= x.room), JSON.stringify(fit));
+  const five = fit.find((x) => x.label === "12x12");
+  ok(`X@${width}: a 5-character label has at least 8 px to spare`, !!five && five.room - five.w >= 8, JSON.stringify(five));
+  ok(`X@${width}: no page errors (the Size box)`, errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const z = barnOf(F.table(OWN))[0];
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1000, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const edges = async () => page.evaluate((id) => {
+    const c = [...document.querySelector(`tr[data-s="${id}"]`).children].slice(0, 3).map((td) => td.getBoundingClientRect());
+    return { sizeRight: Math.round(c[0].right), priceLeft: Math.round(c[1].left), priceRight: Math.round(c[1].right), offLeft: Math.round(c[2].left) };
+  }, z.id);
+  const meet = (e) => e.sizeRight === e.priceLeft && e.priceRight === e.offLeft;
+  const rest = await edges();
+  const ring = async (col) => {
+    await page.locator(sel(z.id, col)).click();
+    return page.evaluate((s0) => {
+      const r = [...document.querySelectorAll(".ss-pg-ring")].find((x) => x.style.display === "block");
+      const td = document.querySelector(s0);
+      if (!r || !td) return false;
+      const [a, b] = [r.getBoundingClientRect(), td.getBoundingClientRect()];
+      return Math.abs(a.left - b.left) < 2 && Math.abs(a.right - b.right) < 2;
+    }, sel(z.id, col));
+  };
+  const rings = [await ring(0), await ring(1), await ring(2), await ring(3)];
+  await page.evaluate(() => { document.querySelector(".ss-pg-box").scrollLeft = 200; });
+  await page.waitForTimeout(100);
+  const moved = await edges();
+  const scrolled = await page.evaluate(() => document.querySelector(".ss-pg-box").scrollLeft);
+  const ringFrozen = [await ring(0), await ring(1), await ring(2)];
+  ok("X: the frozen columns meet edge to edge, at rest and scrolled sideways", meet(rest) && scrolled > 0 && meet(moved), JSON.stringify({ rest, moved, scrolled }));
+  ok("X: the ring sits on its box in Size, Price, Offered and an option, and on the frozen three scrolled sideways", rings.every(Boolean) && ringFrozen.every(Boolean), JSON.stringify({ rings, ringFrozen }));
+  ok("X: no page errors (the frozen columns)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
 /// ── T: timing ──
 if (!process.env.SKIP_TIMING && want("T")) {
   for (const [tag, perStyle] of [["1x", 70], ["3x", 210]]) {

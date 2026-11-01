@@ -4182,13 +4182,13 @@ function ssPgErrorLine(where, field, err) {
 }
 
 // Where a column sits across the grid: { x, w, frozen }, x from the grid's left edge. The widths are
-// the colgroup's (Size 64, Price 76, Offered 30, each option 44). A frozen column (Size, Price and
+// the colgroup's (Size 82, Price 76, Offered 30, each option 44). A frozen column (Size, Price and
 // Offered; Size alone below 700 px) is sticky: the selection overlay and the editor draw it in a
 // sticky lane of their own (PgSelectionOverlay), whose left edge rides along with those columns, so
 // its x is the same however far the grid has scrolled sideways.
 function ssPgColBox(col, narrow) {
   const c = Math.max(0, Number(col) || 0);
-  return { x: c < 3 ? [0, 64, 140][c] : 170 + (c - 3) * 44, w: c < 3 ? [64, 76, 30][c] : 44, frozen: c < (narrow ? 1 : 3) };
+  return { x: c < 3 ? [0, 82, 158][c] : 188 + (c - 3) * 44, w: c < 3 ? [82, 76, 30][c] : 44, frozen: c < (narrow ? 1 : 3) };
 }
 
 // ─── Sizes & prices table: adding sizes, refresh and the backup, the pure half (Phase 4a, 2026-10-31) ───
@@ -11630,7 +11630,7 @@ const SS_PG_LINE_H = 15;                    // one line of a standing name (port
 const SS_PG_HEAD_MIN = 64;
 const SS_PG_HEAD_MAX = 600;
 const SS_PG_HEAD_NARROW = 90;               // below 700 px: capped, with an ellipsis
-const SS_PG_FROZEN_W = 170;                 // Size 64 + Price 76 + Offered 30
+const SS_PG_FROZEN_W = 188;                 // Size 82 + Price 76 + Offered 30
 const SS_PG_COL_W = 44;                     // one option column, about three digits wide
 const SS_PG_LEGEND = "Empty = not included. A number = how many come included (loft = sq ft). Blank price = size not offered. $0 = free.";
 const SS_PG_TOO_BIG = "This catalog is too big for the table right now. Use the Excel sheet, and let us know.";
@@ -12336,7 +12336,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const head = useMemo(() => (base ? (
     <>
       <colgroup>
-        <col style={{ width: 64 }} /><col style={{ width: 76 }} /><col style={{ width: 30 }} />
+        <col style={{ width: 82 }} /><col style={{ width: 76 }} /><col style={{ width: 30 }} />
         {base.cols.map((c) => <col key={c.key} style={{ width: SS_PG_COL_W }} />)}
       </colgroup>
       <PgHeader sections={base.sections} cols={base.cols} rtpOn={base.rtpOn} onPeek={onPeek} onPeekEnd={onPeekEnd} />
@@ -13463,7 +13463,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
         </div>
       )}
       <div className="ss-pg-box" ref={boxRef} aria-busy={load.phase === "loading" ? "true" : undefined}
-        style={{ scrollPaddingTop: SS_PG_SEC_H + hh, scrollPaddingLeft: narrow ? 64 : SS_PG_FROZEN_W }}>
+        style={{ scrollPaddingTop: SS_PG_SEC_H + hh, scrollPaddingLeft: narrow ? 82 : SS_PG_FROZEN_W }}>
         {load.phase === "loading" ? <PgSkeleton />
           : load.phase === "error" ? (
             <div className="ss-pg-fail" role="alert">
@@ -13600,8 +13600,9 @@ const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, o
 // Phase 4a: `busy` is "adding" while the size's create is unanswered, said in the empty Price box
 // ("Adding…"), and "removing" while its delete is queued or out, said over the price ("Deleting…").
 // `deletable` (the delete plan, 10-31: every size of a page that can edit, unless busy) puts a small
-// ✕ at the right of the Size box. A word is too wide to fit beside the size in 64 px, so its title
-// and name say "Delete". `delOff` (ssPgDeleteWhy) greys it, aria-disabled with that reason as its
+// ✕ at the right of the Size box. The box is 82 px, so beside the ✕ a label keeps the room it had in
+// 64 px with none (56 px, 100x100 fits). A word is too wide to fit there as well, so its title and
+// name say "Delete". `delOff` (ssPgDeleteWhy) greys it, aria-disabled with that reason as its
 // title, when saved designs use the size; a click then says the same on the status line. It is
 // handled by the grid's own click (data-pg-act), so PgRow takes no function and its memo holds.
 const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = "",
