@@ -42,7 +42,6 @@
 // host, which the catch-all aborts anyway). getPaymentToken uses window.CollectJS when it is
 // already there, so the page's own code path runs unchanged up to the network.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/billingFounding.mjs          (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to

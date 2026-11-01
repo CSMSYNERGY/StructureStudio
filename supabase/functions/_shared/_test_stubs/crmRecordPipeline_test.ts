@@ -7,9 +7,9 @@
 //   * The top bar names the deal's pipeline and draws that pipeline's own stages: "I want this
 //     up here to say shed deals with the stage that it's in." Picking a deal in another pipeline
 //     switches it (crmPipeBarRow).
-//   * The stage drop-down lists the deal's own pipeline only, and a move to another pipeline
-//     lands in that pipeline's first open stage (crmPipeFirstOpen, crmPipeMoveTargets,
-//     crmPipeMoved). A deal is in one pipeline: "these cards can only be in one pipeline."
+//   * The stage drop-down lists the deal's own pipeline only (crmPipeFirstOpen, crmPipeMoved), and
+//     since 2026-11-01 there is NO moving to another pipeline at all: a deal is in one pipeline,
+//     "these cards can only be in one pipeline", and it stays in it.
 //   * The status is shown and never set on the record: "the statuses are system-driven, 100%."
 //
 // Same technique as crmCardOrder_test: slice the real block between stable anchors, guard
@@ -37,10 +37,10 @@ const slice = (src: string, a: string, b: string, what: string) => {
 const BLOCK = slice(SRC, "const crmPipeDealFor =", "// A deal's status on its Deals row", "the pipeline helpers");
 type Fn = (...a: any[]) => any;
 const H = new Function(
-  `${BLOCK}; return { crmPipeDealFor, crmPipeOf, crmPipeStatus, crmPipeFirstOpen, crmPipeMoveTargets, crmDealRows, crmPipeBarRow, crmPipeMoved, crmPipeLost };`,
+  `${BLOCK}; return { crmPipeDealFor, crmPipeOf, crmPipeStatus, crmPipeFirstOpen, crmDealRows, crmPipeBarRow, crmPipeMoved, crmPipeLost };`,
 )() as Record<string, Fn>;
 
-// Two pipelines and a retired one's card. Every stage is 'open': migration 342 retired the won and
+// Two pipelines and a retired one's card. Every stage is 'open': migration 352 retired the won and
 // lost kinds, so a stage is a step in the process and an outcome lives on the card.
 const SHED = {
   id: "p-shed", name: "Shed Deals", lostReasons: ["Price"],
@@ -143,19 +143,22 @@ Deno.test("the status shown on a row is the card's own, looked up by id", () => 
   assertEquals(H.crmPipeStatus(PIPE, null), null);
 });
 
-Deno.test("a move to another pipeline lands in its first stage (342: there are no outcome stages to skip)", () => {
+Deno.test("a move to another pipeline lands in its first stage (352: there are no outcome stages to skip)", () => {
   assertEquals(H.crmPipeFirstOpen(SHED).id, "s-new");
   assertEquals(H.crmPipeFirstOpen(SOLD).id, "s-signed");
   assertEquals(H.crmPipeFirstOpen(NO_STAGES), null, "a pipeline with no stage is nowhere to land");
   assertEquals(H.crmPipeFirstOpen(null), null);
 });
 
-Deno.test("the move list is every other live pipeline a deal can land in", () => {
-  assertEquals(H.crmPipeMoveTargets(PIPE, DEALS[0]).map((p: any) => p.id), ["p-sold"]);
-  assertEquals(H.crmPipeMoveTargets(PIPE, DEALS[1]).map((p: any) => p.id), ["p-shed"]);
-  // A card in a retired pipeline can be rescued into any of them.
-  assertEquals(H.crmPipeMoveTargets(PIPE, DEALS[3]).map((p: any) => p.id), ["p-shed", "p-sold"]);
-  assertEquals(H.crmPipeMoveTargets(undefined, DEALS[0]), []);
+// A CARD STAYS IN ITS PIPELINE (Carolyn 2026-11-01): "I want to remove the option to move between
+// pipelines ... every design created in shed designer goes to that pipeline only." crmPipeMoveTargets
+// built the list of pipelines a card could be carried into; there is no such list any more, and the
+// test that pinned it went with it. crm_move_deal refuses a stage outside the card's own pipeline,
+// so the rule is kept by the server too, not just by the missing control.
+Deno.test("the record offers no way to carry a card into another pipeline", () => {
+  assert(!("crmPipeMoveTargets" in H), "crmPipeMoveTargets is back; the move-to-pipeline control would follow");
+  assert(!/Move to pipeline|moveDealToPipeline|crmPipeMoveTargets\(/.test(RECORD),
+    "the record builds a move-to-another-pipeline control again");
 });
 
 Deno.test("a move is painted in the stage's pipeline (one pipeline per deal), the status untouched", () => {
@@ -169,14 +172,14 @@ Deno.test("a move is painted in the stage's pipeline (one pipeline per deal), th
   assertEquals(PIPE.deals[0].pipeline_id, "p-shed", "the block it was given is not mutated");
   // The bar follows it.
   assertEquals(H.crmPipeBarRow(after, moved).label, "Sold");
-  // 342: A MOVE CARRIES NO OUTCOME. It used to set or clear the lost reason depending on the
+  // 352: A MOVE CARRIES NO OUTCOME. It used to set or clear the lost reason depending on the
   // stage's kind; marking and reopening are their own thing now, and neither moves the card.
   const wasLost = { ...(PIPE.deals[1] as Record<string, unknown>), lost_at: "2026-10-20T00:00:00Z", lost_reason: "Price" };
   const dragged = H.crmPipeMoved({ ...PIPE, deals: [wasLost] }, "d-2", SOLD.stages[1]).deals[0];
   assertEquals([dragged.lost_at, dragged.lost_reason], ["2026-10-20T00:00:00Z", "Price"], "dragging a lost card does not reopen it");
 });
 
-Deno.test("marking a card lost, and reopening it, never move it (342)", () => {
+Deno.test("marking a card lost, and reopening it, never move it (352)", () => {
   const before = PIPE.deals[0] as Record<string, unknown>;
   const lost = H.crmPipeLost(PIPE, "d-1", "Price").deals.find((d: any) => d.id === "d-1");
   assertEquals(lost.lost_reason, "Price");

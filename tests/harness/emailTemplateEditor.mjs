@@ -25,7 +25,6 @@
 // runs cleanTemplateCopy and templatePreviewEmail, so what the frame shows is what the server would
 // render. Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SENT.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/emailTemplateEditor.mjs     (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/email-template-editor (SS_SHOTS overrides); C-preview.png is the

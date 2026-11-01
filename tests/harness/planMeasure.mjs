@@ -27,7 +27,6 @@
 //      before Measure existed: below them it wraps on its own (door, window, bench 850+, vent 1020+).
 //   Each: zero page errors.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/planMeasure.mjs       (SS_BASE=http://127.0.0.1:<port>, SS_CASES=B,C, SS_SHOTS=<dir>)
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

@@ -42,7 +42,6 @@
 // Every address is the ROOT one (no /portal since 2026-10-13); serveAppRoutes answers them from
 // _redirects the way the host does, since a plain static server ignores that file.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root; SS_BASE overrides the address)
 //   node tests/harness/contactsHub.mjs             (exit 0 = every check held)
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine). Fixtures are

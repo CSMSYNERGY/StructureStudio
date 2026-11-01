@@ -32,7 +32,6 @@
 // Wall close-ups at 6 in and at 4.5 in go to the shots folder too. Supabase is stubbed at the network
 // layer; nothing leaves the machine and nothing is saved anywhere.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>   (after npm run compile)
 //   node tests/harness/lapCourses.mjs           (SS_BASE=http://127.0.0.1:<port> to move it)
 //   SS_SHOTS=<dir> for the shots and the sample quote.
 //

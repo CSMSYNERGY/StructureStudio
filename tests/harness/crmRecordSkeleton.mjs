@@ -10,7 +10,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine), the same
 // shape quoteSalesTax.mjs uses.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmRecordSkeleton.mjs       (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-skeleton (SS_SHOTS overrides).

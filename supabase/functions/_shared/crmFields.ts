@@ -175,7 +175,7 @@ export const CRM_DEAL_BUILTINS: CrmBuiltinField[] = [
     note: "System-driven: contact being made, an estimate going out, an acceptance, an invoice or a delivery sets it. Nobody sets it by hand",
     relabel: false,
   },
-  // Migration 342: Lost is a mark on the card, not a column it was dragged into. Both of these are
+  // Migration 352: Lost is a mark on the card, not a column it was dragged into. Both of these are
   // set together by Mark lost (and cleared together by Reopen), so neither is edited on its own —
   // a reason with no lost date, or the other way round, is a card nobody can read.
   {

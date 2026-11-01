@@ -28,7 +28,6 @@
 // Supabase is stubbed at the network layer; nothing leaves the machine, nothing is deleted anywhere
 // but the stub's own in-memory bucket, and NO CRM IS CALLED.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/deleteDesignDialog.mjs       (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/delete-design-dialog (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an

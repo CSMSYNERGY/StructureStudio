@@ -1,11 +1,14 @@
 // The Pipeline BOARD after Carolyn's 2026-10-12 call, driven for real on the COMPILED portal.
 //
-//   W. No scroll bar on the board, at 1280, 1440 and 1920 wide with an eight-stage pipeline (and a
-//      phone): "This scroll bar is not going to be there. I am going to make this like the designer
-//      where it can be as wide as it needs to be." The page has no sideways scroll, nothing inside
-//      the board scrolls, every stage sits inside the board, the page's 1240px cap is lifted while
-//      the board shows (and back on the Design list), the board fills the page's width, and when
-//      the stages can't all go across, as many as fit do and the rest wrap below.
+//   W. ONE ROW THAT SCROLLS, at 1280, 1440 and 1920 wide with an eight-stage pipeline (and a
+//      phone). Carolyn 2026-11-01: "If there are more stages than fit the page, we need a scrollbar
+//      at the bottom. IT SHOULD NEVER WRAP and have a column under all the other columns." The
+//      stages are always one row; the board scrolls sideways exactly when that row does not fit and
+//      not otherwise; the board is the ONLY thing in the section that scrolls; the PAGE still has
+//      no sideways scroll; the 1240px cap is lifted while the board shows (and back on the Design
+//      list), so the row only starts scrolling once the whole page is used up.
+//      ⚠️ W reverses half of 2026-10-12 ("This scroll bar is not going to be there"), which is why
+//      the cap-lifting checks (f, g, g2) survive untouched while c, d, e, h and i were rewritten.
 //   F. The status filter beside the search: show only one status, show only two, hide one, clear.
 //      "I want to see all my estimates and want to see all my payments, a filter of one or many,
 //      and also a filter to exclude."
@@ -19,11 +22,9 @@
 //      Against the build before, Q1 fails: the button showed only on a board that wasn't embedded,
 //      and the hub's board always is ("Refresh does nothing").
 //
-// (The old board failing W and F is how this was checked: with SS_PORTAL_ARTIFACT set to the
-// previous build, W finds the inner `overflow-x: auto` scroller and the 1240px cap, and F finds no
-// status filter.)
+// (SS_PORTAL_ARTIFACT=<an older build> is how these were checked: the pre-2026-11-01 build wraps,
+// so W…h finds two rows; the pre-2026-10-12 build fails the cap checks and F finds no filter.)
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/pipelineBoard.mjs           (exit 0 = every check held)
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine). Every name,
@@ -44,13 +45,17 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+// Mirrors SS_BOARD_COL_MIN / SS_BOARD_GAP in portal/02-sales.jsx: the width eight stages need
+// before the row has to scroll. Keep in step with the source, or W…c and W…h drift silently.
+const SS_BOARD_COL_MIN = 140;
+const NEEDED = 8 * SS_BOARD_COL_MIN + 7 * 8;
 
 // The account's statuses and an eight-stage pipeline (the widest a builder has today).
 const STATUS_NAMES = [["New Lead", "#64748B"], ["Appt Set", "#0EA5E9"], ["Estimate Sent", "#6366F1"], ["Accepted", "#16A34A"],
   ["Invoiced", "#F59E0B"], ["Payment Received", "#14B8A6"], ["Scheduling", "#F97316"], ["Delivered", "#8B5CF6"]];
 const STATUSES = STATUS_NAMES.map(([name, color], i) => ({ id: uuid(100 + i), name, color, position: i, triggerEvent: null }));
 const ST = Object.fromEntries(STATUSES.map((s) => [s.name, s.id]));
-// EIGHT STAGES, ALL OF THEM STEPS. The last two used to be Won and Lost; migration 342 retired
+// EIGHT STAGES, ALL OF THEM STEPS. The last two used to be Won and Lost; migration 352 retired
 // both kinds (a stage is where a lead IS, never how it ended), so they are two more real steps
 // here — the point of eight is that it is the widest board a builder has, which this still is.
 // What a lost card does now lives in pipelineLostStatus.mjs.
@@ -163,7 +168,7 @@ async function boardReady(page) {
   await page.waitForTimeout(300);
 }
 
-// Everything the "no scroll bar" claim rests on, measured in the page.
+// Everything the one-row claim rests on, measured in the page.
 const measure = (page) => page.evaluate(() => {
   const de = document.documentElement;
   const board = document.querySelector("[data-ss-board-wide]");
@@ -172,9 +177,12 @@ const measure = (page) => page.evaluate(() => {
   const stages = [...document.querySelectorAll("[data-ss-stage]")].map((el) => el.getBoundingClientRect());
   // Anything inside the board section that scrolls, or could: overflow auto/scroll AND more
   // content than room. A clipped ellipsis (overflow hidden) is not a scroll bar.
+  // THE BOARD WRAPPER ITSELF IS EXEMPT since 2026-11-01 — it is the one scroller we want, and it
+  // trips this detector by construction. Everything else inside the section must still be clean.
   const scrollers = [];
   const root = document.querySelector("[data-ss-sales-pipelines]");
   (root ? [root, ...root.querySelectorAll("*")] : []).forEach((el) => {
+    if (el === board) return;
     const cs = getComputedStyle(el);
     const can = /(auto|scroll)/.test(cs.overflowX + " " + cs.overflowY);
     if (can && (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1)) scrollers.push(el.tagName + "." + (el.getAttribute("style") || "").slice(0, 60));
@@ -184,7 +192,12 @@ const measure = (page) => page.evaluate(() => {
   return {
     docScroll: de.scrollWidth, docClient: de.clientWidth,
     boardScroll: board ? board.scrollWidth : -1, boardClient: board ? board.clientWidth : -1,
-    stagesInside: !!br && stages.every((r) => r.left >= br.left - 1 && r.right <= br.right + 1),
+    // In CONTENT coordinates, not viewport ones: a stage scrolled out of view is still inside the
+    // board, and comparing visible rects would fail the moment the row scrolls.
+    stagesInside: !!br && stages.every((r) => r.left + board.scrollLeft >= br.left - 1
+      && r.right + board.scrollLeft <= br.left + board.scrollWidth + 1),
+    boardScrolls: !!board && /(auto|scroll)/.test(getComputedStyle(board).overflowX),
+    boardOverflows: !!board && board.scrollWidth > board.clientWidth + 1,
     stageCount: stages.length, rows, narrowest: Math.round(narrowest),
     cols: board ? Number(board.getAttribute("data-ss-board-cols")) : null,
     innerMax: inner ? getComputedStyle(inner).maxWidth : null,
@@ -211,8 +224,12 @@ try {
     const tag = `W${w}`;
     ok(`${tag}a all eight stages and ${DEALS.length} cards are on the board`, m.stageCount === 8 && (await page.locator("[data-ss-deal]").count()) === DEALS.length, JSON.stringify({ stages: m.stageCount }));
     ok(`${tag}b the page has no sideways scroll`, m.docScroll <= m.docClient, `${m.docScroll} <= ${m.docClient}`);
-    ok(`${tag}c the board has no sideways scroll`, m.boardScroll <= m.boardClient, `${m.boardScroll} <= ${m.boardClient}`);
-    ok(`${tag}d nothing inside the board scrolls (no inner scroll bar, sideways or down)`, m.scrollers.length === 0, m.scrollers.join(" | "));
+    // The row needs eight columns at their 140px floor plus seven 8px gaps. Narrower than that and
+    // the board MUST scroll; wider and it must not — a scrollbar on a board that fits is clutter.
+    ok(`${tag}c the board scrolls sideways exactly when the row does not fit`,
+      m.boardScrolls && m.boardOverflows === (m.boardClient + 1 < NEEDED),
+      JSON.stringify({ scrolls: m.boardScrolls, overflows: m.boardOverflows, client: m.boardClient, needed: NEEDED }));
+    ok(`${tag}d the board is the ONLY thing in the section that scrolls`, m.scrollers.length === 0, m.scrollers.join(" | "));
     ok(`${tag}e every stage sits inside the board`, m.stagesInside, JSON.stringify(m));
     if (w >= 1280) {
       ok(`${tag}f the page's 1240px cap is lifted while the board shows`, m.innerMax === "none", `${m.innerMax}, board ${m.boardWidth}px`);
@@ -220,10 +237,12 @@ try {
         `inner ${m.innerWidth} of ${m.bodyContent}, board ${m.boardWidth}`);
       if (w >= 1600) ok(`${tag}g2 so at ${w} the board is wider than the old 1240px box`, m.boardWidth > 1240, `${m.boardWidth}px`);
     }
-    ok(`${tag}h as many stages go across as fit at 140px, the rest wrap below (cols ${m.cols}, rows ${m.rows}, narrowest ${m.narrowest}px)`,
-      m.cols === Math.min(8, Math.floor((m.boardWidth + 8) / 148)) && m.rows === Math.ceil(8 / m.cols) && m.narrowest >= (w < 600 ? 100 : 140),
+    // THE ONE THIS EXISTS FOR: never a column under the other columns, at any width.
+    ok(`${tag}h all eight stages are ONE row, none of them under another (rows ${m.rows}, narrowest ${m.narrowest}px)`,
+      m.rows === 1 && m.cols === 8 && m.narrowest >= SS_BOARD_COL_MIN - 1,
       JSON.stringify({ cols: m.cols, rows: m.rows, narrowest: m.narrowest, board: m.boardWidth }));
-    if (w === 1920) ok(`${tag}i at 1920 all eight stages go across in one row`, m.rows === 1, `${m.rows} rows`);
+    if (w === 1920) ok(`${tag}i at 1920 the eight fit without scrolling at all`, m.rows === 1 && !m.boardOverflows, JSON.stringify({ rows: m.rows, overflows: m.boardOverflows }));
+    if (w === 390) ok(`${tag}i2 on a phone they are STILL one row, reached by scrolling`, m.rows === 1 && m.boardOverflows, JSON.stringify({ rows: m.rows, overflows: m.boardOverflows }));
     ok(`${tag}z no page errors`, errors.length === 0, errors.join(" | "));
     await page.screenshot({ path: join(shots, `${PREFIX}${w}.png`), fullPage: true });
     await ctx.close();

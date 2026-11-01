@@ -20,7 +20,6 @@
 //   F  a cached revisit where compute AND the fallback fail: cached figures are never armed;
 //      the tab falls back to the empty scaffold, as a failed first read always did
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/commissionsReconcile.mjs
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to

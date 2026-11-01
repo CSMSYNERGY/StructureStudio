@@ -43,7 +43,6 @@
 //        charge then goes out on the new amount with that ZIP
 //   X  no uncaught page errors; nothing went anywhere but the stubs
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/cardBillingFields.mjs       (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> and SS_MY_QUOTES=<an older my-quotes.html>

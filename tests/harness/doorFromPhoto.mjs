@@ -35,7 +35,6 @@
 // The tenant, doors and the photos are made up (public repo). fixtures/made-up-door.avif is this
 // harness's own made-up door photo, encoded as AVIF (no canvas can write AVIF).
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/doorFromPhoto.mjs          (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/door-from-photo (SS_SHOTS overrides).

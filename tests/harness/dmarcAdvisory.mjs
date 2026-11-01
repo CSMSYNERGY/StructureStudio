@@ -23,7 +23,6 @@
 // Supabase is stubbed at the network layer: no login, nothing leaves the machine, nothing is sent.
 // A picture of each scenario's card lands in %TEMP%/ss-harness/dmarc-advisory (SS_SHOTS overrides).
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/dmarcAdvisory.mjs           (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to prove

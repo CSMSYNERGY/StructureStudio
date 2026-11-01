@@ -20,7 +20,6 @@
 //   I  a bicycle turned against a wall stays inside the building
 //   Each: zero page errors.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/planCore.mjs          (SS_BASE=http://127.0.0.1:<port>, SS_CASES=B,C)
 import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, revealTool, bypassGate, BASE } from "./lib.mjs";
 

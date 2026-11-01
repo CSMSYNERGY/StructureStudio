@@ -15,7 +15,6 @@
 // MACHINE (submit-estimate, save_design and log_error would otherwise write into the one database
 // beta and production share).
 //
-//   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/businessContact.mjs             (exit 0 = every check held)
 import { readFileSync } from "node:fs";
 import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE, REF } from "./lib.mjs";

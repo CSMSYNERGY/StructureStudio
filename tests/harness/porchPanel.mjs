@@ -44,7 +44,6 @@
 // and nothing leaves the machine, so no save ever reaches a database. It exercises the COMPILED
 // bundle, so a source change that was never `npm run compile`d is invisible here.
 //
-//   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/porchPanel.mjs
 //
 // Exit 0 = every assertion held.

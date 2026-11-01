@@ -15,7 +15,6 @@
 // sentence without Meetings view) and counts every refusal. Supabase is stubbed at the network
 // layer; nothing leaves the machine. Names are made up (public repo).
 //
-//   python -m http.server 8125 --bind 127.0.0.1    (repo root; SS_BASE overrides the address)
 //   node tests/harness/myProfileMeetingsViewAs.mjs  (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/my-profile-meetings-view-as (SS_SHOTS overrides).

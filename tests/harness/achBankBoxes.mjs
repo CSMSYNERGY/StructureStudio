@@ -33,7 +33,6 @@
 //   X  across both: neither number in localStorage, sessionStorage, the URL, the console, the
 //      error log (log_error) or any request other than the one tokenize POST
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/achBankBoxes.mjs            (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> and SS_MY_QUOTES=<an older my-quotes.html>

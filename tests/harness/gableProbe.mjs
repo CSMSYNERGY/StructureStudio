@@ -14,7 +14,6 @@
 // candidates tinted. Each variant is a fresh page, because the full-screen viewer builds from the
 // props it opened with.
 //
-//   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/gableProbe.mjs                            (hand-written config, 6 variants)
 //   SS_CONFIG_FILE=cfg.json SS_FIXTURES_FILE=fx.json SS_STYLES=Cabin node tests/harness/gableProbe.mjs
 //       (a saved get_config read — how the real tenant's Cabin was measured on 2026-09-15)

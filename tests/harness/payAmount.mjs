@@ -22,7 +22,6 @@
 //      after it made "2000.00150")
 //   X  no uncaught page errors; nothing left the machine
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/payAmount.mjs               (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that bundle instead, which is how to

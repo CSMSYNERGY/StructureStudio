@@ -21,7 +21,6 @@
 //
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/rigidFoamFloor.mjs         (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/rigid-foam-floor (SS_SHOTS overrides). Served from the tree

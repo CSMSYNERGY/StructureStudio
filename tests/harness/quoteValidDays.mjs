@@ -21,7 +21,6 @@
 // types itself, 22.18+ / 23.6+) and refuses exactly what portal-settings refuses. Supabase is stubbed
 // at the network layer; nothing leaves the machine and NOTHING IS SAVED anywhere.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/quoteValidDays.mjs           (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/quote-valid-days (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an older

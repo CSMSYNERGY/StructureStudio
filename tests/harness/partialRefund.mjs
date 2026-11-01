@@ -26,7 +26,6 @@
 //   R10 several partials down to nothing: the row reads "Refunded", struck through at what was taken
 //   X   no uncaught page errors; nothing left the machine
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/partialRefund.mjs          (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to watch

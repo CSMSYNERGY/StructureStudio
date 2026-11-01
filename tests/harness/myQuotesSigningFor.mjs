@@ -8,7 +8,6 @@
 //   B. The invoice signature on a business's estimate: the same line.
 //   C. An estimate with no company: no such line, the panel as it always was.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/myQuotesSigningFor.mjs       (exit 0 = every check held)
 //
 // Fixtures are made up (example.test, a made-up tenant), per the public-repo rule.

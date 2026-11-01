@@ -218,7 +218,7 @@ Deno.test("each pipeline's search, Owner, Status filter and Show lost are kept p
   const OFF = { query: "", owner: "all", showLost: false, status: { mode: "inc", ids: [] } };
   assertEquals(bare(v.ssBoardViewOf("acct", "p-1")), OFF, "with no status list there is nothing to hide, so the board opens unfiltered");
 
-  // -- WHAT THE BOARD OPENS ON (migration 342, Carolyn 2026-10-26) --------------------------
+  // -- WHAT THE BOARD OPENS ON (migration 352, Carolyn 2026-10-26) --------------------------
   // "by default LOST and Payment received, scheduling and delivered should be hidden." Keyed on
   // each status's EVENT, never its name: a builder renames these freely.
   const LADDER = [

@@ -52,7 +52,6 @@
 // save_company_tax's parsing, refusals and answer from _shared/companyTax.ts. A stub that said
 // something the server never says would pass a check the real page fails.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/taxCodesTab.mjs              (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is

@@ -8,7 +8,7 @@
 //      reads its event, never "set by hand"); the Pipelines card names no stage→status link,
 //      and Shed Deals carries the "new designs" badge.
 //      Since 2026-10-13 the copy is true to that: no "add your own", and a status with no event
-//      says "No event yet, so no card will get this status." (since 342 no seeded status is in that
+//      says "No event yet, so no card will get this status." (since 352 no seeded status is in that
 //      state, so A10 frees one to prove it). A new status
 //      needs its event: with every event taken the card says so and offers no Add; once one is
 //      freed, Add stays off until a name AND an event are picked, and sends both (A7-A12; against
@@ -23,7 +23,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the skeleton is
 // crmContactDeal.mjs's.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmPipelineSettings.mjs    (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-pipeline-settings (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an
@@ -44,7 +43,7 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 const U = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-// Carolyn's status set, as 342 seeds it: Contact Made in place of 302's unreachable Appt Set, and
+// Carolyn's status set, as 352 seeds it: Contact Made in place of 302's unreachable Appt Set, and
 // every rung carrying the event that sets it.
 const STATUSES = [
   ["New Lead", "#64748B", "design_submitted"], ["Contact Made", "#0EA5E9", "contact_made"], ["Estimate Sent", "#6366F1", "estimate_sent"],
@@ -146,7 +145,7 @@ try {
   ok("A3 nothing says a status can be set by hand", !/set by hand\)|can still change a status by hand|by hand, or automatically/i.test(text));
   const triggers = await page.locator("[data-ss-pipeline-settings] select[aria-label='Set automatically when']").evaluateAll((els) =>
     els.map((e) => e.options[e.selectedIndex] ? e.options[e.selectedIndex].text : null));
-  // 342: Contact Made has an event of its own, so no rung reads "No event" any more.
+  // 352: Contact Made has an event of its own, so no rung reads "No event" any more.
   ok("A4 every status keeps its 'Set automatically when', Contact Made included", triggers.length === 8
     && triggers[0] === "A design is submitted" && /^Contact is made/.test(triggers[1] || "")
     && !triggers.includes("No event"), JSON.stringify(triggers));
@@ -173,7 +172,7 @@ try {
   let sc = await statusCard();
   ok("A7 the card no longer says 'add your own', and says a new status needs an event of its own",
     !/add your own/i.test(sc.text) && /a new status needs an event of its own/.test(sc.text) && !/Nothing yet/.test(sc.text), sc.text.slice(0, 600));
-  // 342: every seeded status is reachable now, so nothing wears the warning until A10 frees one.
+  // 352: every seeded status is reachable now, so nothing wears the warning until A10 frees one.
   ok("A8 no status says 'no card will get this', because every one of them has an event",
     sc.rows.filter((r) => r.hint).length === 0, JSON.stringify(sc.rows));
   ok("A9 with every event taken there is no Add: the card says why instead",
@@ -215,7 +214,7 @@ try {
     const modal = await page.evaluate(() => document.body.innerText);
     ok("B1 no 'Linked status' drop-down on any stage", (await page.locator("select[aria-label='Linked status']").count()) === 0
       && !/No status link/.test(modal));
-    // 342: a stage has no KIND to pick any more — it is a step in the process, never an outcome.
+    // 352: a stage has no KIND to pick any more — it is a step in the process, never an outcome.
     ok("B2 each stage keeps colour, up/down and remove, and offers no Kind (C16)",
       (await page.locator("select[aria-label='Colour']").count()) >= 6 && (await page.locator("select[aria-label='Kind']").count()) === 0
       && (await page.locator("button[title='Move up']").count()) >= 6 && (await page.locator("button[title='Remove stage']").count()) === 6);

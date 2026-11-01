@@ -27,7 +27,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the skeleton is
 // crmPipelineSettings.mjs's.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/customerHub.mjs            (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/customer-hub (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an older

@@ -24,7 +24,6 @@
 //      corner; and a stored item added in 3D, whose drop point is open ground on this size, lands inside the walls
 //   Each: zero page errors.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/partialWingPlan.mjs      (SS_BASE=http://127.0.0.1:<port>, SS_CASES=N,D, SS_SHOTS=<dir>)
 //
 // Exit 0 = every assertion held. NOTHING LEAVES THE MACHINE (lib.mjs stubSupabase). Made-up tenant and catalog.

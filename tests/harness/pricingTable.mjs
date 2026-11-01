@@ -187,7 +187,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine). Every style, size,
 // option and account here is made up; this repo is public.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/pricingTable.mjs            (exit 0 = every check held)
 //
 // SS_BASE=http://127.0.0.1:<port> points it at another port. SKIP_TIMING=1 skips T; PG_ONLY=C,F runs

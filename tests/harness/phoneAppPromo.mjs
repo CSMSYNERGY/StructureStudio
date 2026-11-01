@@ -26,7 +26,6 @@
 // repo). 127.0.0.1 is a beta host to the portal (ssIsBetaHost), where phone is always offered, so N
 // opens the app on acme.localhost, which the portal reads as a production host.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root; SS_BASE overrides the address)
 //   node tests/harness/phoneAppPromo.mjs           (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead; before this change

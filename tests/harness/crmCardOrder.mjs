@@ -29,7 +29,6 @@
 // cardOrder rule (both kinds, strings only, at most 40), so what the page reads back is what the
 // real whitelist would keep.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmCardOrder.mjs             (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-card-order (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an

@@ -85,7 +85,6 @@
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
 // slab, and a member looked up by its size vanishes from the checks the moment it is built wrong.
 //
-//   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/porchProbe.mjs                            (SS_SHOTS=<dir> for the PNGs)
 //   SS_CASES=A,E node tests/harness/porchProbe.mjs               (a subset)
 //

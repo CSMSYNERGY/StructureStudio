@@ -19,7 +19,6 @@
 // The stub answers `save` with portal-settings' rule (a real boolean or a 400). Supabase is stubbed at
 // the network layer; nothing leaves the machine and NOTHING IS SAVED anywhere.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/quoteCornerSwitch.mjs        (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/quote-corner-switch (SS_SHOTS overrides). Against the portal before

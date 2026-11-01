@@ -22,7 +22,6 @@
 //      number_request_set in_progress;
 //   every scenario: no uncaught page error.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/bringYourNumber.mjs         (exit 0 = every check held)
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

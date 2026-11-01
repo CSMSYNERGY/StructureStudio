@@ -29,7 +29,6 @@
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED. The
 // tenant and its doors are made up, per the public-repo rule.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/settingsRefresh.mjs        (exit 0 = every check held)
 import { join } from "node:path";
 import { launch, reporter, BASE, shotsDir, stubSupabase, collectErrors, openDesigner, readItems, buildingRect, bypassGate } from "./lib.mjs";

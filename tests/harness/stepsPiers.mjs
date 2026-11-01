@@ -32,7 +32,6 @@
 //      with every kind of steps (front, down a side, a recessed porch's) and goes with "None".
 //   D. zero page errors.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/stepsPiers.mjs              (SS_BASE=http://127.0.0.1:<port> to move it)
 //   SS_CASES=A,B,C node tests/harness/stepsPiers.mjs   (a subset)   SS_SHOTS=<dir> for screenshots
 //

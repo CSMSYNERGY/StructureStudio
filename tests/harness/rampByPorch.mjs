@@ -10,7 +10,6 @@
 //       the footprint line. It used to start at the set-back wall, its run buried in the porch floor.
 //   Each: zero page errors.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/rampByPorch.mjs           (SS_BASE=http://127.0.0.1:<port>, SS_CASES=R1,R4)
 import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, revealTool } from "./lib.mjs";
 

@@ -21,7 +21,6 @@
 //      "Exit view-as" button that leaves the account; no "Coming soon", no "Work in progress"
 //   X  no uncaught page errors; nothing left the machine
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/openDesignLink.mjs          (exit 0 = every check held)
 //
 // The app's addresses (/orders/…, /designer) are answered from _redirects by serveAppRoutes, on the

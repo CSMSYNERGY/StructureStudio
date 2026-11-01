@@ -17,7 +17,6 @@
 //   8. an 8 ft gable at 3:12 and a 24 in vent  -> on the wall, with the "too small" toast
 //   9. the porch Cabin's truss end             -> sill over the brace feet, truss in front of the vent
 //
-//   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/ventGable.mjs                    (SS_SHOTS=<dir> for the screenshots)
 import { pathToFileURL } from "node:url";
 import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, armVent } from "./lib.mjs";

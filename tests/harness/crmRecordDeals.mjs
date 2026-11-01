@@ -11,9 +11,9 @@
 //      adds, beside it, a stage drop-down of its own pipeline's stages only and a move control
 //      listing the other pipelines; no second status
 //   F. changing the stage is one crm_deal_move to that stage, and the bar follows
-//   G. moving to another pipeline is one crm_deal_move to that pipeline's first open stage; the
-//      stage drop-down then lists the new pipeline's stages and the bar names it
-//   H. a lost stage asks for the reason first and sends it
+//   G. a card STAYS in its pipeline (2026-11-01): nothing on the record offers another pipeline's
+//      stages, and every move it sends names a stage of the card's own pipeline
+//   H. Mark lost asks for the reason first, sends it, and moves the card NOWHERE
 //   I. a design record (d-...) draws its card's pipeline too
 //   J. the pipeline read failed (pipelineError, or a contact with no block): the designs are still
 //      the rows, and a picked deal (or a design record) says "Couldn't load this deal's pipeline.
@@ -29,7 +29,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the stub
 // shape is crmContactDeal.mjs's.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmRecordDeals.mjs          (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-record-deals (SS_SHOTS overrides), named U3-*.png.
@@ -160,12 +159,12 @@ async function scenario(browser, { withPipeline = true, pipelineError = false, a
       case "crm_deal_move": {
         const stage = [...SHED.stages, ...SOLD.stages].find((s) => s.id === body.stageId);
         const owner = [SHED, SOLD].find((p) => p.stages.includes(stage));
-        // 342: a move carries no outcome. The lost flag is left exactly as it was.
+        // 352: a move carries no outcome. The lost flag is left exactly as it was.
         deals = deals.map((d) => (d.id === body.id ? { ...d, stage_id: stage.id, pipeline_id: owner.id } : d));
         const now = deals.find((d) => d.id === body.id);
         return json(route, { ok: true, moved: true, kind: stage.kind, status_id: now.status_id, lost_at: now.lost_at || null });
       }
-      // 342: marking a card lost, and reopening it. Neither touches the stage.
+      // 352: marking a card lost, and reopening it. Neither touches the stage.
       case "crm_deal_mark_lost": {
         deals = deals.map((d) => (d.id === body.id ? { ...d, lost_at: new Date().toISOString(), lost_reason: body.lostReason } : d));
         const now = deals.find((d) => d.id === body.id);
@@ -292,8 +291,12 @@ try {
     const stageOpts = await page.locator(`${panel} select[aria-label="Stage"] option`).allInnerTexts();
     ok("E2 the stage drop-down lists only this pipeline's stages", JSON.stringify(stageOpts) === JSON.stringify(SHED.stages.map((s) => s.name)), stageOpts.join(" | "));
     ok("E3 with no groups of other pipelines", (await page.locator(`${panel} select[aria-label="Stage"] optgroup`).count()) === 0);
-    const moveOpts = await page.locator(`${panel} select[aria-label="Move to another pipeline"] option`).allInnerTexts();
-    ok("E4 the move control lists the other pipeline", JSON.stringify(moveOpts) === JSON.stringify(["Move to pipeline…", "Sold"]), moveOpts.join(" | "));
+    // 2026-11-01: a card STAYS in its pipeline. Carolyn: "I want to remove the option to move
+    // between pipelines ... every design created in shed designer goes to that pipeline only."
+    ok("E4 there is NO move-to-another-pipeline control",
+      (await page.locator(`${panel} select[aria-label="Move to another pipeline"]`).count()) === 0
+      && !(await page.locator(panel).innerText()).includes("Move to pipeline"),
+      (await page.locator(panel).innerText()).replace(/\s+/g, " ").slice(0, 200));
     ok("E5 no second status inside the opened deal", (await page.locator(`${panel} [data-ss-deal-status]`).count()) === 0);
     // The controls sit at the bottom right, beside Open in designer.
     const geo = await page.evaluate((sel) => {
@@ -320,38 +323,43 @@ try {
     const afterF = await barRow(page);
     ok("F2 and the bar follows", afterF && afterF.lit.join() === "Nurturing - Hot", JSON.stringify(afterF));
 
-    // ── G ──
-    await page.locator(`${panel} select[aria-label="Move to another pipeline"]`).selectOption(SOLD.id);
-    await page.waitForTimeout(800);
+    // ── G ── A CARD STAYS IN ITS PIPELINE (2026-11-01). G used to drive the move-to-another-
+    // pipeline control through a whole round trip (the card lands in Sold's first stage, the stage
+    // drop-down re-lists, the bar renames). That control is gone, so what G asserts now is that
+    // the OTHER pipeline is unreachable from this record: its stages are not offered anywhere, and
+    // the only crm_deal_move this page can send names a stage of the card's own pipeline.
+    const everyStageOpt = await page.locator(`${panel} select option`).allInnerTexts();
+    ok("G1 no control on the record offers another pipeline's stages",
+      SOLD.stages.every((st) => !everyStageOpt.includes(st.name)), everyStageOpt.join(" | "));
     const m2 = moves(calls);
-    ok("G1 a move is one crm_deal_move to the new pipeline's first open stage", m2.length === 2 && m2[1].stageId === SOLD.stages[0].id, JSON.stringify(m2[1]));
-    const stageOpts2 = await page.locator(`${panel} select[aria-label="Stage"] option`).allInnerTexts();
-    ok("G2 the stage drop-down now lists the new pipeline's stages", JSON.stringify(stageOpts2) === JSON.stringify(SOLD.stages.map((s) => s.name)), stageOpts2.join(" | "));
+    ok("G2 and every move this page sent named a stage of the card's own pipeline",
+      m2.length > 0 && m2.every((b) => SHED.stages.some((st) => st.id === b.stageId)), JSON.stringify(m2));
     const afterG = await barRow(page);
-    ok("G3 the bar names the new pipeline", afterG && afterG.label === "Sold" && afterG.lit.join() === "Signed", JSON.stringify(afterG));
-    const moveOpts2 = await page.locator(`${panel} select[aria-label="Move to another pipeline"] option`).allInnerTexts();
-    ok("G4 and the move control now offers the old one", JSON.stringify(moveOpts2) === JSON.stringify(["Move to pipeline…", "Shed Deals"]), moveOpts2.join(" | "));
-    await shot(page, "moved-to-sold");
+    ok("G3 the bar still names the card's own pipeline", afterG && afterG.label === "Shed Deals", JSON.stringify(afterG));
+    await shot(page, "stays-in-pipeline");
 
-    // ── H ── MIGRATION 342: lost is a mark on the card, not a stage to pick. Carolyn: "LOST stays
+    // ── H ── MIGRATION 352: lost is a mark on the card, not a stage to pick. Carolyn: "LOST stays
     // in the column it was when marking lost", so this asks why and then moves NOTHING.
     const stageBefore = await page.locator(`${panel} select[aria-label="Stage"]`).inputValue();
     await page.locator(`${panel} [data-ss-deal-lost]`).click();
     await page.waitForTimeout(500);
     const dialog = page.locator('[role="dialog"]');
-    ok("H1 Mark lost asks for the reason first, and moves nothing", (await dialog.count()) === 1 && moves(calls).length === 2);
+    const movesBefore = moves(calls).length;
+    ok("H1 Mark lost asks for the reason first, and moves nothing", (await dialog.count()) === 1 && movesBefore === 1, `${movesBefore} move(s) so far`);
     await shot(page, "lost-reason");
     // The pipeline's first reason is picked to begin with (SsLostReasonDialog).
     await dialog.locator("button", { hasText: "Mark lost" }).click();
     await page.waitForTimeout(700);
     const lost = calls.filter((b) => b.action === "crm_deal_mark_lost");
     ok("H2 it sends crm_deal_mark_lost with that reason, and still no move",
-      lost.length === 1 && lost[0].lostReason === "Financing fell through" && moves(calls).length === 2, JSON.stringify({ lost, moves: moves(calls).length }));
+      lost.length === 1 && lost[0].lostReason === SHED.lostReasons[0] && moves(calls).length === movesBefore,
+      JSON.stringify({ lost, moves: moves(calls).length, expected: SHED.lostReasons[0] }));
     ok("H3 the card keeps the stage it was being worked in",
       (await page.locator(`${panel} select[aria-label="Stage"]`).inputValue()) === stageBefore,
       JSON.stringify({ before: stageBefore, after: await page.locator(`${panel} select[aria-label="Stage"]`).inputValue() }));
     ok("H4 and the row says it is lost, with the reason",
-      /Lost: Financing fell through/.test(await page.locator(panel).innerText()), (await page.locator(panel).innerText()).replace(/\s+/g, " ").slice(-120));
+      new RegExp("Lost: " + SHED.lostReasons[0]).test(await page.locator(panel).innerText()),
+      (await page.locator(panel).innerText()).replace(/\s+/g, " ").slice(-120));
     // Reopen puts it back in play, where it already is.
     await page.locator(`${panel} [data-ss-deal-reopen]`).click();
     await page.waitForTimeout(600);
@@ -411,7 +419,9 @@ try {
         (bodyText.match(/[^\n]*(Pick a deal|This lead has no design)[^\n]*/g) || []).join(" | "));
       const before = calls.length;
       if (tabsOpen) {
-        await page.locator("button", { hasText: /^Notes$/ }).click();
+        // The tab is "Write Note" since 20f7f292 ("the tabs say what they DO", 2026-10-26); this
+        // selector still said "Notes" and timed out the whole suite.
+        await page.locator("button", { hasText: /^Write Note$/ }).click();
         await page.locator('textarea[placeholder="Click here to add a note…"]').fill("Called about the second building");
         await page.locator("button", { hasText: "Save note" }).click();
         await page.waitForTimeout(700);
@@ -437,7 +447,8 @@ try {
     await go(`/contacts/p-${SOLD.id}`);
     await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
     const unfiltered = await shownCards();
-    ok("M0 the Sold board shows three cards before any filter", unfiltered.length === 3, JSON.stringify(unfiltered));
+    const SOLD_CARDS = DEALS().filter((d) => d.pipeline_id === SOLD.id).length;
+    ok(`M0 the Sold board shows its own ${SOLD_CARDS} cards before any filter`, unfiltered.length === SOLD_CARDS, JSON.stringify(unfiltered));
     await page.locator("[data-ss-status-filter-button]").click();
     await page.locator(`[data-ss-status-option="${STATUSES[2].id}"] input[type="checkbox"]`).check();
     await page.locator("[data-ss-status-filter-menu] button", { hasText: "Done" }).click();
@@ -488,7 +499,7 @@ try {
     await page.locator(`[data-ss-deal="${UTIL_DEAL}"]`).waitFor({ timeout: 20000 }).catch(() => {});
     await page.waitForTimeout(400);
     const cleared = await boardState();
-    ok("M6 a cleared filter and search stay cleared after a round trip", cleared.cards.length === 3 && cleared.filter === "All statuses" && cleared.search === "", JSON.stringify(cleared));
+    ok("M6 a cleared filter and search stay cleared after a round trip", cleared.cards.length === SOLD_CARDS && cleared.filter === "All statuses" && cleared.search === "", JSON.stringify(cleared));
 
     ok("Z1 nothing on the record set a status", !calls.some((c) => c.action === "crm_deal_set_status"), JSON.stringify(calls.map((c) => c.action)));
     ok("Z2 no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));

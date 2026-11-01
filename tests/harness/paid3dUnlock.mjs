@@ -31,7 +31,6 @@
 // bought: subscribe is answered by the stub). The designer's get_config comes from gableProbe.mjs.
 // portal-billing's `status` answer has the real function's shape.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/paid3dUnlock.mjs             (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to

@@ -24,7 +24,6 @@
 // The server half (save_item_map takes the eleven rows and stamps them, and the push bills each
 // kind from its own row) is driven in supabase/functions/_shared/_test_stubs/qboRealmWiring_test.ts.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/qboItemGrid.mjs               (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead. Against

@@ -8,16 +8,29 @@
 // really loads (structure-studio.component.compiled.js) against a config we control. A change
 // that was never `npm run compile`d is invisible to it — that is the point, not a gap.
 //
-//   1. python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
-//   2. node tests/harness/<script>.mjs
+//   node tests/harness/<script>.mjs        (that is the whole recipe — see SERVES ITSELF below)
+//
+// ⚠️ IT SERVES ITSELF, ON A PORT NOBODY ELSE HOLDS (2026-11-01). Every harness used to need
+// `python -m http.server 8125` running first, from the repo root. With four agents working in four
+// clones of this repo on one machine, that is a trap rather than a step: whoever binds 8125 first
+// wins, and every other clone's harnesses then silently drive THAT clone's compiled bundle. A run
+// can report green for code it never loaded. It cost a session real time on 2026-11-01, in the
+// lucky direction (a false RED on a board change that was actually fine).
+//   * No SS_BASE: this module starts its own static server on an EPHEMERAL port (listen(0)) over
+//     this checkout, and unrefs it so the harness still exits on its own. No port to collide on.
+//   * SS_BASE set (a deployed host, or a server you run yourself): it is checked ONCE, before any
+//     harness opens a page — the served portal.html must carry the same compiled-bundle ?v= as the
+//     one on disk here. A mismatch throws by name instead of producing a confident wrong answer.
 //
 // ⚠️ NOTHING LEAVES THE MACHINE. Every Supabase host is fulfilled locally, and every other
 // non-local request is aborted. capture-lead, save_design, submit-estimate and log_error would
 // otherwise write rows into the one database beta AND production share.
 import { chromium } from "@playwright/test";
-import { mkdirSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
 import { bypassGate, showOptTab, revealTool } from "../e2e/helpers.mjs";
 import { parseRedirects, resolveRequest } from "../../scripts/hostRules.mjs";
 
@@ -31,7 +44,79 @@ export async function armVent(page, name) {
   if (await card.count()) { await card.click(); await page.waitForTimeout(250); }
 }
 export const REF = "jzeamjbhdrsbygdnphbm";
-export const BASE = process.env.SS_BASE || "http://127.0.0.1:8125";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+// The compiled bundle this checkout would have a browser load, read out of its own portal.html.
+// It is the identity of a build in one short string, which is exactly what the check below needs.
+function localBundleTag() {
+  try {
+    const m = /portal\.app\.compiled\.js\?v=([a-f0-9]+)/.exec(readFileSync(join(REPO_ROOT, "portal.html"), "utf8"));
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
+const TYPES = {
+  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8",
+  ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
+  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+  ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2", ".map": "application/json",
+  ".txt": "text/plain; charset=utf-8", ".webmanifest": "application/manifest+json",
+};
+
+// A static server over THIS checkout, on a port the OS picks, unrefd so it never holds the process
+// open. Deliberately tiny: it answers GET/HEAD for files that exist and 404s everything else — the
+// app's pretty addresses are routed in the page by serveAppRoutes, not here.
+function startRepoServer() {
+  return new Promise((resolve, reject) => {
+    const server = createServer((req, res) => {
+      let file;
+      try {
+        const rel = decodeURIComponent(new URL(req.url, "http://127.0.0.1").pathname);
+        file = normalize(join(REPO_ROOT, rel));
+      } catch { res.writeHead(400).end(); return; }
+      // Never serve outside the checkout, whatever the request says.
+      if (!file.startsWith(normalize(REPO_ROOT))) { res.writeHead(403).end(); return; }
+      if (!existsSync(file) || !statSync(file).isFile()) { res.writeHead(404).end("not found"); return; }
+      const dot = file.lastIndexOf(".");
+      res.writeHead(200, {
+        "content-type": (dot >= 0 && TYPES[file.slice(dot).toLowerCase()]) || "application/octet-stream",
+        "cache-control": "no-store",
+      });
+      if (req.method === "HEAD") { res.end(); return; }
+      createReadStream(file).pipe(res);
+    });
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.unref();
+      resolve(`http://127.0.0.1:${server.address().port}`);
+    });
+  });
+}
+
+// An SS_BASE somebody handed us: prove it is serving THIS checkout before a single check runs.
+async function assertServesThisCheckout(base) {
+  const mine = localBundleTag();
+  if (!mine) return;                                     // no local portal.html to compare against
+  let served = null;
+  try {
+    const body = await fetch(`${base}/portal.html`, { cache: "no-store" }).then((r) => r.text());
+    served = (/portal\.app\.compiled\.js\?v=([a-f0-9]+)/.exec(body) || [])[1] || null;
+  } catch (e) {
+    throw new Error(`SS_BASE=${base} did not answer /portal.html (${e.message}). Start it, or unset SS_BASE and let the harness serve itself.`);
+  }
+  if (served !== mine) {
+    throw new Error(
+      `SS_BASE=${base} is serving a DIFFERENT checkout: it has portal.app.compiled.js?v=${served}, this one has ?v=${mine}.\n`
+      + "  Another agent's static server is almost certainly holding that port. Unset SS_BASE and the\n"
+      + "  harness will serve this checkout on a port of its own. (Refusing to run: a harness pointed at\n"
+      + "  someone else's build reports on code you did not write.)");
+  }
+}
+
+export const BASE = process.env.SS_BASE || await startRepoServer();
+if (process.env.SS_BASE) await assertServesThisCheckout(BASE);
 
 // A tiny assertion log: every check prints, the exit code is the verdict.
 export function reporter() {

@@ -41,7 +41,6 @@
 //      skirt and the stem wall a piece per edge (8), none across it, and no shade over it
 //   9. zero page errors
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/foundation.mjs                  (SS_BASE=http://127.0.0.1:<port> to move it)
 //   SS_CASES=B,P node tests/harness/foundation.mjs     (a subset; "panel" is the panel part)
 //

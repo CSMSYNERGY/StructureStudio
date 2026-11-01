@@ -29,7 +29,6 @@
 // Supabase is stubbed at the network layer; nothing leaves the machine. Fixtures are made up
 // (example.test, a made-up tenant), per the public-repo rule.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root; SS_BASE overrides the address)
 //   node tests/harness/myProfileAiConsent.mjs      (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/my-profile-ai-consent (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an

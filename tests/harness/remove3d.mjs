@@ -6,7 +6,6 @@
 // in its title. This places items from the 3D palette with real clicks on the canvas — which is
 // what sets the footer's selection — at a desktop and a tablet width, and measures the button.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/remove3d.mjs                (exit 0 = every check held)
 //
 // WebGL runs on SwiftShader (lib.mjs launch). Never the in-app browser pane: it starves

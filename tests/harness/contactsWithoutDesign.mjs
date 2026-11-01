@@ -54,7 +54,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the stub
 // skeleton is crmContactDeal.mjs's and the cold deep links supportConsoles.mjs's.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/contactsWithoutDesign.mjs   (exit 0 = every check held)
 //
 // SS_BASE overrides the server (lib.mjs). The "before" artifact for E and F is

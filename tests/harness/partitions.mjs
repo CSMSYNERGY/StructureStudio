@@ -55,7 +55,6 @@
 //      SS_PARTITIONS_ONLY_O=1 runs only this (and L).
 //   L. zero page errors.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/partitions.mjs        (SS_BASE=http://127.0.0.1:<port> to move it)
 //
 // Exit 0 = every assertion held. NOTHING LEAVES THE MACHINE (lib.mjs stubSupabase). Tenants and

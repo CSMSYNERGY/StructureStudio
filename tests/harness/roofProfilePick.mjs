@@ -34,7 +34,6 @@
 // Supabase is stubbed at the network layer; nothing leaves the machine and nothing is saved anywhere.
 // Builders and people are made up ("Acme Sheds", "Pat Example"). The repo is public.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>   (after npm run compile)
 //   node tests/harness/roofProfilePick.mjs      (SS_BASE=http://127.0.0.1:<port>, SS_SHOTS=<dir>,
 //                                                SS_CASES=P,Q,R,S,E to run some)
 //

@@ -25,7 +25,6 @@
 // The stub answers payments_status in the shape portal-settings does (paymentsStatusWiring_test pins
 // the server side), from a client_settings row the scenario sets.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/paymentsCard.mjs             (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is how

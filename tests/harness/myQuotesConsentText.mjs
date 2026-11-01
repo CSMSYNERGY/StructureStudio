@@ -13,7 +13,6 @@
 //   B. The invoice signature prints signConsentText byte for byte, the same way.
 //   C. With no sentence from the server, the fallbacks say "estimate" (never "quote").
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/myQuotesConsentText.mjs      (exit 0 = every check held)
 //
 // Fixtures are made up (example.test, a made-up tenant), per the public-repo rule.

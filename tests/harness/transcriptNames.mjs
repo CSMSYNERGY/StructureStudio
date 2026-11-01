@@ -15,7 +15,6 @@
 // Supabase and the phone-api Worker are stubbed at the network layer (no login, nothing leaves
 // the machine); the stub shape is crmOptOutBanner.mjs's. Nothing is played or sent.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/transcriptNames.mjs          (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/transcript-names (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an

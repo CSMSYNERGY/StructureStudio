@@ -21,7 +21,6 @@
 // _shared/emailTemplates.ts), and the upload with a made-up address in this builder's folder. Supabase
 // is stubbed at the network layer; nothing leaves the machine and NOTHING IS SENT.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/emailPhotoDesign.mjs        (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead: against the portal

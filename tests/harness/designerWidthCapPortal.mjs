@@ -22,7 +22,6 @@
 // MACHINE — capture-lead, save_design and log_error would otherwise write into the one database
 // beta and production share.
 //
-//   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/designerWidthCapPortal.mjs      (exit 0 = every check held)
 import { launch, stubSupabase, collectErrors, reporter, shotsDir, BASE, REF } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES } from "./gableProbe.mjs";

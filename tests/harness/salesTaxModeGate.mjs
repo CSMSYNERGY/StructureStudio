@@ -26,7 +26,6 @@
 // carries taxRatePct / taxLabel / taxReady, whatever the mode (an older function omits them). So B
 // and D also prove a CRM-mode tenant's Locations tab prints none of those rates.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/salesTaxModeGate.mjs         (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is

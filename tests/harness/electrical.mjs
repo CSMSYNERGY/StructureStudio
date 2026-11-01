@@ -13,7 +13,6 @@
 //   6. a ceiling Light clicked 1.5 ft from a wall lands on no wall, stamped (2026-10-06: it used to
 //      become an unstamped WALL item, free on the quote and not drawn as a light)
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/electrical.mjs              (exit 0 = every check held)
 //
 // The config is written here rather than read from a tenant, so the run needs no network and

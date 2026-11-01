@@ -35,7 +35,6 @@
 // the body when one is sent, by the STORED rate when not. A page that only passes against a stub that
 // says something the server never says would fail here.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/paperworkMove.mjs            (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is how to

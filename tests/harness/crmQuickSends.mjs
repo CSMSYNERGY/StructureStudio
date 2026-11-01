@@ -32,7 +32,6 @@
 // and the view-as setup are mySynergyPhone.mjs's. NOTHING IS SENT: crm_send_email is answered by
 // the stub.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmQuickSends.mjs            (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-quick-sends (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an

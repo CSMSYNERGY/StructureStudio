@@ -21,7 +21,6 @@
 // caught by its text as well as by the call count. Supabase is stubbed at the network layer; nothing
 // leaves the machine. Names are made up (public repo).
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root; SS_BASE overrides the address)
 //   node tests/harness/myProfileMeetingsGate.mjs   (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead; before this change

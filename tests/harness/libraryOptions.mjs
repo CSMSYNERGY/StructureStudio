@@ -24,7 +24,6 @@
 // and admin-catalog are small in-memory stand-ins that answer the way the real ones do. The tenant,
 // styles and rows are made up (public repo).
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/libraryOptions.mjs         (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/library-options (SS_SHOTS overrides).

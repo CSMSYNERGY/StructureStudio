@@ -6,7 +6,6 @@
 // or driver holds none of — so /settings/myprofile bounced them to their fallback page and
 // rewrote the address bar, and both controls did nothing at all.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/myProfileRoute.mjs           (exit 0 = every check held)
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine), the shape

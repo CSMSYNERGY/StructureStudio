@@ -54,7 +54,6 @@
 // the artifacts under test are the compiled bundles the browser really loads. A change that was
 // never `npm run compile`d is invisible here, which is the point.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/calIdempotency.mjs            (SS_BASE=http://127.0.0.1:<port> to move it)
 //
 // Exit 0 = every assertion held.

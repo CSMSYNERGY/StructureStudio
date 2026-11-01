@@ -735,11 +735,6 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
   // order I want"). The server has carried reorder_columns/reorder_groups since the
   // boards shipped — this modal just never exposed them. Same idiom as the setup
   // template editor: move locally is unnecessary because run() reloads the board.
-  //
-  // The board's OWN columns. Created / Requestor arrive in the same list but belong to no
-  // board, so every control here — rename, ▲/▼, delete, and the bounds those arrows dim on —
-  // works off this one and can never send a `sys_` id to reorder_columns.
-  const realColumns = columns.filter((c) => !pmIsSystemCol(c));
   const move = (list, idx, dir, action) => {
     const to = idx + dir;
     if (to < 0 || to >= list.length) return;
@@ -884,20 +879,11 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
         </div>
 
         <span style={flabel}>Columns</span>
-        {/* The two static columns are listed so nobody hunts for them, and that is all: there
-            is no row to rename, reorder or delete, because they are not columns of this board
-            — the server derives them from each item (_shared/pmSystemColumns.ts). */}
-        {columns.some(pmIsSystemCol) && (
-          <div style={{ ...rowStyle, color: "#64748B" }}>
-            <span style={{ fontWeight: 700 }}>{columns.filter(pmIsSystemCol).map((c) => c.name).join(" · ")}</span>
-            <span style={{ fontSize: 11.5 }}>filled in automatically on every board — always first, never editable</span>
-          </div>
-        )}
-        {realColumns.map((col, ci) => (
+        {columns.map((col, ci) => (
           <div key={col.id}>
             <div style={rowStyle}>
-              {arrow("▲", () => move(realColumns, ci, -1, "reorder_columns"), ci === 0)}
-              {arrow("▼", () => move(realColumns, ci, 1, "reorder_columns"), ci === realColumns.length - 1)}
+              {arrow("▲", () => move(columns, ci, -1, "reorder_columns"), ci === 0)}
+              {arrow("▼", () => move(columns, ci, 1, "reorder_columns"), ci === columns.length - 1)}
               <input style={{ ...S.input, width: 160, padding: "4px 8px", fontSize: 12.5 }} defaultValue={col.name}
                 onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== col.name) run({ action: "update_column", id: col.id, name: v }); }} />
               <span style={{ fontSize: 11, color: "#64748B", fontWeight: 700, width: 70 }}>{(PM_COL_TYPES.find(([t]) => t === col.type) || [col.type, col.type])[1]}</span>
@@ -2293,11 +2279,7 @@ function ProjectsTab({ sub, onSub }) {
               onCellCommit={onCellCommit} onDropToGroup={onDropToGroup} onDropOnRow={onDropOnRow}
               onRowOpen={(r) => setOpenItemId(r.id)} onAddItem={onAddItem}
               onReorderCols={(ids) => callOrReload(
-                // The static columns never move and are no board's rows — `reorder_columns`
-                // matches on a pm_columns uuid, so a `sys_` id must not be in the payload.
-                // The optimistic patch below still uses the FULL order, which keeps them where
-                // they are on screen.
-                { action: "reorder_columns", boardId: data.board.id, orderedIds: ids.filter((id) => !pmIsSystemCol(id)) },
+                { action: "reorder_columns", boardId: data.board.id, orderedIds: ids },
                 () => setData((d) => d && ({ ...d, columns: ids.map((id) => d.columns.find((c) => c.id === id)).filter(Boolean) })),
               )}
               activeItemId={openItemId}

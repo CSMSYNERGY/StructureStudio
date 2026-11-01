@@ -16,7 +16,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine), the shape
 // bringYourNumber.mjs uses. The titles below are MADE UP; the repo is public.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/supportOnBeta.mjs           (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to

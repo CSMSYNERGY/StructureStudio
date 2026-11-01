@@ -46,7 +46,6 @@
 // The replies below use the avalara-api branch's own sentences and fields (f3f3c55): a stub that
 // said something the server never says would pass a check the real page fails.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/quoteSalesTax.mjs            (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is how

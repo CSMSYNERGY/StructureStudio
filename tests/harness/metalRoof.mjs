@@ -38,7 +38,6 @@
 // Against the tree before the pick (git archive ea0a0de0, run 2026-10-07) 9 and 10 fail, all 12 of
 // their tile, bump and rib checks (each draws its STYLE's profile), and every other check holds.
 //
-//   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/metalRoof.mjs                             (SS_SHOTS=<dir> for the PNGs)
 //
 // Exit 0 = every assertion held.

@@ -14,7 +14,6 @@
 //   E. a builder switched on in TEST while billable (a row changed by hand): the panel says their
 //      customers can't pay right now; the same builder non-billable, or on live, says nothing
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/adminPaymentsVerify.mjs     (exit 0 = every check held)
 //
 // SS_ADMIN_ARTIFACT=<path to an older admin.app.compiled.js> serves that file instead, which is how to

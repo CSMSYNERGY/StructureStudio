@@ -15,7 +15,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the stub shape
 // is crmQuickSends.mjs's. Nothing is sent.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmOptOutBanner.mjs          (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-opt-out (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an older

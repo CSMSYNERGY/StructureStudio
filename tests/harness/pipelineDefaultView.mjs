@@ -8,6 +8,5 @@
 // (L), and My Profile (K) — so the old name still runs the checks rather than failing on UI that no
 // longer exists.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/pipelineDefaultView.mjs      (exit 0 = every check held)
 await import("./contactsHub.mjs");

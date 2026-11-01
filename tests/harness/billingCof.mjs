@@ -28,7 +28,6 @@
 // Supabase is stubbed at the network layer and Collect.js is a stand-in (billingFounding's
 // idiom); nothing leaves the machine and no card exists.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root; SS_BASE overrides the address)
 //   node tests/harness/billingCof.mjs              (exit 0 = every check held)
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

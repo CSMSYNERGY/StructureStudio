@@ -28,7 +28,6 @@
 // ledger here, in the shape portal-billing's `wallet_transactions` returns
 // (_shared/walletLedger.ts toLedgerRow).
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root; SS_BASE overrides the origin)
 //   node tests/harness/walletTransactions.mjs       (exit 0 = every check held)
 //
 // Screenshots go to SS_SHOTS (else the OS temp dir; see lib.mjs shotsDir).

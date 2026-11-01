@@ -64,7 +64,6 @@
 //      the keys are swallowed, nothing reaches CardSecure, and the page says how to take the card
 //   X  no uncaught page errors; nothing left the machine but the tokenizer page and its script
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/swipeRealFrame.mjs          (exit 0 = every check held, or SKIPPED offline)
 //   HEADED=1 node tests/harness/swipeRealFrame.mjs (a VISIBLE Chrome window: the focus checks are
 //                                                    the ones a hidden window can't be trusted on)

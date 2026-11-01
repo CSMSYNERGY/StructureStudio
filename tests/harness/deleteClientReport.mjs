@@ -17,7 +17,6 @@
 //      report instead of replacing it;
 //   every scenario: no uncaught page error.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/deleteClientReport.mjs       (exit 0 = every check held)
 // SS_SHOT_DIR=<dir> also saves a picture of each result.
 import { readFileSync } from "node:fs";

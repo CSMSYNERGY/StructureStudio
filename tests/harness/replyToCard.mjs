@@ -33,7 +33,6 @@
 // replyCopy only when it is exactly true, as portal-settings does. Supabase is stubbed at the
 // network layer; nothing leaves the machine and NOTHING IS SENT.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/replyToCard.mjs              (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/reply-to-card (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an older

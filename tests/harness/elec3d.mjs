@@ -40,7 +40,6 @@
 //      amount), the same itemSummary.electricalItems in the submit payload, and items carrying
 //      the same keys
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/elec3d.mjs                  (exit 0 = every check held)
 import { pathToFileURL } from "node:url";
 import { launch, stubSupabase, recordRefusals, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool, REF } from "./lib.mjs";

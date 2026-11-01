@@ -26,7 +26,6 @@
 // picture to show Carolyn. Supabase is stubbed at the network layer; nothing leaves the machine and
 // nothing is saved anywhere.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/quoteCornerViews.mjs          (exit 0 = every check held)
 //
 // SS_SHOTS=<dir> puts the shots and the sample there. To prove the checks can fail, serve the tree

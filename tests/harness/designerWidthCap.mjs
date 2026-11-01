@@ -21,7 +21,6 @@
 // harness, designerWidthCapPortal.mjs — that is the surface builders work in, and it is where
 // the embedded footer and the Feedback pill exist at all.
 //
-//   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/designerWidthCap.mjs             (exit 0 = every check held)
 import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES } from "./gableProbe.mjs";

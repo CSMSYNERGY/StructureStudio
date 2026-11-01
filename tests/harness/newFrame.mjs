@@ -37,7 +37,6 @@
 //      are no steps and model.porch carries none of the new fields.
 //  12. zero page errors
 //
-//   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/newFrame.mjs                              (SS_SHOTS=<dir> for the PNGs)
 //   SS_CASES=A,E node tests/harness/newFrame.mjs                 (a subset)
 //

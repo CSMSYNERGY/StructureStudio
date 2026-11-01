@@ -26,7 +26,6 @@
 //      says texts use our name; an older admin-catalog (no verifyService) shows neither row nor button;
 //   every scenario: no uncaught page error.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/twilioAccountCard.mjs        (exit 0 = every check held)
 // SS_SHOT_DIR=<dir> also saves a picture of the card after each scenario.
 import { readFileSync } from "node:fs";

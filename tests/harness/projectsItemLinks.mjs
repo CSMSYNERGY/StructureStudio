@@ -26,7 +26,6 @@
 // projectsEmptyBoards.mjs uses; the board, the cards and the chat ids are made up (placeholder
 // uuids only).
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/projectsItemLinks.mjs        (exit 0 = every check held)
 //
 // SS_BASE=http://127.0.0.1:<port> points it at a server on another port.

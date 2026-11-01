@@ -25,7 +25,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine), the same shape
 // supportConsoles.mjs uses; every board, item and person here is made up.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/projectsEmptyBoards.mjs      (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to

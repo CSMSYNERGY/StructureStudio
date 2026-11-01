@@ -26,7 +26,6 @@
 //      pulled down under H on a wing's end wall
 //   8. zero page errors
 //
-//   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/wings.mjs                                 (SS_SHOTS=<dir> for the PNGs)
 //   SS_WINGS_DIGEST=<file> node tests/harness/wings.mjs          (only write the legacy digests)
 //

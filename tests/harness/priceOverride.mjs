@@ -25,7 +25,6 @@
 // The embedded designer is mounted on a page this harness serves itself (the vendored libraries and
 // the compiled component, exactly as portal.html loads them), so no portal login is involved.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/priceOverride.mjs        (SS_BASE=http://127.0.0.1:<port> to move it)
 //
 // Exit 0 = every assertion held. NOTHING LEAVES THE MACHINE (lib.mjs stubSupabase).

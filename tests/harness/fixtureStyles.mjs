@@ -31,7 +31,6 @@
 //
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/fixtureStyles.mjs          (exit 0 = every check held; SS_SKIP_3D=1 skips F)
 //
 // Shots land in %TEMP%/ss-harness/fixture-styles (SS_SHOTS overrides). Fixtures are made up (a
