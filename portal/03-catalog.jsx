@@ -4337,10 +4337,13 @@ function ssPgCanDelete(q, id, z) {
 // title. A size saved designs use is hidden by unticking Offered; once it is (`offered` false), it
 // says it already is, and how it folds away: "Show hidden sizes" off, or, when that is off already
 // (`showHidden` false: it turned hidden while drawn, so it stays drawn until the page is opened
-// again), the next open. "" when it can go.
+// again), the next open. An Offered size of a hidden style (`hiddenStyle`) is out of the designer
+// already, its tick does nothing there and "Show hidden sizes" doesn't fold it, so it says that
+// instead; unticked, it folds with the toggle like any hidden size. "" when it can go.
 function ssPgDeleteWhy(why, opts) {
   const o = opts || {};
   if (why === "used") {
+    if (o.offered && o.hiddenStyle) return "Its style is hidden, so it isn't in your designer. Saved designs use it, so it stays here.";
     if (o.offered) return "Saved designs use this size, so it can't be deleted. Untick Offered to hide it from your designer.";
     return o.showHidden === false
       ? "It's already hidden from your designer. Saved designs use it, so it stays here. It folds away the next time you open this page."
@@ -4354,11 +4357,12 @@ function ssPgDeleteWhy(why, opts) {
 }
 
 // THE DELETE CONFIRM'S QUESTION, and the line when none can go (the delete plan, 10-31). `ids`: the
-// sizes that can go, in drawn order; `nameOf(id)` is "Test Barn 10x12"; `counts` { used, saving }:
-// the others the selection touched (saving counts a box in flight, a size still being added and one
-// already being deleted); `company`: the account an operator is viewing as, or null. `ids` null: no
-// box is active (the toolbar's Delete sizes before any click). More than one size always asks; a
-// size never priced or edited is counted with the rest.
+// sizes that can go, in drawn order; `nameOf(id)` is "Test Barn 10x12"; `counts` { used, saving,
+// usedHidden }: the others the selection touched (saving counts a box in flight, a size still being
+// added and one already being deleted; usedHidden, how many of the used are in a hidden style: when
+// that is all of them, Offered is no way to hide them); `company`: the account an operator is viewing
+// as, or null. `ids` null: no box is active (the toolbar's Delete sizes before any click). More than
+// one size always asks; a size never priced or edited is counted with the rest.
 function ssPgDeleteText(ids, nameOf, counts, company) {
   if (!Array.isArray(ids)) return "Click a size first, then press Delete sizes.";
   const c = counts || {};
@@ -4367,6 +4371,7 @@ function ssPgDeleteText(ids, nameOf, counts, company) {
   if (!ids.length) {
     if (used && saving) return `None of these sizes can be deleted now: saved designs use ${used}, and ${saving} ${saving === 1 ? "is" : "are"} still saving.`;
     if (saving) return "None of these sizes can be deleted yet: a change on them is saving. Try again in a second.";
+    if (used && Number(c.usedHidden) === used) return "None of these sizes can be deleted: saved designs use them. Their style is hidden, so they aren't in your designer.";
     return "None of these sizes can be deleted: saved designs use them. Untick Offered to hide them.";
   }
   const from = company ? ` from ${company}'s account` : "";
@@ -12371,7 +12376,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
         // its title when saved designs use the size (`delOff`, a string, so the memo holds).
         return <PgRow key={r.id} rowIndex={ri} sizeId={z.id} label={z.label} title={z.title} priceText={v.priceText}
           offered={v.offered} noPrice={v.noPrice} hidden={v.hidden} values={v.values} marks={v.marks} rtp={!!(model && model.rtpOn)}
-          busy={busy} deletable={canEdit && !busy} delOff={z.used ? ssPgDeleteWhy("used", { offered: v.offered, showHidden }) : ""} />;
+          busy={busy} deletable={canEdit && !busy} delOff={z.used ? ssPgDeleteWhy("used", { offered: v.offered, showHidden, hiddenStyle: !r.style.active }) : ""} />;
       }
       if (r.kind === "band") {
         return <PgStyleBand key={r.id} rowIndex={ri} styleId={r.style.id} label={r.style.label} total={r.total} hidden={r.hidden} folded={r.folded} ncols={ncols}
@@ -12673,6 +12678,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     ids.forEach((id) => { delNameRef.current[id] = whereOf(id); });
   };
   const offeredNow = (id) => !!shownOf(id, "active") && shownOf(id, "price") != null;
+  const inHiddenStyle = (id) => !!byId[id] && !byId[id].style.active;
+  const delWhy = (id, why) => ssPgDeleteWhy(why, { offered: offeredNow(id), showHidden, hiddenStyle: inHiddenStyle(id) });
   const company = operatorView ? companyName || null : null;
   const deleteSize = (id) => {
     if (!canEditNow()) return;
@@ -12690,7 +12697,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       return;
     }
     const c = ssPgCanDelete(qRef.current, id, z);
-    if (!c.ok) { delSay(ssPgDeleteWhy(c.why, { offered: offeredNow(id), showHidden })); return; }
+    if (!c.ok) { delSay(delWhy(id, c.why)); return; }
     setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });
   };
   // Delete sizes on the toolbar, and Delete or Backspace on a range that lies wholly in the Size
@@ -12703,10 +12710,12 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     if (!sel) { delSay(ssPgDeleteText(null)); return; }
     const ids = order.slice(sel.r0, sel.r1 + 1);
     if (ids.length === 1) { deleteSize(ids[0]); return; }
-    const go = [], counts = { used: 0, saving: 0 };
+    const go = [], counts = { used: 0, saving: 0, usedHidden: 0 };
     ids.forEach((id) => {
       const c = ssPgCanDelete(qRef.current, id, byId[id] ? byId[id].size : null);
-      if (c.ok) go.push(id); else if (c.why === "used") counts.used++; else counts.saving++;
+      if (c.ok) go.push(id);
+      else if (c.why === "used") { counts.used++; if (inHiddenStyle(id)) counts.usedHidden++; }
+      else counts.saving++;
     });
     if (!go.length) { delSay(ssPgDeleteText([], whereOf, counts, company)); return; }
     commitEdit();
@@ -12721,7 +12730,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const cur = qRef.current;
     const stop = ids.map((id) => ({ id, c: ssPgCanDelete(cur, id, byId[id] ? byId[id].size : null) })).find((x) => !x.c.ok);
     if (stop) {
-      const why = ssPgDeleteWhy(stop.c.why, { offered: offeredNow(stop.id), showHidden });
+      const why = delWhy(stop.id, stop.c.why);
       delSay(ids.length === 1 ? why : `${whereOf(stop.id) || "One of those sizes"}: ${why} Nothing was deleted.`);
       return;
     }

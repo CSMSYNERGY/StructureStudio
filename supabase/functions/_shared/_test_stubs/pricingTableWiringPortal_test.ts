@@ -404,7 +404,12 @@ Deno.test("every way to add or delete a size, or put a backup back, checks the p
   // The plain ✕ clears the status line too, as deleteNow does: said outranks a refused call's note
   // and the "being deleted" tip, so an earlier line would hide both.
   assert(del.includes("setTip(null);\n      setSaid(null);\n      delStart([id]);"), "the plain ✕ leaves an earlier status line up");
-  assert(del.includes("if (!c.ok) { delSay(ssPgDeleteWhy(c.why, { offered: offeredNow(id), showHidden })); return; }"));
+  assert(del.includes("if (!c.ok) { delSay(delWhy(id, c.why)); return; }"));
+  // Every "why" knows a hidden style's size: its tick is no way to hide it (the row's title, the ✕,
+  // the confirm's re-check and several at once).
+  assert(page.includes("const inHiddenStyle = (id) => !!byId[id] && !byId[id].style.active;"));
+  assert(page.includes("const delWhy = (id, why) => ssPgDeleteWhy(why, { offered: offeredNow(id), showHidden, hiddenStyle: inHiddenStyle(id) });"));
+  assert(page.includes("else if (c.why === \"used\") { counts.used++; if (inHiddenStyle(id)) counts.usedHidden++; }"), "several used sizes of a hidden style");
   assert(del.includes("setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });"), "a priced size asks first");
   assert(page.includes(`const delSay = (text) => { setSaid({ tone: "amber", text }); setTip(null); };`), "delete refusals go through said, amber, and clear the tip");
   for (const fn of ["deleteSize", "deleteSel", "deleteNow"]) {
@@ -425,7 +430,7 @@ Deno.test("every way to add or delete a size, or put a backup back, checks the p
   assert(between(page, "const clearCell = (cell) => {", "\n  };", "clearCell").includes("if (cell.col === 0) { deleteSize(cell.sizeId); return; }"), "Delete on a Size box is its ✕");
   // The add strip and the ✕ are only drawn when the page can edit (plan 3.16).
   assert(page.includes("adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds"));
-  assert(page.includes(`busy={busy} deletable={canEdit && !busy} delOff={z.used ? ssPgDeleteWhy("used", { offered: v.offered, showHidden }) : ""} />`));
+  assert(page.includes(`busy={busy} deletable={canEdit && !busy} delOff={z.used ? ssPgDeleteWhy("used", { offered: v.offered, showHidden, hiddenStyle: !r.style.active }) : ""} />`));
   assert(page.includes("canAdd={canEdit} open={!!addOpen[r.style.id] || !r.total} />"));
   assert(between(page, "const body = useMemo(() => {", "\n  // ── Handlers", "the rows' memo").includes("onAddSizes, onCloseAdd, showHidden]);"), "the greyed ✕'s title follows Show hidden sizes");
   assertEquals((page.match(/ssStyleSaveCall\(/g) || []).length, 1, "still one transport call site: adds and deletes ride the save queue");

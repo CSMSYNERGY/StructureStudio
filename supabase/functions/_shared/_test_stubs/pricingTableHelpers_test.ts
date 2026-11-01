@@ -1360,6 +1360,13 @@ Deno.test("ssPgDeleteWhy: the three used texts, saving, adding, deleting, and no
     "It's already hidden from your designer. Saved designs use it, so it stays here. Turn off Show hidden sizes to fold it away.");
   assertEquals(G.ssPgDeleteWhy("used", { offered: false, showHidden: false }),
     "It's already hidden from your designer. Saved designs use it, so it stays here. It folds away the next time you open this page.");
+  // An Offered size of a hidden style: the style keeps it out of the designer, so no "Untick Offered",
+  // and the toggle wouldn't fold it. Unticked, the toggle does, so the hidden texts stay true.
+  const HIDST = "Its style is hidden, so it isn't in your designer. Saved designs use it, so it stays here.";
+  assertEquals([true, false].map((showHidden) => G.ssPgDeleteWhy("used", { offered: true, showHidden, hiddenStyle: true })), [HIDST, HIDST]);
+  assertEquals(G.ssPgDeleteWhy("used", { offered: false, showHidden: true, hiddenStyle: true }), G.ssPgDeleteWhy("used", { offered: false, showHidden: true }));
+  assertEquals(G.ssPgDeleteWhy("used", { offered: false, showHidden: false, hiddenStyle: true }), G.ssPgDeleteWhy("used", { offered: false, showHidden: false }));
+  assertEquals(G.ssPgDeleteWhy("saving", { offered: true, hiddenStyle: true }), "A change on this size is saving. Try again in a second.");
   assertEquals(G.ssPgDeleteWhy("saving"), "A change on this size is saving. Try again in a second.");
   assertEquals(G.ssPgDeleteWhy("adding"), "This size is still being added. Try again in a second.");
   assertEquals(G.ssPgDeleteWhy("deleting"), "This size is being deleted.");
@@ -1455,6 +1462,10 @@ Deno.test("ssPgDeleteText: one, several, some in use, some saving, the three non
   assertEquals(G.ssPgDeleteText([], nameOf, { used: 2, saving: 0 }, null), "None of these sizes can be deleted: saved designs use them. Untick Offered to hide them.");
   assertEquals(G.ssPgDeleteText([], nameOf, { used: 0, saving: 2 }, null), "None of these sizes can be deleted yet: a change on them is saving. Try again in a second.");
   assertEquals(G.ssPgDeleteText([], nameOf, { used: 2, saving: 1 }, null), "None of these sizes can be deleted now: saved designs use 2, and 1 is still saving.");
+  // All of them in a hidden style: Offered is no way to hide them. Only some: it still is, for the rest.
+  assertEquals(G.ssPgDeleteText([], nameOf, { used: 2, saving: 0, usedHidden: 2 }, null), "None of these sizes can be deleted: saved designs use them. Their style is hidden, so they aren't in your designer.");
+  assertEquals(G.ssPgDeleteText([], nameOf, { used: 2, saving: 0, usedHidden: 1 }, null), "None of these sizes can be deleted: saved designs use them. Untick Offered to hide them.");
+  assertEquals(G.ssPgDeleteText([], nameOf, { used: 2, saving: 1, usedHidden: 2 }, null), "None of these sizes can be deleted now: saved designs use 2, and 1 is still saving.");
   assertEquals(G.ssPgDeleteText([A], nameOf, none, "Test Viewed Sheds"),
     "Delete Test Barn 10x12 from Test Viewed Sheds's account? Its price and included options go too, and you can't undo this. To sell it again later, add it with ＋ Add sizes.");
   assertEquals(G.ssPgDeleteText([A, C], nameOf, none, "Test Viewed Sheds"),

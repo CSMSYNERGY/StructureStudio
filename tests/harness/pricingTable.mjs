@@ -4232,7 +4232,54 @@ if (want("X")) {
   ok("X: no page errors (the frozen columns)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-/// ── T: timing ──
+// A size saved designs use, in a hidden style: the style is what keeps it out of the designer, so its
+// ✕ says that, not "Untick Offered". Once unticked, the sentences a hidden size has are true here too
+// (Show hidden sizes off folds it). Several of them at once: none can go, and it says so the same way.
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat, { hiddenStyle: true }));
+  const t = F.table(OWN);
+  const retired = t.styles.find((s) => !s.active);
+  const hz = t.sizes.filter((z) => z.style_id === retired.id && z.active && z.base_price != null).slice(0, 3);
+  hz.forEach((z) => F.used.add(z.id));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.locator(".ss-pg-hs button").click();
+  const HIDST = "Its style is hidden, so it isn't in your designer. Saved designs use it, so it stays here.";
+  ok("X: (set-up) three offered, priced sizes in a hidden style, used by saved designs", hz.length === 3, JSON.stringify(hz.map((x) => [x.label, x.base_price, x.active])));
+  const z = hz[0];
+  await page.locator(`tr[data-s="${z.id}"]`).scrollIntoViewIfNeeded().catch(() => {});
+  let look1 = await rmLook(page, z.id);
+  let n0 = saveCalls(calls).length;
+  await page.locator(`tr[data-s="${z.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(600);
+  ok("X: a used, Offered size of a hidden style says its style is what hides it (title and status line), and sends nothing",
+    !!look1 && look1.off === "true" && look1.title === HIDST && (await statusText(page)) === HIDST && !(await confirmOf(page)) && saveCalls(calls).length === n0, JSON.stringify({ look1, st: await statusText(page) }));
+  await pickSizes(page, hz[1], hz[2]);
+  await delBtn(page).click();
+  await page.waitForTimeout(300);
+  ok("X: …several of them: none can go, in the same words, and nothing is sent",
+    (await statusText(page)) === "None of these sizes can be deleted: saved designs use them. Their style is hidden, so they aren't in your designer." && !(await confirmOf(page)) && saveCalls(calls).length === n0, await statusText(page));
+  // The line goes first: a click that clears it moves the grid under the pressed button, which can
+  // stretch a range, and Space does nothing on a range.
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click();
+  await page.locator(sel(z.id, 2)).click();
+  await page.keyboard.press("Space");
+  await saved(page, calls, n0);
+  await page.locator(`tr[data-s="${z.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  look1 = await rmLook(page, z.id);
+  ok("X: …unticked, it says what any hidden size says", (await statusText(page)) === UHID_ON && !!look1 && look1.title === UHID_ON && F.size(z.id).active === false, JSON.stringify({ st: await statusText(page), look1 }));
+  await page.locator(".ss-pg-tog input").uncheck();
+  await page.waitForTimeout(300);
+  ok("X: …and that advice is true: Show hidden sizes off folds it away, an Offered one stays drawn",
+    !(await page.$(`tr[data-s="${z.id}"]`)) && !!(await page.$(`tr[data-s="${hz[1].id}"]`)));
+  ok("X: no call was malformed (a hidden style)", F.bad.length === 0, F.bad.join());
+  ok("X: no page errors (a hidden style)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// ── T: timing ──
 if (!process.env.SKIP_TIMING && want("T")) {
   for (const [tag, perStyle] of [["1x", 70], ["3x", 210]]) {
     const cat = catalogFor(OWN, { extra: 13 });                    // 25 + 13 = 38 option columns
