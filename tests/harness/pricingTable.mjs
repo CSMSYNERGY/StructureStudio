@@ -4438,6 +4438,13 @@ if (want("X")) {
   const st2 = await state(page);
   ok("X: a double click on a Price box with a line up opens that size's price, not the next one's", !!st2.editor && st2.readout === `Price · Test Barn ${b[2].label}`, JSON.stringify(st2));
   await page.keyboard.press("Escape");
+  // A double click on a ✕ opens no editor, with the ring on another size.
+  await page.locator(sel(b[2].id, 1)).click();
+  const nRing = sentNow().length;
+  await dbl(n[6].id, 8);
+  const st3 = await state(page);
+  ok("X: a double click on a ✕ with the ring on another size's price deletes the size and opens no editor",
+    JSON.stringify(sentNow().slice(nRing)) === JSON.stringify([n[6].id]) && !st3.editor && !!F.size(n[7].id), JSON.stringify({ st3, sent: sentNow().slice(nRing) }));
   ok("X: no call was malformed (double clicks)", F.bad.length === 0, F.bad.join());
   ok("X: no page errors (double clicks)", errors.length === 0, errors.join(" | "));
   await ctx.close();

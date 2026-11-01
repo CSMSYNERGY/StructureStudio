@@ -11916,6 +11916,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const dragRef = useRef(false);
   const handFocusRef = useRef(false);              // focusGrid is giving the grid the focus, so no box is picked for it
   const pressRef = useRef(null);                   // where the button went down, until the pointer has moved SS_PG_DRAG_PX from it
+  const firstBoxRef = useRef(null);                // the box a click's first press hit, null when it hit none: what a double click opens
   const flashRef = useRef(null);
   const fnRef = useRef({});                        // this render's handlers, for listeners added once
   const loadRef = useRef(null);                    // `load`, for the refresh (an async read reads it after it lands)
@@ -13178,6 +13179,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     return { sizeId: tr.getAttribute("data-s"), col: Number(td.getAttribute("data-c")) || 0 };
   };
   const onMouseDown = (e) => {
+    if (e.detail < 2) firstBoxRef.current = null;
     // The grid's own buttons (onAct) act on the click; pressing one commits the editor and keeps
     // the focus where it was, so the keys still drive the grid afterwards.
     if (e.target && e.target.closest && e.target.closest("[data-pg-act]")) { e.preventDefault(); commitEdit(); return; }
@@ -13187,6 +13189,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     // The second press of a double click stays on the first's box: that press can clear the status
     // line, and the grid then moves up, so the row under the pointer is another size now.
     if (e.detail > 1 && activeRef.current) return;
+    firstBoxRef.current = cell;
     commitEdit();
     focusGrid();
     const a = activeRef.current;
@@ -13221,8 +13224,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // The pointer can cross into the next box inside those few pixels and stay there, so no mouse over
   // comes: the move that starts the drag counts the box it is in.
   const onMouseMove = (e) => { if (dragRef.current && pressRef.current && dragStarted(e)) onMouseOver(e); };
-  const onDoubleClick = (e) => {
-    const cell = cellAt(e) ? activeRef.current : null;
+  // Opens the box the first press hit, wherever the grid has moved since. One that began on a ✕ opens
+  // nothing: the ring can be on another size.
+  const onDoubleClick = () => {
+    const cell = firstBoxRef.current;
     if (cell && cell.col !== 2) startEdit(cell, null);
   };
   // Tabbing into the grid lands on the first price (the grid itself: not a box in an add strip). Only

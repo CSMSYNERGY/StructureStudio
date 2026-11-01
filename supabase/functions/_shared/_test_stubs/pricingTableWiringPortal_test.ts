@@ -663,7 +663,8 @@ Deno.test("a double click and a held key act once, on what was aimed at: the gri
   assert(p.includes("onClick={(e) => { if (e.detail < 2) deleteSel(); focusGrid(); }}"), "Delete sizes");
   assert(p.includes("if (e.repeat) return;\n      const x = extentRef.current;"), "a held Delete");
   assert(p.includes("if (e.detail > 1 && activeRef.current) return;"), "a double click's second press keeps the first's box");
-  assert(p.includes("const cell = cellAt(e) ? activeRef.current : null;"), "and the double click opens that box");
+  assert(p.includes("firstBoxRef.current = cell;") && p.includes("if (e.detail < 2) firstBoxRef.current = null;"), "the first press names the box, or none");
+  assert(p.includes("const cell = firstBoxRef.current;\n    if (cell && cell.col !== 2) startEdit(cell, null);"), "and the double click opens that box");
   assert(p.includes("if (flight.removes && flight.removes.length) setSaid(null);"), "a refused delete's note shows at once");
 });
 
