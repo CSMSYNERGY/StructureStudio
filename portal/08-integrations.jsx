@@ -6223,13 +6223,10 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
             <input value={host.publicTitle || ""} maxLength={80} onChange={(e) => setHostField("publicTitle", e.target.value)}
               placeholder="Sales Rep" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
           </div>
-          <div style={{ flex: "1 1 180px" }}>
-            <span style={lbl}>Time zone</span>
-            <select value={host.timeZone} onChange={(e) => setHostField("timeZone", e.target.value)}
-              style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
-              {ssMeetingZones(host.timeZone).map((z) => <option key={z} value={z}>{z.replace(/_/g, " ")}</option>)}
-            </select>
-          </div>
+          {/* The time zone moved to the top of My hours (Carolyn 2026-11-01: "above the hours
+              to set, each user should be able to set their own time zone"). It was always per
+              person — it is their meeting_hosts row — but it sat two cards away from the hours
+              it governs, where somebody typing 08:00 had no way to see which 08:00 they meant. */}
         </div>
         <div style={{ marginBottom: 12 }}>
           <span style={lbl}>The link</span>
@@ -6269,12 +6266,31 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
         </label>
       </div>
 
-      {/* ── MY HOURS ──────────────────────────────────────────────────────────────────── */}
-      <div style={S.card}>
+      {/* ── MY HOURS · DAYS OFF · WHAT I TAKE, SIDE BY SIDE ───────────────────────────────
+          Carolyn 2026-11-01: "I want these 3 side by side to save space." They were three
+          stacked cards, so the meeting types sat two screens below the hours they belong with.
+          Each column keeps its own card, so nothing inside them had to change.
+
+          `flex: 1 1 340px` with wrapping, NOT a three-column grid: the hours column is the wide
+          one (a day row is a checkbox, two time boxes and two buttons), and at a laptop width a
+          fixed third would wrap those buttons onto their own line. Below ~1100px they fall to
+          two columns and then to one, which is the stack this replaced. `alignItems:
+          flex-start` so a short Days off column does not stretch to the height of the hours. */}
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+      <div style={{ ...S.card, flex: "1 1 340px", minWidth: 0 }}>
         <CardHead title="My hours" />
+        {/* YOUR OWN TIME ZONE, above the hours it governs. */}
+        <div style={{ marginBottom: 10 }}>
+          <span style={lbl}>Your time zone</span>
+          <select value={host.timeZone} onChange={(e) => setHostField("timeZone", e.target.value)}
+            style={{ ...S.input, width: "100%", boxSizing: "border-box" }}>
+            {ssMeetingZones(host.timeZone).map((z) => <option key={z} value={z}>{z.replace(/_/g, " ")}</option>)}
+          </select>
+        </div>
         <div style={{ ...sub, marginBottom: 10 }}>
           The hours customers can book, in <strong>{host.timeZone.replace(/_/g, " ")}</strong>. Times are
           24-hour. These are the same kind of hours your phone uses, so they read the same way.
+          Saved with your hours, by the same button.
         </div>
         {MEETING_DAYS.map(([key, label]) => {
           const blocks = blocksFor(key);
@@ -6320,7 +6336,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
 
       {/* ── DAYS OFF ──────────────────────────────────────────────────────────────────── */}
       {data.myHost && (
-        <div style={S.card}>
+        <div style={{ ...S.card, flex: "1 1 300px", minWidth: 0 }}>
           <CardHead title="Days off" />
           <div style={{ ...sub, marginBottom: 10 }}>
             A holiday or a day away. A blocked day beats your hours above, so nobody can book you on it.
@@ -6347,7 +6363,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
 
       {/* ── WHAT I OFFER ──────────────────────────────────────────────────────────────── */}
       {data.myHost && (
-        <div style={S.card}>
+        <div style={{ ...S.card, flex: "1 1 300px", minWidth: 0 }}>
           <CardHead title="Meeting types I take" />
           <div style={{ ...sub, marginBottom: 10 }}>
             Tick the company's meeting types you want on your calendar — customers and your team can
@@ -6378,6 +6394,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
           })}
         </div>
       )}
+      </div>{/* the three-column row */}
 
       </>)}
 
