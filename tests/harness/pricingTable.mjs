@@ -4092,8 +4092,90 @@ if (want("X")) {
   ok("X: no page errors (operator)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-
-// ── T: timing ──
+// More sizes in the first style, never priced or edited (a size added by mistake), or priced.
+const withLabels = (t, labels, price = null) => {
+  const stamp = "2026-10-25T00:00:00.000001+00:00";
+  const more = labels.map((label, i) => {
+    const [w, l] = label.split("x").map(Number);
+    return { id: uid("7", 910 + i), style_id: t.styles[0].id, label, width_ft: w, length_ft: l, base_price: price, active: price != null, sort_order: 90 + i, created_at: stamp, updated_at: stamp };
+  });
+  return { ...t, sizes: [...t.sizes, ...more], counts: { ...t.counts, sizes: t.counts.sizes + more.length } };
+};
+// Delete sizes on the toolbar keeps an open editor open (keepFocus), where the ✕'s mouse down has
+// already closed it. What the editor holds counts first either way: a price typed on a never-priced
+// size makes it one that asks, and it is saved if the builder cancels. With nothing typed the size
+// is still one added by mistake, and goes at once.
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44"]));
+  const [typed, blank] = barnOf(F.table(OWN)).slice(-2);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.locator(sel(typed.id, 1)).click();
+  await page.keyboard.type("4321");
+  const ed = (await state(page)).editor;
+  let n0 = saveCalls(calls).length;
+  await delBtn(page).click();
+  const cf = await confirmOf(page);
+  ok("X: Delete sizes with a price typed in an open editor on a never-priced size asks first, Cancel focused, as its ✕ does",
+    !!ed && ed.value === "4321" && !!cf && cf.text === askDel(typed) && cf.focus === "Cancel" && !saveCalls(calls).slice(n0).some((c) => c.body.removes.length), JSON.stringify({ ed, cf }));
+  await page.locator(".ss-pg-confirm button", { hasText: "Cancel" }).click().catch(() => {});
+  await saved(page, calls, n0, 1);
+  ok("X: …Cancel keeps the size, and the typed price goes out as its price", !!F.size(typed.id) && F.size(typed.id).base_price === 4321 && !(await confirmOf(page)),
+    JSON.stringify(F.size(typed.id) || null));
+  // An editor opened and nothing typed: still a size added by mistake.
+  await page.locator(sel(blank.id, 1)).click();
+  await page.keyboard.press("Enter");
+  const ed2 = (await state(page)).editor;
+  n0 = saveCalls(calls).length;
+  await delBtn(page).click();
+  const cf2 = await confirmOf(page);
+  await saved(page, calls, n0, 1);
+  const sc = saveCalls(calls).slice(n0);
+  ok("X: …with nothing typed in the editor it goes at once, as its id", !!ed2 && !cf2 && sc.length === 1 && JSON.stringify(sc[0].body.removes) === JSON.stringify([blank.id]) && !F.size(blank.id),
+    JSON.stringify({ ed2, cf2, bodies: sc.map((c) => c.body) }));
+  ok("X: no page errors (an open editor)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+// The ✕ on a size added by mistake replaces whatever the status line said, as the confirmed delete
+// does, so nothing about this delete sits under an earlier line: not "being deleted" while it is
+// out, and not a refused call's note.
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44"]));
+  const b = barnOf(F.table(OWN));
+  const U = b[3];
+  const [slow, refused] = b.slice(-2);
+  F.used.add(U.id);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const greyLine = async () => {
+    await page.locator(`tr[data-s="${U.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(200);
+    return (await statusText(page)) === UNCLR;
+  };
+  const up1 = await greyLine();
+  F.script.push({ delayMs: 1500 });
+  await page.locator(`tr[data-s="${slow.id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
+  const after = await statusText(page);
+  await page.locator(sel(slow.id, 1)).click({ timeout: 3000 }).catch(() => {});
+  await page.keyboard.type("5");
+  const typing = await statusText(page);
+  ok("X: the ✕ on a size added by mistake clears an earlier status line, and typing on it then says it is being deleted",
+    up1 && after === "" && typing === "This size is being deleted.", JSON.stringify({ up1, after, typing }));
+  const goneS = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), slow.id, { timeout: 10000 }).then(() => true, () => false);
+  ok("X: …then the line says it went", goneS && (await statusText(page)) === `Deleted Test Barn ${slow.label}.`, await statusText(page));
+  const up2 = await greyLine();
+  F.script.push({ status: 400 });
+  await page.locator(`tr[data-s="${refused.id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
+  const noted = await page.waitForFunction(() => /couldn't be deleted/.test([...document.querySelectorAll(".ss-pg-status > span")].map((d) => d.textContent).join(" ")), null, { timeout: 8000 }).then(() => true, () => false);
+  ok("X: a whole call refused shows its note at once, not under the earlier line, and the row stays",
+    up2 && noted && (await statusText(page)) === "A size couldn't be deleted: This change couldn't be saved. Tell CSM Synergy if it keeps happening." && !!F.size(refused.id) && !!(await page.$(`tr[data-s="${refused.id}"]`)), JSON.stringify({ up2, noted, st: await statusText(page) }));
+  ok("X: no call was malformed (the ✕ clears the line)", F.bad.length === 0, F.bad.join());
+  ok("X: no page errors (the ✕ clears the line)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+/// ── T: timing ──
 if (!process.env.SKIP_TIMING && want("T")) {
   for (const [tag, perStyle] of [["1x", 70], ["3x", 210]]) {
     const cat = catalogFor(OWN, { extra: 13 });                    // 25 + 13 = 38 option columns

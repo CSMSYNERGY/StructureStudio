@@ -12676,10 +12676,14 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const company = operatorView ? companyName || null : null;
   const deleteSize = (id) => {
     if (!canEditNow()) return;
+    // What an open editor holds counts first: a price typed on a never-priced size makes it one that
+    // asks. The ✕'s mouse down has committed it already; Delete sizes keeps the editor open.
+    commitEdit();
     const z = byId[id] ? byId[id].size : null;
     if (ssPgNeverEdited(qRef.current, id, z) && !(z && z.used)) {
-      commitEdit();
       backToWork();
+      setTip(null);
+      setSaid(null);
       delStart([id]);
       apply({ type: "remove", id, at: Date.now() });
       sendNow();
@@ -12687,7 +12691,6 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     }
     const c = ssPgCanDelete(qRef.current, id, z);
     if (!c.ok) { delSay(ssPgDeleteWhy(c.why, { offered: offeredNow(id), showHidden })); return; }
-    commitEdit();
     setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });
   };
   // Delete sizes on the toolbar, and Delete or Backspace on a range that lies wholly in the Size

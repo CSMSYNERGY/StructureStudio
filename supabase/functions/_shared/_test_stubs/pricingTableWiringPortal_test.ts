@@ -398,6 +398,12 @@ Deno.test("every way to add or delete a size, or put a backup back, checks the p
   // { id, base } (the queue's "removes"); one that can't go says why on `said`, never on `tip`.
   const del = between(page, "const deleteSize = (id) => {", "\n  };", "deleteSize");
   assert(del.includes("if (ssPgNeverEdited(qRef.current, id, z) && !(z && z.used)) {") && del.includes(`apply({ type: "remove", id, at: Date.now() });`) && del.includes("backToWork();"));
+  // An open editor commits before the rule reads the queue (Delete sizes keeps it open, where the ✕'s
+  // mouse down has closed it), and once, so a typed price makes the size one that asks.
+  assert(del.indexOf("commitEdit();") > 0 && del.indexOf("commitEdit();") < del.indexOf("ssPgNeverEdited(") && del.indexOf("commitEdit();") === del.lastIndexOf("commitEdit();"), "deleteSize reads the rule before it commits the editor");
+  // The plain ✕ clears the status line too, as deleteNow does: said outranks a refused call's note
+  // and the "being deleted" tip, so an earlier line would hide both.
+  assert(del.includes("setTip(null);\n      setSaid(null);\n      delStart([id]);"), "the plain ✕ leaves an earlier status line up");
   assert(del.includes("if (!c.ok) { delSay(ssPgDeleteWhy(c.why, { offered: offeredNow(id), showHidden })); return; }"));
   assert(del.includes("setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });"), "a priced size asks first");
   assert(page.includes(`const delSay = (text) => { setSaid({ tone: "amber", text }); setTip(null); };`), "delete refusals go through said, amber, and clear the tip");
