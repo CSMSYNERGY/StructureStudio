@@ -34,7 +34,13 @@
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/projectsStaticColumns.mjs   (exit 0 = every check held)
 //
-// SS_BASE=http://127.0.0.1:<port> points it at a server on another port.
+// SS_BASE=http://127.0.0.1:<port> points it at a server on another port — or at the DEPLOYED
+// host, which is how this was verified live on beta:
+//
+//   SS_BASE=https://beta.structurestudiosuite.com node tests/harness/projectsStaticColumns.mjs
+//
+// There it drives the build beta really serves while every Supabase call still comes from the
+// stub below, so no login is needed and nothing is written to a real database.
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to
 // prove these checks can fail: against the artifact from before this change (origin/beta c450d5cf)
@@ -130,7 +136,12 @@ try {
   page.on("pageerror", (e) => pageErrors.push(e.message));
   page.on("dialog", (d) => d.dismiss());
 
-  await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
+  // Everything that is not the server under test is blocked, so the only thing this run can
+  // reach is BASE — which is how SS_BASE can point at the DEPLOYED beta host and still answer
+  // every Supabase call from the stub below (nothing of ours leaves the machine, and nothing
+  // is written to a real database).
+  const ORIGIN = new URL(BASE).origin;
+  await page.route((u) => !u.href.startsWith(ORIGIN + "/"), (route) => route.abort());
   const handler = async (route) => {
     const req = route.request();
     const url = req.url();
@@ -351,7 +362,7 @@ for (const a of locked) {
   ok(`B: ${where}: clicking it opens no editor`, a.editors === 0, a.error || `editors ${a.editors}`);
   ok(`B: ${where}: …opens no card drawer`, a.drawer === false, a.error || `drawer ${a.drawer}`);
   ok(`B: ${where}: …opens no choice menu`, a.menu === 0, a.error || `menus ${a.menu}`);
-  ok(`B: ${where}: …and sends no update_item`, a.wrote === false, a.error || "an update_item was sent");
+  ok(`B: ${where}: …and sends no update_item`, a.wrote === false, a.error || `update_item sent: ${a.wrote}`);
 }
 
 // ── C ────────────────────────────────────────────────────────────────────────────────────────
