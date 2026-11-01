@@ -11637,6 +11637,7 @@ const SS_PG_HEAD_MAX = 600;
 const SS_PG_HEAD_NARROW = 90;               // below 700 px: capped, with an ellipsis
 const SS_PG_FROZEN_W = 188;                 // Size 82 + Price 76 + Offered 30
 const SS_PG_COL_W = 44;                     // one option column, about three digits wide
+const SS_PG_DRAG_PX = 4;                    // how far a held pointer moves before it is a drag, not a click
 const SS_PG_LEGEND = "Empty = not included. A number = how many come included (loft = sq ft). Blank price = size not offered. $0 = free.";
 const SS_PG_TOO_BIG = "This catalog is too big for the table right now. Use the Excel sheet, and let us know.";
 const SS_PG_RTP = "Real-Time Pricing sets prices on this account";
@@ -11913,6 +11914,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   const hidNowRef = useRef(null);                  // the last ssPgHiddenNow answer, handed back while nothing differs
   const stayRef = useRef(null);                    // sizes drawn while "Show hidden sizes" is off: they stay drawn (ssPgRows' `stay`)
   const dragRef = useRef(false);
+  const pressRef = useRef(null);                   // where the button went down, until the pointer has moved SS_PG_DRAG_PX from it
   const flashRef = useRef(null);
   const fnRef = useRef({});                        // this render's handlers, for listeners added once
   const loadRef = useRef(null);                    // `load`, for the refresh (an async read reads it after it lands)
@@ -13181,18 +13183,31 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     setExtent(null);
     setTip(null);
     setSaid(null);
-    if (e.button === 0) dragRef.current = true;
+    if (e.button === 0) { dragRef.current = true; pressRef.current = { x: e.clientX, y: e.clientY }; }
     // A click on an Offered box that is already selected ticks or unticks it.
     if (again && cell.col === 2 && e.button === 0 && e.detail === 1) toggleOffered(cell);
   };
-  // A drag with the button held stretches the range over the cells it passes (not on touch).
+  // A drag with the button held stretches the range over the cells it passes (not on touch). It is a
+  // drag once the pointer has moved SS_PG_DRAG_PX from the press. Before that the pointer is still,
+  // whatever passes under it: the mouse down above can clear the status line, the grid then moves up,
+  // and the browser reports the row below as passed over, so one click would select two boxes.
+  const dragStarted = (e) => {
+    const p = pressRef.current;
+    if (!p) return true;
+    if (Math.abs(e.clientX - p.x) < SS_PG_DRAG_PX && Math.abs(e.clientY - p.y) < SS_PG_DRAG_PX) return false;
+    pressRef.current = null;
+    return true;
+  };
   const onMouseOver = (e) => {
-    if (!dragRef.current) return;
+    if (!dragRef.current || !dragStarted(e)) return;
     const cell = cellAt(e);
     const a = activeRef.current;
     if (!cell || !a) return;
     setExtent(cell.sizeId === a.sizeId && cell.col === a.col ? null : cell);
   };
+  // The pointer can cross into the next box inside those few pixels and stay there, so no mouse over
+  // comes: the move that starts the drag counts the box it is in.
+  const onMouseMove = (e) => { if (dragRef.current && pressRef.current && dragStarted(e)) onMouseOver(e); };
   const onDoubleClick = (e) => {
     const cell = cellAt(e);
     if (cell && cell.col !== 2) startEdit(cell, null);
@@ -13489,7 +13504,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
               <table ref={gridRef} className="ss-pg-grid" role="grid" aria-label="Sizes and prices" tabIndex={0}
                 aria-rowcount={2 + rows.length} aria-colcount={ncols} aria-readonly={canEdit ? undefined : "true"}
                 style={{ width: tableW, "--ss-pg-hh": hh + "px" }}
-                onKeyDown={onKeyDown} onMouseDown={onMouseDown} onMouseOver={onMouseOver} onDoubleClick={onDoubleClick} onFocus={onFocus}
+                onKeyDown={onKeyDown} onMouseDown={onMouseDown} onMouseOver={onMouseOver} onMouseMove={onMouseMove} onDoubleClick={onDoubleClick} onFocus={onFocus}
                 onClick={onAct}>
                 {head}
                 <tbody>{body}</tbody>

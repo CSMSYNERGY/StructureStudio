@@ -648,3 +648,11 @@ Deno.test("Size's width is one number: the colgroup, the frozen total, the scrol
   assert(CATALOG.includes("scrollPaddingLeft: narrow ? 82 : SS_PG_FROZEN_W"), "below 700 px only Size is frozen");
   assert(html.includes(".ss-pg-grid .ss-pg-f1{position:sticky;left:82px;") && html.includes(".ss-pg-grid .ss-pg-f2{position:sticky;left:158px;"), "the sticky offsets");
 });
+
+Deno.test("one click is one box: a range starts only once the held pointer has moved from the press, so a grid that moves under it (the status line clearing) stretches nothing", () => {
+  const p = fnText(CATALOG, "function PricingTablePage(");
+  assert(p.includes("if (e.button === 0) { dragRef.current = true; pressRef.current = { x: e.clientX, y: e.clientY }; }"), "the press is remembered");
+  assert(p.includes("if (!dragRef.current || !dragStarted(e)) return;"), "a mouse over counts only after that");
+  assert(p.includes("const onMouseMove = (e) => { if (dragRef.current && pressRef.current && dragStarted(e)) onMouseOver(e); };"), "and the move that starts the drag counts the box it is in");
+  assert(p.includes("onMouseOver={onMouseOver} onMouseMove={onMouseMove}"), "both reach the grid");
+});

@@ -4260,9 +4260,6 @@ if (want("X")) {
   await page.waitForTimeout(300);
   ok("X: …several of them: none can go, in the same words, and nothing is sent",
     (await statusText(page)) === "None of these sizes can be deleted: saved designs use them. Their style is hidden, so they aren't in your designer." && !(await confirmOf(page)) && saveCalls(calls).length === n0, await statusText(page));
-  // The line goes first: a click that clears it moves the grid under the pressed button, which can
-  // stretch a range, and Space does nothing on a range.
-  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click();
   await page.locator(sel(z.id, 2)).click();
   await page.keyboard.press("Space");
   await saved(page, calls, n0);
@@ -4276,6 +4273,85 @@ if (want("X")) {
     !(await page.$(`tr[data-s="${z.id}"]`)) && !!(await page.$(`tr[data-s="${hz[1].id}"]`)));
   ok("X: no call was malformed (a hidden style)", F.bad.length === 0, F.bad.join());
   ok("X: no page errors (a hidden style)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// One click on a box is one box, whatever the click does around it. Its mouse down clears the status
+// line, the grid moves up under the still pointer, and the browser reports the row below as passed
+// over: page.mouse here, because a real press has a hold in it and the report comes during the hold.
+// A pointer that shakes a pixel or two is still a click. A real drag still makes a range: with no line
+// up, with one, and from a pixel off the next box to just inside it, where no mouse over comes later.
+if (want("X")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  const U = b[5];
+  ok("X: (set-up) six sizes in the first style, the last used by saved designs", b.length >= 6 && !!U, String(b.length));
+  F.used.add(U.id);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1280, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const boxOf = (id, col) => page.locator(sel(id, col)).boundingBox();
+  const middle = (r) => ({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+  const hold = async (from, moves = []) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.waitForTimeout(90);
+    for (const m of moves) { await page.mouse.move(from.x + m.x, from.y + m.y); await page.waitForTimeout(40); }
+    await page.mouse.up();
+    await page.waitForTimeout(60);
+  };
+  const lineUp = async () => {
+    await page.locator(`tr[data-s="${U.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(150);
+    return (await statusText(page)) === UNCLR;
+  };
+  // What Delete asks now: it names the sizes the selection holds. Cancel keeps them all.
+  const asked = async () => {
+    await page.keyboard.press("Delete");
+    await page.waitForTimeout(100);
+    const cf = await confirmOf(page);
+    if (cf) await page.locator(".ss-pg-confirm button", { hasText: "Cancel" }).click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(100);
+    return cf ? cf.text : null;
+  };
+  await hold(middle(await boxOf(b[0].id, 0)));
+  const t0 = await asked();
+  ok("X: (control) one click with no line up, then Delete, names that one size", t0 === askDel(b[0]), String(t0));
+  const up1 = await lineUp();
+  const at1 = await boxOf(b[1].id, 0);
+  await hold(middle(at1));
+  const after1 = await boxOf(b[1].id, 0);
+  const st1 = await statusText(page);
+  const t1 = await asked();
+  ok("X: one click with a line up clears the line, the grid moves up under the pointer, and Delete names only that size",
+    up1 && st1 === "" && after1.y < at1.y && t1 === askDel(b[1]), JSON.stringify({ up1, st1, moved: at1.y - after1.y, t1 }));
+  const up2 = await lineUp();
+  await hold(middle(await boxOf(b[2].id, 0)), [{ x: 2, y: 2 }, { x: 3, y: -1 }]);
+  const t2 = await asked();
+  ok("X: …and a pointer that shakes a pixel or two during that click is still one size", up2 && t2 === askDel(b[2]), JSON.stringify({ up2, t2 }));
+  const up3 = await lineUp();
+  await hold(middle(await boxOf(b[2].id, 2)));
+  const n0 = saveCalls(calls).length;
+  const was = F.size(b[2].id).active;
+  await page.keyboard.press("Space");
+  await saved(page, calls, n0);
+  ok("X: …and Space on an Offered box clicked with a line up ticks that box", up3 && F.size(b[2].id).active === !was, JSON.stringify({ up3, was, now: F.size(b[2].id).active }));
+  await page.locator(".ss-pg-status button", { hasText: "Dismiss" }).click({ timeout: 1000 }).catch(() => {});
+  const r0 = await boxOf(b[0].id, 0), r2 = await boxOf(b[2].id, 0);
+  await hold(middle(r0), [{ x: 0, y: (r2.y - r0.y) / 2 }, { x: 0, y: r2.y - r0.y }]);
+  const t3 = await asked();
+  ok("X: a real drag over three Size boxes still selects all three", /^Delete 3 sizes/.test(String(t3)), String(t3));
+  const r0b = await boxOf(b[0].id, 0);
+  await hold({ x: r0b.x + r0b.width / 2, y: r0b.y + r0b.height - 2 }, [{ x: 0, y: 3 }, { x: 0, y: 9 }]);
+  const t4 = await asked();
+  ok("X: a drag from a pixel off the next box to just inside it selects both, with no later mouse over", /^Delete 2 sizes/.test(String(t4)), String(t4));
+  const up4 = await lineUp();
+  const r0c = await boxOf(b[0].id, 0);
+  await hold(middle(r0c), [{ x: 0, y: 12 }, { x: 0, y: 40 }]);
+  const t5 = await asked();
+  ok("X: a real drag with a line up still makes a range", up4 && /^Delete \d sizes/.test(String(t5)), JSON.stringify({ up4, t5 }));
+  ok("X: no call was malformed (one click, one box)", F.bad.length === 0, F.bad.join());
+  ok("X: no page errors (one click, one box)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
