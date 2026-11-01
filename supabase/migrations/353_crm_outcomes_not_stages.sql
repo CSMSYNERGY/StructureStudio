@@ -1,9 +1,9 @@
--- 352_crm_outcomes_not_stages.sql — Won and Lost stop being STAGES, "Appt Set" becomes
+-- 353_crm_outcomes_not_stages.sql — Won and Lost stop being STAGES, "Appt Set" becomes
 -- "Contact Made" and fires off real activity, and a card's outcome lives on the card.
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT. Pipe this file to `supabase db query --linked`
 --    (stdin; see 270's header), then record it:
---      insert into supabase_migrations.schema_migrations (version, name) values ('352', '352_crm_outcomes_not_stages') returning version;
+--      insert into supabase_migrations.schema_migrations (version, name) values ('353', '353_crm_outcomes_not_stages') returning version;
 --    NEVER `supabase db push`. The file carries its own begin;/commit;, so a failed check anywhere
 --    takes the whole migration with it. To rehearse and change nothing, swap the last `commit;`
 --    for `rollback;`.
@@ -14,13 +14,18 @@
 --    stages and the paths this file retires), so deploying it first is also safe.
 --
 -- ── NUMBERING ────────────────────────────────────────────────────────────────────────────
--- 352 is the next free number in the LIVE LEDGER, which was at 351 on 2026-11-01. This file was
--- written as 342 on 2026-10-26 and renumbered twice while it waited: the ledger moved 341 -> 351
--- in those five days, and 336-341 had been applied from somewhere that is not this clone while the
--- repo's own folder still stopped at 335. **Read the next number from the LEDGER, never from the
--- folder, and re-read it right before you apply:**
---   select version, name from supabase_migrations.schema_migrations order by version desc limit 5;
--- It must come after 303, and refuses without it.
+-- 353. This file was written as 342 on 2026-10-26 and renumbered THREE times while it waited:
+-- 342 -> 352 -> 353. Four agents write migrations into this repo, so a number is only yours at the
+-- moment you apply it. **Take max(live ledger, this folder) + 1, and re-read BOTH right before you
+-- apply** — neither alone is enough, and both failure modes have now happened here:
+--   * the folder alone is stale: 336-341 were applied from a clone this one never saw, so the
+--     folder said 335 while the database said 341;
+--   * the ledger alone misses what a sibling agent has committed but not yet applied — and on
+--     2026-11-01 a sibling's 352_pm_system_columns landed and was applied in the same hour.
+--   select version, name from supabase_migrations.schema_migrations order by version::int desc limit 5;
+--   ls supabase/migrations | sed 's/_.*//' | sort -n | tail -3
+-- scripts/preflight.mjs now refuses a push where two migration files share a number, which is the
+-- half of this a gate can catch. It must come after 303, and refuses without it.
 --
 -- ── WHY (Carolyn, 2026-10-26) ────────────────────────────────────────────────────────────
 --   * "We need a LOST status. We will not be using a column called lost ... it should be a
@@ -100,7 +105,7 @@
 --   check (trigger_event is null or trigger_event in
 --          ('design_submitted', 'estimate_sent', 'estimate_accepted', 'invoiced',
 --           'paid_in_full', 'build_scheduled', 'delivered'));
--- delete from supabase_migrations.schema_migrations where version = '352';
+-- delete from supabase_migrations.schema_migrations where version = '353';
 -- REVERSE-SQL-END
 --   (Cards do NOT go back into the Won/Lost columns: their won_at/lost_at say the same thing, and
 --   which column they sat in is the fact this migration set out to stop losing.)
@@ -115,10 +120,10 @@ begin
      or not exists (select 1 from pg_constraint
                      where conname = 'crm_pipeline_stages_no_status_link'
                        and conrelid = 'public.crm_pipeline_stages'::regclass) then
-    raise exception '352: crm_statuses / the 303 stage CHECK are missing (migration 303 not applied?)';
+    raise exception '353: crm_statuses / the 303 stage CHECK are missing (migration 303 not applied?)';
   end if;
   if to_regclass('public.phone_calls') is null or to_regclass('public.sms_messages') is null then
-    raise exception '352: phone_calls / sms_messages are missing (migrations 150 and 254 not applied?)';
+    raise exception '353: phone_calls / sms_messages are missing (migrations 150 and 254 not applied?)';
   end if;
 end
 $pre$;
@@ -199,7 +204,7 @@ begin
                         where client_id = p_client_id and archived_at is null), 2048) - 1024;
   elsif v_kind = 'outreach' then
     v_name := 'Manufacturer Outreach';
-    -- Won and Lost were the last two stages here until 352. Sold is the status ladder (Invoiced
+    -- Won and Lost were the last two stages here until 353. Sold is the status ladder (Invoiced
     -- onwards); lost is a flag on the card, set where the card already stands.
     v_stages := '[{"n":"New Lead","c":"#64748B"},{"n":"Attempting Contact","c":"#0EA5E9"},
                   {"n":"Connected","c":"#14B8A6"},{"n":"Demo Scheduled","c":"#6366F1"},
@@ -236,7 +241,7 @@ $fn$;
 revoke execute on function public.crm_seed_pipeline(text, text) from public, anon, authenticated;
 grant  execute on function public.crm_seed_pipeline(text, text) to service_role;
 
--- A STAGE MOVE IS A STAGE MOVE (352), WITHIN ONE PIPELINE. It no longer writes won_at, lost_at or
+-- A STAGE MOVE IS A STAGE MOVE (353), WITHIN ONE PIPELINE. It no longer writes won_at, lost_at or
 -- lost_reason, and no longer refuses for want of a lost reason: there is no stage that means won or
 -- lost any more. It now refuses a stage in another pipeline outright.
 -- Moving a card that is marked lost leaves it marked — reopening is deliberate
@@ -300,7 +305,7 @@ grant  execute on function public.crm_move_deal(text, uuid, uuid, uuid, text) to
 
 -- Give a card a status. Only the system calls this (crm_design_event and crm_contact_made, forward
 -- only); the card stays in its stage. p_actor is kept for the signature.
--- 352: reaching the INVOICED status is what marks a deal SOLD now that there is no Won stage —
+-- 353: reaching the INVOICED status is what marks a deal SOLD now that there is no Won stage —
 -- Carolyn, "Invoiced indicates a sold job". Stamped once; a later status never clears it.
 create or replace function public.crm_set_deal_status(
   p_client_id    text,
@@ -369,7 +374,7 @@ $fn$;
 revoke execute on function public.crm_set_deal_status(text, uuid, uuid, uuid, boolean) from public, anon, authenticated;
 grant  execute on function public.crm_set_deal_status(text, uuid, uuid, uuid, boolean) to service_role;
 
--- MARK A CARD LOST WHERE IT STANDS (352). Carolyn: "LOST stays in the column it was when marking
+-- MARK A CARD LOST WHERE IT STANDS (353). Carolyn: "LOST stays in the column it was when marking
 -- lost." The stage, the pipeline and the status are untouched; the board hides the card by default
 -- and shows it in its own column under "Show lost". A reason is required, as it was when this was
 -- a drag into a Lost column.
@@ -438,7 +443,7 @@ $fn$;
 revoke execute on function public.crm_clear_deal_lost(text, uuid, uuid) from public, anon, authenticated;
 grant  execute on function public.crm_clear_deal_lost(text, uuid, uuid) to service_role;
 
--- SOMEBODY ACTUALLY TALKED TO THIS LEAD (352). Carolyn: the status "should switch automatically
+-- SOMEBODY ACTUALLY TALKED TO THIS LEAD (353). Carolyn: the status "should switch automatically
 -- after there was an actual call recorded ... or there was a text inbound and outbound both. This
 -- should only change to this if the lead is in New Lead status."
 --   * keyed on the CONTACT, not a design short_code (crm_design_event's key): a lead you phoned may
@@ -569,7 +574,7 @@ update public.crm_statuses set name = 'Contact Made', trigger_event = 'contact_m
 --   3. else the pipeline's first live stage
 -- From here nothing moves at all — this one-off exists only because these cards are sitting IN the
 -- columns being deleted.
-create temporary table m352_moving on commit drop as
+create temporary table m353_moving on commit drop as
 with dead as (
   select d.id, d.client_id, d.pipeline_id, d.stage_id, d.stage_entered_at,
          d.won_at, d.lost_at, d.lost_reason, s.kind, s.position
@@ -601,11 +606,11 @@ update public.crm_deals d set
   won_at     = case when m.kind = 'won'  then coalesce(m.won_at,  m.stage_entered_at) else m.won_at  end,
   lost_at    = case when m.kind = 'lost' then coalesce(m.lost_at, m.stage_entered_at) else m.lost_at end,
   updated_at = now()
-  from m352_moving m
+  from m353_moving m
  where d.id = m.id and m.to_stage is not null;
 
 insert into public.crm_deal_stage_changes (client_id, deal_id, from_stage, to_stage, changed_by)
-select client_id, id, stage_id, to_stage, null from m352_moving where to_stage is not null;
+select client_id, id, stage_id, to_stage, null from m353_moving where to_stage is not null;
 
 -- Retire the columns themselves. A Won/Lost stage that still holds a card (its pipeline had no
 -- live open stage to put it on) stays, and the checks below refuse the whole file in that case.
@@ -621,7 +626,7 @@ begin
   select count(*) into v_n from public.crm_pipeline_stages
    where kind in ('won', 'lost') and archived_at is null;
   if v_n > 0 then
-    raise exception '352: % Won/Lost stages still hold a card and their pipeline has no live open stage to move it to. Add an open stage to those pipelines, then run this again.', v_n;
+    raise exception '353: % Won/Lost stages still hold a card and their pipeline has no live open stage to move it to. Add an open stage to those pipelines, then run this again.', v_n;
   end if;
 end
 $left$;
@@ -632,37 +637,37 @@ alter table public.crm_pipeline_stages drop constraint if exists crm_pipeline_st
 alter table public.crm_pipeline_stages add constraint crm_pipeline_stages_open_only
   check (kind = 'open' or archived_at is not null);
 comment on column public.crm_pipeline_stages.kind is
-  'Retired by 352: always ''open'' on a live stage (crm_pipeline_stages_open_only). A card''s outcome lives on the card — crm_deals.lost_at/lost_reason, and won_at stamped when it reaches the Invoiced status. Archived Won/Lost stages keep their kind for the reverse.';
+  'Retired by 353: always ''open'' on a live stage (crm_pipeline_stages_open_only). A card''s outcome lives on the card — crm_deals.lost_at/lost_reason, and won_at stamped when it reaches the Invoiced status. Archived Won/Lost stages keep their kind for the reverse.';
 
 -- ── PART 4 — checks ──────────────────────────────────────────────────────────────────────
 do $chk$
 declare
   v_n int;
-  v_t text := 'm352-rehearsal-' || substr(md5(random()::text), 1, 8);
+  v_t text := 'm353-rehearsal-' || substr(md5(random()::text), 1, 8);
   v_p uuid; v_s1 uuid; v_s2 uuid; v_c uuid; v_d uuid; v_d2 uuid;
   v_first uuid; v_made uuid; v_inv uuid;
   v_r jsonb; v_got uuid; v_won timestamptz;
 begin
   select count(*) into v_n from public.crm_pipeline_stages where kind in ('won', 'lost') and archived_at is null;
   if v_n > 0 then
-    raise exception '352: % Won/Lost stages are still live: a card in one had no open stage in its pipeline to go back to', v_n;
+    raise exception '353: % Won/Lost stages are still live: a card in one had no open stage in its pipeline to go back to', v_n;
   end if;
   select count(*) into v_n from public.crm_deals d join public.crm_pipeline_stages s on s.id = d.stage_id
    where s.kind <> 'open';
-  if v_n > 0 then raise exception '352: % cards are still in a Won or Lost stage', v_n; end if;
+  if v_n > 0 then raise exception '353: % cards are still in a Won or Lost stage', v_n; end if;
   select count(*) into v_n from public.crm_statuses
    where btrim(name) = 'Appt Set' and trigger_event is null and archived_at is null;
-  if v_n > 0 then raise exception '352: % accounts still have the unreachable Appt Set status', v_n; end if;
+  if v_n > 0 then raise exception '353: % accounts still have the unreachable Appt Set status', v_n; end if;
   select count(*) into v_n from public.crm_statuses c
    where c.trigger_event = 'contact_made' and c.archived_at is null
      and c.position <= (select min(o.position) from public.crm_statuses o
                          where o.client_id = c.client_id and o.archived_at is null);
   if v_n > 0 then
-    raise exception '352: % accounts have Contact Made as their FIRST status, so no card could ever reach it', v_n;
+    raise exception '353: % accounts have Contact Made as their FIRST status, so no card could ever reach it', v_n;
   end if;
   if has_table_privilege('authenticated', 'public.crm_deals', 'select')
      or has_table_privilege('authenticated', 'public.crm_statuses', 'select') then
-    raise exception '352: browser roles can read the pipeline tables';
+    raise exception '353: browser roles can read the pipeline tables';
   end if;
 
   -- ── Rehearsal on a made-up account (no client_users row, so no owner; no design, so no design
@@ -672,140 +677,140 @@ begin
   select id into v_s1 from public.crm_pipeline_stages where pipeline_id = v_p order by position limit 1;
   select id into v_s2 from public.crm_pipeline_stages where pipeline_id = v_p order by position offset 1 limit 1;
   select count(*) into v_n from public.crm_pipeline_stages where pipeline_id = v_p and kind <> 'open';
-  if v_n > 0 then raise exception '352: a new account''s starter pipeline still has a Won or Lost stage'; end if;
+  if v_n > 0 then raise exception '353: a new account''s starter pipeline still has a Won or Lost stage'; end if;
   v_p := public.crm_seed_pipeline(v_t, 'outreach');
   select count(*) into v_n from public.crm_pipeline_stages where pipeline_id = v_p;
-  if v_n <> 7 then raise exception '352: the outreach starter seeded % stages, not 7', v_n; end if;
+  if v_n <> 7 then raise exception '353: the outreach starter seeded % stages, not 7', v_n; end if;
 
   select id into v_first from public.crm_statuses where client_id = v_t and archived_at is null order by position limit 1;
   select id into v_made  from public.crm_statuses where client_id = v_t and trigger_event = 'contact_made';
   select id into v_inv   from public.crm_statuses where client_id = v_t and trigger_event = 'invoiced';
-  if v_made is null then raise exception '352: a new account has no Contact Made status'; end if;
+  if v_made is null then raise exception '353: a new account has no Contact Made status'; end if;
   if (select name from public.crm_statuses where id = v_made) <> 'Contact Made' then
-    raise exception '352: the contact_made status is not called Contact Made';
+    raise exception '353: the contact_made status is not called Contact Made';
   end if;
 
-  v_r := public.crm_create_lead(v_t, 'Pat Rehearsal', 'Rehearsal Barns', '(555) 010-3036', 'pat352@example.invalid', null, null, 'manual', v_s1);
+  v_r := public.crm_create_lead(v_t, 'Pat Rehearsal', 'Rehearsal Barns', '(555) 010-3036', 'pat353@example.invalid', null, null, 'manual', v_s1);
   v_d := (v_r->>'dealId')::uuid;
   select contact_id into v_c from public.crm_deals where id = v_d;
-  if v_d is null or v_c is null then raise exception '352: create_lead made no deal'; end if;
+  if v_d is null or v_c is null then raise exception '353: create_lead made no deal'; end if;
 
   -- A move is a stage move and nothing else, and needs no lost reason.
   perform public.crm_move_deal(v_t, v_d, v_s2, null, null);
   if (select won_at is not null or lost_at is not null or lost_reason is not null from public.crm_deals where id = v_d) then
-    raise exception '352: a stage move wrote an outcome onto the card';
+    raise exception '353: a stage move wrote an outcome onto the card';
   end if;
 
   -- Marked lost WHERE IT STANDS, reason required, idempotent, and reopening puts it back.
   begin
     perform public.crm_set_deal_lost(v_t, v_d, null, '   ');
-    raise exception '352: a card was marked lost with no reason';
+    raise exception '353: a card was marked lost with no reason';
   exception when check_violation then null;
   end;
   v_r := public.crm_set_deal_lost(v_t, v_d, null, 'Price');
-  if (v_r->>'lost') <> 'true' then raise exception '352: marking a card lost did not take'; end if;
+  if (v_r->>'lost') <> 'true' then raise exception '353: marking a card lost did not take'; end if;
   select stage_id into v_got from public.crm_deals where id = v_d;
-  if v_got <> v_s2 then raise exception '352: marking a card lost MOVED it'; end if;
+  if v_got <> v_s2 then raise exception '353: marking a card lost MOVED it'; end if;
   if (select lost_reason from public.crm_deals where id = v_d) <> 'Price' then
-    raise exception '352: the lost reason was not kept';
+    raise exception '353: the lost reason was not kept';
   end if;
   if ((public.crm_set_deal_lost(v_t, v_d, null, 'Timing'))->>'lost') <> 'false' then
-    raise exception '352: a card already lost was marked lost again';
+    raise exception '353: a card already lost was marked lost again';
   end if;
   if (select lost_reason from public.crm_deals where id = v_d) <> 'Price' then
-    raise exception '352: marking an already-lost card again changed its reason';
+    raise exception '353: marking an already-lost card again changed its reason';
   end if;
   -- A stage move does not quietly reopen it.
   perform public.crm_move_deal(v_t, v_d, v_s1, null, null);
   if (select lost_at is null from public.crm_deals where id = v_d) then
-    raise exception '352: moving a lost card reopened it';
+    raise exception '353: moving a lost card reopened it';
   end if;
   v_r := public.crm_clear_deal_lost(v_t, v_d, null);
-  if (v_r->>'reopened') <> 'true' then raise exception '352: reopening a card answered no'; end if;
+  if (v_r->>'reopened') <> 'true' then raise exception '353: reopening a card answered no'; end if;
   if (select lost_at is not null or lost_reason is not null from public.crm_deals where id = v_d) then
-    raise exception '352: reopening a card did not clear the lost flag';
+    raise exception '353: reopening a card did not clear the lost flag';
   end if;
 
   -- Reaching Invoiced is what marks a deal sold.
   if (select won_at is not null from public.crm_deals where id = v_d) then
-    raise exception '352: the card was already sold';
+    raise exception '353: the card was already sold';
   end if;
   perform public.crm_set_deal_status(v_t, v_d, v_inv, null, true);
   select won_at into v_won from public.crm_deals where id = v_d;
-  if v_won is null then raise exception '352: reaching Invoiced did not mark the deal sold'; end if;
+  if v_won is null then raise exception '353: reaching Invoiced did not mark the deal sold'; end if;
   perform public.crm_set_deal_status(v_t, v_d, (select id from public.crm_statuses where client_id = v_t and trigger_event = 'delivered'), null, true);
   if (select won_at from public.crm_deals where id = v_d) <> v_won then
-    raise exception '352: a later status changed when the deal was sold';
+    raise exception '353: a later status changed when the deal was sold';
   end if;
 
   -- CONTACT MADE: only from the first status, and only on real two-way activity.
-  v_r := public.crm_create_lead(v_t, 'Dale Rehearsal', null, '(555) 010-3037', 'dale352@example.invalid', null, null, 'manual', v_s1);
+  v_r := public.crm_create_lead(v_t, 'Dale Rehearsal', null, '(555) 010-3037', 'dale353@example.invalid', null, null, 'manual', v_s1);
   v_d2 := (v_r->>'dealId')::uuid;
   select contact_id into v_c from public.crm_deals where id = v_d2;
   if (select status_id from public.crm_deals where id = v_d2) <> v_first then
-    raise exception '352: a new card did not start on the first status';
+    raise exception '353: a new card did not start on the first status';
   end if;
 
   -- a missed call is not contact
   insert into public.phone_calls (client_id, contact_id, direction, from_e164, to_e164, status, started_at)
   values (v_t, v_c, 'in', '+15550103037', '+15550100000', 'missed', now());
   if (select status_id from public.crm_deals where id = v_d2) <> v_first then
-    raise exception '352: a missed call moved the card';
+    raise exception '353: a missed call moved the card';
   end if;
   -- one outbound text nobody answered is not contact
   insert into public.sms_messages (client_id, contact_id, direction, from_number, to_number, body, status)
   values (v_t, v_c, 'out', '+15550100000', '+15550103037', 'hello?', 'sent');
   if (select status_id from public.crm_deals where id = v_d2) <> v_first then
-    raise exception '352: a single outbound text moved the card';
+    raise exception '353: a single outbound text moved the card';
   end if;
   -- they answer: that is contact
   insert into public.sms_messages (client_id, contact_id, direction, from_number, to_number, body, status)
   values (v_t, v_c, 'in', '+15550103037', '+15550100000', 'yes hi', 'received');
   if (select status_id from public.crm_deals where id = v_d2) <> v_made then
-    raise exception '352: a two-way text thread did not move the card to Contact Made';
+    raise exception '353: a two-way text thread did not move the card to Contact Made';
   end if;
   if (select stage_id from public.crm_deals where id = v_d2) <> v_s1 then
-    raise exception '352: Contact Made moved the card out of its stage';
+    raise exception '353: Contact Made moved the card out of its stage';
   end if;
   -- and it never runs again from further up the ladder
   perform public.crm_set_deal_status(v_t, v_d2, v_inv, null, true);
   insert into public.phone_calls (client_id, contact_id, direction, from_e164, to_e164, status, started_at, answered_at, duration_s)
   values (v_t, v_c, 'out', '+15550100000', '+15550103037', 'completed', now(), now(), 95);
   if (select status_id from public.crm_deals where id = v_d2) <> v_inv then
-    raise exception '352: an answered call pulled a card back from Invoiced to Contact Made';
+    raise exception '353: an answered call pulled a card back from Invoiced to Contact Made';
   end if;
   -- an answered call on a fresh first-status card does move it
-  v_r := public.crm_create_lead(v_t, 'Robin Rehearsal', null, '(555) 010-3038', 'robin352@example.invalid', null, null, 'manual', v_s1);
+  v_r := public.crm_create_lead(v_t, 'Robin Rehearsal', null, '(555) 010-3038', 'robin353@example.invalid', null, null, 'manual', v_s1);
   v_d := (v_r->>'dealId')::uuid;
   select contact_id into v_c from public.crm_deals where id = v_d;
   insert into public.phone_calls (client_id, contact_id, direction, from_e164, to_e164, status, started_at, answered_at, duration_s)
   values (v_t, v_c, 'in', '+15550103038', '+15550100000', 'completed', now(), now(), 40);
   if (select status_id from public.crm_deals where id = v_d) <> v_made then
-    raise exception '352: an answered call did not move a New Lead card to Contact Made';
+    raise exception '353: an answered call did not move a New Lead card to Contact Made';
   end if;
 
   -- A LOST LEAD THAT COMES BACK (2026-11-01). v_d is on Contact Made and not lost; mark it lost,
   -- then land a paperwork event on it. The card must be back in play.
   perform public.crm_set_deal_lost(v_t, v_d, null, 'Price');
   if (select lost_at is null from public.crm_deals where id = v_d) then
-    raise exception '352: the rehearsal card did not go lost';
+    raise exception '353: the rehearsal card did not go lost';
   end if;
   perform public.crm_set_deal_status(v_t, v_d, (select id from public.crm_statuses where client_id = v_t and trigger_event = 'estimate_sent'), null, true);
   if (select lost_at is not null or lost_reason is not null from public.crm_deals where id = v_d) then
-    raise exception '352: a requote did not bring a lost card back';
+    raise exception '353: a requote did not bring a lost card back';
   end if;
   -- ...and the case that placement exists for: the SAME status again, on a card already there.
   perform public.crm_set_deal_lost(v_t, v_d, null, 'Timing');
   v_r := public.crm_set_deal_status(v_t, v_d, (select id from public.crm_statuses where client_id = v_t and trigger_event = 'estimate_sent'), null, true);
-  if (v_r->>'changed') <> 'false' then raise exception '352: the status moved when it should not have'; end if;
+  if (v_r->>'changed') <> 'false' then raise exception '353: the status moved when it should not have'; end if;
   if (select lost_at is not null from public.crm_deals where id = v_d) then
-    raise exception '352: a second estimate on a card already at Estimate Sent left it lost';
+    raise exception '353: a second estimate on a card already at Estimate Sent left it lost';
   end if;
   -- ...but an ANSWERED CALL does not reopen one.
   perform public.crm_set_deal_lost(v_t, v_d, null, 'No response');
   perform public.crm_contact_made(v_t, v_c);
   if (select lost_at is null from public.crm_deals where id = v_d) then
-    raise exception '352: an answered call reopened a lost card';
+    raise exception '353: an answered call reopened a lost card';
   end if;
   perform public.crm_clear_deal_lost(v_t, v_d, null);
 
@@ -813,14 +818,14 @@ begin
   -- pipeline, so moving this card there is refused.
   begin
     perform public.crm_move_deal(v_t, v_d, (select id from public.crm_pipeline_stages where pipeline_id = v_p order by position limit 1), null, null);
-    raise exception '352: a card moved to another pipeline';
+    raise exception '353: a card moved to another pipeline';
   exception when check_violation then null;
   end;
 
   -- and no live stage can mean won or lost any more
   begin
     update public.crm_pipeline_stages set kind = 'lost' where id = v_s2;
-    raise exception '352: a live stage took kind = lost';
+    raise exception '353: a live stage took kind = lost';
   exception when check_violation then null;
   end;
 
@@ -830,12 +835,12 @@ begin
   delete from public.crm_pipelines where client_id = v_t;
   delete from public.crm_statuses where client_id = v_t;
   delete from public.crm_contacts where client_id = v_t;
-  if exists (select 1 from public.crm_deals where client_id = v_t) then raise exception '352: rehearsal left cards'; end if;
+  if exists (select 1 from public.crm_deals where client_id = v_t) then raise exception '353: rehearsal left cards'; end if;
 end;
 $chk$;
 
 -- What the apply shows.
-select '352' as migration,
+select '353' as migration,
        (select count(*) from public.crm_pipeline_stages where kind in ('won', 'lost') and archived_at is not null) as stages_retired,
        (select count(*) from public.crm_pipeline_stages where archived_at is null and kind <> 'open') as live_outcome_stages,
        (select count(*) from public.crm_statuses where trigger_event = 'contact_made' and archived_at is null) as contact_made_statuses,

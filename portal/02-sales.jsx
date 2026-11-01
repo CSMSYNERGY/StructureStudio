@@ -3449,7 +3449,7 @@ const crmPipeOf = (pipe, deal) =>
 const crmPipeStatus = (pipe, deal) =>
   (pipe && deal && deal.status_id ? (pipe.statuses || []).find((t) => t.id === deal.status_id) : null) || null;
 // The stage a deal lands in when it moves to `pipeline`: its FIRST one, the way a new card starts.
-// Since migration 352 every live stage is a plain step (there is no won or lost stage to skip), so
+// Since migration 353 every live stage is a plain step (there is no won or lost stage to skip), so
 // this is the first stage there is. The name stays: it is what the callers read.
 function crmPipeFirstOpen(pipeline) {
   const st = (pipeline && pipeline.stages) || [];
@@ -3482,7 +3482,7 @@ function crmPipeBarRow(pipe, deal) {
     only: true, emptyLabel: "Stage removed" };
 }
 // A deal's row after a move, painted before the server answers. The pipeline is the stage's.
-// 352: a move is a move. It never marks or clears the lost flag — crmPipeLost does that.
+// 353: a move is a move. It never marks or clears the lost flag — crmPipeLost does that.
 function crmPipeMoved(pipe, dealId, stage) {
   if (!pipe || !stage) return pipe;
   const owner = (pipe.pipelines || []).find((p) => (p.stages || []).some((s) => s.id === stage.id));
@@ -4882,7 +4882,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [dealOpen, setDealOpen] = useState(null);
   const [dealBusy, setDealBusy] = useState(false);
   // The Deals card's pipeline controls (2026-10-12): the lost-reason picker Mark lost needs
-  // ({ deal, reasons, key } — since 352 there is no stage to move into), and "+ Add to a pipeline"
+  // ({ deal, reasons, key } — since 353 there is no stage to move into), and "+ Add to a pipeline"
   // while it is open (the pipeline id it will add to). Up here with the rest, above the early
   // returns (React #310).
   const [dealLost, setDealLost] = useState(null);
@@ -5441,7 +5441,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That move did not save." });
     }
   };
-  // A stage from the deal's own pipeline. Since 352 every stage is a plain step, so this is only
+  // A stage from the deal's own pipeline. Since 353 every stage is a plain step, so this is only
   // ever a move: Mark lost is its own control (markDealLost below), not a stage you drop into.
   const pickDealStage = (deal, stageId, rowKey) => {
     const p = crmPipeOf(pipe, deal);
@@ -5449,7 +5449,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     if (!stage) return;
     moveDeal(deal, stage, rowKey);
   };
-  // ── MARK LOST / REOPEN, FROM THE DEALS CARD (migration 352) ─────────────────────────────────
+  // ── MARK LOST / REOPEN, FROM THE DEALS CARD (migration 353) ─────────────────────────────────
   // The same two actions the board's cards call. The card does not move: it keeps the stage it was
   // being worked in, and the red Lost pill replaces its status pill until somebody reopens it.
   const markDealLost = async (deal, reason, rowKey) => {
@@ -5777,7 +5777,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                           {(inPipe.stages || []).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
                         </select>
                       )}
-                      {/* MARK LOST / REOPEN (migration 352). Lost is not a stage to drop into any
+                      {/* MARK LOST / REOPEN (migration 353). Lost is not a stage to drop into any
                           more, so it is a button — and the card never moves when it is pressed. */}
                       {deal && canEdit && (deal.lost_at ? (
                         <button type="button" disabled={dealBusy} data-ss-deal-reopen={deal.id}
@@ -6973,7 +6973,7 @@ const SS_BOARD_VIEW_OFF = { query: "", owner: "all", showLost: false, status: SS
 //
 // KEYED ON triggerEvent, NEVER THE NAME. The status list is the builder's: they rename, recolour
 // and reorder it, so "Delivered" may be called anything. The EVENT that sets a status is what says
-// what it means — the same rule as the stage kinds before 352 ("automation keys on kind, never the
+// what it means — the same rule as the stage kinds before 353 ("automation keys on kind, never the
 // name", 301's header). A builder who points `delivered` at another status gets that one hidden.
 const SS_BOARD_DONE_EVENTS = ["paid_in_full", "build_scheduled", "delivered"];
 function ssBoardViewDefault(statuses) {
@@ -7165,7 +7165,7 @@ function SsStatusPill({ statuses, value, style = null }) {
   );
 }
 
-// A LOST CARD'S PILL (migration 352). The same shape as the status pill, in the one colour the
+// A LOST CARD'S PILL (migration 353). The same shape as the status pill, in the one colour the
 // board already uses for trouble, with the reason in the tooltip where the pill has no room for it.
 // It replaces the status pill rather than sitting beside it: see the card.
 function SsLostPill({ reason = null, style = null }) {
@@ -7232,7 +7232,7 @@ function SsAddLeadDialog({ pipelines, defaultPipelineId, team, ownOnly, me, onCl
   const [err, setErr] = useState(null);
   const [existing, setExisting] = useState(null);
   const pipe = pipelines.find((p) => p.id === f.pipelineId) || pipelines[0];
-  // Every live stage is a step a new lead can start in (352 retired the won and lost kinds).
+  // Every live stage is a step a new lead can start in (353 retired the won and lost kinds).
   const openStages = pipe ? pipe.stages.slice() : [];
   const stageId = f.stageId && openStages.some((s) => s.id === f.stageId) ? f.stageId : (openStages[0] && openStages[0].id) || "";
   const set = (k) => (e) => { const v = e.target.value; setF((p) => ({ ...p, [k]: v })); };
@@ -7307,7 +7307,7 @@ function SsAddLeadDialog({ pipelines, defaultPipelineId, team, ownOnly, me, onCl
 }
 
 // Marking a deal lost asks why: the pipeline's own list first, then "Other". It used to be what a
-// drag into a Lost stage asked; since 352 it is what the Mark lost button asks, and the card stays
+// drag into a Lost stage asked; since 353 it is what the Mark lost button asks, and the card stays
 // where it is. The dialog itself did not change.
 function SsLostReasonDialog({ reasons, onCancel, onPick }) {
   const list = reasons || [];
@@ -7340,7 +7340,7 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
 // (owner/admin by preset); the server refuses everyone else whatever this shows. Stages are the
 // builder's to shape (Carolyn 2026-10-12: "they can make them whatever they want"). A stage never
 // sets a card's status: statuses are system-driven (migration 303 retired 302's stage link). And
-// since 352 a stage has no KIND to pick: it is a step in the process, never an outcome. The lost
+// since 353 a stage has no KIND to pick: it is a step in the process, never an outcome. The lost
 // reasons stay here — they are what the Mark lost dialog offers, on every pipeline.
 function SsPipelineEditor({ pipeline, onClose, onCreated }) {
   const [name, setName] = useState(pipeline ? pipeline.name : "");
@@ -7381,7 +7381,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
   const addStage = () => run(async () => {
     const label = newStage.trim();
     const r = await ssPipeCall("crm_stage_save", { pipelineId: pipeline.id, name: label, kind: "open" });
-    // The server adds it last, and last is where it belongs: since 352 there is no Won or Lost
+    // The server adds it last, and last is where it belongs: since 353 there is no Won or Lost
     // column for it to have to slot in above, so no reorder follows.
     setStages(stages.concat([{ id: r.id, name: label, color: "#64748B", kind: "open" }]));
     setNewStage("");
@@ -7537,7 +7537,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
   // A drag moves the STAGE only. The status is the system's (Carolyn 2026-10-12: "the statuses are
   // system-driven, 100%"), so the card keeps the one it has and shows whatever status the server
   // answers with, rather than painting one of its own. There is no way to set a status by hand here.
-  // Since 352 it cannot mark a card lost either: every column is a step in the process.
+  // Since 353 it cannot mark a card lost either: every column is a step in the process.
   const moveDeal = async (deal, stage) => {
     const prev = deals;
     setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, stage_entered_at: new Date().toISOString() } : d)));
@@ -7553,7 +7553,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
     moveDeal(deal, stage);
   };
 
-  // ── MARK LOST / REOPEN (migration 352) ─────────────────────────────────────────────────────
+  // ── MARK LOST / REOPEN (migration 353) ─────────────────────────────────────────────────────
   // Carolyn, 2026-10-26: "LOST stays in the column it was when marking lost." So this writes the
   // flag and the card does not move an inch; it leaves the board only because the default view
   // hides lost cards, and Show lost brings it back where it died.
@@ -7634,7 +7634,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
           <SearchInput value={query} onChange={setQuery} placeholder="Search: company, name, phone, email…" />
         </div>
         {pipe && <SsStatusFilter statuses={statuses} deals={deals} value={statusFilter} onChange={setStatusFilter} />}
-        {/* SHOW LOST (migration 352). The board opens on work in play, so a lost card is not drawn
+        {/* SHOW LOST (migration 353). The board opens on work in play, so a lost card is not drawn
             — but it is still in its column, and this is how you look at it. The count says how
             many there are, so nobody has to tick it to find out. */}
         {pipe && (
@@ -7730,7 +7730,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                         {/* The STATUS PILL (left; a label, statuses are the system's) and the close date
                             (right; Carolyn 2026-09-07: "editable straight from the card"). */}
                         <div style={{ marginTop: 5, minHeight: 20, display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 6, rowGap: 3 }}>
-                          {/* 352: a LOST card wears Lost here instead of its status. Two pills, one
+                          {/* 353: a LOST card wears Lost here instead of its status. Two pills, one
                               saying "Estimate Sent" and one saying "Lost", would be two answers to
                               the same question. The status is still on the card underneath, and
                               comes back the moment it is reopened. */}
@@ -7770,7 +7770,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                             {ownerName ? ssPipeInitials(ownerName) : "–"}
                           </span>
                           {days !== null && <span>{days === 0 ? "New today" : `${days}d in stage`}</span>}
-                          {/* THE APPOINTMENT (migration 352). Carolyn: "since we now have meetings
+                          {/* THE APPOINTMENT (migration 353). Carolyn: "since we now have meetings
                               set up we should be able to see on the card when an appt is set. I
                               don't think we want that as a status as it can happen anytime in the
                               process." Read live from the booking, so cancelling one clears it; it
@@ -7787,7 +7787,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                             </span>
                           )}
                         </div>
-                        {/* MARK LOST / REOPEN, on the card (352). Lost is not a column to drag into
+                        {/* MARK LOST / REOPEN, on the card (353). Lost is not a column to drag into
                             any more. stopPropagation because the card itself opens the record. */}
                         {canWrite && (
                           <div style={{ marginTop: 5, display: "flex", justifyContent: "flex-end" }}>
@@ -7850,7 +7850,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
 // settings_crm:edit to change anything (owner/admin by preset); the server refuses everyone else.
 const SS_STATUS_EVENTS = [
   ["design_submitted", "A design is submitted"],
-  // 352: the one rung that is about talking to people rather than paperwork. Carolyn, 2026-10-26:
+  // 353: the one rung that is about talking to people rather than paperwork. Carolyn, 2026-10-26:
   // "it should switch automatically after there was an actual call recorded ... or there was a text
   // inbound and outbound both. This should only change to this if the lead is in New Lead status."
   ["contact_made", "Contact is made (an answered call, or a text both ways)"],
@@ -7887,7 +7887,7 @@ function PipelineSettings({ viewing = false }) {
   const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
   const usedBy = (ev, id) => statuses.some((t) => t.triggerEvent === ev && t.id !== id);
   // A NEW STATUS NEEDS ITS EVENT (2026-10-13). Statuses are the system's, so a status no event sets
-  // is one no card can ever get. Appt Set was exactly that until 352 renamed it Contact Made and
+  // is one no card can ever get. Appt Set was exactly that until 353 renamed it Contact Made and
   // gave it one. Adding a status asks for the event that sets it,
   // from the events no other status has (one status per event, crm_statuses' unique index); with
   // none free, the card says so instead of offering a status that would sit unused.

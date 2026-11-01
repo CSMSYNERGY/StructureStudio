@@ -40,7 +40,7 @@ const H = new Function(
   `${BLOCK}; return { crmPipeDealFor, crmPipeOf, crmPipeStatus, crmPipeFirstOpen, crmDealRows, crmPipeBarRow, crmPipeMoved, crmPipeLost };`,
 )() as Record<string, Fn>;
 
-// Two pipelines and a retired one's card. Every stage is 'open': migration 352 retired the won and
+// Two pipelines and a retired one's card. Every stage is 'open': migration 353 retired the won and
 // lost kinds, so a stage is a step in the process and an outcome lives on the card.
 const SHED = {
   id: "p-shed", name: "Shed Deals", lostReasons: ["Price"],
@@ -143,7 +143,7 @@ Deno.test("the status shown on a row is the card's own, looked up by id", () => 
   assertEquals(H.crmPipeStatus(PIPE, null), null);
 });
 
-Deno.test("a move to another pipeline lands in its first stage (352: there are no outcome stages to skip)", () => {
+Deno.test("a move to another pipeline lands in its first stage (353: there are no outcome stages to skip)", () => {
   assertEquals(H.crmPipeFirstOpen(SHED).id, "s-new");
   assertEquals(H.crmPipeFirstOpen(SOLD).id, "s-signed");
   assertEquals(H.crmPipeFirstOpen(NO_STAGES), null, "a pipeline with no stage is nowhere to land");
@@ -172,14 +172,14 @@ Deno.test("a move is painted in the stage's pipeline (one pipeline per deal), th
   assertEquals(PIPE.deals[0].pipeline_id, "p-shed", "the block it was given is not mutated");
   // The bar follows it.
   assertEquals(H.crmPipeBarRow(after, moved).label, "Sold");
-  // 352: A MOVE CARRIES NO OUTCOME. It used to set or clear the lost reason depending on the
+  // 353: A MOVE CARRIES NO OUTCOME. It used to set or clear the lost reason depending on the
   // stage's kind; marking and reopening are their own thing now, and neither moves the card.
   const wasLost = { ...(PIPE.deals[1] as Record<string, unknown>), lost_at: "2026-10-20T00:00:00Z", lost_reason: "Price" };
   const dragged = H.crmPipeMoved({ ...PIPE, deals: [wasLost] }, "d-2", SOLD.stages[1]).deals[0];
   assertEquals([dragged.lost_at, dragged.lost_reason], ["2026-10-20T00:00:00Z", "Price"], "dragging a lost card does not reopen it");
 });
 
-Deno.test("marking a card lost, and reopening it, never move it (352)", () => {
+Deno.test("marking a card lost, and reopening it, never move it (353)", () => {
   const before = PIPE.deals[0] as Record<string, unknown>;
   const lost = H.crmPipeLost(PIPE, "d-1", "Price").deals.find((d: any) => d.id === "d-1");
   assertEquals(lost.lost_reason, "Price");

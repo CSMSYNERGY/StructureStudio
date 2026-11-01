@@ -1,4 +1,4 @@
-// LOST IS A STATUS, NOT A COLUMN — and the board opens on work in play (migration 352, Carolyn
+// LOST IS A STATUS, NOT A COLUMN — and the board opens on work in play (migration 353, Carolyn
 // 2026-10-26), driven for real on the COMPILED portal.
 //
 // What she asked for, and what each check holds to:
@@ -18,7 +18,7 @@
 //   E. The appointment chip: a card whose customer has a booking shows it, one without shows
 //      nothing, and it is not a status (the status pill is untouched).
 //
-// Against the build before 352, A2/B/C/E fail: the editor has a Kind drop-down, the board opens
+// Against the build before 353, A2/B/C/E fail: the editor has a Kind drop-down, the board opens
 // showing everything, Mark lost does not exist (lost was a drag into a column), and no card has an
 // appointment.
 //
@@ -41,7 +41,7 @@ const SESSION = {
 };
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
-// Carolyn's ladder as 352 seeds it: Contact Made in place of the unreachable Appt Set, and every
+// Carolyn's ladder as 353 seeds it: Contact Made in place of the unreachable Appt Set, and every
 // rung carrying the EVENT that sets it — which is what the default view keys on, never the name.
 const STATUS_DEFS = [
   ["New Lead", "#64748B", "design_submitted"], ["Contact Made", "#0EA5E9", "contact_made"],
@@ -54,7 +54,7 @@ const ST = Object.fromEntries(STATUSES.map((s) => [s.name, s.id]));
 // THE THREE THE BOARD HIDES, by event. Renaming any of them must not change what is hidden.
 const DONE = ["Payment Received", "Scheduling", "Delivered"];
 
-// Four stages, all of them steps. No Won, no Lost: 352 made both impossible.
+// Four stages, all of them steps. No Won, no Lost: 353 made both impossible.
 const STAGE_NAMES = ["New Incoming", "Attempting Contact", "Nurturing - Warm", "Quoted"];
 const PIPE = {
   id: uuid(200), name: "Shed Deals", position: 1024, lostReasons: ["Price", "Went with a competitor", "Timing"],

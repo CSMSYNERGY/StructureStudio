@@ -57,7 +57,7 @@ Deno.test("pipeline and stage saves", () => {
   eq(p.lostReasons, ["Price", "Timing"], "deduped, blanks dropped");
   eq(parseStageSave({ name: "Call" }).ok, false, "new stage needs its pipeline");
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "maybe" }).ok, false, "bad kind");
-  // 352: a stage is a step, never an outcome. Won and Lost are no longer kinds.
+  // 353: a stage is a step, never an outcome. Won and Lost are no longer kinds.
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "won" }).ok, false, "won is not a kind");
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "lost" }).ok, false, "lost is not a kind");
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "open" }).ok, true, "open is the only kind");
@@ -91,7 +91,7 @@ Deno.test("statuses: name, colour and the automatic trigger", () => {
   eq(parseStatusSave({}).ok, false, "new needs a name");
   const a = parseStatusSave({ name: "Contact Made", color: "#0EA5E9", triggerEvent: "" });
   eq(a.ok && [a.name, a.triggerEvent], ["Contact Made", null], "no event yet");
-  // 352: contact being made is an event a status can be set by.
+  // 353: contact being made is an event a status can be set by.
   eq(parseStatusSave({ id: U, triggerEvent: "contact_made" }).ok && true, true, "contact_made is a trigger");
   const b = parseStatusSave({ id: U, triggerEvent: "paid_in_full" });
   eq(b.ok && b.triggerEvent, "paid_in_full", "trigger");

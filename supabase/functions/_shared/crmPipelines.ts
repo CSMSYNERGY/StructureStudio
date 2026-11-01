@@ -16,7 +16,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuidLike = (v: unknown): v is string => typeof v === "string" && UUID.test(v);
 
 /**
- * A STAGE IS JUST A STAGE (migration 352). 301 let a stage mean won or lost, so a card was marked
+ * A STAGE IS JUST A STAGE (migration 353). 301 let a stage mean won or lost, so a card was marked
  * by dragging it into a column. Carolyn, 2026-10-26: "We will not be using a column called lost ...
  * it should be a status", and "Won should also not be a stage ... Invoiced indicates a sold job."
  * Only 'open' is left: a card's outcome lives on the card (lost_at/lost_reason, and won_at stamped
@@ -173,7 +173,7 @@ export type StageIn = {
 export const STAGE_STATUS_LINK_RETIRED =
   "Stages don't set a card's status any more. Statuses are set automatically: see Settings → Pipelines.";
 
-/** A stage no longer means won or lost (migration 352): what a stale editor sending one is told. */
+/** A stage no longer means won or lost (migration 353): what a stale editor sending one is told. */
 export const STAGE_OUTCOME_RETIRED =
   "A stage is a step in your process — there's no Won or Lost column any more. Mark a card lost from "
   + "the card itself; a sold job shows as Invoiced.";
@@ -236,7 +236,7 @@ export function statusArchiveRefusal(cards: number): string {
  *  crm_statuses.trigger_event's CHECK; the labels are what the drop-down reads. */
 export const STATUS_EVENTS: Record<string, string> = {
   design_submitted: "A design is submitted",
-  // 352: the first rung that is about the PEOPLE, not the paperwork. An answered call, or a text
+  // 353: the first rung that is about the PEOPLE, not the paperwork. An answered call, or a text
   // thread with messages both ways; only while the card is still on the first status.
   contact_made: "Contact is made (an answered call, or a text both ways)",
   estimate_sent: "The estimate is sent",
@@ -281,7 +281,7 @@ export function parseIdOrder(b: Record<string, unknown>): Parsed<{ ids: string[]
 
 /**
  * The rule a pipeline's stage list must keep after any change: at least one stage, because a new
- * lead has to start somewhere. Since 352 every live stage is 'open', so this is really "don't
+ * lead has to start somewhere. Since 353 every live stage is 'open', so this is really "don't
  * archive the last one" — it keeps reading the kinds so an older caller still gets the sentence.
  */
 export function stageSetRefusal(kinds: StageKind[]): string | null {

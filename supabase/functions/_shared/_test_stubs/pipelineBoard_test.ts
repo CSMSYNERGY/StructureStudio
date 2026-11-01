@@ -5,7 +5,8 @@
 //      which cards stay, ssStatusFilterToggle ticks and unticks, ssStatusFilterLabel is what the
 //      closed control says.
 //   2. NO SCROLL BAR ON THE BOARD: "This scroll bar is not going to be there. I am going to make this
-//      like the designer where it can be as wide as it needs to be." ssBoardColumns decides how many
+//      like the designer where it can be as wide as it needs to be." Since 2026-11-01 the stages are
+//      ONE row that scrolls; the retired ssBoardColumns decided how many
 //      stage columns go across; the board has no scroller of its own and lifts the page's 1240px cap.
 //   3. STATUSES ARE THE SYSTEM'S: "it is not even possible for them to make the changes, it is
 //      system-driven ... 100%." The card pill is a label, the board never sets a status, and the
@@ -46,18 +47,17 @@ const BLOCK = slice(SRC, "// ── THE BOARD'S STATUS FILTER", "function SsStat
 type F = { mode: string; ids: string[] };
 type Status = { id: string; name: string; color?: string };
 const lifted = new Function(
-  `${BLOCK}; return { SS_NO_STATUS, SS_STATUS_FILTER_OFF, ssStatusFilterKeep, ssStatusFilterToggle, ssStatusFilterLabel, ssBoardColumns, SS_BOARD_COL_MIN, SS_BOARD_GAP };`,
+  `${BLOCK}; return { SS_NO_STATUS, SS_STATUS_FILTER_OFF, ssStatusFilterKeep, ssStatusFilterToggle, ssStatusFilterLabel, SS_BOARD_COL_MIN, SS_BOARD_GAP };`,
 )() as {
   SS_NO_STATUS: string;
   SS_STATUS_FILTER_OFF: F;
   ssStatusFilterKeep: (statusId: string | null, f: F | null) => boolean;
   ssStatusFilterToggle: (f: F | null, id: string) => F;
   ssStatusFilterLabel: (f: F | null, statuses: Status[]) => string;
-  ssBoardColumns: (stages: number, width: number, min?: number, gap?: number) => number;
   SS_BOARD_COL_MIN: number;
   SS_BOARD_GAP: number;
 };
-const { SS_NO_STATUS, SS_STATUS_FILTER_OFF, ssStatusFilterKeep, ssStatusFilterToggle, ssStatusFilterLabel, ssBoardColumns, SS_BOARD_COL_MIN, SS_BOARD_GAP } = lifted;
+const { SS_NO_STATUS, SS_STATUS_FILTER_OFF, ssStatusFilterKeep, ssStatusFilterToggle, ssStatusFilterLabel, SS_BOARD_COL_MIN, SS_BOARD_GAP } = lifted;
 
 const EST = "s-estimate", PAID = "s-paid", NEW = "s-new", ACC = "s-accepted";
 const STATUSES: Status[] = [
@@ -124,53 +124,32 @@ Deno.test("the closed control says what is filtered, by the account's own names"
 });
 
 // ── 2. The board's width ──────────────────────────────────────────────────────────────────
-// Widths are the board's own: viewport − 240 sidebar − 48 page padding − 42 card padding/border,
-// less a 15px scroll bar when the page is long.
-const BOARD_AT = { 1280: 950 - 15, 1440: 1110 - 15, 1920: 1590 - 15 } as const;
-
-Deno.test("every stage in one row whenever they fit at the minimum column width", () => {
-  assertEquals(ssBoardColumns(6, BOARD_AT[1280]), 6, "Shed Deals' six stages fit at 1280");
-  assertEquals(ssBoardColumns(8, BOARD_AT[1920]), 8, "eight stages fit at 1920");
-  assertEquals(ssBoardColumns(7, BOARD_AT[1440]), 7);
-  assertEquals(ssBoardColumns(3, 400), 2, "three stages at 400px: two across");
-  assertEquals(ssBoardColumns(3, 3000), 3);
-});
-
-Deno.test("when they don't fit, as many go across as fit and the rest wrap below", () => {
-  assertEquals(ssBoardColumns(8, BOARD_AT[1440]), 7, "8 at 1440 → 7 + 1");
-  assertEquals(ssBoardColumns(8, BOARD_AT[1280]), 6, "8 at 1280 → 6 + 2");
-  assertEquals(ssBoardColumns(7, BOARD_AT[1280]), 6, "7 at 1280 → 6 + 1");
-  assertEquals(ssBoardColumns(9, 3 * SS_BOARD_COL_MIN + 2 * SS_BOARD_GAP), 3, "9 at three-wide → 3 + 3 + 3");
-  assertEquals(ssBoardColumns(8, 2 * SS_BOARD_COL_MIN + SS_BOARD_GAP), 2);
-  assertEquals(ssBoardColumns(8, 90), 1, "narrower than one column: one column, never zero");
-});
-
-Deno.test("exactly as many columns as fit (never more, never fewer), and never more than stages", () => {
-  for (let n = 1; n <= 14; n++) {
-    for (let w = 100; w <= 2600; w += 37) {
-      const cols = ssBoardColumns(n, w);
-      const fit = Math.max(1, Math.floor((w + SS_BOARD_GAP) / (SS_BOARD_COL_MIN + SS_BOARD_GAP)));
-      assertEquals(cols, Math.min(n, fit), `n=${n} w=${w}`);
-      // And the columns that come out are never under the minimum (unless one column is all there is).
-      const colW = (w - (cols - 1) * SS_BOARD_GAP) / cols;
-      assert(cols === 1 || colW >= SS_BOARD_COL_MIN, `n=${n} w=${w}: ${cols} columns of ${colW}px`);
-    }
-  }
-});
-
-Deno.test("before the board is measured, every stage goes in one row", () => {
-  assertEquals(ssBoardColumns(8, 0), 8);
-  assertEquals(ssBoardColumns(8, NaN), 8);
-  assertEquals(ssBoardColumns(0, 900), 1, "a pipeline with no stages still gets one column");
-});
+// ssBoardColumns and the four tests that pinned its arithmetic lived here. It decided how many
+// stage columns went across before the rest WRAPPED onto another row, and Carolyn ended that on
+// 2026-11-01: "IT SHOULD NEVER WRAP and have a column under all the other columns." One row that
+// scrolls sideways is CSS alone — a grid of `repeat(n, minmax(MIN, 1fr))` inside an `overflow-x`
+// wrapper — so there is no arithmetic left in JS to unit-test. What replaces those tests:
+//   * here, that the SOURCE still spells that layout (below, with BOARD);
+//   * in tests/harness/pipelineBoard.mjs, the W block, which measures a real browser at 1280,
+//     1440, 1920 and phone width and asserts one row at every one of them.
+// SS_BOARD_COL_MIN / SS_BOARD_GAP are still lifted: they are what the grid's minmax floor is
+// written from, and the source check below reads them rather than repeating the numbers.
 
 const BOARD = fnText(SRC, "SalesPipelines");
 
-Deno.test("the board has no scroller of its own and marks itself so the page can widen", () => {
-  assert(!/overflow[XY]?:\s*"(auto|scroll)"/.test(BOARD), "SalesPipelines must not scroll inside itself (Carolyn: 'this scroll bar, absolutely, hell no')");
-  assert(!/minWidth:\s*"min-content"/.test(BOARD), "a min-content strip is what forced the sideways scroll");
+Deno.test("the board is ONE row that scrolls sideways, and marks itself so the page can widen", () => {
+  // ⚠️ This assertion is the exact reverse of what it said until 2026-11-01, when it read
+  // "the board has no scroller of its own" and quoted "this scroll bar, absolutely, hell no".
+  // That was about a 230px strip scrolling INSIDE the page's 1240px cap while the page went
+  // unused. The cap-lifting half of that fix is kept (data-ss-board-wide, below); the wrapping
+  // half is what she reversed: "If there are more stages than fit the page, we need a scrollbar
+  // at the bottom. IT SHOULD NEVER WRAP."
+  assert(/overflowX:\s*"auto"/.test(BOARD), "the board must scroll sideways when its one row does not fit");
   assert(BOARD.includes("data-ss-board-wide"), "the board carries the attribute portal.html widens the page on");
-  assert(BOARD.includes("ssBoardColumns("), "the board sizes its columns with ssBoardColumns");
+  assert(new RegExp(`minmax\\(\\$\\{SS_BOARD_COL_MIN\\}px, 1fr\\)`).test(BOARD),
+    "the grid's columns need a minmax floor of SS_BOARD_COL_MIN — that floor is what overflows the wrapper instead of squashing the columns");
+  assert(!/repeat\(\$\{boardCols\}, minmax\(0,/.test(BOARD), "a 0 floor lets the columns squash instead of scrolling");
+  assert(/const boardCols = pipe \? pipe\.stages\.length/.test(BOARD), "every stage gets a column: one row, never a wrap");
   assert(
     /\.ss-inner:has\(\[data-ss-board-wide\]\)\{max-width:none\}/.test(PAGE),
     "portal.html lifts .ss-inner's 1240px cap while the board shows",
@@ -218,7 +197,7 @@ Deno.test("each pipeline's search, Owner, Status filter and Show lost are kept p
   const OFF = { query: "", owner: "all", showLost: false, status: { mode: "inc", ids: [] } };
   assertEquals(bare(v.ssBoardViewOf("acct", "p-1")), OFF, "with no status list there is nothing to hide, so the board opens unfiltered");
 
-  // -- WHAT THE BOARD OPENS ON (migration 352, Carolyn 2026-10-26) --------------------------
+  // -- WHAT THE BOARD OPENS ON (migration 353, Carolyn 2026-10-26) --------------------------
   // "by default LOST and Payment received, scheduling and delivered should be hidden." Keyed on
   // each status's EVENT, never its name: a builder renames these freely.
   const LADDER = [

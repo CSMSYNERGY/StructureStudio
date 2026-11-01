@@ -182,7 +182,7 @@ import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
 // read below (the Calls report's team scope, the setup screen) asks it for the LITERAL level.
 import { ownPhoneOnly } from "../_shared/access.ts";
 // ownMeetingsOnly is the meetings area's twin, for the APPOINTMENT CHIP on a pipeline card
-// (migration 352). The board's gate is contacts:view and says nothing about the calendar, so the
+// (migration 353). The board's gate is contacts:view and says nothing about the calendar, so the
 // chip asks the meetings area itself — see nextMeetings below.
 import { ownMeetingsOnly } from "../_shared/access.ts";
 import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRecording, parseRoute, phoneLevelOf, recordingServerOn, recordingView, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, transcribeServerOn, type ReportCall, type ReportText } from "./phone.ts";
@@ -597,7 +597,7 @@ const GATES: GateTable = {
   crm_deal_create:       { area: "contacts", level: "edit" },
   crm_deal_update:       { area: "contacts", level: "edit" },
   crm_deal_move:         { area: "contacts", level: "edit" },
-  // Migration 352: Lost is no longer a column to drag into, so marking a card lost (and reopening
+  // Migration 353: Lost is no longer a column to drag into, so marking a card lost (and reopening
   // it) is its own write. Same gate as a move — whoever may work the board may call it lost.
   crm_deal_mark_lost:    { area: "contacts", level: "edit" },
   crm_deal_reopen:       { area: "contacts", level: "edit" },
@@ -1569,7 +1569,7 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     crm_deal_create:       { contactKeys: ["contactId"] },
     crm_deal_update:       { rowTable: "crm_deals", noCode: true },
     crm_deal_move:         { rowTable: "crm_deals", noCode: true },
-    // 352: calling a card lost, and reopening it, are the same altitude as moving it.
+    // 353: calling a card lost, and reopening it, are the same altitude as moving it.
     crm_deal_mark_lost:    { rowTable: "crm_deals", noCode: true },
     crm_deal_reopen:       { rowTable: "crm_deals", noCode: true },
     crm_deal_archive:      { rowTable: "crm_deals", noCode: true },
@@ -9564,7 +9564,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // deal whose pipeline it simply failed to read. Older frontends ignore the extra key.
       (async () => {
         if (!mayReadContacts) return undefined;
-        // lost_at rides along since 352: it is what says a card is lost (the reason alone cannot —
+        // lost_at rides along since 353: it is what says a card is lost (the reason alone cannot —
         // a reopened card keeps neither, and the record's Mark lost / Reopen keys on this).
         const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_at, lost_reason, stage_entered_at, created_at, custom";
         const safeCodes = codes.filter((c) => /^[A-Za-z0-9_-]{1,40}$/.test(String(c)));
@@ -10707,7 +10707,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const seen = await visibleContactIds(deals.map((d) => d.contact_id));
     if (!seen) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
-    // THE NEXT APPOINTMENT, per contact (migration 352). Carolyn: "since we now have meetings set
+    // THE NEXT APPOINTMENT, per contact (migration 353). Carolyn: "since we now have meetings set
     // up we should be able to see on the card when an appt is set. I don't think we want that as a
     // status as it can happen anytime in the process." So it is read live, never stored on the
     // card, and it is a third batched lookup in the same shape as the two above.
@@ -10768,7 +10768,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         const mt = d.contact_id ? meetings.get(d.contact_id) : null;
         return {
           ...d,
-          // 352: the appointment chip. Absent (not null) when the caller may not see the calendar.
+          // 353: the appointment chip. Absent (not null) when the caller may not see the calendar.
           next_meeting: mt
             ? { startsAt: mt.starts_at, endsAt: mt.ends_at, typeName: typeNames.get(mt.type_id) ?? null }
             : null,
@@ -10814,7 +10814,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // behind "Show lost" meanwhile); older ones are reached from the contact's record. DESIGN cards
     // are exempt: the old Pipeline board showed every design whatever its age, and still should.
     //
-    // WON IS NOT A CUT-OFF ANY MORE (352). It used to be, because won_at only ever came from
+    // WON IS NOT A CUT-OFF ANY MORE (353). It used to be, because won_at only ever came from
     // dragging a card into a Won column — an end of the line. Now it is stamped the moment a job
     // is INVOICED, which is the middle of the work: that job is still to be paid, scheduled and
     // delivered. Keeping won_at here would have made every sold job vanish from the board 90 days
@@ -11000,7 +11000,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   if (action === "crm_deal_mark_lost") {
-    // MIGRATION 352: Lost is not a column. The card stays exactly where it is (Carolyn: "LOST
+    // MIGRATION 353: Lost is not a column. The card stays exactly where it is (Carolyn: "LOST
     // stays in the column it was when marking lost") and takes lost_at + the reason. The reason
     // is required, as it was when this was a drag into a Lost stage.
     const id = String(payload.id ?? "").toLowerCase();
@@ -11031,7 +11031,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   if (action === "crm_deal_move") {
     // A stage change only: since migration 303 crm_move_deal never touches the card's status, and
-    // since 352 it never touches the lost flag either — reopening a card is deliberate.
+    // since 353 it never touches the lost flag either — reopening a card is deliberate.
     const id = String(payload.id ?? "").toLowerCase();
     const stageId = String(payload.stageId ?? "").toLowerCase();
     if (!isUuidLike(id) || !isUuidLike(stageId)) return json({ error: "Pick the deal and the stage to move it to." }, 400);
@@ -11070,7 +11070,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         position: (Number(top?.position) || 0) + 1024, created_by: isUuidLike(String(userId ?? "")) ? userId : null,
       }).select("id").single();
       if (error) return dbFail(req, clientId, "create that pipeline", error);
-      // 352: ONE stage. It used to be New/Won/Lost, but neither outcome is a stage any more
+      // 353: ONE stage. It used to be New/Won/Lost, but neither outcome is a stage any more
       // (crm_pipeline_stages_open_only would refuse those two rows), so a new pipeline starts with
       // the one step every pipeline needs and the editor adds the builder's own.
       const { error: sErr } = await admin.from("crm_pipeline_stages").insert([

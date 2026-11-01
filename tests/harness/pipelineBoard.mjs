@@ -55,7 +55,7 @@ const STATUS_NAMES = [["New Lead", "#64748B"], ["Appt Set", "#0EA5E9"], ["Estima
   ["Invoiced", "#F59E0B"], ["Payment Received", "#14B8A6"], ["Scheduling", "#F97316"], ["Delivered", "#8B5CF6"]];
 const STATUSES = STATUS_NAMES.map(([name, color], i) => ({ id: uuid(100 + i), name, color, position: i, triggerEvent: null }));
 const ST = Object.fromEntries(STATUSES.map((s) => [s.name, s.id]));
-// EIGHT STAGES, ALL OF THEM STEPS. The last two used to be Won and Lost; migration 352 retired
+// EIGHT STAGES, ALL OF THEM STEPS. The last two used to be Won and Lost; migration 353 retired
 // both kinds (a stage is where a lead IS, never how it ended), so they are two more real steps
 // here — the point of eight is that it is the widest board a builder has, which this still is.
 // What a lost card does now lives in pipelineLostStatus.mjs.

@@ -2196,6 +2196,42 @@ function wordingFiles() {
 // discovery is still run and still has to find the real set), and `listFiles` exists so
 // the self-test can prove a blind discovery is refused rather than reported clean. `held`
 // is WORDING_SERVER_HELD unless the self-test says otherwise.
+// ── TWO MIGRATIONS CANNOT SHARE A NUMBER (2026-11-01) ────────────────────────────────────
+// Four agents write migrations into this repo from four clones. A number is only yours at the
+// moment you apply it, and 353_crm_outcomes_not_stages was renumbered three times for exactly that
+// reason (342 -> 352 -> 353): the folder goes stale when a sibling applies from their own clone,
+// and the live ledger misses what a sibling has committed but not yet applied. A gate cannot see
+// either of those — but it CAN see two files in this folder claiming the same prefix, which is the
+// shape the collision takes once both sides are committed, and the cheapest moment to catch it.
+//
+// ⚠️ FROM 340 ONLY, and that floor is load-bearing rather than timid: FORTY-ONE pairs below it
+// already share a number (040, 052, 075, 086, 090-095, 102-105, 206 has three...). They are
+// applied history and renaming them now would break the ledger's name match for no one's benefit,
+// so flagging them would mean a gate that refuses every push on day one — which is a gate everyone
+// learns to bypass. Raise the floor, never lower it.
+const MIGRATION_NUMBER_FLOOR = 340;
+function checkMigrationNumbers(inject = null) {
+  const dir = join(root, "supabase", "migrations");
+  let names;
+  try { names = inject || readdirSync(dir).filter((f) => /^\d+_.*\.sql$/.test(f)); }
+  catch { return []; }                                   // no folder here: nothing to say
+  const byNumber = new Map();
+  for (const f of names) {
+    const n = f.slice(0, f.indexOf("_"));
+    if (!byNumber.has(n)) byNumber.set(n, []);
+    byNumber.get(n).push(f);
+  }
+  const errors = [];
+  for (const [n, files] of [...byNumber].sort((a, b) => Number(a[0]) - Number(b[0]))) {
+    if (files.length > 1 && Number(n) >= MIGRATION_NUMBER_FLOOR) {
+      errors.push(`migrations: ${files.length} files are numbered ${n} — ${files.join(", ")}. `
+        + "Another agent took that number. Renumber yours to max(live ledger, this folder) + 1, "
+        + "re-reading BOTH right before you apply.");
+    }
+  }
+  return errors;
+}
+
 function checkEstimateWording(inject = null, { only = null, listFiles = wordingFiles, held = WORDING_SERVER_HELD } = {}) {
   const errors = [];
   const files = listFiles();
@@ -3617,6 +3653,7 @@ errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html")
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkCardTokenMaxAge(Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkEstimateWording());
+errors.push(...checkMigrationNumbers());
 
 // The skip is now the LOUDEST thing this gate prints, and on a clean run it is the LAST.
 // It used to be one line in the middle of the output, which is how a skipped migration suite read

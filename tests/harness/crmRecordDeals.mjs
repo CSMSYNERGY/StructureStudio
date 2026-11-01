@@ -159,12 +159,12 @@ async function scenario(browser, { withPipeline = true, pipelineError = false, a
       case "crm_deal_move": {
         const stage = [...SHED.stages, ...SOLD.stages].find((s) => s.id === body.stageId);
         const owner = [SHED, SOLD].find((p) => p.stages.includes(stage));
-        // 352: a move carries no outcome. The lost flag is left exactly as it was.
+        // 353: a move carries no outcome. The lost flag is left exactly as it was.
         deals = deals.map((d) => (d.id === body.id ? { ...d, stage_id: stage.id, pipeline_id: owner.id } : d));
         const now = deals.find((d) => d.id === body.id);
         return json(route, { ok: true, moved: true, kind: stage.kind, status_id: now.status_id, lost_at: now.lost_at || null });
       }
-      // 352: marking a card lost, and reopening it. Neither touches the stage.
+      // 353: marking a card lost, and reopening it. Neither touches the stage.
       case "crm_deal_mark_lost": {
         deals = deals.map((d) => (d.id === body.id ? { ...d, lost_at: new Date().toISOString(), lost_reason: body.lostReason } : d));
         const now = deals.find((d) => d.id === body.id);
@@ -338,7 +338,7 @@ try {
     ok("G3 the bar still names the card's own pipeline", afterG && afterG.label === "Shed Deals", JSON.stringify(afterG));
     await shot(page, "stays-in-pipeline");
 
-    // ── H ── MIGRATION 352: lost is a mark on the card, not a stage to pick. Carolyn: "LOST stays
+    // ── H ── MIGRATION 353: lost is a mark on the card, not a stage to pick. Carolyn: "LOST stays
     // in the column it was when marking lost", so this asks why and then moves NOTHING.
     const stageBefore = await page.locator(`${panel} select[aria-label="Stage"]`).inputValue();
     await page.locator(`${panel} [data-ss-deal-lost]`).click();
