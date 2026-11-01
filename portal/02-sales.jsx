@@ -3445,12 +3445,12 @@ const crmPipeOf = (pipe, deal) =>
   (pipe && deal ? (pipe.pipelines || []).find((p) => p.id === deal.pipeline_id) : null) || null;
 const crmPipeStatus = (pipe, deal) =>
   (pipe && deal && deal.status_id ? (pipe.statuses || []).find((t) => t.id === deal.status_id) : null) || null;
-// The stage a deal lands in when it moves to `pipeline`: the first OPEN one, the way a new card
-// starts. A pipeline with no open stage falls back to its first won one; never a lost stage, which
-// needs a reason the reader has not given.
+// The stage a deal lands in when it moves to `pipeline`: its FIRST one, the way a new card starts.
+// Since migration 342 every live stage is a plain step (there is no won or lost stage to skip), so
+// this is the first stage there is. The name stays: it is what the callers read.
 function crmPipeFirstOpen(pipeline) {
   const st = (pipeline && pipeline.stages) || [];
-  return st.find((s) => s.kind === "open") || st.find((s) => s.kind !== "lost") || null;
+  return st[0] || null;
 }
 // The pipelines a deal can move to: every live one except its own, and only ones it could land in.
 const crmPipeMoveTargets = (pipe, deal) =>
@@ -3478,14 +3478,26 @@ function crmPipeBarRow(pipe, deal) {
     only: true, emptyLabel: "Stage removed" };
 }
 // A deal's row after a move, painted before the server answers. The pipeline is the stage's.
-function crmPipeMoved(pipe, dealId, stage, lostReason) {
+// 342: a move is a move. It never marks or clears the lost flag — crmPipeLost does that.
+function crmPipeMoved(pipe, dealId, stage) {
   if (!pipe || !stage) return pipe;
   const owner = (pipe.pipelines || []).find((p) => (p.stages || []).some((s) => s.id === stage.id));
   return {
     ...pipe,
     deals: (pipe.deals || []).map((d) => (d.id !== dealId ? d : {
       ...d, stage_id: stage.id, pipeline_id: owner ? owner.id : d.pipeline_id,
-      stage_entered_at: new Date().toISOString(), lost_reason: stage.kind === "lost" ? (lostReason || null) : null,
+      stage_entered_at: new Date().toISOString(),
+    })),
+  };
+}
+// A deal's row after Mark lost or Reopen, painted before the server answers. The card does NOT
+// move (Carolyn: "LOST stays in the column it was when marking lost").
+function crmPipeLost(pipe, dealId, lostReason) {
+  if (!pipe) return pipe;
+  return {
+    ...pipe,
+    deals: (pipe.deals || []).map((d) => (d.id !== dealId ? d : {
+      ...d, lost_at: lostReason ? new Date().toISOString() : null, lost_reason: lostReason || null,
     })),
   };
 }
@@ -4865,9 +4877,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // hoist, so declaring them above would be a TDZ throw rather than a subtle bug.
   const [dealOpen, setDealOpen] = useState(null);
   const [dealBusy, setDealBusy] = useState(false);
-  // The Deals card's pipeline controls (2026-10-12): the lost-reason picker a move into a lost
-  // stage needs ({ deal, stage, reasons, key }), and "+ Add to a pipeline" while it is open (the
-  // pipeline id it will add to). Up here with the rest, above the early returns (React #310).
+  // The Deals card's pipeline controls (2026-10-12): the lost-reason picker Mark lost needs
+  // ({ deal, reasons, key } — since 342 there is no stage to move into), and "+ Add to a pipeline"
+  // while it is open (the pipeline id it will add to). Up here with the rest, above the early
+  // returns (React #310).
   const [dealLost, setDealLost] = useState(null);
   const [dealAdd, setDealAdd] = useState(null);
 
@@ -5409,12 +5422,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // takes the pipeline from the stage), which is what keeps a deal in one pipeline at a time.
   // Painted at once; a refusal reloads the record and says why under that deal. The status is
   // never painted here: it is the system's, and the server's answer carries it.
-  const moveDeal = async (deal, stage, rowKey, lostReason) => {
+  const moveDeal = async (deal, stage, rowKey) => {
     if (!deal || !stage || stage.id === deal.stage_id) return;
     setOpErr(null);
-    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: crmPipeMoved(d.pipeline, deal.id, stage, lostReason) }));
+    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: crmPipeMoved(d.pipeline, deal.id, stage) }));
     try {
-      const r = await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id, lostReason: lostReason || null });
+      const r = await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id });
       if (r && r.status_id) {
         setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: { ...d.pipeline,
           deals: (d.pipeline.deals || []).map((x) => (x.id === deal.id ? { ...x, status_id: r.status_id } : x)) } }));
@@ -5424,16 +5437,44 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That move did not save." });
     }
   };
-  // A stage from the deal's own pipeline. A lost stage asks for the reason first, as the board does.
+  // A stage from the deal's own pipeline. Since 342 every stage is a plain step, so this is only
+  // ever a move: Mark lost is its own control (markDealLost below), not a stage you drop into.
   const pickDealStage = (deal, stageId, rowKey) => {
     const p = crmPipeOf(pipe, deal);
     const stage = p ? (p.stages || []).find((s) => s.id === stageId) : null;
     if (!stage) return;
-    if (stage.kind === "lost") { setDealLost({ deal, stage, reasons: p.lostReasons || [], key: rowKey }); return; }
     moveDeal(deal, stage, rowKey);
   };
-  // To another pipeline: it lands in that pipeline's first open stage, and the stage drop-down,
-  // which now lists the new pipeline's stages, picks any other.
+  // ── MARK LOST / REOPEN, FROM THE DEALS CARD (migration 342) ─────────────────────────────────
+  // The same two actions the board's cards call. The card does not move: it keeps the stage it was
+  // being worked in, and the red Lost pill replaces its status pill until somebody reopens it.
+  const markDealLost = async (deal, reason, rowKey) => {
+    if (!deal || !reason) return;
+    setOpErr(null);
+    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: crmPipeLost(d.pipeline, deal.id, reason) }));
+    try { await ssPipeCall("crm_deal_mark_lost", { id: deal.id, lostReason: reason }); }
+    catch (e2) {
+      await load();
+      setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That did not save." });
+    }
+  };
+  const reopenDeal = async (deal, rowKey) => {
+    if (!deal) return;
+    setOpErr(null);
+    setData((d) => (!d || !d.pipeline ? d : { ...d, pipeline: crmPipeLost(d.pipeline, deal.id, null) }));
+    try { await ssPipeCall("crm_deal_reopen", { id: deal.id }); }
+    catch (e2) {
+      await load();
+      setOpErr({ where: "deals", code: rowKey, msg: e2.message || "That did not save." });
+    }
+  };
+  // The reason picker, then the write. The pipeline's own list, as the board asks it.
+  const askDealLost = (deal, rowKey) => {
+    const p = crmPipeOf(pipe, deal);
+    setDealLost({ deal, reasons: (p && p.lostReasons) || [], key: rowKey });
+  };
+  // To another pipeline: it lands in that pipeline's first stage, and the stage drop-down, which
+  // now lists the new pipeline's stages, picks any other.
   const moveDealToPipeline = (deal, pipelineId, rowKey) => {
     const target = crmPipeMoveTargets(pipe, deal).find((p) => p.id === pipelineId);
     if (target) moveDeal(deal, crmPipeFirstOpen(target), rowKey);
@@ -5709,7 +5750,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                         )}
                       </div>
                     ))}
-                    {deal && deal.lost_reason && <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>Lost: {deal.lost_reason}</div>}
+                    {deal && deal.lost_at && (
+                      <div style={{ fontSize: 11.5, color: "#DC2626", marginTop: 4 }}>
+                        Lost{deal.lost_reason ? `: ${deal.lost_reason}` : ""}
+                      </div>
+                    )}
                     {/* "Open in designer" on the left and, at the bottom right where Carolyn
                         bracketed it, the stage and the move (C37, C38). Wraps under itself in a
                         narrow column rather than squeezing the controls. */}
@@ -5747,6 +5792,19 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                           {targets.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                         </select>
                       )}
+                      {/* MARK LOST / REOPEN (migration 342). Lost is not a stage to drop into any
+                          more, so it is a button — and the card never moves when it is pressed. */}
+                      {deal && canEdit && (deal.lost_at ? (
+                        <button type="button" disabled={dealBusy} data-ss-deal-reopen={deal.id}
+                          title="Put this one back in play. It stays in the stage it is in"
+                          onClick={() => reopenDeal(deal, row.key)}
+                          style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Reopen</button>
+                      ) : (
+                        <button type="button" disabled={dealBusy} data-ss-deal-lost={deal.id}
+                          title="Mark this one lost. It stays in the stage it is in"
+                          onClick={() => askDealLost(deal, row.key)}
+                          style={{ ...S.btn("#FEF2F2", "#DC2626"), padding: "5px 10px", fontSize: 12 }}>Mark lost</button>
+                      ))}
                     </div>
                     {opErr && opErr.where === "deals" && opErr.code === row.key && <div style={{ ...S.err, marginTop: 7, marginBottom: 0 }}>{opErr.msg}</div>}
                   </div>
@@ -5778,7 +5836,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           )}
           {dealLost && (
             <SsLostReasonDialog reasons={dealLost.reasons} onCancel={() => setDealLost(null)}
-              onPick={(reason) => { const l = dealLost; setDealLost(null); moveDeal(l.deal, l.stage, l.key, reason); }} />
+              onPick={(reason) => { const l = dealLost; setDealLost(null); markDealLost(l.deal, reason, l.key); }} />
           )}
         </div>
       );
@@ -6921,23 +6979,57 @@ function ssStatusFilterLabel(f, statuses) {
 // person and account, until it is cleared (the ×, Clear, an emptied search) or the page reloads.
 // IN MEMORY, never sessionStorage, for ssTabCache's reason (01-core): a search is a customer's
 // name or number, and a shared shop computer must not keep it past a sign-out.
-const SS_BOARD_VIEW_OFF = { query: "", owner: "all", status: SS_STATUS_FILTER_OFF };
+const SS_BOARD_VIEW_OFF = { query: "", owner: "all", showLost: false, status: SS_STATUS_FILTER_OFF };
+// ── WHAT THE BOARD OPENS ON (Carolyn, 2026-10-26) ────────────────────────────────────────
+// "by default LOST and Payment received, scheduling and delivered should be hidden." The board is
+// for work in play; a job that is paid, scheduled or delivered is done, and a lost one is done
+// another way. Both are one keystroke away (the Status control, and Show lost) — nothing is hidden
+// where it cannot be found, and the closed Status control says "All but ..." so it reads honestly.
+//
+// KEYED ON triggerEvent, NEVER THE NAME. The status list is the builder's: they rename, recolour
+// and reorder it, so "Delivered" may be called anything. The EVENT that sets a status is what says
+// what it means — the same rule as the stage kinds before 342 ("automation keys on kind, never the
+// name", 301's header). A builder who points `delivered` at another status gets that one hidden.
+const SS_BOARD_DONE_EVENTS = ["paid_in_full", "build_scheduled", "delivered"];
+function ssBoardViewDefault(statuses) {
+  const ids = (statuses || []).filter((t) => SS_BOARD_DONE_EVENTS.indexOf(t.triggerEvent) !== -1).map((t) => t.id);
+  return ids.length
+    ? { ...SS_BOARD_VIEW_OFF, status: { mode: "exc", ids } }
+    : { ...SS_BOARD_VIEW_OFF };
+}
+// Is this view the one the board opens on? What "Clear" goes back to, and what is not worth keeping.
+function ssBoardViewIsDefault(v, statuses) {
+  const d = ssBoardViewDefault(statuses);
+  if (!v) return true;
+  if ((v.query || "") !== "" || (v.owner || "all") !== "all" || v.showLost === true) return false;
+  const a = ((v.status && v.status.ids) || []).slice().sort();
+  const b = ((d.status && d.status.ids) || []).slice().sort();
+  // A filter with NO ids filters nothing whatever its mode (ssStatusFilterKeep lets everything
+  // through), so "Hide: nothing ticked" is the same view as "Show: nothing ticked". Comparing the
+  // mode when both lists are empty would keep a view that is not a view.
+  if (!a.length && !b.length) return true;
+  return (v.status && v.status.mode || "inc") === (d.status.mode || "inc")
+    && a.length === b.length && a.every((x, i) => x === b[i]);
+}
 const ssBoardViews = new Map();
 const ssBoardViewKey = (clientId, pipelineId, user) => `${user || "anon"}|${clientId || "own"}|${pipelineId || ""}`;
-// The view a pipeline's board opens on: the one left on it, else nothing filtered. `key` says
-// which board it belongs to, so a view kept in React state is never applied to another pipeline.
-function ssBoardViewOf(clientId, pipelineId, user = ssCurrentUserId) {
+// The view a pipeline's board opens on: the one left on it, else the default above (work in play).
+// `key` says which board it belongs to, so a view kept in React state is never applied to another
+// pipeline. `statuses` is the account's list, which is where the default's ids come from.
+function ssBoardViewOf(clientId, pipelineId, user = ssCurrentUserId, statuses = null) {
   const key = ssBoardViewKey(clientId, pipelineId, user);
   const kept = pipelineId ? ssBoardViews.get(key) : null;
-  return { ...(kept || SS_BOARD_VIEW_OFF), key };
+  return { ...(kept || ssBoardViewDefault(statuses)), key };
 }
-// Keep a board's view (nothing is kept once every part of it is back to "all").
-function ssBoardViewPut(clientId, pipelineId, v, user = ssCurrentUserId) {
+// Keep a board's view (nothing is kept once it is back to what the board opens on — so a reload
+// and a Clear land in the same place, which is NOT "everything": see ssBoardViewDefault).
+function ssBoardViewPut(clientId, pipelineId, v, user = ssCurrentUserId, statuses = null) {
   const key = ssBoardViewKey(clientId, pipelineId, user);
   const st = v && v.status && Array.isArray(v.status.ids) ? v.status : SS_STATUS_FILTER_OFF;
-  const next = { query: (v && typeof v.query === "string") ? v.query : "", owner: (v && v.owner) || "all", status: st };
+  const next = { query: (v && typeof v.query === "string") ? v.query : "", owner: (v && v.owner) || "all",
+                 showLost: v ? v.showLost === true : false, status: st };
   if (pipelineId) {
-    if (!next.query && next.owner === "all" && !next.status.ids.length) ssBoardViews.delete(key);
+    if (ssBoardViewIsDefault(next, statuses)) ssBoardViews.delete(key);
     else ssBoardViews.set(key, next);
   }
   return { ...next, key };
@@ -7089,6 +7181,41 @@ function SsStatusPill({ statuses, value, style = null }) {
   );
 }
 
+// A LOST CARD'S PILL (migration 342). The same shape as the status pill, in the one colour the
+// board already uses for trouble, with the reason in the tooltip where the pill has no room for it.
+// It replaces the status pill rather than sitting beside it: see the card.
+function SsLostPill({ reason = null, style = null }) {
+  return (
+    <span data-ss-lost-pill="" title={reason ? `Lost: ${reason}` : "Lost"}
+      style={{
+        display: "inline-block", boxSizing: "border-box", verticalAlign: "middle",
+        background: "#FEF2F2", color: "#DC2626", border: "1px solid #DC262655", borderRadius: 999,
+        padding: "1px 9px", fontSize: 10.5, fontWeight: 800, fontFamily: "inherit", lineHeight: "16px",
+        maxWidth: 150, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        ...(style || {}),
+      }}>
+      {reason ? `Lost · ${reason}` : "Lost"}
+    </span>
+  );
+}
+
+// An appointment on a card: "Tue 3:00p" in the chip, the whole thing in its tooltip. The booking's
+// own instant, drawn in the reader's zone — a rep in another state sees their own clock, which is
+// the one they will be at their desk by.
+function ssApptShort(iso) {
+  const t = iso ? new Date(iso) : null;
+  if (!t || isNaN(t.getTime())) return "";
+  const day = t.toLocaleDateString(undefined, { weekday: "short" });
+  const time = t.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+    .replace(/\s?AM$/i, "a").replace(/\s?PM$/i, "p");
+  return `${day} ${time}`;
+}
+function ssApptLong(iso) {
+  const t = iso ? new Date(iso) : null;
+  if (!t || isNaN(t.getTime())) return "";
+  return t.toLocaleString(undefined, { weekday: "long", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 function SsPipeModal({ title, onClose, children, width = 460 }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -7121,7 +7248,8 @@ function SsAddLeadDialog({ pipelines, defaultPipelineId, team, ownOnly, me, onCl
   const [err, setErr] = useState(null);
   const [existing, setExisting] = useState(null);
   const pipe = pipelines.find((p) => p.id === f.pipelineId) || pipelines[0];
-  const openStages = pipe ? pipe.stages.filter((s) => s.kind !== "lost") : [];
+  // Every live stage is a step a new lead can start in (342 retired the won and lost kinds).
+  const openStages = pipe ? pipe.stages.slice() : [];
   const stageId = f.stageId && openStages.some((s) => s.id === f.stageId) ? f.stageId : (openStages[0] && openStages[0].id) || "";
   const set = (k) => (e) => { const v = e.target.value; setF((p) => ({ ...p, [k]: v })); };
   const submit = async (e) => {
@@ -7194,7 +7322,9 @@ function SsAddLeadDialog({ pipelines, defaultPipelineId, team, ownOnly, me, onCl
   );
 }
 
-// Moving a deal to a LOST stage asks why: the pipeline's own list first, then "Other".
+// Marking a deal lost asks why: the pipeline's own list first, then "Other". It used to be what a
+// drag into a Lost stage asked; since 342 it is what the Mark lost button asks, and the card stays
+// where it is. The dialog itself did not change.
 function SsLostReasonDialog({ reasons, onCancel, onPick }) {
   const list = reasons || [];
   const [pick, setPick] = useState(list[0] || "__other");
@@ -7222,10 +7352,12 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
   );
 }
 
-// Stages, colours, kinds and lost reasons for one pipeline, or a new pipeline. settings_crm:edit
+// Stages, colours and lost reasons for one pipeline, or a new pipeline. settings_crm:edit
 // (owner/admin by preset); the server refuses everyone else whatever this shows. Stages are the
 // builder's to shape (Carolyn 2026-10-12: "they can make them whatever they want"). A stage never
-// sets a card's status: statuses are system-driven (migration 303 retired 302's stage link).
+// sets a card's status: statuses are system-driven (migration 303 retired 302's stage link). And
+// since 342 a stage has no KIND to pick: it is a step in the process, never an outcome. The lost
+// reasons stay here — they are what the Mark lost dialog offers, on every pipeline.
 function SsPipelineEditor({ pipeline, onClose, onCreated }) {
   const [name, setName] = useState(pipeline ? pipeline.name : "");
   const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
@@ -7240,7 +7372,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
       <SsPipeModal title="New pipeline" onClose={onClose} width={400}>
         <label style={{ display: "block", marginBottom: 12 }}><span style={S.lbl}>Name</span>
           <input style={S.input} autoFocus value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="Dealer recruiting" /></label>
-        <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px" }}>It starts with New, Won and Lost. Rename them and add stages next.</p>
+        <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px" }}>It starts with one stage, New. Rename it and add the rest next.</p>
         {err && <div style={S.err}>{err}</div>}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" onClick={onClose} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
@@ -7265,12 +7397,10 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
   const addStage = () => run(async () => {
     const label = newStage.trim();
     const r = await ssPipeCall("crm_stage_save", { pipelineId: pipeline.id, name: label, kind: "open" });
-    // The server adds it last; an open stage belongs before the first won/lost one.
-    const next = stages.slice();
-    const at = next.findIndex((x) => x.kind !== "open");
-    next.splice(at < 0 ? next.length : at, 0, { id: r.id, name: label, color: "#64748B", kind: "open" });
-    setStages(next); setNewStage("");
-    if (at >= 0) await ssPipeCall("crm_stages_reorder", { pipelineId: pipeline.id, ids: next.map((s) => s.id) });
+    // The server adds it last, and last is where it belongs: since 342 there is no Won or Lost
+    // column for it to have to slot in above, so no reorder follows.
+    setStages(stages.concat([{ id: r.id, name: label, color: "#64748B", kind: "open" }]));
+    setNewStage("");
   });
   const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
   return (
@@ -7280,9 +7410,11 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
           onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, name })); }} /></label>
       <span style={S.lbl}>Stages</span>
       <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
-        {pipeline.feedsDesigns ? "New designs land in this pipeline, in its first open stage. " : ""}
-        Name, colour and order the stages however you work. Moving a card between stages never changes its
-        status: statuses are set automatically (see Settings → Pipelines).
+        {pipeline.feedsDesigns ? "New designs land in this pipeline, in its first stage. " : ""}
+        Name, colour and order the stages however you work — each one is a step in your process, so there is
+        no Won or Lost column: a sold job shows as Invoiced, and a card is marked lost from the card itself,
+        where it stays. Moving a card between stages never changes its status: statuses are set automatically
+        (see Settings → Pipelines).
       </p>
       <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
         {stages.map((s, i) => (
@@ -7293,9 +7425,6 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
             </select>
             <input aria-label="Stage name" style={{ ...S.input, flex: 1, minWidth: 0, padding: "5px 8px" }} defaultValue={s.name} maxLength={60}
               onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.name) saveStage(s, { name: v }); }} />
-            <select aria-label="Kind" value={s.kind} onChange={(e) => saveStage(s, { kind: e.target.value })} style={{ ...S.input, width: 80, padding: "5px 6px" }}>
-              <option value="open">Open</option><option value="won">Won</option><option value="lost">Lost</option>
-            </select>
             <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>
             <button type="button" title="Move down" disabled={busy || i === stages.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>
             <button type="button" title="Remove stage" disabled={busy}
@@ -7356,7 +7485,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
       boardRO.current = ro;
     }
   }, []);
-  const [dialog, setDialog] = useState(null);  // "add" | "edit" | "new" | { lost: { deal, stage } }
+  const [dialog, setDialog] = useState(null);  // "add" | "edit" | "new" | { lost: { deal } }
   const [dragId, setDragId] = useState(null);
   const [overStage, setOverStage] = useState(null);
   const [pickedLocal, setPickedLocal] = useState(null);
@@ -7386,16 +7515,22 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
   // This pipeline's view: as changed here, else as it was left the last time this board showed
   // (opening a card unmounts the board; see ssBoardViewOf). One object keyed by its pipeline, so
   // switching pipelines never carries the last one's filter across.
+  // metaStatuses: the account's status list, which the DEFAULT view needs to know which ids mean
+  // "done" (ssBoardViewDefault). Read straight off `meta` here because `statuses` below is
+  // declared after the early return, and the view has to be settled before it.
+  const metaStatuses = (meta && meta.statuses) || null;
   const view = useMemo(() => {
-    const kept = ssBoardViewOf(clientId, pipeId);
+    const kept = ssBoardViewOf(clientId, pipeId, ssCurrentUserId, metaStatuses);
     return viewEdit && viewEdit.key === kept.key ? viewEdit : kept;
-  }, [viewEdit, clientId, pipeId]);
-  const setView = (patch) => setViewEdit(ssBoardViewPut(clientId, pipeId, { ...view, ...patch }));
+  }, [viewEdit, clientId, pipeId, metaStatuses]);
+  const setView = (patch) => setViewEdit(ssBoardViewPut(clientId, pipeId, { ...view, ...patch }, ssCurrentUserId, metaStatuses));
   const { query, owner } = view;
+  const showLost = view.showLost === true;
   const statusFilter = view.status;  // { mode, ids }, see ssStatusFilterKeep
   const setQuery = (v) => setView({ query: v });
   const setOwner = (v) => setView({ owner: v });
   const setStatusFilter = (v) => setView({ status: v });
+  const setShowLost = (v) => setView({ showLost: v === true });
 
   const loadDeals = useCallback(async () => {
     if (!pipeId) return;
@@ -7431,11 +7566,12 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
   // A drag moves the STAGE only. The status is the system's (Carolyn 2026-10-12: "the statuses are
   // system-driven, 100%"), so the card keeps the one it has and shows whatever status the server
   // answers with, rather than painting one of its own. There is no way to set a status by hand here.
-  const moveDeal = async (deal, stage, lostReason) => {
+  // Since 342 it cannot mark a card lost either: every column is a step in the process.
+  const moveDeal = async (deal, stage) => {
     const prev = deals;
-    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, stage_entered_at: new Date().toISOString(), lost_reason: lostReason || null } : d)));
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, stage_id: stage.id, stage_entered_at: new Date().toISOString() } : d)));
     try {
-      const r = await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id, lostReason: lostReason || null });
+      const r = await ssPipeCall("crm_deal_move", { id: deal.id, stageId: stage.id });
       if (r && typeof r.status_id === "string") setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, status_id: r.status_id } : d)));
     } catch (e) { setDeals(prev); setErr(e.message); }
   };
@@ -7443,8 +7579,24 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
     const deal = (deals || []).find((d) => d.id === dragId);
     setDragId(null); setOverStage(null);
     if (!deal || deal.stage_id === stage.id) return;
-    if (stage.kind === "lost") { setDialog({ lost: { deal, stage } }); return; }
     moveDeal(deal, stage);
+  };
+
+  // ── MARK LOST / REOPEN (migration 342) ─────────────────────────────────────────────────────
+  // Carolyn, 2026-10-26: "LOST stays in the column it was when marking lost." So this writes the
+  // flag and the card does not move an inch; it leaves the board only because the default view
+  // hides lost cards, and Show lost brings it back where it died.
+  const markLost = async (deal, reason) => {
+    const prev = deals;
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, lost_at: new Date().toISOString(), lost_reason: reason } : d)));
+    try { await ssPipeCall("crm_deal_mark_lost", { id: deal.id, lostReason: reason }); }
+    catch (e) { setDeals(prev); setErr(e.message); }
+  };
+  const reopen = async (deal) => {
+    const prev = deals;
+    setDeals((ds) => (ds || []).map((d) => (d.id === deal.id ? { ...d, lost_at: null, lost_reason: null } : d)));
+    try { await ssPipeCall("crm_deal_reopen", { id: deal.id }); }
+    catch (e) { setDeals(prev); setErr(e.message); }
   };
 
   const q = query.trim().toLowerCase();
@@ -7454,8 +7606,11 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
     mode: statusFilter.mode,
     ids: statusFilter.ids.filter((id) => id === SS_NO_STATUS || statuses.some((t) => t.id === id)),
   };
+  const lostCount = (deals || []).filter((d) => !!d.lost_at).length;
   const shown = (deals || []).filter((d) => {
     const c = d.contact || {};
+    // A LOST CARD IS STILL IN ITS COLUMN; it is just not drawn unless Show lost is on.
+    if (d.lost_at && !showLost) return false;
     if (!ssStatusFilterKeep(d.status_id, statusF)) return false;
     if (owner === "none" && c.ownerUserId) return false;
     if (owner !== "all" && owner !== "none" && c.ownerUserId !== owner) return false;
@@ -7488,7 +7643,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
             <button type="button" data-ss-board-refresh="" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>
           </div>
   );
-  const count = deals ? (q || owner !== "all" || statusF.ids.length ? `${shown.length} of ${deals.length}` : deals.length) : null;
+  const count = deals ? (q || owner !== "all" || statusF.ids.length || (lostCount && !showLost) ? `${shown.length} of ${deals.length}` : deals.length) : null;
   const boardCols = pipe ? ssBoardColumns(pipe.stages.length, boardW) : 1;
 
   return (
@@ -7508,6 +7663,22 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
           <SearchInput value={query} onChange={setQuery} placeholder="Search: company, name, phone, email…" />
         </div>
         {pipe && <SsStatusFilter statuses={statuses} deals={deals} value={statusFilter} onChange={setStatusFilter} />}
+        {/* SHOW LOST (migration 342). The board opens on work in play, so a lost card is not drawn
+            — but it is still in its column, and this is how you look at it. The count says how
+            many there are, so nobody has to tick it to find out. */}
+        {pipe && (
+          <div style={FCTRL}>
+            <span style={FLBL_SPACER} aria-hidden="true">Lost</span>
+            <label title="Lost cards stay in the stage they were in when they were marked"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700,
+                color: lostCount ? "#334155" : "#94A3B8", whiteSpace: "nowrap", cursor: lostCount ? "pointer" : "default",
+                border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 10px", background: "#FFF" }}>
+              <input type="checkbox" data-ss-show-lost="" checked={showLost} disabled={!lostCount}
+                onChange={(e) => setShowLost(e.target.checked)} />
+              Show lost{lostCount ? ` (${lostCount})` : ""}
+            </label>
+          </div>
+        )}
         {!meta.ownOnly && team.length > 0 && (
           <FacetSelect label="Owner" value={owner} onChange={setOwner} allLabel="Everyone"
             options={[{ value: "none", label: "Unassigned" }].concat(team.map((m) => ({ value: m.userId, label: m.name || "Team member" })))} />
@@ -7553,6 +7724,12 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                     const ownerName = teamName(c.ownerUserId);
                     const follow = d.next_follow_up_at ? Date.parse(d.next_follow_up_at) : null;
                     const late = follow !== null && follow < Date.now();
+                    // The next booked appointment with this customer, from crm_deals_list.
+                    const appt = d.next_meeting && d.next_meeting.startsAt ? d.next_meeting : null;
+                    const apptToday = !!appt && ssLocalIso(new Date(appt.startsAt)) === ssLocalIso(new Date());
+                    const apptTitle = appt
+                      ? `${appt.typeName ? appt.typeName + ": " : "Appointment: "}${ssApptLong(appt.startsAt)}`
+                      : null;
                     const openCard = () => { if (onOpenRecord) onOpenRecord(d.short_code || null, d.contact_id || null, d.id); };
                     return (
                       // THE CARD is a focusable div acting as a button (Enter or Space opens it, like a
@@ -7576,7 +7753,13 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                         {/* The STATUS PILL (left; a label, statuses are the system's) and the close date
                             (right; Carolyn 2026-09-07: "editable straight from the card"). */}
                         <div style={{ marginTop: 5, minHeight: 20, display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 6, rowGap: 3 }}>
-                          <SsStatusPill statuses={statuses} value={d.status_id} style={{ maxWidth: "100%" }} />
+                          {/* 342: a LOST card wears Lost here instead of its status. Two pills, one
+                              saying "Estimate Sent" and one saying "Lost", would be two answers to
+                              the same question. The status is still on the card underneath, and
+                              comes back the moment it is reopened. */}
+                          {d.lost_at
+                            ? <SsLostPill reason={d.lost_reason} />
+                            : <SsStatusPill statuses={statuses} value={d.status_id} style={{ maxWidth: "100%" }} />}
                           {closeEdit === d.id ? (
                             <input type="date" autoFocus defaultValue={closeIso || ""} aria-label="Expected close date"
                               onClick={(e) => e.stopPropagation()}
@@ -7603,19 +7786,47 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                             {g.estimateNumber && <span>#{g.estimateNumber}</span>}
                           </div>
                         )}
-                        {st.kind === "lost" && d.lost_reason && <div style={{ fontSize: 11, color: "#DC2626", marginTop: 3 }}>{d.lost_reason}</div>}
+
                         <div style={{ marginTop: 6, display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 6, rowGap: 3, fontSize: 10.5, color: "#94A3B8" }}>
                           <span title={ownerName ? `Owner: ${ownerName}` : "Unassigned"}
                             style={{ width: 20, height: 20, flexShrink: 0, borderRadius: "50%", background: ownerName ? "#E0E7FF" : "#F1F5F9", color: ownerName ? ACCENT : "#94A3B8", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 800 }}>
                             {ownerName ? ssPipeInitials(ownerName) : "–"}
                           </span>
                           {days !== null && <span>{days === 0 ? "New today" : `${days}d in stage`}</span>}
+                          {/* THE APPOINTMENT (migration 342). Carolyn: "since we now have meetings
+                              set up we should be able to see on the card when an appt is set. I
+                              don't think we want that as a status as it can happen anytime in the
+                              process." Read live from the booking, so cancelling one clears it; it
+                              is absent, not blank, for anyone who cannot see the calendar. */}
+                          {appt && (
+                            <span data-ss-deal-appt="" title={apptTitle}
+                              style={{ fontWeight: 700, color: apptToday ? "#B45309" : "#1B7895", background: apptToday ? "#FFFBEB" : "transparent", borderRadius: 4, padding: "0 4px", whiteSpace: "nowrap" }}>
+                              📅 {ssApptShort(appt.startsAt)}
+                            </span>
+                          )}
                           {follow !== null && (
                             <span style={{ marginLeft: "auto", fontWeight: 700, color: late ? "#DC2626" : "#1B7895", background: late ? "#FEF2F2" : "transparent", borderRadius: 4, padding: "0 4px", whiteSpace: "nowrap" }}>
                               {late ? "Overdue " : "Follow up "}{fmtDateShort(d.next_follow_up_at)}
                             </span>
                           )}
                         </div>
+                        {/* MARK LOST / REOPEN, on the card (342). Lost is not a column to drag into
+                            any more. stopPropagation because the card itself opens the record. */}
+                        {canWrite && (
+                          <div style={{ marginTop: 5, display: "flex", justifyContent: "flex-end" }}>
+                            {d.lost_at ? (
+                              <button type="button" data-ss-card-reopen={d.id}
+                                title="Put this one back in play. It stays in this stage"
+                                onClick={(e) => { e.stopPropagation(); reopen(d); }}
+                                style={{ border: "none", background: "transparent", color: "#64748B", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", padding: "0 2px" }}>Reopen</button>
+                            ) : (
+                              <button type="button" data-ss-card-lost={d.id}
+                                title="Mark this one lost. It stays in this stage"
+                                onClick={(e) => { e.stopPropagation(); setDialog({ lost: { deal: d } }); }}
+                                style={{ border: "none", background: "transparent", color: "#CBD5E1", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", padding: "0 2px" }}>Mark lost</button>
+                            )}
+                          </div>
+                        )}
                         {/* Created · Updated, as on the old board: the design's own dates on a design
                             card, the card's on a lead. */}
                         <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #F1F5F9", fontSize: 10, color: "#94A3B8", display: "flex", flexWrap: "wrap", columnGap: 5, fontVariantNumeric: "tabular-nums" }}>
@@ -7643,7 +7854,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
         onCreated={async (id) => { setDialog(null); await loadMeta(); pick(id); }} />}
       {dialog && dialog.lost && (
         <SsLostReasonDialog reasons={pipe ? pipe.lostReasons : []} onCancel={() => setDialog(null)}
-          onPick={(reason) => { const { deal, stage } = dialog.lost; setDialog(null); moveDeal(deal, stage, reason); }} />
+          onPick={(reason) => { const { deal } = dialog.lost; setDialog(null); markLost(deal, reason); }} />
       )}
     </div>
   );
@@ -7662,6 +7873,10 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
 // settings_crm:edit to change anything (owner/admin by preset); the server refuses everyone else.
 const SS_STATUS_EVENTS = [
   ["design_submitted", "A design is submitted"],
+  // 342: the one rung that is about talking to people rather than paperwork. Carolyn, 2026-10-26:
+  // "it should switch automatically after there was an actual call recorded ... or there was a text
+  // inbound and outbound both. This should only change to this if the lead is in New Lead status."
+  ["contact_made", "Contact is made (an answered call, or a text both ways)"],
   ["estimate_sent", "The estimate is sent"],
   ["estimate_accepted", "The estimate is accepted"],
   ["invoiced", "The invoice is sent"],
@@ -7695,7 +7910,8 @@ function PipelineSettings({ viewing = false }) {
   const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
   const usedBy = (ev, id) => statuses.some((t) => t.triggerEvent === ev && t.id !== id);
   // A NEW STATUS NEEDS ITS EVENT (2026-10-13). Statuses are the system's, so a status no event sets
-  // is one no card can ever get (Appt Set, as seeded). Adding one asks for the event that sets it,
+  // is one no card can ever get. Appt Set was exactly that until 342 renamed it Contact Made and
+  // gave it one. Adding a status asks for the event that sets it,
   // from the events no other status has (one status per event, crm_statuses' unique index); with
   // none free, the card says so instead of offering a status that would sit unused.
   const freeEvents = SS_STATUS_EVENTS.filter(([k]) => !usedBy(k, null));

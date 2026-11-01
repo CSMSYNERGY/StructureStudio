@@ -50,11 +50,15 @@ const STATUS_NAMES = [["New Lead", "#64748B"], ["Appt Set", "#0EA5E9"], ["Estima
   ["Invoiced", "#F59E0B"], ["Payment Received", "#14B8A6"], ["Scheduling", "#F97316"], ["Delivered", "#8B5CF6"]];
 const STATUSES = STATUS_NAMES.map(([name, color], i) => ({ id: uuid(100 + i), name, color, position: i, triggerEvent: null }));
 const ST = Object.fromEntries(STATUSES.map((s) => [s.name, s.id]));
-const STAGE_NAMES = ["New Incoming", "Attempting Contact", "Nurturing - Cool", "Nurturing - Warm", "Nurturing - Hot", "Gone Cold Again", "Won", "Lost"];
+// EIGHT STAGES, ALL OF THEM STEPS. The last two used to be Won and Lost; migration 342 retired
+// both kinds (a stage is where a lead IS, never how it ended), so they are two more real steps
+// here — the point of eight is that it is the widest board a builder has, which this still is.
+// What a lost card does now lives in pipelineLostStatus.mjs.
+const STAGE_NAMES = ["New Incoming", "Attempting Contact", "Nurturing - Cool", "Nurturing - Warm", "Nurturing - Hot", "Gone Cold Again", "Quoted", "Follow Up"];
 const PIPE = {
   id: uuid(200), name: "Shed Deals", position: 0, lostReasons: ["Price", "Timing"], seedKind: null, feedsDesigns: true, mirrorsStatuses: false,
   stages: STAGE_NAMES.map((name, i) => ({ id: uuid(300 + i), name, color: ["#64748B", "#0EA5E9", "#14B8A6", "#6366F1", "#8B5CF6", "#94A3B8", "#16A34A", "#DC2626"][i],
-    kind: name === "Won" ? "won" : name === "Lost" ? "lost" : "open", position: i, statusId: null })),
+    kind: "open", position: i, statusId: null })),
 };
 const TEAM = [{ userId: USER.id, name: "Pat Owner", title: null }, { userId: uuid(22), name: "Sam Seller", title: null }];
 const FIRST = ["Avery", "Blake", "Casey", "Drew", "Emery", "Finley", "Gray", "Harper", "Indy", "Jordan", "Kai", "Logan", "Morgan"];
@@ -69,7 +73,7 @@ const DEALS = STAGE_OF.map((si, i) => {
     id: uuid(400 + i), pipeline_id: PIPE.id, stage_id: PIPE.stages[si].id, status_id: ST[STATUS_CYCLE[i % STATUS_CYCLE.length]],
     contact_id: uuid(500 + i), short_code: design ? `SS-HARN${String(i).padStart(4, "0")}` : null, title: design ? null : "Lead",
     value_cents: 500000 + i * 12300, expected_close_date: i % 5 === 0 ? "2026-11-20" : null, next_follow_up_at: null,
-    lost_reason: si === 7 ? "Timing" : null, source: design ? "design" : "manual",
+    lost_reason: null, source: design ? "design" : "manual",
     stage_entered_at: new Date(Date.now() - (i % 12) * 86400000).toISOString(), won_at: null, lost_at: null,
     created_at: "2026-09-20T15:00:00Z", updated_at: "2026-10-01T15:00:00Z",
     contact: { id: uuid(500 + i), name, company: null, phone: null, email: `${name.split(" ")[0].toLowerCase()}@example.test`, ownerUserId: i % 3 ? USER.id : uuid(22) },

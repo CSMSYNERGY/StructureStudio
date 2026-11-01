@@ -5,10 +5,11 @@
 //
 //   A  Settings → Pipelines: the Statuses card says the system sets a status and nobody changes one
 //      by hand; each status keeps its "Set automatically when" drop-down (a status no event sets
-//      reads "No event", never "set by hand"); the Pipelines card names no stage→status link,
+//      reads its event, never "set by hand"); the Pipelines card names no stage→status link,
 //      and Shed Deals carries the "new designs" badge.
 //      Since 2026-10-13 the copy is true to that: no "add your own", and a status with no event
-//      says "No event yet, so no card will get this status." (Appt Set, as seeded). A new status
+//      says "No event yet, so no card will get this status." (since 342 no seeded status is in that
+//      state, so A10 frees one to prove it). A new status
 //      needs its event: with every event taken the card says so and offers no Add; once one is
 //      freed, Add stays off until a name AND an event are picked, and sends both (A7-A12; against
 //      the build before, A7-A12 fail).
@@ -43,9 +44,10 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 const U = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-// Carolyn's status set, as 302 seeded it (Appt Set has no event).
+// Carolyn's status set, as 342 seeds it: Contact Made in place of 302's unreachable Appt Set, and
+// every rung carrying the event that sets it.
 const STATUSES = [
-  ["New Lead", "#64748B", "design_submitted"], ["Appt Set", "#0EA5E9", null], ["Estimate Sent", "#6366F1", "estimate_sent"],
+  ["New Lead", "#64748B", "design_submitted"], ["Contact Made", "#0EA5E9", "contact_made"], ["Estimate Sent", "#6366F1", "estimate_sent"],
   ["Accepted", "#16A34A", "estimate_accepted"], ["Invoiced", "#14B8A6", "invoiced"], ["Payment Received", "#84CC16", "paid_in_full"],
   ["Scheduling", "#F59E0B", "build_scheduled"], ["Delivered", "#0F766E", "delivered"],
 ].map(([name, color, triggerEvent], i) => ({ id: U(100 + i), name, color, position: (i + 1) * 1024, triggerEvent }));
@@ -56,7 +58,7 @@ const SHED_STAGES = ["New Incoming", "Attempting Contact", "Nurturing - Cool", "
 const PIPELINES = [
   { id: U(1), name: "Shed Deals", position: 1024, lostReasons: ["Price", "Timing"], seedKind: "shed_deals", feedsDesigns: true, stages: SHED_STAGES },
   { id: U(2), name: "Manufacturer Outreach", position: 2048, lostReasons: [], seedKind: "outreach", feedsDesigns: false,
-    stages: [{ id: U(300), name: "New Lead", color: "#64748B", kind: "open", position: 1024 }, { id: U(301), name: "Won", color: "#16A34A", kind: "won", position: 2048 }] },
+    stages: [{ id: U(300), name: "New Lead", color: "#64748B", kind: "open", position: 1024 }, { id: U(301), name: "Connected", color: "#16A34A", kind: "open", position: 2048 }] },
 ];
 
 const { ok, failed } = reporter();
@@ -139,12 +141,15 @@ try {
 
   // ── A ──
   const text = await page.evaluate(() => document.body.innerText);
-  ok("A1 Carolyn's status set is kept, Appt Set and Delivered included (C13)", JSON.stringify(names) === JSON.stringify(STATUSES.map((s) => s.name)));
+  ok("A1 Carolyn's status set is kept, Contact Made and Delivered included (C13)", JSON.stringify(names) === JSON.stringify(STATUSES.map((s) => s.name)));
   ok("A2 the card says the system sets a status and nobody changes one by hand", /the system sets it/.test(text) && /nobody\s+changes one by hand/.test(text));
   ok("A3 nothing says a status can be set by hand", !/set by hand\)|can still change a status by hand|by hand, or automatically/i.test(text));
   const triggers = await page.locator("[data-ss-pipeline-settings] select[aria-label='Set automatically when']").evaluateAll((els) =>
     els.map((e) => e.options[e.selectedIndex] ? e.options[e.selectedIndex].text : null));
-  ok("A4 every status keeps its 'Set automatically when'; Appt Set reads 'No event'", triggers.length === 8 && triggers[1] === "No event" && triggers[0] === "A design is submitted", JSON.stringify(triggers));
+  // 342: Contact Made has an event of its own, so no rung reads "No event" any more.
+  ok("A4 every status keeps its 'Set automatically when', Contact Made included", triggers.length === 8
+    && triggers[0] === "A design is submitted" && /^Contact is made/.test(triggers[1] || "")
+    && !triggers.includes("No event"), JSON.stringify(triggers));
   ok("A5 the Pipelines card names no stage→status link, nor Quotes", !/link stages to statuses|Link a stage/i.test(text) && !/\bQuotes\b/.test(text));
   ok("A6 Shed Deals carries the 'new designs' badge", await page.evaluate(() =>
     [...document.querySelectorAll("span")].some((s) => /^Shed Deals/.test((s.innerText || "").trim()) && /new designs/.test(s.innerText || ""))));
@@ -168,8 +173,9 @@ try {
   let sc = await statusCard();
   ok("A7 the card no longer says 'add your own', and says a new status needs an event of its own",
     !/add your own/i.test(sc.text) && /a new status needs an event of its own/.test(sc.text) && !/Nothing yet/.test(sc.text), sc.text.slice(0, 600));
-  ok("A8 the status no event sets (Appt Set) says no card will get it, and only that one",
-    JSON.stringify(sc.rows.filter((r) => r.hint).map((r) => [r.name, r.hint])) === JSON.stringify([["Appt Set", NO_EVENT]]), JSON.stringify(sc.rows));
+  // 342: every seeded status is reachable now, so nothing wears the warning until A10 frees one.
+  ok("A8 no status says 'no card will get this', because every one of them has an event",
+    sc.rows.filter((r) => r.hint).length === 0, JSON.stringify(sc.rows));
   ok("A9 with every event taken there is no Add: the card says why instead",
     !sc.add && !!sc.none && /Every event already sets a status, so a new one would never reach a card/.test(sc.none), JSON.stringify({ add: sc.add, none: sc.none }));
   await page.locator("[data-ss-pipeline-settings]").screenshot({ path: join(shots, "statuses-all-events-taken.png") });
@@ -209,11 +215,14 @@ try {
     const modal = await page.evaluate(() => document.body.innerText);
     ok("B1 no 'Linked status' drop-down on any stage", (await page.locator("select[aria-label='Linked status']").count()) === 0
       && !/No status link/.test(modal));
-    ok("B2 each stage keeps colour, kind, up/down and remove (C16)",
-      (await page.locator("select[aria-label='Colour']").count()) >= 6 && (await page.locator("select[aria-label='Kind']").count()) === 6
+    // 342: a stage has no KIND to pick any more — it is a step in the process, never an outcome.
+    ok("B2 each stage keeps colour, up/down and remove, and offers no Kind (C16)",
+      (await page.locator("select[aria-label='Colour']").count()) >= 6 && (await page.locator("select[aria-label='Kind']").count()) === 0
       && (await page.locator("button[title='Move up']").count()) >= 6 && (await page.locator("button[title='Remove stage']").count()) === 6);
-    ok("B3 the help says a move never changes a status, and where new designs land",
-      /Moving a card between stages never changes its\s+status/.test(modal) && /New designs land in this pipeline, in its first open stage/.test(modal));
+    ok("B3 the help says a move never changes a status, where new designs land, and that there is no Won or Lost column",
+      /Moving a card between stages never changes its\s+status/.test(modal)
+      && /New designs land in this pipeline, in its first stage/.test(modal)
+      && /no Won or Lost column/.test(modal), JSON.stringify((/each one is a step[^.]*\./.exec(modal) || [])[0] || null));
     // Rename a stage: the save carries the name and no statusId.
     const first = page.locator("input[aria-label='Stage name']").first();
     await first.fill("New Incoming Leads");

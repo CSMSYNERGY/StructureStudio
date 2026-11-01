@@ -172,10 +172,20 @@ export const CRM_DEAL_BUILTINS: CrmBuiltinField[] = [
   {
     id: "status", label: "Status", type: "status", group: "Where it stands", editable: false,
     derived: "crm_statuses",
-    note: "System-driven: an estimate going out, an acceptance, an invoice or a delivery sets it. Nobody sets it by hand",
+    note: "System-driven: contact being made, an estimate going out, an acceptance, an invoice or a delivery sets it. Nobody sets it by hand",
     relabel: false,
   },
-  { id: "lost_reason", label: "Lost reason", type: "text", group: "Where it stands", editable: true },
+  // Migration 342: Lost is a mark on the card, not a column it was dragged into. Both of these are
+  // set together by Mark lost (and cleared together by Reopen), so neither is edited on its own —
+  // a reason with no lost date, or the other way round, is a card nobody can read.
+  {
+    id: "lost_at", label: "Lost on", type: "date", group: "Where it stands", editable: false,
+    note: "When the card was marked lost. It keeps the stage it was in", relabel: false,
+  },
+  {
+    id: "lost_reason", label: "Lost reason", type: "text", group: "Where it stands", editable: false,
+    note: "Picked when the card is marked lost", relabel: false,
+  },
 
   {
     id: "short_code", label: "Design", type: "link", group: "The design", editable: false,

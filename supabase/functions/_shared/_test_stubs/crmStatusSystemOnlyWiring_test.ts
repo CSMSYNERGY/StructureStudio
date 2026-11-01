@@ -162,7 +162,7 @@ const world = (over: Partial<World> = {}): World => ({
   pipelines: [SHED, OUTREACH],
   stages: [{ id: STAGE, pipeline_id: FEED, name: "New Incoming", color: "#64748B", kind: "open", position: 1024 }],
   statuses: [{ id: STATUS, name: "New Lead", color: "#64748B", position: 1024, trigger_event: "design_submitted" },
-             { id: STATUS_B, name: "Appt Set", color: "#0EA5E9", position: 2048, trigger_event: null }],
+             { id: STATUS_B, name: "Contact Made", color: "#0EA5E9", position: 2048, trigger_event: "contact_made" }],
   dealCount: 0,
   ...over,
 });
@@ -257,7 +257,7 @@ Deno.test("the board's pipeline list: seeded through crm_ensure_pipelines, no mi
     for (const s of p.stages) assert(!("statusId" in s), "a stage answers a status link again");
   }
   assert(!t.selects.some((x) => /mirrors_statuses|status_id/.test(x) && /^crm_pipeline/.test(x)), t.selects.join(" | "));
-  assertEquals(body.statuses.map((s: any) => s.name), ["New Lead", "Appt Set"], "the statuses are still listed");
+  assertEquals(body.statuses.map((s: any) => s.name), ["New Lead", "Contact Made"], "the statuses are still listed");
 });
 
 // ─── The portal: nothing offers a hand-set or a stage link ────────────────────────────────────

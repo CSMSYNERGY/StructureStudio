@@ -57,6 +57,10 @@ Deno.test("pipeline and stage saves", () => {
   eq(p.lostReasons, ["Price", "Timing"], "deduped, blanks dropped");
   eq(parseStageSave({ name: "Call" }).ok, false, "new stage needs its pipeline");
   eq(parseStageSave({ pipelineId: U, name: "Call", kind: "maybe" }).ok, false, "bad kind");
+  // 342: a stage is a step, never an outcome. Won and Lost are no longer kinds.
+  eq(parseStageSave({ pipelineId: U, name: "Call", kind: "won" }).ok, false, "won is not a kind");
+  eq(parseStageSave({ pipelineId: U, name: "Call", kind: "lost" }).ok, false, "lost is not a kind");
+  eq(parseStageSave({ pipelineId: U, name: "Call", kind: "open" }).ok, true, "open is the only kind");
   eq(parseStageSave({ pipelineId: U, name: "Call", color: "red" }).ok, false, "bad colour");
   eq(parseStageSave({ id: U, color: "#AABBCC" }).ok, true, "edit colour only");
 });
@@ -78,15 +82,17 @@ Deno.test("stage order: every id once", () => {
   eq(parseStageOrder({ pipelineId: U, ids: [U] }).ok, true, "one");
 });
 
-Deno.test("a pipeline keeps an open stage", () => {
-  eq(stageSetRefusal(["won", "lost"]) !== null, true, "no open stage refused");
-  eq(stageSetRefusal(["open"]), null, "one open is enough");
+Deno.test("a pipeline keeps a stage", () => {
+  eq(stageSetRefusal([]) !== null, true, "no stage at all refused");
+  eq(stageSetRefusal(["open"]), null, "one is enough");
 });
 
 Deno.test("statuses: name, colour and the automatic trigger", () => {
   eq(parseStatusSave({}).ok, false, "new needs a name");
-  const a = parseStatusSave({ name: "Appt Set", color: "#0EA5E9", triggerEvent: "" });
-  eq(a.ok && [a.name, a.triggerEvent], ["Appt Set", null], "no event yet");
+  const a = parseStatusSave({ name: "Contact Made", color: "#0EA5E9", triggerEvent: "" });
+  eq(a.ok && [a.name, a.triggerEvent], ["Contact Made", null], "no event yet");
+  // 342: contact being made is an event a status can be set by.
+  eq(parseStatusSave({ id: U, triggerEvent: "contact_made" }).ok && true, true, "contact_made is a trigger");
   const b = parseStatusSave({ id: U, triggerEvent: "paid_in_full" });
   eq(b.ok && b.triggerEvent, "paid_in_full", "trigger");
   eq(parseStatusSave({ id: U, triggerEvent: "whenever" }).ok, false, "unknown trigger");

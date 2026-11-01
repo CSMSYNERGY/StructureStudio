@@ -77,8 +77,8 @@ const SOLD = {
   stages: [
     { id: "33333333-0000-4000-8000-000000000000", name: "Signed", color: "#16A34A", kind: "open" },
     { id: "33333333-0000-4000-8000-000000000001", name: "Building", color: "#6366F1", kind: "open" },
-    { id: "33333333-0000-4000-8000-000000000002", name: "Delivered", color: "#15803D", kind: "won" },
-    { id: "33333333-0000-4000-8000-000000000003", name: "Lost", color: "#DC2626", kind: "lost" },
+    { id: "33333333-0000-4000-8000-000000000002", name: "Delivered", color: "#15803D", kind: "open" },
+    { id: "33333333-0000-4000-8000-000000000003", name: "Paid", color: "#0F766E", kind: "open" },
   ],
 };
 const STATUSES = [
@@ -160,9 +160,20 @@ async function scenario(browser, { withPipeline = true, pipelineError = false, a
       case "crm_deal_move": {
         const stage = [...SHED.stages, ...SOLD.stages].find((s) => s.id === body.stageId);
         const owner = [SHED, SOLD].find((p) => p.stages.includes(stage));
-        deals = deals.map((d) => (d.id === body.id ? { ...d, stage_id: stage.id, pipeline_id: owner.id, lost_reason: body.lostReason || null } : d));
+        // 342: a move carries no outcome. The lost flag is left exactly as it was.
+        deals = deals.map((d) => (d.id === body.id ? { ...d, stage_id: stage.id, pipeline_id: owner.id } : d));
         const now = deals.find((d) => d.id === body.id);
-        return json(route, { ok: true, moved: true, kind: stage.kind, status_id: now.status_id });
+        return json(route, { ok: true, moved: true, kind: stage.kind, status_id: now.status_id, lost_at: now.lost_at || null });
+      }
+      // 342: marking a card lost, and reopening it. Neither touches the stage.
+      case "crm_deal_mark_lost": {
+        deals = deals.map((d) => (d.id === body.id ? { ...d, lost_at: new Date().toISOString(), lost_reason: body.lostReason } : d));
+        const now = deals.find((d) => d.id === body.id);
+        return json(route, { ok: true, lost: true, lost_at: now.lost_at, lost_reason: now.lost_reason, stage_id: now.stage_id });
+      }
+      case "crm_deal_reopen": {
+        deals = deals.map((d) => (d.id === body.id ? { ...d, lost_at: null, lost_reason: null } : d));
+        return json(route, { ok: true, reopened: true, stage_id: (deals.find((d) => d.id === body.id) || {}).stage_id });
       }
       // The Pipeline board (check L): its pipelines, and one pipeline's cards as crm_deals_list
       // shapes them (contact and design attached).
@@ -288,7 +299,9 @@ try {
     const geo = await page.evaluate((sel) => {
       const p = document.querySelector(sel);
       const r = (el) => el && el.getBoundingClientRect();
-      const open = [...p.querySelectorAll("button")].find((b) => b.innerText.includes("Open in designer"));
+      // "Open in designer" is an <a> (it carries the design's href so a middle-click works), not a
+      // <button>: querying only buttons found nothing and this check threw instead of reporting.
+      const open = [...p.querySelectorAll("a, button")].find((b) => b.innerText.includes("Open in designer"));
       const stage = p.querySelector('select[aria-label="Stage"]');
       return { panel: r(p), open: r(open), stage: r(stage) };
     }, panel);
@@ -320,17 +333,31 @@ try {
     ok("G4 and the move control now offers the old one", JSON.stringify(moveOpts2) === JSON.stringify(["Move to pipeline…", "Shed Deals"]), moveOpts2.join(" | "));
     await shot(page, "moved-to-sold");
 
-    // ── H ──
-    await page.locator(`${panel} select[aria-label="Stage"]`).selectOption(SOLD.stages[3].id);
+    // ── H ── MIGRATION 342: lost is a mark on the card, not a stage to pick. Carolyn: "LOST stays
+    // in the column it was when marking lost", so this asks why and then moves NOTHING.
+    const stageBefore = await page.locator(`${panel} select[aria-label="Stage"]`).inputValue();
+    await page.locator(`${panel} [data-ss-deal-lost]`).click();
     await page.waitForTimeout(500);
     const dialog = page.locator('[role="dialog"]');
-    ok("H1 a lost stage asks for the reason first", (await dialog.count()) === 1 && moves(calls).length === 2);
+    ok("H1 Mark lost asks for the reason first, and moves nothing", (await dialog.count()) === 1 && moves(calls).length === 2);
     await shot(page, "lost-reason");
     // The pipeline's first reason is picked to begin with (SsLostReasonDialog).
     await dialog.locator("button", { hasText: "Mark lost" }).click();
     await page.waitForTimeout(700);
-    const m3 = moves(calls);
-    ok("H2 then moves with that reason", m3.length === 3 && m3[2].stageId === SOLD.stages[3].id && m3[2].lostReason === "Financing fell through", JSON.stringify(m3[2]));
+    const lost = calls.filter((b) => b.action === "crm_deal_mark_lost");
+    ok("H2 it sends crm_deal_mark_lost with that reason, and still no move",
+      lost.length === 1 && lost[0].lostReason === "Financing fell through" && moves(calls).length === 2, JSON.stringify({ lost, moves: moves(calls).length }));
+    ok("H3 the card keeps the stage it was being worked in",
+      (await page.locator(`${panel} select[aria-label="Stage"]`).inputValue()) === stageBefore,
+      JSON.stringify({ before: stageBefore, after: await page.locator(`${panel} select[aria-label="Stage"]`).inputValue() }));
+    ok("H4 and the row says it is lost, with the reason",
+      /Lost: Financing fell through/.test(await page.locator(panel).innerText()), (await page.locator(panel).innerText()).replace(/\s+/g, " ").slice(-120));
+    // Reopen puts it back in play, where it already is.
+    await page.locator(`${panel} [data-ss-deal-reopen]`).click();
+    await page.waitForTimeout(600);
+    ok("H5 Reopen sends crm_deal_reopen and the row stops saying lost",
+      calls.filter((b) => b.action === "crm_deal_reopen").length === 1
+      && !/Lost: /.test(await page.locator(panel).innerText()), JSON.stringify(calls.filter((b) => b.action === "crm_deal_reopen")));
 
     // ── I ──
     await go(`/designs/d-${D_DLX.short_code}`);

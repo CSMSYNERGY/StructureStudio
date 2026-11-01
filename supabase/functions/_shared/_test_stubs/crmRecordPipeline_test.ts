@@ -37,10 +37,11 @@ const slice = (src: string, a: string, b: string, what: string) => {
 const BLOCK = slice(SRC, "const crmPipeDealFor =", "// A deal's status on its Deals row", "the pipeline helpers");
 type Fn = (...a: any[]) => any;
 const H = new Function(
-  `${BLOCK}; return { crmPipeDealFor, crmPipeOf, crmPipeStatus, crmPipeFirstOpen, crmPipeMoveTargets, crmDealRows, crmPipeBarRow, crmPipeMoved };`,
+  `${BLOCK}; return { crmPipeDealFor, crmPipeOf, crmPipeStatus, crmPipeFirstOpen, crmPipeMoveTargets, crmDealRows, crmPipeBarRow, crmPipeMoved, crmPipeLost };`,
 )() as Record<string, Fn>;
 
-// Two pipelines and a retired one's card. Stage kinds as migration 301 defines them.
+// Two pipelines and a retired one's card. Every stage is 'open': migration 342 retired the won and
+// lost kinds, so a stage is a step in the process and an outcome lives on the card.
 const SHED = {
   id: "p-shed", name: "Shed Deals", lostReasons: ["Price"],
   stages: [
@@ -53,12 +54,11 @@ const SHED = {
 const SOLD = {
   id: "p-sold", name: "Sold", lostReasons: [],
   stages: [
-    { id: "s-lost", name: "Fell through", color: "#DC2626", kind: "lost" },
-    { id: "s-won", name: "Signed", color: "#16A34A", kind: "won" },
+    { id: "s-signed", name: "Signed", color: "#16A34A", kind: "open" },
     { id: "s-build", name: "Building", color: "#6366F1", kind: "open" },
   ],
 };
-const ONLY_LOST = { id: "p-x", name: "Closed out", lostReasons: [], stages: [{ id: "s-x", name: "Lost", color: "#DC2626", kind: "lost" }] };
+const NO_STAGES = { id: "p-x", name: "Closed out", lostReasons: [], stages: [] };
 const STATUSES = [
   { id: "t-new", name: "New Lead", color: "#64748B" },
   { id: "t-sent", name: "Estimate Sent", color: "#0EA5E9" },
@@ -76,7 +76,7 @@ const DEALS = [
   // A card left in a pipeline that has since been retired (not in the live list).
   { id: "d-4", pipeline_id: "p-retired", stage_id: "s-gone", status_id: null, short_code: null, title: null, created_at: "2026-06-01T09:00:00Z" },
 ];
-const PIPE = { pipelines: [SHED, SOLD, ONLY_LOST], statuses: STATUSES, deals: DEALS };
+const PIPE = { pipelines: [SHED, SOLD, NO_STAGES], statuses: STATUSES, deals: DEALS };
 
 Deno.test("one Deals list: each design with its card, each card with no design on its own row, newest first", () => {
   const rows = H.crmDealRows(DESIGNS, PIPE);
@@ -115,8 +115,8 @@ Deno.test("the top bar names the deal's pipeline and draws that pipeline's stage
   // Picking the deal in another pipeline switches the bar to that pipeline.
   const sold = H.crmPipeBarRow(PIPE, DEALS[1]);
   assertEquals(sold.label, "Sold");
-  assertEquals(sold.stages.map((s: any) => s.name), ["Fell through", "Signed", "Building"]);
-  assertEquals(sold.idx, 2);
+  assertEquals(sold.stages.map((s: any) => s.name), ["Signed", "Building"]);
+  assertEquals(sold.idx, 1);
   // Never the old hard-coded ladder.
   for (const r of [shed, sold]) assert(!r.stages.some((s: any) => /Qualified|Proposal Made|Contract Signed/.test(s.name)));
 });
@@ -143,11 +143,10 @@ Deno.test("the status shown on a row is the card's own, looked up by id", () => 
   assertEquals(H.crmPipeStatus(PIPE, null), null);
 });
 
-Deno.test("a move to another pipeline lands in its first OPEN stage, never a lost one", () => {
+Deno.test("a move to another pipeline lands in its first stage (342: there are no outcome stages to skip)", () => {
   assertEquals(H.crmPipeFirstOpen(SHED).id, "s-new");
-  assertEquals(H.crmPipeFirstOpen(SOLD).id, "s-build", "skips a lost and a won stage ahead of the first open one");
-  assertEquals(H.crmPipeFirstOpen({ stages: [{ id: "a", kind: "lost" }, { id: "b", kind: "won" }] }).id, "b");
-  assertEquals(H.crmPipeFirstOpen(ONLY_LOST), null);
+  assertEquals(H.crmPipeFirstOpen(SOLD).id, "s-signed");
+  assertEquals(H.crmPipeFirstOpen(NO_STAGES), null, "a pipeline with no stage is nowhere to land");
   assertEquals(H.crmPipeFirstOpen(null), null);
 });
 
@@ -160,7 +159,7 @@ Deno.test("the move list is every other live pipeline a deal can land in", () =>
 });
 
 Deno.test("a move is painted in the stage's pipeline (one pipeline per deal), the status untouched", () => {
-  const target = SOLD.stages[2];
+  const target = SOLD.stages[1];
   const after = H.crmPipeMoved(PIPE, "d-1", target);
   const moved = after.deals.find((d: any) => d.id === "d-1");
   assertEquals(moved.pipeline_id, "p-sold");
@@ -170,11 +169,24 @@ Deno.test("a move is painted in the stage's pipeline (one pipeline per deal), th
   assertEquals(PIPE.deals[0].pipeline_id, "p-shed", "the block it was given is not mutated");
   // The bar follows it.
   assertEquals(H.crmPipeBarRow(after, moved).label, "Sold");
-  // A lost stage keeps the reason; any other clears it.
-  const lost = H.crmPipeMoved(PIPE, "d-2", SOLD.stages[0], "Price").deals.find((d: any) => d.id === "d-2");
+  // 342: A MOVE CARRIES NO OUTCOME. It used to set or clear the lost reason depending on the
+  // stage's kind; marking and reopening are their own thing now, and neither moves the card.
+  const wasLost = { ...(PIPE.deals[1] as Record<string, unknown>), lost_at: "2026-10-20T00:00:00Z", lost_reason: "Price" };
+  const dragged = H.crmPipeMoved({ ...PIPE, deals: [wasLost] }, "d-2", SOLD.stages[1]).deals[0];
+  assertEquals([dragged.lost_at, dragged.lost_reason], ["2026-10-20T00:00:00Z", "Price"], "dragging a lost card does not reopen it");
+});
+
+Deno.test("marking a card lost, and reopening it, never move it (342)", () => {
+  const before = PIPE.deals[0] as Record<string, unknown>;
+  const lost = H.crmPipeLost(PIPE, "d-1", "Price").deals.find((d: any) => d.id === "d-1");
   assertEquals(lost.lost_reason, "Price");
-  const back = H.crmPipeMoved({ ...PIPE, deals: [lost] }, "d-2", SOLD.stages[2]).deals[0];
-  assertEquals(back.lost_reason, null);
+  assert(!!lost.lost_at, "it carries when it was lost");
+  assertEquals([lost.stage_id, lost.pipeline_id, lost.status_id], [before.stage_id, before.pipeline_id, before.status_id],
+    "Carolyn: LOST stays in the column it was when marking lost");
+  const back = H.crmPipeLost({ ...PIPE, deals: [lost] }, "d-1", null).deals[0];
+  assertEquals([back.lost_at, back.lost_reason], [null, null], "reopening clears both");
+  assertEquals(back.stage_id, before.stage_id, "and still does not move it");
+  assertEquals((PIPE.deals[0] as Record<string, unknown>).lost_reason, before.lost_reason, "the block it was given is not mutated");
 });
 
 // ── WIRING: the record shows a status and never sets one, and the two cards are one ──────────
