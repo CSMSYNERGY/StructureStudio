@@ -23,25 +23,35 @@
 // It never force-pushes, never uses --no-verify, and never resolves a source conflict.
 
 import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BRANCH = "beta";
 
-// The files `npm run compile` OWNS. A conflict in one of these is not a disagreement about
+// The files `npm run compile` OWNS outright. A conflict in one of these is not a disagreement about
 // anything a person wrote — both sides are machine output from sources that git has already
-// merged, so the fix is always "take either side, then recompile". portal.html is here because
-// compile.mjs rewrites its ?v= cache-busters; its hand-written parts conflicting would show up
-// as a source conflict in the same file, which is why `git checkout --ours` is followed by a
-// recompile AND a marker check rather than trusted on its own.
+// merged, so the fix is always "take either side, then recompile".
 const GENERATED = new Set([
   "portal.app.compiled.js",
   "structure-studio.component.compiled.js",
   "index.mount.compiled.js",
   "admin.app.compiled.js",
-  "portal.html",
 ]);
+
+// portal.html is NOT one of those, even though it conflicts on nearly every rebase. compile.mjs
+// rewrites only its ?v= cache-busters; the rest of the file is hand-written, the portal's CSS among
+// it. A hand-written conflict here is just more hunks in the same conflicted file, and a commit's
+// clean hand-written changes sit outside the hunks altogether, so `git checkout --ours` throws them
+// all away with upstream's whole file. Reproduced 2026-11-02 in a private repo: a commit's 19 CSS
+// lines became 0 and the push still landed. So this file is settled one hunk at a time, see
+// settlePortalHunks.
+const PORTAL = "portal.html";
+
+// Everything the compile can write, compile.mjs's PAGES included. It rewrites a page's busters
+// whether or not that page conflicted, and `rebase --continue` refuses to run over unstaged changes.
+const COMPILE_WRITES = new Set([...GENERATED, PORTAL, "index.html", "admin.html"]);
 
 const args = process.argv.slice(2);
 const DRY = args.includes("--dry");
@@ -73,39 +83,97 @@ function markersIn(path) {
   return r.code === 0 && !/:0$/.test(r.out.trim());
 }
 
-/** Resolve a rebase whose conflicts are ONLY generated files. Returns true when it did. */
-function resolveGenerated() {
-  const paths = conflictedPaths();
-  if (!paths.length) return false;
-  const source = paths.filter((p) => !GENERATED.has(p));
-  if (source.length) {
-    git(["rebase", "--abort"]);
-    die([
-      "STOPPED — a SOURCE file conflicts, and this script will not guess at that:",
-      ...source.map((p) => `  ${p}`),
-      "",
-      "The rebase was aborted, so your branch is exactly as it was. Resolve it by hand,",
-      "run `npm run compile`, then `npm run ship` again.",
-    ].join("\n"));
+/** Abort the rebase, and say how that went for the STOPPED message. */
+function abortRebase() {
+  const a = git(["rebase", "--abort"]);
+  return a.code === 0
+    ? "The rebase was aborted, so your branch is exactly as it was."
+    : `\`git rebase --abort\` failed too, so the rebase is still in progress:\n${a.out.trim()}`;
+}
+
+// A hunk's text with the hash taken out of every compiled tag: the same tags compile.mjs's
+// rebuster() rewrites, and no others. A ?v= on anything else is hand-written, so it has to match.
+const sansBusters = (text) => text.replace(/(src="\/?[a-zA-Z0-9.-]+\.compiled\.js\?v=)[a-zA-Z0-9]*"/g, '$1"');
+
+/**
+ * Settle portal.html's conflict hunks in the working tree, keeping everything git merged on its own.
+ * A hunk whose two sides differ only in ?v= hashes takes upstream's side; the recompile rewrites the
+ * hashes either way. Returns one description per hunk it refused, and writes nothing if there are any.
+ */
+function settlePortalHunks() {
+  // Rebuilt from the index, so the hunks below have the plain two-sided shape whatever
+  // merge.conflictStyle or rerere did to the file.
+  const rebuilt = git(["checkout", "--conflict=merge", "--", PORTAL]);
+  if (rebuilt.code !== 0) return [`git could not rebuild the conflict: ${rebuilt.out.trim()}`];
+  const file = join(root, PORTAL);
+  const refused = [];
+  let hunks = 0;
+  const settled = readFileSync(file, "utf8").replace(
+    /^<{7} [^\n]*\n([\s\S]*?)^={7}\r?\n([\s\S]*?)^>{7} [^\n]*(?:\n|$)/gm,
+    (hunk, upstream, commit) => {
+      hunks++;
+      if (sansBusters(upstream) === sansBusters(commit)) return upstream;
+      const firstLine = (side) => side.split("\n")[0].trim().slice(0, 100);
+      refused.push(`upstream has "${firstLine(upstream)}", your commit has "${firstLine(commit)}"`);
+      return hunk;
+    },
+  );
+  if (!hunks) refused.push("git says it conflicts, but this script can read no conflict hunks in it");
+  if (!refused.length) writeFileSync(file, settled);
+  return refused;
+}
+
+/**
+ * See a stopped rebase through to the end, resolving each commit that conflicts only in what the
+ * compile owns. Anything else aborts the whole rebase and stops. Every round leaves nothing unmerged
+ * before `rebase --continue`, so each one moves on to a later commit and the loop has to end.
+ */
+function finishRebase() {
+  for (;;) {
+    const paths = conflictedPaths();
+    const source = paths.filter((p) => !GENERATED.has(p) && p !== PORTAL);
+    if (source.length) {
+      die([
+        "STOPPED — a SOURCE file conflicts, and this script will not guess at that:",
+        ...source.map((p) => `  ${p}`),
+        "",
+        abortRebase(),
+        "Resolve it by hand, run `npm run compile`, then `npm run ship` again.",
+      ].join("\n"));
+    }
+    if (paths.includes(PORTAL)) {
+      const refused = settlePortalHunks();
+      if (refused.length) {
+        die([
+          `STOPPED — ${PORTAL} has a hand-written conflict, and this script will not guess at that:`,
+          ...refused.map((r) => `  ${r}`),
+          "",
+          abortRebase(),
+          "Resolve it by hand, run `npm run compile`, then `npm run ship` again.",
+        ].join("\n"));
+      }
+    }
+    say(`  conflicts in generated files and ?v= lines only (${paths.join(", ")}) — recompiling`);
+    // Upstream's copy during a rebase is --ours. Whichever side is taken, the recompile below
+    // regenerates every artifact from the MERGED sources, so the content is correct either way;
+    // taking upstream just keeps the busters consistent until it runs.
+    const artifacts = paths.filter((p) => GENERATED.has(p));
+    if (artifacts.length) git(["checkout", "--ours", "--", ...artifacts]);
+    const c = run("npm", ["run", "compile"]);
+    if (c.code !== 0) die(`STOPPED — npm run compile failed:\n${c.out}\n\n${abortRebase()}`);
+    // Belt and braces for the exact bug this script was written after: a file staged with the
+    // markers still in it. compile.mjs rewrites portal.html's busters but has no reason to notice
+    // a conflict hunk elsewhere in the file.
+    for (const p of paths) {
+      if (markersIn(p)) die(`STOPPED — ${p} still has conflict markers after recompiling.\n\n${abortRebase()}\nResolve it by hand.`);
+    }
+    const written = git(["diff", "--name-only"]).out.split("\n").filter((p) => COMPILE_WRITES.has(p));
+    const add = git(["add", "--", ...new Set([...paths, ...written])]);
+    if (add.code !== 0 || conflictedPaths().length) die(`STOPPED — could not stage the recompile:\n${add.out}\n\n${abortRebase()}`);
+    const cont = git(["-c", "core.editor=true", "rebase", "--continue"]);
+    if (cont.code === 0) return;
+    if (!conflictedPaths().length) die(`STOPPED — rebase --continue failed:\n${cont.out}\n\n${abortRebase()}`);
   }
-  say(`  conflicts in generated files only (${paths.join(", ")}) — taking upstream and recompiling`);
-  if (DRY) return true;
-  // Upstream's copy during a rebase is --ours. Whichever side is taken, the recompile below
-  // regenerates every artifact from the MERGED sources, so the content is correct either way;
-  // taking upstream just keeps the busters consistent until it runs.
-  git(["checkout", "--ours", "--", ...paths]);
-  const c = run("npm", ["run", "compile"]);
-  if (c.code !== 0) { git(["rebase", "--abort"]); die(`STOPPED — npm run compile failed:\n${c.out}`); }
-  // Belt and braces for the exact bug this script was written after: a file staged with the
-  // markers still in it. compile.mjs rewrites portal.html's busters but has no reason to notice
-  // a conflict hunk elsewhere in the file.
-  for (const p of paths) {
-    if (markersIn(p)) { git(["rebase", "--abort"]); die(`STOPPED — ${p} still has conflict markers after recompiling. Resolve it by hand.`); }
-  }
-  git(["add", "--", ...paths]);
-  const cont = git(["-c", "core.editor=true", "rebase", "--continue"]);
-  if (cont.code !== 0) { die(`STOPPED — rebase --continue failed:\n${cont.out}`); }
-  return true;
 }
 
 // ── Preconditions ────────────────────────────────────────────────────────────────────────
@@ -132,7 +200,7 @@ for (let n = 1; n <= MAX; n++) {
     const pull = git(["pull", "--rebase", "origin", BRANCH]);
     if (pull.code !== 0) {
       if (!conflictedPaths().length) die(`STOPPED — the rebase failed and nothing is conflicted:\n${pull.out}`);
-      resolveGenerated();
+      finishRebase();
     }
   }
 
