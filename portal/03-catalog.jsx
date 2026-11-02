@@ -12709,6 +12709,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const z = byId[id] ? byId[id].size : null;
     if (ssPgNeverEdited(qRef.current, id, z) && !(z && z.used)) {
       backToWork();
+      setTip(null); setSaid(null);
       delStart([id]);
       apply({ type: "remove", id, at: Date.now() });
       sendNow();

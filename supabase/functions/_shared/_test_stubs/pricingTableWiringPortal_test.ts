@@ -406,9 +406,9 @@ Deno.test("every way to add or delete a size, or put a backup back, checks the p
   // An open editor commits before the rule reads the queue (Delete sizes keeps it open, where the ✕'s
   // mouse down has closed it), and once, so a typed price makes the size one that asks.
   assert(del.indexOf("commitEdit();") > 0 && del.indexOf("commitEdit();") < del.indexOf("ssPgNeverEdited(") && del.indexOf("commitEdit();") === del.lastIndexOf("commitEdit();"), "deleteSize reads the rule before it commits the editor");
-  // The plain ✕ leaves an earlier status line up. A refused call clears it instead (failed), so the
-  // note still shows at once.
-  assert(del.includes("backToWork();\n      delStart([id]);"), "the plain ✕ touches no status line");
+  // The plain ✕ clears an earlier status line, so a stale one doesn't sit through a slow answer. The
+  // grid can't jump for it: the line is in the band.
+  assert(del.includes("backToWork();\n      setTip(null); setSaid(null);\n      delStart([id]);"), "the plain ✕ clears the line");
   assert(del.includes(`if (!c.ok) { const where = whereOf(id); delSay((where ? where + ": " : "") + delWhy(id, c.why)); return; }`), "a refused ✕ starts with the size's name");
   // Every "why" knows a hidden style's size: its tick is no way to hide it (the row's title, the ✕,
   // the confirm's re-check and several at once).

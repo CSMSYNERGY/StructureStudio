@@ -4160,8 +4160,9 @@ if (want("X")) {
   ok("X: no page errors (an open editor)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-// The ✕ on a size added by mistake leaves the status line up, and the delete's own answer replaces it.
-// A call refused whole clears it, so its note shows at once.
+// The ✕ on a size added by mistake clears an earlier status line, so a stale one doesn't sit through a
+// slow answer. The grid stays where it is, and the delete's own answer takes the line. A call refused
+// whole shows its note at once.
 if (want("X")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44"]));
@@ -4182,8 +4183,8 @@ if (want("X")) {
   await page.locator(`tr[data-s="${slow.id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
   const after = await statusText(page);
   const y1 = (await page.locator(sel(slow.id, 0)).boundingBox()).y;
-  ok("X: the ✕ on a size added by mistake leaves an earlier status line up, and the grid doesn't move under the pointer",
-    up1 && after === refusal(U, UNCLR) && y1 === y0, JSON.stringify({ up1, after, y0, y1 }));
+  ok("X: the ✕ on a size added by mistake clears an earlier status line, and the grid doesn't move under the pointer",
+    up1 && after === "" && y1 === y0, JSON.stringify({ up1, after, y0, y1 }));
   const goneS = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), slow.id, { timeout: 10000 }).then(() => true, () => false);
   ok("X: …then the line says it went", goneS && (await statusText(page)) === `Deleted Test Barn ${slow.label}.`, await statusText(page));
   const up2 = await greyLine();
