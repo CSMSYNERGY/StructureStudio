@@ -34,6 +34,11 @@
 //      $0 in the designer, after the change is in the queue (never holding it back); the note is drawn
 //      only while the page can edit; the Excel upload counts the sheet's $0 sizes from the rows it
 //      sends and says so under its result, and the instructions say $0 is free.
+//  12. The status line's band (11-02): it has one height whatever is in it, what runs longer hangs over
+//      the header and stops at its bottom edge, every new text is a new node so the flash runs again,
+//      only what is said sits in the live region, a wide screen always draws the legend, and a phone's
+//      long badge shrinks rather than wrap. The gate runs this file and not the harness, so these are what
+//      refuse a push that loses any of it.
 //
 // Lifted with the xlsxCellText_test anchor idiom: the text between a signature and the next "\n}\n".
 // No network, no DOM: the lifted functions get stubs for exactly the names they use.
@@ -401,10 +406,10 @@ Deno.test("every way to add or delete a size, or put a backup back, checks the p
   // An open editor commits before the rule reads the queue (Delete sizes keeps it open, where the ✕'s
   // mouse down has closed it), and once, so a typed price makes the size one that asks.
   assert(del.indexOf("commitEdit();") > 0 && del.indexOf("commitEdit();") < del.indexOf("ssPgNeverEdited(") && del.indexOf("commitEdit();") === del.lastIndexOf("commitEdit();"), "deleteSize reads the rule before it commits the editor");
-  // The plain ✕ leaves an earlier status line up: clearing it jumps the grid under the pointer. A
-  // refused call clears it instead (failed), so the note still shows at once.
+  // The plain ✕ leaves an earlier status line up. A refused call clears it instead (failed), so the
+  // note still shows at once.
   assert(del.includes("backToWork();\n      delStart([id]);"), "the plain ✕ touches no status line");
-  assert(del.includes("if (!c.ok) { delSay(delWhy(id, c.why)); return; }"));
+  assert(del.includes(`if (!c.ok) { const where = whereOf(id); delSay((where ? where + ": " : "") + delWhy(id, c.why)); return; }`), "a refused ✕ starts with the size's name");
   // Every "why" knows a hidden style's size: its tick is no way to hide it (the row's title, the ✕,
   // the confirm's re-check and several at once).
   assert(page.includes("const inHiddenStyle = (id) => !!byId[id] && !byId[id].style.active;"));
@@ -649,7 +654,7 @@ Deno.test("Size's width is one number: the colgroup, the frozen total, the scrol
   assert(html.includes(".ss-pg-grid .ss-pg-f1{position:sticky;left:82px;") && html.includes(".ss-pg-grid .ss-pg-f2{position:sticky;left:158px;"), "the sticky offsets");
 });
 
-Deno.test("one click is one box: a range starts only once the held pointer has moved from the press, so a grid that moves under it (the status line clearing) stretches nothing", () => {
+Deno.test("one click is one box: a range starts only once the held pointer has moved from the press, so a shake across a row edge, or rows sliding under it, stretches nothing", () => {
   const p = fnText(CATALOG, "function PricingTablePage(");
   assert(p.includes("if (e.button === 0) { dragRef.current = true; pressRef.current = { x: e.clientX, y: e.clientY }; }"), "the press is remembered");
   assert(p.includes("if (!dragRef.current || !dragStarted(e)) return;"), "a mouse over counts only after that");
@@ -657,7 +662,7 @@ Deno.test("one click is one box: a range starts only once the held pointer has m
   assert(p.includes("onMouseOver={onMouseOver} onMouseMove={onMouseMove}"), "both reach the grid");
 });
 
-Deno.test("a double click and a held key act once, on what was aimed at: the grid or the rows can move under a still pointer", () => {
+Deno.test("a double click and a held key act once, on what was aimed at: the rows can slide under a still pointer", () => {
   const p = fnText(CATALOG, "function PricingTablePage(");
   assert(p.includes(`else if (act === "delete" && e.detail < 2) deleteSize(id);`), "the ✕");
   assert(p.includes("onClick={(e) => { if (e.detail < 2) deleteSel(); focusGrid(); }}"), "Delete sizes");
@@ -666,6 +671,36 @@ Deno.test("a double click and a held key act once, on what was aimed at: the gri
   assert(p.includes("firstBoxRef.current = cell;") && p.includes("if (e.detail < 2) firstBoxRef.current = null;"), "the first press names the box, or none");
   assert(p.includes("const cell = firstBoxRef.current;\n    if (cell && cell.col !== 2) startEdit(cell, null);"), "and the double click opens that box");
   assert(p.includes("if (flight.removes && flight.removes.length) setSaid(null);"), "a refused delete's note shows at once");
+});
+
+Deno.test("the status line's band: one height whatever is in it, its overflow capped by the header, a new node for each text, and only what is said in the live region", async () => {
+  const html = (await Deno.readTextFile(new URL("../../../../portal.html", import.meta.url))).replace(/\r\n/g, "\n");
+  const page = fnText(CATALOG, "function PricingTablePage(");
+  assert(html.includes(".ss-pg-slot{position:relative;height:var(--ss-pg-slot);flex-shrink:0;"), "the band's height is fixed");
+  assert(html.includes(".ss-pg-slot-in{position:absolute;top:0;left:0;right:0;z-index:8;max-height:calc(var(--ss-pg-slot) + var(--ss-pg-hd));overflow-y:auto}"), "what runs long sits on top, capped by the header");
+  const band = page.indexOf(`<div className="ss-pg-slot" style={{ "--ss-pg-hd": SS_PG_SEC_H + hh + "px" }}>`);
+  assert(band > 0 && band < page.indexOf(`className="ss-pg-box"`), "--ss-pg-hd is the header's real height, and the band comes before the box");
+  assert(CATALOG.includes(`<div key={String(children)} className={"ss-pg-status ss-pg-status-" + tone} role={role || undefined}>`), "each new text is a new node, so the flash runs again");
+  const live = page.indexOf(`<div className="ss-pg-live" role="status">`);
+  const legend = page.indexOf(`{zeroLine}</PgStatusLine> : null}\n      </div>\n      {(legendOpen || !narrow) && <div id="ss-pg-legend"`);
+  assert(live > band && legend > live, "the live region closes before the legend, so the legend and the note are never read out");
+  assert(page.includes(`{(legendOpen || !narrow) && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}`), "a phone turned sideways still gets the legend");
+  const narrowCss = between(html, "@media (max-width:699.98px){", "\n}\n", "the narrow block");
+  assert(narrowCss.includes(".ss-pg-badge{flex:1 1 0;min-width:0;max-width:max-content;overflow:hidden;text-overflow:ellipsis}"), "a phone's long badge shrinks instead of pushing its buttons to a new row");
+  assert(narrowCss.includes(`.ss-pg[data-ss-pg-editable="0"] .ss-pg-badge{flex:0 1 auto}`), "a page that can't edit keeps its badge whole where it fits");
+  assert(narrowCss.includes(`.ss-pg-bar::after{content:"";order:7;flex-basis:100%}`), "below 560 the badge and ? always get the last row");
+  assert(narrowCss.includes(".ss-pg-slot-in{top:var(--ss-pg-slot);max-height:var(--ss-pg-hd)}") && narrowCss.includes(".ss-pg-slot-in .ss-pg-status>span{max-height:calc(var(--ss-pg-hd) - 7px)}"), "under a phone's readout, what runs long still stops at the header's bottom");
+  assert(narrowCss.includes(".ss-pg-legend{padding:3px 14px;border-bottom:1px solid #E2E8F0}"), "a phone's open legend has its own bottom edge, since it can spill past the band");
+  assert(html.includes(".ss-pg-slot .ss-pg-status>span{flex:1;min-width:0;max-height:calc(var(--ss-pg-slot) + var(--ss-pg-hd) - 7px);overflow-y:auto;overflow-wrap:anywhere}"), "a long line scrolls inside itself, and typed text with no spaces wraps");
+  assert(html.includes(".ss-pg-earlier~.ss-pg-status button{align-self:flex-start}"), "with the offer up, a long line's Dismiss stays in view");
+  assert(html.includes("@media (min-width:560px) and (max-width:699.98px){\n  .ss-pg{--ss-pg-slot:31px}\n  .ss-pg-bar::after{display:none}\n  .ss-pg-slot>.ss-pg-readout{display:block;white-space:nowrap}\n}"), "from 560 to 699 the band is one line, and the toolbar keeps its two rows");
+  assert(page.includes("{!narrow && readoutEl}") && page.includes(`px" }}>{narrow && readoutEl}<div className="ss-pg-slot-in">`), "below 700 the readout lives in the band");
+  assert(page.includes(`if (act === "delete" && e.detail < 2 && !ssPgCanDelete(qRef.current, id, byId[id] ? byId[id].size : null).ok) ssPgNoFlash(b.closest("td"));`), "a refused ✕ flashes at the pointer, once for a double click");
+  assert(CATALOG.includes(`window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;\n  try { td.animate(`), "the flash stays off under reduced motion, and can't take the message down");
+  assert(page.includes(`tone={SS_PG_TIP_NO.has(tip) ? "amber" : "grey"}`) && CATALOG.includes(`new Set([SS_PG_RTP + ".", SS_PG_NO_UNDO, SS_PG_ADD_PRICE + ".", SS_PG_SIZE_FIXED, SS_PG_REMOVING])`), "the tips that say no read amber");
+  assert(page.includes("if (Math.abs(e.clientX - p.x) < SS_PG_DRAG_PX && Math.abs(e.clientY - p.y) < SS_PG_DRAG_PX) return false;"), "a shake under the drag distance stays one box");
+  assert(page.includes("aria-expanded={narrow ? legendOpen : undefined}") && page.includes("onClick={() => { if (narrow) setLegendOpen((o) => !o); }}"), "? folds the legend only on a phone, and only there says it does");
+  assert(page.includes(`onMouseDown={keepFocus} onClick={() => { if (narrow) setLegendOpen`), "a click on ? leaves the keyboard on the grid");
 });
 
 Deno.test("only Tab picks the first price for the grid: focus given back after a button picks no box, so Delete sizes keeps saying to click one", () => {

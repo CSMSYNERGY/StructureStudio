@@ -11647,6 +11647,8 @@ const SS_PG_SIZE_FIXED = "A size's width and length can't be changed here.";
 const SS_PG_REFUSED_CALL = "This change couldn't be saved. Tell CSM Synergy if it keeps happening";
 const SS_PG_FORBIDDEN = "You can't change Sheds on this account";
 const SS_PG_REMOVING = "This size is being deleted.";
+// The tips that say no. They read amber, as every other refusal does.
+const SS_PG_TIP_NO = new Set([SS_PG_RTP + ".", SS_PG_NO_UNDO, SS_PG_ADD_PRICE + ".", SS_PG_SIZE_FIXED, SS_PG_REMOVING]);
 const SS_PG_OPEN_CH = "ss-pg-open";            // the tables that are open answer here (PricingTablePage, offerEarlier)
 
 // A Settings address in THIS tab that keeps the account (?view=) and the person (?as=), and
@@ -11726,12 +11728,19 @@ function PgBadge({ tone, text, title = null, onClick = null, actions = null }) {
   );
 }
 
-// The line under the toolbar (plan 3.14), role=status: the active red box's reason with what was
-// typed, a note from the queue (a column that went away), a one-off tip (undo, a locked price), or
-// why the page is view-only, or that the read did not add up.
-function PgStatusLine({ tone = "grey", children, action = null }) {
+// A refused ✕ says no where the pointer is: the message is far up the page, and a second click changes
+// nothing else. A browser that can't run one keyframe throws, and that must not cost it the message.
+function ssPgNoFlash(td) {
+  if (!td || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  try { td.animate([{ backgroundColor: "#FDE68A", offset: 0 }], { duration: 1000, easing: "ease-out" }); } catch (_e) { /* no flash, then */ }
+}
+// The line under the toolbar (plan 3.14): the active red box's reason with what was typed, a note
+// from the queue (a column that went away), a one-off tip (undo, a locked price), or why the page is
+// view-only, or that the read did not add up. `.ss-pg-live` is the live region, and the view-only
+// line outside it passes its own role.
+function PgStatusLine({ tone = "grey", children, action = null, role = null }) {
   return (
-    <div className={"ss-pg-status ss-pg-status-" + tone} role="status">
+    <div key={String(children)} className={"ss-pg-status ss-pg-status-" + tone} role={role || undefined}>
       <span>{children}</span>
       {action}
     </div>
@@ -11844,8 +11853,8 @@ function PricingTableGate({ clientId, viewing, isSupportOp, supportCheckGaveUp, 
 }
 
 // THE PAGE (plan 3.2-3.17, 4.6-4.9). A flex column the height of the window: the toolbar, the
-// operator strip in view-as, the status line, the legend, and the grid box, which is the only thing
-// on the page that scrolls, both ways.
+// operator strip in view-as, the band (the status line and the legend, which can hang over the
+// header), and the grid box, which is all that scrolls the table, both ways.
 //
 // ⚠️ EVERY HOOK IS IN THE TOP BLOCK, and there is no early return at all: the one return picks what
 // to draw. Later phases add their state up here too, never beside the handlers that use it (React
@@ -12027,7 +12036,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // in the header's own font (ssPgHeaderHeight); then the drawn names are checked, and if any still
   // runs to a third line or past its box the header grows 8 px and is checked again. All before
   // paint, so no name is ever drawn cut. Below 700 px the header is a fixed 90 px with an ellipsis
-  // (portal.html), and the toolbar's readout carries the full name.
+  // (portal.html), and the band's readout carries the full name.
   React.useLayoutEffect(() => {
     if (!base || narrow || !gridRef.current) return;
     const spans = [...gridRef.current.querySelectorAll("thead .ss-pg-vh")];
@@ -12517,8 +12526,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       ssLogError("portal", `pricing table: the server refused a save the page let through: ${String(v.reason || "").slice(0, 300)}`,
         "pricing_table_save_refused", { status: v.status || null });
       apply({ type: "fail", n: flight.n, kind: "refused", reason: SS_PG_REFUSED_CALL });
-      // A delete's note goes on the line at once: `said` outranks it, and the plain ✕ leaves an earlier
-      // line up, because clearing it would jump the grid under the pointer.
+      // A delete's note goes on the line at once: `said` outranks it, and a line said while the delete
+      // is out (Ctrl+C, say) would otherwise hide the refused call's note.
       if (flight.removes && flight.removes.length) setSaid(null);
       return;
     }
@@ -12706,7 +12715,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       return;
     }
     const c = ssPgCanDelete(qRef.current, id, z);
-    if (!c.ok) { delSay(delWhy(id, c.why)); return; }
+    if (!c.ok) { const where = whereOf(id); delSay((where ? where + ": " : "") + delWhy(id, c.why)); return; }
     setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });
   };
   // Delete sizes on the toolbar, and Delete or Backspace on a range that lies wholly in the Size
@@ -12739,8 +12748,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const cur = qRef.current;
     const stop = ids.map((id) => ({ id, c: ssPgCanDelete(cur, id, byId[id] ? byId[id].size : null) })).find((x) => !x.c.ok);
     if (stop) {
-      const why = delWhy(stop.id, stop.c.why);
-      delSay(ids.length === 1 ? why : `${whereOf(stop.id) || "One of those sizes"}: ${why} Nothing was deleted.`);
+      const why = delWhy(stop.id, stop.c.why), where = whereOf(stop.id);
+      delSay(ids.length === 1 ? (where ? where + ": " : "") + why : `${where || "One of those sizes"}: ${why} Nothing was deleted.`);
       return;
     }
     commitEdit();
@@ -12758,9 +12767,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const b = e.target && e.target.closest ? e.target.closest("[data-pg-act]") : null;
     if (!b || !gridRef.current || !gridRef.current.contains(b)) return;
     const act = b.getAttribute("data-pg-act"), id = b.getAttribute("data-pg-id");
+    if (act === "delete" && e.detail < 2 && !ssPgCanDelete(qRef.current, id, byId[id] ? byId[id].size : null).ok) ssPgNoFlash(b.closest("td"));
     if (act === "add") toggleAdd(id);
-    // Not the second click of a double click: the first can move the grid under the still pointer (a
-    // line comes up, a delete lands and the next row slides up), so another size's ✕ may be there now.
+    // Not the second click of a double click: a delete can land between the two and the next row
+    // slides up under the still pointer, so another size's ✕ may be there now.
     else if (act === "delete" && e.detail < 2) deleteSize(id);
   };
 
@@ -13047,7 +13057,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     e.preventDefault();
     if (!canEditNow()) return;
     const sel = selRect();
-    if (!sel) { setSaid({ tone: "grey", text: "Click the box where the paste should start." }); return; }
+    if (!sel) { setSaid({ tone: "amber", text: "Click the box where the paste should start." }); return; }
     const text = e.clipboardData ? e.clipboardData.getData("text/plain") : "";
     propose(ssPgPastePlan(viewOf(), { sizeId: order[sel.r0], col: sel.c0 }, ssPgParseTsv(text)));
   };
@@ -13119,7 +13129,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
   const confirmNo = () => { setConfirm(null); focusGrid(); };
   // The toolbar's buttons keep the focus where it was (the grid, or the open editor, which their
-  // click then commits).
+  // click then commits; ?'s commits nothing).
   const keepFocus = (e) => { e.preventDefault(); };
 
   // ── The grid's own keys and mouse (plan 3.10) ──
@@ -13186,8 +13196,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     const cell = cellAt(e);
     if (!cell) return;
     e.preventDefault();   // no drag-select of text; focus is given by hand, without a scroll
-    // The second press of a double click stays on the first's box: that press can clear the status
-    // line, and the grid then moves up, so the row under the pointer is another size now.
+    // The second press of a double click stays on the first's box: rows can slide between the two
+    // presses, so the row under the pointer can be another size now.
     if (e.detail > 1 && activeRef.current) return;
     firstBoxRef.current = cell;
     commitEdit();
@@ -13205,8 +13215,8 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   };
   // A drag with the button held stretches the range over the cells it passes (not on touch). It is a
   // drag once the pointer has moved SS_PG_DRAG_PX from the press. Before that the pointer is still,
-  // whatever passes under it: the mouse down above can clear the status line, the grid then moves up,
-  // and the browser reports the row below as passed over, so one click would select two boxes.
+  // whatever passes under it: a shake of a pixel or two across a row edge, or rows sliding during the
+  // hold, reports the next row as passed over, so one click would select two boxes.
   const dragStarted = (e) => {
     const p = pressRef.current;
     if (!p) return true;
@@ -13224,7 +13234,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
   // The pointer can cross into the next box inside those few pixels and stay there, so no mouse over
   // comes: the move that starts the drag counts the box it is in.
   const onMouseMove = (e) => { if (dragRef.current && pressRef.current && dragStarted(e)) onMouseOver(e); };
-  // Opens the box the first press hit, wherever the grid has moved since. One that began on a ✕ opens
+  // Opens the box the first press hit, wherever the rows have slid since. One that began on a ✕ opens
   // nothing: the ring can be on another size.
   const onDoubleClick = () => {
     const cell = firstBoxRef.current;
@@ -13426,6 +13436,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
     </>}>{`${n(unsaved, "1 change isn't", "changes aren't")} saved yet, so you're still on this page.`}</PgStatusLine>
   ) : null;
 
+  const readoutEl = <span className="ss-pg-readout" title={readout || undefined}>{readout}</span>;
   return (
     <div className="ss-pg" data-ss-pg-editable={canEdit ? "1" : "0"}>
       <div className="ss-pg-bar">
@@ -13454,10 +13465,10 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
               title="Delete the sizes in the selected rows">Delete sizes</button>
           </>
         )}
-        <span className="ss-pg-readout" title={readout || undefined}>{readout}</span>
+        {!narrow && readoutEl}
         <PgBadge {...badge} />
-        <button type="button" className="ss-pg-q" aria-expanded={legendOpen} aria-controls="ss-pg-legend"
-          title="What the boxes mean" onClick={() => setLegendOpen((o) => !o)}>?</button>
+        <button type="button" className="ss-pg-q" aria-expanded={narrow ? legendOpen : undefined} aria-controls="ss-pg-legend"
+          title="What the boxes mean" onMouseDown={keepFocus} onClick={() => { if (narrow) setLegendOpen((o) => !o); }}>?</button>
       </div>
       {/* The chromeless page has no top bar, so it says for itself whose account this is. */}
       {operatorView && (
@@ -13467,11 +13478,15 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
             : `Editing ${companyName} as operator. Changes are live.`}
         </div>
       )}
-      {viewOnly && <PgStatusLine>{viewOnly.long}</PgStatusLine>}
+      {viewOnly && <PgStatusLine role="status">{viewOnly.long}</PgStatusLine>}
+      {/* One band that is always this high, so nothing that comes and goes in it moves the grid. What
+          runs longer than the band hangs over the frozen header, and --ss-pg-hd stops it there. Only
+          what is said sits in the live region: the legend and the note would be read out. */}
+      <div className="ss-pg-slot" style={{ "--ss-pg-hd": SS_PG_SEC_H + hh + "px" }}>{narrow && readoutEl}<div className="ss-pg-slot-in"><div className="ss-pg-live" role="status">
       {tooBig && <PgStatusLine tone="amber" action={<button type="button" onClick={fetchAll}>Reload</button>}>{SS_PG_TOO_BIG}</PgStatusLine>}
       {/* The backup from earlier (plan 4.9): offered back once, until Save them or Discard. */}
       {earlier && canEdit && (
-        <div className="ss-pg-earlier" role="status">
+        <div className="ss-pg-earlier">
           <span>{earlier.count === 1 ? "You have 1 change from earlier that wasn't saved." : `You have ${earlier.count} changes from earlier that weren't saved.`}</span>
           {/* Greyed while a call is out (about a second, or while saving is stopped): Save them goes on
               the stored versions only when nothing is in flight (ssPgQueue's restore). */}
@@ -13485,15 +13500,17 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
         : errLine ? <PgStatusLine tone={aerr.kind === "conflict" ? "amber" : "red"} action={dismissBtn(() => apply({ type: "dismiss", sizeId: active.sizeId, f: af }))}>{errLine}</PgStatusLine>
         : earlierLine ? <PgStatusLine tone="amber" action={dismissBtn(dismissEarlierRed)}>{earlierLine}</PgStatusLine>
         : q && q.note ? <PgStatusLine tone="amber" action={dismissBtn(() => apply({ type: "note-off" }))}>{q.note.text}</PgStatusLine>
-        : tip ? <PgStatusLine action={dismissBtn(() => setTip(null))}>{tip}</PgStatusLine>
+        : tip ? <PgStatusLine tone={SS_PG_TIP_NO.has(tip) ? "amber" : "grey"} action={dismissBtn(() => setTip(null))}>{tip}</PgStatusLine>
         : zeroLine ? <PgStatusLine tone="amber" action={dismissBtn(() => setZeroIds(null))}>{zeroLine}</PgStatusLine> : null}
-      {legendOpen && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}
+      </div>
+      {(legendOpen || !narrow) && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}
       {narrow && !noteOff && (
         <div className="ss-pg-narrow">
           <span>Easiest on a computer. You can still check and change numbers here.</span>
           <button type="button" aria-label="Dismiss" onClick={() => setNoteOff(true)}>✕</button>
         </div>
       )}
+      </div></div>
       {noCols && (
         <div className="ss-pg-optbox">
           <b>Set up your Options first.</b> Every door, window, ramp, and add-on you offer becomes a column here — that's
@@ -13583,7 +13600,7 @@ function PgConfirm({ text, onYes, onNo, yesLabel = "Continue", danger = false })
 // The two header rows (plan 3.3-3.4): the section band in each section's template colour, then the
 // names. Option names stand on end in a .ss-pg-vh span, top to bottom (Carolyn Q6), and wrap onto a
 // second line inside the column rather than being cut; the full name is also each header's title
-// and aria-label, and the toolbar's readout while it is pointed at.
+// and aria-label, and the readout while it is pointed at.
 const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, onPeekEnd }) {
   // A section too narrow for its name (ssPgSecNarrow) draws it in the narrow style instead of
   // cutting it. Measured in the band's own style (portal.html .ss-pg-sec th: weight 800, 10.5 px,

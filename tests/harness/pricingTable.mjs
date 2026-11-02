@@ -41,7 +41,7 @@
 //      account could not be opened, and no table read ever goes out; a view-only access map opens
 //      view-only; a billing lock shows the lock.
 //   G  NARROW (390 px): the page does not scroll sideways, the header is at most 90 px, at least 8 rows
-//      show.
+//      show, and ? opens and folds the legend.
 //   P  EDITING AND AUTOSAVE (Phase 3), against a fake of save_pricing_cells answering as migration 350
 //      does (fakeServer): a digit opens the editor over the box holding it; Enter/Tab/Shift+Tab/Up/Down
 //      commit and move, Left/Right stay in the text, Escape cancels, F2/Enter/double-click edit in place;
@@ -141,6 +141,23 @@
 //      2 calls and say "Deleted 60 sizes."; the Excel template after a delete leaves them out; when
 //      the size clicked first is used and stays, the next Delete (key or toolbar) says why it stays,
 //      not "Click a size first"; an operator's confirm names the account.
+//   S  STILL (the status line plan, 11-02), against fakeServer, with page.mouse and a frame sampler, at
+//      eleven windows from 1920x860 to 360x640: at the top of the scroll and at its very end, a row's y,
+//      the header's y, scrollTop, the box's height, the toolbar's and the box under a point stay the
+//      same while a grey line, an amber line, a conflict, the 318-character line, ?, the note's ✕, a
+//      first press, a header hover and a save each come and go, and through the earlier offer's arrival
+//      and its Discard; a keyboard user on ? sees the legend under a line. On the normal header and a
+//      short one, with the offer up and without, a 318- and a 3000-character line stop at the header's
+//      bottom, Dismiss hit-tests as Dismiss, and the page has no sideways scroll. Two slow clicks on a
+//      greyed ✕ at five heights on it (1440, 1366, 390): the size above stays, nothing is sent, and the
+//      box flashes for both and gets its colour back. The real failure flow at 15 phone widths: one
+//      toolbar height through the retry badge, the stopped badge and the save landing. The band flashes
+//      on a new text, not the same text, and neither flash runs under reduced motion. One live region,
+//      holding only what is said. The name in a phone's band: on top of a line and the legend, two lines
+//      at most, one from 560. ? on a wide screen, by mouse, keyboard and touch, and on a phone turned
+//      sideways and back. Rows fully shown in every state. The tips that say no are amber. And the four
+//      guards nothing else exercises now: a shake over a row edge, a delete landing inside a double
+//      click, a double click on Delete sizes, Ctrl+C during a refused delete.
 //   T  TIMING (always printed): first render, arrow-key and typing time at 1x (210 sizes x 41 columns,
 //      about 8,600 cells) and 3x (630 x 41, about 25,800). Fails if an arrow key re-renders a row or a
 //      commit re-renders more than the one it changed, and at 1x if the plan's targets are missed
@@ -458,11 +475,11 @@ function fakeServer(cat, table) {
 //      page's own scripts: __ssPgBackoffMs, __ssSaveDeadlineMs, __ssPgRefreshMs), onImport (runs on
 //      an import_pricing_csv, before its answer), storage (localStorage entries set before the page's
 //      own scripts, once per context) }
-async function open(path, S0 = {}, { width = 1440, height = 900 } = {}) {
+async function open(path, S0 = {}, { width = 1440, height = 900, hasTouch = false } = {}) {
   const S = { own: OWN, operator: false, operatorDelayMs: 0, role: "owner", access: null, locked: false, sizeTableDelayMs: 0, sizeTableFailures: 0, countSkew: false, ...S0 };
   S.cat = S.cat || ((cid) => catalogFor(cid));
   S.table = S.table || (S.fake ? (cid) => S.fake.table(cid) : (cid) => tableFor(cid, S.cat(cid)));
-  const ctx = await browser.newContext({ viewport: { width, height }, serviceWorkers: "block", acceptDownloads: true });
+  const ctx = await browser.newContext({ viewport: { width, height }, serviceWorkers: "block", acceptDownloads: true, hasTouch });
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
   }, [REF, SESSION]);
@@ -589,6 +606,9 @@ const saveCalls = (calls) => calls.filter((c) => c.fn === "portal-settings" && c
 const barnOf = (t) => t.sizes.filter((z) => z.style_id === t.styles[0].id).sort((a, b) => a.sort_order - b.sort_order);
 const keyCol = (cat, key) => 3 + OPTION_KEYS(cat).indexOf(key);
 const named = (z) => `Test Barn ${z.label}`;
+// What a greyed ✕ says: its size's name, then why it stays. The name is why another size's refusal
+// changes the text, and so flashes the band.
+const refusal = (z, why, style = "Test Barn") => `${style} ${z.label}: ${why}`;
 const look = (page, id, col) => page.evaluate((s) => { const td = document.querySelector(s); return td ? { text: td.textContent, cls: td.className, invalid: td.getAttribute("aria-invalid") } : null; }, sel(id, col));
 const state = (page) => page.evaluate(() => ({
   badge: (document.querySelector(".ss-pg-badge") || {}).textContent || "",
@@ -1083,9 +1103,9 @@ if (want("D")) {
   const jl = await jumpTo("Test Utility Shed", t.styles[2].id);
   ok("D: …the last style scrolls as far as the grid goes, its band in view under the header", (Math.abs(jl.band - jl.head) <= 2 || (jl.atEnd && jl.band >= jl.head - 2 && jl.band < jl.boxBottom))
     && /^Price · Test Utility Shed /.test(jl.readout), JSON.stringify(jl));
-  // The legend folds.
+  // Folding buys no row now, so a wide screen keeps the legend (G folds it at 390).
   await page.locator(".ss-pg-q").click();
-  ok("D: '?' folds the legend", !(await page.locator(".ss-pg-legend").count()));
+  ok("D: '?' leaves the legend up at 1440", await page.locator(".ss-pg-legend").isVisible());
   await page.screenshot({ path: join(shots, "D-grid.png") });
   ok("D: no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
@@ -1334,6 +1354,10 @@ if (want("G")) {
   ok("G: the header is at most 90 px", g.head <= 90, String(g.head));
   ok("G: at least 8 rows show", g.visibleRows >= 8, String(g.visibleRows));
   ok("G: only Size stays frozen, the legend starts folded, and the computer note shows", g.priceSticky === "static" && !g.legend && /Easiest on a computer\./.test(g.note), JSON.stringify(g));
+  await page.locator(".ss-pg-q").click();
+  const opened = await page.locator(".ss-pg-legend").isVisible();
+  await page.locator(".ss-pg-q").click();
+  ok("G: '?' opens the legend, and a second press folds it", opened && !(await page.locator(".ss-pg-legend").count()));
   await page.screenshot({ path: join(shots, "G-390.png") });
   ok("G: no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
@@ -2516,7 +2540,7 @@ if (want("R")) {
   let n0 = saveCalls(calls).length;
   await clickGrey(U.id);
   await page.waitForTimeout(900);
-  ok("R: …its click says how to hide it instead, asks nothing and sends nothing", (await statusText(page)) === UNCLR && !(await confirmOf(page)) && saveCalls(calls).length === n0,
+  ok("R: …its click says how to hide it instead, asks nothing and sends nothing", (await statusText(page)) === refusal(U, UNCLR) && !(await confirmOf(page)) && saveCalls(calls).length === n0,
     await statusText(page));
   // Untick Offered on it as told, then ✕ again: it says it is already hidden, and how it folds away.
   await page.locator(sel(U.id, 2)).click();
@@ -2526,7 +2550,7 @@ if (want("R")) {
   await page.waitForTimeout(300);
   u = await rmLook(page, U.id);
   ok("R: unticked as told, its ✕ says it is already hidden: turn off Show hidden sizes to fold it away (title and status line)",
-    (await statusText(page)) === UHID_ON && !!u && u.title === UHID_ON && F.size(U.id).active === false, JSON.stringify({ st: await statusText(page), u }));
+    (await statusText(page)) === refusal(U, UHID_ON) && !!u && u.title === UHID_ON && F.size(U.id).active === false, JSON.stringify({ st: await statusText(page), u }));
   // A priced size nobody uses: the confirm, Cancel sends nothing.
   n0 = saveCalls(calls).length;
   await page.locator(`tr[data-s="${P.id}"] .ss-pg-rm`).click();
@@ -2551,7 +2575,7 @@ if (want("R")) {
   // A used size's ✕ now: its own line replaces "Deleted …".
   await clickGrey(V.id);
   await page.waitForTimeout(300);
-  ok("R: after a delete, a used size's ✕ reads its text exactly, not 'Deleted …'", (await statusText(page)) === UNCLR, await statusText(page));
+  ok("R: after a delete, a used size's ✕ reads its text exactly, not 'Deleted …'", (await statusText(page)) === refusal(V, UNCLR), await statusText(page));
   // A size with a red box: its ✕ asks, and the delete takes the red box with it.
   const LOFT = keyCol(cat, "loft");
   await typeIn(page, Rd.id, LOFT, "abc");
@@ -2591,7 +2615,7 @@ if (want("R")) {
   await page.waitForTimeout(300);
   const w = await rmLook(page, W.id);
   ok("R: with Show hidden sizes off, a used size unticked while drawn stays drawn and says it folds away the next time the page opens",
-    (await statusText(page)) === UHID_OFF && !!w && w.title === UHID_OFF, JSON.stringify({ st: await statusText(page), w }));
+    (await statusText(page)) === refusal(W, UHID_OFF) && !!w && w.title === UHID_OFF, JSON.stringify({ st: await statusText(page), w }));
   ok("R: no call was malformed (deleting priced sizes)", F.bad.length === 0, F.bad.join());
   ok("R: no page errors (deleting priced sizes)", errors.length === 0, errors.join(" | "));
   await ctx.close();
@@ -4062,7 +4086,7 @@ if (want("X")) {
   ok("X: a range whose first-clicked size is used: the other three go and it stays",
     !!cf && /^Delete 3 sizes, /.test(cf.text) && / 1 more stays because a saved design uses it\.$/.test(cf.text) && went && st0 === "Deleted 3 sizes.", JSON.stringify({ cf: cf && cf.text, went, st0 }));
   ok("X: …then Delete on its still-ringed Size box, and Delete sizes, say why it stays, not 'Click a size first', and send nothing",
-    byKey === UNCLR && byBar === UNCLR && saveCalls(calls).length === n0 && !(await confirmOf(page)), JSON.stringify({ byKey, byBar }));
+    byKey === refusal(b[0], UNCLR) && byBar === refusal(b[0], UNCLR) && saveCalls(calls).length === n0 && !(await confirmOf(page)), JSON.stringify({ byKey, byBar }));
   ok("X: no page errors (a used first size)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
@@ -4136,9 +4160,8 @@ if (want("X")) {
   ok("X: no page errors (an open editor)", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
-// The ✕ on a size added by mistake leaves the status line up, so the grid doesn't jump under the
-// pointer, and the delete's own answer replaces it. A call refused whole clears it, so its note shows
-// at once.
+// The ✕ on a size added by mistake leaves the status line up, and the delete's own answer replaces it.
+// A call refused whole clears it, so its note shows at once.
 if (want("X")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44"]));
@@ -4151,7 +4174,7 @@ if (want("X")) {
   const greyLine = async () => {
     await page.locator(`tr[data-s="${U.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(200);
-    return (await statusText(page)) === UNCLR;
+    return (await statusText(page)) === refusal(U, UNCLR);
   };
   const up1 = await greyLine();
   F.script.push({ delayMs: 1500 });
@@ -4159,8 +4182,8 @@ if (want("X")) {
   await page.locator(`tr[data-s="${slow.id}"] .ss-pg-rm`).click({ timeout: 3000 }).catch(() => {});
   const after = await statusText(page);
   const y1 = (await page.locator(sel(slow.id, 0)).boundingBox()).y;
-  ok("X: the ✕ on a size added by mistake leaves an earlier status line up, so the grid doesn't move under the pointer",
-    up1 && after === UNCLR && y1 === y0, JSON.stringify({ up1, after, y0, y1 }));
+  ok("X: the ✕ on a size added by mistake leaves an earlier status line up, and the grid doesn't move under the pointer",
+    up1 && after === refusal(U, UNCLR) && y1 === y0, JSON.stringify({ up1, after, y0, y1 }));
   const goneS = await page.waitForFunction((id) => !document.querySelector(`tr[data-s="${id}"]`), slow.id, { timeout: 10000 }).then(() => true, () => false);
   ok("X: …then the line says it went", goneS && (await statusText(page)) === `Deleted Test Barn ${slow.label}.`, await statusText(page));
   const up2 = await greyLine();
@@ -4252,7 +4275,7 @@ if (want("X")) {
   await page.locator(`tr[data-s="${z.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
   await page.waitForTimeout(600);
   ok("X: a used, Offered size of a hidden style says its style is what hides it (title and status line), and sends nothing",
-    !!look1 && look1.off === "true" && look1.title === HIDST && (await statusText(page)) === HIDST && !(await confirmOf(page)) && saveCalls(calls).length === n0, JSON.stringify({ look1, st: await statusText(page) }));
+    !!look1 && look1.off === "true" && look1.title === HIDST && (await statusText(page)) === refusal(z, HIDST, retired.label) && !(await confirmOf(page)) && saveCalls(calls).length === n0, JSON.stringify({ look1, st: await statusText(page) }));
   await pickSizes(page, hz[1], hz[2]);
   await delBtn(page).click();
   await page.waitForTimeout(300);
@@ -4264,7 +4287,7 @@ if (want("X")) {
   await page.locator(`tr[data-s="${z.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
   await page.waitForTimeout(300);
   look1 = await rmLook(page, z.id);
-  ok("X: …unticked, it says what any hidden size says", (await statusText(page)) === UHID_ON && !!look1 && look1.title === UHID_ON && F.size(z.id).active === false, JSON.stringify({ st: await statusText(page), look1 }));
+  ok("X: …unticked, it says what any hidden size says", (await statusText(page)) === refusal(z, UHID_ON, retired.label) && !!look1 && look1.title === UHID_ON && F.size(z.id).active === false, JSON.stringify({ st: await statusText(page), look1 }));
   await page.locator(".ss-pg-tog input").uncheck();
   await page.waitForTimeout(300);
   ok("X: …and that advice is true: Show hidden sizes off folds it away, an Offered one stays drawn",
@@ -4274,11 +4297,11 @@ if (want("X")) {
   await ctx.close();
 }
 
-// One click on a box is one box, whatever the click does around it. Its mouse down clears the status
-// line, the grid moves up under the still pointer, and the browser reports the row below as passed
-// over: page.mouse here, because a real press has a hold in it and the report comes during the hold.
-// A pointer that shakes a pixel or two is still a click. A real drag still makes a range: with no line
-// up, with one, and from a pixel off the next box to just inside it, where no mouse over comes later.
+// One click on a box is one box, whatever the click does around it. The line clearing no longer moves
+// the grid, so nothing moves in these scenes and S's shake over a row edge is what holds the drag rule.
+// page.mouse here, because a real press has a hold in it. A pointer that shakes a pixel or two is still
+// a click. A real drag still makes a range: with no line up, with one, and from a pixel off the next
+// box to just inside it, where no mouse over comes later.
 if (want("X")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, tableFor(OWN, cat));
@@ -4301,7 +4324,7 @@ if (want("X")) {
   const lineUp = async () => {
     await page.locator(`tr[data-s="${U.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(150);
-    return (await statusText(page)) === UNCLR;
+    return (await statusText(page)) === refusal(U, UNCLR);
   };
   // What Delete asks now: it names the sizes the selection holds. Cancel keeps them all.
   const asked = async () => {
@@ -4321,8 +4344,8 @@ if (want("X")) {
   const after1 = await boxOf(b[1].id, 0);
   const st1 = await statusText(page);
   const t1 = await asked();
-  ok("X: one click with a line up clears the line, the grid moves up under the pointer, and Delete names only that size",
-    up1 && st1 === "" && after1.y < at1.y && t1 === askDel(b[1]), JSON.stringify({ up1, st1, moved: at1.y - after1.y, t1 }));
+  ok("X: one click with a line up clears the line, the grid stays under the pointer, and Delete names only that size",
+    up1 && st1 === "" && after1.y === at1.y && t1 === askDel(b[1]), JSON.stringify({ up1, st1, moved: at1.y - after1.y, t1 }));
   const up2 = await lineUp();
   await hold(middle(await boxOf(b[2].id, 0)), [{ x: 2, y: 2 }, { x: 3, y: -1 }]);
   const t2 = await asked();
@@ -4353,10 +4376,10 @@ if (want("X")) {
   await ctx.close();
 }
 
-// A double click acts on what was aimed at, and a held Delete acts once. A first click can move the
-// grid under the still pointer (a line comes or goes, a delete lands and the next row slides up), so
-// the second click's ✕ or box may be another size's. page.mouse here: each pixel row of a ✕ lands
-// somewhere different, and only a real press has a click count.
+// A double click acts on what was aimed at, and a held Delete acts once. A first click can slide the
+// rows under the still pointer (a delete lands and the next row comes up), so the second click's ✕ may
+// be another size's. Lines no longer move the grid, so S holds the second press's guard, with a delete
+// landing inside the double click. page.mouse here: only a real press has a click count.
 if (want("X")) {
   const cat = catalogFor(OWN);
   const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44", "20x48", "20x52", "20x56", "20x60", "20x64", "20x68"]));
@@ -4373,7 +4396,7 @@ if (want("X")) {
   const lineUp = async () => {
     await page.locator(`tr[data-s="${U.id}"] .ss-pg-rm`).click({ force: true, timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(150);
-    return (await statusText(page)) === UNCLR;
+    return (await statusText(page)) === refusal(U, UNCLR);
   };
   const dbl = async (id, dy) => {
     const r = await rmBox(id);
@@ -4402,12 +4425,12 @@ if (want("X")) {
   await page.mouse.up({ clickCount: 2 });
   await page.waitForTimeout(400);
   ok("X: …and with an answer fast enough to slide the next row under the pointer", !F.size(n[2].id) && !!F.size(n[3].id), JSON.stringify(sentNow()));
-  // A greyed ✕ brings the line up, so the grid moves down: the size above it stays.
+  // A double click on a greyed ✕ only says why: nothing moves, and the size above it stays.
   const dis = page.locator(".ss-pg-status button", { hasText: "Dismiss" });
   await dis.click({ timeout: 1000 }).catch(() => {});
   const nBefore = sentNow().length;
   await dbl(n[5].id, 14);
-  ok("X: a double click on a greyed ✕ says why and deletes nothing, not the size above it", (await statusText(page)) === UHID_ON && sentNow().length === nBefore && !!F.size(n[4].id),
+  ok("X: a double click on a greyed ✕ says why and deletes nothing, not the size above it", (await statusText(page)) === refusal(n[5], UHID_ON) && sentNow().length === nBefore && !!F.size(n[4].id),
     JSON.stringify({ st: await statusText(page), sent: sentNow().slice(nBefore) }));
   // A held Delete on a size that goes at once: one size, not a walk down the list.
   await page.locator(sel(n[3].id, 0)).click();
@@ -4419,7 +4442,7 @@ if (want("X")) {
   ok("X: a held Delete takes the one size and walks no further", JSON.stringify(sentNow().slice(nHold)) === JSON.stringify([n[3].id]) && !!F.size(n[4].id) && !(await confirmOf(page)),
     JSON.stringify(sentNow().slice(nHold)));
   // A double click on a box with a line up is that box: Size says it can't be edited, and Delete then
-  // names it; Price opens on it. The line going moves the grid before the second press.
+  // names it; Price opens on it.
   await lineUp();
   const box = await page.locator(sel(b[1].id, 0)).boundingBox();
   await page.mouse.dblclick(box.x + 12, box.y + box.height / 2, { delay: 30 });
@@ -4478,6 +4501,837 @@ if (want("X")) {
   ok("X: focus coming into the grid from outside, as Tab does, lands on the first price", rd === `Price · Test Barn ${b[0].label}`, String(rd));
   ok("X: nothing was sent (nothing clicked)", saveCalls(calls).length === 0);
   ok("X: no page errors (nothing clicked)", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+// ── S: still (the status line plan, 11-02). Messages show in one band under the toolbar, at one height,
+// so nothing that comes or goes in it moves the grid. Real presses through page.mouse, the button held,
+// because a layout shift under a held pointer is what made these bugs and locator.click() hides it;
+// page.mouse never scrolls, so every target is in view first. Each window is its own page, a few at a
+// time: each only waits on its own answers, and one at a time would take minutes. ──
+const STILL_WINDOWS = [[1920, 860], [1440, 860], [1366, 650], [1000, 860], [701, 860], [699, 860], [667, 375], [568, 320], [414, 800], [390, 800], [360, 640]];
+const STILL_AT_ONCE = 6;
+const inTurns = async (items, fn) => {
+  const out = [];
+  for (let i = 0; i < items.length; i += STILL_AT_ONCE) out.push(...await Promise.all(items.slice(i, i + STILL_AT_ONCE).map(fn)));
+  return out;
+};
+const soon = async (fn, timeout = 5000) => {
+  const stop = Date.now() + timeout;
+  for (;;) { const v = await fn(); if (v || Date.now() > stop) return v; await sleep(20); }
+};
+const centerOf = (page, s) => page.evaluate((q) => { const e = document.querySelector(q); if (!e) return null; const r = e.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; }, s);
+const onTop = (page, s) => page.evaluate((q) => { const e = document.querySelector(q); if (!e) return false; const r = e.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && (hit === e || e.contains(hit)); }, s);
+const pressAt = async (page, p, holdMs = 70) => { await page.mouse.move(p.x, p.y); await page.mouse.down(); await page.waitForTimeout(holdMs); await page.mouse.up(); };
+const pressOn = async (page, s) => { const p = await centerOf(page, s); if (p) await pressAt(page, p); return !!p; };
+const rmOf = (id) => `tr[data-s="${id}"] .ss-pg-rm`;
+const DISMISS = ".ss-pg-status button";
+// The rows fully shown now, top to bottom, and whether each one's ✕ is greyed.
+const rowsIn = (page) => page.evaluate(() => {
+  const box = document.querySelector(".ss-pg-box"), bottom = box.getBoundingClientRect().top + box.clientHeight, head = document.querySelector(".ss-pg-names th").getBoundingClientRect().bottom;
+  return [...box.querySelectorAll("tr[data-s]")].filter((tr) => { const r = tr.getBoundingClientRect(); return r.top >= head - 0.5 && r.bottom <= bottom + 0.5; })
+    .map((tr) => ({ id: tr.getAttribute("data-s"), grey: !!tr.querySelector('.ss-pg-rm[aria-disabled="true"]') }));
+});
+// Every frame once that row is drawn: its y, the header's y, scrollTop, the box's height, the toolbar's
+// height and the box under a point on the row's Size box. A change goes in the log under the step it
+// happened in. It can go in before the page's own scripts (the earlier offer's arrival), and `early`
+// says whether the offer was already up on the first frame.
+function stillSampler(rowId) {
+  const W = window.__ssStill = { step: "", moves: [], frames: 0, badges: [], early: null };
+  const begin = () => {
+    const first = document.querySelector(`tr[data-s="${rowId}"] td[data-c="0"]`);
+    if (!first) { requestAnimationFrame(begin); return; }
+    const box = document.querySelector(".ss-pg-box"), bar = document.querySelector(".ss-pg-bar"), size = first.getBoundingClientRect();
+    const read = () => {
+      const tr = document.querySelector(`tr[data-s="${rowId}"]`);
+      const hit = document.elementFromPoint(size.left + 6, size.top + size.height / 2);
+      const td = hit && hit.closest ? hit.closest("td[data-c]") : null;
+      return { row: tr ? tr.getBoundingClientRect().top : null, head: document.querySelector(".ss-pg-names th").getBoundingClientRect().top, scrollTop: box.scrollTop,
+        boxH: box.getBoundingClientRect().height, bar: bar.getBoundingClientRect().height, under: td ? `${td.parentElement.getAttribute("data-s")}:${td.getAttribute("data-c")}` : hit ? hit.className || hit.tagName : null };
+    };
+    W.early = !!document.querySelector(".ss-pg-earlier");
+    let last = read();
+    const tick = () => {
+      const now = read();
+      Object.keys(now).forEach((k) => { if (now[k] !== last[k]) W.moves.push({ step: W.step, k, from: last[k], to: now[k] }); });
+      last = now;
+      W.frames++;
+      const badge = `${(document.querySelector(".ss-pg-badge") || {}).textContent || ""} | ${[...document.querySelectorAll(".ss-pg-bact")].map((b) => b.textContent).join()}`;
+      if (W.badges[W.badges.length - 1] !== badge) W.badges.push(badge);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+  begin();
+}
+const watchStill = (page, id) => page.evaluate(stillSampler, id);
+const stillStep = (page, step) => page.evaluate((s) => { window.__ssStill.step = s; }, step);
+const stillLog = (page) => page.evaluate(() => window.__ssStill);
+// A red box's line quotes what was typed, so a long line is the page's own text. `n` is its whole
+// length; the box has to hold the ring for its line to show.
+const sayLong = async (page, id, n, word) => {
+  await pressOn(page, sel(id, 1));
+  const where = (await state(page)).readout.replace(/^Price · /, "");
+  const room = n - `${where} · Price: “” wasn't saved. A price is a number, 0 or more.`.length;
+  const text = word.repeat(Math.ceil(room / word.length)).slice(0, room - 1) + word[0];
+  await page.keyboard.type(text[0]);
+  await page.keyboard.insertText(text.slice(1));
+  await page.keyboard.press("Enter");
+  await pressOn(page, sel(id, 1));
+};
+const legendOf = (page) => page.evaluate(() => {
+  const l = document.querySelector(".ss-pg-legend"), line = document.querySelector(".ss-pg-status"), band = document.querySelector(".ss-pg-slot"), expanded = document.querySelector(".ss-pg-q").getAttribute("aria-expanded");
+  if (!l) return { mounted: false, shown: false, expanded };
+  const r = l.getBoundingClientRect(), b = band ? band.getBoundingClientRect() : null, cs = getComputedStyle(l);
+  return { mounted: true, shown: cs.display !== "none", top: r.top, underLine: !!line && r.top >= line.getBoundingClientRect().bottom - 0.5, inBand: !!b && r.top >= b.top - 0.5 && r.bottom <= b.bottom + 0.5, edge: cs.borderBottomWidth, expanded };
+});
+
+// 1. Nothing that comes or goes moves the grid, at the top of the scroll and at its very end. The first
+// and last rows of the table are used, so a greyed ✕ is in view at either end in the shortest window.
+const stillRun = async ([width, height], at) => {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const t = F.table(OWN);
+  const shed = t.sizes.filter((z) => z.style_id === t.styles[2].id).sort((p, q) => p.sort_order - q.sort_order);
+  [...barnOf(t).slice(0, 2), ...shed.slice(-2)].forEach((z) => F.used.add(z.id));
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(200);
+  const scrolled = at === "end" ? await page.evaluate(() => { const b = document.querySelector(".ss-pg-box"); b.scrollTop = b.scrollHeight; return b.scrollTop; }) : 0;
+  await page.waitForTimeout(60);
+  const rows = await rowsIn(page);
+  const A = rows[0], grey = rows.find((r) => r.grey);
+  await watchStill(page, rows[rows.length - 1].id);
+  const narrow = width < 700, away = { x: width - 6, y: height - 6 }, missed = at === "end" && !scrolled ? ["the very end"] : [];
+  const step = async (name, act, happened) => {
+    await stillStep(page, name);
+    await act();
+    if (!(await soon(happened))) missed.push(name);
+    await page.waitForTimeout(40);
+  };
+  const says = (re) => async () => re.test(await statusText(page));
+  const clear = async () => (await statusText(page)) === "";
+  const pressA = () => pressOn(page, sel(A.id, 1));
+  const q = await centerOf(page, ".ss-pg-q");
+  // From 700 to 997 px the toolbar is cut off and ? with it, an old bug (the plan's question 4).
+  if (q && q.x < width) {
+    await step("? pressed", () => pressAt(page, q), async () => (await legendOf(page)).shown);
+    await step("? pressed again", () => pressAt(page, q), async () => (await legendOf(page)).shown === !narrow);
+    await step("? left", () => page.mouse.move(away.x, away.y), async () => true);
+  }
+  if (narrow && at === "top") await step("the note's ✕", () => pressOn(page, ".ss-pg-narrow button"), async () => !(await page.$(".ss-pg-narrow")));
+  const th = await centerOf(page, ".ss-pg-names th.ss-pg-oh");
+  await step("a header hover", () => page.mouse.move(th.x, th.y), async () => !!(await state(page)).readout);
+  await step("the hover leaves", () => page.mouse.move(away.x, away.y), async () => !(await state(page)).readout);
+  await step("a first press", pressA, async () => /^Price · /.test((await state(page)).readout));
+  await step("a grey line", () => clip.copy(page), says(/^Copied 1 box\.$/));
+  await step("the grey line goes", pressA, clear);
+  await step("an amber line", () => pressOn(page, rmOf(grey.id)), says(/^Test .+ \d+x\d+: /));
+  await step("the amber line goes", pressA, clear);
+  F.poke(A.id, { price: 9876 });
+  await step("a conflict", async () => { await page.keyboard.type("5151"); await page.keyboard.press("Enter"); await pressA(); }, says(/changed elsewhere to \$9,876/));
+  await step("the conflict goes", () => pressOn(page, DISMISS), clear);
+  await step("the 318-character line", () => sayLong(page, A.id, 318, "word "), async () => (await statusText(page)).length === 318);
+  await step("the long line goes", () => pressOn(page, DISMISS), clear);
+  const n0 = saveCalls(calls).length;
+  await step("a save", async () => { await pressA(); await page.keyboard.type("4321"); await page.keyboard.press("Enter"); }, () => saved(page, calls, n0));
+  // Where ? is cut off, Tab to it scrolls the whole page sideways. That comes with the old bug above.
+  let keyed = null;
+  if (!narrow && at === "top" && q.x < width) {
+    await stillStep(page, "keyboard focus on ?");
+    await pressOn(page, rmOf(grey.id));
+    await soon(says(/^Test .+ \d+x\d+: /));
+    await page.locator(".ss-pg-q").focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await page.waitForTimeout(40);
+    keyed = await legendOf(page);
+  }
+  const log = await stillLog(page);
+  await ctx.close();
+  return { width, height, at, moves: log.moves, frames: log.frames, missed, keyed, errors, bad: F.bad };
+};
+if (want("S")) {
+  const runs = await inTurns(STILL_WINDOWS.flatMap((w) => [[w, "top"], [w, "end"]]), ([w, at]) => stillRun(w, at));
+  runs.forEach((r) => ok(`S: ${r.width}x${r.height}, at the scroll's ${r.at === "top" ? "top" : "very end"}: row, header, scrollTop, box height and the box under a point stay put through a grey line, amber, a conflict, the 318-character line, ?, a header hover, a first press and a save${r.width < 700 && r.at === "top" ? ", and the note's ✕" : ""}`,
+    r.frames > 30 && !r.moves.length && !r.missed.length && !r.errors.length && !r.bad.length, JSON.stringify({ frames: r.frames, missed: r.missed, moves: r.moves.slice(0, 8), n: r.moves.length, errors: r.errors, bad: r.bad })));
+  const keyed = runs.filter((r) => r.keyed);
+  ok("S: with a line up on a wide screen, keyboard focus on ? shows the legend under the line", keyed.length === 4 && keyed.every((r) => r.keyed.shown && r.keyed.underLine), JSON.stringify(keyed.map((r) => [r.width, r.keyed])));
+}
+
+// 2 and 3. The earlier offer arrives after the grid and goes with its Discard: a frame sampler sees one
+// row y through both. And long lines, with the offer up and then without it, on the normal header and
+// on a short one: they stop at the header's bottom, Dismiss stays Dismiss, and the page stays its width.
+const shortCat = () => {
+  const c = catalogFor(OWN, { items: [{ key: "loft", label: "Loft" }, { key: "workbench", label: "Bench" }, { key: "shelving", label: "Shelf" }] });
+  c.fixtures = c.fixtures.filter((f) => f.id === 101).map((f) => ({ ...f, name: "Door", width_in: null, height_in: null }));
+  return c;
+};
+const lineGeo = (page) => page.evaluate(() => {
+  const line = document.querySelector(".ss-pg-status"), btn = line && line.querySelector("button"), over = document.querySelector(".ss-pg-slot-in") || line;
+  if (!btn) return null;
+  const r = btn.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2), span = line.querySelector("span");
+  return { len: span.textContent.length, end: over.getBoundingClientRect().bottom, head: document.querySelector(".ss-pg-names th").getBoundingClientRect().bottom,
+    dismiss: hit === btn && btn.textContent === "Dismiss", at: [r.top, r.bottom], hit: hit && hit !== btn ? hit.className || hit.tagName : undefined, wider: document.documentElement.scrollWidth - innerWidth, sideways: span.scrollWidth - span.clientWidth };
+});
+const stillLong = async ([width, height], short) => {
+  const cat = short ? shortCat() : catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  const { ctx, page, errors } = await open(null, { cat: () => cat, fake: F, storage: { [BACKUP_KEY(OWN)]: backupOf(Date.now() - 60e3, b[2], 5555) } }, { width, height });
+  await page.addInitScript(stillSampler, b[1].id);
+  await page.goto(`${BASE}/settings/sheds-table`);
+  await waitGrid(page).catch(() => {});
+  const rows = await rowsIn(page);
+  await stillStep(page, "the offer arrives");
+  const arrived = await soon(async () => !!(await page.$(".ss-pg-earlier")), 6000);
+  await page.waitForTimeout(60);
+  const geos = [];
+  const long = async (n, word, offer) => {
+    await stillStep(page, "a long line");
+    await sayLong(page, rows[0].id, n, word);
+    const up = await soon(async () => (await statusText(page)).length === n);
+    await page.waitForTimeout(40);
+    geos.push({ n, offer, up, ...(await lineGeo(page)) });
+    await pressOn(page, DISMISS);
+    await soon(async () => (await statusText(page)) === "");
+  };
+  await long(318, "word ", true);
+  await long(3000, "x", true);
+  await stillStep(page, "the offer's Discard");
+  await pressOn(page, ".ss-pg-earlier button:last-of-type");
+  const gone = await soon(async () => !(await page.$(".ss-pg-earlier")));
+  await page.waitForTimeout(40);
+  await long(318, "word ", false);
+  await long(3000, "x", false);
+  const log = await stillLog(page);
+  const head = await page.evaluate(() => document.querySelector(".ss-pg-grid thead").getBoundingClientRect().height);
+  await ctx.close();
+  return { width, height, short, early: log.early, arrived, gone, head, geos, moves: log.moves, frames: log.frames, errors };
+};
+if (want("S")) {
+  const runs = await inTurns(STILL_WINDOWS.flatMap((w) => [[w, false], [w, true]]), ([w, short]) => stillLong(w, short));
+  runs.forEach((r) => {
+    const name = `${r.width}x${r.height}, ${r.short ? "short names" : "the normal header"}`;
+    const offer = r.moves.filter((m) => m.step !== "a long line");
+    ok(`S: ${name}: one row y through the earlier offer's arrival and its Discard`, r.frames > 10 && !r.early && r.arrived && r.gone && !offer.length, JSON.stringify({ frames: r.frames, early: r.early, arrived: r.arrived, gone: r.gone, moves: offer.slice(0, 6) }));
+    const lines = r.moves.filter((m) => m.step === "a long line");
+    const bad = r.geos.filter((g) => !g.up || g.len !== g.n || g.end > g.head + 0.5 || !g.dismiss || g.at[1] > g.end + 0.5 || g.sideways > 0 || g.wider > 0);
+    ok(`S: ${name}: 318 and 3000 characters, with the offer up and without, end at or above the header's bottom, Dismiss hit-tests as Dismiss and sits whole above that edge, no sideways scroll in the line or the page, and the grid stays`,
+      r.geos.length === 4 && !bad.length && !lines.length && !r.errors.length, JSON.stringify({ head: r.head, bad, moves: lines.slice(0, 6), errors: r.errors }));
+  });
+}
+
+// 4. Two slow clicks on a greyed ✕, with a size never priced right above it, at five heights on the ✕.
+// Before the band a first click moved the grid, and a second on the same pixel could take that size.
+const stillGrey = async ([width, height]) => {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44"]));
+  const b = barnOf(F.table(OWN));
+  const [above, grey] = b.slice(-2);
+  F.used.add(grey.id);
+  const { ctx, page, calls, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(200);
+  await page.evaluate((id) => document.querySelector(`tr[data-s="${id}"]`).scrollIntoView({ block: "center" }), grey.id);
+  await page.waitForTimeout(60);
+  await watchStill(page, grey.id);
+  const colour = () => page.evaluate((s) => getComputedStyle(document.querySelector(s)).backgroundColor, sel(grey.id, 0));
+  const flashed = () => page.evaluate((s) => document.querySelector(s).getAnimations().some((a) => !a.animationName && a.currentTime < 400), sel(grey.id, 0));
+  const base = await colour();
+  const clicks = [];
+  for (const f of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+    const p = await page.evaluate(([s, at]) => { const x = document.querySelector(s).getBoundingClientRect(); return { x: x.left + x.width / 2, y: x.top + x.height * at }; }, [rmOf(grey.id), f]);
+    await pressAt(page, p);
+    const first = await flashed();
+    await page.waitForTimeout(450);
+    await pressAt(page, p);
+    clicks.push({ f, first, second: await flashed(), line: (await statusText(page)).slice(0, 40) });
+    await pressOn(page, DISMISS);
+    await page.waitForTimeout(40);
+  }
+  const back = await soon(async () => (await colour()) === base && !(await page.evaluate((s) => document.querySelector(s).getAnimations().length, sel(grey.id, 0))), 1500);
+  const log = await stillLog(page);
+  const out = { width, height, clicks, stays: !!F.size(above.id), sent: saveCalls(calls).length, back, base, now: await colour(), moves: log.moves, errors };
+  await ctx.close();
+  return out;
+};
+if (want("S")) {
+  const runs = await inTurns([[1440, 860], [1366, 650], [390, 800]], stillGrey);
+  runs.forEach((r) => ok(`S: ${r.width}x${r.height}: two slow clicks on a greyed ✕, five heights on it: the size above stays, nothing is sent, the grid moves 0, the box flashes for both, and its colour returns`,
+    r.stays && r.sent === 0 && !r.moves.length && r.clicks.every((c) => c.first && c.second && /: /.test(c.line)) && r.back && !r.errors.length, JSON.stringify({ stays: r.stays, sent: r.sent, back: r.back, base: r.base, now: r.now, clicks: r.clicks.map((c) => [c.f, c.first, c.second]), moves: r.moves.slice(0, 6) })));
+  // Reduced motion: neither the box nor the band flashes, and the line still comes up.
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  F.used.add(b[3].id);
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await pressOn(page, rmOf(b[3].id));
+  const up = await soon(async () => !!(await statusText(page)));
+  const still = await page.evaluate((s) => ({ box: document.querySelector(s).getAnimations().length, band: document.querySelector(".ss-pg-status").getAnimations().length }), sel(b[3].id, 0));
+  ok("S: under reduced motion a greyed ✕ flashes neither its box nor the band, and the line still comes up", up && still.box === 0 && still.band === 0 && !errors.length, JSON.stringify(still));
+  await ctx.close();
+}
+// The flash goes with the refusal, not with the grey: a ✕ that asks has none, and one that isn't greyed
+// but is refused has it. A browser that can't run it still gets the line. A size that turns used while
+// its confirm is open is refused by name too.
+if (want("S")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  F.used.add(b[3].id);
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgRefreshMs: 30 } }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  const flashes = (id) => page.evaluate((s) => document.querySelector(s).getAnimations().filter((a) => !a.animationName).length, sel(id, 0));
+  const noBtn = ".ss-pg-confirm button:not(.ss-pg-confirm-del)";
+  await pressOn(page, rmOf(b[1].id));
+  const asked = !!(await soon(() => confirmOf(page)));
+  const asks = await flashes(b[1].id);
+  ok("S: a ✕ that isn't refused opens its confirm with no flash on its box", asked && asks === 0, JSON.stringify({ asked, asks }));
+  await pressOn(page, noBtn);
+  F.script.push({ delayMs: 2500 });
+  await pressOn(page, sel(b[0].id, 1));
+  await page.keyboard.type("777");
+  await page.keyboard.press("Enter");
+  await waitBadge(page, /^Saving 1 change/, 5000);
+  const looks = await page.evaluate((s) => document.querySelector(s).getAttribute("aria-disabled"), rmOf(b[0].id));
+  await pressOn(page, rmOf(b[0].id));
+  const saving = await soon(async () => (await statusText(page)) === refusal(b[0], "A change on this size is saving. Try again in a second."));
+  const refused = await flashes(b[0].id);
+  ok("S: a ✕ that isn't greyed but is refused, a box on its size saving, flashes its box and names the size", looks === null && saving && refused === 1, JSON.stringify({ looks, saving, refused, line: await statusText(page) }));
+  await soon(async () => /^All changes saved/.test((await state(page)).badge), 6000);
+  await page.evaluate(() => { Element.prototype.animate = () => { throw new DOMException("Partial keyframes are not supported", "NotSupportedError"); }; });
+  await pressOn(page, rmOf(b[3].id));
+  const said = await soon(async () => (await statusText(page)) === refusal(b[3], UNCLR));
+  ok("S: a browser whose animate() throws still gets a greyed ✕'s line, and no page error", said && !errors.length, JSON.stringify({ said, errors, line: await statusText(page) }));
+  await pressOn(page, DISMISS);
+  await pressOn(page, rmOf(b[1].id));
+  await soon(() => confirmOf(page));
+  F.used.add(b[1].id);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.waitForTimeout(500);
+  await pressOn(page, ".ss-pg-confirm-del");
+  const late = await soon(async () => (await statusText(page)) === refusal(b[1], UNCLR));
+  ok("S: a size read as used while its confirm is open: Delete refuses it by name, and it stays", late && !!F.size(b[1].id), JSON.stringify({ late, line: await statusText(page) }));
+  await ctx.close();
+}
+
+// 5. The real failure flow, the action buttons present, at phone widths: 500s until saving stops, then
+// Retry, and the save lands. One toolbar height and one row y through all of it.
+const stillFail = async (width) => {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, win: { __ssPgBackoffMs: [150, 150, 150, 150] } }, { width, height: 800 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  await pressOn(page, sel(b[1].id, 1));
+  await page.waitForTimeout(40);
+  await watchStill(page, b[3].id);
+  for (let i = 0; i < 5; i++) F.script.push({ status: 500 });
+  await page.keyboard.type("888");
+  await page.keyboard.press("Enter");
+  const stopped = await waitBadge(page, /^Saving stopped/, 15000);
+  await page.waitForTimeout(40);
+  const wider = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+  await pressOn(page, ".ss-pg-bact");
+  const landed = await soon(async () => /^All changes saved/.test((await state(page)).badge) && F.size(b[1].id).base_price === 888, 8000);
+  await page.waitForTimeout(40);
+  const log = await stillLog(page);
+  await ctx.close();
+  return { width, stopped, landed, wider, badges: log.badges, moves: log.moves, errors };
+};
+if (want("S")) {
+  const runs = await inTurns([320, 360, 375, 390, 393, 412, 430, 480, 520, 559, 560, 600, 640, 667, 699], stillFail);
+  runs.forEach((r) => ok(`S: ${r.width} px: one toolbar height and one row y through the retry badge, the stopped badge and the save landing, with their buttons, and no sideways scroll`,
+    r.stopped && r.landed && r.wider <= 0 && !r.moves.length && !r.errors.length && r.badges.some((x) => /^Can't reach the server.* \| Retry now/.test(x)) && r.badges.some((x) => /^Saving stopped.* \| Retry,Discard these changes$/.test(x)),
+    JSON.stringify({ stopped: r.stopped, landed: r.landed, wider: r.wider, badges: r.badges.map((x) => x.slice(0, 60)), moves: r.moves.slice(0, 6) })));
+}
+// A 403 takes the toolbar's buttons away, and the badge is then all that says why the table stopped
+// taking edits. With no buttons beside it, it isn't squeezed where it fits. From 560 up nothing moves.
+const stillForbidden = async (width) => {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height: 800 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  await pressOn(page, sel(b[1].id, 1));
+  await page.waitForTimeout(40);
+  await watchStill(page, b[3].id);
+  F.script.push({ status: 403 });
+  await page.keyboard.type("888");
+  await page.keyboard.press("Enter");
+  const got = await waitBadge(page, /^View only/, 8000);
+  await page.waitForTimeout(60);
+  const badge = await page.evaluate(() => { const e = document.querySelector(".ss-pg-badge"); return { shown: e.clientWidth, needs: e.scrollWidth }; });
+  const log = await stillLog(page);
+  await ctx.close();
+  return { width, got, badge, moves: log.moves, errors };
+};
+if (want("S")) {
+  const runs = await inTurns([360, 390, 560, 600, 640, 699], stillForbidden);
+  runs.forEach((r) => ok(`S: ${r.width} px: after a 403 the view-only badge shows whole${r.width >= 560 ? ", and the grid and toolbar stay" : ""}`,
+    r.got && r.badge.shown >= r.badge.needs && (r.width < 560 || !r.moves.length) && !r.errors.length, JSON.stringify({ got: r.got, badge: r.badge, moves: r.moves.slice(0, 6), errors: r.errors })));
+}
+
+// 6. Every new text flashes the band: a new line, another size's refusal, a swap to another kind of
+// line. The same text again does not.
+if (want("S")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  F.used.add(b[3].id);
+  F.used.add(b[4].id);
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const running = () => page.evaluate(() => { const l = document.querySelector(".ss-pg-status"); return !!l && l.getAnimations().some((a) => a.animationName === "ss-pg-moved" && a.playState === "running"); });
+  await pressOn(page, sel(b[0].id, 1));
+  await pressOn(page, rmOf(b[3].id));
+  const fresh = await soon(running, 300);
+  await page.waitForTimeout(700);
+  const ended = await running();
+  await pressOn(page, rmOf(b[3].id));
+  await page.waitForTimeout(80);
+  const same = await running();
+  await pressOn(page, rmOf(b[4].id));
+  const other = await soon(running, 300);
+  await page.waitForTimeout(700);
+  await clip.copy(page);
+  const swap = await soon(running, 300);
+  ok("S: the band flashes (ss-pg-moved) on a new text, on another size's refusal and on a swap to another line, not on the same text", fresh && !ended && !same && other && swap && !errors.length, JSON.stringify({ fresh, ended, same, other, swap }));
+  await ctx.close();
+}
+
+// 7. One live region in the band, holding only what is said. The view-only line, which never goes,
+// keeps its own role outside it.
+const liveOf = (page) => page.evaluate(() => {
+  const all = [...document.querySelectorAll(".ss-pg-slot [role=status]")], live = document.querySelector(".ss-pg-live");
+  return { n: all.length, isLive: !!live && all[0] === live, text: live ? live.textContent : null, roleInside: !!document.querySelector(".ss-pg-live .ss-pg-status[role], .ss-pg-live .ss-pg-earlier[role]"),
+    legendIn: !!document.querySelector(".ss-pg-live .ss-pg-legend"), noteIn: !!document.querySelector(".ss-pg-live .ss-pg-narrow"), legend: !!document.querySelector(".ss-pg-legend"), note: !!document.querySelector(".ss-pg-narrow") };
+});
+if (want("S")) {
+  for (const [width, height] of [[1440, 860], [390, 800]]) {
+    const cat = catalogFor(OWN);
+    const F = fakeServer(cat, tableFor(OWN, cat));
+    const b = barnOf(F.table(OWN));
+    F.used.add(b[0].id);
+    const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height });
+    await waitGrid(page).catch(() => {});
+    await page.waitForTimeout(100);
+    const rest = await liveOf(page);
+    await pressOn(page, rmOf(b[0].id));
+    await soon(async () => /: /.test(await statusText(page)));
+    const up = await liveOf(page);
+    await pressOn(page, sel(b[1].id, 1));
+    await soon(async () => (await statusText(page)) === "");
+    const cleared = await liveOf(page);
+    const held = width < 700 ? rest.note && !rest.noteIn : rest.legend && !rest.legendIn;
+    ok(`S: ${width} px: one [role=status] in the band, .ss-pg-live, empty at rest and after a line clears, holding the line while it is up, with the legend and the note outside it`,
+      rest.n === 1 && rest.isLive && rest.text === "" && held && up.n === 1 && /^Test Barn .+Dismiss$/.test(up.text) && !up.roleInside && cleared.n === 1 && cleared.text === "" && !errors.length, JSON.stringify({ rest, up, cleared }));
+    await ctx.close();
+  }
+  const { ctx, page, errors } = await open("/settings/sheds-table", { role: "user", access: { settings_structures: "view", designs: "view" } }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const only = await soon(() => page.evaluate(() => { const l = document.querySelector(".ss-pg-status[role=status]"); return l ? { text: l.textContent, inBand: !!l.closest(".ss-pg-slot") } : null; }));
+  ok("S: the view-only line keeps its own role, outside the band", !!only && !only.inBand && !!only.text && !errors.length, JSON.stringify(only));
+  await ctx.close();
+}
+
+// 8. A phone's band: the note until the first press, then the box's full name, on top of a line and of
+// the legend. A long name takes two lines below 560 and one from 560.
+const NAME_120 = `Test Barn ${"WITH A VERY WIDE STYLE NAME ".repeat(4)}`.slice(0, 106) + "X";
+const readoutLines = (page) => page.evaluate(() => {
+  const e = document.querySelector(".ss-pg-readout"), b = e.getBoundingClientRect(), rg = document.createRange(), band = document.querySelector(".ss-pg-slot");
+  rg.selectNodeContents(e);
+  const rows = [...new Set([...rg.getClientRects()].map((r) => `${r.top}|${r.bottom}`))].map((x) => x.split("|").map(Number)).sort((p, q) => p[0] - q[0]);
+  const cs = getComputedStyle(e);
+  return { len: e.textContent.length, box: [b.top, b.bottom], rows, whole: rows.filter((r) => r[1] <= b.bottom + 0.5).length, part: rows.filter((r) => r[0] < b.bottom - 0.5 && r[1] > b.bottom + 0.5).length, hidden: rows.filter((r) => r[0] >= b.bottom - 0.5).length,
+    inBand: !!band && b.top >= band.getBoundingClientRect().top - 0.5 && b.bottom <= band.getBoundingClientRect().bottom + 0.5, nowrap: cs.whiteSpace === "nowrap", ellipsis: cs.textOverflow === "ellipsis", cut: e.scrollWidth > e.clientWidth };
+});
+if (want("S")) {
+  for (const [width, height] of [[390, 800], [360, 640]]) {
+    const cat = catalogFor(OWN);
+    const F = fakeServer(cat, tableFor(OWN, cat));
+    const b = barnOf(F.table(OWN));
+    const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height });
+    await waitGrid(page).catch(() => {});
+    await page.waitForTimeout(100);
+    const noted = await page.locator(".ss-pg-narrow").isVisible() && !(await state(page)).readout;
+    await pressOn(page, sel(b[1].id, 1));
+    const pressed = { name: (await state(page)).readout, note: await page.locator(".ss-pg-narrow").isVisible(), top: await onTop(page, ".ss-pg-readout") };
+    await page.keyboard.type("0");
+    await page.keyboard.press("Enter");
+    const zero = await soon(async () => /free/.test(await statusText(page)));
+    const lined = { name: (await state(page)).readout, top: await onTop(page, ".ss-pg-readout"), dismiss: await onTop(page, DISMISS) };
+    await pressOn(page, DISMISS);
+    await pressOn(page, ".ss-pg-q");
+    await page.waitForTimeout(40);
+    const legend = { shown: (await legendOf(page)).shown, top: await onTop(page, ".ss-pg-readout"), name: (await state(page)).readout };
+    ok(`S: ${width} px: the note shows before the first press; after it the box's full name is on top in the band, with a $0 line up and with the legend open, and Dismiss hit-tests as Dismiss`,
+      noted && pressed.name === `Price · ${named(b[1])}` && !pressed.note && pressed.top && zero && lined.name === `Price · ${named(b[2])}` && lined.top && lined.dismiss && legend.shown && legend.top && legend.name === `Price · ${named(b[2])}` && !errors.length,
+      JSON.stringify({ noted, pressed, zero, lined, legend }));
+    await ctx.close();
+  }
+  for (const [width, height] of [[390, 800], [360, 640], [600, 860]]) {
+    const cat = catalogFor(OWN);
+    const t = tableFor(OWN, cat);
+    t.styles[0].label = NAME_120;
+    const F = fakeServer(cat, t);
+    const b = barnOf(F.table(OWN));
+    const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height });
+    await waitGrid(page).catch(() => {});
+    await pressOn(page, sel(b[0].id, 1));
+    await page.waitForTimeout(40);
+    const r = await readoutLines(page);
+    if (width < 560) {
+      ok(`S: ${width} px: a 120-character name shows two lines, in the band, and its third is clipped whole`, r.len === 120 && r.whole === 2 && r.part === 0 && r.hidden >= 1 && r.inBand && !errors.length, JSON.stringify(r));
+    } else {
+      ok(`S: ${width} px: a 120-character name shows one line, in the band, with an ellipsis`, r.len === 120 && r.rows.length === 1 && r.nowrap && r.ellipsis && r.cut && r.inBand && !errors.length, JSON.stringify(r));
+    }
+    await ctx.close();
+  }
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F, storage: { [BACKUP_KEY(OWN)]: backupOf(Date.now() - 60e3, b[2], 5555) } }, { width: 390, height: 800 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForSelector(".ss-pg-earlier", { timeout: 6000 }).catch(() => {});
+  const heights = await page.evaluate(() => [...document.querySelectorAll(".ss-pg-earlier button")].map((x) => x.getBoundingClientRect().height));
+  ok("S: 390 px: the earlier offer's buttons are 26 px", heights.length === 2 && heights.every((h) => Math.round(h) === 26) && !errors.length, JSON.stringify(heights));
+  await ctx.close();
+}
+
+// 9. ? on a wide screen never folds: it shows the legend under a line while the pointer or the keyboard
+// is on it. On a touch screen a tap does the same. A phone turned sideways gets the legend, and ? still
+// folds it once it is back.
+if (want("S")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  F.used.add(b[3].id);
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  await watchStill(page, b[1].id);
+  const q = await centerOf(page, ".ss-pg-q");
+  const away = () => page.mouse.move(700, 600);
+  await pressAt(page, q);
+  await page.waitForTimeout(40);
+  const atRest = await legendOf(page);
+  await away();
+  await pressOn(page, rmOf(b[3].id));
+  await soon(async () => /: /.test(await statusText(page)));
+  await away();
+  await page.waitForTimeout(40);
+  const lineUp = await legendOf(page);
+  await page.mouse.move(q.x, q.y);
+  await page.waitForTimeout(40);
+  const hovered = await legendOf(page);
+  await pressAt(page, q);
+  await page.waitForTimeout(40);
+  const clicked = await legendOf(page);
+  await away();
+  await page.waitForTimeout(40);
+  const left = await legendOf(page);
+  await page.locator(".ss-pg-q").focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(40);
+  const keyed = await legendOf(page);
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(40);
+  const tabbedOff = await legendOf(page);
+  await pressOn(page, DISMISS);
+  await soon(async () => (await statusText(page)) === "");
+  await away();
+  await page.waitForTimeout(40);
+  const after = await legendOf(page);
+  const log = await stillLog(page);
+  ok("S: 1440: a click on ? leaves the legend up at rest, and ? has no aria-expanded, since it folds nothing here", atRest.mounted && atRest.shown && atRest.expanded === null, JSON.stringify(atRest));
+  ok("S: 1440: with a line up the legend hides, shows under the line on hover and through a click, and a click leaves none once the pointer leaves", !lineUp.shown && hovered.shown && hovered.underLine && clicked.shown && clicked.underLine && !left.shown, JSON.stringify({ lineUp, hovered, clicked, left }));
+  ok("S: 1440: keyboard focus on ? shows it under the line, and it goes when focus does", keyed.shown && keyed.underLine && !tabbedOff.shown, JSON.stringify({ keyed, tabbedOff }));
+  ok("S: 1440: after Dismiss the band holds the legend, and the grid moved 0 through all of it", after.shown && after.inBand && !log.moves.length && !errors.length, JSON.stringify({ after, moves: log.moves.slice(0, 6), errors }));
+  await ctx.close();
+}
+if (want("S")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  F.used.add(b[1].id);
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1024, height: 768, hasTouch: true });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  await page.locator(".ss-pg-q").tap();
+  await page.waitForTimeout(40);
+  const atRest = await legendOf(page);
+  await page.locator(rmOf(b[1].id)).tap({ force: true });
+  await soon(async () => /: /.test(await statusText(page)));
+  await page.locator(".ss-pg-q").tap();
+  await page.waitForTimeout(60);
+  const tapped = await legendOf(page);
+  await page.locator(DISMISS).first().tap();
+  await soon(async () => (await statusText(page)) === "");
+  await page.waitForTimeout(40);
+  const after = await legendOf(page);
+  ok("S: touch at 1024: a tap on ? leaves the legend up at rest, with a line up it shows under the line, and after Dismiss the band holds it", atRest.mounted && atRest.shown && tapped.shown && tapped.underLine && after.shown && after.inBand && !errors.length, JSON.stringify({ atRest, tapped, after }));
+  await ctx.close();
+}
+if (want("S")) {
+  const { ctx, page, errors } = await open("/settings/sheds-table", {}, { width: 390, height: 800 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  const phone = await legendOf(page);
+  await page.setViewportSize({ width: 1024, height: 768 });
+  const wide = await soon(async () => (await legendOf(page)).shown);
+  const sideways = await legendOf(page);
+  await page.setViewportSize({ width: 390, height: 800 });
+  const back = await soon(async () => !(await legendOf(page)).mounted);
+  await pressOn(page, ".ss-pg-q");
+  await page.waitForTimeout(40);
+  const opened = await legendOf(page);
+  await pressOn(page, ".ss-pg-q");
+  await page.waitForTimeout(40);
+  const folded = await legendOf(page);
+  ok("S: from 390 turned to 1024 wide the legend shows, and back at 390 ? opens and folds it, with aria-expanded saying so", !phone.mounted && phone.expanded === "false" && wide && sideways.expanded === null && back && opened.shown && opened.expanded === "true" && !folded.mounted && folded.expanded === "false" && !errors.length, JSON.stringify({ phone, wide, sideways, back, opened, folded }));
+  await ctx.close();
+}
+if (want("S")) {
+  const { ctx, page, errors } = await open("/settings/sheds-table", {}, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  await pressOn(page, ".ss-pg-q");
+  await page.waitForTimeout(40);
+  await page.setViewportSize({ width: 390, height: 860 });
+  await page.waitForTimeout(150);
+  const phone = await legendOf(page);
+  ok("S: a click on ? at 1440 folds nothing for later: at 390 the legend is still open", phone.mounted && phone.expanded === "true" && !errors.length, JSON.stringify(phone));
+  await ctx.close();
+}
+// A click on ? leaves the keyboard on the grid, as the toolbar's buttons do. An open legend on a phone
+// has its own bottom edge, since it can spill past the band.
+const stillQ = async ([width, height]) => {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(100);
+  await pressOn(page, sel(b[0].id, 1));
+  await pressOn(page, ".ss-pg-q");
+  await page.waitForTimeout(40);
+  const legend = await legendOf(page);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(40);
+  const readout = (await state(page)).readout;
+  await ctx.close();
+  return { width, height, legend, readout, want: `Price · ${named(b[1])}`, errors };
+};
+if (want("S")) {
+  const runs = await inTurns([[1366, 650], [600, 860], [390, 800]], stillQ);
+  runs.forEach((r) => ok(`S: ${r.width}x${r.height}: after a click on ? an arrow key still moves the box${r.width < 700 ? ", and the open legend has its bottom edge" : ""}`,
+    r.readout === r.want && r.legend.shown && (r.width >= 700 || r.legend.edge === "1px") && !r.errors.length, JSON.stringify({ readout: r.readout, legend: r.legend })));
+}
+
+// 10. Rows fully shown, in every state the band can be in.
+const stillRows = async ([width, height, rows]) => {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat));
+  const b = barnOf(F.table(OWN));
+  F.used.add(b[0].id);
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width, height });
+  await waitGrid(page).catch(() => {});
+  await page.waitForTimeout(150);
+  const seen = {};
+  const count = async (name) => { await page.waitForTimeout(40); seen[name] = (await rowsIn(page)).length; };
+  await count("at load");
+  await pressOn(page, ".ss-pg-q");
+  await count("? pressed");
+  await pressOn(page, ".ss-pg-q");
+  await count("? pressed again");
+  if (width < 700) { await pressOn(page, ".ss-pg-narrow button"); await count("the note shut"); }
+  await pressOn(page, sel(b[0].id, 1));
+  await count("a press");
+  await clip.copy(page);
+  await count("a grey line");
+  await pressOn(page, rmOf(b[0].id));
+  await count("an amber line");
+  await pressOn(page, ".ss-pg-q");
+  await count("? with a line up");
+  await ctx.close();
+  return { width, height, rows, seen, errors };
+};
+if (want("S")) {
+  const runs = await inTurns([[1440, 860, 19], [390, 860, 17], [667, 375, 4], [640, 360, 4], [568, 320, 2], [699, 860, 20]], stillRows);
+  runs.forEach((r) => ok(`S: ${r.width}x${r.height}: ${r.rows} rows fully shown in every state`, Object.values(r.seen).every((n) => n === r.rows) && !r.errors.length, JSON.stringify(r.seen)));
+}
+
+// 11. The tips that say no read amber, as every other refusal does. Other grey lines get a firmer grey.
+const toneOf = (page, text) => soon(() => page.evaluate((t) => {
+  const l = document.querySelector(".ss-pg-status");
+  if (!l || l.querySelector("span").textContent !== t) return null;
+  l.getAnimations().forEach((a) => a.finish());   // the band's flash, so this reads the line's own colour
+  const cs = getComputedStyle(l);
+  return { amber: l.classList.contains("ss-pg-status-amber"), grey: l.classList.contains("ss-pg-status-grey"), bg: cs.backgroundColor, color: cs.color };
+}, text));
+if (want("S")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40"]));
+  const never = barnOf(F.table(OWN)).slice(-1)[0];
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  const tone = (text) => toneOf(page, text);
+  const AMBER = "rgb(254, 243, 199)", GREY = "rgb(226, 232, 240)";
+  // No box yet: Delete sizes refuses and gives the focus back to the grid, and a paste then has no box either.
+  await delBtn(page).click();
+  await clip.paste(page, "1");
+  const noBox = await tone("Click the box where the paste should start.");
+  ok("S: a paste with no box is amber", !!noBox && noBox.amber && noBox.bg === AMBER, JSON.stringify({ noBox, line: await statusText(page) }));
+  await page.locator(`tr[data-s="${never.id}"]`).scrollIntoViewIfNeeded().catch(() => {});
+  await pressOn(page, sel(never.id, 2));
+  await pressOn(page, sel(never.id, 2));
+  const addPrice = await tone("Add a price first.");
+  await pressOn(page, sel(never.id, 0));
+  await page.keyboard.press("Enter");
+  const fixed = await tone("A size's width and length can't be changed here.");
+  await page.keyboard.press("Control+z");
+  const noUndo = await tone("Undo isn't in this version yet. Type the old value back.");
+  await clip.copy(page);
+  const copied = await tone("Copied 1 box.");
+  ok("S: 'Add a price first.', a size's fixed width and length, and Ctrl+Z are amber", [addPrice, fixed, noUndo].every((x) => !!x && x.amber && x.bg === AMBER), JSON.stringify({ addPrice, fixed, noUndo }));
+  ok("S: 'Copied 1 box.' is the firmer grey", !!copied && copied.grey && copied.bg === GREY && copied.color === "rgb(30, 41, 59)" && !errors.length, JSON.stringify(copied));
+  await ctx.close();
+}
+if (want("S")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, tableFor(OWN, cat, { rtpOn: true }));
+  const b = barnOf(F.table(OWN));
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await pressOn(page, sel(b[0].id, 1));
+  await page.keyboard.press("Enter");
+  const t = await toneOf(page, "Real-Time Pricing sets prices on this account.");
+  ok("S: a locked Real-Time price is amber", !!t && t.amber && !errors.length, JSON.stringify(t));
+  await ctx.close();
+}
+if (want("S")) {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40"]));
+  const never = barnOf(F.table(OWN)).slice(-1)[0];
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1440, height: 860 });
+  await waitGrid(page).catch(() => {});
+  await page.evaluate((id) => document.querySelector(`tr[data-s="${id}"]`).scrollIntoView({ block: "center" }), never.id);
+  await page.waitForTimeout(40);
+  F.script.push({ delayMs: 1500 });
+  await pressOn(page, rmOf(never.id));
+  await page.waitForTimeout(60);
+  await pressOn(page, sel(never.id, 1));
+  await page.keyboard.type("5");
+  const t = await toneOf(page, "This size is being deleted.");
+  ok("S: a tip on a size being deleted is amber", !!t && t.amber && !errors.length, JSON.stringify(t));
+  await ctx.close();
+}
+
+// 12. The guards nothing else exercises now that the grid stays put, each in the scene that still needs
+// it: a shake across a row edge, a delete landing inside a double click, a double click on Delete sizes
+// on a never-priced row, and Ctrl+C while a delete that gets refused is out.
+const guardPage = async () => {
+  const cat = catalogFor(OWN);
+  const F = fakeServer(cat, withLabels(tableFor(OWN, cat), ["20x40", "20x44", "20x48", "20x52"]));
+  const b = barnOf(F.table(OWN));
+  const o = await open("/settings/sheds-table", { cat: () => cat, fake: F }, { width: 1366, height: 650 });
+  await waitGrid(o.page).catch(() => {});
+  await o.page.waitForTimeout(150);
+  return { ...o, F, b, never: b.slice(-4) };
+};
+const centerRow = async (page, id) => {
+  await page.evaluate((x) => document.querySelector(`tr[data-s="${x}"]`).scrollIntoView({ block: "center" }), id);
+  await page.waitForTimeout(40);
+};
+if (want("S")) {
+  const { ctx, page, b, errors } = await guardPage();
+  const p = await page.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.left + 12, y: r.bottom - 1 }; }, sel(b[1].id, 0));
+  await page.mouse.move(p.x, p.y);
+  await page.mouse.down();
+  await page.waitForTimeout(30);
+  await page.mouse.move(p.x, p.y + 2);
+  await page.waitForTimeout(30);
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  await delBtn(page).click();
+  await page.waitForTimeout(100);
+  const cf = await confirmOf(page);
+  ok("S: a press 1 px above a row's bottom, moved 2 px down, names 1 size", !!cf && cf.text === askDel(b[1]) && !errors.length, JSON.stringify(cf));
+  await ctx.close();
+}
+if (want("S")) {
+  const { ctx, page, F, never, errors } = await guardPage();
+  await centerRow(page, never[0].id);
+  // A priced box under the delete: the double click has something to open, whichever row it reaches.
+  F.poke(never[1].id, { price: 3000 });
+  F.poke(never[2].id, { price: 3100 });
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await soon(async () => /\$3,000/.test((await look(page, never[1].id, 1)).text));
+  const rm = await centerOf(page, rmOf(never[0].id)), target = await centerOf(page, sel(never[1].id, 1));
+  F.script.push({ delayMs: 500 });
+  await page.mouse.move(rm.x, rm.y);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.mouse.move(target.x, target.y);
+  await page.waitForTimeout(100);
+  await page.mouse.down({ clickCount: 1 });
+  await page.mouse.up({ clickCount: 1 });
+  const first = (await state(page)).readout;
+  const before = !!(await page.$(`tr[data-s="${never[0].id}"]`));
+  // The delete lands here, and the next row slides up under the pointer.
+  const landed = await soon(async () => !(await page.$(`tr[data-s="${never[0].id}"]`)));
+  const under = await page.evaluate((p) => { const e = document.elementFromPoint(p.x, p.y); const tr = e && e.closest ? e.closest("tr[data-s]") : null; return tr ? tr.getAttribute("data-s") : null; }, target);
+  await page.mouse.down({ clickCount: 2 });
+  await page.mouse.up({ clickCount: 2 });
+  await page.waitForTimeout(150);
+  const st = await state(page);
+  ok("S: a delete landing between the two presses of a double click opens the size that was pressed, not the one that slid under the pointer",
+    first === `Price · ${named(never[1])}` && before && landed && under === never[2].id && !!st.editor && st.readout === first && !errors.length, JSON.stringify({ first, before, landed, under: under === never[2].id, st }));
+  await page.keyboard.press("Escape");
+  await ctx.close();
+}
+if (want("S")) {
+  const { ctx, page, F, never, errors } = await guardPage();
+  await centerRow(page, never[0].id);
+  await page.locator(sel(never[0].id, 0)).click({ position: { x: 10, y: 10 } });
+  const t = await delBtn(page).boundingBox();
+  await page.mouse.move(t.x + t.width / 2, t.y + t.height / 2);
+  await page.mouse.down({ clickCount: 1 });
+  await page.mouse.up({ clickCount: 1 });
+  const went = await soon(() => !F.size(never[0].id));
+  await page.waitForTimeout(150);
+  await page.mouse.down({ clickCount: 2 });
+  await page.mouse.up({ clickCount: 2 });
+  await page.waitForTimeout(500);
+  const left = never.filter((z) => !!F.size(z.id)).map((z) => z.label);
+  const cf = await confirmOf(page);
+  ok("S: a double click on Delete sizes on a never-priced row deletes 1", went && left.join() === never.slice(1).map((z) => z.label).join() && !cf && !errors.length, JSON.stringify({ went, left, cf }));
+  await ctx.close();
+}
+if (want("S")) {
+  const { ctx, page, F, never, errors } = await guardPage();
+  await centerRow(page, never[0].id);
+  await page.locator(sel(never[3].id, 1)).click();
+  F.script.push({ status: 400, delayMs: 700 });
+  await pressOn(page, rmOf(never[0].id));
+  await page.waitForTimeout(60);
+  await clip.copy(page);
+  const during = await soon(async () => (await statusText(page)) === "Copied 1 box.", 500);
+  const note = await soon(async () => (await statusText(page)) === "A size couldn't be deleted: This change couldn't be saved. Tell CSM Synergy if it keeps happening.", 4000);
+  ok("S: Ctrl+C during a refused delete leaves the note showing", during && note && !!F.size(never[0].id) && !errors.length, JSON.stringify({ during, note, st: await statusText(page) }));
   await ctx.close();
 }
 

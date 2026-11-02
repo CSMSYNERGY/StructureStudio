@@ -397,13 +397,29 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-bact{font:inherit;font-size:12px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:3px 8px;cursor:pointer;white-space:nowrap;flex-shrink:0}
 .ss-pg-q{width:28px;height:28px;border-radius:50%;border:1px solid #CBD5E1;background:#FFF;font:inherit;font-weight:800;color:#475569;cursor:pointer;flex-shrink:0}
 .ss-pg-op{background:#FEE2E2;border-bottom:1px solid #DC2626;color:#991B1B;font-size:12.5px;font-weight:700;padding:6px 14px;flex-shrink:0}
-.ss-pg-status{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:6px 14px;border-bottom:1px solid #E2E8F0;flex-shrink:0;line-height:1.4}
+/* The band under the toolbar: one height whatever is in it, so nothing that comes or goes in it moves
+   the grid. Its contents sit on top of it. Past one line they hang over the frozen header, and
+   --ss-pg-hd (the header's height, set in the JSX) stops them at its bottom edge. */
+.ss-pg{--ss-pg-slot:31px}
+.ss-pg-slot{position:relative;height:var(--ss-pg-slot);flex-shrink:0;background:#FFF;border-bottom:1px solid #E2E8F0;box-sizing:border-box}
+.ss-pg-slot-in{position:absolute;top:0;left:0;right:0;z-index:8;max-height:calc(var(--ss-pg-slot) + var(--ss-pg-hd));overflow-y:auto}
+.ss-pg-status{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:3px 14px;min-height:var(--ss-pg-slot);box-sizing:border-box;border-bottom:1px solid #E2E8F0;flex-shrink:0;line-height:1.4}
+.ss-pg-slot .ss-pg-status>span{flex:1;min-width:0;max-height:calc(var(--ss-pg-slot) + var(--ss-pg-hd) - 7px);overflow-y:auto;overflow-wrap:anywhere}
+.ss-pg-slot .ss-pg-status,.ss-pg-slot .ss-pg-earlier{animation:ss-pg-moved .6s ease-out}
+@media (prefers-reduced-motion:reduce){.ss-pg-slot .ss-pg-status,.ss-pg-slot .ss-pg-earlier{animation:none}}
 .ss-pg-status-grey{background:#F8FAFC;color:#475569}
+.ss-pg-slot .ss-pg-status-grey{background:#E2E8F0;color:#1E293B}
 .ss-pg-status-amber{background:#FEF3C7;color:#92400E}
 .ss-pg-status-red{background:#FEF2F2;color:#991B1B}
 .ss-pg-status button,.ss-pg-fail button,.ss-pg-narrow button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:4px 10px;cursor:pointer;flex-shrink:0}
-.ss-pg-legend{font-size:12.5px;color:#475569;background:#FFF;border-bottom:1px solid #E2E8F0;padding:6px 14px;flex-shrink:0;line-height:1.4}
-.ss-pg-narrow{display:flex;align-items:center;gap:10px;justify-content:space-between;font-size:12.5px;color:#1B7895;background:#DBEAFF;border-bottom:1px solid #75E6DA;padding:6px 14px;flex-shrink:0}
+.ss-pg-status button,.ss-pg-narrow button{padding:2px 10px}
+/* The offer pushes a long line past the band's cap: Dismiss keeps to the line's top, in view. */
+.ss-pg-earlier~.ss-pg-status button{align-self:flex-start}
+.ss-pg-legend{font-size:12.5px;color:#475569;background:#FFF;padding:6px 14px;line-height:1.4}
+.ss-pg-live:not(:empty)~.ss-pg-legend{display:none}
+.ss-pg-bar:has(.ss-pg-q:is(:hover,:focus-visible))~.ss-pg-slot .ss-pg-live:not(:empty)~.ss-pg-legend{display:block;border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0}
+.ss-pg-narrow{display:flex;align-items:center;gap:10px;justify-content:space-between;font-size:12.5px;color:#1B7895;background:#DBEAFF;border-bottom:1px solid #75E6DA;padding:3px 14px;min-height:var(--ss-pg-slot);box-sizing:border-box}
+.ss-pg-live:not(:empty)~.ss-pg-narrow,.ss-pg-legend~.ss-pg-narrow{display:none}
 .ss-pg-optbox{background:#FEF3C7;border-bottom:1px solid #FDE68A;color:#92400E;font-size:13px;line-height:1.5;padding:9px 14px;flex-shrink:0}
 .ss-pg-optbox a{color:#92400E;font-weight:800}
 .ss-pg-msg{margin:40px auto;max-width:460px;padding:0 16px;text-align:center;font-size:14px;color:#475569;line-height:1.5}
@@ -518,8 +534,8 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-pg-grid td.ss-pg-moved{animation:ss-pg-moved .6s ease-out}
 @keyframes ss-pg-moved{from{background-color:#CBD5E1}}
 /* "You have N changes from earlier that weren't saved." */
-.ss-pg-earlier{display:flex;flex-wrap:wrap;align-items:center;gap:10px;font-size:12.5px;font-weight:600;padding:6px 14px;background:#FFFBEB;color:#92400E;border-bottom:1px solid #FDE68A;flex-shrink:0}
-.ss-pg-earlier button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:4px 10px;cursor:pointer}
+.ss-pg-earlier{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:12.5px;font-weight:600;padding:3px 14px;min-height:var(--ss-pg-slot);box-sizing:border-box;background:#FFFBEB;color:#92400E;border-bottom:1px solid #FDE68A}
+.ss-pg-earlier button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:2px 10px;cursor:pointer}
 /* COPY, PASTE, FILL DOWN AND CLEAR (Phase 4b, 2026-10-31): the toolbar's Fill down and Clear, and the
    confirm before a change to more than one size, a modal over the whole page. */
 .ss-pg-tbtn{font:inherit;font-size:12.5px;font-weight:700;color:#334155;border:1px solid #CBD5E1;background:#FFF;border-radius:7px;padding:5px 9px;cursor:pointer;white-space:nowrap;flex-shrink:0}
@@ -533,10 +549,26 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 /* The delete confirm's Delete: the ✕'s hover red, not the brand purple (its focus starts on Cancel). */
 .ss-pg-confirm-acts .ss-pg-confirm-del{background:#B91C1C;border-color:#B91C1C;color:#FFF}
 /* Below 700 px (plan 3.15): only Size stays frozen, the toolbar wraps, and the header is capped at
-   90 px with an ellipsis (the toolbar's readout carries the full name). */
+   90 px with an ellipsis (the band's readout carries the full name). */
 @media (max-width:699.98px){
-  .ss-pg-bar{flex-wrap:wrap;gap:8px}
-  .ss-pg-readout{order:9;flex-basis:100%;text-align:left}
+  .ss-pg{--ss-pg-slot:42px}
+  .ss-pg-status button,.ss-pg-narrow button,.ss-pg-earlier button{padding:4px 10px}
+  .ss-pg-legend{padding:3px 14px;border-bottom:1px solid #E2E8F0}
+  /* One shape whatever the badge says: the badge, its actions and ? get the last row, and a long badge
+     shrinks rather than wrap. The readout lives in the band here, and what is said hangs under it. A
+     page that can't edit has no buttons to make room for, and its badge is all that says why. */
+  .ss-pg-bar{flex-wrap:wrap;gap:4px 8px}
+  .ss-pg-bar::after{content:"";order:7;flex-basis:100%}
+  .ss-pg-badge,.ss-pg-bact,.ss-pg-q{order:8}
+  .ss-pg-badge{flex:1 1 0;min-width:0;max-width:max-content;overflow:hidden;text-overflow:ellipsis}
+  .ss-pg[data-ss-pg-editable="0"] .ss-pg-badge{flex:0 1 auto}
+  .ss-pg-q{margin-left:auto}
+  .ss-pg-slot{display:flex;align-items:center;padding:0 14px}
+  .ss-pg-slot>.ss-pg-readout{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;text-align:left;line-height:1.4}
+  .ss-pg-slot>.ss-pg-readout:not(:empty)~.ss-pg-slot-in>.ss-pg-narrow{display:none}
+  .ss-pg-slot>.ss-pg-readout:not(:empty)~.ss-pg-slot-in{top:var(--ss-pg-slot);max-height:var(--ss-pg-hd)}
+  .ss-pg-slot>.ss-pg-readout:not(:empty)~.ss-pg-slot-in .ss-pg-status>span{max-height:calc(var(--ss-pg-hd) - 7px)}
+  .ss-pg-live:not(:empty)~.ss-pg-legend{display:block;border-top:1px solid #E2E8F0}
   .ss-pg-co{max-width:120px}
   .ss-pg-grid td.ss-pg-f1,.ss-pg-grid td.ss-pg-f2{position:static}
   .ss-pg-grid td.ss-pg-f1.ss-pg-rtp{position:relative;left:auto;z-index:auto}
@@ -544,6 +576,12 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   .ss-pg-grid .ss-pg-corner{left:auto}
   .ss-pg-names th{height:90px}
   .ss-pg-vh{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-inline-size:74px}
+}
+/* Wide enough for the toolbar's two rows: the badge stays on them, and the band can be one line. */
+@media (min-width:560px) and (max-width:699.98px){
+  .ss-pg{--ss-pg-slot:31px}
+  .ss-pg-bar::after{display:none}
+  .ss-pg-slot>.ss-pg-readout{display:block;white-space:nowrap}
 }
 </style>
 </head><body><div id="root"></div>
@@ -597,7 +635,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
-<script defer src="/portal.app.compiled.js?v=baae5db9" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=528caf1f" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline
