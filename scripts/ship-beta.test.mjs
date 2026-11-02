@@ -9,8 +9,9 @@
 // WHY (2026-11-02). portal.html sat in the script's "take upstream's whole file" set, so a commit's
 // hand-written CSS vanished on the ordinary ?v= conflict and the push still landed. A second commit
 // that also compiled then stopped the script mid-rebase. Both are pinned here, along with the other
-// half of the bargain: a real conflict stops, aborts, and pushes nothing. Fixture text is made up. The
-// repo is public.
+// half of the bargain: a real conflict stops, aborts, and pushes nothing. index.html and admin.html
+// have the same shape, and their ?v= lines used to stop the script as a false "source conflict", so
+// they are pinned to the same rules. Fixture text is made up. The repo is public.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -76,8 +77,8 @@ function setup(t) {
   // Both ends of the portal's first <style> block, far enough apart to merge cleanly.
   const cssAtEnd = (cwd, ...rules) => write(cwd, "portal.html", read(cwd, "portal.html").replace("</style>", () => `${rules.join("\n")}\n</style>`));
   const cssAtStart = (cwd, ...rules) => write(cwd, "portal.html", read(cwd, "portal.html").replace("<style>", () => `<style>\n${rules.join("\n")}`));
-  const sourceFirst = (cwd, line) => write(cwd, TARGETS["portal.app.compiled.js"], `${line}\n${read(cwd, TARGETS["portal.app.compiled.js"])}`);
-  const sourceLast = (cwd, line) => write(cwd, TARGETS["portal.app.compiled.js"], `${read(cwd, TARGETS["portal.app.compiled.js"])}${line}\n`);
+  const sourceFirst = (cwd, line, src = TARGETS["portal.app.compiled.js"]) => write(cwd, src, `${line}\n${read(cwd, src)}`);
+  const sourceLast = (cwd, line, src = TARGETS["portal.app.compiled.js"]) => write(cwd, src, `${read(cwd, src)}${line}\n`);
   const compile = (cwd) => {
     const r = spawnSync(process.execPath, ["scripts/compile.mjs"], { cwd, encoding: "utf8", env });
     if (r.status !== 0) throw new Error(`compile: ${r.stderr}`);
@@ -199,7 +200,7 @@ test("a real CSS conflict stops, aborts, and pushes nothing", (t) => {
   f.git(f.other, "push", "-q", "origin", "beta");
 
   const before = f.snapshot();
-  f.assertStopped(f.ship(), before, /portal\.html has a hand-written conflict[\s\S]*\.their-rule[\s\S]*\.mine-rule/);
+  f.assertStopped(f.ship(), before, /a page has a hand-written conflict[\s\S]*portal\.html: [\s\S]*\.their-rule[\s\S]*\.mine-rule/);
 });
 
 test("a hand edit inside the ?v= hunk is a real conflict, not a difference in hashes", (t) => {
@@ -211,7 +212,7 @@ test("a hand edit inside the ?v= hunk is a real conflict, not a difference in ha
 
   const before = f.snapshot();
   assert.ok(before.portal.includes('data-mine="1"'), "the fixture's edit missed the real tag");
-  f.assertStopped(f.ship(), before, /portal\.html has a hand-written conflict/);
+  f.assertStopped(f.ship(), before, /a page has a hand-written conflict[\s\S]*portal\.html: /);
 });
 
 test("a real conflict in the second commit aborts the whole rebase, the first commit included", (t) => {
@@ -229,9 +230,52 @@ test("a real conflict in the second commit aborts the whole rebase, the first co
   const before = f.snapshot();
   const r = f.ship();
   assert.equal(count(r.stdout, "— recompiling"), 1, "the first commit should have been resolved first");
-  f.assertStopped(r, before, /portal\.html has a hand-written conflict/);
+  f.assertStopped(r, before, /a page has a hand-written conflict[\s\S]*portal\.html: /);
   assert.equal(f.git(f.mine, "log", "-2", "--format=%s"), "commit 2\ncommit 1");
 });
+
+// The artifact whose tag each page carries, so both sides recompiling makes that page's ?v= conflict.
+for (const [page, artifact] of [["index.html", "structure-studio.component.compiled.js"], ["admin.html", "admin.app.compiled.js"]]) {
+  const src = TARGETS[artifact];
+
+  test(`${page}: its ?v= conflict resolves, and both sides' hand-written changes survive`, (t) => {
+    const f = setup(t);
+    f.write(f.mine, page, f.read(f.mine, page).replace("</body>", () => "<!-- my note -->\n</body>"));
+    f.sourceLast(f.mine, "my change", src);
+    f.commit(f.mine, "my commit");
+    f.write(f.other, page, f.read(f.other, page).replace("<head>", () => "<head><!-- their note -->"));
+    f.sourceFirst(f.other, "another session's change", src);
+    f.commit(f.other, "another session: recompile");
+    f.git(f.other, "push", "-q", "origin", "beta");
+
+    const r = f.ship();
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /PUSHED/);
+    assert.ok(new RegExp(`only \\(.*${page.replace(".", "\\.")}.*\\) — recompiling`).test(r.stdout), `${page} never conflicted:\n${r.stdout}`);
+
+    const html = f.onOrigin(page);
+    assert.equal(count(html, "<!-- my note -->"), 1);
+    assert.equal(count(html, "<!-- their note -->"), 1);
+    assert.equal(count(html, "<<<<<<<"), 0);
+    const source = f.onOrigin(src);
+    assert.ok(source.includes("my change") && source.includes("another session's change"));
+    f.assertBustersMatch("origin/beta");
+  });
+
+  test(`${page}: a real conflict stops, named, and pushes nothing`, (t) => {
+    const f = setup(t);
+    f.write(f.mine, page, f.read(f.mine, page).replace("</body>", () => "<!-- my note -->\n</body>"));
+    f.sourceLast(f.mine, "my change", src);
+    f.commit(f.mine, "my commit");
+    f.write(f.other, page, f.read(f.other, page).replace("</body>", () => "<!-- their note -->\n</body>"));
+    f.sourceFirst(f.other, "another session's change", src);
+    f.commit(f.other, "another session: same spot");
+    f.git(f.other, "push", "-q", "origin", "beta");
+
+    const before = f.snapshot();
+    f.assertStopped(f.ship(), before, new RegExp(`a page has a hand-written conflict[\\s\\S]*${page.replace(".", "\\.")}: `));
+  });
+}
 
 test("a conflicted source file still stops, named as one", (t) => {
   const f = setup(t);

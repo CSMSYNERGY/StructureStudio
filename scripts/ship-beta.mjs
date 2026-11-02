@@ -40,18 +40,18 @@ const GENERATED = new Set([
   "admin.app.compiled.js",
 ]);
 
-// portal.html is NOT one of those, even though it conflicts on nearly every rebase. compile.mjs
-// rewrites only its ?v= cache-busters; the rest of the file is hand-written, the portal's CSS among
-// it. A hand-written conflict here is just more hunks in the same conflicted file, and a commit's
-// clean hand-written changes sit outside the hunks altogether, so `git checkout --ours` throws them
-// all away with upstream's whole file. Reproduced 2026-11-02 in a private repo: a commit's 19 CSS
-// lines became 0 and the push still landed. So this file is settled one hunk at a time, see
-// settlePortalHunks.
-const PORTAL = "portal.html";
+// compile.mjs's PAGES are NOT among those, even though portal.html conflicts on nearly every rebase
+// and index.html whenever two sessions change the designer. The compile rewrites only their ?v=
+// cache-busters; the rest of each page is hand-written, the portal's CSS among it. A hand-written
+// conflict here is just more hunks in the same conflicted file, and a commit's clean hand-written
+// changes sit outside the hunks altogether, so `git checkout --ours` throws them all away with
+// upstream's whole file. Reproduced 2026-11-02 in a private repo: a commit's 19 CSS lines became 0
+// and the push still landed. So a page is settled one hunk at a time, see settlePageHunks.
+const PAGES = new Set(["index.html", "portal.html", "admin.html"]);
 
-// Everything the compile can write, compile.mjs's PAGES included. It rewrites a page's busters
-// whether or not that page conflicted, and `rebase --continue` refuses to run over unstaged changes.
-const COMPILE_WRITES = new Set([...GENERATED, PORTAL, "index.html", "admin.html"]);
+// Everything the compile can write. It rewrites a page's busters whether or not that page
+// conflicted, and `rebase --continue` refuses to run over unstaged changes.
+const COMPILE_WRITES = new Set([...GENERATED, ...PAGES]);
 
 const args = process.argv.slice(2);
 const DRY = args.includes("--dry");
@@ -96,16 +96,16 @@ function abortRebase() {
 const sansBusters = (text) => text.replace(/(src="\/?[a-zA-Z0-9.-]+\.compiled\.js\?v=)[a-zA-Z0-9]*"/g, '$1"');
 
 /**
- * Settle portal.html's conflict hunks in the working tree, keeping everything git merged on its own.
+ * Settle a page's conflict hunks in the working tree, keeping everything git merged on its own.
  * A hunk whose two sides differ only in ?v= hashes takes upstream's side; the recompile rewrites the
  * hashes either way. Returns one description per hunk it refused, and writes nothing if there are any.
  */
-function settlePortalHunks() {
+function settlePageHunks(page) {
   // Rebuilt from the index, so the hunks below have the plain two-sided shape whatever
   // merge.conflictStyle or rerere did to the file.
-  const rebuilt = git(["checkout", "--conflict=merge", "--", PORTAL]);
+  const rebuilt = git(["checkout", "--conflict=merge", "--", page]);
   if (rebuilt.code !== 0) return [`git could not rebuild the conflict: ${rebuilt.out.trim()}`];
-  const file = join(root, PORTAL);
+  const file = join(root, page);
   const refused = [];
   let hunks = 0;
   const settled = readFileSync(file, "utf8").replace(
@@ -131,7 +131,7 @@ function settlePortalHunks() {
 function finishRebase() {
   for (;;) {
     const paths = conflictedPaths();
-    const source = paths.filter((p) => !GENERATED.has(p) && p !== PORTAL);
+    const source = paths.filter((p) => !GENERATED.has(p) && !PAGES.has(p));
     if (source.length) {
       die([
         "STOPPED — a SOURCE file conflicts, and this script will not guess at that:",
@@ -141,17 +141,15 @@ function finishRebase() {
         "Resolve it by hand, run `npm run compile`, then `npm run ship` again.",
       ].join("\n"));
     }
-    if (paths.includes(PORTAL)) {
-      const refused = settlePortalHunks();
-      if (refused.length) {
-        die([
-          `STOPPED — ${PORTAL} has a hand-written conflict, and this script will not guess at that:`,
-          ...refused.map((r) => `  ${r}`),
-          "",
-          abortRebase(),
-          "Resolve it by hand, run `npm run compile`, then `npm run ship` again.",
-        ].join("\n"));
-      }
+    const refused = paths.filter((p) => PAGES.has(p)).flatMap((p) => settlePageHunks(p).map((r) => `${p}: ${r}`));
+    if (refused.length) {
+      die([
+        "STOPPED — a page has a hand-written conflict, and this script will not guess at that:",
+        ...refused.map((r) => `  ${r}`),
+        "",
+        abortRebase(),
+        "Resolve it by hand, run `npm run compile`, then `npm run ship` again.",
+      ].join("\n"));
     }
     say(`  conflicts in generated files and ?v= lines only (${paths.join(", ")}) — recompiling`);
     // Upstream's copy during a rebase is --ours. Whichever side is taken, the recompile below
