@@ -4526,7 +4526,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
                   {busy ? "Booking…" : slot ? `Book ${fmtDay(slot.date)} at ${fmtT(slot.startsAt)}` : "Pick a time"}
                 </button>
                 {host.slug && (
-                  <a href={`${shopPublicOrigin()}/book?client=${encodeURIComponent(clientId)}&with=${encodeURIComponent(host.slug)}`}
+                  <a href={ssBookUrl(clientId, host.slug)}
                     target="_blank" rel="noopener noreferrer"
                     style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", textDecoration: "none" }}>
                     Open their booking page

@@ -5851,6 +5851,16 @@ const INV_SOLD_EST = new Set(["accepted", "invoiced", "delivered"]);
 const shopPublicOrigin = () => (/^https:\/\/(app|beta)\.structurestudiosuite\.com$/.test(window.location.origin)
   ? window.location.origin : "https://app.structurestudiosuite.com");
 
+// A person's public booking page, in THE SHORT FORM (Carolyn 2026-11-01: "Do we have to have
+// these meeting links sooo long?"). `/book/<client>/<host>` says exactly what
+// `?client=&with=` said, 12 characters shorter, and reads like an address rather than a
+// query string. book.html takes either, and everything already sent — confirmations,
+// calendar invites, builders' own sites — carries the query form, so this changes what we
+// HAND OUT and never what resolves. One helper because two screens offer this link and a
+// second copy of the shape is how they drift.
+const ssBookUrl = (clientId, slug) =>
+  `${shopPublicOrigin()}/book/${encodeURIComponent(clientId)}/${encodeURIComponent(slug)}`;
+
 function ShopSettingsPanel({ clientId, canEdit }) {
   const [s, setS] = useState(null);
   const [paymentsLive, setPaymentsLive] = useState(false);

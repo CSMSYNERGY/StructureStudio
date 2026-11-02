@@ -36,9 +36,17 @@
 /form/       /form            301
 
 # MEETINGS (migration 326, 2026-10-22): a person's public booking page. ?client= picks the
-# builder, ?with= the person, ?type= skips straight to one meeting type; no sub-paths, so no
-# /book/* rule. Like /shop, deliberately NO X-Frame-Options in _headers — a builder embeds
-# this in their own site, which is the point of it.
+# builder, ?with= the person, ?type= skips straight to one meeting type. Like /shop,
+# deliberately NO X-Frame-Options in _headers — a builder embeds this in their own site,
+# which is the point of it.
+#
+# SHORT FORM (Carolyn 2026-11-01, "Do we have to have these meeting links sooo long?"):
+# /book/<client>/<host> says the same thing as ?client=&with= in 12 fewer characters, and
+# reads like an address rather than a query string. book.html takes the path when the query
+# does not name a client, so BOTH forms work and neither is going away — the long one is in
+# every confirmation, calendar invite and builder's website already sent.
+# The `/book/*` splat itself lives DOWN in the dynamic block, because every static rule
+# has to sit above the first dynamic one; `/book/` alone still normalises to /book here.
 /book        /book.html       200
 /book/       /book            301
 
@@ -106,6 +114,8 @@
 /portal/admin                  /console       301
 
 # ── DYNAMIC RULES: nothing static below this line ────────────────────────────────────────
+# The booking page's short form: /book/<client>/<host> (see the MEETINGS block above).
+/book/*                        /book.html     200
 /designer/*                    /portal.html   200
 /advanced/*                    /portal.html   200
 /contacts/*                    /portal.html   200

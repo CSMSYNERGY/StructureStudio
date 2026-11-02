@@ -6100,7 +6100,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
   const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
   const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
   const bookUrl = host.slug
-    ? `${shopPublicOrigin()}/book?client=${encodeURIComponent(clientId)}&with=${encodeURIComponent(host.slug)}`
+    ? ssBookUrl(clientId, host.slug)
     : null;
 
   const setHostField = (k, v) => setHost((h) => ({ ...h, [k]: v }));
@@ -6232,7 +6232,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
           <span style={lbl}>The link</span>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 260px", minWidth: 0 }}>
-              <span style={{ ...sub, whiteSpace: "nowrap" }}>/book?with=</span>
+              <span style={{ ...sub, whiteSpace: "nowrap" }}>/book/{clientId}/</span>
               <input value={host.slug || ""} maxLength={40} onChange={(e) => setHostField("slug", e.target.value)}
                 placeholder="jamie" style={{ ...S.input, flex: 1, minWidth: 0 }} />
             </div>

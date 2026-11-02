@@ -256,8 +256,21 @@ textarea { resize: vertical; }
 
   var params;
   try { params = new URLSearchParams(location.search); } catch (e) { params = { get: function () { return null; } }; }
-  var clientId = (params.get("client") || "").trim().toLowerCase();
-  var hostSlug = (params.get("with") || "").trim().toLowerCase();
+  // THE SHORT FORM: /book/<client>/<host>, which says exactly what ?client=&with= says
+  // (Carolyn 2026-11-01: "Do we have to have these meeting links sooo long?"). The QUERY WINS
+  // wherever it names a client, so every link already sent — in confirmations, calendar
+  // invites and on builders' own sites — resolves exactly as it did. Both forms are permanent.
+  // Whatever comes out of here still has to pass the slug check further down, so a junk path
+  // lands on the same "link may be out of date" page a junk query does.
+  var fromPath = (function () {
+    try {
+      var parts = location.pathname.split("/").filter(function (p) { return !!p; });
+      if (parts[0] !== "book") return {};
+      return { client: parts[1] || "", host: parts[2] || "" };
+    } catch (e) { return {}; }
+  })();
+  var clientId = (params.get("client") || fromPath.client || "").trim().toLowerCase();
+  var hostSlug = (params.get("with") || fromPath.host || "").trim().toLowerCase();
   var typeFromUrl = (params.get("type") || "").trim().toLowerCase();
   // The manage link from a confirmation email: /book?manage=<token>. It deliberately carries
   // no client or host - the token resolves the booking on its own (see book-public).
