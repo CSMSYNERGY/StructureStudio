@@ -75,6 +75,13 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
   const sbUrl = SB_URL();
   const id = isUuid(p.id) ? p.id : null;
   const customFields = NEEDS_FIELD_DEFS.has(action) ? await customContactFields(admin, clientId) : null;
+  // Whether the builder's texting-consent box shows at all (lead_sms_consent_box, migration 242),
+  // for the Recommendations line that says a form's box is hidden. A failed read is "on", the
+  // designer's and the public form's reading, so the line can only ever under-warn.
+  const smsBoxOn = NEEDS_FIELD_DEFS.has(action)
+    ? await admin.from("client_settings").select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle()
+      .then((r: { data: { lead_sms_consent_box?: boolean } | null }) => r.data?.lead_sms_consent_box !== false, () => true)
+    : true;
 
   // ── Forms ─────────────────────────────────────────────────────────────────────────────────
   if (action === "crm_forms_list") {
@@ -136,7 +143,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     }).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "create that form", error);
     audit("crm_form_create", 1, `form=${data.id}`).catch(() => {});
-    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields, smsBoxOn) });
   }
 
   if (action === "crm_form_get") {
@@ -144,7 +151,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     const { data, error } = await admin.from("lead_forms").select(FORM_COLS).eq("client_id", clientId).eq("id", id).maybeSingle();
     if (error) return dbFail(req, clientId, "load that form", error);
     if (!data) return json({ error: "That form no longer exists." }, 404);
-    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields, smsBoxOn) });
   }
 
   if (action === "crm_form_save") {
@@ -156,7 +163,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     const { data, error } = await admin.from("lead_forms").update(patch).eq("client_id", clientId).eq("id", id).select(FORM_COLS).maybeSingle();
     if (error) return dbFail(req, clientId, "save that form", error);
     if (!data) return json({ error: "That form no longer exists." }, 404);
-    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields, smsBoxOn) });
   }
 
   if (action === "crm_form_publish") {
@@ -173,7 +180,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
     }).eq("client_id", clientId).eq("id", id).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "publish that form", error);
     audit("crm_form_publish", 1, `form=${id} v=${data.published_version}`).catch(() => {});
-    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields, smsBoxOn) });
   }
 
   if (action === "crm_form_unpublish" || action === "crm_form_archive") {
@@ -186,7 +193,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
       .eq("client_id", clientId).eq("id", id).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "update that form", error);
     audit(action, 1, `form=${id} status=${status}`).catch(() => {});
-    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields, smsBoxOn) });
   }
 
   if (action === "crm_form_duplicate") {
@@ -198,7 +205,7 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
       settings: cleanSettings(cur.settings), created_by: x.userId,
     }).select(FORM_COLS).single();
     if (error) return dbFail(req, clientId, "copy that form", error);
-    return json({ ok: true, form: withRecs(data, sbUrl, customFields) });
+    return json({ ok: true, form: withRecs(data, sbUrl, customFields, smsBoxOn) });
   }
 
   if (action === "crm_form_delete") {
@@ -359,11 +366,11 @@ export async function handleLeadFormAction(x: LeadFormCtx): Promise<Response> {
 }
 
 // deno-lint-ignore no-explicit-any
-function withRecs(row: any, sbUrl: string, defs: CustomFieldDef[] | null) {
+function withRecs(row: any, sbUrl: string, defs: CustomFieldDef[] | null, smsBoxOn = true) {
   const def = cleanDefinition(row.definition, sbUrl, defs);
   return {
     ...row, definition: def, settings: cleanSettings(row.settings),
     // jsonb reorders keys, so the published copy is rebuilt the same way before comparing.
-    recommendations: recommendations(def, row.status === "published" && row.published_definition ? cleanDefinition(row.published_definition, sbUrl, defs) : null),
+    recommendations: recommendations(def, row.status === "published" && row.published_definition ? cleanDefinition(row.published_definition, sbUrl, defs) : null, smsBoxOn),
   };
 }

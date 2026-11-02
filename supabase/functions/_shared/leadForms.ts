@@ -91,6 +91,9 @@ export type Theme = typeof THEMES[number];
 export type FormField = {
   id: string; type: string; label: string; placeholder: string; help: string;
   required: boolean; width: "full" | "half"; options: string[];
+  /** This field's width on a tablet or a phone, when the builder changed it for that device.
+   *  Absent = the device's own default (tablet: the desktop width; phone: full). */
+  widthBy?: Partial<Record<Device, "full" | "half">>;
   text?: string; imageUrl?: string; source?: string; value?: string; level?: 1 | 2;
   /** `custom` only: the crm_field_defs key the answer is stored under, and that definition's own
    *  type, copied in so the renderer knows which control to draw. Never free text — the key is
@@ -102,13 +105,29 @@ export type FormField = {
  *  form side needs; portal-settings and lead-form both select them straight off the table. */
 export type CustomFieldDef = { key: string; field_type: string; choices?: string[] | null; label?: string };
 
+/** The two devices a form can be laid out for on its own. Desktop is the base `style`. */
+export const DEVICES = ["tablet", "mobile"] as const;
+export type Device = typeof DEVICES[number];
+
+/** What a tablet or phone may change. Colors, font, theme, input style, corners, shadow and the
+ *  button's words are one look shared by all three; this is only the LAYOUT. */
+export type DeviceStyle = Partial<{
+  layout: "single" | "two"; width: number; fieldSpacing: number; padding: number;
+  labelAlign: "top" | "left" | "right"; labelWidth: number; showLabels: boolean; fontSize: number;
+  button: Partial<{ size: "sm" | "md" | "lg"; align: "left" | "center" | "right"; fullWidth: boolean }>;
+}>;
+
 export type FormStyle = {
   layout: "single" | "two"; inputStyle: "box" | "underline" | "rounded";
   width: number; fieldSpacing: number; labelAlign: "top" | "left" | "right"; labelWidth: number;
   padding: number; showLabels: boolean; font: string; fontSize: number; radius: number;
-  colors: { pageBg: string; formBg: string; label: string; text: string; inputBg: string; border: string; accent: string; buttonBg: string; buttonText: string };
+  /** `placeholder` (the hint in an empty field) and `inputText` (what the visitor types) are
+   *  optional: "" means "follow `text`", the look every form had before they existed. */
+  colors: { pageBg: string; formBg: string; label: string; text: string; inputBg: string; border: string; accent: string; buttonBg: string; buttonText: string; placeholder: string; inputText: string };
   button: { text: string; fullWidth: boolean; radius: number; size: "sm" | "md" | "lg"; align: "left" | "center" | "right" };
   shadow: boolean; cssClass: string;
+  /** Per-device layout overrides, sparse. Absent = no device changes anything. */
+  devices?: Partial<Record<Device, DeviceStyle>>;
 };
 
 export type FormDefinition = {
@@ -137,10 +156,10 @@ export const FONTS: Record<string, string> = {
 };
 
 export const THEME_PRESETS: Record<Theme, Partial<FormStyle> & { colors: FormStyle["colors"] }> = {
-  clean: { inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F3F4F6", formBg: "#FFFFFF", label: "#111827", text: "#111827", inputBg: "#FFFFFF", border: "#D1D5DB", accent: "#2563EB", buttonBg: "#2563EB", buttonText: "#FFFFFF" } },
-  brand: { inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F8FAFC", formBg: "#FFFFFF", label: "#0F172A", text: "#0F172A", inputBg: "#FFFFFF", border: "#CBD5E1", accent: "#1E3A5F", buttonBg: "#1E3A5F", buttonText: "#FFFFFF" } },
-  dark: { inputStyle: "box", radius: 6, shadow: false, colors: { pageBg: "#0B1220", formBg: "#111827", label: "#F9FAFB", text: "#F9FAFB", inputBg: "#1F2937", border: "#374151", accent: "#60A5FA", buttonBg: "#3B82F6", buttonText: "#FFFFFF" } },
-  rounded: { inputStyle: "rounded", radius: 22, shadow: true, colors: { pageBg: "#FFF7ED", formBg: "#FFFFFF", label: "#1C1917", text: "#1C1917", inputBg: "#FFFBF5", border: "#E7E5E4", accent: "#EA580C", buttonBg: "#EA580C", buttonText: "#FFFFFF" } },
+  clean: { inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F3F4F6", formBg: "#FFFFFF", label: "#111827", text: "#111827", inputBg: "#FFFFFF", border: "#D1D5DB", accent: "#2563EB", buttonBg: "#2563EB", buttonText: "#FFFFFF", placeholder: "", inputText: "" } },
+  brand: { inputStyle: "box", radius: 6, shadow: true, colors: { pageBg: "#F8FAFC", formBg: "#FFFFFF", label: "#0F172A", text: "#0F172A", inputBg: "#FFFFFF", border: "#CBD5E1", accent: "#1E3A5F", buttonBg: "#1E3A5F", buttonText: "#FFFFFF", placeholder: "", inputText: "" } },
+  dark: { inputStyle: "box", radius: 6, shadow: false, colors: { pageBg: "#0B1220", formBg: "#111827", label: "#F9FAFB", text: "#F9FAFB", inputBg: "#1F2937", border: "#374151", accent: "#60A5FA", buttonBg: "#3B82F6", buttonText: "#FFFFFF", placeholder: "", inputText: "" } },
+  rounded: { inputStyle: "rounded", radius: 22, shadow: true, colors: { pageBg: "#FFF7ED", formBg: "#FFFFFF", label: "#1C1917", text: "#1C1917", inputBg: "#FFFBF5", border: "#E7E5E4", accent: "#EA580C", buttonBg: "#EA580C", buttonText: "#FFFFFF", placeholder: "", inputText: "" } },
 };
 
 export const DEFAULT_STYLE: FormStyle = {
@@ -176,6 +195,36 @@ export const formAssetUrl = (v: unknown, supabaseUrl: string) => {
   return t.startsWith(base) && /^[a-z0-9-]+\/[0-9a-f-]{36}\.(jpg|jpeg|png|webp|gif)$/i.test(t.slice(base.length)) ? t : "";
 };
 const fieldId = (v: unknown) => typeof v === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(v) ? v : "";
+
+/** A tablet's or phone's layout changes, rebuilt key by key with the base style's ranges. A key
+ *  that is absent stays absent (it follows desktop), and a device with nothing left is dropped. */
+function cleanDevices(raw: unknown): FormStyle["devices"] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const out: Partial<Record<Device, DeviceStyle>> = {};
+  for (const dv of DEVICES) {
+    const v = (raw as Record<string, unknown>)[dv];
+    if (!v || typeof v !== "object") continue;
+    const o = v as Record<string, unknown>;
+    const d: DeviceStyle = {};
+    const has = (k: string) => o[k] !== undefined && o[k] !== null;
+    if (o.layout === "single" || o.layout === "two") d.layout = o.layout;
+    if (has("width")) d.width = num(o.width, 280, 1200, 640);
+    if (has("fieldSpacing")) d.fieldSpacing = num(o.fieldSpacing, 0, 48, 16);
+    if (has("padding")) d.padding = num(o.padding, 0, 64, 24);
+    if (o.labelAlign === "top" || o.labelAlign === "left" || o.labelAlign === "right") d.labelAlign = o.labelAlign;
+    if (has("labelWidth")) d.labelWidth = num(o.labelWidth, 80, 400, 200);
+    if (typeof o.showLabels === "boolean") d.showLabels = o.showLabels;
+    if (has("fontSize")) d.fontSize = num(o.fontSize, 12, 22, 15);
+    const b = o.button && typeof o.button === "object" ? o.button as Record<string, unknown> : {};
+    const bt: NonNullable<DeviceStyle["button"]> = {};
+    if (b.size === "sm" || b.size === "md" || b.size === "lg") bt.size = b.size;
+    if (b.align === "left" || b.align === "center" || b.align === "right") bt.align = b.align;
+    if (typeof b.fullWidth === "boolean") bt.fullWidth = b.fullWidth;
+    if (Object.keys(bt).length) d.button = bt;
+    if (Object.keys(d).length) out[dv] = d;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 /** Rebuild a definition from whatever arrived, keeping only what a form may hold.
  *
@@ -214,6 +263,7 @@ export function cleanDefinition(raw: unknown, supabaseUrl: string, defs?: Custom
       inputBg: color(c.inputBg, base.colors.inputBg), border: color(c.border, base.colors.border),
       accent: color(c.accent, base.colors.accent), buttonBg: color(c.buttonBg, base.colors.buttonBg),
       buttonText: color(c.buttonText, base.colors.buttonText),
+      placeholder: color(c.placeholder, ""), inputText: color(c.inputText, ""),
     },
     button: {
       text: s(b.text, 60) || "Submit", fullWidth: b.fullWidth !== false, radius: num(b.radius, 0, 30, base.radius),
@@ -222,6 +272,8 @@ export function cleanDefinition(raw: unknown, supabaseUrl: string, defs?: Custom
     shadow: st.shadow === undefined ? !!base.shadow : st.shadow === true,
     cssClass: typeof st.cssClass === "string" && /^[A-Za-z][A-Za-z0-9_ -]{0,79}$/.test(st.cssClass.trim()) ? st.cssClass.trim() : "",
   };
+  const devices = cleanDevices(st.devices);
+  if (devices) style.devices = devices;
   const seen = new Set<string>();
   const fields: FormField[] = [];
   for (const f of Array.isArray(d.fields) ? d.fields.slice(0, MAX_FIELDS) : []) {
@@ -261,6 +313,10 @@ export function cleanDefinition(raw: unknown, supabaseUrl: string, defs?: Custom
       width: r.width === "half" ? "half" : "full",
       options: [],
     };
+    const wb = r.widthBy && typeof r.widthBy === "object" ? r.widthBy as Record<string, unknown> : {};
+    for (const dv of DEVICES) {
+      if (wb[dv] === "full" || wb[dv] === "half") (field.widthBy ??= {})[dv] = wb[dv] as "full" | "half";
+    }
     if (type === "select" || type === "radio" || type === "checkboxes" || type === "timeframe") {
       const opts = Array.isArray(r.options) ? r.options.map((o) => s(o, OPTION_MAX)).filter(Boolean) : [];
       field.options = [...new Set(opts)].slice(0, MAX_OPTIONS);
@@ -457,7 +513,8 @@ export function recommendations(def: FormDefinition, published: unknown, smsBoxA
   const contactRequired = def.fields.some((f) => (f.type === "email" || f.type === "phone") && f.required);
   if ((types.has("email") || types.has("phone")) && !contactRequired) out.push({ id: "contact_optional", text: "Make Email or Phone required so every lead can be reached." });
   if (types.has("phone") && !types.has("sms_consent") && smsBoxAllowed) out.push({ id: "no_sms_consent", text: "You collect a phone number but have no text message consent box. Without one you can't text these leads." });
-  if (types.has("sms_consent")) out.push({ id: "a2p", text: "A texting consent box on your website is a new opt-in page. Check your texting registration lists this page before you text these leads." });
+  if (types.has("sms_consent") && !smsBoxAllowed) out.push({ id: "sms_box_off", text: "Your texting box is hidden: texting consent is off for your business. Turn it on in Customer Hub → Text Messaging." });
+  else if (types.has("sms_consent")) out.push({ id: "a2p", text: "A texting consent box on your website is a new opt-in page. Check your texting registration lists this page before you text these leads." });
   if (!def.footerLinks.privacy) out.push({ id: "no_privacy", text: "Add your Privacy Policy link (Settings tab of this form)." });
   if (published && JSON.stringify(published) !== JSON.stringify(def)) out.push({ id: "unpublished", text: "You have changes that aren't live yet. Press Publish to put them on your website." });
   return out;

@@ -197,6 +197,10 @@ const GATES: GateTable = {
   check_auth_token: { area: "settings_billing", level: "edit" },
   // Testing rig. Same bar as submitting, because it changes what submitting DOES.
   set_mock:        { area: "settings_billing", level: "edit" },
+  // The texting-consent box on the builder's website forms, the designer's lead gate and the
+  // public opt-in page (client_settings.lead_sms_consent_box, migration 242). Spends nothing, but
+  // it adds or removes an opt-in the carriers review, so it is held to save_copy's bar.
+  save_consent_box: { area: "settings_billing", level: "edit" },
 };
 
 /** Everything the browser might send, clipped to what a column and Twilio will hold. */
@@ -358,6 +362,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
   const settingsWebsite = String(csRow?.business_website ?? "");
   const consentCompanyName = String(ccRow?.company_name ?? "");
   const consentBoxOn = csRow?.lead_sms_consent_box === true;
+  // What the builder's switch SHOWS, which follows the designer and the disclosure page: a
+  // missing row is the column default, on. Only the suggestion above reads a failed read as off.
+  const consentBoxShown = csRow?.lead_sms_consent_box !== false;
 
   /** Load the row, creating the empty one on first sight so every later write can assume it. */
   const load = async () => {
@@ -422,6 +429,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       disclosureUrl: optInDisclosureUrl(clientId),
     }),
     aupAcceptedAt: reg?.aup_accepted_at ?? null,
+    consentBox: consentBoxShown,
     aupText: AUP_TEXT,
     numbers: (numbers ?? []).map((n) => ({
       phoneNumber: n.phone_number,
@@ -855,6 +863,30 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         }).eq("client_id", clientId);
         await note("policy_urls_saved", { status: reg.status });
         return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
+      case "save_consent_box": {
+        // Refuse, never coerce: "false" as a string must not read as on.
+        if (typeof p.on !== "boolean") return json({ error: "on must be true or false." }, 400);
+        const on = p.on as boolean;
+        const now = new Date().toISOString();
+        // UPDATE first; a row is created only to turn the box OFF, because a missing row already
+        // reads as on. Not an upsert: a created row takes every default, and ramp_enabled defaults
+        // to true while get_fixtures reads a missing row's ramps as off (portal-settings
+        // save_advanced_mode has the same rule and the same reason).
+        const upd = await admin.from("client_settings")
+          .update({ lead_sms_consent_box: on, updated_at: now }).eq("client_id", clientId).select("client_id");
+        if (upd.error) return json({ error: "We couldn't save that. Please try again." }, 500);
+        if ((upd.data?.length ?? 0) === 0 && !on) {
+          let ins = await admin.from("client_settings")
+            .insert({ client_id: clientId, lead_sms_consent_box: false, ramp_enabled: false, updated_at: now });
+          if (ins.error?.code === "23505") {
+            ins = await admin.from("client_settings").update({ lead_sms_consent_box: false, updated_at: now }).eq("client_id", clientId);
+          }
+          if (ins.error) return json({ error: "We couldn't save that. Please try again." }, 500);
+        }
+        await note("consent_box_set", { on });
+        return json({ ok: true, consentBox: on });
       }
 
       case "accept_aup": {

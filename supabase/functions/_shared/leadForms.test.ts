@@ -240,3 +240,46 @@ Deno.test("customPatch enriches, coerces, and never clobbers what the contact al
   assertEquals(customPatch(def, checked.answers, DEFS.filter((d) => d.key !== "budget"), {}).budget, undefined);
   assertEquals(customPatch(def, checked.answers, [], {}), {});
 });
+
+Deno.test("a tablet's and a phone's layout changes are kept key by key, junk dropped", () => {
+  const d = cleanDefinition({
+    fields: [{ id: "email", type: "email", widthBy: { mobile: "full", tablet: "half", desktop: "half", watch: "half" } },
+      { id: "phone", type: "phone", widthBy: { mobile: "wide" } }],
+    style: {
+      layout: "two",
+      devices: {
+        mobile: { layout: "single", fieldSpacing: 999, labelAlign: "top", colors: { text: "#000" }, button: { size: "lg", text: "Go", align: "sideways" } },
+        tablet: { padding: "12", showLabels: false },
+        watch: { layout: "single" },
+        desktop: { layout: "single" },
+      },
+    },
+  }, SB);
+  assertEquals(d.style.layout, "two");
+  assertEquals(d.style.devices, {
+    mobile: { layout: "single", fieldSpacing: 48, labelAlign: "top", button: { size: "lg" } },
+    tablet: { padding: 12, showLabels: false },
+  });
+  assertEquals(d.fields[0].widthBy, { tablet: "half", mobile: "full" });
+  assertEquals(d.fields[1].widthBy, undefined);
+});
+
+Deno.test("an empty device override is dropped and a form without one carries no devices key", () => {
+  assertEquals(cleanDefinition({ fields: [{ id: "email", type: "email" }], style: { devices: { mobile: { nonsense: 1 } } } }, SB).style.devices, undefined);
+  assertEquals("devices" in cleanDefinition({ fields: [{ id: "email", type: "email" }] }, SB).style, false);
+});
+
+Deno.test("placeholder and typed-answer colors are hex or empty, and empty follows the text color", () => {
+  const d = cleanDefinition({ fields: [], style: { colors: { placeholder: "#9CA3AF", inputText: "red" } } }, SB);
+  assertEquals(d.style.colors.placeholder, "#9CA3AF");
+  assertEquals(d.style.colors.inputText, "");
+  assertEquals(cleanDefinition({ fields: [] }, SB).style.colors.placeholder, "");
+});
+
+Deno.test("a texting box that is switched off for the business is called hidden, not an A2P reminder", () => {
+  const def = cleanDefinition({ fields: [{ id: "phone", type: "phone", required: true }, { id: "sms_consent", type: "sms_consent" }] }, SB);
+  const off = recommendations(def, null, false).map((r) => r.id);
+  assert(off.includes("sms_box_off") && !off.includes("a2p"));
+  const on = recommendations(def, null, true).map((r) => r.id);
+  assert(on.includes("a2p") && !on.includes("sms_box_off"));
+});

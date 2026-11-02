@@ -855,6 +855,52 @@ function SmsOtpCard({ data, limits, busy, readOnly, card, onResend }) {
   );
 }
 
+// THE TEXTING-CONSENT BOX SWITCH (Carolyn 2026-11-01, "what does this mean? it is quite unclear").
+// client_settings.lead_sms_consent_box (migration 242) decides whether the builder's website forms,
+// the designer's lead gate and the public opt-in page show the optional "you may text me" box. It
+// had no screen: the form designer told builders it was "switched off in Settings" and there was
+// nothing in Settings to find. Turning it ON adds an opt-in the carriers review, so the warning
+// sits here, at the switch, where the decision is made.
+function SmsConsentBoxCard({ on, readOnly, card, onSave }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const save = async (next) => {
+    setBusy(true); setErr("");
+    try { await onSave(next); setConfirming(false); } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <div style={card} id="sms-consent-box">
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <h3 style={{ margin: 0, fontSize: 15 }}>Texting consent box on your website</h3>
+        <span style={{ fontSize: 12, fontWeight: 800, borderRadius: 999, padding: "3px 10px", color: on ? "#166534" : "#475569", background: on ? "#DCFCE7" : "#F1F5F9" }}>{on ? "On" : "Off"}</span>
+        {!readOnly && (
+          <button type="button" disabled={busy} onClick={() => (on ? save(false) : setConfirming(true))}
+            style={{ marginLeft: "auto", background: on ? "#FFF" : "#2563EB", color: on ? "#334155" : "#FFF", border: "1px solid " + (on ? "#CBD5E1" : "#2563EB"), borderRadius: 8, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+            {busy ? "Saving…" : on ? "Turn off" : "Turn on"}
+          </button>
+        )}
+      </div>
+      <p style={{ margin: "10px 0 0", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        When on, your website forms and the designer show an optional box letting customers agree to receive texts from you.
+        {!on && " It is off now, so customers don't see it anywhere."}
+      </p>
+      {confirming && (
+        <div style={{ marginTop: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", lineHeight: 1.5 }}>
+          <strong>Before you turn it on:</strong> your texting registration describes how customers opt in. Make sure it mentions your website forms and designer, or carriers may reject your messages.
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button type="button" disabled={busy} onClick={() => save(true)} style={{ background: "#2563EB", color: "#FFF", border: "none", borderRadius: 8, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>{busy ? "Saving…" : "Turn it on"}</button>
+            <button type="button" disabled={busy} onClick={() => setConfirming(false)} style={{ background: "#FFF", color: "#334155", border: "1px solid #CBD5E1", borderRadius: 8, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {readOnly && <div style={{ marginTop: 8, fontSize: 12, color: "#64748B" }}>Only someone who manages billing and texting for your business can change this.</div>}
+      {err && <div style={{ marginTop: 8, color: "#B91C1C", fontSize: 13 }}>{err}</div>}
+    </div>
+  );
+}
+
 function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN. This file's siblings guard with
   // early returns and a hook added below one white-screens the page on React #310 — which
@@ -1062,6 +1108,14 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           </div>
         )}
       </div>
+
+      {typeof data.consentBox === "boolean" && (
+        <SmsConsentBoxCard on={data.consentBox} readOnly={readOnly} card={card}
+          onSave={async (on) => {
+            const d = await call("save_consent_box", { on });
+            setData((x) => { const n = { ...x, consentBox: d.consentBox }; ssCachePut("portal-sms", "status", clientId, n); return n; });
+          }} />
+      )}
 
       {/* ── What they have to have ready ─────────────────────────────────────
           ⚠️ THIS USED TO BE A HAND-WRITTEN LIST OF PROSE THAT NOTHING VERIFIED — five bullets

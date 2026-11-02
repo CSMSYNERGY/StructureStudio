@@ -6900,13 +6900,47 @@ function ssfRenderer() {
   if (!ssfRendererP) {
     ssfRendererP = new Promise((resolve, reject) => {
       const s = document.createElement("script");
-      s.src = "/forms-render.js?v=3";
+      s.src = "/forms-render.js?v=4";
       s.onload = () => (window.SSForm ? resolve(window.SSForm) : reject(new Error("The form preview didn't load.")));
       s.onerror = () => { ssfRendererP = null; reject(new Error("The form preview couldn't load. Refresh the page.")); };
       document.head.appendChild(s);
     });
   }
   return ssfRendererP;
+}
+
+// DEVICES (Carolyn 2026-11-01): "When I flip in the view between desktop and phone view and make
+// adjustments, those adjustments should be made only on that view ... We also need a tablet view."
+// The rules for what a device inherits live in forms-render.js (SSForm.resolve / widthOn), the one
+// place the website uses too; the panels read them from there rather than keep a second copy.
+const SSF_DEVICES = [["desktop", "🖥️", "Desktop"], ["tablet", "📲", "Tablet"], ["mobile", "📱", "Phone"]];
+const SSF_DEV_NAME = { desktop: "Desktop", tablet: "Tablet", mobile: "Phone" };
+const SSF_DEV_PLURAL = { tablet: "tablets", mobile: "phones" };
+const SSF_FRAME = { tablet: 768, mobile: 375 };
+function useSsfRenderer() {
+  const [SSF, setSSF] = useState(window.SSForm || null);
+  useEffect(() => { if (!SSF) ssfRenderer().then(setSSF, () => {}); }, []);
+  return SSF;
+}
+/** A field's width on a device; desktop's own until the renderer has loaded. */
+const ssfWidthOn = (SSF, f, device) => (SSF && SSF.widthOn ? SSF.widthOn(f, device) : (f.width === "half" ? "half" : "full"));
+/** The field patch that sets its width on one device: desktop is the field's own width, a tablet
+ *  or phone writes widthBy[device]; `null` clears that device back to its default. */
+function ssfWidthPatch(f, device, v) {
+  if (device === "desktop") return { width: v };
+  const wb = { ...(f.widthBy || {}) };
+  if (v == null) delete wb[device]; else wb[device] = v;
+  return { widthBy: Object.keys(wb).length ? wb : undefined };
+}
+/** "Phone only · Use desktop setting", shown under a control this device has changed. */
+function SsfDevTag({ device, on, onReset, disabled }) {
+  if (device === "desktop" || !on) return null;
+  return (
+    <div style={{ fontSize: 11, color: "#7C3AED", marginTop: 4, fontWeight: 600 }}>
+      {SSF_DEV_NAME[device]} only
+      {!disabled && <> · <button type="button" onClick={onReset} style={{ background: "none", border: "none", padding: 0, color: "#7C3AED", textDecoration: "underline", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>Use {device === "mobile" ? "the phone default" : "desktop setting"}</button></>}
+    </div>
+  );
 }
 
 // The palette, in the screenshot's groups. Types and default labels mirror _shared/leadForms.ts
@@ -7227,6 +7261,15 @@ function FormEditor({ id, clientId, canEdit, meta, onClose }) {
     fields.splice(to > from ? to - 1 : to, 0, f);
     setFields(fields);
   };
+  // The texting-consent switch lives on Text Messaging. Save first: leaving unmounts the editor,
+  // and its autosave is on a timer that would otherwise never fire.
+  const goSms = async () => {
+    if (dirty && canEdit && !(await save())) return;
+    const q = new URLSearchParams(window.location.search);
+    q.delete("form");
+    window.history.pushState({ page: "settings", sub: "sms" }, "", ssPageBase("settings", "sms") + (q.toString() ? "?" + q.toString() : ""));
+    window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+  };
   const patchField = (fid, patch) => setFields(def.fields.map((f) => (f.id === fid ? { ...f, ...patch } : f)));
   const removeField = (fid) => { setFields(def.fields.filter((f) => f.id !== fid)); setSel(null); };
   const dupField = (fid) => {
@@ -7281,8 +7324,7 @@ function FormEditor({ id, clientId, canEdit, meta, onClose }) {
         <span style={{ fontSize: 12, color: "#94A3B8" }}>{!canEdit ? "View only" : saving ? "Saving…" : dirty ? "Unsaved" : savedAt ? "Saved" : ""}</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <div style={{ display: "flex", gap: 2, background: "#F1F5F9", borderRadius: 8, padding: 2 }}>
-            <button type="button" title="Desktop" aria-label="Desktop view" onClick={() => setDevice("desktop")} style={topBtn(device === "desktop")}>🖥️</button>
-            <button type="button" title="Phone" aria-label="Phone view" onClick={() => setDevice("mobile")} style={topBtn(device === "mobile")}>📱</button>
+            {SSF_DEVICES.map(([k, icon, l]) => <button key={k} type="button" title={`${l} view`} aria-label={`${l} view`} aria-pressed={device === k} onClick={() => setDevice(k)} style={topBtn(device === k)}>{icon}</button>)}
           </div>
           {canEdit && <><button type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!hist.past.length} onClick={undo} style={topBtn(false)}>↶</button>
             <button type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled={!hist.future.length} onClick={redo} style={topBtn(false)}>↷</button></>}
@@ -7317,13 +7359,13 @@ function FormEditor({ id, clientId, canEdit, meta, onClose }) {
             <SsfCanvas def={def} sel={sel} device={device} meta={meta} canEdit={canEdit}
               onSelect={setSel} onAdd={addField} onMove={moveField}
               onRemove={removeField} onDuplicate={dupField}
-              onWidth={(fid) => patchField(fid, { width: (def.fields.find((f) => f.id === fid) || {}).width === "half" ? "full" : "half" })}
+              onWidth={(fid) => { const f = def.fields.find((x) => x.id === fid); if (f) patchField(fid, ssfWidthPatch(f, device, ssfWidthOn(window.SSForm, f, device) === "half" ? "full" : "half")); }}
               onShift={(fid, d) => { const i = def.fields.findIndex((f) => f.id === fid); const j = i + d; if (j < 0 || j >= def.fields.length) return; const fields = [...def.fields]; [fields[i], fields[j]] = [fields[j], fields[i]]; setFields(fields); }} />
           </div>
           <div style={{ width: 330, flexShrink: 0, background: "#FFF", borderLeft: "1px solid #E2E8F0", overflow: "auto" }}>
             {selected
-              ? <SsfFieldPanel key={selected.id} field={selected} meta={meta} disabled={!canEdit} onChange={(p) => patchField(selected.id, p)} onClose={() => setSel(null)} onRemove={() => removeField(selected.id)} />
-              : <SsfStylePanel def={def} meta={meta} disabled={!canEdit} onStyle={setStyle} onDef={change} />}
+              ? <SsfFieldPanel key={selected.id} field={selected} meta={meta} device={device} disabled={!canEdit} onGoSms={goSms} onChange={(p) => patchField(selected.id, p)} onClose={() => setSel(null)} onRemove={() => removeField(selected.id)} />
+              : <SsfStylePanel def={def} meta={meta} device={device} disabled={!canEdit} onStyle={setStyle} onDef={change} />}
           </div>
         </>)}
         {tab === "settings" && <SsfSettingsTab def={def} settings={settings} meta={meta} disabled={!canEdit} onDef={change} onSettings={setSet} />}
@@ -7395,7 +7437,7 @@ function SsfCanvas({ def, sel, device, meta, canEdit, onSelect, onAdd, onMove, o
     let dead = false;
     ssfRenderer().then((SSF) => {
       if (dead || !host.current) return;
-      const node = SSF.build(def, { designer: true, catalog: meta?.catalog, consentSentence: meta?.consentSentence });
+      const node = SSF.build(def, { designer: true, device, catalog: meta?.catalog, consentSentence: meta?.consentSentence });
       host.current.textContent = "";
       host.current.appendChild(node);
       host.current.querySelectorAll("[data-field-id]").forEach((b) => {
@@ -7447,10 +7489,11 @@ function SsfCanvas({ def, sel, device, meta, canEdit, onSelect, onAdd, onMove, o
     setDrop(null);
     if (t) onAdd(t, at); else if (m) onMove(m, at);
   };
-  const width = device === "mobile" ? 375 : Math.min(1200, Math.max(320, (def.style?.width || 640) + 48));
+  const framed = device !== "desktop";
+  const width = SSF_FRAME[device] || Math.min(1200, Math.max(320, (def.style?.width || 640) + 48));
   const tool = { background: "#FFF", border: "none", cursor: "pointer", padding: "4px 7px", fontSize: 13, color: "#1E293B" };
   return (
-    <div ref={wrap} style={{ position: "relative", width, maxWidth: "100%", margin: "0 auto", background: def.style?.colors?.pageBg || "#F3F4F6", borderRadius: device === "mobile" ? 24 : 10, padding: device === "mobile" ? "28px 10px" : 24, boxShadow: device === "mobile" ? "0 0 0 10px #1E293B" : "none", transition: "width .2s" }}
+    <div ref={wrap} style={{ position: "relative", width, maxWidth: "100%", margin: "0 auto", background: def.style?.colors?.pageBg || "#F3F4F6", borderRadius: framed ? 24 : 10, padding: framed ? "28px 10px" : 24, boxShadow: framed ? "0 0 0 10px #1E293B" : "none", transition: "width .2s" }}
       onClick={(e) => { const b = e.target.closest && e.target.closest("[data-field-id]"); if (b) onSelect(b.getAttribute("data-field-id")); else onSelect(null); }}
       onDragStart={onDragStart} onDragOver={onDragOver} onDragLeave={(e) => { if (!wrap.current.contains(e.relatedTarget)) setDrop(null); }} onDrop={onDrop}>
       {err && <div style={S.err}>{err}</div>}
@@ -7525,7 +7568,10 @@ function useSsfBrand() {
   return v;
 }
 
-function SsfColor({ label, value, onChange, disabled }) {
+const SSF_COLOR_GROUP = { fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "14px 0 8px" };
+// `optional`: an empty value is a real setting ("follow the text color"), so the box may be empty,
+// says what empty means, and offers a way back to it.
+function SsfColor({ label, value, onChange, disabled, optional = false, emptyNote = "" }) {
   const brand = useSsfBrand();
   // `draft` holds what is being TYPED, including the half-finished "#D9" nobody can use yet, so
   // the box doesn't fight the person's cursor. null means "show the saved value". A draft that
@@ -7533,6 +7579,7 @@ function SsfColor({ label, value, onChange, disabled }) {
   const [draft, setDraft] = useState(null);
   const saved = ssfHex(value) || "";
   const shown = draft == null ? (saved || String(value || "")) : draft;
+  const unsetOk = optional && !saved && draft == null;
   const take = (raw) => { const h = ssfHex(raw); setDraft(raw); if (h) onChange(h); };
   const sw = (hex, name, on) => (
     <button key={hex + name} type="button" disabled={disabled} title={name ? `${name} · ${hex}` : hex}
@@ -7544,7 +7591,7 @@ function SsfColor({ label, value, onChange, disabled }) {
     <div style={{ marginBottom: 10 }}>
       <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 4 }}>{label}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <input type="text" disabled={disabled} value={shown} placeholder="#RRGGBB" spellCheck={false} aria-label={`${label} hex code`}
+        <input type="text" disabled={disabled} value={shown} placeholder={unsetOk ? "Not set" : "#RRGGBB"} spellCheck={false} aria-label={`${label} hex code`}
           onChange={(e) => take(e.target.value)}
           onPaste={(e) => { const t = e.clipboardData?.getData("text"); if (t && ssfHex(t)) { e.preventDefault(); setDraft(null); onChange(ssfHex(t)); } }}
           onBlur={() => setDraft(null)}
@@ -7559,6 +7606,9 @@ function SsfColor({ label, value, onChange, disabled }) {
           {brand.map((c) => sw(c.hex, c.name, c.hex === saved))}
         </div>
       )}
+      {optional && (unsetOk
+        ? <div style={{ fontSize: 11, color: "#64748B", marginTop: 4 }}>{emptyNote}</div>
+        : saved && !disabled && <button type="button" onClick={() => { setDraft(null); onChange(""); }} style={{ background: "none", border: "none", padding: 0, marginTop: 4, color: ACCENT, textDecoration: "underline", cursor: "pointer", fontSize: 11 }}>Use the text color</button>)}
     </div>
   );
 }
@@ -7580,16 +7630,36 @@ function SsfSection({ title, open: start = false, children }) {
   );
 }
 
-function SsfStylePanel({ def, meta, onStyle, onDef, disabled }) {
+function SsfStylePanel({ def, meta, onStyle, onDef, disabled, device = "desktop" }) {
   const [t, setT] = useState("styles");
+  const SSF = useSsfRenderer();
   const st = def.style || {};
   const c = st.colors || {};
   const b = st.button || {};
+  // LAYOUT controls read what this device really uses and write only to this device; everything
+  // else (colors, fonts, corners, the button's words) is one look shared by all three.
+  const dev = device !== "desktop";
+  const ov = (dev && st.devices && st.devices[device]) || {};
+  const rs = dev && SSF && SSF.resolve ? SSF.resolve(def, device) : st;
+  const rb = rs.button || b;
+  const putDev = (next) => {
+    const devices = { ...(st.devices || {}) };
+    if (Object.keys(next).length) devices[device] = next; else delete devices[device];
+    onStyle({ devices: Object.keys(devices).length ? devices : undefined });
+  };
+  const lay = (patch) => (dev ? putDev({ ...ov, ...patch }) : onStyle(patch));
+  const layBtn = (patch) => (dev ? putDev({ ...ov, button: { ...(ov.button || {}), ...patch } }) : onStyle({ button: { ...b, ...patch } }));
+  const unset = (k) => { const n = { ...ov }; delete n[k]; putDev(n); };
+  const unsetBtn = (k) => { const nb = { ...(ov.button || {}) }; delete nb[k]; const n = { ...ov }; if (Object.keys(nb).length) n.button = nb; else delete n.button; putDev(n); };
+  const tag = (k) => <SsfDevTag device={device} disabled={disabled} on={ov[k] !== undefined} onReset={() => unset(k)} />;
+  const tagBtn = (k) => <SsfDevTag device={device} disabled={disabled} on={(ov.button || {})[k] !== undefined} onReset={() => unsetBtn(k)} />;
   const color = (k) => (v) => onStyle({ colors: { ...c, [k]: v } });
   const btn = (patch) => onStyle({ button: { ...b, ...patch } });
   const applyTheme = (key) => {
     const p = SSF_THEMES[key];
-    const colors = { ...p.colors };
+    // A theme is a whole look, so it also clears the two optional field colors back to "follow
+    // the text color" rather than leaving last theme's placeholder grey on a dark form.
+    const colors = { ...p.colors, placeholder: "", inputText: "" };
     if (key === "brand" && meta?.brand?.accent) { colors.accent = meta.brand.accent; colors.buttonBg = meta.brand.accent; }
     onDef({ ...def, theme: key, style: { ...st, inputStyle: p.inputStyle, radius: p.radius, shadow: p.shadow, colors, button: { ...b, radius: p.radius } },
       header: key === "brand" && meta?.brand?.logoUrl && !def.header?.imageUrl ? { ...(def.header || {}), title: def.header?.title || meta.brand.companyName || "" } : def.header });
@@ -7602,41 +7672,57 @@ function SsfStylePanel({ def, meta, onStyle, onDef, disabled }) {
         ))}
       </div>
       {t === "styles" && (<>
+        {dev && (
+          <div style={{ background: "#F5F3FF", borderBottom: "1px solid #DDD6FE", padding: "10px 14px", fontSize: 12.5, color: "#4C1D95", lineHeight: 1.45 }}>
+            <b>Editing the {SSF_DEV_NAME[device]} layout.</b> Layout changes here only affect {SSF_DEV_PLURAL[device]}.
+            {device === "mobile" ? " Phones start with one column and labels on top." : " Anything you don't change follows Desktop."}
+            {" "}Colors, fonts, corners and the button's words are the same on every device.
+          </div>
+        )}
         <SsfSection title="Layout" open>
-          <SsfRow label="Columns" hint={(st.layout || "single") === "two" ? "Fields sit side by side, two to a row. Text boxes, headings and checkboxes stay full width." : "Each field uses its own width (Full or Half, set on the field)."}><SsfSeg disabled={disabled} value={st.layout || "single"} onChange={(v) => onStyle({ layout: v })} options={[["single", "Single column"], ["two", "Two columns"]]} /></SsfRow>
+          <SsfRow label="Columns" hint={(rs.layout || "single") === "two" ? "Fields sit side by side, two to a row. Text boxes, headings and checkboxes stay full width." : "Each field uses its own width (Full or Half, set on the field)."}><SsfSeg disabled={disabled} value={rs.layout || "single"} onChange={(v) => lay({ layout: v })} options={[["single", "Single column"], ["two", "Two columns"]]} />{tag("layout")}</SsfRow>
           <SsfRow label="Input style"><SsfSeg disabled={disabled} value={st.inputStyle || "box"} onChange={(v) => onStyle({ inputStyle: v })} options={[["box", "Box"], ["underline", "Underline"], ["rounded", "Rounded"]]} /></SsfRow>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <SsfRow label="Width"><SsfNum disabled={disabled} value={st.width} min={280} max={1200} onChange={(v) => onStyle({ width: v })} /></SsfRow>
-            <SsfRow label="Field spacing"><SsfNum disabled={disabled} value={st.fieldSpacing} min={0} max={48} onChange={(v) => onStyle({ fieldSpacing: v })} /></SsfRow>
-            <SsfRow label="Padding"><SsfNum disabled={disabled} value={st.padding} min={0} max={64} onChange={(v) => onStyle({ padding: v })} /></SsfRow>
+            <SsfRow label="Width"><SsfNum disabled={disabled} value={rs.width} min={280} max={1200} onChange={(v) => lay({ width: v })} />{tag("width")}</SsfRow>
+            <SsfRow label="Field spacing"><SsfNum disabled={disabled} value={rs.fieldSpacing} min={0} max={48} onChange={(v) => lay({ fieldSpacing: v })} />{tag("fieldSpacing")}</SsfRow>
+            <SsfRow label="Padding"><SsfNum disabled={disabled} value={rs.padding} min={0} max={64} onChange={(v) => lay({ padding: v })} />{tag("padding")}</SsfRow>
             <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={st.radius} min={0} max={30} onChange={(v) => onStyle({ radius: v })} /></SsfRow>
           </div>
-          <SsfRow label="Label position"><SsfSeg disabled={disabled} value={st.labelAlign || "top"} onChange={(v) => onStyle({ labelAlign: v })} options={[["top", "Top"], ["left", "Left"], ["right", "Right"]]} /></SsfRow>
-          {st.labelAlign && st.labelAlign !== "top" && <SsfRow label="Label width"><SsfNum disabled={disabled} value={st.labelWidth} min={80} max={400} onChange={(v) => onStyle({ labelWidth: v })} /></SsfRow>}
-          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 6 }}><input type="checkbox" disabled={disabled} checked={st.showLabels !== false} onChange={(e) => onStyle({ showLabels: e.target.checked })} /> Show field labels</label>
+          <SsfRow label="Label position"><SsfSeg disabled={disabled} value={rs.labelAlign || "top"} onChange={(v) => lay({ labelAlign: v })} options={[["top", "Top"], ["left", "Left"], ["right", "Right"]]} />{tag("labelAlign")}</SsfRow>
+          {rs.labelAlign && rs.labelAlign !== "top" && <SsfRow label="Label width"><SsfNum disabled={disabled} value={rs.labelWidth} min={80} max={400} onChange={(v) => lay({ labelWidth: v })} />{tag("labelWidth")}</SsfRow>}
+          <div style={{ marginBottom: 6 }}>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={rs.showLabels !== false} onChange={(e) => lay({ showLabels: e.target.checked })} /> Show field labels</label>
+            {tag("showLabels")}
+          </div>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={!!st.shadow} onChange={(e) => onStyle({ shadow: e.target.checked })} /> Drop shadow</label>
         </SsfSection>
         <SsfSection title="Colors & background">
           <SsfColor disabled={disabled} label="Page background" value={c.pageBg} onChange={color("pageBg")} />
           <SsfColor disabled={disabled} label="Form background" value={c.formBg} onChange={color("formBg")} />
+          <div style={SSF_COLOR_GROUP}>Form text</div>
           <SsfColor disabled={disabled} label="Labels" value={c.label} onChange={color("label")} />
-          <SsfColor disabled={disabled} label="Text" value={c.text} onChange={color("text")} />
+          <SsfColor disabled={disabled} label="Text (headings, paragraphs, help text, choices)" value={c.text} onChange={color("text")} />
+          <div style={SSF_COLOR_GROUP}>Fields</div>
           <SsfColor disabled={disabled} label="Field background" value={c.inputBg} onChange={color("inputBg")} />
           <SsfColor disabled={disabled} label="Field border" value={c.border} onChange={color("border")} />
+          <SsfColor disabled={disabled} optional label="Placeholder (the hint in an empty field)" value={c.placeholder} onChange={color("placeholder")} emptyNote="Following the text color, lighter" />
+          <SsfColor disabled={disabled} optional label="Typed answer (what customers type)" value={c.inputText} onChange={color("inputText")} emptyNote="Following the text color" />
+          <div style={SSF_COLOR_GROUP}>Accents</div>
           <SsfColor disabled={disabled} label="Accent (focus, ticks, links)" value={c.accent} onChange={color("accent")} />
           <SsfColor disabled={disabled} label="Button" value={c.buttonBg} onChange={color("buttonBg")} />
           <SsfColor disabled={disabled} label="Button text" value={c.buttonText} onChange={color("buttonText")} />
         </SsfSection>
         <SsfSection title="Typography">
           <SsfRow label="Font"><select disabled={disabled} value={st.font || "system"} onChange={(e) => onStyle({ font: e.target.value })} style={S.input}>{SSF_FONTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></SsfRow>
-          <SsfRow label="Text size"><SsfNum disabled={disabled} value={st.fontSize} min={12} max={22} onChange={(v) => onStyle({ fontSize: v })} /></SsfRow>
+          <SsfRow label="Text size"><SsfNum disabled={disabled} value={rs.fontSize} min={12} max={22} onChange={(v) => lay({ fontSize: v })} />{tag("fontSize")}</SsfRow>
         </SsfSection>
         <SsfSection title="Submit button">
           <SsfRow label="Button text"><input disabled={disabled} value={b.text || ""} maxLength={60} onChange={(e) => btn({ text: e.target.value })} style={S.input} /></SsfRow>
-          <SsfRow label="Size"><SsfSeg disabled={disabled} value={b.size || "md"} onChange={(v) => btn({ size: v })} options={[["sm", "Small"], ["md", "Medium"], ["lg", "Large"]]} /></SsfRow>
-          <SsfRow label="Alignment"><SsfSeg disabled={disabled} value={b.align || "center"} onChange={(v) => btn({ align: v })} options={[["left", "Left"], ["center", "Center"], ["right", "Right"]]} /></SsfRow>
+          <SsfRow label="Size"><SsfSeg disabled={disabled} value={rb.size || "md"} onChange={(v) => layBtn({ size: v })} options={[["sm", "Small"], ["md", "Medium"], ["lg", "Large"]]} />{tagBtn("size")}</SsfRow>
+          <SsfRow label="Alignment"><SsfSeg disabled={disabled} value={rb.align || "center"} onChange={(v) => layBtn({ align: v })} options={[["left", "Left"], ["center", "Center"], ["right", "Right"]]} />{tagBtn("align")}</SsfRow>
           <SsfRow label="Corner radius"><SsfNum disabled={disabled} value={b.radius} min={0} max={30} onChange={(v) => btn({ radius: v })} /></SsfRow>
-          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={b.fullWidth !== false} onChange={(e) => btn({ fullWidth: e.target.checked })} /> Full width</label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155" }}><input type="checkbox" disabled={disabled} checked={rb.fullWidth !== false} onChange={(e) => layBtn({ fullWidth: e.target.checked })} /> Full width</label>
+          {tagBtn("fullWidth")}
         </SsfSection>
       </>)}
       {t === "themes" && (
@@ -7688,8 +7774,9 @@ function SsfImagePick({ url, onUrl, disabled }) {
   );
 }
 
-function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }) {
+function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled, device = "desktop", onGoSms = null }) {
   const t = f.type;
+  const SSF = useSsfRenderer();
   // A custom field's definition, when we still have it. `gone` is a field whose definition was
   // deleted or archived after this form was built: it is shown and can be removed, but it stores
   // nothing on submit, so saying so is the only honest thing to do.
@@ -7763,20 +7850,35 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled }
           </SsfRow>
           {f.source === "static" && <SsfRow label="Fixed value"><input disabled={disabled} value={f.value || ""} maxLength={300} onChange={(e) => onChange({ value: e.target.value })} style={S.input} /></SsfRow>}
         </>)}
-        {t === "sms_consent" && (
+        {t === "sms_consent" && (<>
+          {/* Carolyn 2026-11-01: "what does this mean? it is quite unclear". The plain fact first
+              (is this box on my website or not?), then where to change it. The switch is
+              client_settings.lead_sms_consent_box, now on Customer Hub → Text Messaging. */}
+          {meta && meta.smsBoxOn === false ? (
+            <div style={{ fontSize: 12.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
+              <b>Hidden on your website.</b> Texting consent is turned off for your business, so customers won't see this box.
+              {!disabled && onGoSms && <div style={{ marginTop: 6 }}><button type="button" onClick={onGoSms} style={{ background: "none", border: "none", padding: 0, color: "#92400E", textDecoration: "underline", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>Turn it on in Customer Hub → Text Messaging</button></div>}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, color: "#166534", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: 10, marginBottom: 12 }}><b>Shows on your website.</b></div>
+          )}
           <div style={{ fontSize: 12.5, color: "#334155", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
             <div style={{ fontWeight: 800, marginBottom: 4 }}>The wording is set for you</div>
             “{meta?.consentSentence}”
-            <div style={{ marginTop: 6, color: "#64748B" }}>Carriers require these exact words and your business name, so they can't be edited. The box is never required — texting has to be optional. Before you text these leads, check that your texting registration lists this page as a place people opt in.</div>
-            {meta && meta.smsBoxOn === false && <div style={{ ...S.err, marginTop: 8, marginBottom: 0 }}>Your texting consent box is switched off in Settings, so this box won't show on your website.</div>}
+            <div style={{ marginTop: 6, color: "#64748B" }}>Carriers require these exact words, so they can't be edited. Texting is always optional, so this box is never required.</div>
           </div>
-        )}
+        </>)}
         {t === "terms" && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>Links to the Privacy Policy and Terms you set on the form's Settings tab. Always required.</div>}
         {SSF_INPUT(t) && t !== "hidden" && <SsfRow label="Help text"><input disabled={disabled} value={f.help || ""} maxLength={500} onChange={(e) => onChange({ help: e.target.value })} style={S.input} /></SsfRow>}
         {SSF_INPUT(t) && !["hidden", "sms_consent", "terms"].includes(t) && (
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#334155", marginBottom: 12 }}><input type="checkbox" disabled={disabled} checked={!!f.required} onChange={(e) => onChange({ required: e.target.checked })} /> Required</label>
         )}
-        {t !== "hidden" && <SsfRow label="Width"><SsfSeg disabled={disabled} value={f.width === "half" ? "half" : "full"} onChange={(v) => onChange({ width: v })} options={[["full", "Full"], ["half", "Half"]]} /></SsfRow>}
+        {t !== "hidden" && (
+          <SsfRow label={device === "desktop" ? "Width" : `Width on ${SSF_DEV_PLURAL[device]}`}>
+            <SsfSeg disabled={disabled} value={ssfWidthOn(SSF, f, device)} onChange={(v) => onChange(ssfWidthPatch(f, device, v))} options={[["full", "Full"], ["half", "Half"]]} />
+            <SsfDevTag device={device} disabled={disabled} on={!!(f.widthBy && f.widthBy[device])} onReset={() => onChange(ssfWidthPatch(f, device, null))} />
+          </SsfRow>
+        )}
         {t !== "custom" && ["email", "phone", "full_name", "first_name", "last_name", "address", "city", "state", "postal_code", "delivery_zip", "organization"].includes(t) && (
           <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 12 }}>Saved onto the contact's {t === "full_name" ? "name" : (SSF_LABEL[t] || "").toLowerCase()} in your CRM.</div>
         )}
@@ -7796,7 +7898,7 @@ function SsfPreview({ def, settings, meta, onClose }) {
       if (dead || !host.current) return;
       host.current.textContent = "";
       host.current.appendChild(SSF.build(def, {
-        catalog: meta?.catalog, consentSentence: meta?.consentSentence,
+        device, catalog: meta?.catalog, consentSentence: meta?.consentSentence,
         onSubmit: () => Promise.resolve({ ok: true, afterSubmit: settings?.afterSubmit?.mode === "redirect" ? { mode: "message", message: `On your website this would now go to ${settings.afterSubmit.redirectUrl}` } : settings?.afterSubmit }),
       }));
     }, (e) => setErr(e.message));
@@ -7807,13 +7909,12 @@ function SsfPreview({ def, settings, meta, onClose }) {
       <div style={{ position: "sticky", top: 0, display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", background: "#1E293B", color: "#FFF", zIndex: 2 }}>
         <b style={{ fontSize: 13 }}>Preview</b><span style={{ fontSize: 12, opacity: 0.8 }}>Nothing you type here is sent.</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button type="button" style={SSF_BTN(device === "desktop")} onClick={() => setDevice("desktop")}>Desktop</button>
-          <button type="button" style={SSF_BTN(device === "mobile")} onClick={() => setDevice("mobile")}>Phone</button>
+          {SSF_DEVICES.map(([k, , l]) => <button key={k} type="button" style={SSF_BTN(device === k)} onClick={() => setDevice(k)}>{l}</button>)}
           <button type="button" style={SSF_BTN(false)} onClick={onClose}>Close preview</button>
         </div>
       </div>
       {err && <div style={{ ...S.err, margin: 16 }}>{err}</div>}
-      <div style={{ width: device === "mobile" ? 375 : "100%", maxWidth: "100%", margin: "24px auto", padding: "0 16px" }}><div ref={host} /></div>
+      <div style={{ width: SSF_FRAME[device] || "100%", maxWidth: "100%", margin: "24px auto", padding: "0 16px" }}><div ref={host} /></div>
     </div>
   );
 }

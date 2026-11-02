@@ -12,6 +12,7 @@
  *   SSForm.build(def, opts) -> HTMLElement
  *     def   the cleaned definition (supabase/functions/_shared/leadForms.ts is the source of truth)
  *     opts  { consentSentence, catalog: {styles, sizes}, designer: bool, selectedId,
+ *             device: "desktop"|"tablet"|"mobile" (designer only; omitted = all three by media query),
  *             onSubmit(answers, meta) -> Promise<{ok, errors?, afterSubmit?, error?}>,
  *             onStart(), privacyUrl, termsUrl }
  *   SSForm.FONTS  the font stacks, mirrored from leadForms.ts FONTS
@@ -38,8 +39,60 @@
     return e;
   }
 
-  function css(def, scope) {
-    var st = def.style || {};
+  // -- DEVICES (Carolyn 2026-11-01) ---------------------------------------------------------------
+  // "I want 2 columns in desktop and single column in mobile. We also need a tablet view." A form
+  // has ONE look (colors, font, theme, corners, the button's words) and THREE layouts. Desktop is
+  // the base style; style.devices.tablet / .mobile hold only what the builder changed for that
+  // device. A tablet starts from desktop. A phone starts from its own layout (one column, labels on
+  // top, every field full width), because a two-column form squeezed onto a phone is never what
+  // anyone wants; the builder can still change any of it for phones.
+  var DEVS = { desktop: "d", tablet: "t", mobile: "m" };
+  var LAYOUT_KEYS = ["layout", "width", "fieldSpacing", "padding", "labelAlign", "labelWidth", "showLabels", "fontSize"];
+  var PHONE_BASE = { layout: "single", labelAlign: "top" };
+
+  /** The style a device actually uses: desktop, then (phone only) its starting layout, then the
+   *  device's own changes. Colors and the rest are never per device, so they pass straight through. */
+  function resolve(def, device) {
+    var st = (def && def.style) || {};
+    if (device !== "tablet" && device !== "mobile") return st;
+    var o = (st.devices && st.devices[device]) || {};
+    var out = {}, k;
+    for (k in st) if (k !== "devices") out[k] = st[k];
+    if (device === "mobile") for (k in PHONE_BASE) out[k] = PHONE_BASE[k];
+    for (var i = 0; i < LAYOUT_KEYS.length; i++) if (o[LAYOUT_KEYS[i]] !== undefined) out[LAYOUT_KEYS[i]] = o[LAYOUT_KEYS[i]];
+    if (o.button) {
+      var b = {};
+      for (k in (st.button || {})) b[k] = st.button[k];
+      for (k in o.button) b[k] = o.button[k];
+      out.button = b;
+    }
+    return out;
+  }
+
+  /** A field's width on a device: desktop's own; a tablet follows desktop; a phone is full width
+   *  unless the builder set it, either way, for phones. */
+  function widthOn(f, device) {
+    var w = f.widthBy && f.widthBy[device];
+    if (w === "full" || w === "half") return w;
+    if (device === "mobile") return "full";
+    return f.width === "half" ? "half" : "full";
+  }
+
+  /** CSS for a form. With a device (the portal canvas and Preview, which sit in a wide window and
+   *  so cannot use media queries) it writes only that device's layout. Without one (the public
+   *  page and every embed) it writes all three, each inside a media query that excludes the other
+   *  two, so no desktop rule can leak onto a phone. The width measured is the frame's, so a form
+   *  embedded in a narrow sidebar takes the phone layout, which is the right one there. */
+  function css(def, scope, device) {
+    if (DEVS[device]) return rulesFor(resolve(def, device), scope, DEVS[device]).join("\n");
+    return [
+      "@media (min-width:1025px){" + rulesFor(resolve(def, "desktop"), scope, "d").join("") + "}",
+      "@media (min-width:601px) and (max-width:1024px){" + rulesFor(resolve(def, "tablet"), scope, "t").join("") + "}",
+      "@media (max-width:600px){" + rulesFor(resolve(def, "mobile"), scope, "m").join("") + "}"
+    ].join("\n");
+  }
+
+  function rulesFor(st, scope, p) {
     var c = st.colors || {};
     var b = st.button || {};
     var S = "." + scope;
@@ -62,19 +115,20 @@
       S + " .ssf-sub{margin:0;opacity:.8}",
       S + " .ssf-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:16px;row-gap:" + gap + "px}",
       S + " .ssf-f{grid-column:span 2;min-width:0}",
-      S + " .ssf-half{grid-column:span 1}",
+      S + " .ssf-" + p + "-half{grid-column:span 1}",
       // Two columns puts every ordinary field side by side; Single column uses each field's own width.
-      S + ".ssf-two .ssf-f:not(.ssf-wide){grid-column:span 1}",
+      S + ".ssf-" + p + "-two .ssf-f:not(.ssf-wide){grid-column:span 1}",
       S + " .ssf-label{display:block;font-weight:600;margin-bottom:6px;color:" + hex(c.label, "#111827") + "}",
       S + " .ssf-req{color:#DC2626;margin-left:2px}",
-      S + ".ssf-left .ssf-row," + S + ".ssf-right .ssf-row{display:flex;gap:12px;align-items:flex-start}",
-      S + ".ssf-left .ssf-row>.ssf-label," + S + ".ssf-right .ssf-row>.ssf-label{flex:0 0 " + lw + "px;margin:10px 0 0}",
-      S + ".ssf-right .ssf-row>.ssf-label{text-align:right}",
+      S + ".ssf-" + p + "-left .ssf-row," + S + ".ssf-" + p + "-right .ssf-row{display:flex;gap:12px;align-items:flex-start}",
+      S + ".ssf-" + p + "-left .ssf-row>.ssf-label," + S + ".ssf-" + p + "-right .ssf-row>.ssf-label{flex:0 0 " + lw + "px;margin:10px 0 0}",
+      S + ".ssf-" + p + "-right .ssf-row>.ssf-label{text-align:right}",
+      S + ".ssf-" + p + "-nolabel .ssf-label{display:none}",
       S + " .ssf-ctl{flex:1;min-width:0}",
-      S + " .ssf-in{display:block;width:100%;font:inherit;color:" + hex(c.text, "#111827") + ";background:" + hex(c.inputBg, "#FFF") + ";padding:10px 12px;border-radius:" + inputRadius + "px;" + (st.inputStyle === "underline" ? "border:0;border-bottom:1px solid " + border + ";padding-left:2px;background:transparent;" : "border:1px solid " + border + ";") + "outline:none;transition:border-color .15s,box-shadow .15s}",
+      S + " .ssf-in{display:block;width:100%;font:inherit;color:" + hex(c.inputText, hex(c.text, "#111827")) + ";background:" + hex(c.inputBg, "#FFF") + ";padding:10px 12px;border-radius:" + inputRadius + "px;" + (st.inputStyle === "underline" ? "border:0;border-bottom:1px solid " + border + ";padding-left:2px;background:transparent;" : "border:1px solid " + border + ";") + "outline:none;transition:border-color .15s,box-shadow .15s}",
       S + " textarea.ssf-in{min-height:110px;resize:vertical}",
       S + " .ssf-in:focus{border-color:" + accent + ";box-shadow:0 0 0 3px " + accent + "33}",
-      S + " .ssf-in::placeholder{color:" + hex(c.text, "#111827") + ";opacity:.45}",
+      (hex(c.placeholder, "") ? S + " .ssf-in::placeholder{color:" + c.placeholder + ";opacity:1}" : S + " .ssf-in::placeholder{color:" + hex(c.text, "#111827") + ";opacity:.45}"),
       S + " .ssf-opt{display:flex;gap:8px;align-items:flex-start;margin:4px 0;cursor:pointer;font-weight:400}",
       S + " .ssf-opt input{margin-top:3px;accent-color:" + accent + ";flex:0 0 auto;width:16px;height:16px}",
       S + " .ssf-help{font-size:" + (fs - 2) + "px;opacity:.7;margin-top:4px}",
@@ -95,10 +149,9 @@
       S + " .ssf-done b{display:block;font-size:" + (fs + 7) + "px;margin-bottom:6px}",
       S + " .ssf-formerr{color:#DC2626;margin-top:10px;text-align:center}",
       S + " .ssf-hp{position:absolute!important;left:-10000px!important;width:1px;height:1px;overflow:hidden}",
-      S + " .ssf-hiddenchip{font-size:12px;opacity:.6;border:1px dashed " + border + ";border-radius:6px;padding:6px 10px}",
-      "@media (max-width:520px){" + S + " .ssf-half{grid-column:span 2}" + S + ".ssf-left .ssf-row," + S + ".ssf-right .ssf-row{display:block}" + S + ".ssf-left .ssf-row>.ssf-label," + S + ".ssf-right .ssf-row>.ssf-label{margin:0 0 6px;text-align:left}}"
+      S + " .ssf-hiddenchip{font-size:12px;opacity:.6;border:1px dashed " + border + ";border-radius:6px;padding:6px 10px}"
     ];
-    return rules.join("\n");
+    return rules;
   }
 
   function optionsFor(f, opts) {
@@ -231,9 +284,14 @@
     var st = def.style || {};
     seq++;
     var scope = "ssf-s" + seq + "-" + Math.random().toString(36).slice(2, 7);
-    var root = el("div", "ssf " + scope + " ssf-" + (st.layout === "two" ? "two" : "single") + " ssf-" + (st.labelAlign === "left" || st.labelAlign === "right" ? st.labelAlign : "top") + (st.cssClass ? " " + st.cssClass : ""));
+    var cls = "ssf " + scope;
+    for (var dv in DEVS) {
+      var ds = resolve(def, dv), dp = DEVS[dv];
+      cls += " ssf-" + dp + "-" + (ds.layout === "two" ? "two" : "single") + " ssf-" + dp + "-" + (ds.labelAlign === "left" || ds.labelAlign === "right" ? ds.labelAlign : "top") + (ds.showLabels === false ? " ssf-" + dp + "-nolabel" : "");
+    }
+    var root = el("div", cls + (st.cssClass ? " " + st.cssClass : ""));
     var style = el("style");
-    style.textContent = css(def, scope);
+    style.textContent = css(def, scope, opts.device);
     root.appendChild(style);
 
     var h = def.header || {};
@@ -255,7 +313,7 @@
       var f = def.fields[i];
       var wide = ["heading", "paragraph", "divider", "image", "textarea", "sms_consent", "terms", "checkboxes", "radio"].indexOf(f.type) >= 0
         || (f.type === "custom" && (f.fieldType === "textarea" || f.fieldType === "checkbox"));
-      var box = el("div", "ssf-f" + (f.width === "half" ? " ssf-half" : "") + (wide ? " ssf-wide" : ""));
+      var box = el("div", "ssf-f" + (widthOn(f, "desktop") === "half" ? " ssf-d-half" : "") + (widthOn(f, "tablet") === "half" ? " ssf-t-half" : "") + (widthOn(f, "mobile") === "half" ? " ssf-m-half" : "") + (wide ? " ssf-wide" : ""));
       box.setAttribute("data-field-id", f.id);
       if (f.type === "hidden") {
         if (!opts.designer) continue;
@@ -273,14 +331,14 @@
       } else {
         var row = el("div", "ssf-row");
         var ctl = control(f, ctlOpts);
-        var showLabel = st.showLabels !== false && f.type !== "sms_consent" && f.type !== "terms";
-        if (showLabel) {
+        // The label is always drawn; "Show field labels" off hides it per device in CSS, so the
+        // control carries its own name too and never goes nameless on the device that hides it.
+        if (f.type !== "sms_consent" && f.type !== "terms") {
           var lab = el("label", "ssf-label", f.label);
           if (ctl.id) lab.htmlFor = ctl.id;
           if (f.required) lab.appendChild(el("span", "ssf-req", "*"));
           row.appendChild(lab);
-        } else if (ctl.setAttribute && ctl.tagName !== "LABEL" && ctl.tagName !== "DIV") {
-          ctl.setAttribute("aria-label", f.label);
+          if (ctl.setAttribute && ctl.tagName !== "LABEL" && ctl.tagName !== "DIV") ctl.setAttribute("aria-label", f.label);
         }
         var wrap = el("div", "ssf-ctl");
         wrap.appendChild(ctl);
@@ -380,5 +438,5 @@
     return root;
   }
 
-  window.SSForm = { build: build, css: css, FONTS: FONTS, version: 1 };
+  window.SSForm = { build: build, css: css, resolve: resolve, widthOn: widthOn, FONTS: FONTS, version: 2 };
 })();
