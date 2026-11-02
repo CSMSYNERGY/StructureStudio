@@ -349,6 +349,8 @@ try {
   ok("A: owner sees the Sales Tax tab in Company", (await tabButton().count()) === 1);
   ok("A: …and no tab is still called Tax", (await tabNamed("Tax").count()) === 0);
   ok("A: the card opens", await openTax());
+  // The whole list's size means nothing to a builder who picks from the short one.
+  ok("A: the footnote names Avalara's list and its date, not how many codes it holds", await waitText("The codes come from Avalara's list, last updated") && !/\d codes, last updated/.test(await text()));
   await page.waitForTimeout(400);
   const titles = await page.locator("[data-tax-row]").evaluateAll((els) => els.map((e) => e.innerText.split("\n")[0].trim()));
   ok("A: three suggested rows: Products, Services, Delivery", JSON.stringify(titles) === JSON.stringify(["PRODUCTS", "SERVICES", "DELIVERY"]), JSON.stringify(titles));

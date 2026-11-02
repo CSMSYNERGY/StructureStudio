@@ -5144,8 +5144,8 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
       {d && d.catalog && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 12 }}>
           {d.catalog.syncedAt
-            ? `The codes come from Avalara's list: ${Number(d.catalog.count || 0).toLocaleString("en-US")} codes, last updated ${new Date(d.catalog.syncedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.`
-            : "Only Avalara's common codes are listed until CSM Synergy loads the full list."}
+            ? `The codes come from Avalara's list, last updated ${new Date(d.catalog.syncedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.`
+            : "Some codes on this list won't show until CSM Synergy loads Avalara's list."}
         </div>
       )}
       </>)}
