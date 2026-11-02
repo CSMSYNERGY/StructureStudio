@@ -11720,7 +11720,7 @@ async function ssPgFetch(target, expect) {
 function PgBadge({ tone, text, title = null, onClick = null, actions = null }) {
   return (
     <>
-      <span className={"ss-pg-badge ss-pg-badge-" + tone} aria-live="polite" title={title || undefined}>
+      <span className={"ss-pg-badge ss-pg-badge-" + tone} aria-live="polite" title={title || text}>
         {onClick ? <button type="button" className="ss-pg-badge-btn" onClick={onClick}>{text}</button> : text}
       </span>
       {actions}
@@ -13391,7 +13391,7 @@ function PricingTablePage({ clientId, target, companyName, operatorView, viewOnl
       actions: retryAt ? bact("Retry now", retryNow) : null }
     : out ? { tone: "blue", text: `Saving ${n(out, "1 change", "changes")}…` }
     : unsent ? { tone: "blue", text: `${n(unsent, "1 change", "changes")} not saved yet` }
-    : q && q.unsure ? { tone: "amber", text: "Discarded, but the last try may have saved", title: "Reload to see what's on file", actions: bact("Reload", fetchAll) }
+    : q && q.unsure ? { tone: "amber", text: "Discarded, but the last try may have saved", title: "Discarded, but the last try may have saved. Reload to see what's on file", actions: bact("Reload", fetchAll) }
     : counts.red ? { tone: "red", text: `${n(counts.red, "1 box needs", "boxes need")} you`, onClick: () => jumpRed(), title: "Go to the next box that didn't save" }
     : { tone: "green", text: `All changes saved · ${time}` };
   const noStyles = !!model && model.styles.length === 0;
@@ -13740,7 +13740,7 @@ const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, 
     <tr role="row" aria-rowindex={rowIndex} className="ss-pg-band" data-band={styleId}>
       <td role="rowheader" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
         <div className="ss-pg-bandin">
-          <b>{label}</b>
+          <b title={label}>{label}</b>
           <span>{total === 1 ? "1 size" : `${total} sizes`}{hidden ? ` · ${hidden} hidden${folded ? (folded < hidden ? `, ${folded} folded away` : ", folded away") : ""}` : ""}</span>
           {canAdd && <button type="button" className="ss-pg-addbtn" title="Add sizes to this style (Alt+Enter on any of its sizes)" data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>}
         </div>

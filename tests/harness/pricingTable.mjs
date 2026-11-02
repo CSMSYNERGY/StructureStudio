@@ -1688,7 +1688,8 @@ if (want("P")) {
   await page.locator(".ss-pg-bact", { hasText: "Discard these changes" }).click();
   const unsure = await waitBadge(page, /^Discarded, but the last try may have saved$/, 8000);
   s = await state(page);
-  ok("P: …when that read fails: 'Discarded, but the last try may have saved', with Reload", unsure && reads() === r0 + 1 && s.actions.includes("Reload"), JSON.stringify(s));
+  const unsureTitle = await page.evaluate(() => document.querySelector(".ss-pg-badge").title);
+  ok("P: …when that read fails: 'Discarded, but the last try may have saved', with Reload, and hover has those words", unsure && reads() === r0 + 1 && s.actions.includes("Reload") && unsureTitle.startsWith(s.badge), JSON.stringify({ s, unsureTitle }));
   await page.locator(".ss-pg-bact", { hasText: "Reload" }).click({ timeout: 3000 }).catch(() => {});
   ok("P: …and Reload shows what is on file", await waitBadge(page, /^All changes saved/) && (await look(page, barn[3].id, 1)).text === "$6,262" && F.size(barn[3].id).base_price === 6262);
   ok("P: no page errors (stopped)", errors.length === 0, errors.join(" | "));
@@ -4614,12 +4615,9 @@ const stillRun = async ([width, height], at) => {
   const clear = async () => (await statusText(page)) === "";
   const pressA = () => pressOn(page, sel(A.id, 1));
   const q = await centerOf(page, ".ss-pg-q");
-  // From 700 to 997 px the toolbar is cut off and ? with it, an old bug (the plan's question 4).
-  if (q && q.x < width) {
-    await step("? pressed", () => pressAt(page, q), async () => (await legendOf(page)).shown);
-    await step("? pressed again", () => pressAt(page, q), async () => (await legendOf(page)).shown === !narrow);
-    await step("? left", () => page.mouse.move(away.x, away.y), async () => true);
-  }
+  await step("? pressed", () => pressAt(page, q), async () => (await legendOf(page)).shown);
+  await step("? pressed again", () => pressAt(page, q), async () => (await legendOf(page)).shown === !narrow);
+  await step("? left", () => page.mouse.move(away.x, away.y), async () => true);
   if (narrow && at === "top") await step("the note's ✕", () => pressOn(page, ".ss-pg-narrow button"), async () => !(await page.$(".ss-pg-narrow")));
   const th = await centerOf(page, ".ss-pg-names th.ss-pg-oh");
   await step("a header hover", () => page.mouse.move(th.x, th.y), async () => !!(await state(page)).readout);
@@ -4636,9 +4634,8 @@ const stillRun = async ([width, height], at) => {
   await step("the long line goes", () => pressOn(page, DISMISS), clear);
   const n0 = saveCalls(calls).length;
   await step("a save", async () => { await pressA(); await page.keyboard.type("4321"); await page.keyboard.press("Enter"); }, () => saved(page, calls, n0));
-  // Where ? is cut off, Tab to it scrolls the whole page sideways. That comes with the old bug above.
   let keyed = null;
-  if (!narrow && at === "top" && q.x < width) {
+  if (!narrow && at === "top") {
     await stillStep(page, "keyboard focus on ?");
     await pressOn(page, rmOf(grey.id));
     await soon(says(/^Test .+ \d+x\d+: /));
@@ -4657,7 +4654,7 @@ if (want("S")) {
   runs.forEach((r) => ok(`S: ${r.width}x${r.height}, at the scroll's ${r.at === "top" ? "top" : "very end"}: row, header, scrollTop, box height and the box under a point stay put through a grey line, amber, a conflict, the 318-character line, ?, a header hover, a first press and a save${r.width < 700 && r.at === "top" ? ", and the note's ✕" : ""}`,
     r.frames > 30 && !r.moves.length && !r.missed.length && !r.errors.length && !r.bad.length, JSON.stringify({ frames: r.frames, missed: r.missed, moves: r.moves.slice(0, 8), n: r.moves.length, errors: r.errors, bad: r.bad })));
   const keyed = runs.filter((r) => r.keyed);
-  ok("S: with a line up on a wide screen, keyboard focus on ? shows the legend under the line", keyed.length === 4 && keyed.every((r) => r.keyed.shown && r.keyed.underLine), JSON.stringify(keyed.map((r) => [r.width, r.keyed])));
+  ok("S: with a line up on a wide screen, keyboard focus on ? shows the legend under the line", keyed.length === 5 && keyed.every((r) => r.keyed.shown && r.keyed.underLine), JSON.stringify(keyed.map((r) => [r.width, r.keyed])));
 }
 
 // 2 and 3. The earlier offer arrives after the grid and goes with its Discard: a frame sampler sees one
@@ -4882,6 +4879,111 @@ if (want("S")) {
   const runs = await inTurns([360, 390, 560, 600, 640, 699], stillForbidden);
   runs.forEach((r) => ok(`S: ${r.width} px: after a 403 the view-only badge shows whole${r.width >= 560 ? ", and the grid and toolbar stay" : ""}`,
     r.got && r.badge.shown >= r.badge.needs && (r.width < 560 || !r.moves.length) && !r.errors.length, JSON.stringify({ got: r.got, badge: r.badge, moves: r.moves.slice(0, 6), errors: r.errors })));
+}
+
+// The toolbar can't scroll sideways, so nothing on it may ever sit past the edge. From 560 to 1099 it has
+// two rows, always, and from 1100 one, where the jump, the company name and the badge give way. The real
+// failure flow again, on one page through green, retry, stopped, the save landing and a 403, on the plain
+// fixture, in view-as and with long style names. At every step each control's whole box is in the window
+// and it is what's under its centre. A frame sampler sees one toolbar height and one row y through all of
+// it, and the height is that shape's on all three. Tab to ? leaves the page where it is. On a builder's
+// own page Fill down, Clear and Delete sizes stay put too, since a still pointer's next press lands by x.
+const BAR_WIDTHS = [560, 600, 699, 700, 701, 780, 850, 997, 1000, 1024, 1099, 1100, 1200, 1259, 1260, 1280, 1366, 1440];
+const LONG_STYLE = `Test Barn ${"WITH A VERY WIDE STYLE NAME ".repeat(4)}`.slice(0, 106);
+const barLook = (page) => page.evaluate(() => {
+  const named = [["Back", ".ss-pg-back"], ["Jump", ".ss-pg-jump"], ["Show hidden", ".ss-pg-tog"], ["?", ".ss-pg-q"]].map(([n, s]) => [n, document.querySelector(s)]);
+  [...document.querySelectorAll(".ss-pg-tbtn, .ss-pg-bact")].forEach((b) => named.push([b.textContent, b]));
+  const out = (e) => { const r = e.getBoundingClientRect(); return r.width <= 0 || r.left < 0 || r.right > innerWidth || r.top < 0 || r.bottom > innerHeight; };
+  const under = (e) => { const r = e.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && (hit === e || e.contains(hit)); };
+  const middle = (e) => { const r = e.getBoundingClientRect(); return r.top + r.height / 2; };
+  const b = document.querySelector(".ss-pg-badge");
+  return { seen: named.map(([n]) => n), off: named.filter(([, e]) => !e || out(e)).map(([n]) => n), covered: named.filter(([, e]) => e && !under(e)).map(([n]) => n),
+    rows: new Set(named.map(([, e]) => Math.round(middle(e)))).size, bar: document.querySelector(".ss-pg-bar").getBoundingClientRect().height,
+    btnX: [...document.querySelectorAll(".ss-pg-tbtn")].map((e) => e.getBoundingClientRect().left),
+    badge: { text: b.textContent, title: b.title, shown: b.clientWidth, needs: b.scrollWidth } };
+});
+const stillBar = async ([width, kind]) => {
+  const view = kind === "view-as";
+  const client = view ? VIEWED : OWN;
+  const cat = catalogFor(client);
+  const t = tableFor(client, cat);
+  if (kind === "long style names") t.styles.forEach((s, i) => { s.label = LONG_STYLE + i; });
+  const F = fakeServer(cat, t);
+  const b = barnOf(F.table(client));
+  const win = { __ssPgBackoffMs: [800, 50, 50, 50] };
+  const { ctx, page, errors } = await open(`/settings/sheds-table${view ? `?view=${VIEWED}` : ""}`, view ? { own: OPS, operator: true, cat: (cid) => ({ ...cat, clientId: cid }), fake: F, win } : { cat: () => cat, fake: F, win }, { width, height: 800 });
+  await waitGrid(page).catch(() => {});
+  if (view) await page.waitForSelector(".ss-pg-op", { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(100);
+  await watchStill(page, b[3].id);
+  const looks = {};
+  const snap = async (name) => { await stillStep(page, name); await page.waitForTimeout(40); looks[name] = await barLook(page); };
+  await snap("green");
+  await pressOn(page, sel(b[1].id, 1));
+  for (let i = 0; i < 5; i++) F.script.push({ status: 500 });
+  await page.keyboard.type("888");
+  await page.keyboard.press("Enter");
+  const retrying = await soon(() => page.evaluate(() => [...document.querySelectorAll(".ss-pg-bact")].some((x) => x.textContent === "Retry now")), 6000);
+  looks.retry = await barLook(page);
+  const stopped = await waitBadge(page, /^Saving stopped/, 15000);
+  await snap("stopped");
+  await stillStep(page, "Retry");
+  await pressOn(page, ".ss-pg-bact");
+  const landed = await soon(async () => /^All changes saved/.test((await state(page)).badge) && F.size(b[1].id).base_price === 888, 8000);
+  await snap("landed");
+  await page.evaluate(() => [...document.querySelectorAll(".ss-pg-tbtn")].pop().focus({ preventScroll: true }));
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(40);
+  const tabbed = await page.evaluate(() => ({ q: document.activeElement === document.querySelector(".ss-pg-q"), left: document.querySelector(".ss-pg").scrollLeft }));
+  await pressOn(page, sel(b[2].id, 1));
+  F.script.push({ status: 403 });
+  await page.keyboard.type("777");
+  await page.keyboard.press("Enter");
+  const forbidden = await waitBadge(page, /^View only/, 8000);
+  await snap("403");
+  const log = await stillLog(page);
+  await ctx.close();
+  return { width, kind, retrying, stopped, landed, forbidden, looks, tabbed, moves: log.moves, frames: log.frames, errors };
+};
+if (want("S")) {
+  const runs = await inTurns(BAR_WIDTHS.flatMap((w) => ["the plain fixture", "view-as", "long style names"].map((k) => [w, k])), stillBar);
+  runs.forEach((r) => {
+    const name = `${r.width} px, ${r.kind}`, states = Object.values(r.looks), shape = r.width < 1100 ? { rows: 2, bar: 75 } : { rows: 1, bar: 44 };
+    const need = [["green", "Fill down,Clear,Delete sizes"], ["retry", "Fill down,Clear,Delete sizes,Retry now"], ["stopped", "Fill down,Clear,Delete sizes,Retry,Discard these changes"], ["landed", "Fill down,Clear,Delete sizes"], ["403", ""]];
+    const drawn = need.every(([s, more]) => r.looks[s].seen.slice(4).join() === more);
+    ok(`S: ${name}: every toolbar control's whole box is in the window and it is what's under its centre, through green, retry, stopped, the landing and a 403`,
+      r.retrying && r.stopped && r.landed && r.forbidden && drawn && states.every((x) => !x.off.length && !x.covered.length) && !r.errors.length, JSON.stringify({ retrying: r.retrying, stopped: r.stopped, landed: r.landed, forbidden: r.forbidden, drawn, bad: Object.entries(r.looks).filter(([, x]) => x.off.length || x.covered.length).map(([s, x]) => [s, x.off, x.covered]), errors: r.errors }));
+    ok(`S: ${name}: ${shape.rows === 2 ? "two rows" : "one row"}, ${shape.bar} px, and one toolbar height and row y through all of it`,
+      r.frames > 10 && !r.moves.length && states.every((x) => x.bar === shape.bar && x.rows === shape.rows), JSON.stringify({ frames: r.frames, bars: states.map((x) => x.bar), rows: states.map((x) => x.rows), moves: r.moves.slice(0, 6) }));
+    ok(`S: ${name}: Tab reaches ? and the page stays where it is`, r.tabbed.q && r.tabbed.left === 0, JSON.stringify(r.tabbed));
+    if (r.kind !== "view-as") ok(`S: ${name}: Fill down, Clear and Delete sizes stay where they are through green, retry, stopped and the landing`,
+      ["retry", "stopped", "landed"].every((s) => r.looks[s].btnX.every((x, i) => Math.abs(x - r.looks.green.btnX[i]) <= 1)), JSON.stringify(["green", "retry", "stopped", "landed"].map((s) => r.looks[s].btnX)));
+    const stop = r.looks.stopped.badge, late = r.looks.landed.badge, no = r.looks["403"].badge;
+    ok(`S: ${name}: the stopped badge says its words on hover${r.width >= 1100 ? " and keeps Saving stopped…" : r.width >= 780 ? " and is whole, the empty readout taking none of its room" : ""}, green is whole, and the 403's badge is whole`,
+      stop.title === stop.text && (r.width < 780 || (r.width < 1100 ? stop.shown >= stop.needs : stop.shown - 20 >= 98)) && late.shown >= late.needs && no.shown >= no.needs, JSON.stringify({ stop, late, no }));
+  });
+}
+
+// A long style name gives way, so the band's ＋ Add sizes stays in the window: the band is sticky, so
+// scrolling can't bring it back. A real press opens the strip, a cut name has its words on hover, and a
+// short one stays whole.
+const stillBand = async ([width, chars]) => {
+  const cat = catalogFor(OWN);
+  const t = tableFor(OWN, cat);
+  t.styles.forEach((s, i) => { s.label = LONG_STYLE.slice(0, chars - 1) + i; });
+  const { ctx, page, errors } = await open("/settings/sheds-table", { cat: () => cat, fake: fakeServer(cat, t) }, { width, height: 800 });
+  await waitGrid(page).catch(() => {});
+  const band = `tr[data-band="${t.styles[0].id}"]`;
+  const at = await page.evaluate((q) => { const r = document.querySelector(`${q} .ss-pg-addbtn`).getBoundingClientRect(), n = document.querySelector(`${q} b`); return { left: r.left, right: r.right, shown: n.clientWidth, needs: n.scrollWidth, title: n.title, text: n.textContent }; }, band);
+  await pressOn(page, `${band} .ss-pg-addbtn`);
+  const expanded = await soon(() => page.evaluate((q) => document.querySelector(`${q} .ss-pg-addbtn`).getAttribute("aria-expanded") === "true", band), 2000);
+  await ctx.close();
+  return { width, chars, at, expanded, errors };
+};
+if (want("S")) {
+  const runs = await inTurns([[560, 20], [560, 60], [560, 106], [850, 106], [1440, 106]], stillBand);
+  runs.forEach((r) => ok(`S: ${r.width} px, a ${r.chars}-character style name: the band's ＋ Add sizes is in the window and a real press opens its strip${r.chars === 20 ? ", and the name is whole" : ", and hover has the name"}`,
+    r.at.left >= 0 && r.at.right <= r.width && r.expanded && (r.chars === 20 ? r.at.shown >= r.at.needs : r.at.title === r.at.text) && !r.errors.length, JSON.stringify(r)));
 }
 
 // 6. Every new text flashes the band: a new line, another size's refusal, a swap to another kind of
@@ -5171,7 +5273,7 @@ const stillRows = async ([width, height, rows]) => {
   return { width, height, rows, seen, errors };
 };
 if (want("S")) {
-  const runs = await inTurns([[1440, 860, 19], [390, 860, 17], [667, 375, 4], [640, 360, 4], [568, 320, 2], [699, 860, 20]], stillRows);
+  const runs = await inTurns([[1440, 860, 19], [1100, 860, 19], [1099, 860, 17], [1000, 860, 17], [701, 860, 17], [844, 390, 2], [390, 860, 17], [667, 375, 4], [640, 360, 4], [568, 320, 2], [699, 860, 20]], stillRows);
   runs.forEach((r) => ok(`S: ${r.width}x${r.height}: ${r.rows} rows fully shown in every state`, Object.values(r.seen).every((n) => n === r.rows) && !r.errors.length, JSON.stringify(r.seen)));
 }
 

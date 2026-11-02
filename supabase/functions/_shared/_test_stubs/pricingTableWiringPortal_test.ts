@@ -36,9 +36,10 @@
 //      sends and says so under its result, and the instructions say $0 is free.
 //  12. The status line's band (11-02): it has one height whatever is in it, what runs longer hangs over
 //      the header and stops at its bottom edge, every new text is a new node so the flash runs again,
-//      only what is said sits in the live region, a wide screen always draws the legend, and a phone's
-//      long badge shrinks rather than wrap. The gate runs this file and not the harness, so these are what
-//      refuse a push that loses any of it.
+//      only what is said sits in the live region, a wide screen always draws the legend, the toolbar has
+//      two rows from 560 to 1099 and one from 1100, and a long badge shrinks rather than wrap or push
+//      anything off screen. The gate runs this file and not the harness, so these are what refuse a push
+//      that loses any of it.
 //
 // Lifted with the xlsxCellText_test anchor idiom: the text between a signature and the next "\n}\n".
 // No network, no DOM: the lifted functions get stubs for exactly the names they use.
@@ -686,14 +687,22 @@ Deno.test("the status line's band: one height whatever is in it, its overflow ca
   assert(live > band && legend > live, "the live region closes before the legend, so the legend and the note are never read out");
   assert(page.includes(`{(legendOpen || !narrow) && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}`), "a phone turned sideways still gets the legend");
   const narrowCss = between(html, "@media (max-width:699.98px){", "\n}\n", "the narrow block");
-  assert(narrowCss.includes(".ss-pg-badge{flex:1 1 0;min-width:0;max-width:max-content;overflow:hidden;text-overflow:ellipsis}"), "a phone's long badge shrinks instead of pushing its buttons to a new row");
-  assert(narrowCss.includes(`.ss-pg[data-ss-pg-editable="0"] .ss-pg-badge{flex:0 1 auto}`), "a page that can't edit keeps its badge whole where it fits");
-  assert(narrowCss.includes(`.ss-pg-bar::after{content:"";order:7;flex-basis:100%}`), "below 560 the badge and ? always get the last row");
+  assert(html.includes("border:1px solid;flex:99999 1 0;min-width:0;max-width:max-content;overflow:hidden;text-overflow:ellipsis}"), "a long badge shrinks at every width instead of pushing anything off screen, and takes the room before the readout does");
+  assert(html.includes(".ss-pg-readout{flex:1;min-width:0;"), "the readout's grow is the small one");
+  assert(html.includes(`\n.ss-pg[data-ss-pg-editable="0"] .ss-pg-badge{flex:0 1 auto}\n`), "a page that can't edit keeps its badge whole where it fits");
+  assert(CATALOG.includes(`aria-live="polite" title={title || text}>`) && CATALOG.includes(`title: "Discarded, but the last try may have saved. Reload to see what's on file"`), "a cut badge has its words on hover");
+  assert(narrowCss.includes(".ss-pg-bar{flex-wrap:wrap;gap:4px 8px}") && narrowCss.includes(`.ss-pg-bar::after{content:"";order:7;flex-basis:100%}`) && narrowCss.includes(".ss-pg-badge,.ss-pg-bact,.ss-pg-q{order:8}"), "below 560 the badge and ? always get the last row");
   assert(narrowCss.includes(".ss-pg-slot-in{top:var(--ss-pg-slot);max-height:var(--ss-pg-hd)}") && narrowCss.includes(".ss-pg-slot-in .ss-pg-status>span{max-height:calc(var(--ss-pg-hd) - 7px)}"), "under a phone's readout, what runs long still stops at the header's bottom");
   assert(narrowCss.includes(".ss-pg-legend{padding:3px 14px;border-bottom:1px solid #E2E8F0}"), "a phone's open legend has its own bottom edge, since it can spill past the band");
   assert(html.includes(".ss-pg-slot .ss-pg-status>span{flex:1;min-width:0;max-height:calc(var(--ss-pg-slot) + var(--ss-pg-hd) - 7px);overflow-y:auto;overflow-wrap:anywhere}"), "a long line scrolls inside itself, and typed text with no spaces wraps");
   assert(html.includes(".ss-pg-earlier~.ss-pg-status button{align-self:flex-start}"), "with the offer up, a long line's Dismiss stays in view");
-  assert(html.includes("@media (min-width:560px) and (max-width:699.98px){\n  .ss-pg{--ss-pg-slot:31px}\n  .ss-pg-bar::after{display:none}\n  .ss-pg-slot>.ss-pg-readout{display:block;white-space:nowrap}\n}"), "from 560 to 699 the band is one line, and the toolbar keeps its two rows");
+  assert(html.includes("@media (min-width:560px) and (max-width:699.98px){\n  .ss-pg{--ss-pg-slot:31px}\n  .ss-pg-slot>.ss-pg-readout{display:block;white-space:nowrap}\n}"), "from 560 to 699 the band is one line");
+  assert(html.includes(`@media (min-width:560px) and (max-width:1099.98px){\n  .ss-pg-bar{flex-wrap:wrap;gap:2px 8px}\n  .ss-pg-bar::after{content:"";order:7;flex-basis:100%}\n  .ss-pg-tbtn,.ss-pg-readout,.ss-pg-badge,.ss-pg-bact,.ss-pg-q{order:8}\n  .ss-pg-co{flex:1 1 0;min-width:0;max-width:max-content}\n  .ss-pg-jump{flex:1 1 60px}\n}`), "from 560 to 1099 the toolbar has two rows, always: its second one is the work, and the name and the jump can't start a third");
+  assert(html.includes("max-width:180px;min-width:60px}"), "on one row the jump gives way, down to 60 px");
+  assert(html.includes("@media (min-width:1100px){\n  .ss-pg-badge{flex:99999 .01 122px}\n}"), "from 1100 the toolbar is one row, and the badge keeps Saving stopped while the jump and the name give way");
+  assert(html.includes("@media (min-width:1100px) and (max-width:1259.98px){\n  .ss-pg-jump{flex:0 1 70px}\n}"), "up to 1259 the jump stays small at rest, so the toolbar's buttons don't slide under a still pointer when saving stops");
+  assert(html.indexOf("@media (max-width:699.98px){") < html.indexOf("@media (min-width:560px) and (max-width:1099.98px){") && html.indexOf(".ss-pg-badge{font-size:12px") < html.indexOf("@media (min-width:1100px){"), "the blocks stay in the order their overrides need");
+  assert(html.includes(".ss-pg-bandin b{min-width:0;overflow:hidden;text-overflow:ellipsis}") && CATALOG.includes("<b title={label}>{label}</b>"), "a long style name gives way, so the band's Add sizes stays on screen, and hover has the name");
   assert(page.includes("{!narrow && readoutEl}") && page.includes(`px" }}>{narrow && readoutEl}<div className="ss-pg-slot-in">`), "below 700 the readout lives in the band");
   assert(page.includes(`if (act === "delete" && e.detail < 2 && !ssPgCanDelete(qRef.current, id, byId[id] ? byId[id].size : null).ok) ssPgNoFlash(b.closest("td"));`), "a refused ✕ flashes at the pointer, once for a double click");
   assert(CATALOG.includes(`window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;\n  try { td.animate(`), "the flash stays off under reduced motion, and can't take the message down");
