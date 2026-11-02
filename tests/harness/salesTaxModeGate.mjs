@@ -135,11 +135,11 @@ const boot = async (shape) => {
   await page.getByText("Settings", { exact: true }).last().click();
   await page.waitForTimeout(900);
 };
-// The company rate is not a box on GHL Connection since 2026-10-09 (it is set on Company → Tax); a
+// The company rate is not a box on GHL Connection since 2026-10-09 (it is set on Company → Sales Tax); a
 // tenant without the capability sees its read-only summary, whose link is the anchor here.
 const openCrm = async () => {
   await page.getByText("GHL Connection", { exact: true }).last().click();
-  await waitText(S.allowed ? "Estimates and invoices through my CRM" : "Change it in Company → Tax");
+  await waitText(S.allowed ? "Estimates and invoices through my CRM" : "Change it in Company → Sales Tax");
 };
 const openLocations = async () => {
   await page.getByText("Company", { exact: true }).last().click();
@@ -163,7 +163,7 @@ try {
   await openCrm();
   await page.waitForTimeout(1500);
   let t = await text();
-  ok("B: numbering + the company-rate summary still show (unchanged)", t.includes("Change it in Company → Tax") && t.includes("6.5%, shown on documents as"));
+  ok("B: numbering + the company-rate summary still show (unchanged)", t.includes("Change it in Company → Sales Tax") && t.includes("6.5%, shown on documents as"));
   ok("B: GHL Connection makes no tax_settings call", taxCalls() === before, `calls ${taxCalls() - before}`);
   ok("B: GHL Connection shows no tax text", !TAX_TEXT.test(t), hit(t));
   await openLocations();

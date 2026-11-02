@@ -21,6 +21,8 @@
 //   8. a builder-side tax code action reaching Avalara;
 //   9. avalara_tax_codes_status (the Admin console's catalog row) growing an Avalara call or a
 //      read of anything but the catalog, while it sits on READ_ONLY_ACTIONS;
+//  11. tax_codes_search going back to the whole catalog, or tax_codes_save accepting a code off the
+//      Sales Tax list, or judging that without the tenant's own stored codes (2026-11-02);
 //  10. tax_codes_get losing the company rate and the Tax tab's states (2026-10-09), sending a CRM
 //      credential instead of a boolean, or folding the codes switch (migration 290) into its main
 //      select, which would fail the whole action on a database without 290. Driven for real in
@@ -164,11 +166,21 @@ Deno.test("GATES: save_company_tax is settings_crm:edit, beside the rates, with 
   assert(/if \(action === "save_company_tax"\) \{/.test(SETTINGS), "the save_company_tax branch is gone");
 });
 
-Deno.test("tax_codes_search reads the stored catalog only: active codes, North America unless asked", () => {
-  assert(/admin\.from\("avalara_tax_codes"\)\.select\(columns\)\.eq\("is_active", true\)/.test(SEARCH), "the search no longer limits itself to active codes");
-  assert(/return includeAll \? b : b\.eq\("north_america", true\);/.test(SEARCH), "the North America filter no longer defaults on");
-  assert(/const q = searchQuery\(payload\?\.q\);/.test(SEARCH), "the typed text reaches ilike without searchQuery's escaping");
+Deno.test("tax_codes_search reads the stored catalog only: the Sales Tax list's active codes, never the whole catalog", () => {
+  assert(/\.eq\("is_active", true\)\.in\("code", SALES_TAX_CODES\.map\(\(c\) => c\.code\)\)/.test(SEARCH),
+    "the search no longer limits itself to the Sales Tax list's active codes, which puts Avalara's whole list back in a builder's picker");
+  assert(!/includeAll|north_america|ilike/.test(SEARCH), "a path to codes off the list is back in the search");
+  assert(/searchCodes\(orderCodes\(\(data \?\? \[\]\)\.map\(taxCodeView\)\), payload\?\.q\)/.test(SEARCH), "the search's answer no longer comes from searchCodes, in the list's order");
   for (const t of SEARCH.matchAll(/admin\.from\("([^"]+)"\)/g)) assert(t[1] === "avalara_tax_codes", `the search reads ${t[1]}`);
+});
+
+Deno.test("tax_codes_save refuses a code off the Sales Tax list before its first write, knowing this tenant's stored codes", () => {
+  const storedRead = at(SAVE, 'admin.from("tax_code_assignments")', "tax_codes_save");
+  const check = at(SAVE, "const offList = codesOffTheList(codes, stored ?? []);", "tax_codes_save");
+  const refusal = at(SAVE, '"code_not_on_list"', "tax_codes_save");
+  const firstWrite = Math.min(at(SAVE, ".upsert(", "tax_codes_save"), at(SAVE, ".delete(", "tax_codes_save"));
+  assert(storedRead < check, "the check runs before the stored codes are read, so a builder's saved code would be refused");
+  assert(check < refusal && refusal < firstWrite, "the refusal sits below a write — a refused save would already have changed the set");
 });
 
 Deno.test("no builder-side tax code action reaches Avalara", () => {

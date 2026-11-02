@@ -5,7 +5,7 @@
 // or an operator viewing as them, saves Settings → GHL Connection → Estimates & Invoices with, if they
 // have them, their own next estimate and invoice numbers: since migration 283 (Carolyn 2026-10-06) a
 // blank number starts at 1000. The builder's tax rate is still required, and since 2026-10-09 it is
-// SET on Company → Tax (save_company_tax): this card shows it as a read-only summary with a link there,
+// SET on Company → Sales Tax (save_company_tax): this card shows it as a read-only summary with a link there,
 // and its save no longer posts it (portal-settings' guard reads the stored rate). This drives the
 // COMPILED portal with Supabase stubbed at the network layer (no login, nothing leaves the machine)
 // through the tenant shapes that move, and asserts what shows, what gets posted and what the page says
@@ -17,10 +17,10 @@
 //      Tax, no banner; the save posts invoiceInGhl false with exactly what was typed and NO tax key;
 //      the success line says StructureStudio issues the paperwork now, and the card re-reads status
 //   B. a tenant with NO settings row (status answers as portal-settings does for a missing row): the
-//      same card; no rate on file, so the banner names Company → Tax and the save is refused with the
+//      same card; no rate on file, so the banner names Company → Sales Tax and the save is refused with the
 //      server's own sentence
 //   C. a blank stored rate: the save posts no tax key and shows the server's sentence (not a generic
-//      failure), and the banner's link opens Company → Tax in the same document
+//      failure), and the banner's link opens Company → Sales Tax in the same document
 //   D. 0% on file is an answer: no banner, and the save goes through
 //   E. the one tenant WITH the capability: the checkbox is there and on, no numbering is asked for, and
 //      the save posts invoiceInGhl true and says the CRM keeps the paperwork
@@ -43,7 +43,7 @@
 // A's fill with no "1000" box to type into; F is the case that pins the new copy. Against the artifact
 // from just before 217's capability (95e8351b~1, which shows every tenant the checkbox, on, with the
 // numbering hidden behind it) A's first checks fail the same way. Against the artifact from just
-// before the company rate moved to Company → Tax (2c203e02's), 14 checks fail: the summary, the
+// before the company rate moved to Company → Sales Tax (2c203e02's), 14 checks fail: the summary, the
 // banner's link and the "no tax key posted" checks in A, B, C, D and F.
 //
 // Tenants and numbers are made up. The repo is public.
@@ -165,11 +165,11 @@ const fill = async ({ quote, invoice }) => {
   if (quote != null) await quoteBox().fill(quote);
   if (invoice != null) await invoiceBox().fill(invoice);
 };
-// The company rate is not a box on this card any more: a summary with a link to Company → Tax.
+// The company rate is not a box on this card any more: a summary with a link to Company → Sales Tax.
 const summary = () => page.locator("[data-company-tax-summary]");
 const TAX_KEYS = ["ssTaxRate", "ssTaxLabel", "ssTaxDelivery"];
 const postsNoTax = (b) => !TAX_KEYS.some((k) => k in (b || {}));
-const BANNER_TAX = "Before saving, set your sales tax rate in Company → Tax (0 counts).";
+const BANNER_TAX = "Before saving, set your sales tax rate in Company → Sales Tax (0 counts).";
 const QUOTE_HELP = "Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last estimate). Counts up by one per estimate.";
 const INVOICE_HELP = "Invoices number separately from estimates. Leave blank to start at 1000 (or carry on after your last invoice).";
 const QBO_HELP = "Connected to QuickBooks? Enter your next QuickBooks invoice number.";
@@ -184,7 +184,7 @@ const SAVED_SS = "Saved — StructureStudio now issues your estimates and invoic
 const SAVED_CRM = "Saved — your estimates and invoices are created in your CRM, exactly as before.";
 
 try {
-  // A — grandfathered, CRM-connected, no capability, no numbering, a rate on file (set on Company → Tax)
+  // A — grandfathered, CRM-connected, no capability, no numbering, a rate on file (set on Company → Sales Tax)
   await boot({ invoiceInGhl: true, allowed: false, crm: true, taxPct: 6.5 });
   let t = await text();
   ok("A: no \"through my CRM\" checkbox for a tenant without the capability", !t.includes(CHECKBOX));
@@ -193,8 +193,8 @@ try {
   ok("A: there is no tax rate box on this card any more", (await box("e.g. 7.25").count()) === 0);
   const sumA = await summary().innerText().catch(() => "");
   ok("A: the stored rate is summarised", /6\.5%, shown on documents as “Sales tax”, not charged on delivery\./.test(sumA), sumA.replace(/\n/g, " | "));
-  const hrefA = await summary().getByRole("link", { name: "Change it in Company → Tax" }).getAttribute("href").catch(() => null);
-  ok("A: …with a link to Company → Tax", hrefA === "/settings/tax", String(hrefA));
+  const hrefA = await summary().getByRole("link", { name: "Change it in Company → Sales Tax" }).getAttribute("href").catch(() => null);
+  ok("A: …with a link to Company → Sales Tax", hrefA === "/settings/tax", String(hrefA));
   ok("A: no banner while a rate is on file", !t.includes("Before saving, set"));
   ok("A: and none for numbers, nor a warning about restarting at 1", !/Before saving, set a starting/.test(t) && !/restarted at 1/.test(t));
   await fill({ quote: "3101", invoice: "7001" });
@@ -203,7 +203,7 @@ try {
   const sa = saves[0] || {};
   ok("A: it asks for paperwork mode (invoiceInGhl false)", sa.invoiceInGhl === false, JSON.stringify(sa));
   ok("A: it carries exactly what was typed", sa.ssQuoteNext === "3101" && sa.ssInvoiceNext === "7001", JSON.stringify(sa));
-  ok("A: and posts no tax key (the rate is Company → Tax's)", postsNoTax(sa), JSON.stringify(sa));
+  ok("A: and posts no tax key (the rate is Company → Sales Tax's)", postsNoTax(sa), JSON.stringify(sa));
   ok("A: and names no CRM field (the connection is left alone)", !Object.keys(sa).some((k) => /^ghl/i.test(k)), Object.keys(sa).join(","));
   ok("A: the page says StructureStudio issues the paperwork now", await waitText(SAVED_SS, 5000));
   ok("A: the card re-reads status after the save", reread >= 1, `status reads ${reread}`);
@@ -214,7 +214,7 @@ try {
   ok("B: no-row tenant: no checkbox", !t.includes(CHECKBOX));
   ok("B: no-row tenant: the numbering boxes are there, and the summary says no rate is set", (await numberBoxes().count()) === 2
     && (await summary().innerText().catch(() => "")).includes("Not set yet."));
-  ok("B: no-row tenant: the banner names Company → Tax", t.includes(BANNER_TAX), (t.match(/Before saving[^\n]*/) || [""])[0]);
+  ok("B: no-row tenant: the banner names Company → Sales Tax", t.includes(BANNER_TAX), (t.match(/Before saving[^\n]*/) || [""])[0]);
   await fill({ quote: "1", invoice: "1" });
   await press();
   const sb = saves[0] || {};
@@ -230,8 +230,8 @@ try {
   ok("C: blank stored rate: the server's own sentence is shown", await waitText(NEED_TAX, 5000));
   t = await text();
   ok("C: blank stored rate: no success line, no generic failure text", !t.includes(SAVED_SS) && !/non-2xx/i.test(t));
-  const bannerLink = page.locator("[data-company-tax-needed]").getByRole("link", { name: "Company → Tax" });
-  ok("C: the banner links to Company → Tax", (await bannerLink.getAttribute("href").catch(() => null)) === "/settings/tax");
+  const bannerLink = page.locator("[data-company-tax-needed]").getByRole("link", { name: "Company → Sales Tax" });
+  ok("C: the banner links to Company → Sales Tax", (await bannerLink.getAttribute("href").catch(() => null)) === "/settings/tax");
   await page.evaluate(() => { window.__ssSameDoc = true; });
   await bannerLink.click().catch(() => {});
   ok("C: the link opens the Tax tab in the same document",

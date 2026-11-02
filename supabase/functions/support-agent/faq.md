@@ -90,7 +90,7 @@ rate (0 counts). If QuickBooks is connected, enter your next QuickBooks invoice 
 invoice number, or invoices won't send.
 
 ### Where do I set sales tax, and how is it worked out?
-Your company rate is on Settings > Company > Tax, along with optional tax codes for each building, option
+Your company rate is on Settings > Company > Sales Tax, along with optional tax codes for each building, option
 and service. An estimate uses its sales location's own rate if that lot has one (Settings > Company >
 Locations), otherwise your company rate. Tax is not looked up from the delivery address automatically:
 address-verified lookups are off unless the Structure Studio team switches them on for your account, and

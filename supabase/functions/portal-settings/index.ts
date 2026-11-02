@@ -53,8 +53,8 @@ import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts"
 // This UTC month's lookups and what they took from the wallet, for the Sales tax box (319).
 import { monthTaxUsage } from "../_shared/taxUsage.ts";
 import {
-  COMMON_CODES, headingsView, mergeCodeLists, orderCodes, parseAssignmentsPayload, planAssignments, type PlannedAssignment,
-  searchQuery, TAX_CODE_SEARCH_LIMIT, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
+  codesOffTheList, headingsView, orderCodes, parseAssignmentsPayload, planAssignments, type PlannedAssignment,
+  SALES_TAX_CODES, searchCodes, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
 } from "../_shared/taxCodes.ts";
 import {
   isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
@@ -7987,8 +7987,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // save plan are _shared/taxCodes.ts.
   //
   // tax_codes_get's answer, and tax_codes_save's: a save hands back what the database now holds,
-  // not an echo of what was sent. `hint` rides on the common codes (the picker's empty-box list)
-  // and `headingGroups` names the heading groups in order — both additive to the brief's shape.
+  // not an echo of what was sent. `hint` and `group` ride on the list's codes (the picker's empty-box
+  // list) and `headingGroups` names the heading groups in order — all additive to the brief's shape.
   //
   // THE COMPANY RATE RIDES ALONG (2026-10-09): the Tax tab's "Your sales tax rate" block reads
   // companyRatePct / companyLabel / ssTaxDelivery (tax_settings' shapes, through companyTaxView),
@@ -8027,8 +8027,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const styles = (stylesRes.data ?? []).map((s: any) => ({ id: String(s.id).toLowerCase(), label: s.label ?? "", active: s.active === true }));
     const assignments = visibleAssignments(storedRes.data ?? [], new Set(styles.map((s) => s.id)));
     // Every assigned code's details (an inactive one included, so the card can say it needs
-    // changing) plus the common codes the picker opens on.
-    const wanted = [...new Set([...COMMON_CODES.map((c) => c.code), ...assignments.map((a) => a.code)])];
+    // changing) plus the Sales Tax list the picker opens on.
+    const wanted = [...new Set([...SALES_TAX_CODES.map((c) => c.code), ...assignments.map((a) => a.code)])];
     const codesRes = await admin.from("avalara_tax_codes").select("code, description, type_id, is_active").in("code", wanted);
     if (codesRes.error) return dbFail(req, clientId, "load the tax code list", codesRes.error);
 
@@ -8085,33 +8085,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
   }
 
-  // The picker's type-ahead, over the stored catalog. Active codes only; the codes Avalara marks
-  // not applicable to North America are left out unless `includeAll`. An empty box lists the
-  // common codes first. Two queries rather than one `or=` filter: typed text inside an or-filter
-  // string would need PostgREST's quoting rules for commas, dots and parentheses, while a plain
-  // ilike filter takes the value as it is (searchQuery escapes the pattern characters).
+  // The picker's type-ahead: the Sales Tax list (_shared/taxCodes.ts), never the whole catalog, and
+  // only the codes the stored catalog holds as active. One read of those few rows, then the search
+  // runs over them in memory, which is what lets a builder's own words match (searchCodes).
   if (action === "tax_codes_search") {
-    const q = searchQuery(payload?.q);
-    const includeAll = payload?.includeAll === true;
-    const columns = "code, description, type_id, is_active";
-    const active = () => {
-      const b = admin.from("avalara_tax_codes").select(columns).eq("is_active", true);
-      return includeAll ? b : b.eq("north_america", true);
-    };
-    const [firstRes, secondRes] = await Promise.all(q
-      ? [
-        active().ilike("code", `${q}%`).order("code").limit(TAX_CODE_SEARCH_LIMIT),
-        active().ilike("description", `%${q}%`).order("code").limit(TAX_CODE_SEARCH_LIMIT),
-      ]
-      : [
-        active().in("code", COMMON_CODES.map((c) => c.code)),
-        active().order("code").limit(TAX_CODE_SEARCH_LIMIT),
-      ]);
-    if (firstRes.error) return dbFail(req, clientId, "search the tax codes", firstRes.error);
-    if (secondRes.error) return dbFail(req, clientId, "search the tax codes", secondRes.error);
-    const first = (firstRes.data ?? []).map(taxCodeView);
-    const second = (secondRes.data ?? []).map(taxCodeView);
-    return json({ ok: true, codes: mergeCodeLists(q ? first : orderCodes(first), second) });
+    const { data, error } = await admin.from("avalara_tax_codes").select("code, description, type_id, is_active")
+      .eq("is_active", true).in("code", SALES_TAX_CODES.map((c) => c.code));
+    if (error) return dbFail(req, clientId, "search the tax codes", error);
+    return json({ ok: true, codes: searchCodes(orderCodes((data ?? []).map(taxCodeView)), payload?.q) });
   }
 
   // Replace the tenant's whole mapping with exactly the payload's. Validated in full BEFORE any
@@ -8171,6 +8152,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: stored, error: storedErr } = await admin.from("tax_code_assignments")
       .select("target_type, target_key, tax_code").eq("client_id", clientId);
     if (storedErr) return dbFail(req, clientId, "load your tax codes", storedErr);
+    const offList = codesOffTheList(codes, stored ?? []);
+    if (offList.length) {
+      return json({ error: `Tax code ${offList[0]} isn't on the Sales Tax list. Pick a code from the list.`, reason: "code_not_on_list" }, 400);
+    }
     const plan = planAssignments(stored ?? [], rows);
 
     const now = new Date().toISOString();

@@ -3194,7 +3194,7 @@ function AdmMaster({ master, masterErr }) {
 }
 
 // ── Avalara tax codes (global) ───────────────────────────────────────────────
-// The platform catalog every builder's Settings → Company → Tax picker searches (migration 246).
+// The platform catalog behind every builder's Settings → Company → Sales Tax picker (migration 246).
 // Builders never call Avalara: an operator fills the stored copy from here, on purpose, through
 // admin-catalog's avalara_sync_tax_codes. The row first shows what the copy holds
 // (avalara_tax_codes_status, a read of the table only), so a sync is pressed because the list
@@ -3240,7 +3240,7 @@ function AdmTaxCodes() {
   return (
     <div style={S.card}>
       <CardHead title="Avalara tax codes" count={status && !status.err ? n(status.count) : null}
-        desc="The list every builder's Settings → Company → Tax picker searches. Builders never call Avalara: a sync here reads Avalara's full list and stores it."
+        desc="The stored copy of Avalara's full list. A builder's Settings → Company → Sales Tax picker reads it for the short Sales Tax list, so builders never call Avalara. A sync here reads Avalara's full list and stores it."
         right={
           /* Disabled only while a sync runs, and the label says so. */
           <button type="button" onClick={sync} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.7 : 1 }}>

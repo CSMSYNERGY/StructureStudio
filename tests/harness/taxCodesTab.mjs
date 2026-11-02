@@ -1,10 +1,11 @@
-// Settings → Company → Tax: the tax code mapping a builder saves, driven for real (2026-09-17).
+// Settings → Company → Sales Tax: the tax code mapping a builder saves, driven for real (2026-09-17;
+// the tab was "Tax" and the picker offered Avalara's whole list until 2026-11-02).
 //
 // Drives the COMPILED portal with Supabase stubbed at the network layer (no login, nothing leaves
 // the machine, no call reaches Avalara) and asserts what shows, what gets called, and with which
 // body:
 //
-//   A. the Tax tab shows for an owner, and an empty tenant starts on three suggested rows —
+//   A. the Sales Tax tab shows for an owner, and an empty tenant starts on three suggested rows —
 //      Products, Services, Delivery — ticked, with NO code, marked "Pick a code", nothing to save
 //   B. picking a code in the type-ahead and saving posts exactly the Products row (the codeless
 //      rows are not sent); typing is debounced; the answer rebuilds the rows and keeps the
@@ -12,9 +13,9 @@
 //      that search is still out it picks nothing, and once the answer lands it picks the top match
 //   C. a target ticked in a second row says which code it is under, moves out of the first row,
 //      and the save posts it under the new code only
-//   D. a settings_crm READER (no Branding, no Team) reaches Company → Tax through the widened hub
+//   D. a settings_crm READER (no Branding, no Team) reaches Company → Sales Tax through the widened hub
 //      gate and sees the stored mapping with no Save, no Add, no picker and no checklist
-//   E. without settings_crm the Tax tab is absent and tax_codes_get is never called
+//   E. without settings_crm the Sales Tax tab is absent and tax_codes_get is never called
 //   F. a refusal shows the server's sentence: a stored code Avalara stopped listing is flagged on
 //      its row, and the save that still carries it is refused with unknown_code's own words
 //   G. a portal-settings older than this page (403 "Unrecognised action") reads "not available
@@ -45,6 +46,12 @@
 //   Q. a database without 290 (taxCodesEnabled null): the block shows, the switch does not, and the
 //      editor is today's
 //
+// The Sales Tax list (2026-11-02).
+//   R. the search finds a builder's own words ("foundation", "truck"), and a code off the list reads
+//      as not on the list, with who to ask
+//   S. a code saved before the list existed still shows on its row, and an unrelated change saves
+//      with it still in the set
+//
 // The stub answers tax_codes_get / _search / _save with the SERVER'S OWN pure module
 // (supabase/functions/_shared/taxCodes.ts, imported directly — Node strips the types): its
 // headings, groups, starter codes and hints, payload parsing, and the refusal sentences
@@ -69,7 +76,7 @@
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 import {
-  COMMON_CODES, TAX_HEADING_GROUPS, headingsView, mergeCodeLists, orderCodes, parseAssignmentsPayload, taxCodeView, visibleAssignments,
+  SALES_TAX_CODES, SALES_TAX_CODE_GROUPS, TAX_HEADING_GROUPS, codesOffTheList, headingsView, orderCodes, parseAssignmentsPayload, searchCodes, taxCodeView, visibleAssignments,
 } from "../../supabase/functions/_shared/taxCodes.ts";
 import { partialSyncText, syncFailureText } from "../../supabase/functions/_shared/taxCodeSync.ts";
 import {
@@ -97,8 +104,9 @@ const HEADINGS = headingsView();
 const heading = (key) => ({ type: "heading", key });
 const style = (key) => ({ type: "style", key });
 
-// Migration 246's twelve seeds, word for word, plus two synced codes: one only a search finds, and
-// one that is not applicable to North America (the search must leave it out).
+// Migration 246's twelve seeds, word for word, the rest of the Sales Tax list as the sync stores it,
+// and two codes the picker must never offer: an active one off the list, and one that is not
+// applicable to North America.
 const SEED = {
   P0000000: "Tangible personal property (tpp)",
   NT: "Non-taxable product",
@@ -113,9 +121,30 @@ const SEED = {
   FR030000: "Shipping / shipping and handling combined",
   OH010000: "Handling only charges (separately identified from shipping)",
 };
+const SYNCED = {
+  SF010001: "Fabrication Services / Fabricator Provides Raw Materials / Item Is Not Installed Into Real Property",
+  PH101300: "Doors, garage doors, and windows labeled impact-resistant or has impact-resistant rating",
+  SC150600: "Construction services relating to real property (existing construction, residential, capital improvement)",
+  SC150601: "Construction services relating to real property (existing construction, residential, no capital improvement)",
+  SC150200: "Construction services relating to real property (existing construction, commercial)",
+  SI026665: "Installation Services Separately Stated - Item Installed Becomes Real Property After Installation (capital improvement)",
+  SI026666: "Installation Services Separately Stated - Item Installed Becomes Real Property After Installation",
+  SI026667: "Installation Services Separately Stated - First-time installation into a new construction; item becomes part of real property (capital improvement)",
+  SC156211: "Excavation & Grading Services / Residential Real Property / Capital Improvement",
+  SC156213: "Excavation & Grading Services / Residential Real Property / No capital improvement",
+  SC156210: "Excavation & Grading Services / Commercial Real Property / Capital Improvement",
+  SC156212: "Excavation & Grading Services / Commercial Real Property / No Capital Improvement",
+  FR020200: "Shipping / Common Carrier / FOB Origin",
+  FR020400: "Shipping / Non-Common Carrier / FOB Destination",
+  FR020500: "Shipping / Non-Common Carrier / FOB Origin",
+  FR059314: "Freight Loading or Unloading / Charge by Seller / Mandatory",
+  FR060000: "International Freight Service - Canada",
+  S0000001: "Services (required to complete a sale other than delivery & installation)",
+  S0000000: "Services",
+};
 const baseCatalog = () => [
-  ...Object.entries(SEED).map(([code, description]) => ({ code, description, type_id: null, is_active: true, north_america: true })),
-  { code: "PH101300", description: "Doors, garage doors, and windows labeled impact-resistant or has impact-resistant rating", type_id: "P", is_active: true, north_america: true },
+  ...Object.entries({ ...SEED, ...SYNCED }).map(([code, description]) => ({ code, description, type_id: null, is_active: true, north_america: true })),
+  { code: "PA3000400", description: "Lumber - Solid Wood Product", type_id: "P", is_active: true, north_america: true },
   { code: "PF050100", description: "Food and beverage - not applicable to north america", type_id: "P", is_active: true, north_america: false },
 ];
 
@@ -147,7 +176,7 @@ page.on("dialog", async (dlg) => {
 const getAnswer = () => {
   const styleIds = new Set(STYLES.map((s) => s.id));
   const assignments = visibleAssignments(S.stored, styleIds);
-  const wanted = new Set([...COMMON_CODES.map((c) => c.code), ...assignments.map((a) => a.code)]);
+  const wanted = new Set([...SALES_TAX_CODES.map((c) => c.code), ...assignments.map((a) => a.code)]);
   const c = S.company;
   return {
     ok: true, ssMode: S.ssMode, lookupEnabled: S.lookupEnabled,
@@ -187,20 +216,11 @@ const companyAnswer = (body) => {
     ...("tax_codes_enabled" in updates ? { taxCodesEnabled: c.codes } : {}),
   }, 200];
 };
-// tax_codes_search: active, North America, code prefix first then description; an empty box leads
-// with the common codes.
-const searchAnswer = (q) => {
-  const text = String(q || "").trim().toUpperCase();
-  const active = S.catalog.filter((c) => c.is_active && c.north_america);
-  const byCode = (a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0);
-  const codes = text
-    ? mergeCodeLists(
-      active.filter((c) => c.code.startsWith(text)).sort(byCode).map(taxCodeView),
-      active.filter((c) => c.description.toUpperCase().includes(text)).sort(byCode).map(taxCodeView),
-    )
-    : mergeCodeLists(orderCodes(active.filter((c) => COMMON_CODES.some((x) => x.code === c.code)).map(taxCodeView)), active.sort(byCode).map(taxCodeView));
-  return { ok: true, codes };
-};
+// tax_codes_search: the Sales Tax list's active codes, searched by the server's own searchCodes.
+const searchAnswer = (q) => ({
+  ok: true,
+  codes: searchCodes(orderCodes(S.catalog.filter((c) => c.is_active && SALES_TAX_CODES.some((x) => x.code === c.code)).map(taxCodeView)), q),
+});
 // tax_codes_save: parse, then codes — the server's order and its sentences. (Every style here is this
 // tenant's, so the style check has nothing to refuse.)
 const saveAnswer = (body) => {
@@ -216,6 +236,8 @@ const saveAnswer = (body) => {
       reason: "unknown_code",
     }, 400];
   }
+  const offList = codesOffTheList([...new Set(parsed.rows.map((r) => r.code))], S.stored);
+  if (offList.length) return [{ error: `Tax code ${offList[0]} isn't on the Sales Tax list. Pick a code from the list.`, reason: "code_not_on_list" }, 400];
   S.stored = parsed.rows.flatMap((r) => r.targets.map((t) => ({ target_type: t.type, target_key: t.key, tax_code: r.code })));
   return [getAnswer(), 200];
 };
@@ -292,7 +314,9 @@ if (process.env.SS_PORTAL_ARTIFACT) {
 const text = () => page.evaluate(() => document.body.innerText);
 const waitText = (s, timeout = 15000) => page.waitForFunction((x) => document.body.innerText.includes(x), s, { timeout }).then(() => true, () => false);
 const callsOf = (action) => calls.filter((c) => c.action === action);
-const tabButton = () => page.getByRole("button", { name: "Tax", exact: true });
+// A tab is a link where the row has an address, a button where it does not (SubTabs), so both count.
+const tabNamed = (name) => page.getByRole("link", { name, exact: true }).or(page.getByRole("button", { name, exact: true }));
+const tabButton = () => tabNamed("Sales Tax");
 const row = (i) => page.locator(`[data-tax-row="${i}"]`);
 const boot = async (shape) => {
   Object.assign(S, { role: "owner", access: null, ssMode: true, lookupEnabled: false, stored: [], catalog: baseCatalog(), old: false, searchDelayMs: 0,
@@ -322,7 +346,8 @@ const allHeadings = (groups) => HEADINGS.filter((h) => groups.includes(h.group))
 try {
   // ── A ──
   await boot({});
-  ok("A: owner sees the Tax tab in Company", (await tabButton().count()) === 1);
+  ok("A: owner sees the Sales Tax tab in Company", (await tabButton().count()) === 1);
+  ok("A: …and no tab is still called Tax", (await tabNamed("Tax").count()) === 0);
   ok("A: the card opens", await openTax());
   await page.waitForTimeout(400);
   const titles = await page.locator("[data-tax-row]").evaluateAll((els) => els.map((e) => e.innerText.split("\n")[0].trim()));
@@ -343,9 +368,15 @@ try {
   // ── B ──
   const search = row(0).locator('input[aria-label="Search tax codes"]');
   await search.click();
-  ok("B: an empty box lists the common codes first, with their hints", await waitText("COMMON CODES") && await waitText("General goods — the usual choice for a building sold as a finished product"));
+  ok("B: an empty box lists the Sales Tax list under its group names, with hints", await waitText("BUILDINGS AND OPTIONS") && await waitText("General goods. The usual choice for a building sold as a finished product, and its options"));
   const firstOption = await page.locator('[role="option"]').first().innerText();
   ok("B: P0000000 leads the empty-box list", firstOption.startsWith("P0000000 — Tangible personal property (tpp)"), firstOption.replace(/\n/g, " | "));
+  ok("B: it offers exactly the 31 codes, nothing else", (await page.locator('[role="option"]').count()) === SALES_TAX_CODES.length && SALES_TAX_CODES.length === 31);
+  const listB = await page.locator('[role="listbox"]').innerText();
+  const headsB = SALES_TAX_CODE_GROUPS.map((g) => g.label.toUpperCase());
+  ok("B: its five groups show once each, in order", headsB.every((h, i) => listB.indexOf(h) >= 0 && (i === 0 || listB.indexOf(headsB[i - 1]) < listB.indexOf(h))), listB.slice(0, 120));
+  ok("B: the old Common codes and More codes headings are gone", !listB.includes("COMMON CODES") && !listB.includes("MORE CODES"));
+  ok("B: a code off the list is not offered", !listB.includes("PA3000400") && !listB.includes("PF050100"));
   const searchesBefore = callsOf("tax_codes_search").length;
   await search.pressSequentially("P00", { delay: 60 });
   await page.waitForTimeout(900);
@@ -371,7 +402,7 @@ try {
   // window is wider than the keystrokes, whatever the machine's speed.
   const services = row(1).locator('input[aria-label="Search tax codes"]');
   await services.click();
-  await waitText("COMMON CODES");
+  await waitText("BUILDINGS AND OPTIONS");
   S.searchDelayMs = 1500;
   await services.pressSequentially("SI020200");
   await services.press("Enter");
@@ -457,7 +488,7 @@ try {
       { target_type: "heading", target_key: "delivery", tax_code: "FR010000" },
     ],
   }));
-  ok("D: a settings_crm reader reaches Company → Tax", await openTax());
+  ok("D: a settings_crm reader reaches Company → Sales Tax", await openTax());
   await page.waitForTimeout(500);
   const tD = await text();
   ok("D: the reader sees the stored mapping", tD.includes("P0000000 — Tangible personal property (tpp)") && tD.includes("FR010000 — Delivery by company vehicle"));
@@ -473,8 +504,8 @@ try {
   // ── E ──
   await boot({ role: "user", access: { settings_team: "view", settings_crm: "none" } });
   await waitText("Locations", 8000);
-  ok("E: without settings_crm the Company tabs render (Team, Locations)", (await page.getByRole("button", { name: "Locations", exact: true }).count()) === 1);
-  ok("E: …and there is no Tax tab", (await tabButton().count()) === 0);
+  ok("E: without settings_crm the Company tabs render (Team, Locations)", (await tabNamed("Locations").count()) === 1);
+  ok("E: …and there is no Sales Tax tab", (await tabButton().count()) === 0);
   ok("E: tax_codes_get is never called", callsOf("tax_codes_get").length === 0);
 
   // ── F ──
@@ -665,6 +696,47 @@ try {
   await page.waitForTimeout(400);
   ok("Q: taxCodesEnabled null: the rate block shows", (await block().count()) === 1);
   ok("Q: …no switch, and today's editor", (await page.locator("[data-tax-codes-switch]").count()) === 0 && (await page.locator("[data-tax-row]").count()) === 3);
+
+  // ── R: the search speaks a builder's words, and stops at the list ──
+  await boot({});
+  await openTax();
+  await page.waitForTimeout(400);
+  const boxR = row(0).locator('input[aria-label="Search tax codes"]');
+  const optionsFor = async (q) => {
+    await boxR.click();
+    await boxR.fill(q);
+    await page.waitForFunction(() => !document.querySelector('[role="listbox"]')?.innerText.includes("Searching"), null, { timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    return page.locator('[role="option"]').evaluateAll((els) => els.map((e) => e.innerText.split(" ")[0]));
+  };
+  const foundation = await optionsFor("foundation");
+  ok("R: \"foundation\" finds the site work codes, though Avalara's wording never says it", JSON.stringify(foundation) === JSON.stringify(["SC156211", "SC156213", "SC156210", "SC156212"]), JSON.stringify(foundation));
+  ok("R: …under their group's name", (await page.locator('[role="listbox"]').innerText()).startsWith("FOUNDATION AND SITE WORK"));
+  const truck = await optionsFor("truck");
+  ok("R: \"truck\" finds delivery on your own truck", truck[0] === "FR010000", JSON.stringify(truck));
+  const lumber = await optionsFor("lumber");
+  ok("R: a code that exists at Avalara but is off the list is not found", lumber.length === 0, JSON.stringify(lumber));
+  ok("R: …and the box says so, and who to ask", await waitText("No code on this list matches “lumber”. Ask Structure Studio support if you need one added."));
+  const byCode = await optionsFor("PA3000400");
+  ok("R: its code finds nothing either", byCode.length === 0, JSON.stringify(byCode));
+
+  // ── S: a code saved before the list existed ──
+  await boot({
+    lookupEnabled: true,
+    stored: [
+      { target_type: "heading", target_key: "doors", tax_code: "PA3000400" },
+      { target_type: "heading", target_key: "delivery", tax_code: "FR010000" },
+    ],
+  });
+  await openTax();
+  await page.waitForTimeout(400);
+  const offListRow = await page.locator("[data-tax-row]").filter({ hasText: "PA3000400" }).innerText();
+  ok("S: it still shows on its row, in Avalara's words", offListRow.includes("PA3000400 — Lumber - Solid Wood Product"), offListRow.replace(/\n/g, " | "));
+  await row(0).getByRole("button", { name: "Change what it covers" }).click();
+  await checkbox(row(0), "Windows").check();
+  await page.getByRole("button", { name: "Save tax codes" }).click();
+  ok("S: an unrelated change saves with it still in the set", await waitText("Tax codes saved"));
+  ok("S: …and it is still stored", S.stored.some((a) => a.tax_code === "PA3000400" && a.target_key === "doors"));
 
   ok("no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {

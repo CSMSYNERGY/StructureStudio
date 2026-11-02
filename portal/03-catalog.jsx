@@ -675,7 +675,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
             {status && status.ssTaxRate != null
               ? <><b>{status.ssTaxRate}%</b>, shown on documents as “{status.ssTaxLabel || "Sales tax"}”, {status.ssTaxDelivery === true ? "also charged on delivery" : "not charged on delivery"}.</>
               : <>Not set yet.</>}
-            {" "}{taxLink("Change it in Company → Tax")}
+            {" "}{taxLink("Change it in Company → Sales Tax")}
           </div>
         )}
         {/* Read-only: where else a quote's rate can come from, and whether verified lookups
@@ -718,7 +718,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
             the STORED rate that counts (this card no longer posts one), so the banner reads status. */}
         {ssMode && status && status.ssTaxRate == null && (
           <div data-company-tax-needed="" style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Before saving, set your sales tax rate in {taxLink("Company → Tax", "#B45309")} (0 counts).
+            Before saving, set your sales tax rate in {taxLink("Company → Sales Tax", "#B45309")} (0 counts).
             Without a company tax rate, an estimate whose sales location has no rate of its own has nothing to charge.
           </div>
         )}

@@ -4588,9 +4588,9 @@ const ssCompanyTaxForm = (d) => ({
 });
 
 // One row's code picker: the chosen code with a Change button, or a type-ahead over
-// tax_codes_search — debounced 300ms while typing, at once for an empty box, which lists the
-// common codes first with their hints. The search reads the stored catalog; nothing here reaches
-// Avalara.
+// tax_codes_search — debounced 300ms while typing, at once for an empty box, which lists the whole
+// Sales Tax list (_shared/taxCodes.ts SALES_TAX_CODES) under its group names, with hints. The search
+// reads the stored catalog; nothing here reaches Avalara.
 function TaxCodePicker({ code, info, onPick, disabled = false }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -4643,7 +4643,6 @@ function TaxCodePicker({ code, info, onPick, disabled = false }) {
   const linkBtn = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: ACCENT, fontWeight: 700 };
   const note = { padding: "9px 11px", fontSize: 12.5, color: "#64748B" };
   const head = { padding: "7px 11px 3px", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" };
-  const empty = !q.trim();
   return (
     <div style={{ position: "relative", maxWidth: 640 }}>
       {!searching ? (
@@ -4672,11 +4671,10 @@ function TaxCodePicker({ code, info, onPick, disabled = false }) {
           style={{ position: "absolute", zIndex: 30, left: 0, right: 0, top: "calc(100% + 4px)", background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 8, boxShadow: "0 10px 28px rgba(15,23,42,0.14)", maxHeight: 320, overflowY: "auto" }}>
           {err && <div style={{ ...note, color: "#B91C1C" }}>{err}</div>}
           {list === null && !err && <div style={note}>Searching…</div>}
-          {list && list.length === 0 && !err && <div style={note}>No active tax codes match “{q.trim()}”.</div>}
+          {list && list.length === 0 && !err && <div style={note}>No code on this list matches “{q.trim()}”. Ask Structure Studio support if you need one added.</div>}
           {(list || []).map((c, i) => (
             <React.Fragment key={c.code}>
-              {empty && i === 0 && c.hint && <div style={head}>Common codes</div>}
-              {empty && i > 0 && !c.hint && list[i - 1].hint && <div style={{ ...head, borderTop: "1px solid #E2E8F0" }}>More codes</div>}
+              {c.group && (i === 0 || list[i - 1].group !== c.group) && <div style={i ? { ...head, borderTop: "1px solid #E2E8F0" } : head}>{c.group}</div>}
               <button type="button" role="option" aria-selected={i === hi}
                 onMouseEnter={() => setHi(i)} onClick={() => pick(c)}
                 style={{ display: "block", width: "100%", textAlign: "left", fontFamily: "inherit", cursor: "pointer", border: "none", background: i === hi ? "#F1F5F9" : "#FFF", padding: "8px 11px" }}>
@@ -4995,9 +4993,10 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false, onOpenConnection
       )}
       {!codesOff && (<>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
-        Every building, option and service you sell falls under a tax code from Avalara's list. Pick a code, then tick
-        everything that code covers — each building style and option heading takes one code. You (or your accountant)
-        choose the codes, so they match how you file. The notes beside common codes are suggestions, not tax advice.
+        Every building, option and service you sell falls under a tax code. This is the short list of Avalara's codes
+        for building companies. Pick a code, then tick everything that code covers — each building style and option
+        heading takes one code. You (or your accountant) choose the codes, so they match how you file. The notes beside
+        the codes are suggestions, not tax advice.
         {/* Said up front rather than left to missing buttons, as on the location rates. */}
         {d && !canEditTax && " Only someone who can edit GHL Connection settings can change these codes."}
       </div>

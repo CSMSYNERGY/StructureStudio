@@ -2057,7 +2057,9 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     // like every tab here; the hub gate in ssSettingsTabs admits that area for it. Since
     // 2026-10-09 it is also where the company sales tax rate is set, and the codes are optional
     // (the "Use tax codes" switch, migration 290).
-    ["tax", "Tax", "Your sales tax rate, and optional tax codes for each building, option and service"],
+    // Named "Sales Tax" on the owner's ask (2026-11-02). Use Tax comes later as its own tab beside
+    // this one, for post-frame builders. The id stays "tax" so existing links keep working.
+    ["tax", "Sales Tax", "Your sales tax rate, and optional tax codes for each building, option and service"],
     // PAYMENTS (workstream 1 phase 4): read-only. The card account is set up and managed by the
     // Structure Studio team, so this tab shows its status and how to ask for a change, and saves
     // nothing. Last, so every tab above keeps its place. Its area is SETTINGS_TAB_AREA.payments.

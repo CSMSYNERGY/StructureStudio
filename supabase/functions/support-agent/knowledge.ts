@@ -72,7 +72,7 @@ The Settings page has a rail of sections. Some sections are hubs with their own 
   - **Locations** (/settings/locations): Your sales lots: where inventory buildings sit, the delivery pickup point, and each lot's own tax rate
   - **Crews** (/settings/crews): Who builds — each crew gets its own Build Schedule calendar
   - **Drivers** (/settings/drivers): Who delivers, what they can haul, and the territories they cover
-  - **Tax** (/settings/tax): Your sales tax rate, and optional tax codes for each building, option and service
+  - **Sales Tax** (/settings/tax): Your sales tax rate, and optional tax codes for each building, option and service
   - **Payments** (/settings/payments): Taking card and bank payments, set up and managed for you by the Structure Studio team
 - **Billing** (/settings/billing): Your subscription, and the wallet that pays for usage
   - **Subscription** (/settings/billing): Your plan: what you pay, your features, and the next renewal
@@ -151,7 +151,7 @@ The account tool get_account_overview says which steps THIS builder still has op
 - **Decide if customers see prices**: One switch on the Branding page: show live pricing to customers as they design, or keep numbers private until you send the quote.
 ### Quotes, invoices & email
 - **Connect your CRM (if you use GoHighLevel)**: Optional, and separate from who issues paperwork. If you use GoHighLevel, paste your Location ID and API key in Settings > GHL Connection and pick the pipelines and stages where new contacts and opportunities should land. Structure Studio still issues your estimates and invoices; without a connection, contacts stay in Structure Studio.
-- **Choose how quotes & invoices go out**: Structure Studio issues your estimates and invoices (sending them through GoHighLevel is only for accounts the team has switched on). The one thing you must set is your company sales tax rate in Settings > Company > Tax (0 if you don't collect tax). Starting estimate and invoice numbers are optional: blank starts at 1000, or carries on after your last number. Estimates use the sales location's own rate if it has one, otherwise your company rate; address-verified tax lookups are off unless the team switches them on.
+- **Choose how quotes & invoices go out**: Structure Studio issues your estimates and invoices (sending them through GoHighLevel is only for accounts the team has switched on). The one thing you must set is your company sales tax rate in Settings > Company > Sales Tax (0 if you don't collect tax). Starting estimate and invoice numbers are optional: blank starts at 1000, or carries on after your last number. Estimates use the sales location's own rate if it has one, otherwise your company rate; address-verified tax lookups are off unless the team switches them on.
 - **Send email from your own domain**: Add a few DNS records so estimates and invoices come from your business address instead of ours (there's a button to email the records straight to your webmaster), then press Check verification. Once it is verified, tick "Send estimate & invoice emails from my domain"; verifying alone doesn't switch it on.
 - **Send yourself a test quote**: First turn on Testing (Branding page: beta mode + your test inbox) so nothing reaches a real customer. Then build one design end to end and submit it. Check the email and the PDF look the way you want, and turn Testing back off when you're happy.
 - **Share your customer design link**: Your link is at the top of the Branding page. Copy it, put it on your website and social pages, and send it to walk-in customers — every design made there lands in your portal.
@@ -257,7 +257,7 @@ rate (0 counts). If QuickBooks is connected, enter your next QuickBooks invoice 
 invoice number, or invoices won't send.
 
 ### Where do I set sales tax, and how is it worked out?
-Your company rate is on Settings > Company > Tax, along with optional tax codes for each building, option
+Your company rate is on Settings > Company > Sales Tax, along with optional tax codes for each building, option
 and service. An estimate uses its sales location's own rate if that lot has one (Settings > Company >
 Locations), otherwise your company rate. Tax is not looked up from the delivery address automatically:
 address-verified lookups are off unless the Structure Studio team switches them on for your account, and
