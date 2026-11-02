@@ -250,6 +250,9 @@ export const STATUS_NAME_MAX = 40;
 
 export type StatusIn = {
   id: string | null; name: string | null; color: string | null;
+  /** The pipeline the status belongs to (migration 354). Required to CREATE one; an edit finds it
+   *  from the row, so an older caller editing a name still works. */
+  pipelineId: string | null;
   /** undefined = not being edited; null = no event sets it. */
   triggerEvent?: string | null;
   archive: boolean;
@@ -258,6 +261,11 @@ export type StatusIn = {
 export function parseStatusSave(b: Record<string, unknown>): Parsed<StatusIn> {
   const id = str(b.id, 64);
   if (id && !isUuidLike(id)) return { ok: false, error: "That status wasn't found." };
+  // 354: a status is one pipeline's rung, so a NEW one must say whose. There is no tenant-wide
+  // list left to add it to, and a row with no pipeline is refused by the database.
+  const pipelineId = str(b.pipelineId, 64);
+  if (pipelineId && !isUuidLike(pipelineId)) return { ok: false, error: "Pick the pipeline the status belongs to." };
+  if (!id && !isUuidLike(pipelineId)) return { ok: false, error: "Pick the pipeline the status belongs to." };
   const name = str(b.name, STATUS_NAME_MAX + 1);
   if (name && name.length > STATUS_NAME_MAX) return { ok: false, error: `Keep the status name under ${STATUS_NAME_MAX} characters.` };
   if (!id && !name) return { ok: false, error: "Name the new status." };
@@ -268,7 +276,23 @@ export function parseStatusSave(b: Record<string, unknown>): Parsed<StatusIn> {
     triggerEvent = str(b.triggerEvent, 32);
     if (triggerEvent && !(triggerEvent in STATUS_EVENTS)) return { ok: false, error: "Pick when it is set from the list." };
   }
-  return { ok: true, id: id ? id.toLowerCase() : null, name, color, triggerEvent, archive: b.archive === true };
+  return { ok: true, id: id ? id.toLowerCase() : null, pipelineId: pipelineId ? pipelineId.toLowerCase() : null,
+           name, color, triggerEvent, archive: b.archive === true };
+}
+
+/**
+ * One PIPELINE'S statuses, in their new order (migration 354) — the twin of parseStageOrder, and
+ * deliberately the same shape. Before 354 this was parseIdOrder, which carried ids alone: with a
+ * ladder per pipeline, a reorder that does not say WHICH pipeline cannot be checked against
+ * anything, because the posted ids are always a subset of the account's statuses.
+ */
+export function parseStatusOrder(b: Record<string, unknown>): Parsed<{ pipelineId: string; ids: string[] }> {
+  const pipelineId = str(b.pipelineId, 64);
+  if (!isUuidLike(pipelineId)) return { ok: false, error: "Pick the pipeline to reorder." };
+  if (!Array.isArray(b.ids) || !b.ids.length || b.ids.length > 100) return { ok: false, error: "Send the statuses in their new order." };
+  const ids = b.ids.map((v) => String(v).toLowerCase());
+  if (ids.some((v) => !isUuidLike(v)) || new Set(ids).size !== ids.length) return { ok: false, error: "Send each status once." };
+  return { ok: true, pipelineId: pipelineId.toLowerCase(), ids };
 }
 
 /** A full ordering of a list (statuses): every id exactly once. */

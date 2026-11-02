@@ -1,24 +1,22 @@
-// Settings → Pipelines and the stage editor after migration 303 (Carolyn's 2026-10-12 call), driven
-// for real on the COMPILED portal.
+// Settings → Pipelines after migration 354, driven for real on the COMPILED portal.
 //
-// Carolyn: "I want quotes gone", and "the statuses are system-driven, 100%". What this proves:
+// Carolyn, 2026-11-01: "I want to make specific statuses per pipeline and they will work the way it
+// is now (internally you decide when the status changes). So in settings lets move the pipelines
+// above the statuses. and then the statuses and pipelines and lost reasons all within that
+// pipeline." Before 354 this page was TWO cards — a tenant-wide Statuses list first, then
+// Pipelines — because one ladder served every board. What this proves now:
 //
-//   A  Settings → Pipelines: the Statuses card says the system sets a status and nobody changes one
-//      by hand; each status keeps its "Set automatically when" drop-down (a status no event sets
-//      reads its event, never "set by hand"); the Pipelines card names no stage→status link,
-//      and Shed Deals carries the "new designs" badge.
-//      Since 2026-10-13 the copy is true to that: no "add your own", and a status with no event
-//      says "No event yet, so no card will get this status." (since 353 no seeded status is in that
-//      state, so A10 frees one to prove it). A new status
-//      needs its event: with every event taken the card says so and offers no Add; once one is
-//      freed, Add stays off until a name AND an event are picked, and sends both (A7-A12; against
-//      the build before, A7-A12 fail).
-//   B  the stage editor (Edit stages on Shed Deals): every stage keeps name, colour, kind, order
-//      and remove (C16), and there is no "Linked status" drop-down; the help says a move never
-//      changes a status and new designs land in the first open stage; Shed Deals (the pipeline new
-//      designs land in) offers no "Remove pipeline", another pipeline still does.
-//   C  nothing on either screen sends crm_deal_set_status, and saving a stage name sends no
-//      statusId.
+//   A  ONE card, and it is Pipelines. There is no account-level status list left; each row names
+//      its pipeline, the "new designs" badge where it belongs, and how many stages AND statuses it
+//      has. Nothing on the page offers a stage→status link or mentions Quotes.
+//   B  Opening a pipeline shows its stages, its statuses and its lost reasons TOGETHER, and the
+//      statuses shown are that pipeline's own — the other pipeline's rungs are not there.
+//   C  A status may wait for its trigger (354): adding one with "Nothing yet" is allowed, the row
+//      says nothing sets it, and the save names the pipeline. Before 354 a new status HAD to claim
+//      an unused event, because a status no event set was unreachable; Carolyn is building a
+//      SmartBuild pipeline whose rungs the webhooks will drive later.
+//   D  A reorder names its pipeline (without it the server cannot tell a subset from a mismatch),
+//      and nothing on either screen sends crm_deal_set_status or a statusId on a stage.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the skeleton is
 // crmContactDeal.mjs's.
@@ -26,10 +24,8 @@
 //   node tests/harness/crmPipelineSettings.mjs    (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-pipeline-settings (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an
-// older portal.app.compiled.js> serves that file instead: against the artifact from before 303, A
-// and B fail on the "set by hand" copy and the Linked status drop-down.
-//
-// ⚠️ EVERY CHECK IS GUARDED BY "the card rendered": nothing to find is not the same as nothing there.
+// older portal.app.compiled.js> serves that file instead: against the build before 354, A fails on
+// the second card and B finds no statuses inside the editor.
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
@@ -43,22 +39,28 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 const U = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-// Carolyn's status set, as 353 seeds it: Contact Made in place of 302's unreachable Appt Set, and
-// every rung carrying the event that sets it.
-const STATUSES = [
+// Carolyn's ladder, as 354 seeds it INTO ONE PIPELINE. Every pipeline owns a copy; two pipelines
+// may each have an "Invoiced" rung, which is the whole change.
+const LADDER = [
   ["New Lead", "#64748B", "design_submitted"], ["Contact Made", "#0EA5E9", "contact_made"], ["Estimate Sent", "#6366F1", "estimate_sent"],
   ["Accepted", "#16A34A", "estimate_accepted"], ["Invoiced", "#14B8A6", "invoiced"], ["Payment Received", "#84CC16", "paid_in_full"],
   ["Scheduling", "#F59E0B", "build_scheduled"], ["Delivered", "#0F766E", "delivered"],
-].map(([name, color, triggerEvent], i) => ({ id: U(100 + i), name, color, position: (i + 1) * 1024, triggerEvent }));
-// What crm_pipelines_list answers, changed by crm_status_save the way the server changes it.
-const live = STATUSES.map((s) => ({ ...s }));
+];
+const rungs = (base) => LADDER.map(([name, color, triggerEvent], i) => ({ id: U(base + i), name, color, position: (i + 1) * 1024, triggerEvent }));
 const SHED_STAGES = ["New Incoming", "Attempting Contact", "Nurturing - Cool", "Nurturing - Warm", "Nurturing - Hot", "Gone Cold Again"]
   .map((name, i) => ({ id: U(200 + i), name, color: "#64748B", kind: "open", position: (i + 1) * 1024 }));
+// Shed Deals carries the whole ladder; the hand-made one keeps only what its cards use — which is
+// exactly what 354's backfill does, and what Carolyn asked for ("I don't want any changes to my
+// Builders pipeline").
 const PIPELINES = [
-  { id: U(1), name: "Shed Deals", position: 1024, lostReasons: ["Price", "Timing"], seedKind: "shed_deals", feedsDesigns: true, stages: SHED_STAGES },
-  { id: U(2), name: "Manufacturer Outreach", position: 2048, lostReasons: [], seedKind: "outreach", feedsDesigns: false,
-    stages: [{ id: U(300), name: "New Lead", color: "#64748B", kind: "open", position: 1024 }, { id: U(301), name: "Connected", color: "#16A34A", kind: "open", position: 2048 }] },
+  { id: U(1), name: "Shed Deals", position: 1024, lostReasons: ["Price", "Timing"], seedKind: "shed_deals", feedsDesigns: true,
+    stages: SHED_STAGES, statuses: rungs(100) },
+  { id: U(2), name: "Manufacturer Outreach", position: 2048, lostReasons: ["Not interested"], seedKind: "outreach", feedsDesigns: false,
+    stages: [{ id: U(300), name: "New Lead", color: "#64748B", kind: "open", position: 1024 }, { id: U(301), name: "Connected", color: "#16A34A", kind: "open", position: 2048 }],
+    statuses: [{ id: U(400), name: "Reached out", color: "#64748B", position: 1024, triggerEvent: null }] },
 ];
+// The flat UNION the server still sends for the pills, and what the stub mutates on a save.
+const live = PIPELINES.flatMap((p) => p.statuses.map((t) => ({ ...t, pipelineId: p.id })));
 
 const { ok, failed } = reporter();
 const shots = shotsDir("crm-pipeline-settings");
@@ -99,12 +101,21 @@ const handler = async (route) => {
       return json(route, { ok: true, pipelines: PIPELINES, statuses: live, team: [], canManage: true, canWrite: true, ownOnly: false, me: USER.id });
     case "crm_status_save": {
       if (!body.id) {
-        live.push({ id: U(150 + live.length), name: body.name, color: "#64748B", position: (live.length + 1) * 1024, triggerEvent: body.triggerEvent || null });
-        return json(route, { ok: true, id: U(150 + live.length - 1) });
+        // 354: a new rung names its pipeline, and lands on THAT pipeline only.
+        const owner = PIPELINES.find((p) => p.id === body.pipelineId);
+        if (!owner) return json(route, { error: "That pipeline wasn't found." }, 404);
+        const made = { id: U(500 + live.length), name: body.name, color: "#64748B", position: (owner.statuses.length + 1) * 1024, triggerEvent: body.triggerEvent || null };
+        owner.statuses.push(made);
+        live.push({ ...made, pipelineId: owner.id });
+        return json(route, { ok: true, id: made.id });
       }
-      const t = live.find((s) => s.id === body.id);
-      if (t && body.triggerEvent !== undefined) t.triggerEvent = body.triggerEvent || null;
-      if (t && body.name) t.name = body.name;
+      for (const p of PIPELINES) {
+        const t = p.statuses.find((x) => x.id === body.id);
+        if (!t) continue;
+        if (body.triggerEvent !== undefined) t.triggerEvent = body.triggerEvent || null;
+        if (body.name) t.name = body.name;
+        if (body.archive) p.statuses = p.statuses.filter((x) => x.id !== body.id);
+      }
       return json(route, { ok: true, id: body.id });
     }
     case "crm_stage_save": return json(route, { ok: true, id: body.id || U(399) });
@@ -127,116 +138,82 @@ try {
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
   await go("/settings/pipelines");
-  await page.waitForFunction(() => !!document.querySelector("[data-ss-pipeline-settings] input[aria-label='Status name']"), null, { timeout: 20000 })
+  await page.waitForFunction(() => !!document.querySelector("[data-ss-pipeline-settings] [data-ss-pipeline-row]"), null, { timeout: 20000 })
     .catch(() => { /* the guard below reports it */ });
   await page.waitForTimeout(500);
 
-  // THE GUARD.
+  // THE GUARD: refuse to report the rest as passes if the page never rendered.
   const card = page.locator("[data-ss-pipeline-settings]");
-  const names = await page.locator("[data-ss-pipeline-settings] input[aria-label='Status name']").evaluateAll((els) => els.map((e) => e.value));
-  const rendered = ok("the Statuses card rendered with the 8 statuses", (await card.count()) === 1 && names.length === 8, JSON.stringify(names));
+  const rowCount = await page.locator("[data-ss-pipeline-row]").count();
+  const rendered = ok("the Pipelines card rendered with both pipelines", (await card.count()) === 1 && rowCount === PIPELINES.length, `${rowCount} row(s)`);
   if (!rendered) throw new Error("Settings → Pipelines never rendered; refusing to report the rest as passes");
   await page.screenshot({ path: join(shots, "settings-pipelines.png"), fullPage: true });
 
-  // ── A ──
+  // ── A: one card, and it is Pipelines ───────────────────────────────────────────────────
   const text = await page.evaluate(() => document.body.innerText);
-  ok("A1 Carolyn's status set is kept, Contact Made and Delivered included (C13)", JSON.stringify(names) === JSON.stringify(STATUSES.map((s) => s.name)));
-  ok("A2 the card says the system sets a status and nobody changes one by hand", /the system sets it/.test(text) && /nobody\s+changes one by hand/.test(text));
-  ok("A3 nothing says a status can be set by hand", !/set by hand\)|can still change a status by hand|by hand, or automatically/i.test(text));
-  const triggers = await page.locator("[data-ss-pipeline-settings] select[aria-label='Set automatically when']").evaluateAll((els) =>
-    els.map((e) => e.options[e.selectedIndex] ? e.options[e.selectedIndex].text : null));
-  // 353: Contact Made has an event of its own, so no rung reads "No event" any more.
-  ok("A4 every status keeps its 'Set automatically when', Contact Made included", triggers.length === 8
-    && triggers[0] === "A design is submitted" && /^Contact is made/.test(triggers[1] || "")
-    && !triggers.includes("No event"), JSON.stringify(triggers));
-  ok("A5 the Pipelines card names no stage→status link, nor Quotes", !/link stages to statuses|Link a stage/i.test(text) && !/\bQuotes\b/.test(text));
-  ok("A6 Shed Deals carries the 'new designs' badge", await page.evaluate(() =>
+  const headings = await page.evaluate(() =>
+    [...document.querySelectorAll("[data-ss-pipeline-settings]")].map((c) => (c.querySelector("div") || {}).textContent));
+  ok("A1 the page is ONE card, headed Pipelines — the account-wide Statuses card is gone",
+    headings.length === 1 && headings[0] === "Pipelines", JSON.stringify(headings));
+  ok("A2 no status list outside a pipeline: nothing on the page edits a status until one is opened",
+    (await page.locator("[data-ss-pipeline-settings] input[aria-label='Status name']").count()) === 0);
+  ok("A3 each row says how many stages AND statuses its pipeline has",
+    /6 stages · 8 statuses/.test(text) && /2 stages · 1 status/.test(text),
+    (text.match(/\d+ stages? · \d+ status(es)?/g) || []).join(" | "));
+  ok("A4 Shed Deals carries the 'new designs' badge", await page.evaluate(() =>
     [...document.querySelectorAll("span")].some((s) => /^Shed Deals/.test((s.innerText || "").trim()) && /new designs/.test(s.innerText || ""))));
+  ok("A5 nothing names a stage→status link, nor Quotes", !/link stages to statuses|Link a stage/i.test(text) && !/\bQuotes\b/.test(text));
+  ok("A6 the copy says a pipeline owns its own stages, statuses and lost reasons",
+    /its own stages, its own statuses and its own lost reasons/.test(text), text.slice(0, 400));
 
-  // ── A7-A12: the copy is true, and a new status needs its event (2026-10-13) ──
-  const NO_EVENT = "No event yet, so no card will get this status.";
-  const statusCard = async () => page.evaluate(() => {
-    const c = document.querySelector("[data-ss-pipeline-settings]");
-    const rows = [...c.querySelectorAll("input[aria-label='Status name']")].map((inp) => {
-      const row = inp.parentElement;
-      const hint = row.querySelector("[data-ss-status-no-event]");
-      return { name: inp.value, hint: hint ? hint.innerText.trim() : null };
-    });
-    const add = c.querySelector("[data-ss-status-add]");
-    const none = c.querySelector("[data-ss-status-add-none]");
-    const sel = add ? add.querySelector("select") : null;
-    const btn = add ? [...add.querySelectorAll("button")].find((b) => b.textContent.trim() === "Add status") : null;
-    return { text: c.innerText, rows, add: !!add, none: none ? none.innerText.trim() : null,
-      events: sel ? [...sel.options].map((o) => o.value) : null, addDisabled: btn ? btn.disabled : null };
-  });
-  let sc = await statusCard();
-  ok("A7 the card no longer says 'add your own', and says a new status needs an event of its own",
-    !/add your own/i.test(sc.text) && /a new status needs an event of its own/.test(sc.text) && !/Nothing yet/.test(sc.text), sc.text.slice(0, 600));
-  // 353: every seeded status is reachable now, so nothing wears the warning until A10 frees one.
-  ok("A8 no status says 'no card will get this', because every one of them has an event",
-    sc.rows.filter((r) => r.hint).length === 0, JSON.stringify(sc.rows));
-  ok("A9 with every event taken there is no Add: the card says why instead",
-    !sc.add && !!sc.none && /Every event already sets a status, so a new one would never reach a card/.test(sc.none), JSON.stringify({ add: sc.add, none: sc.none }));
-  await page.locator("[data-ss-pipeline-settings]").screenshot({ path: join(shots, "statuses-all-events-taken.png") });
-  // Free an event: Delivered set to No event.
-  await page.locator("[data-ss-pipeline-settings] select[aria-label='Set automatically when']").nth(7).selectOption("");
-  await page.waitForTimeout(900);
-  const freed = sent.filter((b) => b.action === "crm_status_save").pop();
-  sc = await statusCard();
-  ok("A10 a status set to No event is saved so, then says no card will get it, and its event is offered for a new status",
-    !!freed && freed.id === STATUSES[7].id && freed.triggerEvent === "" && sc.rows[7].hint === NO_EVENT && sc.add
-      && JSON.stringify(sc.events) === JSON.stringify(["", "delivered"]), JSON.stringify({ freed, rows: sc.rows.map((r) => r.hint), events: sc.events }));
-  // Each step reports rather than throws when its control is missing (the build before has none).
-  await page.locator("[data-ss-status-add] input[aria-label='New status name']").fill("Ready for pickup", { timeout: 3000 }).catch(() => {});
-  await page.waitForTimeout(150);
-  const offWithoutEvent = (await statusCard()).addDisabled;
-  await page.locator("[data-ss-status-add] select").selectOption("delivered", { timeout: 3000 }).catch(() => {});
-  await page.waitForTimeout(150);
-  const onWithEvent = (await statusCard()).addDisabled === false;
-  ok("A11 Add stays off with a name and no event, and comes on once the event is picked", offWithoutEvent === true && onWithEvent, JSON.stringify({ offWithoutEvent, onWithEvent }));
-  await page.locator("[data-ss-status-add] button", { hasText: "Add status" }).click({ timeout: 3000 }).catch(() => {});
-  await page.waitForTimeout(900);
-  const made = sent.filter((b) => b.action === "crm_status_save").pop();
-  sc = await statusCard();
-  const newRow = sc.rows.find((r) => r.name === "Ready for pickup");
-  ok("A12 Add sends the name AND its event, and the new status shows with no hint",
-    !!made && !made.id && made.name === "Ready for pickup" && made.triggerEvent === "delivered" && !!newRow && newRow.hint === null && !sc.add && !!sc.none,
-    JSON.stringify({ made, newRow }));
-  await page.locator("[data-ss-pipeline-settings]").screenshot({ path: join(shots, "statuses-after-add.png") });
-
-  // ── B ──
-  await page.locator("button", { hasText: "Edit stages" }).first().click();
+  // ── B: a pipeline owns its stages, statuses and lost reasons, together ──────────────────
+  await page.locator("[data-ss-pipeline-row] button", { hasText: "Edit" }).first().click();
   await page.waitForTimeout(700);
+  const modal = await page.evaluate(() => document.body.innerText);
   const stageNames = await page.locator("input[aria-label='Stage name']").evaluateAll((els) => els.map((e) => e.value));
-  const editorUp = ok("B0 the Shed Deals stage editor opened with its 6 stages", stageNames.length === 6 && stageNames[0] === "New Incoming", JSON.stringify(stageNames));
-  if (editorUp) {
-    await page.screenshot({ path: join(shots, "stage-editor.png") });
-    const modal = await page.evaluate(() => document.body.innerText);
-    ok("B1 no 'Linked status' drop-down on any stage", (await page.locator("select[aria-label='Linked status']").count()) === 0
-      && !/No status link/.test(modal));
-    // 353: a stage has no KIND to pick any more — it is a step in the process, never an outcome.
-    ok("B2 each stage keeps colour, up/down and remove, and offers no Kind (C16)",
-      (await page.locator("select[aria-label='Colour']").count()) >= 6 && (await page.locator("select[aria-label='Kind']").count()) === 0
-      && (await page.locator("button[title='Move up']").count()) >= 6 && (await page.locator("button[title='Remove stage']").count()) === 6);
-    ok("B3 the help says a move never changes a status, where new designs land, and that there is no Won or Lost column",
-      /Moving a card between stages never changes its\s+status/.test(modal)
-      && /New designs land in this pipeline, in its first stage/.test(modal)
-      && /no Won or Lost column/.test(modal), JSON.stringify((/each one is a step[^.]*\./.exec(modal) || [])[0] || null));
-    // Rename a stage: the save carries the name and no statusId.
-    const first = page.locator("input[aria-label='Stage name']").first();
-    await first.fill("New Incoming Leads");
-    await first.blur();
-    await page.waitForTimeout(600);
-    const save = sent.find((b) => b.action === "crm_stage_save");
-    ok("C1 renaming a stage saves the name with no statusId", !!save && save.name === "New Incoming Leads" && !("statusId" in save), JSON.stringify(save));
-    ok("B4 the pipeline new designs land in offers no Remove pipeline", (await page.locator("button", { hasText: "Remove pipeline" }).count()) === 0);
-    await page.locator("button", { hasText: "Done" }).first().click();
-    await page.waitForTimeout(500);
-    await page.locator("button", { hasText: "Edit stages" }).nth(1).click();
-    await page.waitForTimeout(700);
-    ok("B5 another pipeline still can be removed", (await page.locator("button", { hasText: "Remove pipeline" }).count()) === 1);
-  }
-  ok("C2 nothing sent crm_deal_set_status", !sent.some((b) => b.action === "crm_deal_set_status"), JSON.stringify(sent.map((b) => b.action)));
+  const statusNames = await page.locator("input[aria-label='Status name']").evaluateAll((els) => els.map((e) => e.value));
+  ok("B1 the editor shows Shed Deals' six stages", JSON.stringify(stageNames) === JSON.stringify(SHED_STAGES.map((s) => s.name)), stageNames.join(" | "));
+  ok("B2 and its EIGHT statuses, in the same modal", JSON.stringify(statusNames) === JSON.stringify(LADDER.map(([n]) => n)), statusNames.join(" | "));
+  ok("B3 and its lost reasons, in the same modal", (await page.evaluate(() => {
+    const el = [...document.querySelectorAll("textarea")].pop(); return el ? el.value : "";
+  })).includes("Price"));
+  ok("B4 the other pipeline's status is NOT here — a ladder belongs to one pipeline",
+    !statusNames.includes("Reached out"), statusNames.join(" | "));
+  ok("B5 every status keeps its 'Set automatically when'",
+    (await page.locator("select[aria-label='Set automatically when']").count()) === 8);
+  ok("B6 no 'Linked status' drop-down, and no Kind on a stage",
+    (await page.locator("select[aria-label='Linked status']").count()) === 0
+    && (await page.locator("select[aria-label='Kind']").count()) === 0);
+  ok("B7 the copy says these belong to this pipeline and renaming leaves the others alone",
+    /belong to .*Shed Deals.* — another pipeline has its own/.test(modal.replace(/\s+/g, " ")),
+    (modal.replace(/\s+/g, " ").match(/These belong to[^.]*\./) || [])[0] || "not found");
+  await page.screenshot({ path: join(shots, "pipeline-editor.png") });
+
+  // ── C: a status may wait for its trigger (354) ─────────────────────────────────────────
+  const beforeAdd = sent.filter((b) => b.action === "crm_status_save").length;
+  await page.locator("[data-ss-status-add] input[aria-label='New status name']").fill("Waiting on SmartBuild");
+  await page.locator("[data-ss-status-add] button", { hasText: "Add status" }).click();
+  await page.waitForTimeout(700);
+  const add = sent.filter((b) => b.action === "crm_status_save").slice(beforeAdd)[0];
+  ok("C1 a status with NO trigger is allowed, and the save names its pipeline",
+    !!add && add.name === "Waiting on SmartBuild" && !add.triggerEvent && add.pipelineId === PIPELINES[0].id, JSON.stringify(add));
+  const after = await page.locator("input[aria-label='Status name']").evaluateAll((els) => els.map((e) => e.value));
+  ok("C2 it joins this pipeline's ladder", after.includes("Waiting on SmartBuild"), after.join(" | "));
+  ok("C3 and the row says nothing sets it yet",
+    /Nothing sets this yet, so no card will reach it/.test(await page.evaluate(() => document.body.innerText)));
+
+  // ── D: a reorder names its pipeline, and nothing sets a status by hand ─────────────────
+  // Scoped to the STATUS list: the stage rows above have the same control, and an unscoped
+  // selector reorders the stages instead (which is what this check caught the first time).
+  await page.locator("[data-ss-pipeline-statuses] button[title='Move down']").first().click();
+  await page.waitForTimeout(700);
+  const reorder = sent.filter((b) => b.action === "crm_statuses_reorder").pop();
+  ok("D1 a reorder names the pipeline whose ladder it is, and posts that ladder whole",
+    !!reorder && reorder.pipelineId === PIPELINES[0].id && Array.isArray(reorder.ids) && reorder.ids.length === after.length,
+    JSON.stringify(reorder && { pipelineId: reorder.pipelineId, n: reorder.ids.length }));
+  const stageSave = sent.find((b) => b.action === "crm_stage_save");
+  ok("D2 no stage save carries a statusId", !stageSave || !("statusId" in stageSave), JSON.stringify(stageSave || null));
+  ok("D3 nothing sent crm_deal_set_status", !sent.some((b) => b.action === "crm_deal_set_status"), JSON.stringify(sent.map((b) => b.action)));
   ok("Z no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {
   await browser.close();

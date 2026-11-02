@@ -7342,11 +7342,19 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
 // sets a card's status: statuses are system-driven (migration 303 retired 302's stage link). And
 // since 353 a stage has no KIND to pick: it is a step in the process, never an outcome. The lost
 // reasons stay here — they are what the Mark lost dialog offers, on every pipeline.
-function SsPipelineEditor({ pipeline, onClose, onCreated }) {
+function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null }) {
   const [name, setName] = useState(pipeline ? pipeline.name : "");
   const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
   const [reasons, setReasons] = useState(pipeline ? (pipeline.lostReasons || []).join("\n") : "");
   const [newStage, setNewStage] = useState("");
+  // ── THIS PIPELINE'S STATUSES (migration 354) ───────────────────────────────────────────
+  // Carolyn, 2026-11-01: "I want to make specific statuses per pipeline ... and then the statuses
+  // and pipelines and lost reasons all within that pipeline." They used to be one tenant-wide list
+  // in a card of its own; now a pipeline owns its ladder, so it is edited where its stages and its
+  // lost reasons are.
+  const [statuses, setStatuses] = useState(pipeline ? (pipeline.statuses || []).map((t) => ({ ...t })) : []);
+  const [newStatus, setNewStatus] = useState("");
+  const [newEvent, setNewEvent] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const run = async (fn) => { setBusy(true); setErr(null); try { await fn(); } catch (e) { setErr(e.message); } finally { setBusy(false); } };
@@ -7387,6 +7395,33 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
     setNewStage("");
   });
   const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
+
+  // ── this pipeline's statuses ──────────────────────────────────────────────────────────
+  // usedBy is scoped to THIS pipeline: one status per event per pipeline (354's unique index),
+  // so another pipeline having an "Invoiced" says nothing about this one.
+  const usedBy = (ev, id) => statuses.some((t) => t.triggerEvent === ev && t.id !== id);
+  const touched = () => { if (onChanged) onChanged(); };
+  const saveStatus = (t, patch) => run(async () => {
+    await ssPipeCall("crm_status_save", { id: t.id, ...patch });
+    setStatuses((all) => (patch.archive ? all.filter((x) => x.id !== t.id) : all.map((x) => (x.id === t.id ? { ...x, ...patch } : x))));
+    touched();
+  });
+  const moveStatus = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= statuses.length) return;
+    const next = statuses.slice(); const t = next[i]; next[i] = next[j]; next[j] = t;
+    setStatuses(next);
+    run(async () => { await ssPipeCall("crm_statuses_reorder", { pipelineId: pipeline.id, ids: next.map((x) => x.id) }); touched(); });
+  };
+  const addStatus = () => run(async () => {
+    const label = newStatus.trim();
+    if (!label) return;
+    const r = await ssPipeCall("crm_status_save", { pipelineId: pipeline.id, name: label, triggerEvent: newEvent || "" });
+    setStatuses(statuses.concat([{ id: r.id, name: label, color: "#64748B", triggerEvent: newEvent || null }]));
+    setNewStatus(""); setNewEvent("");
+    touched();
+  });
+
   return (
     <SsPipeModal title={`Edit “${pipeline.name}”`} onClose={onClose} width={560}>
       <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Pipeline name</span>
@@ -7421,6 +7456,62 @@ function SsPipelineEditor({ pipeline, onClose, onCreated }) {
         <input style={{ ...S.input, flex: 1 }} value={newStage} maxLength={60} onChange={(e) => setNewStage(e.target.value)} placeholder="New stage name"
           onKeyDown={(e) => { if (e.key === "Enter" && newStage.trim()) { e.preventDefault(); addStage(); } }} />
         <button type="button" disabled={busy || !newStage.trim()} style={S.btn(ACCENT, "#FFF")} onClick={addStage}>Add stage</button>
+      </div>
+      {/* ── STATUSES, this pipeline's own (354) ─────────────────────────────────────────── */}
+      <span style={S.lbl}>Statuses</span>
+      <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
+        Every card on this pipeline shows its status as a coloured pill, and the system sets it: each status is
+        set automatically when its event happens (<b>Set automatically when</b>). A status only ever moves forward
+        in this order, and nobody changes one by hand. These belong to <b>{pipeline.name}</b> — another pipeline
+        has its own, and renaming one here leaves the others alone.
+      </p>
+      <div data-ss-pipeline-statuses="" style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
+        {statuses.map((t, i) => (
+          <div key={t.id} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "6px 8px", borderBottom: i < statuses.length - 1 ? "1px solid #F1F5F9" : "none" }}>
+            <select aria-label="Status colour" disabled={busy} value={t.color} onChange={(e) => saveStatus(t, { color: e.target.value })}
+              style={{ width: 34, height: 28, flexShrink: 0, border: "1px solid #CBD5E1", borderRadius: 6, background: t.color, color: "transparent", cursor: "pointer" }}>
+              {SS_STAGE_COLORS.concat(["#84CC16", "#0F766E", "#60A5FA", "#EF4444"]).concat(SS_STAGE_COLORS.includes(t.color) ? [] : [t.color])
+                .filter((c, k, a) => a.indexOf(c) === k).map((c) => <option key={c} value={c} style={{ background: c, color: "#FFF" }}>{c}</option>)}
+            </select>
+            <input key={t.id + t.name} aria-label="Status name" disabled={busy} style={{ ...S.input, flex: "1 1 140px", minWidth: 110, padding: "5px 8px" }}
+              defaultValue={t.name} maxLength={40}
+              onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== t.name) saveStatus(t, { name: v }); }} />
+            <label style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 220px", fontSize: 11.5, color: "#64748B", fontWeight: 700 }}>
+              Set automatically when
+              <select aria-label="Set automatically when" disabled={busy} value={t.triggerEvent || ""}
+                onChange={(e) => saveStatus(t, { triggerEvent: e.target.value })} style={{ ...S.input, flex: 1, padding: "5px 6px" }}>
+                <option value="">Nothing yet</option>
+                {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k} disabled={usedBy(k, t.id)}>{label}{usedBy(k, t.id) ? " (used)" : ""}</option>)}
+              </select>
+            </label>
+            <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => moveStatus(i, -1)} style={small}>↑</button>
+            <button type="button" title="Move down" disabled={busy || i === statuses.length - 1} onClick={() => moveStatus(i, 1)} style={small}>↓</button>
+            <button type="button" title="Remove status" disabled={busy}
+              onClick={() => { if (window.confirm(`Remove the “${t.name}” status from ${pipeline.name}? Only a status no card has can be removed.`)) saveStatus(t, { archive: true }); }}
+              style={{ ...small, background: "#FEF2F2", color: "#DC2626" }}>✕</button>
+            {!t.triggerEvent && (
+              <div data-ss-status-no-event="" style={{ flexBasis: "100%", fontSize: 11.5, fontWeight: 600, color: "#B45309", paddingLeft: 40 }}>
+                Nothing sets this yet, so no card will reach it.
+              </div>
+            )}
+          </div>
+        ))}
+        {statuses.length === 0 && <div style={{ padding: "8px 10px", fontSize: 12.5, color: "#64748B" }}>No statuses on this pipeline yet.</div>}
+      </div>
+      {/* A STATUS MAY WAIT FOR ITS TRIGGER (354). Until 2026-11-01 a new status HAD to name an event
+          nothing else used, because a status no event set was unreachable. Carolyn is building a
+          SmartBuild pipeline whose rungs will be driven by webhooks that do not exist yet, so a
+          status with no trigger is now allowed and says so about itself. */}
+      <div data-ss-status-add="" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+        <input style={{ ...S.input, flex: "1 1 150px", minWidth: 130 }} value={newStatus} maxLength={40} onChange={(e) => setNewStatus(e.target.value)}
+          placeholder="New status name" aria-label="New status name"
+          onKeyDown={(e) => { if (e.key === "Enter" && newStatus.trim() && !busy) { e.preventDefault(); addStatus(); } }} />
+        <select aria-label="New status is set automatically when" value={newEvent} onChange={(e) => setNewEvent(e.target.value)}
+          style={{ ...S.input, flex: "1 1 200px", minWidth: 170, padding: "6px 8px" }}>
+          <option value="">Nothing yet — set it later</option>
+          {SS_STATUS_EVENTS.filter(([k]) => !usedBy(k, null)).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
+        <button type="button" disabled={busy || !newStatus.trim()} style={S.btn(ACCENT, "#FFF")} onClick={addStatus}>Add status</button>
       </div>
       <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Lost reasons, one per line</span>
         <textarea style={{ ...S.input, minHeight: 90 }} value={reasons} onChange={(e) => setReasons(e.target.value)}
@@ -7864,121 +7955,50 @@ const SS_STATUS_EVENTS = [
 function PipelineSettings({ viewing = false }) {
   const [meta, setMeta] = useState(null);
   const [err, setErr] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [newName, setNewName] = useState("");
-  // The event a new status is set by. Required: a status no event sets never reaches a card.
-  const [newEvent, setNewEvent] = useState("");
   const [editing, setEditing] = useState(null);   // pipeline object | "new"
   const load = useCallback(async () => {
     try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
     catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [], statuses: [] }); }
   }, []);
   useEffect(() => { load(); }, [load]);
-  const run = async (fn) => { setBusy(true); setErr(null); try { await fn(); await load(); } catch (e) { setErr(e.message); await load(); } finally { setBusy(false); } };
-  if (!meta) return <div style={S.card}><div style={S.h2}>Pipelines &amp; Statuses</div><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
+  if (!meta) return <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
   const can = !!meta.canManage && !viewing;
-  const statuses = meta.statuses || [];
-  const save = (t, patch) => run(() => ssPipeCall("crm_status_save", { id: t.id, ...patch }));
-  const move = (i, d) => {
-    const j = i + d; if (j < 0 || j >= statuses.length) return;
-    const ids = statuses.map((t) => t.id); const x = ids[i]; ids[i] = ids[j]; ids[j] = x;
-    run(() => ssPipeCall("crm_statuses_reorder", { ids }));
-  };
-  const small = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
-  const usedBy = (ev, id) => statuses.some((t) => t.triggerEvent === ev && t.id !== id);
-  // A NEW STATUS NEEDS ITS EVENT (2026-10-13). Statuses are the system's, so a status no event sets
-  // is one no card can ever get. Appt Set was exactly that until 353 renamed it Contact Made and
-  // gave it one. Adding a status asks for the event that sets it,
-  // from the events no other status has (one status per event, crm_statuses' unique index); with
-  // none free, the card says so instead of offering a status that would sit unused.
-  const freeEvents = SS_STATUS_EVENTS.filter(([k]) => !usedBy(k, null));
-  const addEvent = freeEvents.some(([k]) => k === newEvent) ? newEvent : "";
-  const canAdd = !busy && !!newName.trim() && !!addEvent;
-  const add = () => run(async () => {
-    await ssPipeCall("crm_status_save", { name: newName.trim(), triggerEvent: addEvent });
-    setNewName(""); setNewEvent("");
-  });
+  const pipes = meta.pipelines || [];
   return (
     <>
+      {/* ── ONE CARD, AND A PIPELINE OWNS EVERYTHING ABOUT ITSELF (migration 354) ──────────
+          Carolyn, 2026-11-01: "in settings lets move the pipelines above the statuses. and then
+          the statuses and pipelines and lost reasons all within that pipeline." There used to be
+          two cards here — a tenant-wide Statuses list FIRST, then Pipelines — because one ladder
+          served every board. Now each pipeline has its own, so there is nothing left to show at
+          the account level: the list below is the page, and opening a pipeline shows its stages,
+          its statuses and its lost reasons together. */}
       <div style={S.card} data-ss-pipeline-settings="">
-        <div style={S.h2}>Statuses</div>
+        <div style={S.h2}>Pipelines</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-          Every card on every pipeline shows its status as a coloured pill, and the system sets it: each status
-          is set automatically when its event happens (<b>Set automatically when</b>). A status only ever moves
-          forward in this order, and nobody changes one by hand. You can rename them, recolour them and put them
-          in order. A status with no event never reaches a card, so a new status needs an event of its own.
+          Each pipeline has its own stages, its own statuses and its own lost reasons — a shed pipeline and a
+          post-frame one do not move through the same steps. New designs land in the pipeline marked
+          <b> new designs</b>, in its first stage. Open one to edit it.
         </p>
         {err && <div style={S.err}>{err}</div>}
-        <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 10 }}>
-          {statuses.map((t, i) => (
-            <div key={t.id} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "7px 9px", borderBottom: i < statuses.length - 1 ? "1px solid #F1F5F9" : "none" }}>
-              <select aria-label="Colour" disabled={!can || busy} value={t.color} onChange={(e) => save(t, { color: e.target.value })}
-                style={{ width: 34, height: 28, flexShrink: 0, border: "1px solid #CBD5E1", borderRadius: 6, background: t.color, color: "transparent", cursor: can ? "pointer" : "default" }}>
-                {SS_STAGE_COLORS.concat(["#84CC16", "#0F766E", "#60A5FA", "#EF4444"]).concat(SS_STAGE_COLORS.includes(t.color) ? [] : [t.color])
-                  .filter((c, k, a) => a.indexOf(c) === k).map((c) => <option key={c} value={c} style={{ background: c, color: "#FFF" }}>{c}</option>)}
-              </select>
-              <input key={t.id + t.name} aria-label="Status name" disabled={!can || busy} style={{ ...S.input, flex: "1 1 150px", minWidth: 120, padding: "5px 8px" }}
-                defaultValue={t.name} maxLength={40}
-                onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== t.name) save(t, { name: v }); }} />
-              <label style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 230px", fontSize: 11.5, color: "#64748B", fontWeight: 700 }}>
-                Set automatically when
-                <select aria-label="Set automatically when" disabled={!can || busy} value={t.triggerEvent || ""}
-                  onChange={(e) => save(t, { triggerEvent: e.target.value })} style={{ ...S.input, flex: 1, padding: "5px 6px" }}>
-                  <option value="">No event</option>
-                  {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k} disabled={usedBy(k, t.id)}>{label}{usedBy(k, t.id) ? " (used)" : ""}</option>)}
-                </select>
-              </label>
-              {can && <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => move(i, -1)} style={small}>↑</button>}
-              {can && <button type="button" title="Move down" disabled={busy || i === statuses.length - 1} onClick={() => move(i, 1)} style={small}>↓</button>}
-              {can && <button type="button" title="Remove status" disabled={busy}
-                onClick={() => { if (window.confirm(`Remove the “${t.name}” status? Only a status no card has can be removed.`)) save(t, { archive: true }); }}
-                style={{ ...small, background: "#FEF2F2", color: "#DC2626" }}>✕</button>}
-              {!t.triggerEvent && (
-                <div data-ss-status-no-event="" style={{ flexBasis: "100%", fontSize: 11.5, fontWeight: 600, color: "#B45309", paddingLeft: 40 }}>
-                  No event yet, so no card will get this status.
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        {can && (freeEvents.length > 0 ? (
-          <div data-ss-status-add="" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <input style={{ ...S.input, flex: "1 1 160px", minWidth: 140 }} value={newName} maxLength={40} onChange={(e) => setNewName(e.target.value)}
-              placeholder="New status name" aria-label="New status name"
-              onKeyDown={(e) => { if (e.key === "Enter" && canAdd) { e.preventDefault(); add(); } }} />
-            <select aria-label="New status is set automatically when" value={addEvent} onChange={(e) => setNewEvent(e.target.value)}
-              style={{ ...S.input, flex: "1 1 200px", minWidth: 170, padding: "6px 8px" }}>
-              <option value="">Set automatically when…</option>
-              {freeEvents.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
-            </select>
-            <button type="button" disabled={!canAdd} style={S.btn(ACCENT, "#FFF")} onClick={add}>Add status</button>
-          </div>
-        ) : (
-          <p data-ss-status-add-none="" style={{ fontSize: 12, color: "#64748B", margin: 0, lineHeight: 1.5 }}>
-            Every event already sets a status, so a new one would never reach a card. Rename a status instead, or
-            free an event by setting a status to <b>No event</b>.
-          </p>
-        ))}
-      </div>
-      <div style={S.card}>
-        <div style={S.h2}>Pipelines</div>
-        <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
-          New designs land in the pipeline marked <b>new designs</b>, in its first open stage. Open a pipeline to
-          rename, reorder and add stages and set its lost reasons.
-        </p>
-        {(meta.pipelines || []).map((p) => (
-          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid #F1F5F9" }}>
-            <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+        {pipes.map((p) => (
+          <div key={p.id} data-ss-pipeline-row={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid #F1F5F9" }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
               {p.name}
               {p.feedsDesigns && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: "#1B7895", background: "#E0F2FE", borderRadius: 999, padding: "1px 8px" }}>new designs</span>}
-              <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 600, color: "#94A3B8" }}>{p.stages.length} stages</span>
+              <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 600, color: "#94A3B8" }}>
+                {p.stages.length} {p.stages.length === 1 ? "stage" : "stages"} · {(p.statuses || []).length} {(p.statuses || []).length === 1 ? "status" : "statuses"}
+              </span>
             </span>
-            {can && <button type="button" onClick={() => setEditing(p)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>Edit stages</button>}
+            {can && <button type="button" onClick={() => setEditing(p)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>Edit</button>}
           </div>
         ))}
+        {pipes.length === 0 && <p style={{ fontSize: 12.5, color: "#64748B", margin: 0 }}>No pipelines yet.</p>}
         {can && <button type="button" onClick={() => setEditing("new")} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 10 }}>＋ New pipeline</button>}
       </div>
-      {editing && editing !== "new" && <SsPipelineEditor pipeline={editing} onClose={() => { setEditing(null); load(); }} />}
+      {editing && editing !== "new" && (
+        <SsPipelineEditor pipeline={editing} onClose={() => { setEditing(null); load(); }} onChanged={load} />
+      )}
       {editing === "new" && <SsPipelineEditor pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}
     </>
   );

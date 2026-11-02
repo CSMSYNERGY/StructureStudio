@@ -2122,7 +2122,7 @@ function ssBillingTabs() {
 // the rail item appears at all.
 function ssCustomerHubTabs({ isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
-    ["pipelines", "Pipelines & Statuses", "Card statuses, when each is set automatically, and each pipeline's stages"],
+    ["pipelines", "Pipelines", "Each pipeline's stages, its statuses and when each one is set, and its lost reasons"],
     // Lifted off the connection page, where it sat under the GHL credentials and read as part
     // of them. It never was: "Every tenant, CRM or not: the login is ours either way" (the
     // card's own note in 03-catalog.jsx), which is precisely why it belongs here.

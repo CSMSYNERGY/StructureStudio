@@ -1,6 +1,6 @@
 // Unit tests for _shared/crmPipelines.ts (migration 301). Self-contained: no registry imports.
 import {
-  parseIdOrder, parseStatusSave, STAGE_STATUS_LINK_RETIRED, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
+  parseIdOrder, parseStatusOrder, parseStatusSave, STAGE_STATUS_LINK_RETIRED, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
   parseDay, parseDealPatch, parseInstant, parseLead, parseMoneyCents, parsePipelineSave,
   parseStageOrder, parseStageSave, stageSetRefusal,
 } from "./crmPipelines.ts";
@@ -9,6 +9,7 @@ function eq(a: unknown, b: unknown, msg: string) {
   if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`);
 }
 
+const U2 = "00000000-0000-4000-8000-0000000000f2";
 const U = "11111111-2222-4333-8444-555555555555";
 
 Deno.test("money: dollars to cents, blanks clear, junk refused", () => {
@@ -89,17 +90,33 @@ Deno.test("a pipeline keeps a stage", () => {
 
 Deno.test("statuses: name, colour and the automatic trigger", () => {
   eq(parseStatusSave({}).ok, false, "new needs a name");
-  const a = parseStatusSave({ name: "Contact Made", color: "#0EA5E9", triggerEvent: "" });
-  eq(a.ok && [a.name, a.triggerEvent], ["Contact Made", null], "no event yet");
+  // 354: a NEW status must say which pipeline it is a rung of — there is no tenant-wide list left.
+  eq(parseStatusSave({ name: "Contact Made" }).ok, false, "a new status needs its pipeline");
+  const a = parseStatusSave({ pipelineId: U2, name: "Contact Made", color: "#0EA5E9", triggerEvent: "" });
+  eq(a.ok && [a.name, a.triggerEvent, a.pipelineId], ["Contact Made", null, U2], "no event yet, on its pipeline");
+  // An EDIT finds the pipeline from the row, so a caller changing a name need not send one.
+  eq(parseStatusSave({ id: U, name: "Renamed" }).ok, true, "editing one needs no pipeline");
+  eq(parseStatusSave({ pipelineId: "not-a-uuid", name: "x" }).ok, false, "a pipeline id must look like one");
   // 353: contact being made is an event a status can be set by.
   eq(parseStatusSave({ id: U, triggerEvent: "contact_made" }).ok && true, true, "contact_made is a trigger");
   const b = parseStatusSave({ id: U, triggerEvent: "paid_in_full" });
   eq(b.ok && b.triggerEvent, "paid_in_full", "trigger");
   eq(parseStatusSave({ id: U, triggerEvent: "whenever" }).ok, false, "unknown trigger");
-  eq(parseStatusSave({ name: "x".repeat(41) }).ok, false, "too long");
+  eq(parseStatusSave({ pipelineId: U2, name: "x".repeat(41) }).ok, false, "too long");
   const c = parseStatusSave({ id: U, name: "New" });
   eq(c.ok && c.triggerEvent, undefined, "absent trigger means unchanged");
   eq(parseIdOrder({ ids: [U, U] }).ok, false, "duplicate");
+});
+
+// 354: a reorder is ONE pipeline's ladder, posted whole — the twin of parseStageOrder. Without the
+// pipeline the posted ids are always a subset of the account's statuses and can never be checked.
+Deno.test("status order: one pipeline's ids, each exactly once", () => {
+  eq(parseStatusOrder({ ids: [U] }).ok, false, "needs the pipeline");
+  eq(parseStatusOrder({ pipelineId: U2 }).ok, false, "needs the ids");
+  eq(parseStatusOrder({ pipelineId: U2, ids: [U, U] }).ok, false, "each one once");
+  eq(parseStatusOrder({ pipelineId: U2, ids: ["nope"] }).ok, false, "ids must look like ids");
+  const o = parseStatusOrder({ pipelineId: U2, ids: [U] });
+  eq(o.ok && [o.pipelineId, o.ids], [U2, [U]], "the pipeline and its order");
 });
 
 Deno.test("statuses are system-driven (Carolyn 2026-10-12): the sentences a person reads", () => {

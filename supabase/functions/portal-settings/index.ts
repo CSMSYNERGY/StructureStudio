@@ -261,7 +261,7 @@ import { coerceFieldValue } from "../_shared/crmFields.ts";
 import {
   DESIGN_FEED_STAYS, isUuidLike, LOST_REASON_MAX, LOST_REASON_REQUIRED, parseDealPatch, parseIdOrder, parseLead,
   parseMoneyCents, parsePipelineSave, parseStageOrder,
-  parseStageSave, parseStatusSave, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
+  parseStageSave, parseStatusOrder, parseStatusSave, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
   stageSetRefusal, type StageKind as PipeStageKind,
 } from "../_shared/crmPipelines.ts";
 // Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
@@ -9566,7 +9566,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
           admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position")
             .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
-          admin.from("crm_statuses").select("id, name, color, position")
+          // pipeline_id rides along since 354 so this SECOND copy of the status read keeps the same
+          // shape as readPipelines' one. The record resolves a pill from an id, so the flat union
+          // is still what it needs; letting the two drift is how the record and the board end up
+          // disagreeing about a card.
+          admin.from("crm_statuses").select("id, pipeline_id, name, color, position")
             .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
           dealsQ.order("created_at", { ascending: false }).limit(100),
         ]);
@@ -9578,7 +9582,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             stages: stages.filter((s: any) => s.pipeline_id === p.id)
               .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind })),
           })),
-          statuses: (tRes.data ?? []).map((t: any) => ({ id: t.id, name: t.name, color: t.color })),
+          statuses: (tRes.data ?? []).map((t: any) => ({ id: t.id, pipelineId: t.pipeline_id ?? null, name: t.name, color: t.color })),
           deals: dRes.data ?? [],
         };
       })(),
@@ -10620,7 +10624,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .select("id, name, position, lost_reasons, seed_kind, feeds_designs")
       .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
     const readStatuses = () => admin.from("crm_statuses")
-      .select("id, name, color, position, trigger_event")
+      .select("id, pipeline_id, name, color, position, trigger_event")
       .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
     let [{ data: pipes, error }, { data: statuses, error: stErr }] = await Promise.all([read(), readStatuses()]);
     if (error) return { dbError: error };
@@ -10651,8 +10655,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         feedsDesigns: p.feeds_designs === true,
         stages: (stages ?? []).filter((s: any) => s.pipeline_id === p.id)
           .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, position: s.position })),
+        // A STATUS BELONGS TO THIS PIPELINE (migration 354). Its ladder, its lost reasons and its
+        // stages now all hang off the pipeline, which is what Settings → Pipelines edits.
+        statuses: (statuses ?? []).filter((t: any) => t.pipeline_id === p.id)
+          .map((t: any) => ({ id: t.id, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
       })),
-      statuses: (statuses ?? []).map((t: any) => ({ id: t.id, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
+      // The UNION, still flat and still called `statuses`: a status PILL is drawn from an id alone
+      // (SsStatusPill, CrmDealStatusPill, the record's rows), and the card carrying it may belong to
+      // any pipeline. Keeping it costs one array and means every pill lookup keeps working; the
+      // per-pipeline lists above are what the board's filter and the settings editor read.
+      statuses: (statuses ?? []).map((t: any) => ({ id: t.id, pipelineId: t.pipeline_id ?? null, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
     };
   };
 
@@ -11189,18 +11201,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const now = new Date().toISOString();
     // A status is its own row and nothing else: 302's Quotes pipeline, whose stages mirrored the
     // statuses, was retired by 303, and no stage links to a status any more.
+    // 354: an event is unique PER PIPELINE now, so the sentence says which list it collided in.
     const dupe = (e: any) => String(e?.code) === "23505"
-      ? json({ error: "Another status is already set by that. Each one can set only one status." }, 409) : null;
+      ? json({ error: "Another status on this pipeline is already set by that. Each one can set only one status." }, 409) : null;
 
     if (!st.id) {
+      // The pipeline the new status belongs to, and its OWN last position — scoping this to the
+      // tenant would drop a new rung after some other pipeline's last one.
+      const { data: pipe, error: pErr } = await admin.from("crm_pipelines").select("id")
+        .eq("client_id", clientId).eq("id", st.pipelineId).is("archived_at", null).maybeSingle();
+      if (pErr) return dbFail(req, clientId, "add that status", pErr);
+      if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
       const { data: top } = await admin.from("crm_statuses").select("position")
-        .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: false }).limit(1).maybeSingle();
+        .eq("client_id", clientId).eq("pipeline_id", st.pipelineId).is("archived_at", null)
+        .order("position", { ascending: false }).limit(1).maybeSingle();
       const { data: made, error } = await admin.from("crm_statuses").insert({
-        client_id: clientId, name: st.name, color: st.color ?? "#64748B",
+        client_id: clientId, pipeline_id: st.pipelineId, name: st.name, color: st.color ?? "#64748B",
         trigger_event: st.triggerEvent ?? null, position: (Number(top?.position) || 0) + 1024,
       }).select("id").single();
       if (error) return dupe(error) ?? dbFail(req, clientId, "add that status", error);
-      audit("crm_status_save", 1, `created=${made.id}`).catch(() => {});
+      audit("crm_status_save", 1, `created=${made.id} pipeline=${st.pipelineId}`).catch(() => {});
       return json({ ok: true, id: made.id });
     }
 
@@ -11210,9 +11230,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (cErr) return dbFail(req, clientId, "check that status's cards", cErr);
       // Nobody can give those cards another status by hand, so the answer is "rename it".
       if ((count ?? 0) > 0) return json({ error: statusArchiveRefusal(count ?? 0) }, 409);
+      // The last rung OF THIS PIPELINE, not of the account: every pipeline needs one left, and a
+      // tenant-wide count would happily let a pipeline be emptied while another still had eight.
+      const { data: row } = await admin.from("crm_statuses").select("pipeline_id")
+        .eq("client_id", clientId).eq("id", st.id).maybeSingle();
       const { count: left } = await admin.from("crm_statuses").select("id", { count: "exact", head: true })
-        .eq("client_id", clientId).is("archived_at", null);
-      if ((left ?? 0) <= 1) return json({ error: "Keep at least one status: every card needs one." }, 409);
+        .eq("client_id", clientId).eq("pipeline_id", row?.pipeline_id ?? "").is("archived_at", null);
+      if ((left ?? 0) <= 1) return json({ error: "Keep at least one status on this pipeline: every card needs one." }, 409);
     }
     const patch: Record<string, unknown> = { updated_at: now };
     if (st.name) patch.name = st.name;
@@ -11228,10 +11252,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   if (action === "crm_statuses_reorder") {
-    const o = parseIdOrder((payload ?? {}) as Record<string, unknown>);
+    // 354: ONE PIPELINE'S ladder, posted whole. Without the pipeline this compared the posted ids
+    // against every status in the account, so reordering one pipeline would always have answered
+    // "the statuses changed while you were editing" — the subset never matches the tenant's set.
+    const o = parseStatusOrder((payload ?? {}) as Record<string, unknown>);
     if (!o.ok) return json({ error: o.error }, 400);
     const { data: live, error } = await admin.from("crm_statuses").select("id")
-      .eq("client_id", clientId).is("archived_at", null);
+      .eq("client_id", clientId).eq("pipeline_id", o.pipelineId).is("archived_at", null);
     if (error) return dbFail(req, clientId, "reorder those statuses", error);
     const have = new Set((live ?? []).map((x: any) => x.id));
     if (have.size !== o.ids.length || o.ids.some((id) => !have.has(id))) {

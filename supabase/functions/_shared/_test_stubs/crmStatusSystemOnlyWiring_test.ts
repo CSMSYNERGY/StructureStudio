@@ -211,18 +211,46 @@ Deno.test("a stage can't be linked to a status: a link is refused, a blank one i
 });
 
 // ─── The status list (Settings → Pipelines) ───────────────────────────────────────────────────
-Deno.test("renaming, adding and reordering statuses touches crm_statuses alone (no Quotes mirror)", async () => {
+// EDITING a status still touches crm_statuses alone: an edit finds the pipeline from the row, so
+// nothing else is read or written. (Creating one is different since 354 — see below.)
+Deno.test("renaming and reordering statuses touches crm_statuses alone (no Quotes mirror)", async () => {
   for (const body of [
     { action: "crm_status_save", id: STATUS, name: "Booked", color: "#0EA5E9" },
-    { action: "crm_status_save", name: "Site visit" },
     { action: "crm_status_save", id: STATUS_B, triggerEvent: "estimate_sent" },
-    { action: "crm_statuses_reorder", ids: [STATUS_B, STATUS] },
+    { action: "crm_statuses_reorder", pipelineId: FEED, ids: [STATUS_B, STATUS] },
   ]) {
     const { status, text, t } = await call(world(), body);
     assertEquals(status, 200, `${JSON.stringify(body)} ${text}`);
     assert(t.writes.length > 0 && t.writes.every((x) => x.table === "crm_statuses"), `${JSON.stringify(body)} wrote ${t.writes.map((x) => x.table)}`);
-    assert(!t.reads.includes("crm_pipelines") && !t.reads.includes("crm_pipeline_stages"), `${JSON.stringify(body)} read ${t.reads}`);
+    assert(!t.reads.includes("crm_pipeline_stages"), `${JSON.stringify(body)} read ${t.reads}`);
   }
+});
+
+// ─── A STATUS IS ONE PIPELINE'S RUNG (migration 354) ──────────────────────────────────────────
+// Before 354 a status belonged to the account, so neither of these needed to say which pipeline.
+// Now a create without one has no list to join, and a reorder without one cannot be checked at all
+// (the posted ids are always a subset of the account's statuses, so it would answer "the statuses
+// changed while you were editing" every single time).
+Deno.test("creating or reordering statuses must name the pipeline", async () => {
+  for (const body of [
+    { action: "crm_status_save", name: "Site visit" },
+    { action: "crm_statuses_reorder", ids: [STATUS_B, STATUS] },
+  ]) {
+    const { status, body: out, t } = await call(world(), body);
+    assertEquals(status, 400, `${JSON.stringify(body)} was allowed with no pipeline`);
+    assert(/pipeline/i.test(String(out.error)), `${JSON.stringify(body)} refused without saying why: ${out.error}`);
+    assertEquals(t.writes, [], "a refused status save wrote something");
+  }
+});
+
+Deno.test("a new status joins the pipeline it names, and that pipeline is checked first", async () => {
+  const { status, text, t } = await call(world(), { action: "crm_status_save", pipelineId: FEED, name: "Site visit" });
+  assertEquals(status, 200, text);
+  // It reads crm_pipelines to prove the pipeline is live and this tenant's — a status hung off a
+  // pipeline that is gone is a rung no card could ever stand on.
+  assert(t.reads.includes("crm_pipelines"), `a new status did not check its pipeline: read ${t.reads}`);
+  assert(t.writes.length > 0 && t.writes.every((x) => x.table === "crm_statuses"), `wrote ${t.writes.map((x) => x.table)}`);
+  assertEquals(t.writes[0].row.pipeline_id, FEED, JSON.stringify(t.writes[0].row));
 });
 
 Deno.test("a status cards still have can't be removed, and the answer is to rename it", async () => {
@@ -270,6 +298,9 @@ Deno.test("Settings → Pipelines and the stage editor: no hand-set, no stage li
     assert(!/crm_deal_set_status/.test(src), `${label} sets a status`);
     assert(!/\bQuotes\b/.test(src), `${label} names the retired Quotes pipeline`);
   }
-  assert(/nobody\s+changes one by hand/.test(settings), "the Statuses card says nobody changes a status by hand");
+  // 354: the status list moved OUT of PipelineSettings and into the pipeline's own editor, so the
+  // sentence that promises nobody sets a status by hand moved with it.
+  assert(/nobody\s+changes one by hand/.test(editor), "the pipeline editor's status list says nobody changes a status by hand");
+  assert(!/input aria-label="Status name"|Status name/.test(settings), "the account-level Statuses card is back");
   assert(/Moving a card between stages never changes its\s+status/.test(editor), "the stage editor says a move never changes the status");
 });

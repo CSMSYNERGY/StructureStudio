@@ -56,7 +56,11 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   crm_activities: { fate: "wipe", export: true, why: "Contact activity (NO ACTION to crm_contacts)." },
   crm_pipelines: { fate: "wipe", export: true, why: "Pipelines (deleting one cascades its deals and stages)." },
   crm_pipeline_stages: { fate: "cascade", parent: "crm_pipelines", export: true, why: "Pipeline stages (deals point at them with NO ACTION)." },
-  crm_statuses: { fate: "wipe", export: true, why: "Statuses (deals point at them with NO ACTION)." },
+  // 354: a status hangs off a pipeline (ON DELETE CASCADE), the same as a stage above, so deleting
+  // the pipelines takes the statuses with them. Still listed rather than dropped from the table:
+  // the archived tenant-wide rows 354 retired have no pipeline, and a plain wipe is what clears
+  // those. Exported either way.
+  crm_statuses: { fate: "wipe", export: true, why: "Statuses (live ones cascade from crm_pipelines; the pre-354 tenant-wide rows do not)." },
   // Migration 330. The builder's own fields on a contact and on a deal, and their relabels of
   // ours. WIPE: it is per-tenant configuration, like the pipelines and statuses above, and a
   // recreated slug must not inherit the old builder's field list. Exported, because the VALUES
