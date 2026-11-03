@@ -34,6 +34,12 @@
 # /form/* rule. Deliberately NO X-Frame-Options in _headers: framing is the point.
 /form        /form.html       200
 /form/       /form            301
+# The same page under a name WITHOUT "/form" in it, which is what form-embed.js frames (2026-11-03).
+# GoHighLevel's form_embed.js — on most builders' sites already — treats every iframe whose src
+# contains "/form" as one of its own forms and hides it (opacity 0, left -9999px), so a /form frame
+# rendered blank on any page that also carries a GHL form. Keep /form for direct links.
+/lead-form   /form.html       200
+/lead-form/  /lead-form       301
 
 # MEETINGS (migration 326, 2026-10-22): a person's public booking page. ?client= picks the
 # builder, ?with= the person, ?type= skips straight to one meeting type. Like /shop,

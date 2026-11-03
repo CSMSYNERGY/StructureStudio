@@ -30,7 +30,9 @@
       });
     } catch (e) {}
     var f = document.createElement("iframe");
-    f.src = ORIGIN + "/form?client=" + encodeURIComponent(m[1].toLowerCase()) + "&id=" + m[2] + "&embed=1&page=" + encodeURIComponent(location.href.slice(0, 500)) + extra;
+    // /lead-form, not /form: GoHighLevel's form_embed.js hides every iframe whose src contains
+    // "/form", and most builders' sites carry it. Same page (see _redirects).
+    f.src = ORIGIN + "/lead-form?client=" + encodeURIComponent(m[1].toLowerCase()) + "&id=" + m[2] + "&embed=1&page=" + encodeURIComponent(location.href.slice(0, 500)) + extra;
     f.title = "Contact form";
     f.loading = "lazy";
     f.style.cssText = "width:100%;border:0;display:block;min-height:320px;height:640px;overflow:hidden;background:transparent;";
