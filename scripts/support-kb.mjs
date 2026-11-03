@@ -54,7 +54,7 @@ const NOT_IN_NAV = new Map([
 ]);
 /** Sidebar pages that appear only with a paid add-on; without it they are hidden, not padlocked. */
 const NAV_NEEDS = new Map([
-  ["conversations", "only appears on accounts with the built-in CRM; without it the item is hidden"],
+  ["conversations", "only appears on accounts with the Customer Hub; without it the item is hidden"],
 ]);
 
 /** THE CHECKLIST'S STALE TEXT, corrected here (knowledge audit 2026-10-28). The live checklist is

@@ -18,7 +18,7 @@ account's subscription itself isn't active. Pages marked "coming soon" are not a
 
 - **Shed Designer** (/designer): Design a building and build an estimate
 - **Customer Hub** (/contacts): Everyone who has enquired, their designs, and your pipelines
-- **Conversations** (/conversations): Every email, text and call with your customers, newest first (only appears on accounts with the built-in CRM; without it the item is hidden)
+- **Conversations** (/conversations): Every email, text and call with your customers, newest first (only appears on accounts with the Customer Hub; without it the item is hidden)
 - **Orders** (/orders): Track accepted estimates from sale to payment and delivery
 - **Support** (/support): Get set up, report a problem, request a feature, and see what's new
 - **Settings** (/settings): Sheds, options, colors, branding & estimates, connection, QuickBooks, and billing
