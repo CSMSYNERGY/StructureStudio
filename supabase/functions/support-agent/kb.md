@@ -77,7 +77,7 @@ The Settings page has a rail of sections. Some sections are hubs with their own 
   - **Wallet** (/settings/wallet): Your card on file, and prepaid credit for usage — top-ups, auto top-up, and what has been charged
 - **Customer Hub** (/settings/pipelines): Your pipelines, forms, customer emails and texts, your phone, and your meetings
   (Customer Hub is being reworked; this list is as of the last knowledge build and may have moved.)
-  - **Pipelines & Statuses** (/settings/pipelines): Card statuses, when each is set automatically, and each pipeline's stages
+  - **Pipelines** (/settings/pipelines): Each pipeline's stages, its statuses and when each one is set, and its lost reasons
   - **Customer login** (/settings/customer-login): How customers get the code that logs them in to accept estimates and pay invoices
   - **Forms** (/settings/forms): Lead forms for your website: design, publish, and see who filled them in
   - **Email Templates** (/settings/email-templates): Designed emails your forms send: the lead's auto-reply and your team's alert
