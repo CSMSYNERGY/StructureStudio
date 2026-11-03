@@ -7342,7 +7342,38 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
 // sets a card's status: statuses are system-driven (migration 303 retired 302's stage link). And
 // since 353 a stage has no KIND to pick: it is a step in the process, never an outcome. The lost
 // reasons stay here — they are what the Mark lost dialog offers, on every pipeline.
-function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null }) {
+// ── THE EDITOR OPENS IN PLACE, UNDER THE LIST (Carolyn 2026-11-02) ──────────────────────
+// "When we edit a pipeline I want it to show in the area under all the pipelines (not a pop-up)."
+// Same editor, a different shell. In Settings it is a card below the list, so the pipelines stay
+// on screen while one of them is open and nothing is covered over.
+//
+// It is NOT SsPipeModal with the overlay turned off, and the difference is the whole point: the
+// modal locks body scroll and swallows Escape, which are right for something covering the page and
+// wrong for a panel that is simply part of it — a locked page with no overlay reads as a frozen
+// tab. This also keeps the board's own "Edit stages" on the modal, where the board IS the page
+// behind it and a card pushed in under the list would shove every column down the screen.
+function SsPipeInline({ title, onClose, children }) {
+  const ref = useRef(null);
+  // Opening the editor on a long list would otherwise leave it below the fold with no sign
+  // anything happened. "nearest" so a panel already in view is not yanked about.
+  useEffect(() => {
+    const el = ref.current;
+    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, []);
+  return (
+    <div ref={ref} data-ss-pipeline-editor="" style={{ ...S.card, border: `2px solid ${ACCENT}` }}>
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#1E293B", flex: 1 }}>{title}</div>
+        <button type="button" onClick={onClose} aria-label="Close"
+          style={{ background: "none", border: "none", fontSize: 20, lineHeight: 1, color: "#94A3B8", cursor: "pointer" }}>×</button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null, inline = false }) {
+  const Shell = inline ? SsPipeInline : SsPipeModal;
   const [name, setName] = useState(pipeline ? pipeline.name : "");
   const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
   const [reasons, setReasons] = useState(pipeline ? (pipeline.lostReasons || []).join("\n") : "");
@@ -7361,7 +7392,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null }) {
 
   if (!pipeline) {
     return (
-      <SsPipeModal title="New pipeline" onClose={onClose} width={400}>
+      <Shell title="New pipeline" onClose={onClose} width={400}>
         <label style={{ display: "block", marginBottom: 12 }}><span style={S.lbl}>Name</span>
           <input style={S.input} autoFocus value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="Dealer recruiting" /></label>
         <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px" }}>It starts with one stage, New. Rename it and add the rest next.</p>
@@ -7371,7 +7402,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null }) {
           <button type="button" disabled={busy || !name.trim()} style={S.btn(ACCENT, "#FFF")}
             onClick={() => run(async () => { const r = await ssPipeCall("crm_pipeline_save", { name }); onCreated(r.id); })}>Create</button>
         </div>
-      </SsPipeModal>
+      </Shell>
     );
   }
 
@@ -7423,7 +7454,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null }) {
   });
 
   return (
-    <SsPipeModal title={`Edit “${pipeline.name}”`} onClose={onClose} width={560}>
+    <Shell title={`Edit “${pipeline.name}”`} onClose={onClose} width={560}>
       <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Pipeline name</span>
         <input style={S.input} value={name} maxLength={80} onChange={(e) => setName(e.target.value)}
           onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, name })); }} /></label>
@@ -7527,7 +7558,7 @@ function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null }) {
         )}
         <button type="button" disabled={busy} onClick={onClose} style={S.btn(ACCENT, "#FFF")}>Done</button>
       </div>
-    </SsPipeModal>
+    </Shell>
   );
 }
 
@@ -7981,8 +8012,14 @@ function PipelineSettings({ viewing = false }) {
           <b> new designs</b>, in its first stage. Open one to edit it.
         </p>
         {err && <div style={S.err}>{err}</div>}
-        {pipes.map((p) => (
-          <div key={p.id} data-ss-pipeline-row={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid #F1F5F9" }}>
+        {pipes.map((p) => {
+        // The editor is a card further down the page rather than something covering it, so the
+        // row says which one is open — otherwise, on a long list, the only clue is off screen.
+        const open = !!editing && editing !== "new" && editing.id === p.id;
+        return (
+          <div key={p.id} data-ss-pipeline-row={p.id} data-ss-pipeline-open={open ? "" : undefined}
+            style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 6px", borderTop: "1px solid #F1F5F9",
+              background: open ? "#F0F9FF" : undefined, borderRadius: open ? 8 : undefined }}>
             <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
               {p.name}
               {p.feedsDesigns && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: "#1B7895", background: "#E0F2FE", borderRadius: 999, padding: "1px 8px" }}>new designs</span>}
@@ -7990,16 +8027,24 @@ function PipelineSettings({ viewing = false }) {
                 {p.stages.length} {p.stages.length === 1 ? "stage" : "stages"} · {(p.statuses || []).length} {(p.statuses || []).length === 1 ? "status" : "statuses"}
               </span>
             </span>
-            {can && <button type="button" onClick={() => setEditing(p)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>Edit</button>}
+            {can && (
+              <button type="button" onClick={() => setEditing(open ? null : p)}
+                style={{ ...S.btn(open ? ACCENT : "#F1F5F9", open ? "#FFF" : "#334155"), border: `1px solid ${open ? ACCENT : "#E2E8F0"}`, padding: "6px 12px" }}>
+                {open ? "Close" : "Edit"}
+              </button>
+            )}
           </div>
-        ))}
+        );
+        })}
         {pipes.length === 0 && <p style={{ fontSize: 12.5, color: "#64748B", margin: 0 }}>No pipelines yet.</p>}
         {can && <button type="button" onClick={() => setEditing("new")} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 10 }}>＋ New pipeline</button>}
       </div>
+      {/* IN PLACE, UNDER THE LIST (Carolyn 2026-11-02) — not a pop-up. `inline` swaps the modal
+          shell for a card, so the pipelines above stay readable while one of them is open. */}
       {editing && editing !== "new" && (
-        <SsPipelineEditor pipeline={editing} onClose={() => { setEditing(null); load(); }} onChanged={load} />
+        <SsPipelineEditor inline pipeline={editing} onClose={() => { setEditing(null); load(); }} onChanged={load} />
       )}
-      {editing === "new" && <SsPipelineEditor pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}
+      {editing === "new" && <SsPipelineEditor inline pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}
     </>
   );
 }

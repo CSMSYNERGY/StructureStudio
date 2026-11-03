@@ -170,11 +170,33 @@ try {
   await page.locator("[data-ss-pipeline-row] button", { hasText: "Edit" }).first().click();
   await page.waitForTimeout(700);
   const modal = await page.evaluate(() => document.body.innerText);
+
+  // B0: IN PLACE, UNDER THE LIST — NOT A POP-UP (Carolyn 2026-11-02). The editor is a card in
+  // the document flow below the pipelines card, nothing is laid over the page, and the page is
+  // not scroll-locked (the modal shell locks the body; a locked page with no overlay reads as a
+  // frozen tab). The pipelines stay on screen and the open row says which one it is.
+  const shape = await page.evaluate(() => {
+    const ed = document.querySelector("[data-ss-pipeline-editor]");
+    const list = document.querySelector("[data-ss-pipeline-settings]");
+    if (!ed || !list) return { ed: !!ed, list: !!list };
+    const pos = getComputedStyle(ed).position;
+    return {
+      ed: true, list: true, pos,
+      dialog: !!ed.closest('[role="dialog"]') || !!document.querySelector('[role="dialog"][aria-modal="true"]'),
+      belowList: list.compareDocumentPosition(ed) === Node.DOCUMENT_POSITION_FOLLOWING,
+      listVisible: list.getBoundingClientRect().height > 0,
+      bodyLocked: getComputedStyle(document.body).overflow === "hidden",
+      openRows: document.querySelectorAll("[data-ss-pipeline-open]").length,
+    };
+  });
+  ok("B0 the editor opens IN PLACE under the list, not as a pop-up",
+    shape.ed && shape.list && !shape.dialog && shape.pos !== "fixed" && shape.belowList
+    && shape.listVisible && !shape.bodyLocked && shape.openRows === 1, JSON.stringify(shape));
   const stageNames = await page.locator("input[aria-label='Stage name']").evaluateAll((els) => els.map((e) => e.value));
   const statusNames = await page.locator("input[aria-label='Status name']").evaluateAll((els) => els.map((e) => e.value));
   ok("B1 the editor shows Shed Deals' six stages", JSON.stringify(stageNames) === JSON.stringify(SHED_STAGES.map((s) => s.name)), stageNames.join(" | "));
-  ok("B2 and its EIGHT statuses, in the same modal", JSON.stringify(statusNames) === JSON.stringify(LADDER.map(([n]) => n)), statusNames.join(" | "));
-  ok("B3 and its lost reasons, in the same modal", (await page.evaluate(() => {
+  ok("B2 and its EIGHT statuses, in the same panel", JSON.stringify(statusNames) === JSON.stringify(LADDER.map(([n]) => n)), statusNames.join(" | "));
+  ok("B3 and its lost reasons, in the same panel", (await page.evaluate(() => {
     const el = [...document.querySelectorAll("textarea")].pop(); return el ? el.value : "";
   })).includes("Price"));
   ok("B4 the other pipeline's status is NOT here — a ladder belongs to one pipeline",
