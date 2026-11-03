@@ -152,8 +152,17 @@ export interface TestEmailInput {
   businessName: string;
   fromAddress: string;
   /** The sender's own email signature (My Profile; cleaned by _shared/emailSignature.ts), so a
-   *  test shows how their emails will end. Plain text: escaped here, line breaks kept. */
+   *  test shows how their emails will end. Plain text: escaped here, line breaks kept. Always
+   *  the WORDS, and always what the text half of the test uses. */
   signature?: string | null;
+  /** A RICH signature, already sanitised AND already rendered by the caller
+   *  (_shared/emailSignature.ts signatureHtml). Used in place of the escaped block when present.
+   *  ⚠️ This file takes a finished STRING rather than importing the signature cleaner, and that
+   *  is deliberate: emailTemplates.ts is bundled into customer-accept, shop-checkout,
+   *  submit-estimate AND portal-settings, so an import here would put four functions in the
+   *  deploy set for a change only portal-settings needs. It is also why nothing here validates
+   *  it — the caller is the only one that can, and the only one that does. */
+  signatureBlockHtml?: string | null;
 }
 
 export interface InvoiceRequestEmailInput {
@@ -204,7 +213,7 @@ export function formatMoney(total: string | number): string {
 function oneLine(v: unknown): string {
   return String(v ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
 }
-
+
 export const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 /** A bare domain becomes an https:// href; real http(s) URLs pass through. */
@@ -215,7 +224,7 @@ function websiteHref(website: string): string {
 /**
  * The one primary CTA. Padding lives on the <td>, not the <a>: Outlook ignores <a>
  * padding. Explicit bgcolor so a dark-mode inversion cannot render white-on-white.
- */
+ */
 export function ctaButton(url: string, label: string): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:24px auto 4px auto;">
   <tr>
@@ -226,7 +235,7 @@ export function ctaButton(url: string, label: string): string {
 </table>`;
 }
 
-/** One label/value row of the summary table. `valueHtml` is ALREADY escaped by the caller. */
+/** One label/value row of the summary table. `valueHtml` is ALREADY escaped by the caller. */
 // Exported since 2026-10-22 so the meeting emails (_shared/meetingEmails.ts) render in the
 // SAME 600px card as an estimate or an invoice, with the same button and the same tenant
 // footer. A second house style for the same business is how a product starts looking like
@@ -237,7 +246,7 @@ export function detailRow(label: string, valueHtml: string): string {
   <td align="right" style="padding:8px 0 8px 18px;font-family:${FONT};font-size:14px;font-weight:600;color:#1F2937;">${valueHtml}</td>
 </tr>`;
 }
-
+
 export interface ShellInput {
   businessName: string;
   logoUrl?: string | null;
@@ -249,7 +258,7 @@ export interface ShellInput {
   bodyHtml: string;
 }
 
-/** The shared 600px card: tenant header, body, tenant contact footer + quote terms. */
+/** The shared 600px card: tenant header, body, tenant contact footer + quote terms. */
 export function htmlShell(s: ShellInput): string {
   const logo = s.logoUrl
     ? `<img src="${esc(s.logoUrl)}" alt="${esc(s.businessName)}" width="170" style="display:block;max-width:170px;max-height:64px;width:auto;height:auto;border:0;margin:0 auto 10px auto;" />`
@@ -1404,8 +1413,16 @@ export function testEmail(input: TestEmailInput): EmailContent {
   const from = oneLine(input.fromAddress);
   const signature = String(input.signature ?? "").replace(/\r\n?/g, "\n").trim();
   // The sender's signature, the way their conversation emails end: inside the card, under the
-  // message, drawn the way the quote terms are (escaped, line by line).
-  const signatureHtml = signature
+  // message, drawn the way the quote terms are (escaped, line by line) — unless the caller sent a
+  // RICH one, which it has already sanitised and rendered.
+  //
+  // ⚠️ The rich block is emitted as a SIBLING DIV, never inside the <p> the plain one uses: a
+  // <table> or an <img> inside a <p> is invalid HTML and Outlook makes a mess of it.
+  const richSignature = String(input.signatureBlockHtml ?? "").trim();
+  const signatureHtml = richSignature
+    ? `
+            <div style="margin:16px 0 0 0">${richSignature}</div>`
+    : signature
     ? `
             <p style="margin:16px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;">${esc(signature).replace(/\n/g, "<br>")}</p>`
     : "";

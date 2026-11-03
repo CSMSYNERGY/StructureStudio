@@ -958,6 +958,36 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         return json({ ok: true });
       }
 
+      // THE ORDER OF THE BOARD TABS, dragged in the strip (Carolyn 2026-11-01). Tenant-wide:
+      // pm_boards.position is one shared column and list_boards has always sorted on it, so
+      // whoever drags sets the order for the whole team — there is no per-operator order and
+      // adding one would mean a prefs column on app_operators.
+      //
+      // The whole ordered list arrives and is renumbered 1024, 2048, … (the reorder_columns
+      // shape, minus its board_id filter). Not reorder_item's midpoint: a tab strip holds a
+      // handful of rows, the browser already knows every one, and a renumber cannot collapse a
+      // gap the way repeated midpoints do.
+      //
+      // ⚠️ A LOCKED board (private, caller not a member) is in the browser's list as a stub and
+      // carries its real `position`, so it rides along in orderedIds and keeps its slot. It is
+      // NOT re-checked here on purpose: a caller who omitted it would renumber around it, which
+      // moves a board they cannot see — the full list is the protection, and list_boards is what
+      // guarantees they have it. Write-gated like every other board action by READ_ACTIONS.
+      case "reorder_boards": {
+        const ids = Array.isArray(payload.orderedIds) ? payload.orderedIds.map((x: unknown) => str(x, 40)) : [];
+        let pos = 1024;
+        for (const id of ids) {
+          // Same lock reorder_columns carries: `id` goes into eq() on a uuid column, so anything
+          // else is a 22P02 from Postgres and a 500 from here.
+          if (!PM_UUID.test(id)) continue;
+          const { error } = await admin.from("pm_boards").update({ position: pos }).eq("id", id);
+          if (error) throw error;
+          pos += 1024;
+        }
+        await act(null, null, "reorder_boards", { count: ids.length });
+        return json({ ok: true });
+      }
+
       case "archive_board": {
         const id = str(payload.id, 40);
         const { error } = await admin.from("pm_boards")

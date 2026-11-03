@@ -4744,7 +4744,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // The signed-in person's email signature (My Profile), shown under the Email box because the
   // server adds it to what they send: "" when they have none, null when it isn't known (view-as),
   // which shows nothing. onEditProfile opens My Profile, where it is changed.
-  emailSignature = null, onEditProfile = null,
+  emailSignature = null, emailSignatureHtml = null, onEditProfile = null,
   // Whether the signed-in person switched reply copies on (My Profile): true, false, or null in
   // view-as. It only changes the line above the Email box; the server decides what goes out.
   replyCopy = null,
@@ -4784,6 +4784,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [mail, setMail] = useState({ subject: "", body: "" });
+  // Whether the rich signature's preview is open under the Email box. Collapsed by default: the
+  // composer is for writing, and a headshot permanently parked under it is in the way.
+  const [sigPeek, setSigPeek] = useState(false);
   const [mailMsg, setMailMsg] = useState(null);
   // QUICK SENDS, read the first time a picker opens and never when the record opens:
   // null (not asked yet) → "loading" → { list, myName }, or "off" when the server would not give
@@ -6498,12 +6501,24 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     the draft is not kept anywhere. */}
                 {emailSignature !== null && (
                   <div style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
-                    <span title={emailSignature || undefined}
+                    {/* A RICH signature cannot be flattened onto one line — there is nothing
+                        sensible to do with a headshot beside a table — so it gets a disclosure
+                        that renders it instead. A plain one keeps the one-line summary it has
+                        always had. */}
+                    <span title={emailSignatureHtml ? undefined : (emailSignature || undefined)}
                       style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {emailSignature
-                        ? "Your signature is added: " + emailSignature.split("\n").map((l) => l.trim()).filter(Boolean).join(" · ")
-                        : "No email signature yet."}
+                      {emailSignatureHtml
+                        ? "Your signature is added."
+                        : emailSignature
+                          ? "Your signature is added: " + emailSignature.split("\n").map((l) => l.trim()).filter(Boolean).join(" · ")
+                          : "No email signature yet."}
                     </span>
+                    {emailSignatureHtml && (
+                      <button type="button" onClick={() => setSigPeek((v) => !v)}
+                        style={{ background: "none", border: "none", padding: 0, fontSize: 11.5, fontWeight: 700, fontFamily: "inherit", color: ACCENT, cursor: "pointer", whiteSpace: "nowrap" }}>
+                        {sigPeek ? "Hide" : "Preview"}
+                      </button>
+                    )}
                     {onEditProfile && (
                       <a href={ssPagePath("settings", "myprofile")}
                         onClick={ssNavClick(() => {
@@ -6516,6 +6531,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       </a>
                     )}
                   </div>
+                )}
+                {sigPeek && emailSignatureHtml && (
+                  /* Sandboxed, never dangerouslySetInnerHTML — the value is server-sanitised but
+                     it arrives through boot prefs, and an innerHTML here would be a stored-XSS
+                     primitive one sanitiser bug away from live. */
+                  <SsSigPreview html={emailSignatureHtml} height={150} />
                 )}
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
                   {/* QUICK SENDS. Insert fills the body above; Send email is still the only way out. */}

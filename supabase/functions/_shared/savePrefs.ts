@@ -20,7 +20,11 @@
 
 // Every key save_prefs keeps. A new per-user pref goes here AND gets its check in save_prefs, or
 // the next save from any screen destroys it.
-export const PREF_KEYS = ["designsView", "contactsView", "replyToEmail", "replyCopy", "emailSignature", "cardOrder"] as const;
+// ⚠️ `emailSignature` and `emailSignatureHtml` are TWO SHAPES OF ONE THING and My Profile names
+// BOTH on every save, even when clearing. Name only one and this merge carries the other back:
+// clearing the text would leave the rich signature still going out, and clearing the rich one
+// would leave the plain twin behind. _shared/emailSignature.ts' header has the reasoning.
+export const PREF_KEYS = ["designsView", "contactsView", "replyToEmail", "replyCopy", "emailSignature", "emailSignatureHtml", "cardOrder"] as const;
 
 const CONTACTS_VIEW_RE = /^(people|designs|p-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 

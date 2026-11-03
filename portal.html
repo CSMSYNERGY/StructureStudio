@@ -120,7 +120,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    viewport may gain transform/filter/contain, or fixed re-anchors to that element. */
 .ss-user-menu{position:fixed;bottom:14px;left:246px;min-width:212px;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:5px;display:none;z-index:80}
 .ss-user-wrap:hover .ss-user-menu,.ss-user-wrap:focus-within .ss-user-menu{display:block}
-/* The 6px gap beside the row (now horizontal — it was above until the menu moved to the
+/* The gap beside the row (now horizontal — it was above until the menu moved to the
    right) used to be a dead zone: a child rendered outside its parent's box does not extend
    that parent's hover region, so moving the
    mouse off the name toward the menu left :hover before reaching it and the menu vanished
@@ -129,9 +129,26 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    intuitive ... we should be able to mouse over your name and click on the nav popup."
    This bridges the gap with a transparent strip that belongs to the MENU, so crossing it
    keeps the wrap hovered (hover still propagates up the DOM, so the menu being position:fixed
-   changes nothing here). Wider than the gap on purpose — a 6px bridge against a 6px gap
-   loses to sub-pixel rounding at fractional zoom levels. */
-.ss-user-menu::before{content:"";position:absolute;top:0;bottom:0;right:100%;width:12px}
+   changes nothing here).
+
+   ⚠️ THE FIRST ATTEMPT (12px wide, top:0 bottom:0) DID NOT FIX IT, and Carolyn reported the
+   same bug again on 2026-11-01: "you should be able to click on this when it hovers.
+   Currently, you have to actually click your name". Two measurements say why, and both are
+   arithmetic off this very file — re-measure, do not re-guess:
+     1. HORIZONTAL. .ss-side is width:240px with padding:16px 14px 0, so the wrap's right
+        edge is at x≈226px while the menu starts at left:246px. The gap is ~20px, not 6px.
+        A 12px bridge left ~8px of dead zone. Now 28px — wider than the gap on purpose, since
+        a bridge equal to the gap loses to sub-pixel rounding at fractional zoom levels, and
+        the overlap under the row is harmless (the wrap is hovered there anyway).
+     2. VERTICAL. The menu is position:fixed at bottom:14px and sized by its content, so it
+        is SHORTER than, and offset from, the identity row it belongs to — the row is ~44px
+        tall and its avatar/email lines can sit outside the menu's vertical band entirely.
+        top:0/bottom:0 is the MENU's box, so a pointer travelling diagonally from the name
+        crossed neither the wrap nor the bridge. ±64px covers the row plus the collapsed-rail
+        offset below. Keep both numbers in step with the <=900px override.
+   position:fixed stays load-bearing (see above) — .ss-side's overflow-y:auto clips an
+   absolutely-positioned fly-out, so the bridge is the mechanism, not a workaround. */
+.ss-user-menu::before{content:"";position:absolute;top:-64px;bottom:-64px;right:100%;width:28px}
 .ss-user-menu button,.ss-user-menu a{display:flex;text-decoration:none;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
 /* Sign Out owns the red hover; My Profile is an <a> (it navigates rather than acting) and
    opts out via .neutral, same as Contact support. */
@@ -338,7 +355,11 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      `bottom` is 14px + the 18px BOTTOM PADDING this block puts back on .ss-side — the
      wide rail is `16px 14px 0` precisely so .ss-foot can own its bottom edge, and this
      override restores padding on all four sides, lifting the footer 18px off the
-     viewport floor. Measured, not guessed; re-measure if either padding changes. */
+     viewport floor. Measured, not guessed; re-measure if either padding changes.
+     `left` is NOT overridden for the hover bridge and does not need to be: the rail is 68px
+     with padding:18px 10px, so the wrap's right edge is x≈58px against the menu's left:74px
+     — a ~16px gap, which the shared 28px ::before already covers. Re-check that arithmetic
+     if either number here moves. */
   .ss-user-menu{left:74px;bottom:32px}
   .ss-user{justify-content:center}
   .ss-foot{width:100%}
@@ -635,7 +656,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
-<script defer src="/portal.app.compiled.js?v=fad99171" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=ca243d94" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

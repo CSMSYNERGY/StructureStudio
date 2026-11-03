@@ -67,7 +67,10 @@ const OWNER_ACCESS = Object.fromEntries(["designer", "designs", "contacts", "inv
   "change_order_approve", "build_schedule", "delivery_schedule", "repairs", "commissions", "reports", "phone",
   "settings_structures", "settings_options", "settings_branding", "settings_crm", "settings_quickbooks",
   "settings_email", "settings_team", "settings_billing"].map((k) => [k, "edit"]));
-const PREFS = { designsView: "pipeline", emailSignature: "Sam\nAcme Sheds" };
+// A signature is TWO keys since 2026-11-01, and a save from the reply-to card must leave both
+// of them exactly as they were.
+const SIG_HTML = "<p>Sam<br>Acme Sheds</p>";
+const PREFS = { designsView: "pipeline", emailSignature: "Sam\nAcme Sheds", emailSignatureHtml: SIG_HTML };
 
 const { ok, failed } = reporter();
 const shots = shotsDir("reply-to-card");
@@ -93,6 +96,7 @@ function savePrefs(raw, server) {
   }
   if (server === "new" && raw.replyCopy === true) clean.replyCopy = true;
   if (typeof raw.emailSignature === "string" && raw.emailSignature.trim()) clean.emailSignature = raw.emailSignature.trim();
+  if (typeof raw.emailSignatureHtml === "string" && raw.emailSignatureHtml.trim()) clean.emailSignatureHtml = raw.emailSignatureHtml.trim();
   return clean;
 }
 
@@ -225,7 +229,8 @@ try {
     const sv = saves(s);
     const last = (sv[sv.length - 1] || {}).prefs || {};
     ok("D1 save_prefs is posted once, with the address as typed (trimmed)", sv.length === 1 && last.replyToEmail === GOOD, JSON.stringify(sv));
-    ok("D2 carrying the other preferences", last.designsView === "pipeline" && last.emailSignature === "Sam\nAcme Sheds", JSON.stringify(last));
+    ok("D2 carrying the other preferences, both halves of the signature included",
+      last.designsView === "pipeline" && last.emailSignature === "Sam\nAcme Sheds" && last.emailSignatureHtml === SIG_HTML, JSON.stringify(last));
     ok("D3 and the screen says Saved.", /(^|\n)Saved\.(\n|$)/.test(await cardText(s.page)), (await cardText(s.page)).slice(-200));
     ok("C0 the server keeps the address the box saved", cleanReplyAddress(GOOD) === GOOD);
     await card(s.page).screenshot({ path: join(shots, "D-saved.png") }).catch(() => {});

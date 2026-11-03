@@ -33,22 +33,22 @@ Deno.test("a key the save does not name keeps what is stored", () => {
 });
 
 Deno.test("a key the save names is decided by the save alone: set, changed or cleared", () => {
-  const stored = { replyToEmail: "rep@example.test", replyCopy: true, emailSignature: "Pat", contactsView: "people" };
+  const stored = { replyToEmail: "rep@example.test", replyCopy: true, emailSignature: "Pat", emailSignatureHtml: "<p>Pat</p>", contactsView: "people" };
   // Cleared: named, failed its check (or is how a card clears it), so it is not in `clean`.
-  const cleared = mergePrefs({}, { replyToEmail: "", replyCopy: false, emailSignature: "", contactsView: null }, stored);
+  const cleared = mergePrefs({}, { replyToEmail: "", replyCopy: false, emailSignature: "", emailSignatureHtml: "", contactsView: null }, stored);
   assertEquals(cleared, {});
   // Changed.
   assertEquals(mergePrefs({ contactsView: "p-" + PIPE }, { contactsView: "p-" + PIPE }, stored).contactsView, "p-" + PIPE);
   // My Profile names every key on every save, so nothing stored can come back under it.
   const full = { designsView: "pipeline", contactsView: "people" };
-  const raw = { designsView: "pipeline", contactsView: "people", replyToEmail: "", replyCopy: false, emailSignature: "", cardOrder: null };
+  const raw = { designsView: "pipeline", contactsView: "people", replyToEmail: "", replyCopy: false, emailSignature: "", emailSignatureHtml: "", cardOrder: null };
   assertEquals(mergePrefs(full, raw, stored), full);
 });
 
 Deno.test("only listed keys are carried from the stored blob", () => {
   const out = mergePrefs({}, {}, { designsView: "list", stray: "x", __proto__x: 1, contactsView: "designs" });
   assertEquals(out, { designsView: "list", contactsView: "designs" });
-  assertEquals([...PREF_KEYS].sort(), ["cardOrder", "contactsView", "designsView", "emailSignature", "replyCopy", "replyToEmail"]);
+  assertEquals([...PREF_KEYS].sort(), ["cardOrder", "contactsView", "designsView", "emailSignature", "emailSignatureHtml", "replyCopy", "replyToEmail"]);
 });
 
 Deno.test("nothing stored, or a stored value that isn't a map, adds nothing", () => {

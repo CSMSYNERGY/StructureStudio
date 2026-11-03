@@ -80,7 +80,10 @@ const TITLES = { summary: "Summary", details: "Details", deals: "Deals", orders:
 const CONTACT_SHOWING = CONTACT_KEYS.filter((k) => k !== "tax");
 const SAVED_CONTACT = CONTACT_KEYS.slice().reverse();
 const SAVED_DESIGN = ["tax", "person", "summary", "details", "build", "delivery", "repairs", "overview"];
-const PREFS = { designsView: "pipeline", emailSignature: "Sam\nAcme Sheds", cardOrder: { contact: SAVED_CONTACT, design: SAVED_DESIGN } };
+// emailSignatureHtml rides along from 2026-11-01: a signature is TWO keys now, and a save
+// from this card must carry both of somebody else's untouched (_shared/savePrefs.ts).
+const SIG_HTML = "<p>Sam<br>Acme Sheds</p>";
+const PREFS = { designsView: "pipeline", emailSignature: "Sam\nAcme Sheds", emailSignatureHtml: SIG_HTML, cardOrder: { contact: SAVED_CONTACT, design: SAVED_DESIGN } };
 
 const { ok, failed } = reporter();
 const shots = shotsDir("crm-card-order");
@@ -96,6 +99,7 @@ function savePrefs(raw, server) {
   if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
   if (typeof raw.contactsView === "string" && /^(people|designs|p-[0-9a-f-]{36})$/.test(raw.contactsView)) clean.contactsView = raw.contactsView;
   if (typeof raw.emailSignature === "string" && raw.emailSignature.trim()) clean.emailSignature = raw.emailSignature.trim();
+  if (typeof raw.emailSignatureHtml === "string" && raw.emailSignatureHtml.trim()) clean.emailSignatureHtml = raw.emailSignatureHtml.trim();
   const order = (raw.cardOrder && typeof raw.cardOrder === "object" && !Array.isArray(raw.cardOrder)) ? raw.cardOrder : null;
   if (order && server !== "old") {
     const co = {};
@@ -234,7 +238,7 @@ try {
 
     // ── D. My Profile ──
     await openProfile(s);
-    const hasCard = ok("D0 My Profile shows the Record card order card", (await orderCard(s.page).count()) > 0 && /On a contact/.test(await cardText(s.page)) && /On a deal/.test(await cardText(s.page)));
+    const hasCard = ok("D0 My Profile shows the Record card order card", (await orderCard(s.page).count()) > 0 && /On a contact/.test(await cardText(s.page)) && /On a design/.test(await cardText(s.page)));
     if (!hasCard) throw new Error("My Profile has no Record card order card; refusing to report the rest as passes");
     ok("D1 both lists hold every card the kind can show, in the saved order",
       same(await listKeys(s.page, "contact"), SAVED_CONTACT) && same(await listKeys(s.page, "design"), SAVED_DESIGN),
@@ -253,7 +257,8 @@ try {
     ok("D4 save_prefs is posted once, with the FULL contact list in the new order", saves(s).length === before + 1 && sent.cardOrder && same(sent.cardOrder.contact, WANT),
       JSON.stringify(sent.cardOrder));
     ok("D5 the deal list rides along as it was", sent.cardOrder && same(sent.cardOrder.design, SAVED_DESIGN), JSON.stringify(sent.cardOrder));
-    ok("D6 and so do the person's other preferences", sent.emailSignature === "Sam\nAcme Sheds" && sent.designsView === "pipeline", JSON.stringify(sent));
+    ok("D6 and so do the person's other preferences, both halves of the signature included",
+      sent.emailSignature === "Sam\nAcme Sheds" && sent.emailSignatureHtml === SIG_HTML && sent.designsView === "pipeline", JSON.stringify(sent));
     ok("D7 the screen says Saved.", /(^|\n)Saved\.(\n|$)/.test(await cardText(s.page)), (await cardText(s.page)).split("\n").pop());
     await orderCard(s.page).screenshot({ path: join(shots, "D-saved.png") }).catch(() => {});
 
@@ -336,7 +341,8 @@ try {
     ok("E6 a Contacts default saved mid-run rides along: the run's last save still says the Design list",
       sv.length >= 3 && last.contactsView === "designs" && last.designsView === "list" && same(last.cardOrder && last.cardOrder.contact, WANT2),
       JSON.stringify(sv.map((p) => [p.contactsView, p.designsView, p.cardOrder && p.cardOrder.contact && p.cardOrder.contact.slice(0, 3)])));
-    ok("E7 and the person's other preferences with it", last.emailSignature === "Sam\nAcme Sheds" && same(last.cardOrder && last.cardOrder.design, SAVED_DESIGN), JSON.stringify(last));
+    ok("E7 and the person's other preferences with it", last.emailSignature === "Sam\nAcme Sheds"
+      && last.emailSignatureHtml === SIG_HTML && same(last.cardOrder && last.cardOrder.design, SAVED_DESIGN), JSON.stringify(last));
     await s.ctx.close();
   }
 

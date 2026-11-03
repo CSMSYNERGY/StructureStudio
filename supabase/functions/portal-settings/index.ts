@@ -22,7 +22,8 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
 // The routing Reply-To sendTenantEmail adds, asked here only to refuse a view-as email no reply can reach.
 import { buildReplyAddress } from "../_shared/emailInbound.ts";
-import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
+import { cleanSignature, signatureHtml, signText, signaturePair, signatureImageOrigin } from "../_shared/emailSignature.ts";
+import { cleanSignatureHtml, signatureHtmlToText, SIGNATURE_BUCKET, SIGNATURE_HTML_MAX } from "../_shared/emailSignatureHtml.ts";
 import { cleanContactsView, mergePrefs } from "../_shared/savePrefs.ts";
 // Whose inbox a customer's reply is copied to: the person who sent it, or the customer's rep.
 import { cleanReplyAddress, repReplyTo } from "../_shared/repReplyTo.ts";
@@ -287,6 +288,11 @@ const GATES: GateTable = {
   // that, as its own definition in access.ts says. Someone's default view is not tenant
   // data, so a sales rep sets their own.
   save_prefs: "self",
+  // The headshot or logo in YOUR OWN email signature. "self", deliberately NOT the
+  // settings_crm:edit gate crm_form_upload_url carries: every rep who writes to a customer needs
+  // a signature, and that includes the Crew Leaders, Drivers and Dealers who hold no CRM
+  // settings at all. It mints a path in the same public bucket and nothing else.
+  signature_upload_url: "self",
 
   // ── Your own account ─────────────────────────────────────────────────────
   get_profile: "self",
@@ -1722,7 +1728,11 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
       // The signature crm_send_email puts under this person's emails, exactly as it will go out
       // (cleanSignature is what the send runs too). My Synergy Phone shows it under its Email box;
       // the portal reads it off the prefs `status` already returns. "" when there is none.
-      emailSignature: cleanSignature((data?.prefs as Record<string, unknown> | null)?.emailSignature) ?? "",
+      // Both shapes. `emailSignature` keeps its v1 meaning and value, so My Synergy Phone — which
+      // reads this and is not deployed by this change — is untouched; `emailSignatureHtml` is the
+      // rich one, "" when there is none. signaturePair owns the precedence rule.
+      emailSignature: signaturePair(data?.prefs).text ?? "",
+      emailSignatureHtml: signaturePair(data?.prefs).html ?? "",
     });
   }
 
@@ -2045,6 +2055,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
   }
 
+  // ── A SIGNATURE IMAGE ────────────────────────────────────────────────────────────────────
+  // A signed upload URL for a picture going into this person's own email signature. Same bucket,
+  // same path shape and the same ext allow-list as crm_form_upload_url (leadForms.ts), because
+  // the sanitiser's <img src> rule is written against exactly that shape — a second bucket would
+  // mean a second origin rule for no gain. form-assets is public-read, 5 MB, images only
+  // (migration 325), which is what an <img> in a sent email needs.
+  if (action === "signature_upload_url") {
+    // An operator in view-as is refused. A signature is per person and view-as never signs (both
+    // send sites gate on `operator`), so an operator uploading into a builder's bucket would be
+    // write access with no purpose behind it. Same reasoning as the quick-sends branch.
+    if (operator) return json({ error: "Signature pictures are personal — upload yours from your own account, not from inside a builder's." }, 403);
+    const ext = typeof payload.ext === "string" ? String(payload.ext).toLowerCase().replace(/^\./, "") : "";
+    if (!["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return json({ error: "Images only: JPG, PNG, WebP or GIF." }, 400);
+    const sbUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const path = `${clientId}/${crypto.randomUUID()}.${ext}`;
+    const { data, error } = await admin.storage.from(SIGNATURE_BUCKET).createSignedUploadUrl(path);
+    if (error || !data) return dbFail(req, clientId, "start that upload", error);
+    return json({
+      ok: true, path, token: data.token,
+      publicUrl: `${sbUrl.replace(/\/+$/, "")}/storage/v1/object/public/${SIGNATURE_BUCKET}/${path}`,
+    });
+  }
+
   // ── SAVING THEM ──────────────────────────────────────────────────────────────────
   // Ahsan, 2026-08-28 @42:28: "all of these settings for contact cards, the pipeline cards,
   // and the default one, I think should add, in settings, add another tab ... for structure
@@ -2102,6 +2135,25 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // empty value is how the UI clears it, and arrives here as "drop the key".
     const emailSignature = cleanSignature(raw.emailSignature);
     if (emailSignature) clean.emailSignature = emailSignature;
+    // THE RICH SIGNATURE (Carolyn 2026-11-01), held to its own sanitiser. Two keys, never one
+    // with a marker or a sniff: _shared/emailSignature.ts' header says why, and the short of it
+    // is that "Jane <jane@acme.com>" is a real plain-text signature no heuristic may mangle.
+    // My Profile names BOTH keys on every save, so clearing one cannot leave the other sending.
+    const sigHtml = cleanSignatureHtml(raw.emailSignatureHtml, signatureImageOrigin());
+    // Over the cap is a REFUSAL, not a silent drop: a signature that vanished on save with no
+    // word about it is indistinguishable from a broken Save button.
+    if (!sigHtml && typeof raw.emailSignatureHtml === "string" && /<[a-z]/i.test(raw.emailSignatureHtml)
+      && raw.emailSignatureHtml.length > SIGNATURE_HTML_MAX) {
+      return json({ error: "That signature is too big to save, even after tidying it up — usually that means a picture was pasted into the text. Use Upload image for the picture and keep the rest to a few lines." }, 400);
+    }
+    if (sigHtml) {
+      clean.emailSignatureHtml = sigHtml;
+      // The plain-text twin is derived HERE, from the HTML the server kept — never from the
+      // browser, which is not the authority on what survived the cleaner, and whose copy would
+      // drift from the HTML the moment the allow-list changed.
+      const twin = cleanSignature(signatureHtmlToText(sigHtml));
+      if (twin) clean.emailSignature = twin; else delete clean.emailSignature;
+    }
     // Card order is a list of section keys. Unknown keys are kept rather than dropped here
     // and filtered at RENDER time instead -- the server would otherwise silently delete a
     // card belonging to a newer frontend than itself, and the user would watch their layout
@@ -10359,12 +10411,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // membership of their own), so a builder's customer would have got CSM Synergy's name under
     // the builder's email. Keyed on this tenant it finds no row for them now; the operator check
     // stays as the plain statement of the rule. The composer shows no signature in view-as either.
-    let signature: string | null = null;
+    let sig: { text: string | null; html: string | null } = { text: null, html: null };
     try {
       const { data: pu } = await admin.from("client_users")
         .select("prefs").eq("user_id", userId ?? "").eq("client_id", clientId).limit(1).maybeSingle();
-      const prefs = pu?.prefs as Record<string, unknown> | null;
-      signature = operator ? null : cleanSignature(prefs?.emailSignature);
+      sig = operator ? { text: null, html: null } : signaturePair(pu?.prefs);
     } catch (_) { /* no signature */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
@@ -10372,8 +10423,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the branded template already exists for the documents that want one. The signature goes
     // under it: "-- " and the signature in the text, its own block in the HTML (escaped too).
     const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>${signatureHtml(signature)}`;
-    const text = signText(body, signature);
+    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>${signatureHtml(sig.text, sig.html)}`;
+    const text = signText(body, sig.text, sig.html);
 
     const out = await sendTenantEmail(admin, clientId, {
       kind: "conversation",
@@ -14187,12 +14238,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // crm_send_email adds, read the same way (keyed on the JWT, limit(1)). A failed read just
     // sends the test without it. None in view-as, as there: the person writing is CSM Synergy
     // staff, not the builder, and the composer shows no signature, so none is added.
-    let signature: string | null = null;
+    let sig: { text: string | null; html: string | null } = { text: null, html: null };
     try {
       const { data: pu } = await admin.from("client_users")
         .select("prefs").eq("user_id", userId ?? "").limit(1).maybeSingle();
-      signature = operator ? null : cleanSignature((pu?.prefs as Record<string, unknown> | null)?.emailSignature);
+      sig = operator ? { text: null, html: null } : signaturePair(pu?.prefs);
     } catch (_) { /* no signature is fine for a test */ }
+    // The HTML block is rendered HERE and handed to testEmail as a finished string. testEmail
+    // lives in emailTemplates.ts, which is bundled into customer-accept, shop-checkout and
+    // submit-estimate as well — letting it import the signature cleaner would turn a one-function
+    // deploy into four, for nothing.
+    const signatureBlockHtml = signatureHtml(sig.text, sig.html);
     // sendTenantEmail owns the ledger row, the beta redirect and the dark guards — it
     // never throws; the verdict below is the whole outcome. It also writes the contact (and
     // who sent the test) on the ledger row at the claim (migration 261), so the test sits in
@@ -14203,7 +14259,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       to,
       ...(contactId ? { contactId } : {}),
       ...(userId ? { sentBy: String(userId) } : {}),
-      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}`, signature }),
+      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}`, signature: sig.text, signatureBlockHtml }),
     });
     if (out.sent) {
       return json({ ok: true, messageId: out.messageId });

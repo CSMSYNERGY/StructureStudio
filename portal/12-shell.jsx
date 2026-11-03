@@ -3207,26 +3207,13 @@ function Dashboard({ session }) {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                 <span className="mtext">My Profile</span>
               </a>
-              {/* Carolyn, 2026-07-23: a direct contact option ALONGSIDE the feedback widget.
-                  Deliberately worded to route bugs to the widget, because that path is tracked
-                  in monday.com and an untracked mailto would quietly drain its volume — which
-                  is exactly how Nevin's release complaint got lost in the old email flow.
-                  Hidden while an operator is viewing a tenant: the mail would arrive from the
-                  operator's own address about someone else's account.
-                  A <button> rather than an <a> so the existing `.ss-user-menu button` CSS
-                  applies unchanged; `.neutral` opts out of Sign Out's red hover. */}
-              {!viewing && (
-                <button type="button" className="neutral" role="menuitem"
-                  title={supportOn ? "Email CSM Synergy about your account — for bugs, use the Support button at the top"
-                    : "Email CSM Synergy about your account — for bugs, use the Feedback button"}
-                  onClick={() => {
-                    const subj = `Structure Studio — ${shownBusiness || "support request"}`;
-                    window.location.href = "mailto:support@csmsynergy.com?subject=" + encodeURIComponent(subj);
-                  }}>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>
-                  <span className="mtext">Contact support</span>
-                </button>
-              )}
+              {/* NO "Contact support" HERE (removed 2026-11-01, Carolyn: "Contact support should
+                  be removed from here"). It was a mailto: to support@csmsynergy.com, added
+                  2026-07-23 as a direct line alongside the feedback widget. The support paths
+                  that remain are the ones that are TRACKED: the Support link directly above
+                  this menu, the topbar Support button, and the Feedback widget — the mailto was
+                  the only untracked one, which is what the original comment here already worried
+                  about. Don't put it back without somewhere for the mail to be tracked. */}
               <button type="button" onClick={signOut} role="menuitem">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
                 <span className="mtext">Sign Out</span>
@@ -3632,6 +3619,9 @@ function Dashboard({ session }) {
                    no prefs read (status is skipped), so null: the composer shows nothing rather
                    than a guess. */
                 emailSignature={viewing ? null : ((tenant.prefs && typeof tenant.prefs.emailSignature === "string") ? tenant.prefs.emailSignature : "")}
+                /* The RICH signature, same `viewing ? null` guard and for the same reason: in
+                   view-as the server adds none, so the composer must promise none. */
+                emailSignatureHtml={viewing ? null : ((tenant.prefs && typeof tenant.prefs.emailSignatureHtml === "string") ? tenant.prefs.emailSignatureHtml : "")}
                 onEditProfile={viewing ? null : () => navigate("settings", "myprofile")}
                 /* REPLY COPIES (My Profile, 2026-10-07). Whether the SIGNED-IN person asked for a
                    copy of customers' replies in their own inbox, off the same boot prefs and kept

@@ -98,5 +98,6 @@ Deno.test("the line above the record's Email box never promises the inbox when c
 Deno.test("the shell hands the record the signed-in person's own switch, and nothing in view-as", () => {
   assert(SHELL.includes("replyCopy={viewing ? null : !!(tenant.prefs && tenant.prefs.replyCopy === true)}"),
     "12-shell.jsx passes replyCopy from the boot prefs, null in view-as");
-  assert(/emailSignature = null, onEditProfile = null,[\s\S]{0,400}replyCopy = null,/.test(SALES), "CrmRecord takes it, null by default");
+  // emailSignatureHtml joined the two in 2026-11-01's rich-signature change, so the gap widened.
+  assert(/emailSignature = null, emailSignatureHtml = null, onEditProfile = null,[\s\S]{0,500}replyCopy = null,/.test(SALES), "CrmRecord takes it, null by default");
 });

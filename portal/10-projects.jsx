@@ -1552,6 +1552,14 @@ function ProjectsTab({ sub, onSub }) {
   const [newBoardOpen, setNewBoardOpen] = useState(false);
   const [newBoardName, setNewBoardName] = useState("");
   const [newBoardPrivate, setNewBoardPrivate] = useState(false);
+  // DRAGGING A BOARD TAB into a new slot (Carolyn 2026-11-01: "In projects I want to be able
+  // to slide the different boards around to my specific likings"). The order is the tenant's,
+  // not the viewer's — pm_boards.position is one column shared by the team, which is what the
+  // tab strip has always sorted on, so whoever drags sets it for everyone. Same hand-rolled
+  // HTML5 drag the table engine uses for column headers (09-table-engine thProps); this app
+  // carries no drag library and should not gain one.
+  const [dragBoardId, setDragBoardId] = useState(null);
+  const [boardDropId, setBoardDropId] = useState(null);
   // Ticked rows, and the cards a move dialog is open for. Selection lives HERE rather than
   // in PMTable because a re-sort, a re-group or a reload rebuilds that table, and all three
   // happen while somebody is still deciding what to move.
@@ -1565,6 +1573,24 @@ function ProjectsTab({ sub, onSub }) {
     }).catch((e) => { setErr(e.message); return []; });
   }, []);
   useEffect(() => { loadBoards(); }, [loadBoards]);
+
+  // Drop `dragId` into `targetId`'s slot. The whole ordered list goes to the server, which
+  // renumbers it 1024, 2048, … — the reorder_columns shape, not reorder_item's midpoint, because
+  // a tab strip is a handful of rows and the browser already holds every one of them.
+  // ⚠️ A LOCKED (private, not-yours) board is in `boards` as a stub and MUST stay in the list:
+  // list_boards carries its real `position`, so sending the full list keeps its slot. Filter it
+  // out and the renumber would silently shuffle boards the dragger cannot even see.
+  const reorderBoards = (dragId, targetId) => {
+    if (!dragId || !targetId || dragId === targetId || !boards) return;
+    const from = boards.findIndex((b) => b.id === dragId);
+    const to = boards.findIndex((b) => b.id === targetId);
+    if (from < 0 || to < 0) return;
+    const next = boards.slice();
+    next.splice(to, 0, next.splice(from, 1)[0]);
+    setBoards(next);                                   // optimistic: the tab moves under the cursor
+    pmCall({ action: "reorder_boards", orderedIds: next.map((b) => b.id) })
+      .catch((e) => { setErr(e.message); loadBoards(); });
+  };
 
   // "setup" is a reserved slug, not a board: the Client Setup surface rides the same tab
   // strip and the same /projects/<sub> routing, but has no pm_board behind it. A
@@ -1903,9 +1929,33 @@ function ProjectsTab({ sub, onSub }) {
             return (
               <button key={b.id} type="button" role="tab" aria-selected={on ? "true" : "false"}
                 onClick={() => onSub(b.slug)}
-                title={b.locked ? (owners ? `Private board — ask ${owners} to add you.` : "Private board.") : undefined}
+                draggable={canWrite}
+                onDragStart={(e) => { setDragBoardId(b.id); e.dataTransfer.effectAllowed = "move"; }}
+                onDragEnd={() => { setDragBoardId(null); setBoardDropId(null); }}
+                /* preventDefault on dragover is what makes an element a drop target at all;
+                   stopPropagation keeps this tab's claim over the strip behind it. */
+                onDragOver={(e) => { if (dragBoardId && dragBoardId !== b.id) { e.preventDefault(); e.stopPropagation(); setBoardDropId(b.id); } }}
+                onDragEnter={(e) => { if (dragBoardId && dragBoardId !== b.id) { e.preventDefault(); setBoardDropId(b.id); } }}
+                onDragLeave={() => setBoardDropId((t) => (t === b.id ? null : t))}
+                onDrop={(e) => { e.preventDefault(); e.stopPropagation(); const d = dragBoardId; setDragBoardId(null); setBoardDropId(null); reorderBoards(d, b.id); }}
+                /* The same move without a mouse. A drag is unreachable from the keyboard, and
+                   this strip is how Projects is navigated — Alt+←/→ steps the focused tab one
+                   slot, and focus rides with it because the button is keyed on the board id.
+                   Plain ←/→ is left alone: it is how a browser walks a role="tablist". */
+                onKeyDown={(e) => {
+                  if (!canWrite || !e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+                  const i = boards.findIndex((x) => x.id === b.id);
+                  const to = i + (e.key === "ArrowLeft" ? -1 : 1);
+                  if (i < 0 || to < 0 || to >= boards.length) return;
+                  e.preventDefault();
+                  reorderBoards(b.id, boards[to].id);
+                }}
+                title={b.locked ? (owners ? `Private board — ask ${owners} to add you.` : "Private board.")
+                  : (canWrite ? "Drag to move this board, or Alt+← / Alt+→" : undefined)}
                 style={{ background: on ? "#FFF" : "none", border: "none", borderBottom: `3px solid ${on ? ACCENT : "transparent"}`,
-                  marginBottom: -2, padding: "9px 16px", fontSize: 13.5, fontWeight: on ? 800 : 600,
+                  borderLeft: boardDropId === b.id ? `3px solid ${ACCENT}` : "3px solid transparent",
+                  marginBottom: -2, padding: "9px 16px 9px 13px", fontSize: 13.5, fontWeight: on ? 800 : 600,
+                  opacity: dragBoardId === b.id ? 0.4 : 1,
                   color: on ? ACCENT : (b.locked ? "#94A3B8" : "#64748B"), cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
                 {b.locked ? "🔒 " : (b.visibility === "private" ? "🔒 " : "")}{b.name}
                 <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, color: on ? ACCENT : "#94A3B8", opacity: 0.75 }}>

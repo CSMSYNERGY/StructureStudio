@@ -3952,10 +3952,26 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   const copyKept = useRef(!!(prefs && prefs.replyCopy === true));
   // ── The email signature card's own state ────────────────────────────────────────
   // Seeded from prefs and not re-synced, for the same reason as the reply-to address above.
-  const [sig, setSig] = useState(((prefs && prefs.emailSignature) || ""));
   const [sigBusy, setSigBusy] = useState(false);
   const [sigMsg, setSigMsg] = useState(null);
-  const savedSig = (prefs && prefs.emailSignature) || "";
+  const [sigNote, setSigNote] = useState(null);
+  const [sigPreview, setSigPreview] = useState(false);
+  const [sigDirty, setSigDirty] = useState(false);
+  // What is STORED. The editor seeds itself from this once and owns its own HTML after that (a
+  // re-seed on every keystroke would reset the caret), so the live value lives in a ref and only
+  // the things the card draws — the counter, the dirty flag — are state.
+  const savedSigHtml = (prefs && (prefs.emailSignatureHtml || "")) ||
+    // A rep who has only ever had a PLAIN signature opens the editor on an escaped copy of it, so
+    // their first view is exactly what their emails already look like. They become a rich-signature
+    // rep only when they press Save.
+    (((prefs && prefs.emailSignature) || "")
+      ? ((prefs.emailSignature).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>"))
+      : "");
+  const sigHtmlRef = useRef(savedSigHtml);
+  const [sigLen, setSigLen] = useState(() => ssSigVisibleLength(savedSigHtml));
+  // The counter and the live value follow the box when it re-seeds — same two cases the key on
+  // SsSigEditor covers: prefs arriving after this card mounted, and a save coming back cleaned.
+  useEffect(() => { sigHtmlRef.current = savedSigHtml; setSigLen(ssSigVisibleLength(savedSigHtml)); }, [savedSigHtml]);
   // ── The record card order card's own state ──────────────────────────────────────
   // The SAVED list per kind, or null for "never arranged" (the registry order). Seeded from prefs
   // and moved on screen at once, so a run of presses doesn't wait on the server between them;
@@ -4091,16 +4107,33 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   // all the same, and an empty answer to a non-empty save is the whitelist check again: an older
   // server build drops the key and still says ok.
   const saveSig = async () => {
-    const next = sig.trim();
-    setSigBusy(true); setSigMsg(null);
+    const nextHtml = (sigHtmlRef.current || "").trim();
+    // An "empty" contentEditable is rarely an empty string — it is <br>, or <p><br></p>, or a
+    // stack of empty divs. Clearing has to be the literal empty string or the server keeps it.
+    const emptied = !ssSigVisibleLength(nextHtml) && !/<img\b/i.test(nextHtml);
+    const send = emptied ? "" : nextHtml;
+    setSigBusy(true); setSigMsg(null); setSigNote(null);
     try {
-      const back = await commit({ emailSignature: next });
-      const kept = (back && back.emailSignature) || "";
-      if (next && !kept) {
+      // ⚠️ BOTH KEYS, ALWAYS. mergePrefs carries back any key a save does not name, so sending
+      // only the HTML would leave a stale plain-text twin behind, and sending only the text would
+      // leave the old rich signature still going out. The server derives the twin from the HTML
+      // it kept and returns both; it is the authority on what survived the sanitiser, which is
+      // why nothing here computes the plain text itself.
+      // emailSignature goes as "" even when saving a rich one: naming it is what stops mergePrefs
+      // carrying the stored twin back over the one the server is about to derive. An undefined
+      // here would be dropped by JSON.stringify, i.e. not named at all — the exact bug.
+      const back = await commit({ emailSignatureHtml: send, emailSignature: "" });
+      const keptHtml = (back && back.emailSignatureHtml) || "";
+      const keptText = (back && back.emailSignature) || "";
+      if (send && !keptHtml && !keptText) {
         setSigMsg({ err: "Saved, but this server build didn't keep the signature — your emails go out without one for now. Tell CSM Synergy." });
       } else {
-        setSig(kept);
-        setSigMsg({ ok: next ? "Saved. It goes under every email you send a customer." : "Removed — your emails go out without a signature." });
+        setSigDirty(false);
+        if (send && !keptHtml) {
+          setSigMsg({ ok: "Saved as plain text — this server build doesn't keep the formatting yet." });
+        } else {
+          setSigMsg({ ok: send ? "Saved. It goes under every email you send a customer." : "Removed — your emails go out without a signature." });
+        }
       }
     } catch (e) { setSigMsg({ err: e.message }); }
     setSigBusy(false);
@@ -4246,6 +4279,20 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           because she asked for "a different order under a contact, and a different order under a
           deal".
 
+          ⚠️ THE SECOND LIST IS THE DESIGN RECORD, and calling it "a deal" is what made this
+          card unreadable. Carolyn, 2026-11-01: "This needs to be specified more clearly what
+          this is for ... And we don't need the deal panel anymore because we're not using
+          that." The second half of that is a misreading the label caused: the kind is
+          `design`, and it orders /contacts/d-<code> — the record that opens from the Design
+          list, which is ALSO the only one a tenant without the CRM subscription can open
+          (12-shell gates `c-` on crmUnlocked and deliberately does not gate `d-`), and where
+          the build/delivery schedule's customer buttons land (05-schedule schedCustomerDest).
+          Removing the column would strand that page's cards on the registry default for
+          everyone on the free tier. So the LABEL changed and nothing else did.
+          ⛔ The kind string stays `design`: it is the persisted key
+          (client_users.prefs.cardOrder.design), the CRM_SECTIONS.kinds value and the route's
+          meaning. Renaming it orphans every order anyone has already saved.
+
           ⚠️ THE ARROWS ARE NEVER `disabled`. Chrome drops focus from a button the moment it
           becomes disabled, so the ▲ on a card that has just reached the top would throw a
           keyboard user's place back to the start of the page. aria-disabled says the same thing
@@ -4253,15 +4300,17 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
       <div style={S.card}>
         <div style={S.h2}>Record card order</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          Put the cards down the side of a customer's record in the order you want them. Your own
-          order, not the business's — everyone on your team arranges their own.
+          Open a customer in the Customer Hub and their record has a column of cards down the
+          side — Summary, Details, Orders and the rest. This is the order those cards sit in.
+          Your own order, not the business's — everyone on your team arranges their own.
         </p>
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
-          {[["contact", "On a contact"], ["design", "On a deal"]].map(([kind, label]) => {
+          {[["contact", "On a contact", "The customer's own record."],
+            ["design", "On a design", "The record that opens from the Design list."]].map(([kind, label, sub]) => {
             const cards = cardsFor(kind);
             return (
               <div key={kind} data-ss-card-order={kind} style={{ flex: "1 1 240px", minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 }}>
                   <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", flex: 1 }}>{label}</div>
                   <button onClick={() => resetCardOrder(kind)} aria-disabled={!cardOrder[kind]}
                     style={{ background: "none", border: "none", padding: 0, fontSize: 12, fontWeight: 700, fontFamily: "inherit",
@@ -4269,6 +4318,7 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
                     Reset to default
                   </button>
                 </div>
+                <div style={{ fontSize: 11.5, color: "#94A3B8", lineHeight: 1.35, marginBottom: 6 }}>{sub}</div>
                 <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
                   {cards.map((s, i) => (
                     <div key={s.key} data-ss-card-order-row={s.key}
@@ -4426,32 +4476,58 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           Per PERSON, so it lives in My Profile beside the reply-to address: each rep signs their
           own emails. It goes under the emails a person writes (a record's Email tab, My Synergy
           Phone) and under test emails. Quotes and invoices are NOT signed: they have their own
-          branded footer, and signing them is a later change. Plain text on purpose; the server
-          escapes it into the HTML, so no signature can carry markup into a customer's inbox. */}
+          branded footer, and signing them is a later change.
+
+          RICH SINCE 2026-11-01 (Carolyn: "We need rich text / html for signatures. I tried to
+          paste this in for my signature and it doesn't work."). It was plain text until then, and
+          the escape that made that safe is replaced by a signature-specific sanitiser on the
+          server (_shared/emailSignatureHtml.ts) — not by a loosening of cleanRichText, which
+          guards every builder-authored email template. Two keys are stored, the HTML and a
+          plain-text twin the SERVER derives from it, and this card names BOTH on every save: name
+          only one and mergePrefs carries the other back, so clearing the box would leave the old
+          signature still going out. */}
       <div style={S.card}>
         <div style={S.h2}>Your email signature</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          Added to the end of every email you write to a customer, and to test emails. Plain
-          text, up to 1,000 characters. Estimates and invoices keep their own footer.
+          Added to the end of every email you write to a customer, and to test emails. Paste your
+          signature straight in — the picture, fonts, colours and links come with it. Estimates and
+          invoices keep their own footer.
         </p>
-        <textarea
-          value={sig}
-          disabled={sigBusy}
-          maxLength={1000}
-          rows={4}
-          onChange={(e) => { setSig(e.target.value); setSigMsg(null); }}
-          placeholder={"Jane Smith\nSales, Your Company\n(555) 201-8890"}
-          style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5, opacity: sigBusy ? 0.6 : 1 }}
-        />
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+        {/* KEYED ON THE STORED VALUE, and that key is load-bearing twice over. The box seeds
+            itself ONCE and owns its HTML after that (re-seeding on every keystroke resets the
+            caret), so without a key: a card that mounts before the boot prefs arrive would seed
+            empty and never catch up, and after a save the box would keep showing what was typed
+            rather than what the server's sanitiser actually kept. Typing does not change this
+            value, so it does not remount mid-edit. */}
+        <SsSigEditor key={"sig-" + savedSigHtml.length + "-" + savedSigHtml.slice(0, 40)}
+          html={savedSigHtml} disabled={sigBusy} onNote={(n) => setSigNote(n)}
+          onChange={(h) => { sigHtmlRef.current = h; setSigLen(ssSigVisibleLength(h)); setSigDirty(true); setSigMsg(null); }} />
+        {sigNote && <div style={{ marginTop: 8, fontSize: 12, color: "#B45309" }}>{sigNote}</div>}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
           <button
             onClick={saveSig}
-            disabled={sigBusy || sig.trim() === savedSig}
-            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (sigBusy || sig.trim() === savedSig) ? 0.5 : 1 }}>
+            disabled={sigBusy || !sigDirty}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (sigBusy || !sigDirty) ? 0.5 : 1 }}>
             Save
           </button>
-          <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{sig.length}/1000</span>
+          {/* VISIBLE characters, not markup: the number a person can act on. The HTML budget is a
+              guard the server enforces and this only mentions when it is hit. */}
+          <span style={{ fontSize: 11.5, color: sigLen > 1000 ? "#B45309" : "#94A3B8" }}>
+            {sigLen.toLocaleString()} characters{sigLen > 1000 ? " — longer than most signatures" : ""}
+          </span>
+          {savedSigHtml && (
+            <button onClick={() => setSigPreview((v) => !v)}
+              style={{ background: "none", border: "none", padding: 0, fontSize: 12, fontWeight: 700, fontFamily: "inherit", color: ACCENT, cursor: "pointer" }}>
+              {sigPreview ? "Hide preview" : "Preview"}
+            </button>
+          )}
         </div>
+        {sigPreview && savedSigHtml && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 4 }}>How it arrives in a customer's inbox:</div>
+            <SsSigPreview html={savedSigHtml} />
+          </div>
+        )}
         {sigMsg && <div style={{ marginTop: 10, fontSize: 12, color: sigMsg.err ? "#DC2626" : "#15803D" }}>{sigMsg.err || sigMsg.ok}</div>}
       </div>
     </div>
@@ -8441,6 +8517,247 @@ function SseTagInput({ value, onChange, disabled, maxLength, placeholder }) {
       <SseTagMenu disabled={disabled} onPick={insert} />
     </div>
   );
+}
+
+// ── THE EMAIL SIGNATURE EDITOR ────────────────────────────────────────────────────────────────
+// Carolyn, 2026-11-01, pasting her own signature into the old plain-text box: "We need rich text /
+// html for signatures. I tried to paste this in for my signature and it doesn't work."
+//
+// ⚠️ A SIBLING OF SseRichText, NOT AN EDIT TO IT. That one is the email-TEMPLATE block editor; its
+// narrow toolbar and its server contract (cleanRichText — no images, no styles) exist for
+// builder-authored marketing email, and widening it would widen that. This one answers to
+// _shared/emailSignatureHtml.ts instead. Two editors, two contracts.
+//
+// The server is the authority on what is kept — everything below is cleaned again in save_prefs,
+// and again on the way out at send time. What happens here is about the PASTE, which the server
+// never sees in its original form.
+
+const SS_SIG_TAGS = new Set(["b", "strong", "i", "em", "u", "s", "strike", "sub", "sup", "br", "p",
+  "div", "span", "a", "img", "hr", "ul", "ol", "li", "table", "thead", "tbody", "tr", "td", "th"]);
+const SS_SIG_KEEP_ATTR = {
+  a: ["href"], img: ["src", "alt", "width", "height"],
+  table: ["width", "align", "cellpadding", "cellspacing"], tr: ["align", "valign"],
+  td: ["colspan", "rowspan", "align", "valign", "width"], th: ["colspan", "rowspan", "align", "valign", "width"],
+};
+const SS_SIG_PUBLIC_PREFIX = SUPABASE_URL.replace(/\/+$/, "") + "/storage/v1/object/public/form-assets/";
+// A 1x1 grey dot, so a picture still uploading has a box rather than a broken-image icon. The
+// server's <img src> rule refuses a data: URL, so a save taken mid-upload stores a signature with
+// no picture rather than a broken one.
+const SS_SIG_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAIAAAMzMzP///yH5BAEAAAEALAAAAAABAAEAAAICTAEAOw==";
+
+// A signed upload for a picture going into YOUR OWN signature. Not crm_form_upload_url: that one
+// is gated settings_crm:edit, which locks out every Driver, Crew Leader and Dealer who writes to a
+// customer. signature_upload_url is gated "self".
+async function ssSigUpload(file) {
+  if (!file) return null;
+  if (file.size > 5 * 1024 * 1024) throw new Error("That image is over 5 MB. Choose a smaller one.");
+  const fitted = await ssFitImageForUpload(file);
+  const byType = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+  const ext = byType[fitted.type] || (String(fitted.name || "").split(".").pop() || "png").toLowerCase();
+  const r = await ssPipeCall("signature_upload_url", { ext });
+  const { error } = await sb.storage.from("form-assets").uploadToSignedUrl(r.path, r.token, fitted, { contentType: fitted.type || undefined });
+  if (error) throw new Error("The upload didn't finish. Try again.");
+  return r.publicUrl;
+}
+
+// Reduce pasted HTML to roughly the shape the server keeps, in an INERT document. DOMParser runs
+// no script and loads no resource, which is why the parsing happens here rather than by assigning
+// innerHTML somewhere first. Returns { html, lost }: `lost` counts images whose source no browser
+// can reach.
+function ssSigCleanPaste(raw) {
+  const doc = new DOMParser().parseFromString(String(raw || ""), "text/html");
+  doc.querySelectorAll("script,style,iframe,object,embed,svg,math,noscript,link,meta,base,form,input,button,template")
+    .forEach((n) => n.remove());
+  let lost = 0;
+  const walk = (node) => {
+    for (const child of [...node.childNodes]) {
+      if (child.nodeType === 8) { child.remove(); continue; }      // comment
+      if (child.nodeType !== 1) continue;                           // text and the rest stay
+      const tag = child.tagName.toLowerCase();
+      walk(child);
+      if (!SS_SIG_TAGS.has(tag)) {
+        // UNWRAP, never delete: the words inside a <font>, an <o:p> or an <h2> are the signature.
+        if (tag === "img") { child.remove(); continue; }
+        while (child.firstChild) node.insertBefore(child.firstChild, child);
+        child.remove();
+        continue;
+      }
+      const keep = SS_SIG_KEEP_ATTR[tag] || [];
+      for (const attr of [...child.attributes]) {
+        const name = attr.name.toLowerCase();
+        if (name === "style") continue;              // the server prunes style property by property
+        if (keep.indexOf(name) === -1) child.removeAttribute(attr.name);
+      }
+      if (tag === "a") {
+        const href = (child.getAttribute("href") || "").trim();
+        if (!/^(https:\/\/|mailto:|tel:)/i.test(href)) child.removeAttribute("href");
+      }
+      if (tag === "img") {
+        const src = (child.getAttribute("src") || "").trim();
+        if (src.indexOf(SS_SIG_PUBLIC_PREFIX) === 0) { /* already ours */ }
+        else if (/^(data:image\/|blob:)/i.test(src) || src.indexOf(location.origin + "/") === 0) {
+          // Reachable from here, so it is marked for the upload pass that runs after the insert.
+          child.setAttribute("data-ss-sig-fetch", src);
+          child.setAttribute("src", SS_SIG_PLACEHOLDER);
+        } else {
+          // cid:, file:/// and a cookie-authenticated Gmail URL are structurally unreachable — from
+          // here AND for the recipient, which IS the bug. Say so rather than ship a broken image.
+          lost++;
+          child.remove();
+        }
+      }
+    }
+  };
+  walk(doc.body);
+  return { html: doc.body.innerHTML, lost };
+}
+
+function SsSigEditor({ html, onChange, disabled, onNote }) {
+  const ref = useRef(null);
+  const fileRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  // Seeded ONCE. After that the box owns its HTML — re-seeding on every keystroke resets the
+  // caret, the trap SseRichText documents and this one inherits.
+  const first = useRef(html);
+  useEffect(() => { if (ref.current) ref.current.innerHTML = first.current || ""; }, []);
+  const emit = () => { if (ref.current) onChange(ref.current.innerHTML); };
+  const cmd = (c, v) => (e) => { e.preventDefault(); if (disabled) return; ref.current.focus(); document.execCommand(c, false, v); emit(); };
+  const link = (e) => {
+    e.preventDefault();
+    if (disabled) return;
+    const url = window.prompt("Link address (https://…, mailto: or tel:)", "https://");
+    if (!url) return;
+    if (!/^(https:\/\/|mailto:|tel:)/i.test(url.trim())) { window.alert("Links must start with https://, mailto: or tel:."); return; }
+    ref.current.focus(); document.execCommand("createLink", false, url.trim()); emit();
+  };
+
+  // Swap a placeholder for its uploaded URL once the bytes land. The element is found AGAIN by its
+  // marker rather than held across the await: the box is editable, and the caret may have moved
+  // anything in the meantime.
+  const settle = async (marker, src) => {
+    try {
+      const blob = await (await fetch(src)).blob();
+      const type = blob.type || "image/png";
+      const url = await ssSigUpload(new File([blob], "signature." + (type.split("/")[1] || "png"), { type }));
+      const el = ref.current && ref.current.querySelector('[data-ss-sig-pending="' + marker + '"]');
+      if (el) { el.setAttribute("src", url); el.removeAttribute("data-ss-sig-pending"); }
+    } catch (e) {
+      const el = ref.current && ref.current.querySelector('[data-ss-sig-pending="' + marker + '"]');
+      if (el) el.remove();
+      if (onNote) onNote("That picture couldn't be added. Use Upload image to add it from a file.");
+    }
+    emit();
+  };
+
+  const onPaste = async (e) => {
+    if (disabled) return;
+    const clip = e.clipboardData;
+    if (!clip) return;
+    const rawHtml = clip.getData("text/html");
+    const plain = clip.getData("text/plain");
+    // ⚠️ Captured BEFORE the first await: some browsers empty clipboardData the moment the handler
+    // yields, and this list is what rescues an Outlook-desktop paste.
+    const files = [...(clip.items || [])]
+      .filter((it) => it.kind === "file" && /^image\//.test(it.type))
+      .map((it) => it.getAsFile()).filter(Boolean);
+    e.preventDefault();
+    if (!rawHtml) {
+      // Plain text keeps its line breaks; insertText alone does not do that reliably.
+      const esc = (v) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      document.execCommand("insertHTML", false, esc(plain || "").replace(/\r\n?|\n/g, "<br>"));
+      emit();
+      return;
+    }
+    const cleanedPaste = ssSigCleanPaste(rawHtml);
+    const lost = cleanedPaste.lost;
+    // Insert SYNCHRONOUSLY with placeholders and rewrite each src as its upload lands. Blocking the
+    // paste on a network round trip loses the selection and reads as a broken editor.
+    const stamp = String(Date.now());
+    const jobs = [];
+    const withMarkers = cleanedPaste.html.replace(/data-ss-sig-fetch="([^"]*)"/g, (_m, src) => {
+      const marker = stamp + "-" + jobs.length;
+      jobs.push({ marker, src: src.replace(/&amp;/g, "&") });
+      return 'data-ss-sig-pending="' + marker + '"';
+    });
+    document.execCommand("insertHTML", false, withMarkers);
+    emit();
+    if (onNote) {
+      // ONE lost image and ONE bitmap on the clipboard is the Outlook-desktop case, and the only
+      // pairing that is sound: order is not guaranteed, so never pair many to many, or somebody's
+      // logo lands where their headshot should be.
+      if (lost === 1 && files.length === 1) onNote(null);
+      else if (lost) onNote(lost === 1
+        ? "Your signature came across, but its picture didn't — the copy only pointed at a file on your own computer. Use Upload image to add it."
+        : "Your signature came across, but its pictures didn't — the copy only pointed at files on your own computer. Use Upload image to add them.");
+      else onNote(null);
+    }
+    setBusy(true);
+    for (let i = 0; i < jobs.length; i++) await settle(jobs[i].marker, jobs[i].src);
+    if (lost === 1 && files.length === 1) {
+      const url = await ssSigUpload(files[0]).catch(() => null);
+      if (url) { ref.current.focus(); document.execCommand("insertHTML", false, '<img src="' + url + '" alt="" width="150">'); emit(); }
+      else if (onNote) onNote("That picture couldn't be added. Use Upload image to add it from a file.");
+    }
+    setBusy(false);
+  };
+
+  const pickImage = async (file) => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const url = await ssSigUpload(file);
+      ref.current.focus();
+      document.execCommand("insertHTML", false, '<img src="' + url + '" alt="" width="150">');
+      emit();
+      if (onNote) onNote(null);
+    } catch (err) { if (onNote) onNote(err.message); }
+    setBusy(false);
+  };
+
+  const tb = { background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 5, padding: "3px 8px", cursor: "pointer", fontSize: 12.5, fontFamily: "inherit" };
+  const off = disabled || busy;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
+        <button type="button" style={{ ...tb, fontWeight: 800 }} onMouseDown={cmd("bold")} aria-label="Bold">B</button>
+        <button type="button" style={{ ...tb, fontStyle: "italic" }} onMouseDown={cmd("italic")} aria-label="Italic">I</button>
+        <button type="button" style={{ ...tb, textDecoration: "underline" }} onMouseDown={cmd("underline")} aria-label="Underline">U</button>
+        <button type="button" style={tb} onMouseDown={link} aria-label="Link">🔗</button>
+        <button type="button" style={tb} onMouseDown={cmd("insertUnorderedList")} aria-label="Bulleted list">• List</button>
+        <button type="button" style={tb} onMouseDown={cmd("insertHorizontalRule")} aria-label="Divider line">— Line</button>
+        <button type="button" style={tb} disabled={off} onClick={() => fileRef.current && fileRef.current.click()}>🖼 Upload image</button>
+        <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" style={{ display: "none" }}
+          onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; pickImage(f); }} />
+        {busy && <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Adding the picture…</span>}
+      </div>
+      <div ref={ref} contentEditable={!disabled} suppressContentEditableWarning
+        onInput={emit} onBlur={emit} onPaste={onPaste} data-ss-sig-editor="1"
+        style={{ ...S.input, minHeight: 150, fontWeight: 400, lineHeight: 1.5, overflow: "auto", maxHeight: 420, opacity: disabled ? 0.6 : 1 }} />
+    </div>
+  );
+}
+
+// What a signature will look like in the customer's inbox, in a SANDBOXED IFRAME.
+// ⛔ NEVER dangerouslySetInnerHTML. The value is server-sanitised, but it reaches the browser
+// through `status`'s prefs, and a dangerouslySetInnerHTML in the portal is a stored-XSS primitive
+// one sanitiser bug away from live. The iframe makes that structurally impossible, costs nothing,
+// and _shared/emailTemplateSenders.test.ts already asserts this house rule for the other previews.
+function SsSigPreview({ html, height = 170 }) {
+  const doc = '<!doctype html><meta charset="utf-8"><body style="margin:0;font:14px system-ui,-apple-system,\'Segoe UI\',sans-serif;color:#1E293B">'
+    + (html || "") + "</body>";
+  return (
+    <iframe title="Signature preview" sandbox="" srcDoc={doc}
+      style={{ width: "100%", height, border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }} />
+  );
+}
+
+// The visible characters in a signature, which is the number a person can act on. The HTML budget
+// is a guard, surfaced only when it is hit — nobody can do anything with "9,214 / 12,000" when it
+// moves by 400 for one pasted word.
+function ssSigVisibleLength(html) {
+  const doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+  doc.querySelectorAll("script,style").forEach((n) => n.remove());
+  return (doc.body.textContent || "").replace(/\s+/g, " ").trim().length;
 }
 
 // A small rich-text box: bold, italic, underline, links, lists and merge fields. Its HTML is cut
