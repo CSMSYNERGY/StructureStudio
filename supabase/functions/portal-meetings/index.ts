@@ -279,7 +279,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
   }
   if (!crmOn) {
     return refusal({
-      error: "The built-in CRM isn't part of your subscription — add it under Settings → Billing.",
+      error: "The Customer Hub isn't part of your subscription — add it under Settings → Billing.",
       code: "crm_locked",
     }, 403);
   }

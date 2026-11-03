@@ -1772,9 +1772,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const clearedExempt = wasExempt && p.billingExempt === false;
         const hasLive = Boolean(live && live.length);
         const note = clearedExempt && !hasLive
-          ? "Saved — but this tenant is now BILLABLE with no active subscription, so they are locked out of the portal as of right now, and Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D are switched off. Tick Non-billable again, or give them a Free until date, until they subscribe."
+          ? "Saved — but this tenant is now BILLABLE with no active subscription, so they are locked out of the portal as of right now, and Scheduling, QuickBooks Sync, Real-Time Pricing, the Customer Hub and 3D are switched off. Tick Non-billable again, or give them a Free until date, until they subscribe."
           : clearedExempt
-          ? "Saved. Non-billable is off, so this tenant now keeps only what their subscription covers — Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D are switched off unless they are paying for them."
+          ? "Saved. Non-billable is off, so this tenant now keeps only what their subscription covers — Scheduling, QuickBooks Sync, Real-Time Pricing, the Customer Hub and 3D are switched off unless they are paying for them."
           : hasLive
           ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
           : "Saved.";

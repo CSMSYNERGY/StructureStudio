@@ -168,7 +168,7 @@ const ssHubTabStyle = (on, locked) => ({
 });
 // A pipeline's name is capped, so one long name cannot take the row from the others.
 const SS_HUB_NAME = { display: "inline-block", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", verticalAlign: "bottom" };
-const SS_HUB_CRM_TITLE = "Part of the built-in CRM";
+const SS_HUB_CRM_TITLE = "Part of the Customer Hub";
 // The bubble's two glyphs, built once (the rail's ICONS reasoning, 12-shell): people for Contacts
 // (the rail's own Contacts glyph), a page with lines for the Design list.
 const SS_HUB_ICONS = {
@@ -2580,7 +2580,7 @@ function crmMergeCardOrder(saved, known) {
 // an owner — who has every permission there is — off to Team looking for a switch that is not
 // there. Worded to match the 403 portal-settings returns for the same prefix, so the greyed
 // hint and any refusal that reaches the browser tell one story.
-const CRM_LOCKED_HINT = "The built-in CRM isn't part of your subscription — add it under Settings → Billing.";
+const CRM_LOCKED_HINT = "The Customer Hub isn't part of your subscription — add it under Settings → Billing.";
 
 // The reason a tab is greyed on a CONTACT record with no deal picked yet. Carolyn,
 // 2026-09-02, looking at a contact holding four quotes: "Which one the heck is it when I'm
@@ -6281,7 +6281,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 the moment a page tells them something is locked. */}
             {!crmUnlocked && (
               <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
-                Notes, activities, email, texts and customer files are part of the <strong>built-in CRM</strong>,
+                Notes, activities, email, texts and customer files are part of the <strong>Customer Hub</strong>,
                 which isn&rsquo;t on this subscription yet. This design, its estimates, its documents and its
                 build and delivery schedule are unaffected.
                 {onSeeBilling ? (

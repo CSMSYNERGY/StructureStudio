@@ -3,7 +3,7 @@
 // tab ... I want that bar at the top that shows that I can sort and see just that." And @42:45:
 // "I want to be able to see my calls."
 //
-//   A. with the CRM, the rail has Conversations directly under Contacts; the page shows a skeleton
+//   A. with the Customer Hub, the rail has Conversations directly under it; the page shows a skeleton
 //      while it loads, then one row per customer (an email in, a text out, a missed call) with the
 //      channel, the direction, the preview, the time, and "Waiting on you" on the two that are;
 //      the request is crm_inbox with channel "all" and Mine off
@@ -225,8 +225,11 @@ try {
   {
     const s = await scenario(browser, { name: "main", inboxDelay: 900 });
     const labels = await navLabels(s.page);
-    const ci = labels.indexOf("Contacts");
-    if (!ok("A1 the rail has Conversations directly under Contacts", ci >= 0 && labels[ci + 1] === "Conversations", JSON.stringify(labels))) {
+    // The rail item is still id "contacts"; its LABEL became "Customer Hub" on 2026-10-29 and
+    // this assertion kept looking for the old word, so it has failed ever since. Part C finishes
+    // that rename, so it is corrected here rather than left red.
+    const ci = labels.indexOf("Customer Hub");
+    if (!ok("A1 the rail has Conversations directly under the Customer Hub", ci >= 0 && labels[ci + 1] === "Conversations", JSON.stringify(labels))) {
       throw new Error("no Conversations in the rail — stopping (expected against an older artifact)");
     }
     await tap(s.page.locator(".ss-ws-nav .ss-nav a", { hasText: "Conversations" }));
@@ -392,11 +395,11 @@ try {
   {
     const s = await scenario(browser, { name: "no-crm", crm: false });
     const labels = await navLabels(s.page);
-    ok("G1 no Conversations in the rail (Contacts stays, to sell the CRM)", !labels.includes("Conversations") && labels.includes("Contacts"), JSON.stringify(labels));
+    ok("G1 no Conversations in the rail (the Customer Hub stays, to sell it)", !labels.includes("Conversations") && labels.includes("Customer Hub"), JSON.stringify(labels));
     await s.go("/conversations");
     await s.page.waitForTimeout(500);
     const t = await s.page.evaluate(() => document.body.innerText);
-    ok("G2 a typed /conversations shows the CRM card", /Every email, text and call with your customers in one list/.test(t) && /Add the CRM/.test(t), t.slice(0, 120));
+    ok("G2 a typed /conversations shows the CRM card", /Every email, text and call with your customers in one list/.test(t) && /Add the Customer Hub/.test(t), t.slice(0, 120));
     ok("G3 and never asks the server", inboxCalls(s).length === 0, `${inboxCalls(s).length} calls`);
     await s.page.screenshot({ path: join(shots, "G-no-crm-1440.png") });
     await s.ctx.close();

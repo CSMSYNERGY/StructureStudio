@@ -2988,7 +2988,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (crmGated || action === "crm_record") {
     try { crmPaid = await hasPaidFeature(admin, clientId, "crm"); }
     catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
-    if (crmGated && !crmPaid) return json({ error: "The built-in CRM is not part of your subscription - add it under Settings -> Billing." }, 403);
+    if (crmGated && !crmPaid) return json({ error: "The Customer Hub is not part of your subscription - add it under Settings -> Billing." }, 403);
   }
 
   // ENTITLEMENT, server-side, for QuickBooks sync. Third instance of the RTP posture above
@@ -9153,7 +9153,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (kind === "contact" && !mayReadContacts) {
       return json({
         error: canRead("contacts")
-          ? "The built-in CRM is not part of your subscription - add it under Settings -> Billing."
+          ? "The Customer Hub is not part of your subscription - add it under Settings -> Billing."
           : "Your access does not include Contacts. Ask an owner or admin.",
       }, 403);
     }

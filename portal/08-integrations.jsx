@@ -4204,9 +4204,9 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
             const locked = needsCrm && !crmUnlocked && !crmPending;
             return (
               <button key={k} disabled={busy} aria-pressed={val === k} data-ss-view-pick={k}
-                title={locked ? "Part of the built-in CRM" : undefined}
+                title={locked ? "Part of the Customer Hub" : undefined}
                 onClick={() => (locked
-                  ? setMsg({ err: "Contacts is part of the built-in CRM, so the Contacts tab opens on the Design list." })
+                  ? setMsg({ err: "Contacts is part of the Customer Hub, so the Contacts tab opens on the Design list." })
                   : save(k))}
                 style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : (locked ? "#94A3B8" : "#334155")), opacity: busy ? 0.6 : 1 }}>
                 {locked ? `🔒 ${label}` : label}
@@ -4223,12 +4223,12 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
             ? (applied.view === "pipe"
               ? `You haven't picked one, so the Contacts tab opens on ${nameOf(appliedId)}, your first pipeline.`
               : applied.view === "designs"
-                ? `You haven't picked one, so the Contacts tab opens on the Design list${pipesOn ? "." : ", the default without the built-in CRM."}`
+                ? `You haven't picked one, so the Contacts tab opens on the Design list${pipesOn ? "." : ", the default without the Customer Hub."}`
                 : `You haven't picked one, so the Contacts tab opens on ${nameOf(appliedId)}.`)
             : (appliedId === picked || (picked === SS_HUB_PIPELINE && applied.view === "pipe"))
             ? `The Contacts tab opens on ${nameOf(appliedId)} (your choice).`
             : `You picked ${nameOf(picked)}, but ${(picked === SS_HUB_PEOPLE || ssHubPipeId(picked) || picked === SS_HUB_PIPELINE) && !crmUnlocked
-                ? "that is part of the built-in CRM"
+                ? "that is part of the Customer Hub"
                 : "that isn't one of your tabs any more"}, so the Contacts tab opens on ${appliedId ? nameOf(appliedId) : "the first tab you have"}.`}
         </div>
         {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
@@ -5462,7 +5462,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
       <SubTabs tabs={tabs} sub={sub} onSub={onSub} href={(id) => ssPagePath("settings", id)} />
       {sub === "pipelines" && (crmUnlocked || crmPending
         ? <PipelineSettings viewing={!!viewingLabel} />
-        : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+        : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}
       {/* One card, its own section of SettingsView — the form state covers every field whichever
           section renders and this card posts only its own, so nothing else is touched. */}
       {sub === "customer-login" && <SettingsView section="customer-login" />}
@@ -5470,7 +5470,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
           teaser as Pipelines. The server refuses every crm_form_* / crm_email_tpl_* action for an
           unentitled tenant regardless. */}
       {(sub === "forms" || sub === "email-templates") && !(crmUnlocked || crmPending) && (
-        <div style={S.card}><div style={S.h2}>{sub === "forms" ? "Website forms" : "Email templates"}</div><p style={{ fontSize: 13, color: "#64748B" }}>Website lead forms and their emails are part of the built-in CRM. Add it under Settings → Billing.</p></div>
+        <div style={S.card}><div style={S.h2}>{sub === "forms" ? "Website forms" : "Email templates"}</div><p style={{ fontSize: 13, color: "#64748B" }}>Website lead forms and their emails are part of the Customer Hub. Add it under Settings → Billing.</p></div>
       )}
       {sub === "forms" && (crmUnlocked || crmPending) && <FormsHub clientId={clientId} canEdit={canEdit} />}
       {sub === "email-templates" && (crmUnlocked || crmPending) && <EmailTemplatesHub canEdit={canEdit} />}
@@ -5481,7 +5481,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
           server still refuses every action for an unentitled tenant. */}
       {sub === "meetings" && (crmUnlocked || crmPending
         ? <MeetingsSettings clientId={clientId} viewingLabel={viewingLabel} />
-        : <div style={S.card}><div style={S.h2}>Meetings</div><p style={{ fontSize: 13, color: "#64748B" }}>Meeting types and booking pages are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+        : <div style={S.card}><div style={S.h2}>Meetings</div><p style={{ fontSize: 13, color: "#64748B" }}>Meeting types and booking pages are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}
       {/* EMAIL SETTINGS, TEXT MESSAGING, PHONE — moved in from the rail on 2026-10-23 with their
           slugs, props and canEdit rules exactly as they were in SettingsShell. */}
       {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
@@ -5506,7 +5506,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
           whose every button 403s. */}
       {sub === "fields" && (crmUnlocked || crmPending
         ? <CrmFieldsHub clientId={clientId} canEdit={canEdit} />
-        : <div style={S.card}><div style={S.h2}>Fields</div><p style={{ fontSize: 13, color: "#64748B" }}>Contact and deal fields are part of the built-in CRM. Add it under Settings → Billing.</p></div>)}
+        : <div style={S.card}><div style={S.h2}>Fields</div><p style={{ fontSize: 13, color: "#64748B" }}>Contact and deal fields are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}
     </div>
   );
 }

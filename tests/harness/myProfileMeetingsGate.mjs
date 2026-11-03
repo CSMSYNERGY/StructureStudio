@@ -51,7 +51,7 @@ const REP = Object.fromEntries(AREAS.map((k) => [k, ["designer", "designs", "con
 // A crew member: the build schedule only, no meetings area.
 const CREW = Object.fromEntries(AREAS.map((k) => [k, k === "build_schedule" ? "view" : "none"]));
 // portal-meetings' own sentences (index.ts: the crm_locked refusal, and resolveTenant's area gate).
-const CRM_LOCKED = "The built-in CRM isn't part of your subscription — add it under Settings → Billing.";
+const CRM_LOCKED = "The Customer Hub isn't part of your subscription — add it under Settings → Billing.";
 const NO_AREA = "Your access does not let you view Meetings. Ask an owner or admin.";
 
 const { ok, failed } = reporter();
@@ -141,7 +141,7 @@ try {
   {
     const s = await scenario(browser, { name: "no-crm owner hub", path: "/settings/meetings", role: "owner", access: OWNER, crm: false });
     const t = await s.text();
-    ok("T1 the owner's Customer Hub → Meetings is the CRM teaser", t.includes("Meeting types and booking pages are part of the built-in CRM. Add it under Settings → Billing."), t.slice(0, 160));
+    ok("T1 the owner's Customer Hub → Meetings is the CRM teaser", t.includes("Meeting types and booking pages are part of the Customer Hub. Add it under Settings → Billing."), t.slice(0, 160));
     ok("T2 ...not a red refusal, and portal-meetings was never asked", !t.includes("isn't part of your subscription") && s.meetings.length === 0, s.meetings.join(","));
     await pageShot(s.page, "no-crm-owner-hub-meetings.png");
     await s.ctx.close();

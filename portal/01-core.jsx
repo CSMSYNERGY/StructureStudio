@@ -2841,7 +2841,7 @@ const SS_FEATURE_LABELS = {
   schedule_builds:     { label: "Scheduling",           buyable: true },
   quickbooks_sync:     { label: "QuickBooks Sync",      buyable: true },
   on_demand_pricing:   { label: "Real-Time Pricing",    buyable: true },
-  crm:                 { label: "the Built-in CRM",     buyable: true },
+  crm:                 { label: "the Customer Hub",     buyable: true },
   simple_layout:       { label: "Simple Layout",        buyable: true },
   self_serve_displays: { label: "Self Serve Displays",  buyable: false },
   view_3d:             { label: "3D",                   buyable: true },

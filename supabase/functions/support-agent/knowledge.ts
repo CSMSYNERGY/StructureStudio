@@ -18,7 +18,7 @@ account's subscription itself isn't active. Pages marked "coming soon" are not a
 
 - **Shed Designer** (/designer): Design a building and build an estimate
 - **Customer Hub** (/contacts): Everyone who has enquired, their designs, and your pipelines
-- **Conversations** (/conversations): Every email, text and call with your customers, newest first (only appears on accounts with the built-in CRM; without it the item is hidden)
+- **Conversations** (/conversations): Every email, text and call with your customers, newest first (only appears on accounts with the Customer Hub; without it the item is hidden)
 - **Orders** (/orders): Track accepted estimates from sale to payment and delivery
 - **Support** (/support): Get set up, report a problem, request a feature, and see what's new
 - **Settings** (/settings): Sheds, options, colors, branding & estimates, connection, QuickBooks, and billing
@@ -338,7 +338,7 @@ calls" view. Team calls adds the whole team's calls and the Team view. Edit also
 ### Why can't someone on my team see a page?
 Access is per area (Designs, Contacts, Orders, Build Schedule, Settings pages and so on), set by their job
 title and any changes made on the Team page. An owner or admin can change it in Settings > Company > Team.
-Some pages also need an add-on: Conversations, for example, only appears with the built-in CRM.
+Some pages also need an add-on: Conversations, for example, only appears with the Customer Hub.
 
 ## Connections and add-ons
 
@@ -376,8 +376,8 @@ several days. No EIN? Answer No and submit a ticket; the team can tell you where
 stands.
 
 ### What is Conversations?
-Every email, text and call with your customers, newest first. It is part of the built-in CRM (added under
-Settings > Billing); without the CRM it doesn't appear in the sidebar at all.
+Every email, text and call with your customers, newest first. It is part of the Customer Hub (added under
+Settings > Billing); without the Customer Hub it doesn't appear in the sidebar at all.
 
 ### How do I take card payments?
 Settings > Company > Payments. Card and bank payments are set up and managed for you by the Structure
@@ -389,7 +389,7 @@ code for your website. Each building's photos and "show price" are set on that b
 
 ### How do customers book a meeting with us?
 Settings > Customer Hub > Meetings sets the meeting types and booking pages. Your own booking link and
-hours are in My Profile > My meetings. Both are part of the built-in CRM.
+hours are in My Profile > My meetings. Both are part of the Customer Hub.
 
 ## Getting help
 

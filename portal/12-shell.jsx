@@ -3536,13 +3536,13 @@ function Dashboard({ session }) {
               <ComingSoon
                 title="Contacts"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
-                blurb="Customer records are part of the built-in CRM — their designs and estimates, your notes, the texts and emails you've traded, and what needs doing next."
+                blurb="Customer records are part of the Customer Hub — their designs and estimates, your notes, the texts and emails you've traded, and what needs doing next."
                 bullets={[
                   "One record per customer: designs, estimates, notes and files",
                   "Text and email them from inside the record — the thread stays",
                   "Follow-up activities so nobody quietly goes cold",
                 ]}
-                cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                cta={canAdmin ? { label: "Add the Customer Hub — see Billing", onClick: () => navigate("settings", "billing") } : null}
                 available
               />
             ) : !gateLocked && activeTab === "contacts" && sub && /^[cd]-/.test(sub) ? (
@@ -3730,7 +3730,7 @@ function Dashboard({ session }) {
                       "Follow-up activities so nobody quietly goes cold",
                       "A pipeline board for every pipeline, beside your Design list",
                     ]}
-                    cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                    cta={canAdmin ? { label: "Add the Customer Hub — see Billing", onClick: () => navigate("settings", "billing") } : null}
                     available
                   />
                 )} />
@@ -3755,13 +3755,13 @@ function Dashboard({ session }) {
                 <ComingSoon
                   title="Conversations"
                   icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>}
-                  blurb="Every email, text and call with your customers in one list, newest first, with a bar on top to see just one kind. Part of the built-in CRM."
+                  blurb="Every email, text and call with your customers in one list, newest first, with a bar on top to see just one kind. Part of the Customer Hub."
                   bullets={[
                     "One line per customer, showing their latest message",
                     "See who's waiting on a reply at a glance",
                     "Click through to the customer's record to answer",
                   ]}
-                  cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                  cta={canAdmin ? { label: "Add the Customer Hub — see Billing", onClick: () => navigate("settings", "billing") } : null}
                   available
                 />
               )

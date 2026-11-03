@@ -477,7 +477,7 @@ try {
     await shot(page, "U1-1280-no-crm.png");
     await page.locator('[data-ss-hub-tab="people"]').click();
     const l = await settled(page, "locked");
-    ok("E4 the padlocked Contacts tab opens the card that sells the CRM", l.view === "locked" && (await page.evaluate(() => document.body.innerText.includes("Add the CRM"))), JSON.stringify({ view: l.view, path: l.path }));
+    ok("E4 the padlocked Contacts tab opens the card that sells the CRM", l.view === "locked" && (await page.evaluate(() => document.body.innerText.includes("Add the Customer Hub"))), JSON.stringify({ view: l.view, path: l.path }));
     ok("E5 no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }

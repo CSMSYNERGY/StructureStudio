@@ -43,7 +43,7 @@ const AREAS = ["designer", "designs", "contacts", "inventory", "orders", "change
   "delivery_schedule", "repairs", "commissions", "reports", "projects", "phone", "meetings", "settings_structures", "settings_options",
   "settings_branding", "settings_crm", "settings_quickbooks", "settings_email", "settings_team", "settings_billing"];
 const OWNER_ACCESS = Object.fromEntries(AREAS.map((k) => [k, "edit"]));
-const CRM_LOCKED = "The built-in CRM isn't part of your subscription — add it under Settings → Billing.";
+const CRM_LOCKED = "The Customer Hub isn't part of your subscription — add it under Settings → Billing.";
 const NO_MEETINGS = "Your access does not let you view Meetings. Ask an owner or admin.";
 const RED = [CRM_LOCKED.slice(0, 40), "does not let you view Meetings"];
 

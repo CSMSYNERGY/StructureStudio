@@ -48,7 +48,7 @@ const ADD_ONS: Record<string, string> = {
   schedule_builds: "Scheduling",
   quickbooks_sync: "QuickBooks",
   on_demand_pricing: "RealTime Pricing",
-  crm: "CRM",
+  crm: "Customer Hub",
 };
 
 /** feedback_submissions.status, in the words My Requests shows (FB_STATUS in 04-orders.jsx). */

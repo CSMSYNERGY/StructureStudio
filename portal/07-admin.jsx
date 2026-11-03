@@ -3569,7 +3569,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       `Make ${label} non-billable?
 
 `
-      + `This switches on Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D free `
+      + `This switches on Scheduling, QuickBooks Sync, Real-Time Pricing, the Customer Hub and 3D free `
       + `(about $755/mo), and makes AI generations free.
 
 `
@@ -3683,7 +3683,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
             Non-billable — full access to every feature, and never charged
             <span style={{ display: "block", fontSize: 12, color: "#64748B", marginTop: 2, fontWeight: 400 }}>
               More than skipping the billing gate: it switches on Scheduling, QuickBooks Sync, Real-Time Pricing,
-              the CRM and 3D with no subscription, and makes AI generations free. For CSM Synergy's own, demo and
+              the Customer Hub and 3D with no subscription, and makes AI generations free. For CSM Synergy's own, demo and
               test accounts only.
             </span>
           </span>

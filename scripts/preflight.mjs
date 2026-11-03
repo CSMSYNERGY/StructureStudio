@@ -2379,6 +2379,88 @@ function checkEstimateWording(inject = null, { only = null, listFiles = wordingF
   }
 }
 
+// ── "CUSTOMER HUB", NEVER "CRM", FOR OUR OWN FEATURE (Carolyn 2026-11-01) ────────────────
+// The product was renamed and the old word is still all over the screen. This is NOT the broad
+// rule its estimate sibling is, and deliberately so: most person-facing "CRM" in this codebase
+// is CORRECT, because it means the builder's GoHighLevel — "your CRM", "CRM Connection",
+// "CRM estimate" (a GHL document kind), "CRM mode", "Synergy CRM" (a separate CSM product).
+// Flagging those would be a gate that is wrong hundreds of times on day one.
+//
+// What is checked instead is the phrase that can only ever mean OUR add-on. "built-in CRM" and
+// "Add the CRM" were how the Contacts/pipelines/meetings/fields feature was sold and refused, and
+// a person reads both. Those always become "Customer Hub".
+//
+// Identifiers keep the word, as with the estimate rule: `crm_*` tables, `crm_deal_move`, the
+// access key `settings_crm`, URLs, storage keys. Nothing here can touch them — the phrases hold a
+// space and a capital, so no identifier matches. COMMENTS are exempt by construction too: this
+// walks string, template and JSX text in the AST, and a comment is none of those. That is wanted
+// — the comments carry the history of why the feature is shaped as it is.
+const HUB_RE = /\bbuilt[- ]in CRM\b|\bAdd the CRM\b/i;
+function checkCustomerHubWording(inject = null, { only = null, listFiles = wordingFiles } = {}) {
+  const errors = [];
+  const files = listFiles();
+  if (inject) for (const f of Object.keys(inject)) if (!files.includes(f)) files.push(f);
+  if (files.filter((f) => f.startsWith(FUNCTIONS_DIR + "/")).length < 20 || !files.includes("portal/02-sales.jsx")) {
+    return ["Customer Hub wording: only " + files.length + " file(s) found to scan — the discovery "
+      + "has gone blind and the rule is checking nothing; re-anchor wordingFiles() in scripts/preflight.mjs"];
+  }
+  let babel;
+  try { babel = wordingBabel(); } catch (e) {
+    return [`Customer Hub wording: the vendored Babel did not load (${String(e.message).slice(0, 120)}) — the rule is checking nothing`];
+  }
+  const flag = (f, line, text) => errors.push(`${f}:${line}  calls our own feature a "CRM" where a person `
+    + `reads it: "${text.replace(/\s+/g, " ").trim().slice(0, 140)}" — say "Customer Hub" (Carolyn 2026-11-01). `
+    + "The builder's GoHighLevel is still a CRM; identifiers keep the word. See checkCustomerHubWording.");
+  for (const f of only || files) {
+    const src = inject && Object.prototype.hasOwnProperty.call(inject, f) ? inject[f] : readIfExists(f);
+    if (src == null) { errors.push(`${f}: missing — the Customer Hub wording check expected to scan it`); continue; }
+    if (/\.json$/.test(f)) {
+      let j = null;
+      try { j = JSON.parse(src); } catch { continue; }
+      for (const k of ["name", "short_name", "description"]) {
+        const v = j && typeof j[k] === "string" ? j[k] : "";
+        if (HUB_RE.test(v)) flag(f, 1, v);
+      }
+      continue;
+    }
+    if (/\.html$/.test(f)) {                          // my-quotes.html: visible text and nothing else
+      if (HUB_RE.test(src)) {
+        const at = src.search(HUB_RE);
+        flag(f, src.slice(0, at).split("\n").length, src.slice(Math.max(0, at - 60), at + 80));
+      }
+      continue;
+    }
+    const isTs = /\.ts$/.test(f);
+    let ast;
+    try {
+      ast = babel.transform(src, {
+        filename: f + (isTs ? ".ts" : ".jsx"), ast: true, code: false, babelrc: false, configFile: false,
+        parserOpts: { sourceType: "unambiguous", allowReturnOutsideFunction: true, plugins: isTs ? ["typescript"] : ["jsx"] },
+      }).ast;
+    } catch (e) {
+      errors.push(`${f}: Customer Hub wording check could not parse this file (${String(e.message).slice(0, 120)}) — `
+        + "it is checking nothing here; fix the parse or the file list");
+      continue;
+    }
+    const walk = (node) => {
+      if (!node || typeof node.type !== "string") return;
+      let text = null;
+      if (node.type === "StringLiteral") text = node.value;
+      else if (node.type === "TemplateElement") text = node.value.cooked ?? node.value.raw;
+      else if (node.type === "JSXText") text = node.value;
+      if (text && HUB_RE.test(text)) flag(f, node.loc.start.line, text);
+      for (const k of Object.keys(node)) {
+        if (k === "loc" || k === "leadingComments" || k === "trailingComments" || k === "innerComments" || k === "extra") continue;
+        const v = node[k];
+        if (Array.isArray(v)) { for (const c of v) if (c && typeof c === "object") walk(c); }
+        else if (v && typeof v === "object" && typeof v.type === "string") walk(v);
+      }
+    };
+    walk(ast.program);
+  }
+  return errors;
+}
+
 if (process.argv.includes("--self-test")) {
   // The gate must FAIL on the exact incident that motivated it: commit a763b3b shipped
   // `RANK[st]` after the RANK definition was removed. Reconstruct that state by reverting
@@ -3611,6 +3693,56 @@ if (process.argv.includes("--self-test")) {
     + "identifiers, classes, keys, log text and the carrier opt-in sentence stay quiet; a blind discovery "
     + "is refused; the server-half hold sets aside only what discovery found, and a stale hold is refused");
 
+  // ── "Customer Hub", never "CRM", for our own feature ──────────────────────────────────
+  // Both directions matter more here than for the estimate rule, because the word is CORRECT
+  // most of the time: the builder's GoHighLevel really is a CRM. A rule that flags "your CRM"
+  // would be wrong on every page it touched and would be deleted within a day.
+  const chFail = (why, errs = []) => {
+    console.error("self-test FAILED: Customer Hub wording — " + why);
+    for (const e of errs) console.error("  " + e);
+    process.exit(1);
+  };
+  const chJsx = "portal/02-sales.jsx";
+  const chTs = FUNCTIONS_DIR + "/portal-meetings/index.ts";
+  // (a) THE REAL TREE IS CLEAN.
+  const chClean = checkCustomerHubWording();
+  if (chClean.length) chFail("the real tree is not clean today:", chClean);
+  // (b) IT FIRES on our own feature, in JSX text, a string and a server sentence.
+  if (!checkCustomerHubWording({ [chJsx]: 'const X = () => <p>Notes are part of the built-in CRM.</p>;' }, { only: [chJsx] })
+    .some((e) => /built-in CRM/.test(e))) chFail("JSX text saying \"built-in CRM\" was not caught");
+  if (!checkCustomerHubWording({ [chJsx]: 'const cta = { label: "Add the CRM — see Billing" };' }, { only: [chJsx] })
+    .some((e) => /Add the CRM/.test(e))) chFail("a button reading \"Add the CRM\" was not caught");
+  if (!checkCustomerHubWording({ [chTs]: 'export const e = { error: "The built-in CRM is not part of your subscription." };' }, { only: [chTs] })
+    .some((e) => e.startsWith(chTs + ":1 "))) chFail("a server refusal saying \"built-in CRM\" was not caught");
+  // (c) IT STAYS QUIET on the builder's GoHighLevel — every spelling that must survive.
+  for (const ghl of [
+    'const a = "Estimates and invoices through my CRM";',
+    'const b = "Connect your CRM first (Settings → CRM Connection).";',
+    'const c = { estimate: "CRM estimate" };',
+    'const d = "Refresh from CRM";',
+    'const e = "Synergy CRM";',
+    'const f = "This account quotes through the CRM — re-send it from there.";',
+  ]) {
+    const errs = checkCustomerHubWording({ [chJsx]: ghl }, { only: [chJsx] });
+    if (errs.length) chFail("a GoHighLevel mention tripped the rule: " + ghl, errs);
+  }
+  // (d) COMMENTS ARE EXEMPT: the history of why the feature is shaped as it is stays readable.
+  if (checkCustomerHubWording({ [chJsx]: '// behind the built-in CRM (the teaser shows without it)\nconst x = 1;' }, { only: [chJsx] }).length) {
+    chFail("a code comment tripped the rule");
+  }
+  // (e) IDENTIFIERS keep the word.
+  if (checkCustomerHubWording({ [chJsx]: 'const t = "crm_deal_move"; const u = { settings_crm: 1 };' }, { only: [chJsx] }).length) {
+    chFail("an identifier tripped the rule");
+  }
+  // (f) REFUSES TO RUN BLIND when discovery finds nothing.
+  if (!checkCustomerHubWording(null, { listFiles: () => [] }).some((e) => /gone blind/.test(e))) {
+    chFail("an empty discovery reported clean instead of blind");
+  }
+  console.log("self-test passed: our own feature is never called a \"CRM\" where a person reads it today; "
+    + "a planted \"built-in CRM\" in JSX, a button and a server refusal all fire; the builder's GoHighLevel "
+    + "(your CRM, CRM Connection, CRM estimate, Synergy CRM), comments and identifiers stay quiet; "
+    + "a blind discovery is refused");
+
   process.exit(0);
 }
 
@@ -3653,6 +3785,7 @@ errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html")
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkCardTokenMaxAge(Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkEstimateWording());
+errors.push(...checkCustomerHubWording());
 errors.push(...checkMigrationNumbers());
 
 // The skip is now the LOUDEST thing this gate prints, and on a clean run it is the LAST.
