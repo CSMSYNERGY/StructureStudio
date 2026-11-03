@@ -7357,6 +7357,391 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
   );
 }
 
+// ── RULES: "when ‹this happens› → ‹do this›" (migration 355) ──────────────────────────────
+// Part D of the Customer Hub rework. 354 gave each pipeline its own status ladder but left the
+// rungs no built-in event sets unreachable; rules are the general answer, so a builder says what
+// should happen instead of us shipping an event per wish.
+//
+// Carolyn decided the scope on 2026-11-02, asked before any of it was written: the triggers are
+// the eight events the product already records AND a clock ("30 days after delivered" is the
+// Reviews pipeline she is building towards), and an action may reach the customer by text or
+// email, not only write inside the Hub.
+//
+// ⚠️ THE EVENT LIST IS SS_STATUS_EVENTS ITSELF, not a copy. They are the same eight facts, and the
+// server makes the same choice (RULE_EVENTS = STATUS_EVENTS in _shared/crmRules.ts). A second list
+// is the drift this product has already paid for twice — the Monday label map, and area_level_for's
+// SQL mirror. Adding an event means the CHECK on crm_statuses.trigger_event, the CHECK on
+// crm_rules.trigger_event, and that one array.
+const SS_RULE_ANCHORS = [
+  ["delivered", "it was delivered"],
+  ["stage_entered", "it moved into its stage"],
+  ["last_contact", "anyone last spoke to them"],
+  // This one can come due BEFORE its anchor is reached, which is why every label reads "after".
+  ["expected_close", "the expected close date"],
+];
+// Mirrors RULE_ACTION_LABELS. Inside the Hub first, reaching the customer last — the order of how
+// much a mistake costs, which is also the order a builder should read them in.
+const SS_RULE_ACTIONS = [
+  ["set_status", "Set the status to…"],
+  ["move_stage", "Move the card to stage…"],
+  ["mark_lost", "Mark it lost, reason…"],
+  ["reopen", "Reopen it if it was lost"],
+  ["set_follow_up", "Set a follow-up in… days"],
+  ["set_close_date", "Set the expected close date in… days"],
+  ["add_note", "Add a note to the customer"],
+  ["create_card", "Create a card in another pipeline"],
+  ["send_sms", "Send the customer a text"],
+  ["send_email", "Send the customer an email"],
+];
+const SS_RULE_OUTBOUND = ["send_sms", "send_email"];
+const SS_RULE_MERGE_HINT = "{{first_name}} {{name}} {{company}} {{business}} {{deal_title}}";
+const SS_RULE_ACTIONS_MAX = 10;
+
+/** One rule said in a sentence — the same words the server's ruleSentence builds, so the row reads
+ *  back what the builder wrote rather than a form they have to re-interpret. */
+function ssRuleSentence(r) {
+  const anchor = (SS_RULE_ANCHORS.find(([k]) => k === r.elapsedAnchor) || [null, "then"])[1];
+  const ev = (SS_STATUS_EVENTS.find(([k]) => k === r.triggerEvent) || [null, "something happens"])[1];
+  const when = r.triggerKind === "elapsed"
+    ? `${r.elapsedDays == null ? 0 : r.elapsedDays} day${r.elapsedDays === 1 ? "" : "s"} after ${anchor}`
+    : ev;
+  const what = (r.actions || []).map((a) => ((SS_RULE_ACTIONS.find(([k]) => k === a.kind) || [null, a.kind])[1]).replace(/…$/, "").trim());
+  return `When ${when.charAt(0).toLowerCase() + when.slice(1)} → ${what.length ? what.join(", then ") : "nothing yet"}`;
+}
+
+/**
+ * ONE ACTION'S OWN FIELDS. Each kind asks for exactly what _shared/crmRules.ts' parseRuleAction
+ * requires, because the alternative is a rule that SAVES and then throws on every card for ever:
+ * migration 355 stores params as unchecked jsonb and the evaluator records a malformed action as a
+ * failed run, which nobody would ever go looking for from this screen.
+ */
+function SsRuleActionFields({ action, pipeline, pipelines, onChange, disabled }) {
+  const p = action.params || {};
+  const set = (patch) => onChange({ ...action, params: { ...p, ...patch } });
+  const inp = { ...S.input, flex: "1 1 160px", minWidth: 120, padding: "5px 8px" };
+  if (action.kind === "set_status") {
+    return (
+      <select aria-label="Status to set" disabled={disabled} style={inp} value={p.statusId || ""} onChange={(e) => set({ statusId: e.target.value })}>
+        <option value="">Pick a status…</option>
+        {(pipeline.statuses || []).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select>
+    );
+  }
+  if (action.kind === "move_stage") {
+    return (
+      <select aria-label="Stage to move to" disabled={disabled} style={inp} value={p.stageId || ""} onChange={(e) => set({ stageId: e.target.value })}>
+        <option value="">Pick a stage…</option>
+        {(pipeline.stages || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+    );
+  }
+  if (action.kind === "mark_lost") {
+    // The pipeline's own lost reasons, because those are what the Mark lost dialog offers and a
+    // rule writing a reason nobody else can pick would make the reports disagree. Free text is
+    // still allowed — crm_set_deal_lost only requires that there IS one.
+    return (
+      <input aria-label="Lost reason" list="ss-rule-lost-reasons" disabled={disabled} style={inp} maxLength={200}
+        value={p.reason || ""} onChange={(e) => set({ reason: e.target.value })} placeholder="Why it was lost" />
+    );
+  }
+  if (action.kind === "set_follow_up" || action.kind === "set_close_date") {
+    return (
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#64748B", fontWeight: 700 }}>
+        <input aria-label="Days" type="number" min={0} max={3650} disabled={disabled} style={{ ...S.input, width: 80, padding: "5px 8px" }}
+          value={p.days == null ? "" : p.days} onChange={(e) => set({ days: e.target.value === "" ? "" : Number(e.target.value) })} />
+        days from now
+      </label>
+    );
+  }
+  if (action.kind === "add_note") {
+    return (
+      <textarea aria-label="Note" disabled={disabled} style={{ ...S.input, flex: "1 1 100%", minHeight: 56 }} maxLength={4000}
+        value={p.body || ""} onChange={(e) => set({ body: e.target.value })} placeholder="What the note should say" />
+    );
+  }
+  if (action.kind === "create_card") {
+    // NOT a move (Carolyn 2026-11-01: a card stays in its pipeline). This is the second card — a
+    // delivered shed becoming a reviews card — so this pipeline is not in the list, and the server
+    // refuses it too rather than quietly piling a duplicate beside the original.
+    const others = (pipelines || []).filter((x) => x.id !== pipeline.id);
+    return (
+      <>
+        <select aria-label="Pipeline to create the card in" disabled={disabled} style={inp} value={p.pipelineId || ""} onChange={(e) => set({ pipelineId: e.target.value })}>
+          <option value="">Pick a pipeline…</option>
+          {others.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+        </select>
+        {!others.length && <span style={{ fontSize: 11.5, fontWeight: 600, color: "#B45309" }}>Add a second pipeline first.</span>}
+        <input aria-label="New card title" disabled={disabled} style={{ ...inp, flex: "1 1 120px" }} maxLength={200}
+          value={p.title || ""} onChange={(e) => set({ title: e.target.value })} placeholder="Card title (optional)" />
+      </>
+    );
+  }
+  if (action.kind === "send_sms") {
+    return (
+      <textarea aria-label="Text message" disabled={disabled} style={{ ...S.input, flex: "1 1 100%", minHeight: 56 }} maxLength={480}
+        value={p.body || ""} onChange={(e) => set({ body: e.target.value })}
+        placeholder={`Hi {{first_name}}, …   (merge fields: ${SS_RULE_MERGE_HINT})`} />
+    );
+  }
+  if (action.kind === "send_email") {
+    return (
+      <>
+        <input aria-label="Email subject" disabled={disabled} style={{ ...S.input, flex: "1 1 100%" }} maxLength={200}
+          value={p.subject || ""} onChange={(e) => set({ subject: e.target.value })} placeholder="Subject" />
+        <textarea aria-label="Email body" disabled={disabled} style={{ ...S.input, flex: "1 1 100%", minHeight: 90 }} maxLength={8000}
+          value={p.body || ""} onChange={(e) => set({ body: e.target.value })}
+          placeholder={`Hi {{first_name}}, …   (merge fields: ${SS_RULE_MERGE_HINT})`} />
+      </>
+    );
+  }
+  return <span style={{ fontSize: 12, color: "#64748B" }}>Nothing to set.</span>;
+}
+
+/**
+ * ONE RULE, EDITED IN PLACE UNDER THE LIST — the same shape Carolyn asked the pipeline editor to
+ * take on 2026-11-02 ("not a pop-up"), one level down, because the reason is the same: the other
+ * rules stay readable while one of them is open.
+ *
+ * The draft is local until Save, and the actions post WHOLE. Their order is meaning rather than
+ * decoration — two actions on one rule see each other's writes, so "set the status, then create
+ * the review card" is a different thing from the reverse — and a half-saved list would be a rule
+ * that does something nobody wrote.
+ */
+function SsRuleEditor({ pipeline, pipelines, rule, onSaved, onCancel }) {
+  const [draft, setDraft] = useState(() => (rule ? {
+    name: rule.name || "", triggerKind: rule.triggerKind, triggerEvent: rule.triggerEvent || "delivered",
+    elapsedAnchor: rule.elapsedAnchor || "delivered", elapsedDays: rule.elapsedDays == null ? 30 : rule.elapsedDays,
+    oncePerCard: rule.oncePerCard !== false, enabled: rule.enabled !== false,
+    actions: (rule.actions || []).map((a) => ({ kind: a.kind, params: { ...(a.params || {}) } })),
+  } : {
+    name: "", triggerKind: "event", triggerEvent: "delivered",
+    elapsedAnchor: "delivered", elapsedDays: 30, oncePerCard: true, enabled: true, actions: [],
+  }));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const ref = useRef(null);
+  useEffect(() => { const el = ref.current; if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, []);
+  const patch = (p) => setDraft((d) => ({ ...d, ...p }));
+  const sm = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
+  const setAction = (i, next) => setDraft((d) => ({ ...d, actions: d.actions.map((a, k) => (k === i ? next : a)) }));
+  const moveAction = (i, dir) => setDraft((d) => {
+    const j = i + dir;
+    if (j < 0 || j >= d.actions.length) return d;
+    const next = d.actions.slice(); const t = next[i]; next[i] = next[j]; next[j] = t;
+    return { ...d, actions: next };
+  });
+  const outbound = draft.actions.some((a) => SS_RULE_OUTBOUND.indexOf(a.kind) >= 0);
+
+  const save = () => {
+    setBusy(true); setErr(null);
+    const body = {
+      ...(rule ? { id: rule.id } : { pipelineId: pipeline.id }),
+      name: draft.name.trim(),
+      triggerKind: draft.triggerKind,
+      ...(draft.triggerKind === "event"
+        ? { triggerEvent: draft.triggerEvent }
+        : { elapsedAnchor: draft.elapsedAnchor, elapsedDays: Number(draft.elapsedDays) }),
+      // A time rule's switch is locked on, so send what the database will accept rather than
+      // whatever the draft happened to be carrying from when it was an event rule.
+      oncePerCard: draft.triggerKind === "elapsed" ? true : draft.oncePerCard,
+      enabled: draft.enabled,
+      actions: draft.actions,
+    };
+    ssPipeCall("crm_rule_save", body)
+      .then(() => onSaved())
+      .catch((e) => { setErr(e.message); setBusy(false); });
+  };
+
+  return (
+    <div ref={ref} data-ss-rule-editor="" style={{ border: `2px solid ${ACCENT}`, borderRadius: 8, padding: 10, marginBottom: 8, background: "#F8FAFC" }}>
+      <datalist id="ss-rule-lost-reasons">{(pipeline.lostReasons || []).map((r) => <option key={r} value={r} />)}</datalist>
+      <label style={{ display: "block", marginBottom: 8 }}><span style={S.lbl}>Rule name (optional)</span>
+        <input style={S.input} maxLength={120} value={draft.name} onChange={(e) => patch({ name: e.target.value })} placeholder="Ask for a review" /></label>
+
+      <span style={S.lbl}>When</span>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+        <select aria-label="When the rule runs" disabled={busy} style={{ ...S.input, flex: "0 0 150px", padding: "5px 8px" }}
+          value={draft.triggerKind} onChange={(e) => patch({ triggerKind: e.target.value })}>
+          <option value="event">Something happens</option>
+          <option value="elapsed">Time passes</option>
+        </select>
+        {draft.triggerKind === "event" ? (
+          <select aria-label="Which event" disabled={busy} style={{ ...S.input, flex: "1 1 240px", minWidth: 200, padding: "5px 8px" }}
+            value={draft.triggerEvent} onChange={(e) => patch({ triggerEvent: e.target.value })}>
+            {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+          </select>
+        ) : (
+          <>
+            <input aria-label="Days" type="number" min={0} max={3650} disabled={busy} style={{ ...S.input, width: 80, padding: "5px 8px" }}
+              value={draft.elapsedDays} onChange={(e) => patch({ elapsedDays: e.target.value === "" ? "" : Number(e.target.value) })} />
+            <span style={{ fontSize: 12.5, color: "#475569", fontWeight: 600 }}>days after</span>
+            <select aria-label="Counted from" disabled={busy} style={{ ...S.input, flex: "1 1 200px", minWidth: 170, padding: "5px 8px" }}
+              value={draft.elapsedAnchor} onChange={(e) => patch({ elapsedAnchor: e.target.value })}>
+              {SS_RULE_ANCHORS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          </>
+        )}
+      </div>
+
+      <span style={S.lbl}>Then</span>
+      <div data-ss-rule-actions="" style={{ border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF", marginBottom: 6 }}>
+        {draft.actions.map((a, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", padding: "6px 8px", borderBottom: i < draft.actions.length - 1 ? "1px solid #F1F5F9" : "none" }}>
+            <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", width: 16 }}>{i + 1}</span>
+            <select aria-label="What it does" disabled={busy} style={{ ...S.input, flex: "1 1 200px", minWidth: 180, padding: "5px 8px" }}
+              value={a.kind} onChange={(e) => setAction(i, { kind: e.target.value, params: {} })}>
+              {SS_RULE_ACTIONS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+            <SsRuleActionFields action={a} pipeline={pipeline} pipelines={pipelines} disabled={busy} onChange={(next) => setAction(i, next)} />
+            <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => moveAction(i, -1)} style={sm}>↑</button>
+            <button type="button" title="Move down" disabled={busy || i === draft.actions.length - 1} onClick={() => moveAction(i, 1)} style={sm}>↓</button>
+            <button type="button" title="Remove this action" disabled={busy}
+              onClick={() => setDraft((d) => ({ ...d, actions: d.actions.filter((_x, k) => k !== i) }))}
+              style={{ ...sm, background: "#FEF2F2", color: "#DC2626" }}>✕</button>
+          </div>
+        ))}
+        {!draft.actions.length && <div style={{ padding: "8px 10px", fontSize: 12.5, color: "#64748B" }}>Nothing yet — add what the rule should do.</div>}
+      </div>
+      <button type="button" disabled={busy || draft.actions.length >= SS_RULE_ACTIONS_MAX} style={{ ...sm, marginBottom: 10 }}
+        onClick={() => setDraft((d) => ({ ...d, actions: d.actions.concat([{ kind: "set_status", params: {} }]) }))}>+ Add action</button>
+
+      {/* ⛔ A TIME RULE IS ALWAYS ONCE PER CARD, and the database says so too (355's
+          crm_rules_elapsed_is_once). "30 days after delivered" is true of a card from the moment
+          it comes due and stays true, so a repeating one would fire on every sweep — the same
+          customer texted every few minutes. The switch is shown locked rather than hidden, so the
+          rule still reads as complete. */}
+      {draft.triggerKind === "elapsed" ? (
+        <div data-ss-rule-once-locked="" style={{ display: "flex", gap: 8, marginBottom: 8, fontSize: 12.5, color: "#334155" }}>
+          <input type="checkbox" checked disabled readOnly aria-label="Only once per card" />
+          <span><b>Only once per card.</b> A time rule always runs once: once it comes due it stays due.</span>
+        </div>
+      ) : (
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 8, fontSize: 12.5, color: "#334155" }}>
+          <input type="checkbox" disabled={busy} checked={draft.oncePerCard} onChange={(e) => patch({ oncePerCard: e.target.checked })} />
+          <span><b>Only once per card.</b> Leave this on unless you mean it to run again every time — a review
+            request belongs on a card once, and the same text arriving twice is what a customer notices.</span>
+        </label>
+      )}
+      {outbound && (
+        <div data-ss-rule-outbound-warning="" style={{ fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginBottom: 8, lineHeight: 1.45 }}>
+          This rule messages the customer by itself, with nobody reading it first. Texts skip anyone who
+          has opted out. Try it on one card before you leave it running.
+        </div>
+      )}
+      {err && <div style={S.err}>{err}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button type="button" disabled={busy} onClick={onCancel} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+        <button type="button" disabled={busy || !draft.actions.length} style={S.btn(ACCENT, "#FFF")} onClick={save}>{busy ? "Saving…" : "Save rule"}</button>
+      </div>
+    </div>
+  );
+}
+
+/** This pipeline's rules: the list, one open editor, and the run log on demand. */
+function SsPipeRules({ pipeline, pipelines, onChanged }) {
+  const [editing, setEditing] = useState(null);   // rule object | "new" | null
+  const [log, setLog] = useState(null);           // null = not asked for
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const rules = pipeline.rules || [];
+  const sm = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
+  const act = (fn) => { setBusy(true); setErr(null); fn().then(() => setBusy(false)).catch((e) => { setErr(e.message); setBusy(false); }); };
+  const reorder = (i, dir) => act(async () => {
+    const ids = rules.map((x) => x.id);
+    const j = i + dir;
+    const t = ids[i]; ids[i] = ids[j]; ids[j] = t;
+    await ssPipeCall("crm_rules_reorder", { pipelineId: pipeline.id, ids });
+    onChanged();
+  });
+
+  return (
+    <div data-ss-pipeline-rules="" style={{ marginBottom: 14 }}>
+      <span style={S.lbl}>Rules</span>
+      <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
+        <b>When something happens → do this.</b> Rules run by themselves on cards in <b>{pipeline.name}</b>, in the
+        order below, and two rules on the same trigger see each other's work. This is also how a status
+        nothing sets gets reached: give it a rule.
+      </p>
+      <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
+        {rules.map((r, i) => {
+          const open = !!editing && editing !== "new" && editing.id === r.id;
+          return (
+            <div key={r.id} data-ss-rule-row={r.id} data-ss-rule-open={open ? "" : undefined}
+              style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "7px 8px", borderBottom: i < rules.length - 1 ? "1px solid #F1F5F9" : "none", background: open ? "#F0F9FF" : undefined }}>
+              <input type="checkbox" aria-label="Rule is running" title={r.enabled === false ? "Paused" : "Running"} disabled={busy}
+                checked={r.enabled !== false}
+                onChange={(e) => { const on = e.target.checked; act(async () => { await ssPipeCall("crm_rule_save", { id: r.id, enabled: on }); onChanged(); }); }} />
+              <div style={{ flex: "1 1 240px", minWidth: 180 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: r.enabled === false ? "#94A3B8" : "#1E293B" }}>
+                  {r.name || ssRuleSentence(r)}
+                </div>
+                {!!r.name && <div style={{ fontSize: 11.5, color: "#64748B" }}>{ssRuleSentence(r)}</div>}
+                {/* A paused rule looks exactly like a running one at a glance, and "why did nothing
+                    happen?" is this far more often than it is a bug. */}
+                {r.enabled === false && <div data-ss-rule-paused="" style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>Paused — it will not run.</div>}
+                {r.oncePerCard === false && <div style={{ fontSize: 11.5, color: "#64748B" }}>Runs every time, not once per card.</div>}
+              </div>
+              <button type="button" disabled={busy} onClick={() => setEditing(open ? null : r)} style={sm}>{open ? "Close" : "Edit"}</button>
+              <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => reorder(i, -1)} style={sm}>↑</button>
+              <button type="button" title="Move down" disabled={busy || i === rules.length - 1} onClick={() => reorder(i, 1)} style={sm}>↓</button>
+              <button type="button" title="Remove rule" disabled={busy} style={{ ...sm, background: "#FEF2F2", color: "#DC2626" }}
+                onClick={() => { if (window.confirm(`Remove this rule from ${pipeline.name}?`)) act(async () => { await ssPipeCall("crm_rule_save", { id: r.id, archive: true }); setEditing(null); onChanged(); }); }}>✕</button>
+            </div>
+          );
+        })}
+        {!rules.length && <div style={{ padding: "8px 10px", fontSize: 12.5, color: "#64748B" }}>No rules on this pipeline yet.</div>}
+      </div>
+      {editing && (
+        <SsRuleEditor pipeline={pipeline} pipelines={pipelines} rule={editing === "new" ? null : editing}
+          onCancel={() => setEditing(null)} onSaved={() => { setEditing(null); onChanged(); }} />
+      )}
+      {err && <div style={S.err}>{err}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button type="button" disabled={busy || !!editing} style={S.btn(ACCENT, "#FFF")} onClick={() => setEditing("new")}>+ Add rule</button>
+        {/* WHY A RULE DID NOTHING. Without this the only answer is a shrug: not whether it matched,
+            not whether the once-per-card guard held it, not what the database said when it threw. */}
+        <button type="button" disabled={busy} style={sm}
+          onClick={() => { if (log) { setLog(null); return; } act(async () => { const r = await ssPipeCall("crm_rule_log", { pipelineId: pipeline.id }); setLog({ runs: r.runs || [], outbox: r.outbox || [] }); }); }}>
+          {log ? "Hide recent runs" : "Recent runs"}
+        </button>
+      </div>
+      {log && (
+        <div data-ss-rule-log="" style={{ marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 8, maxHeight: 220, overflowY: "auto" }}>
+          {!log.runs.length && !log.outbox.length && (
+            <div style={{ padding: "8px 10px", fontSize: 12.5, color: "#64748B" }}>Nothing has run yet.</div>
+          )}
+          {/* A QUEUED MESSAGE IS NOT A FAILURE — it is the commonest answer to "it did not send",
+              and it means the sweep has not come round yet. Shown first, because somebody looking
+              at this screen is usually looking for exactly that. */}
+          {log.outbox.filter((o) => o.state === "queued").map((o) => (
+            <div key={`q${o.id}`} style={{ padding: "6px 10px", fontSize: 12, color: "#B45309", borderBottom: "1px solid #F1F5F9" }}>
+              {o.kind === "send_sms" ? "Text" : "Email"} queued — waiting to go out.
+            </div>
+          ))}
+          {log.outbox.filter((o) => o.state === "failed").map((o) => (
+            <div key={`f${o.id}`} style={{ padding: "6px 10px", fontSize: 12, color: "#B91C1C", borderBottom: "1px solid #F1F5F9" }}>
+              {o.kind === "send_sms" ? "Text" : "Email"} did not send: {o.lastError || "no reason given"}
+            </div>
+          ))}
+          {log.runs.map((r) => (
+            <div key={r.id} style={{ display: "flex", gap: 8, padding: "6px 10px", fontSize: 12, borderBottom: "1px solid #F1F5F9" }}>
+              <span style={{ fontWeight: 800, flexShrink: 0, width: 56, color: r.outcome === "failed" ? "#B91C1C" : r.outcome === "skipped" ? "#B45309" : "#15803D" }}>
+                {r.outcome === "done" ? "ran" : r.outcome}
+              </span>
+              <span style={{ flex: 1, minWidth: 0, color: "#475569" }}>
+                {r.trigger}
+                {r.outcome === "skipped" && r.detail && r.detail.reason ? ` — ${r.detail.reason}` : ""}
+                {r.outcome === "failed" && r.detail && r.detail.error ? ` — ${r.detail.error}` : ""}
+              </span>
+              <span style={{ flexShrink: 0, color: "#94A3B8" }}>{ssInboxWhen(r.firedAt)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Stages, colours and lost reasons for one pipeline, or a new pipeline. settings_crm:edit
 // (owner/admin by preset); the server refuses everyone else whatever this shows. Stages are the
 // builder's to shape (Carolyn 2026-10-12: "they can make them whatever they want"). A stage never
@@ -7393,7 +7778,10 @@ function SsPipeInline({ title, onClose, children }) {
   );
 }
 
-function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null, inline = false }) {
+// `pipelines`: every live pipeline, which a rule's "create a card in another pipeline" action needs
+// to offer a target. Only Settings passes it; the board's "Edit stages" does not, and the action's
+// drop-down says "Add a second pipeline first" rather than sitting there empty.
+function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onChanged = null, inline = false, rulesReady = true }) {
   const Shell = inline ? SsPipeInline : SsPipeModal;
   const [name, setName] = useState(pipeline ? pipeline.name : "");
   const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
@@ -7568,6 +7956,15 @@ function SsPipelineEditor({ pipeline, onClose, onCreated, onChanged = null, inli
       <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Lost reasons, one per line</span>
         <textarea style={{ ...S.input, minHeight: 90 }} value={reasons} onChange={(e) => setReasons(e.target.value)}
           onBlur={() => run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, lostReasons: reasons.split("\n") }))} /></label>
+      {/* RULES LAST (355), after the stages, the statuses and the lost reasons they act on — a rule
+          names those, so reading the panel top to bottom means everything a rule can refer to has
+          already been seen.
+          ⚠️ SETTINGS ONLY, on purpose. Carolyn's standing rule is that a feature's settings live
+          under Settings and never as a panel on the working tab, and the board's own "Edit stages"
+          is the working tab. `onChanged` is the test because only Settings passes it: that is also
+          what re-reads the pipeline, and these rows are rendered from the PROP, so without it a
+          saved rule would never appear. */}
+      {onChanged && rulesReady && <SsPipeRules pipeline={pipeline} pipelines={pipelines || [pipeline]} onChanged={onChanged} />}
       {err && <div style={S.err}>{err}</div>}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
         {/* The pipeline new designs land in can't be removed (the server refuses it too): without it
@@ -8007,7 +8404,11 @@ const SS_STATUS_EVENTS = [
 function PipelineSettings({ viewing = false }) {
   const [meta, setMeta] = useState(null);
   const [err, setErr] = useState(null);
-  const [editing, setEditing] = useState(null);   // pipeline object | "new"
+  // THE OPEN PIPELINE IS HELD BY ID, NOT AS AN OBJECT (355). It used to be the object itself,
+  // which was fine while the editor's own state was seeded from it once. Rules are rendered
+  // straight from these props, so a stored object would have gone stale the moment `load()`
+  // returned — a rule would save, the server would answer, and the list would not change.
+  const [editing, setEditing] = useState(null);   // pipeline id | "new" | null
   const load = useCallback(async () => {
     try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
     catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [], statuses: [] }); }
@@ -8016,6 +8417,7 @@ function PipelineSettings({ viewing = false }) {
   if (!meta) return <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
   const can = !!meta.canManage && !viewing;
   const pipes = meta.pipelines || [];
+  const openPipe = editing && editing !== "new" ? (pipes.find((p) => p.id === editing) || null) : null;
   return (
     <>
       {/* ── ONE CARD, AND A PIPELINE OWNS EVERYTHING ABOUT ITSELF (migration 354) ──────────
@@ -8036,7 +8438,7 @@ function PipelineSettings({ viewing = false }) {
         {pipes.map((p) => {
         // The editor is a card further down the page rather than something covering it, so the
         // row says which one is open — otherwise, on a long list, the only clue is off screen.
-        const open = !!editing && editing !== "new" && editing.id === p.id;
+        const open = editing === p.id;
         return (
           <div key={p.id} data-ss-pipeline-row={p.id} data-ss-pipeline-open={open ? "" : undefined}
             style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 6px", borderTop: "1px solid #F1F5F9",
@@ -8049,7 +8451,7 @@ function PipelineSettings({ viewing = false }) {
               </span>
             </span>
             {can && (
-              <button type="button" onClick={() => setEditing(open ? null : p)}
+              <button type="button" onClick={() => setEditing(open ? null : p.id)}
                 style={{ ...S.btn(open ? ACCENT : "#F1F5F9", open ? "#FFF" : "#334155"), border: `1px solid ${open ? ACCENT : "#E2E8F0"}`, padding: "6px 12px" }}>
                 {open ? "Close" : "Edit"}
               </button>
@@ -8062,8 +8464,15 @@ function PipelineSettings({ viewing = false }) {
       </div>
       {/* IN PLACE, UNDER THE LIST (Carolyn 2026-11-02) — not a pop-up. `inline` swaps the modal
           shell for a card, so the pipelines above stay readable while one of them is open. */}
-      {editing && editing !== "new" && (
-        <SsPipelineEditor inline pipeline={editing} onClose={() => { setEditing(null); load(); }} onChanged={load} />
+      {openPipe && (
+        <SsPipelineEditor inline pipeline={openPipe} pipelines={pipes}
+          /* ⚠️ POSITIVE TEST, deliberately: rules are offered only when the SERVER says it can
+             store them. A false says migration 355 is not on that database; a MISSING field says
+             the deployed portal-settings predates rules. Both mean a + Add rule that cannot save,
+             and the two deploys (function, migration) land separately from this bundle, so the
+             order they go out in must not matter. */
+          rulesReady={!!(meta && meta.rulesReady === true)}
+          onClose={() => { setEditing(null); load(); }} onChanged={load} />
       )}
       {editing === "new" && <SsPipelineEditor inline pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}
     </>

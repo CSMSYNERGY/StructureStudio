@@ -17,6 +17,14 @@
 //      SmartBuild pipeline whose rungs the webhooks will drive later.
 //   D  A reorder names its pipeline (without it the server cannot tell a subset from a mismatch),
 //      and nothing on either screen sends crm_deal_set_status or a statusId on a stage.
+//   E  RULES (migration 355, Part D): they live in the same panel, under the statuses they act
+//      on; a rule reads back as a sentence; a PAUSED one says so and one set to run every time
+//      says that too; the editor opens in place rather than as a pop-up; switching to a clock
+//      rule LOCKS once-per-card on (355 makes that a CHECK — a repeating clock rule would text
+//      the same customer on every sweep); an action that messages the customer warns before the
+//      rule is saved; the save posts the whole rule with its actions in order; and the run log
+//      gives the three non-bug answers to "why did nothing happen?" — held by the once guard,
+//      it threw, or it is still queued.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the skeleton is
 // crmContactDeal.mjs's.
@@ -46,18 +54,36 @@ const LADDER = [
   ["Accepted", "#16A34A", "estimate_accepted"], ["Invoiced", "#14B8A6", "invoiced"], ["Payment Received", "#84CC16", "paid_in_full"],
   ["Scheduling", "#F59E0B", "build_scheduled"], ["Delivered", "#0F766E", "delivered"],
 ];
+// FALSE is what portal-settings sends while migration 355 is not applied to the database it is
+// talking to (beta and production share one project, so the function can be live before the
+// migration). E11 flips it: the Rules section must then not be offered at all.
+let rulesReady = true;
 const rungs = (base) => LADDER.map(([name, color, triggerEvent], i) => ({ id: U(base + i), name, color, position: (i + 1) * 1024, triggerEvent }));
 const SHED_STAGES = ["New Incoming", "Attempting Contact", "Nurturing - Cool", "Nurturing - Warm", "Nurturing - Hot", "Gone Cold Again"]
   .map((name, i) => ({ id: U(200 + i), name, color: "#64748B", kind: "open", position: (i + 1) * 1024 }));
 // Shed Deals carries the whole ladder; the hand-made one keeps only what its cards use — which is
 // exactly what 354's backfill does, and what Carolyn asked for ("I don't want any changes to my
 // Builders pipeline").
+// RULES (355), Part D. Carolyn's own example is the first one: ask for a review 30 days after the
+// shed was delivered. The second is deliberately the awkward pair — no name, and PAUSED — because
+// "why did nothing happen?" is a paused rule far more often than it is a bug.
+const RULES = [
+  { id: U(600), name: "Ask for a review", triggerKind: "elapsed", triggerEvent: null,
+    elapsedAnchor: "delivered", elapsedDays: 30, oncePerCard: true, enabled: true, position: 1024,
+    actions: [
+      { id: U(610), kind: "set_status", params: { statusId: U(107) }, position: 1024 },
+      { id: U(611), kind: "send_sms", params: { body: "Hi {{first_name}}, how is the shed?" }, position: 2048 },
+    ] },
+  { id: U(601), name: null, triggerKind: "event", triggerEvent: "contact_made",
+    elapsedAnchor: null, elapsedDays: null, oncePerCard: false, enabled: false, position: 2048,
+    actions: [{ id: U(620), kind: "add_note", params: { body: "Someone got through." }, position: 1024 }] },
+];
 const PIPELINES = [
   { id: U(1), name: "Shed Deals", position: 1024, lostReasons: ["Price", "Timing"], seedKind: "shed_deals", feedsDesigns: true,
-    stages: SHED_STAGES, statuses: rungs(100) },
+    stages: SHED_STAGES, statuses: rungs(100), rules: RULES },
   { id: U(2), name: "Manufacturer Outreach", position: 2048, lostReasons: ["Not interested"], seedKind: "outreach", feedsDesigns: false,
     stages: [{ id: U(300), name: "New Lead", color: "#64748B", kind: "open", position: 1024 }, { id: U(301), name: "Connected", color: "#16A34A", kind: "open", position: 2048 }],
-    statuses: [{ id: U(400), name: "Reached out", color: "#64748B", position: 1024, triggerEvent: null }] },
+    statuses: [{ id: U(400), name: "Reached out", color: "#64748B", position: 1024, triggerEvent: null }], rules: [] },
 ];
 // The flat UNION the server still sends for the pills, and what the stub mutates on a save.
 const live = PIPELINES.flatMap((p) => p.statuses.map((t) => ({ ...t, pipelineId: p.id })));
@@ -98,7 +124,7 @@ const handler = async (route) => {
       return json(route, { ok: true, clientId: CLIENT, role: "owner", access: null, prefs: null, configured: false, invoiceInGhl: false,
         ghlInvoicingAllowed: false, ssQuoteNext: 1042, ssInvoiceNext: 2001, ssTaxRate: 6.5, ssTaxLabel: "Sales tax", businessAddress: {}, branding: {}, emailReady: true });
     case "crm_pipelines_list":
-      return json(route, { ok: true, pipelines: PIPELINES, statuses: live, team: [], canManage: true, canWrite: true, ownOnly: false, me: USER.id });
+      return json(route, { ok: true, pipelines: PIPELINES, statuses: live, team: [], canManage: true, canWrite: true, ownOnly: false, me: USER.id, rulesReady });
     case "crm_status_save": {
       if (!body.id) {
         // 354: a new rung names its pipeline, and lands on THAT pipeline only.
@@ -119,6 +145,58 @@ const handler = async (route) => {
       return json(route, { ok: true, id: body.id });
     }
     case "crm_stage_save": return json(route, { ok: true, id: body.id || U(399) });
+    // ── RULES (355) ───────────────────────────────────────────────────────────────────────
+    case "crm_rule_save": {
+      const owner = PIPELINES.find((p) => p.id === body.pipelineId) || PIPELINES.find((p) => (p.rules || []).some((r) => r.id === body.id));
+      if (!owner) return json(route, { error: "That pipeline wasn't found." }, 404);
+      if (!body.id) {
+        const made = {
+          id: U(700 + owner.rules.length), name: body.name || null, triggerKind: body.triggerKind,
+          triggerEvent: body.triggerEvent || null, elapsedAnchor: body.elapsedAnchor || null,
+          elapsedDays: body.elapsedDays == null ? null : body.elapsedDays,
+          oncePerCard: body.oncePerCard !== false, enabled: body.enabled !== false,
+          position: (owner.rules.length + 1) * 1024,
+          actions: (body.actions || []).map((a, i) => ({ id: U(750 + i), kind: a.kind, params: a.params || {}, position: (i + 1) * 1024 })),
+        };
+        owner.rules.push(made);
+        return json(route, { ok: true, id: made.id });
+      }
+      const r = owner.rules.find((x) => x.id === body.id);
+      if (!r) return json(route, { error: "That rule wasn't found." }, 404);
+      if (body.archive) owner.rules = owner.rules.filter((x) => x.id !== body.id);
+      else {
+        if (body.enabled !== undefined) r.enabled = body.enabled;
+        if (body.name !== undefined) r.name = body.name || null;
+        if (body.triggerKind) {
+          r.triggerKind = body.triggerKind;
+          r.triggerEvent = body.triggerEvent || null;
+          r.elapsedAnchor = body.elapsedAnchor || null;
+          r.elapsedDays = body.elapsedDays == null ? null : body.elapsedDays;
+        }
+        if (body.oncePerCard !== undefined) r.oncePerCard = body.oncePerCard;
+        if (body.actions !== undefined) r.actions = body.actions.map((a, i) => ({ id: U(760 + i), kind: a.kind, params: a.params || {}, position: (i + 1) * 1024 }));
+      }
+      return json(route, { ok: true, id: body.id });
+    }
+    case "crm_rules_reorder": {
+      const owner = PIPELINES.find((p) => p.id === body.pipelineId);
+      if (owner) owner.rules = body.ids.map((id) => owner.rules.find((r) => r.id === id)).filter(Boolean);
+      return json(route, { ok: true });
+    }
+    case "crm_rule_log":
+      // The three answers to "why did nothing happen?" that are NOT a bug, which is the whole
+      // point of the log: it was held by the once guard, it threw, or it is still queued.
+      return json(route, { ok: true,
+        runs: [
+          { id: 3, ruleId: U(600), dealId: U(900), trigger: "elapsed:delivered+30d", outcome: "skipped",
+            detail: { reason: "already run for this card" }, firedAt: "2026-11-02T10:00:00Z" },
+          { id: 2, ruleId: U(600), dealId: U(901), trigger: "elapsed:delivered+30d", outcome: "failed",
+            detail: { sqlstate: "P0002", error: "status not found" }, firedAt: "2026-11-02T09:00:00Z" },
+          { id: 1, ruleId: U(600), dealId: U(902), trigger: "elapsed:delivered+30d", outcome: "done",
+            detail: { actions: [] }, firedAt: "2026-11-02T08:00:00Z" },
+        ],
+        outbox: [{ id: 9, ruleId: U(600), dealId: U(903), kind: "send_sms", state: "queued", attempts: 0, lastError: null, queuedAt: "2026-11-02T10:05:00Z", sentAt: null }],
+      });
     default: return json(route, { ok: true });
   }
 };
@@ -236,6 +314,101 @@ try {
   const stageSave = sent.find((b) => b.action === "crm_stage_save");
   ok("D2 no stage save carries a statusId", !stageSave || !("statusId" in stageSave), JSON.stringify(stageSave || null));
   ok("D3 nothing sent crm_deal_set_status", !sent.some((b) => b.action === "crm_deal_set_status"), JSON.stringify(sent.map((b) => b.action)));
+
+  // ── E: RULES (migration 355, Part D) ──────────────────────────────────────────────────
+  // Shape and SAFETY, not wording. Two of these pin things that would be expensive to get
+  // wrong in front of a builder's customers rather than merely untidy: a clock rule may not be
+  // asked to repeat, and a rule that messages the customer says so before it is saved.
+  const rules = page.locator("[data-ss-pipeline-rules]");
+  ok("E1 the rules live in the same panel as the stages and statuses, under them",
+    (await rules.count()) === 1 && (await page.evaluate(() => {
+      const ed = document.querySelector("[data-ss-pipeline-editor]");
+      const rl = document.querySelector("[data-ss-pipeline-rules]");
+      const st = document.querySelector("[data-ss-pipeline-statuses]");
+      return !!(ed && rl && st && ed.contains(rl)
+        && (st.compareDocumentPosition(rl) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+    })));
+  const ruleText = (await rules.innerText()).replace(/\s+/g, " ");
+  ok("E2 a rule reads back as a sentence, trigger and actions in order",
+    /Ask for a review/.test(ruleText)
+    && /When 30 days after it was delivered → Set the status to, then Send the customer a text/.test(ruleText),
+    ruleText.slice(0, 220));
+  ok("E3 a PAUSED rule says so — the commonest answer to 'why did nothing happen?'",
+    (await page.locator("[data-ss-rule-paused]").count()) === 1
+    && /Paused — it will not run/.test(ruleText), ruleText.slice(0, 260));
+  // A rule with no name falls back to its own sentence, so a list of unnamed rules is still
+  // readable; and a rule set to run every time says that too, because it is the other half of
+  // "why did this customer hear from us twice?".
+  ok("E4 an unnamed rule still reads as a sentence, and 'every time' is stated",
+    /When contact is made.* → Add a note to the customer/.test(ruleText)
+    && /Runs every time, not once per card/.test(ruleText), ruleText.slice(0, 400));
+
+  // The editor opens IN PLACE, the way Carolyn asked the pipeline panel to (2026-11-02), one
+  // level down: measured as position, not as a label.
+  await page.locator("[data-ss-pipeline-rules] button", { hasText: "+ Add rule" }).click();
+  await page.waitForTimeout(400);
+  ok("E5 the rule editor opens in place under the rules, not as a pop-up", await page.evaluate(() => {
+    const ed = document.querySelector("[data-ss-rule-editor]");
+    if (!ed) return false;
+    const cs = getComputedStyle(ed);
+    return cs.position === "static" && !ed.closest("[role=dialog]")
+      && !!document.querySelector("[data-ss-pipeline-rules]").contains(ed);
+  }));
+
+  // A CLOCK RULE MAY NOT REPEAT (355's crm_rules_elapsed_is_once). Once it comes due it stays
+  // due, so a repeating one would text the same customer every sweep.
+  await page.locator("[data-ss-rule-editor] select[aria-label='When the rule runs']").selectOption("elapsed");
+  await page.waitForTimeout(250);
+  ok("E6 switching to a time rule locks 'only once per card' on",
+    (await page.locator("[data-ss-rule-once-locked] input[type=checkbox]").count()) === 1
+    && (await page.locator("[data-ss-rule-once-locked] input[type=checkbox]").isChecked())
+    && (await page.locator("[data-ss-rule-once-locked] input[type=checkbox]").isDisabled()));
+
+  await page.locator("[data-ss-rule-editor] button", { hasText: "+ Add action" }).click();
+  await page.waitForTimeout(250);
+  await page.locator("[data-ss-rule-actions] select[aria-label='What it does']").first().selectOption("send_sms");
+  await page.waitForTimeout(250);
+  ok("E7 an action that reaches the customer warns before it is saved",
+    (await page.locator("[data-ss-rule-outbound-warning]").count()) === 1
+    && /messages the customer by itself/.test(await page.locator("[data-ss-rule-outbound-warning]").innerText()));
+  await page.locator("[data-ss-rule-editor] textarea[aria-label='Text message']").fill("Hi {{first_name}}, how did we do?");
+  await page.locator("[data-ss-rule-editor] input[aria-label='Days']").fill("45");
+  await page.locator("[data-ss-rule-editor] select[aria-label='Counted from']").selectOption("delivered");
+  await page.screenshot({ path: join(shots, "rule-editor.png") });
+  await page.locator("[data-ss-rule-editor] button", { hasText: "Save rule" }).click();
+  await page.waitForTimeout(800);
+  const saved = sent.filter((b) => b.action === "crm_rule_save").pop();
+  ok("E8 the save posts the whole rule — trigger, days, once, and the actions in order",
+    !!saved && saved.pipelineId === PIPELINES[0].id && saved.triggerKind === "elapsed"
+    && saved.elapsedAnchor === "delivered" && saved.elapsedDays === 45 && saved.oncePerCard === true
+    && Array.isArray(saved.actions) && saved.actions.length === 1 && saved.actions[0].kind === "send_sms"
+    && /how did we do\?/.test(String(saved.actions[0].params.body)),
+    JSON.stringify(saved));
+  ok("E9 the new rule joins the list", /45 days after it was delivered/.test((await rules.innerText()).replace(/\s+/g, " ")),
+    (await rules.innerText()).replace(/\s+/g, " ").slice(0, 300));
+
+  await page.locator("[data-ss-pipeline-rules] button", { hasText: "Recent runs" }).click();
+  await page.waitForTimeout(600);
+  const logText = (await page.locator("[data-ss-rule-log]").innerText()).replace(/\s+/g, " ");
+  ok("E10 the run log explains a skip, a failure and a message still queued",
+    /already run for this card/.test(logText) && /status not found/.test(logText)
+    && /queued — waiting to go out/.test(logText), logText.slice(0, 300));
+  await page.screenshot({ path: join(shots, "rule-log.png") });
+  // ── E11: the database has no rules tables yet ───────────────────────────────────────────
+  // The whole panel must keep working and simply not offer rules — not error, and not show a
+  // "+ Add rule" that cannot save. This is the ordering trap: the function reaches production
+  // the moment it is deployed, and the migration is a separate step.
+  rulesReady = false;
+  await go("/settings");
+  await go("/settings/pipelines");
+  await page.waitForTimeout(400);
+  await page.locator("[data-ss-pipeline-row] button", { hasText: "Edit" }).first().click();
+  await page.waitForTimeout(700);
+  ok("E11 with no rules tables on the database, the panel drops Rules and still edits statuses",
+    (await page.locator("[data-ss-pipeline-rules]").count()) === 0
+    && (await page.locator("input[aria-label='Status name']").count()) > 0
+    && !/Add rule/.test(await page.evaluate(() => document.body.innerText)));
+
   ok("Z no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {
   await browser.close();

@@ -45,6 +45,7 @@ import { chargeMonthlyNumberFees } from "./cron/numberFee";
 import { runTranscriptions } from "./cron/transcribe";
 import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
 import { runMeetingReminders } from "./cron/meetingReminders";
+import { runCrmRules } from "./cron/crmRules";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_DAILY = "0 9 * * *";
@@ -67,6 +68,20 @@ export const USAGE_MINUTE_MOD5 = 2;
  * costs nothing.
  */
 export const MEETINGS_MINUTE_MOD5 = 4;
+/**
+ * Customer Hub rules (migration 355), every five minutes: the clock sweep and the queue of texts
+ * and emails a rule asked for.
+ *
+ * A THIRD offset, for the same reason the second one exists — and this job has more claim on a
+ * quiet invocation than either, because it can make up to SEND_PER_RUN provider calls of its own.
+ * Offset 0 also means it never shares a minute with the 15-minute recording sweep (which runs on
+ * minutes divisible by 15, i.e. mod 5 == 0) — so this is deliberately 1, the only offset left
+ * that collides with nothing.
+ *
+ * Five minutes is well inside what either job cares about: a rule that comes due waits a few
+ * minutes, and a queued message is retried on the next tick.
+ */
+export const CRM_RULES_MINUTE_MOD5 = 1;
 
 // ── Twilio ──────────────────────────────────────────────────────────────────────────
 
@@ -307,6 +322,7 @@ export default {
     const dailyDue = event.cron === CRON_DAILY || (tick && at.getUTCHours() === 9 && at.getUTCMinutes() === 0);
     const usageDue = tick && at.getUTCMinutes() % 5 === USAGE_MINUTE_MOD5;
     const meetingsDue = tick && at.getUTCMinutes() % 5 === MEETINGS_MINUTE_MOD5;
+    const crmRulesDue = tick && at.getUTCMinutes() % 5 === CRM_RULES_MINUTE_MOD5;
     const run = async () => {
       if (tick) await job("keep_warm", () => keepWarm(env));
       if (sweepDue) {
@@ -323,6 +339,12 @@ export default {
         // the project — pg_cron is not installed — so the meeting feature borrows it. The work
         // is done by the meeting-reminders edge function; see that file's header.
         await job("meeting_reminders", () => runMeetingReminders(env));
+      }
+      if (crmRulesDue) {
+        // Customer Hub rules (migration 355): the clock sweep, and the texts and emails a rule
+        // asked for. The same borrowed scheduler as the reminders above and for the same reason —
+        // pg_cron is not installed — so read cron/crmRules.ts before moving it.
+        await job("crm_rules", () => runCrmRules(env));
       }
       if (dailyDue) {
         await job("retention", () => retention(env));

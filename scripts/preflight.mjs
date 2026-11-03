@@ -740,6 +740,8 @@ function run(files) {
 
   // The permission model's two hand-maintained copies must agree. See checkAreaMirror().
   errors.push(...checkAreaMirror(files));
+  // The rule vocabularies' two hand-maintained copies must agree. See checkRuleMirror().
+  errors.push(...checkRuleMirror(files));
 
   // ...and every contacts write must know which ROW it is allowed to touch. See
   // checkContactRowScope() — this is the guard for the write half of contacts:'own'.
@@ -1425,6 +1427,113 @@ const listMigrations = () => {
 // drift can be pushed through the real comparison. A rule nothing ever proves can fire is the
 // failure mode this whole script keeps re-learning, and it is the exact failure that let the
 // two copies drift while 183's header claimed they were checked.
+/**
+ * THE RULE VOCABULARIES, BROWSER vs SERVER (migration 355, Part D).
+ *
+ * Per-pipeline rules carry three hand-maintained lists that exist twice — the action kinds, the
+ * clock anchors, and the eight trigger events — once in `portal/02-sales.jsx` for the editor and
+ * once in `supabase/functions/_shared/crmRules.ts` for the parser that refuses what the editor
+ * sends. This repo has paid for exactly this shape of drift twice already: the Monday status map
+ * (a renamed label silently stalled every feature-request sync) and `area_level_for`'s SQL mirror
+ * (two areas drifted and lasted months because an unknown area returns 'none' rather than
+ * raising). checkAreaMirror below exists because of the second one.
+ *
+ * The failure here is the same quiet kind. An action kind the editor offers and the parser does
+ * not is a rule a builder writes, saves — and the save is REFUSED with "Pick what the rule should
+ * do from the list", about the thing they just picked from the list. In the other direction a kind
+ * the server accepts is simply unreachable, which looks like the feature not being built.
+ *
+ * Compared as SETS, both directions, by key only: the labels are allowed to differ (the server's
+ * are for its own sentences) and are not this rule's business. Refuses to run blind.
+ */
+function checkRuleMirror(files = {}, inject = null) {
+  const errors = [];
+  const JSX = "portal/02-sales.jsx";
+  const TS = "supabase/functions/_shared/crmRules.ts";
+  // The EVENTS live in crmPipelines.ts, not crmRules.ts: `RULE_EVENTS = STATUS_EVENTS` on purpose,
+  // one list for the status ladder and for rules. So that arm is read from where the list actually
+  // is — and if somebody forks it into crmRules.ts, this reads the original and the fork drifts
+  // unseen, so the RULE_EVENTS alias is checked below too.
+  const PIP = "supabase/functions/_shared/crmPipelines.ts";
+  const jsx = (inject && inject.jsx) ?? files[JSX] ?? readIfExists(JSX);
+  const ts = (inject && inject.ts) ?? files[TS] ?? readIfExists(TS);
+  const pip = (inject && inject.pip) ?? files[PIP] ?? readIfExists(PIP);
+  if (!jsx || !ts || !pip) {
+    errors.push(`${!jsx ? JSX : !ts ? TS : PIP}: missing — the rule vocabularies are now `
+      + "unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+    return errors;
+  }
+  // ONE LIST, SHARED. If this alias is ever replaced by a literal array, the events have been
+  // forked and the arm below would be comparing the browser against a list nothing reads.
+  if (!/export\s+const\s+RULE_EVENTS\s*=\s*STATUS_EVENTS\s*;/.test(ts)) {
+    errors.push(`${TS}: \`RULE_EVENTS\` is no longer \`= STATUS_EVENTS\` — the trigger events have `
+      + "been forked from the status ladder's list, which is the drift the Monday label map cost us. "
+      + "Keep one list, or re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  }
+
+  // Anchored on the `= [` / `] as const`, not the bare name: a name is a prefix of anything
+  // somebody renames it to, which is how checkAreaMirror once reported clean on a renamed export.
+  const pairKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*=\\s*\\[`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n];", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/\[\s*"([a-z_]+)"/g)].map((x) => x[1]);
+  };
+  const constKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*=\\s*\\[`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("] as const", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
+  };
+  const recordKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*:\\s*Record<string, string>\\s*=\\s*\\{`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n};", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/^\s{2}([a-z_]+):/gm)].map((x) => x[1]);
+  };
+
+  const pairs = [
+    ["action kinds", pairKeys(jsx, "SS_RULE_ACTIONS"), "SS_RULE_ACTIONS", constKeys(ts, "RULE_ACTION_KINDS"), "RULE_ACTION_KINDS"],
+    ["clock anchors", pairKeys(jsx, "SS_RULE_ANCHORS"), "SS_RULE_ANCHORS", recordKeys(ts, "RULE_ANCHORS"), "RULE_ANCHORS"],
+    // The events are deliberately ONE list on each side (SS_STATUS_EVENTS, and STATUS_EVENTS via
+    // `RULE_EVENTS = STATUS_EVENTS`), shared with the status ladder — so this arm also catches the
+    // day somebody forks one of them for rules.
+    ["trigger events", pairKeys(jsx, "SS_STATUS_EVENTS"), "SS_STATUS_EVENTS", recordKeys(pip, "STATUS_EVENTS"), "STATUS_EVENTS"],
+  ];
+  for (const [what, a, aName, b, bName] of pairs) {
+    if (!a || !a.length) {
+      errors.push(`${JSX}: cannot read \`${aName}\` — it was renamed or reshaped, so the ${what} `
+        + "are now unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+      continue;
+    }
+    if (!b || !b.length) {
+      errors.push(`${TS}: cannot read \`${bName}\` — it was renamed or reshaped, so the ${what} `
+        + "are now unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+      continue;
+    }
+    const inA = new Set(a);
+    const inB = new Set(b);
+    for (const k of a) {
+      if (!inB.has(k)) {
+        errors.push(`rule ${what}: "${k}" is in ${aName} (${JSX}) but NOT in ${bName} (${TS}) — `
+          + "the editor offers it and the server refuses it, so saving says \"pick one from the list\" "
+          + "about the one they picked. Add it to both, in the same commit.");
+      }
+    }
+    for (const k of b) {
+      if (!inA.has(k)) {
+        errors.push(`rule ${what}: "${k}" is in ${bName} (${TS}) but NOT in ${aName} (${JSX}) — `
+          + "the server accepts it and nothing can ask for it, so it reads as unbuilt. Add it to both, "
+          + "in the same commit.");
+      }
+    }
+  }
+  return errors;
+}
+
 function checkAreaMirror(files, inject = null) {
   const errors = [];
   const TS = "supabase/functions/_shared/access.ts";
@@ -3415,6 +3524,57 @@ if (process.argv.includes("--self-test")) {
   }
   console.log(`self-test passed: the GATES cross-check reads all ${gateFns.length} discovered function(s), fires on `
     + "both `action === \"x\"` and `switch/case` dispatch, ignores a non-dispatch switch, and refuses to run blind");
+
+  // ── The rule vocabularies' browser <-> server mirror (migration 355) ──
+  // Clean on the real files, fires in BOTH directions, and refuses to run blind — the three
+  // things checkAreaMirror's own history says a mirror rule has to prove about itself.
+  const rmJsx = readIfExists("portal/02-sales.jsx");
+  const rmTs = readIfExists("supabase/functions/_shared/crmRules.ts");
+  const rmPip = readIfExists("supabase/functions/_shared/crmPipelines.ts");
+  if (!rmJsx || !rmTs || !rmPip) {
+    console.error("self-test FAILED: could not load both halves of the rule vocabularies — "
+      + "checkRuleMirror has no subject and is silently inert");
+    process.exit(1);
+  }
+  const rmClean = checkRuleMirror({}, { jsx: rmJsx, ts: rmTs, pip: rmPip });
+  if (rmClean.length) {
+    console.error("self-test FAILED: the rule vocabularies do not agree on the real files:");
+    for (const e of rmClean) console.error("  " + e);
+    process.exit(1);
+  }
+  // (a) an action the editor offers and the server does not: the builder picks it from the list
+  //     and is told to pick one from the list.
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmTs.replace('"create_card", ', ""), pip: rmPip })
+        .some((e) => /"create_card" is in SS_RULE_ACTIONS/.test(e))) {
+    console.error("self-test FAILED: an action kind missing from the server's list passed the rule mirror");
+    process.exit(1);
+  }
+  // (b) the other way: the server accepts something nothing can ask for, which reads as unbuilt.
+  if (!checkRuleMirror({}, { jsx: rmJsx.replace('  ["reopen", "Reopen it if it was lost"],\n', ""), ts: rmTs, pip: rmPip })
+        .some((e) => /"reopen" is in RULE_ACTION_KINDS/.test(e))) {
+    console.error("self-test FAILED: an action kind missing from the editor's list passed the rule mirror");
+    process.exit(1);
+  }
+  // (c) a clock anchor dropped on the server side.
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmTs.replace(/^  last_contact:.*$/m, ""), pip: rmPip })
+        .some((e) => /clock anchors: "last_contact"/.test(e))) {
+    console.error("self-test FAILED: a dropped clock anchor passed the rule mirror");
+    process.exit(1);
+  }
+  // (d) BLIND DETECTION. A renamed list must read as "this rule has gone blind", never as a pass
+  //     — the exact failure checkAreaMirror was caught by.
+  if (!checkRuleMirror({}, { jsx: rmJsx.replace("const SS_RULE_ACTIONS = [", "const SS_RULE_ACTIONS_V2 = ["), ts: rmTs, pip: rmPip })
+        .some((e) => /cannot read `SS_RULE_ACTIONS`/.test(e))) {
+    console.error("self-test FAILED: a renamed SS_RULE_ACTIONS reported clean — the rule mirror is blind");
+    process.exit(1);
+  }
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmTs.replace("const RULE_ACTION_KINDS = [", "const RULE_ACTION_KINDS_V2 = ["), pip: rmPip })
+        .some((e) => /cannot read `RULE_ACTION_KINDS`/.test(e))) {
+    console.error("self-test FAILED: a renamed RULE_ACTION_KINDS reported clean — the rule mirror is blind");
+    process.exit(1);
+  }
+  console.log("self-test passed: the rule vocabularies' mirror is clean on the real files, fires in both "
+    + "directions for actions and anchors, and refuses to run blind on a rename");
 
   // ── The access.ts <-> area_level_for() mirror ──
   // Proves all four directions, because this rule exists precisely BECAUSE a claim that it

@@ -331,3 +331,6 @@ verify_jwt = false
 # or MEETING_REMINDER_SECRET.
 [functions.meeting-reminders]
 verify_jwt = true
+
+[functions.crm-rules-tick]
+verify_jwt = true

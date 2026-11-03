@@ -265,6 +265,10 @@ import {
   parseStageSave, parseStatusOrder, parseStatusSave, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
   stageSetRefusal, type StageKind as PipeStageKind,
 } from "../_shared/crmPipelines.ts";
+// Per-pipeline RULES (migration 355): the request shapes and the action vocabulary. The evaluator
+// itself is in Postgres (crm_rules_run) and the sending is crm-rules-tick's; this function only
+// writes what the builder authored.
+import { parseRuleOrder, parseRuleSave, RULE_ACTIONS_MAX } from "../_shared/crmRules.ts";
 // Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
 // account CSM sets up in Admin. paymentSettings.ts only, never the gateway client (cardpointe.ts).
 import { cpEnvOf, cpMerchant, midLast4, readPaymentSettings } from "../_shared/paymentSettings.ts";
@@ -619,6 +623,14 @@ const GATES: GateTable = {
   crm_deal_set_status:   { area: "contacts", level: "edit" },
   crm_status_save:       { area: "settings_crm", level: "edit" },
   crm_statuses_reorder:  { area: "settings_crm", level: "edit" },
+  // RULES (migration 355): "when ‹this happens› → ‹do this›", one list per pipeline, edited in
+  // the same place as that pipeline's stages and statuses. The same write gate, and deliberately
+  // not a weaker one: a rule can text a builder's customer, so whoever may write one is whoever
+  // may already reshape the pipeline. The run log is a read — it is how "the review text never
+  // went out" gets an answer, and anyone who can see the settings may look.
+  crm_rule_save:         { area: "settings_crm", level: "edit" },
+  crm_rules_reorder:     { area: "settings_crm", level: "edit" },
+  crm_rule_log:          { area: "settings_crm", level: "view" },
 
   // ── Customer Hub → Fields (migration 330, ./crmFields.ts) ───────────────────────────────
   // What a contact and a design/deal hold, and the builder's own fields beside it. crm_* on
@@ -10670,7 +10682,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   };
 
   /** The tenant's live pipelines with their live stages, seeding the statuses and Shed Deals once. */
-  const readPipelines = async (): Promise<{ pipelines: any[]; statuses: any[] } | { dbError: unknown }> => {
+  const readPipelines = async (): Promise<{ pipelines: any[]; statuses: any[]; rulesReady: boolean } | { dbError: unknown }> => {
     const read = () => admin.from("crm_pipelines")
       .select("id, name, position, lost_reasons, seed_kind, feeds_designs")
       .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
@@ -10698,6 +10710,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           .order("position", { ascending: true })
       : { data: [], error: null };
     if (sErr) return { dbError: sErr };
+    // RULES (migration 355), read in two queries rather than a join because the actions carry a
+    // jsonb column and PostgREST's embedded select would flatten the ordering we need: a rule's
+    // actions run in `position` order, and that order is part of what the builder wrote.
+    //
+    // ⚠️ A MISSING TABLE DEGRADES TO "no rules", it does not fail this read. Beta and production
+    // share ONE Supabase project, so this function can be live for both before 355 is applied —
+    // and failing here would take Settings → Pipelines down for every tenant on both, over a
+    // feature nobody is using yet. `rulesReady: false` is what the editor keys on, so it hides
+    // the Rules section rather than offering a + Add rule that cannot save. Any OTHER error is
+    // still a real failure and is reported as one.
+    const MISSING_TABLE = new Set(["42P01", "PGRST205", "PGRST204"]);
+    const { data: rules, error: rErr } = ids.length
+      ? await admin.from("crm_rules")
+          .select("id, pipeline_id, name, trigger_kind, trigger_event, elapsed_anchor, elapsed_days, once_per_card, enabled, position")
+          .eq("client_id", clientId).in("pipeline_id", ids).is("archived_at", null)
+          .order("position", { ascending: true })
+      : { data: [], error: null };
+    const rulesReady = !(rErr && MISSING_TABLE.has(String((rErr as any)?.code)));
+    if (rErr && rulesReady) return { dbError: rErr };
+    const ruleIds = rulesReady ? (rules ?? []).map((r: any) => r.id) : [];
+    const { data: ruleActions, error: raErr } = ruleIds.length
+      ? await admin.from("crm_rule_actions").select("id, rule_id, kind, params, position")
+          .eq("client_id", clientId).in("rule_id", ruleIds).order("position", { ascending: true })
+      : { data: [], error: null };
+    if (raErr && !MISSING_TABLE.has(String((raErr as any)?.code))) return { dbError: raErr };
     return {
       pipelines: (pipes ?? []).map((p: any) => ({
         // feedsDesigns: new designs land in this one, in its first open stage (Shed Deals since 303).
@@ -10710,13 +10747,48 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // stages now all hang off the pipeline, which is what Settings → Pipelines edits.
         statuses: (statuses ?? []).filter((t: any) => t.pipeline_id === p.id)
           .map((t: any) => ({ id: t.id, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
+        // A RULE BELONGS TO THIS PIPELINE TOO (355), so it is edited in the same panel. There is
+        // no tenant-wide rule on purpose: "when delivered" means one thing in the shed pipeline
+        // and another in a reviews pipeline, and a shared rule would fire on both.
+        rules: (rules ?? []).filter((r: any) => r.pipeline_id === p.id).map((r: any) => ({
+          id: r.id, name: r.name ?? null, triggerKind: r.trigger_kind,
+          triggerEvent: r.trigger_event ?? null, elapsedAnchor: r.elapsed_anchor ?? null,
+          elapsedDays: r.elapsed_days ?? null,
+          oncePerCard: r.once_per_card === true, enabled: r.enabled === true, position: r.position,
+          actions: (ruleActions ?? []).filter((a: any) => a.rule_id === r.id)
+            .map((a: any) => ({ id: a.id, kind: a.kind, params: a.params ?? {}, position: a.position })),
+        })),
       })),
       // The UNION, still flat and still called `statuses`: a status PILL is drawn from an id alone
       // (SsStatusPill, CrmDealStatusPill, the record's rows), and the card carrying it may belong to
       // any pipeline. Keeping it costs one array and means every pill lookup keeps working; the
       // per-pipeline lists above are what the board's filter and the settings editor read.
       statuses: (statuses ?? []).map((t: any) => ({ id: t.id, pipelineId: t.pipeline_id ?? null, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
+      // FALSE means migration 355 is not on this database yet, so the editor hides the Rules
+      // section entirely rather than offering a + Add rule that cannot save. See the read above.
+      rulesReady,
     };
+  };
+
+  /**
+   * ONE RULE'S ACTIONS, REPLACED WHOLE (migration 355). Returns a Postgres error or null.
+   *
+   * Delete-then-insert rather than a diff, because the list is at most RULE_ACTIONS_MAX rows and
+   * their ORDER is meaning, not decoration: the actions run in `position` order and two of them
+   * see each other's writes. Matching rows up to preserve ids would buy nothing and could leave a
+   * gap in the order; the ids are referenced only by the run log's `detail`, which records what
+   * fired at the time and is deliberately not a live join.
+   */
+  const writeRuleActions = async (ruleId: string, actions: { kind: string; params: Record<string, unknown> }[]) => {
+    const { error: dErr } = await admin.from("crm_rule_actions").delete()
+      .eq("client_id", clientId).eq("rule_id", ruleId);
+    if (dErr) return dErr;
+    if (!actions.length) return null;
+    const rows = actions.slice(0, RULE_ACTIONS_MAX).map((a, i) => ({
+      client_id: clientId, rule_id: ruleId, kind: a.kind, params: a.params, position: (i + 1) * 1024,
+    }));
+    const { error: iErr } = await admin.from("crm_rule_actions").insert(rows);
+    return iErr ?? null;
   };
 
   const DEAL_COLS = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at, custom";
@@ -11324,6 +11396,180 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // The order is what "forward only" means for the automatic changes, so it matters beyond
     // looks: an event never moves a card to a status earlier in this list.
     return json({ ok: true });
+  }
+
+  // ── RULES (migration 355) ────────────────────────────────────────────────────────────────
+  // "When ‹this happens› → ‹do this›", one list per pipeline. The evaluator is in Postgres
+  // (crm_rules_run) and the sending is crm-rules-tick's; all this does is write what the builder
+  // authored — and REFUSE what the evaluator could only record as a failure.
+  //
+  // That refusal is the point of the long block below. 355 stores an action's params as unchecked
+  // jsonb, and a rule naming another pipeline's status is not a syntax error: it parses, it saves,
+  // and then it throws on every card for ever while the run log fills with 'failed'. Nobody would
+  // find that from the editor, so the ids are resolved HERE, against this pipeline, at save time.
+  if (action === "crm_rule_save") {
+    const rl = parseRuleSave((payload ?? {}) as Record<string, unknown>);
+    if (!rl.ok) return json({ error: rl.error }, 400);
+    const now = new Date().toISOString();
+
+    // Which pipeline this rule is on: the posted one for a new rule, the stored one for an edit.
+    // An edit must never be allowed to carry its rule to another pipeline — the actions were
+    // validated against the one it is on.
+    let pipelineId = rl.pipelineId;
+    if (rl.id) {
+      const { data: row, error: rErr } = await admin.from("crm_rules").select("pipeline_id")
+        .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null).maybeSingle();
+      if (rErr) return dbFail(req, clientId, "find that rule", rErr);
+      if (!row) return json({ error: "That rule wasn't found." }, 404);
+      pipelineId = row.pipeline_id;
+    } else {
+      const { data: pipe, error: pErr } = await admin.from("crm_pipelines").select("id")
+        .eq("client_id", clientId).eq("id", pipelineId).is("archived_at", null).maybeSingle();
+      if (pErr) return dbFail(req, clientId, "add that rule", pErr);
+      if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
+    }
+
+    // Every id an action names, checked against THIS pipeline and this tenant.
+    if (rl.actions && rl.actions.length) {
+      const wantStatuses = [...new Set(rl.actions.filter((a) => a.kind === "set_status").map((a) => String(a.params.statusId)))];
+      const wantStages = [...new Set(rl.actions.filter((a) => a.kind === "move_stage").map((a) => String(a.params.stageId)))];
+      const wantPipes = [...new Set(rl.actions.filter((a) => a.kind === "create_card").map((a) => String(a.params.pipelineId)))];
+      if (wantStatuses.length) {
+        const { data: live, error } = await admin.from("crm_statuses").select("id")
+          .eq("client_id", clientId).eq("pipeline_id", pipelineId).in("id", wantStatuses).is("archived_at", null);
+        if (error) return dbFail(req, clientId, "check that rule's statuses", error);
+        if ((live ?? []).length !== wantStatuses.length) {
+          // 354's own refusal sentence, in the editor's voice: crm_set_deal_status raises exactly
+          // this when a rule points at another pipeline's rung, and that raise is invisible.
+          return json({ error: "Pick a status from this pipeline — a status belongs to one pipeline." }, 409);
+        }
+      }
+      if (wantStages.length) {
+        const { data: live, error } = await admin.from("crm_pipeline_stages").select("id")
+          .eq("client_id", clientId).eq("pipeline_id", pipelineId).in("id", wantStages).is("archived_at", null);
+        if (error) return dbFail(req, clientId, "check that rule's stages", error);
+        if ((live ?? []).length !== wantStages.length) {
+          return json({ error: "Pick a stage from this pipeline — a card stays in its pipeline." }, 409);
+        }
+      }
+      if (wantPipes.length) {
+        // Creating the card in the pipeline the rule is already on would mean every delivery adds
+        // a second card beside the first. Refused rather than silently skipped, because the
+        // builder meant something and we cannot tell what.
+        if (wantPipes.includes(String(pipelineId))) {
+          return json({ error: "Pick a different pipeline — the card is already in this one." }, 409);
+        }
+        const { data: live, error } = await admin.from("crm_pipelines").select("id")
+          .eq("client_id", clientId).in("id", wantPipes).is("archived_at", null);
+        if (error) return dbFail(req, clientId, "check that rule's pipelines", error);
+        if ((live ?? []).length !== wantPipes.length) return json({ error: "That pipeline wasn't found." }, 404);
+      }
+    }
+
+    if (!rl.id) {
+      const { data: top } = await admin.from("crm_rules").select("position")
+        .eq("client_id", clientId).eq("pipeline_id", pipelineId).is("archived_at", null)
+        .order("position", { ascending: false }).limit(1).maybeSingle();
+      const { data: made, error } = await admin.from("crm_rules").insert({
+        client_id: clientId, pipeline_id: pipelineId, name: rl.name,
+        trigger_kind: rl.triggerKind, trigger_event: rl.triggerEvent,
+        elapsed_anchor: rl.elapsedAnchor, elapsed_days: rl.elapsedDays,
+        ...(rl.oncePerCard === undefined ? {} : { once_per_card: rl.oncePerCard }),
+        ...(rl.enabled === undefined ? {} : { enabled: rl.enabled }),
+        position: (Number(top?.position) || 0) + 1024,
+        created_by: userId ?? null,
+      }).select("id").single();
+      if (error) return dbFail(req, clientId, "add that rule", error);
+      const wrote = await writeRuleActions(made.id, rl.actions ?? []);
+      if (wrote) return dbFail(req, clientId, "save that rule's actions", wrote);
+      audit("crm_rule_save", 1, `created=${made.id} pipeline=${pipelineId}`).catch(() => {});
+      return json({ ok: true, id: made.id });
+    }
+
+    const patch: Record<string, unknown> = { updated_at: now };
+    if (rl.name !== null) patch.name = rl.name;
+    if (rl.triggerKind) {
+      // The trigger is replaced WHOLE, both halves, or the shape CHECK refuses the row: an
+      // event rule still carrying elapsed_days from when it was a clock is exactly what that
+      // constraint exists to stop.
+      patch.trigger_kind = rl.triggerKind;
+      patch.trigger_event = rl.triggerEvent;
+      patch.elapsed_anchor = rl.elapsedAnchor;
+      patch.elapsed_days = rl.elapsedDays;
+    }
+    if (rl.oncePerCard !== undefined) patch.once_per_card = rl.oncePerCard;
+    if (rl.enabled !== undefined) patch.enabled = rl.enabled;
+    if (rl.archive) patch.archived_at = now;
+    const { data, error } = await admin.from("crm_rules").update(patch)
+      .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null).select("id");
+    if (error) return dbFail(req, clientId, "save that rule", error);
+    if (!data || !data.length) return json({ error: "That rule wasn't found." }, 404);
+    if (rl.actions !== undefined && !rl.archive) {
+      const wrote = await writeRuleActions(rl.id, rl.actions);
+      if (wrote) return dbFail(req, clientId, "save that rule's actions", wrote);
+    }
+    audit("crm_rule_save", 1, `rule=${rl.id} archive=${rl.archive}`).catch(() => {});
+    return json({ ok: true, id: rl.id });
+  }
+
+  if (action === "crm_rules_reorder") {
+    // One PIPELINE'S rules, posted whole — the same shape as the stage and status reorders, and
+    // for the same reason: a subset of the account's rules can be checked against nothing.
+    const o = parseRuleOrder((payload ?? {}) as Record<string, unknown>);
+    if (!o.ok) return json({ error: o.error }, 400);
+    const { data: live, error } = await admin.from("crm_rules").select("id")
+      .eq("client_id", clientId).eq("pipeline_id", o.pipelineId).is("archived_at", null);
+    if (error) return dbFail(req, clientId, "reorder those rules", error);
+    const have = new Set((live ?? []).map((x: any) => x.id));
+    if (have.size !== o.ids.length || o.ids.some((id) => !have.has(id))) {
+      return json({ error: "The rules changed while you were editing — refresh and try again." }, 409);
+    }
+    for (let i = 0; i < o.ids.length; i++) {
+      const { error: uErr } = await admin.from("crm_rules")
+        .update({ position: (i + 1) * 1024, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", o.ids[i]);
+      if (uErr) return dbFail(req, clientId, "reorder those rules", uErr);
+    }
+    // The order is the order the rules RUN in, not just how they are listed: two rules on one
+    // event see each other's writes, so "set the status, then create the review card" is a
+    // different thing from the reverse.
+    return json({ ok: true });
+  }
+
+  if (action === "crm_rule_log") {
+    // WHY A RULE DID NOTHING. Without this the only answer to "the review text never went out"
+    // is a shrug — not whether the rule matched, not whether the once guard held it, not what
+    // Postgres said when it threw. One pipeline's recent runs, newest first.
+    const pipelineId = String(payload?.pipelineId ?? "");
+    if (!isUuidLike(pipelineId)) return json({ error: "Pick the pipeline." }, 400);
+    const { data: rules, error: rErr } = await admin.from("crm_rules").select("id, name, trigger_kind, trigger_event, elapsed_anchor, elapsed_days")
+      .eq("client_id", clientId).eq("pipeline_id", pipelineId);
+    if (rErr) return dbFail(req, clientId, "read the rule log", rErr);
+    const ids = (rules ?? []).map((r: any) => r.id);
+    if (!ids.length) return json({ ok: true, runs: [], outbox: [] });
+    const { data: runs, error: nErr } = await admin.from("crm_rule_runs")
+      .select("id, rule_id, deal_id, trigger, outcome, detail, fired_at")
+      .eq("client_id", clientId).in("rule_id", ids)
+      .order("fired_at", { ascending: false }).limit(100);
+    if (nErr) return dbFail(req, clientId, "read the rule log", nErr);
+    // The queue beside the log, because a message that is still queued is the commonest answer
+    // to "it did not send" and it is NOT a failure — the tick simply has not run yet.
+    const { data: outbox, error: oErr } = await admin.from("crm_rule_outbox")
+      .select("id, rule_id, deal_id, kind, state, attempts, last_error, queued_at, sent_at")
+      .eq("client_id", clientId).in("rule_id", ids)
+      .order("queued_at", { ascending: false }).limit(100);
+    if (oErr) return dbFail(req, clientId, "read the rule log", oErr);
+    return json({
+      ok: true,
+      runs: (runs ?? []).map((r: any) => ({
+        id: r.id, ruleId: r.rule_id, dealId: r.deal_id, trigger: r.trigger,
+        outcome: r.outcome, detail: r.detail ?? {}, firedAt: r.fired_at,
+      })),
+      outbox: (outbox ?? []).map((o: any) => ({
+        id: o.id, ruleId: o.rule_id, dealId: o.deal_id, kind: o.kind, state: o.state,
+        attempts: o.attempts, lastError: o.last_error ?? null, queuedAt: o.queued_at, sentAt: o.sent_at,
+      })),
+    });
   }
 
   if (action === "contact_activity") {

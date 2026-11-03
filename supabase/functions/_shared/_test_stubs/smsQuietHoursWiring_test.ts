@@ -66,6 +66,7 @@ const where = (s: Send) => `${s.fn}${s.action ? ` (${s.action})` : ""}`;
 Deno.test("the scan found the text senders it is meant to police", () => {
   // A scan that matched nothing would pass every test below. These are the callers as of the fix.
   assertEquals(ALL.map(where).sort(), [
+    "crm-rules-tick",
     "portal-settings (crm_send_sms)",
     "portal-settings (text_sign_link)",
     "submit-estimate",
