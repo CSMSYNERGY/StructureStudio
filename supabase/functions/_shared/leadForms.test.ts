@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { checkSubmission, cleanDefinition, cleanSettings, customPatch, recommendations, starterDefinition, submissionNote } from "./leadForms.ts";
+import { checkSubmission, cleanDefinition, cleanSettings, consentTextOk, consentTextProblems, customPatch, recommendations, starterDefinition, submissionNote } from "./leadForms.ts";
 
 const SB = "https://example.supabase.co";
 
@@ -282,4 +282,42 @@ Deno.test("a texting box that is switched off for the business is called hidden,
   assert(off.includes("sms_box_off") && !off.includes("a2p"));
   const on = recommendations(def, null, true).map((r) => r.id);
   assert(on.includes("a2p") && !on.includes("sms_box_off"));
+});
+
+// ── a builder's own texting-consent wording (2026-11-03) ───────────────────────────────────
+const REGISTERED = "I consent to receive non-marketing text messages from CSM Capital LLC DBA Structure Studio Suite about appointment and demo reminders, account notifications, order and quote updates, and customer support responses. Message frequency may vary, message & data rates may apply. Text HELP for assistance, reply STOP to opt out.";
+
+Deno.test("own consent wording is kept on the consent box only", () => {
+  const d = cleanDefinition({
+    fields: [
+      { id: "phone", type: "phone", consentText: REGISTERED },
+      { id: "sms", type: "sms_consent", consentText: "  " + REGISTERED + "  " },
+      { id: "sms2", type: "sms_consent", consentText: "" },
+    ],
+  }, SB);
+  assertEquals(d.fields[0].consentText, undefined);
+  assertEquals(d.fields[1].consentText, REGISTERED);
+  assertEquals(d.fields[2].consentText, undefined, "empty wording means the standard sentence");
+});
+
+Deno.test("own consent wording must carry every required clause", () => {
+  assert(consentTextOk(REGISTERED));
+  assertEquals(consentTextProblems(REGISTERED), []);
+  // The standard sentence has no HELP clause, so it would not pass as someone's own wording.
+  assertEquals(consentTextProblems("By checking this box, you agree that Acme may send you text messages about your quote and your building. Message frequency varies. Message and data rates may apply. Reply STOP to opt out at any time."), ["HELP for help"]);
+  assertEquals(consentTextProblems("Text me"), ["a full sentence (this is too short)", "message frequency", "\"message and data rates may apply\"", "STOP to opt out", "HELP for help"]);
+  assert(!consentTextOk(undefined));
+});
+
+Deno.test("recommendations: bad own wording blocks publish; good own wording beats the business switch", () => {
+  const base = { fields: [{ id: "email", type: "email", required: true }, { id: "phone", type: "phone" }], footerLinks: { privacy: "https://x.example/privacy" } };
+  const bad = cleanDefinition({ ...base, fields: [...base.fields, { id: "sms", type: "sms_consent", consentText: "Reply STOP." }] }, SB);
+  assert(recommendations(bad, null).some((r) => r.id === "consent_text" && r.blocking));
+  const good = cleanDefinition({ ...base, fields: [...base.fields, { id: "sms", type: "sms_consent", consentText: REGISTERED }] }, SB);
+  const recs = recommendations(good, null, false);
+  assert(!recs.some((r) => r.blocking));
+  assert(!recs.some((r) => r.id === "sms_box_off"), "own wording shows even with the standard box off");
+  assert(recs.some((r) => r.id === "a2p"));
+  const std = cleanDefinition({ ...base, fields: [...base.fields, { id: "sms", type: "sms_consent" }] }, SB);
+  assert(recommendations(std, null, false).some((r) => r.id === "sms_box_off"));
 });

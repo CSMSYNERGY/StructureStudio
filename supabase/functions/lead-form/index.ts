@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 import { smsConsentSentence } from "../_shared/smsConsentText.ts";
-import { checkSubmission, cleanDefinition, cleanSettings, customPatch, isUuid, submissionNote, type CustomFieldDef, type FormDefinition } from "../_shared/leadForms.ts";
+import { checkSubmission, cleanDefinition, cleanSettings, consentTextOk, customPatch, isUuid, submissionNote, type CustomFieldDef, type FormDefinition } from "../_shared/leadForms.ts";
 import { companyTokens, loadTemplate, sendAutoreply, sendLeadAlert, teamEmails } from "../_shared/leadFormMail.ts";
 
 // lead-form: the PUBLIC side of website lead forms (migration 325, Settings → Customer Hub →
@@ -19,7 +19,9 @@ import { companyTokens, loadTemplate, sendAutoreply, sendLeadAlert, teamEmails }
 // THE CONSENT SENTENCE IS OURS, NOT THE BROWSER'S. load returns smsConsentSentence(name) and submit
 // files the same server-built sentence as evidence — a public caller never chooses the words that
 // get stored as this builder's proof of permission (capture-lead accepts browser text and has to
-// police it; this function never needs to).
+// police it; this function never needs to). The one exception is still not the browser's: a
+// signed-in builder may save their OWN registered sentence on the form's consent field
+// (consentText, 2026-11-03), and then that published sentence is shown and stored instead.
 //
 // ABUSE: the capture-lead Guard 1 shape — a per-tenant cap on submissions per minute, checked
 // BEFORE any write, index-backed by lead_form_submissions_client. Plus a honeypot field and a
@@ -92,8 +94,14 @@ Deno.serve(withErrorLog("lead-form", async (req: Request) => {
       companyTokens(sb, clientId),
     ]);
     const smsBoxOn = cs?.lead_sms_consent_box !== false;
-    // A builder who switched the texting box off (Settings, migration 242) gets no box here either.
-    const fields = smsBoxOn ? def.fields : def.fields.filter((f) => f.type !== "sms_consent");
+    // A builder who switched the texting box off (Settings, migration 242) gets no box here either,
+    // UNLESS the box carries their own registered wording: 242's switch exists because the
+    // STANDARD sentence was an opt-in their campaign never listed, and their own sentence is the
+    // one it does list. A saved sentence that fails consentTextOk is never shown.
+    const fields = def.fields.flatMap((f) => {
+      if (f.type !== "sms_consent" || consentTextOk(f.consentText)) return [f];
+      return smsBoxOn ? [{ ...f, consentText: undefined }] : [];
+    });
     await bump("views");
     return json({
       ok: true,
@@ -251,15 +259,18 @@ Deno.serve(withErrorLog("lead-form", async (req: Request) => {
   }
 
   // ── texting consent (the capture-lead rules: one grant per tenant+phone, never touches opt-outs) ──
-  if (checked.smsConsent && smsBoxOn && phoneDigits.length >= 10) {
-    const company = await companyTokens(sb, clientId);
+  // The sentence stored is the one the ticked box showed: the builder's own, or the standard one.
+  const tickedId = checked.answers.find((a) => a.type === "sms_consent" && a.value === "Yes")?.id;
+  const tickedBox = def.fields.find((f) => f.id === tickedId);
+  const ownWords = tickedBox && consentTextOk(tickedBox.consentText) ? tickedBox.consentText : "";
+  if (checked.smsConsent && (smsBoxOn || ownWords) && phoneDigits.length >= 10) {
     const tenDigits = ten(phoneDigits);
     const { data: prior } = await sb.from("sms_consent_log").select("id")
       .eq("client_id", clientId).eq("phone_digits", tenDigits).eq("action", "granted").limit(1).maybeSingle();
     if (!prior) {
       const { error: consentErr } = await sb.from("sms_consent_log").insert({
         client_id: clientId, phone_digits: tenDigits, action: "granted", source: "web_form",
-        disclosure_text: smsConsentSentence(company.name), consent_url: pageUrl,
+        disclosure_text: ownWords || smsConsentSentence((await companyTokens(sb, clientId)).name), consent_url: pageUrl,
         ip: clientIp(req), user_agent: (req.headers.get("user-agent") || "").slice(0, 300),
         detail: { name: c.name || null, formId: form.id, submissionId: sub.id },
       });

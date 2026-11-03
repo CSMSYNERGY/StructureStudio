@@ -6975,7 +6975,7 @@ function ssfRenderer() {
   if (!ssfRendererP) {
     ssfRendererP = new Promise((resolve, reject) => {
       const s = document.createElement("script");
-      s.src = "/forms-render.js?v=4";
+      s.src = "/forms-render.js?v=5";
       s.onload = () => (window.SSForm ? resolve(window.SSForm) : reject(new Error("The form preview didn't load.")));
       s.onerror = () => { ssfRendererP = null; reject(new Error("The form preview couldn't load. Refresh the page.")); };
       document.head.appendChild(s);
@@ -7048,6 +7048,19 @@ function ssfCustomGroup(meta) {
   return ["Your fields", list.map((d) => [`custom:${d.key}`, d.label || d.key, SSF_CF_ICON[d.field_type]])];
 }
 const SSF_INPUT = (t) => !["heading", "paragraph", "divider", "image"].includes(t);
+// What a builder's own texting-consent sentence is missing. A copy of consentTextProblems in
+// _shared/leadForms.ts, which is the one that counts: Publish refuses what it refuses, and the
+// public form never shows a sentence that fails it. Change both together.
+function ssfConsentMissing(text) {
+  const t = String(text || "");
+  const miss = [];
+  if (t.trim().length < 60) miss.push("a full sentence (this is too short)");
+  if (!/frequency/i.test(t)) miss.push("message frequency");
+  if (!/rates\s+may\s+apply/i.test(t)) miss.push("\"message and data rates may apply\"");
+  if (!/\bSTOP\b/.test(t)) miss.push("STOP to opt out");
+  if (!/\bHELP\b/.test(t)) miss.push("HELP for help");
+  return miss;
+}
 const SSF_CHOICES = (t) => ["select", "radio", "checkboxes", "timeframe"].includes(t);
 const SSF_TIMEFRAME = ["As soon as possible", "Within 1 month", "1–3 months", "3–6 months", "Just looking"];
 const SSF_THEMES = {
@@ -7929,19 +7942,39 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled, 
           {/* Carolyn 2026-11-01: "what does this mean? it is quite unclear". The plain fact first
               (is this box on my website or not?), then where to change it. The switch is
               client_settings.lead_sms_consent_box, now on Customer Hub → Text Messaging. */}
-          {meta && meta.smsBoxOn === false ? (
-            <div style={{ fontSize: 12.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
-              <b>Hidden on your website.</b> Texting consent is turned off for your business, so customers won't see this box.
-              {!disabled && onGoSms && <div style={{ marginTop: 6 }}><button type="button" onClick={onGoSms} style={{ background: "none", border: "none", padding: 0, color: "#92400E", textDecoration: "underline", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>Turn it on in Customer Hub → Text Messaging</button></div>}
-            </div>
-          ) : (
-            <div style={{ fontSize: 12.5, color: "#166534", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: 10, marginBottom: 12 }}><b>Shows on your website.</b></div>
-          )}
-          <div style={{ fontSize: 12.5, color: "#334155", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
-            <div style={{ fontWeight: 800, marginBottom: 4 }}>The wording is set for you</div>
-            “{meta?.consentSentence}”
-            <div style={{ marginTop: 6, color: "#64748B" }}>Carriers require these exact words, so they can't be edited. Texting is always optional, so this box is never required.</div>
-          </div>
+          {/* Own wording (2026-11-03): an account whose texting registration lists a different
+              sentence (Carolyn's own, whose standard box is off by migration 242) pastes theirs.
+              A box with valid own wording shows even with the standard box off — see lead-form. */}
+          {(() => {
+            const own = typeof f.consentText === "string";
+            const miss = own ? ssfConsentMissing(f.consentText) : [];
+            const shown = (meta && meta.smsBoxOn !== false) || (own && !miss.length);
+            return (<>
+              {!shown ? (
+                <div style={{ fontSize: 12.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
+                  <b>Hidden on your website.</b> Texting consent is turned off for your business, so customers won't see this box{own ? "" : " unless you use your own registered wording below"}.
+                  {!disabled && onGoSms && <div style={{ marginTop: 6 }}><button type="button" onClick={onGoSms} style={{ background: "none", border: "none", padding: 0, color: "#92400E", textDecoration: "underline", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>Turn it on in Customer Hub → Text Messaging</button></div>}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "#166534", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: 10, marginBottom: 12 }}><b>Shows on your website.</b></div>
+              )}
+              <SsfRow label="Wording">
+                <SsfSeg disabled={disabled} value={own ? "own" : "standard"} onChange={(v) => onChange({ consentText: v === "own" ? "" : undefined })} options={[["standard", "Standard"], ["own", "My registered wording"]]} />
+              </SsfRow>
+              {own ? (
+                <SsfRow label="Your consent sentence" hint="Paste it exactly as your texting registration (A2P) lists it. It must name who is texting and say message frequency, message and data rates may apply, STOP to opt out and HELP for help.">
+                  <textarea disabled={disabled} rows={5} maxLength={600} value={f.consentText} onChange={(e) => onChange({ consentText: e.target.value })} style={S.input} />
+                  {f.consentText && miss.length > 0 && <div style={{ ...S.err, marginTop: 6 }}>Still needs: {miss.join(", ")}. Publish is blocked until it does.</div>}
+                </SsfRow>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "#334155", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
+                  “{meta?.consentSentence}”
+                  <div style={{ marginTop: 6, color: "#64748B" }}>Carriers require these exact words, so the standard sentence can't be edited. If your texting registration lists a different sentence, choose My registered wording.</div>
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>Texting is always optional, so this box is never required.</div>
+            </>);
+          })()}
         </>)}
         {t === "terms" && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>Links to the Privacy Policy and Terms you set on the form's Settings tab. Always required.</div>}
         {SSF_INPUT(t) && t !== "hidden" && <SsfRow label="Help text"><input disabled={disabled} value={f.help || ""} maxLength={500} onChange={(e) => onChange({ help: e.target.value })} style={S.input} /></SsfRow>}

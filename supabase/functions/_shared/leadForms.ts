@@ -99,7 +99,32 @@ export type FormField = {
    *  type, copied in so the renderer knows which control to draw. Never free text — the key is
    *  checked against the tenant's own definitions (see cleanDefinition's `defs`). */
   key?: string; fieldType?: string;
+  /** `sms_consent` only: the builder's OWN texting-consent sentence, word for word as their texting
+   *  registration (A2P) lists it (2026-11-03). Absent = the standard smsConsentSentence(). Shown and
+   *  stored as evidence only when consentTextOk() passes; Publish refuses a sentence that fails. */
+  consentText?: string;
 };
+
+export const CONSENT_TEXT_MAX = 600;
+
+/** What a builder's own texting-consent sentence is missing, in plain words. Empty = usable.
+ *  These are the clauses carriers require in the call to action itself (see smsConsentText.ts);
+ *  who is texting and what about cannot be checked mechanically, so the editor asks for the
+ *  sentence exactly as registered. */
+export function consentTextProblems(text: string): string[] {
+  const t = String(text || "");
+  const miss: string[] = [];
+  if (t.trim().length < 60) miss.push("a full sentence (this is too short)");
+  if (!/frequency/i.test(t)) miss.push("message frequency");
+  if (!/rates\s+may\s+apply/i.test(t)) miss.push("\"message and data rates may apply\"");
+  if (!/\bSTOP\b/.test(t)) miss.push("STOP to opt out");
+  if (!/\bHELP\b/.test(t)) miss.push("HELP for help");
+  return miss;
+}
+
+export function consentTextOk(text: unknown): text is string {
+  return typeof text === "string" && consentTextProblems(text).length === 0;
+}
 
 /** One of the builder's own contact fields, as crm_field_defs holds it. The three members the
  *  form side needs; portal-settings and lead-form both select them straight off the table. */
@@ -335,6 +360,7 @@ export function cleanDefinition(raw: unknown, supabaseUrl: string, defs?: Custom
     }
     if (type === "heading") { field.text = s(r.text, 200) || "Heading"; field.level = r.level === 2 ? 2 : 1; }
     if (type === "paragraph") field.text = s(r.text, TEXT_BLOCK_MAX);
+    if (type === "sms_consent") { const ct = s(r.consentText, CONSENT_TEXT_MAX); if (ct) field.consentText = ct; }
     if (type === "image") field.imageUrl = formAssetUrl(r.imageUrl, supabaseUrl);
     if (type === "hidden") {
       field.source = oneOf(r.source, HIDDEN_SOURCES, "utm_source");
@@ -513,7 +539,17 @@ export function recommendations(def: FormDefinition, published: unknown, smsBoxA
   const contactRequired = def.fields.some((f) => (f.type === "email" || f.type === "phone") && f.required);
   if ((types.has("email") || types.has("phone")) && !contactRequired) out.push({ id: "contact_optional", text: "Make Email or Phone required so every lead can be reached." });
   if (types.has("phone") && !types.has("sms_consent") && smsBoxAllowed) out.push({ id: "no_sms_consent", text: "You collect a phone number but have no text message consent box. Without one you can't text these leads." });
-  if (types.has("sms_consent") && !smsBoxAllowed) out.push({ id: "sms_box_off", text: "Your texting box is hidden: texting consent is off for your business. Turn it on in Customer Hub → Text Messaging." });
+  // A box carrying the builder's own registered wording shows even with the standard box switched
+  // off for the business (lead-form's load), so the "hidden" line is about the standard box only.
+  const consentBoxes = def.fields.filter((f) => f.type === "sms_consent");
+  for (const f of consentBoxes) {
+    if (f.consentText && !consentTextOk(f.consentText)) {
+      out.push({ id: "consent_text", blocking: true, text: `Your texting consent wording needs: ${consentTextProblems(f.consentText).join(", ")}. Paste it exactly as your texting registration lists it, or switch back to the standard wording.` });
+      break;
+    }
+  }
+  const ownWords = consentBoxes.some((f) => consentTextOk(f.consentText));
+  if (types.has("sms_consent") && !smsBoxAllowed && !ownWords) out.push({ id: "sms_box_off", text: "Your texting box is hidden: texting consent is off for your business. Turn it on in Customer Hub → Text Messaging." });
   else if (types.has("sms_consent")) out.push({ id: "a2p", text: "A texting consent box on your website is a new opt-in page. Check your texting registration lists this page before you text these leads." });
   if (!def.footerLinks.privacy) out.push({ id: "no_privacy", text: "Add your Privacy Policy link (Settings tab of this form)." });
   if (published && JSON.stringify(published) !== JSON.stringify(def)) out.push({ id: "unpublished", text: "You have changes that aren't live yet. Press Publish to put them on your website." });

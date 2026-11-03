@@ -211,8 +211,9 @@
       l2.appendChild(cb);
       var span = el("span");
       if (t === "sms_consent") {
-        // The sentence is the server's (smsConsentSentence), never the builder's own words.
-        span.textContent = opts.consentSentence || "By checking this box, you agree that we may send you text messages about your quote and your building. Message frequency varies. Message and data rates may apply. Reply STOP to opt out at any time.";
+        // The server's sentence (smsConsentSentence), or the builder's own registered wording saved
+        // on this field (consentText) — published by them, never typed by the visitor.
+        span.textContent = f.consentText || opts.consentSentence || "By checking this box, you agree that we may send you text messages about your quote and your building. Message frequency varies. Message and data rates may apply. Reply STOP to opt out at any time.";
       } else {
         span.appendChild(document.createTextNode(f.label && f.label !== "Terms & privacy" ? f.label + " " : "I agree to the "));
         var pv = opts.privacyUrl, tm = opts.termsUrl;
