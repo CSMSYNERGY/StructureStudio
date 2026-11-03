@@ -10918,6 +10918,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ok: true,
       pipelines: r.pipelines,
       statuses: r.statuses,
+      // ⚠️ MUST BE PASSED THROUGH. The browser offers the Rules section only when this is true
+      // (a positive test, because the migration, this function and the bundle deploy separately).
+      // Leaving it out reads to the browser exactly like a pre-355 database, so the section never
+      // appears however well everything else works — which is what shipped on 2026-11-03, caught
+      // only by opening the page on beta. `rulesReadyWiring_test` now fails the push instead.
+      rulesReady: r.rulesReady,
       team: (roster ?? []).map((m: any) => ({ userId: m.user_id, name: m.full_name ?? null, title: m.title ?? null })),
       canManage: canEdit("settings_crm"),
       canWrite: canEdit("contacts"),
