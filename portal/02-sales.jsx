@@ -4299,6 +4299,12 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [notes, setNotes] = useState("");
+  // Carolyn 2026-11-04: "I need the signed in user to be able to override the time slots and
+  // pick the specific time he wants even if it doesnt meet the rules of the calendar." The
+  // chips above are what the calendar OFFERS; these two boxes are what the host DECIDES.
+  const [manual, setManual] = useState(false);
+  const [mDate, setMDate] = useState("");
+  const [mTime, setMTime] = useState("");
 
   const call = useCallback(async (action, body) => {
     const { data, error } = await sb.functions.invoke("portal-meetings", { body: { action, ...(body || {}) } });
@@ -4391,16 +4397,34 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
     } catch (_e) { return iso; }
   };
 
+  // A typed-in clock time, shown back the way the rest of the panel shows times. The date is
+  // arbitrary - only the hours and minutes are read - so it is pinned in UTC and read in UTC.
+  const fmtClock = (hhmm) => {
+    const t = /^(\d{1,2}):(\d{2})$/.exec(hhmm || "");
+    if (!t) return hhmm;
+    try {
+      return new Intl.DateTimeFormat(undefined, { timeZone: "UTC", hour: "numeric", minute: "2-digit" })
+        .format(new Date(Date.UTC(2000, 0, 1, +t[1], +t[2])));
+    } catch (_e) { return hhmm; }
+  };
+  const manualReady = manual && /^\d{4}-\d{2}-\d{2}$/.test(mDate) && /^\d{1,2}:\d{2}$/.test(mTime);
+  const ready = manual ? manualReady : !!slot;
+
   const run = async (fn) => {
     setBusy(true); setMsg(null);
     try { await fn(); } catch (e) { setMsg({ err: e.message }); } finally { setBusy(false); }
   };
 
   const book = () => run(async () => {
-    if (!slot || !host || !type) return;
+    if (!host || !type || !ready) return;
     try {
       await call("book", {
-        hostId: host.id, typeId: type.id, startsAt: slot.startsAt,
+        hostId: host.id, typeId: type.id,
+        // Two shapes on purpose: a picked slot is an INSTANT the availability engine produced,
+        // a typed-in time is a WALL CLOCK in the host's zone that only the server can resolve.
+        ...(manual
+          ? { override: true, date: mDate, time: mTime }
+          : { startsAt: slot.startsAt }),
         contactId: contact.id,
         // The deal the record has picked, when it has one. A meeting is with the person, so a
         // pick is never required — but when there is one, file against it.
@@ -4424,6 +4448,8 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
     }
     setSlot(null);
     setNotes("");
+    setManual(false);
+    setMDate(""); setMTime("");
     setMsg({ ok: "Booked." });
     // It lands in Planned, which owns the list now.
     if (onBooked) onBooked();
@@ -4473,14 +4499,15 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
               {host.publicName} has booking switched off at the moment, so there are no times to offer.
             </div>
           )}
-          {host && host.accepting && !offered.length && (
+          {host && !offered.length && (
             <div style={{ ...sub, marginBottom: 10 }}>
               {host.publicName} hasn't picked any meeting types yet — that's in their My Profile → My meetings.
             </div>
           )}
 
-          {host && host.accepting && !!offered.length && (
+          {host && !!offered.length && (
             <>
+              {host.accepting && (<>
               <div style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", marginBottom: 6 }}>
                 Next times open{type ? ` · ${type.durationMinutes} min` : ""}
                 <span style={{ fontWeight: 600, color: "#94A3B8" }}>{` · ${String(tz).replace(/_/g, " ")}`}</span>
@@ -4510,7 +4537,48 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
                 </div>
               )}
 
-              {slot && (
+              </>)}
+
+              {/* ── A TIME OF YOUR OWN ───────────────────────────────────────────────────
+                  The chips above are what this person's hours, days off and lead time
+                  OFFER. These two boxes are the person whose calendar it is saying "no,
+                  Saturday at seven". It is deliberately not a slot picker: the whole point
+                  is that the time being asked for is one the rules do not produce. */}
+              <div style={{ marginBottom: 10 }}>
+                <button type="button"
+                  onClick={() => { const on = !manual; setManual(on); if (on) setSlot(null); }}
+                  style={{
+                    background: "none", border: "none", padding: 0, cursor: "pointer",
+                    color: ACCENT, fontSize: 12, fontWeight: 700, textDecoration: "underline",
+                  }}>
+                  {manual ? "Use the times above instead" : "Pick a different time"}
+                </button>
+
+                {manual && (
+                  <div style={{ marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 10, padding: 10, background: "#F8FAFC" }}>
+                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ flex: "1 1 150px" }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>Date</span>
+                        <input type="date" value={mDate} onChange={(e) => setMDate(e.target.value)}
+                          style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+                      </div>
+                      <div style={{ flex: "1 1 120px" }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>Time</span>
+                        <input type="time" value={mTime} onChange={(e) => setMTime(e.target.value)}
+                          style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+                      </div>
+                    </div>
+                    <div style={{ ...sub, marginTop: 7 }}>
+                      {`${host.publicName}'s time (${String(tz).replace(/_/g, " ")})`}
+                      {type ? `, ${type.durationMinutes} min` : ""}. This books outside their
+                      hours, days off and notice period, and while they're away — the only thing
+                      it won't do is put two meetings on them at once.
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {(slot || manualReady) && (
                 <div style={{ marginBottom: 10 }}>
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 }}>
                     Anything they should know? (optional)
@@ -4522,8 +4590,12 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
               )}
 
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !slot || viewing} onClick={book}>
-                  {busy ? "Booking…" : slot ? `Book ${fmtDay(slot.date)} at ${fmtT(slot.startsAt)}` : "Pick a time"}
+                <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !ready || viewing} onClick={book}>
+                  {busy
+                    ? "Booking…"
+                    : manual
+                      ? (manualReady ? `Book ${fmtDay(mDate)} at ${fmtClock(mTime)}` : "Pick a date and a time")
+                      : (slot ? `Book ${fmtDay(slot.date)} at ${fmtT(slot.startsAt)}` : "Pick a time")}
                 </button>
                 {host.slug && (
                   <a href={ssBookUrl(clientId, host.slug)}
@@ -4540,9 +4612,9 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
                 <div style={{ ...sub, marginTop: 7 }}>Booking isn't available while viewing another account.</div>
               )}
               <div style={{ ...sub, marginTop: 7 }}>
-                Booking this is the same as the customer doing it on the booking page — one diary, one
-                set of rules, and they get the same confirmation and calendar invite. There's no
-                separate "log a meeting", on purpose.
+                {manual
+                  ? `A time you pick yourself still goes in the same diary and still sends ${contact.name || "them"} the same confirmation and calendar invite. It just isn't a time the booking page would have offered.`
+                  : `Booking this is the same as the customer doing it on the booking page — one diary, one set of rules, and they get the same confirmation and calendar invite. There's no separate "log a meeting", on purpose.`}
               </div>
             </>
           )}

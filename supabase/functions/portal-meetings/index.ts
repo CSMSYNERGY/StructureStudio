@@ -4,7 +4,7 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { ownMeetingsOnly, type GateTable } from "../_shared/access.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
-import { availableSlots, widenBusy, parseDay } from "../_shared/meetingAvailability.ts";
+import { availableSlots, widenBusy, parseDay, zonedWallToUtc } from "../_shared/meetingAvailability.ts";
 import { sendMeetingEmail, claimConfirmation, bumpIcsSequence } from "../_shared/meetingSend.ts";
 import { denoVideoEnv, ensureConference, videoReadiness } from "../_shared/meetingVideo.ts";
 import {
@@ -955,14 +955,44 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
     case "book": {
       const typeId = typeof p.typeId === "string" ? p.typeId : null;
       const startsAt = typeof p.startsAt === "string" ? p.startsAt : null;
-      if (!typeId || !startsAt) return json({ error: "Pick a meeting type and a time." }, 400);
-      const startMs = Date.parse(startsAt);
-      if (!Number.isFinite(startMs)) return json({ error: "That is not a time we can read." }, 400);
+      // -- OVERRIDE (Carolyn 2026-11-04) --------------------------------------------------
+      // "I need the signed in user to be able to override the time slots and pick the
+      // specific time he wants even if it doesnt meet the rules of the calendar."
+      //
+      // A PICKED slot arrives as an ISO instant, because it came out of the availability
+      // engine and the engine speaks instants. A TYPED-IN time cannot: "Saturday at 7" means
+      // seven o'clock where the HOST is, and only the host's row knows what that is. So the
+      // override sends the wall clock and the conversion happens here, through the same
+      // `zonedWallToUtc` the engine uses - one implementation, DST gap included.
+      const override = p.override === true;
+      const wallDate = typeof p.date === "string" ? p.date.trim() : null;
+      const wallTime = typeof p.time === "string" ? p.time.trim() : null;
+      const typedIn = override && !!wallDate && !!wallTime;
+      if (!typeId || (!startsAt && !typedIn)) return json({ error: "Pick a meeting type and a time." }, 400);
 
       const loaded = await loadRules(scopedHostId!, typeId);
       if (!loaded) return json({ error: "That person or meeting type is not on this account." }, 404);
       const { host, type } = loaded;
       if (!type.active) return json({ error: "That meeting type isn't being offered." }, 409);
+
+      let startMs: number;
+      if (typedIn) {
+        const day = parseDay(wallDate!);
+        const hm = /^(\d{1,2}):(\d{2})$/.exec(wallTime!);
+        if (!day || !hm) return json({ error: "Give the date as a date and the time as a time." }, 400);
+        const hh = +hm[1], mm = +hm[2];
+        if (hh > 23 || mm > 59) return json({ error: "There is no such time of day." }, 400);
+        const utc = zonedWallToUtc(day.y, day.m, day.d, hh, mm, host.time_zone);
+        // The spring-forward gap: 02:30 never happens on the morning the clocks go forward,
+        // so there is no instant to book. Saying so beats booking an hour nobody meant.
+        if (utc === null) {
+          return json({ error: "The clocks go forward over that time, so it doesn't exist that day. Pick another." }, 400);
+        }
+        startMs = utc;
+      } else {
+        startMs = Date.parse(startsAt!);
+        if (!Number.isFinite(startMs)) return json({ error: "That is not a time we can read." }, 400);
+      }
 
       const name = String(p.customerName ?? "").trim();
       const email = p.customerEmail ? String(p.customerEmail).trim().slice(0, 254) : null;
@@ -976,7 +1006,9 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
 
       // 341: one look at the host's own Google / Outlook calendar, so a rep cannot book over
       // something put there in the last few minutes. Fails open: a slow provider never blocks.
-      if (await liveBusyCheck(admin, host.id,
+      // An override deliberately skips it: the person typing the time is looking at that
+      // same calendar, and "busy there" is the rule they are overriding.
+      if (!override && await liveBusyCheck(admin, host.id,
         new Date(startMs - type.buffer_before_minutes * 60_000).toISOString(),
         new Date(endMs + type.buffer_after_minutes * 60_000).toISOString(), denoVideoEnv())) {
         return json({ error: "That time is busy on " + host.public_name + "'s own calendar. Pick another.", code: "slot_taken" }, 409);
@@ -1002,15 +1034,21 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         p_created_by: userId,
         p_buffer_before_minutes: type.buffer_before_minutes,
         p_buffer_after_minutes: type.buffer_after_minutes,
+        // 358: lets the booking through while the host is marked away. It does NOT relax the
+        // overlap check - two meetings on one person at one time stays impossible.
+        p_override: override,
       });
       if (be) throw be;
       if (!booked) {
         return json({
-          error: "That time was just taken. Pick another and it'll go straight in.",
+          error: override
+            ? "There's already a meeting at that time, so it can't go in twice. Pick another."
+            : "That time was just taken. Pick another and it'll go straight in.",
           code: "slot_taken",
         }, 409);
       }
-      await r.ctx.audit("meetings_book", 1, `${host.slug} ${new Date(startMs).toISOString()}`);
+      await r.ctx.audit("meetings_book", 1,
+        `${host.slug} ${new Date(startMs).toISOString()}${override ? " override" : ""}`);
 
       // ⚠️ THE SAME CONFIRMATION THE PUBLIC PAGE SENDS, through the same module. A rep
       // booking for a customer on the phone and the customer booking themselves must produce
