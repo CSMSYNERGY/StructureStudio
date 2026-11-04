@@ -15,6 +15,7 @@ import { buildQuotePdf } from "../_shared/quotePdf.ts";
 // The customer block, the logo and the per-builder validity on the quote documents (2026-10-05).
 import { fetchPdfLogo, pdfLogoSources } from "../_shared/pdfLogo.ts";
 import { readQuoteValidDays } from "../_shared/quoteValidity.ts";
+import { resolveGhlSenderPin } from "../_shared/ghlSender.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
@@ -728,13 +729,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
   // 5b. Resolve the GHL userId the estimate is assigned to. GHL's estimate API rejects an
   // empty userId ("userId should not be empty"). Resolution order:
+  //   0. client_settings.ghl_sender_user_id — the builder's pinned sender (migration 356). GHL
+  //      routes the email by this user: _shared/ghlSender.ts says why that matters.
   //   1. products[0].createdBy   — borrow from an existing product (how prod/Junior Barns works)
   //   2. GET /users/?locationId= — first user in the location
   // If both come up empty (e.g. a brand-new GHL location with no products and no assigned
   // users), we fail early with an actionable message instead of GHL's cryptic 422. In SS mode
   // no GHL estimate is ever created, so the id stays "" and nothing requires it (the contact
   // upsert and the opportunity never take a userId).
-  let dynamicUserId = (products[0]?.createdBy) || "";
+  const senderPin = invoiceInGhl
+    ? await resolveGhlSenderPin(supabase, clientId, locationId, ghlHeaders)
+    : { userId: "", stale: false };
+  if (senderPin.stale) {
+    // Severity error on purpose: the quote still goes out, but as the default user, so its email
+    // may be back on the route the pin was set to avoid, and nothing else would say so.
+    await logEdgeError({
+      fn: "submit-estimate", req, clientId, code: "ghl_sender_pin_stale",
+      message: "client_settings.ghl_sender_user_id names a user this GHL location no longer lists; sent as the default user",
+      context: { designId: String(designId) },
+    }).catch(() => {});
+  }
+  let dynamicUserId = senderPin.userId || (products[0]?.createdBy) || "";
   if (invoiceInGhl && !dynamicUserId) {
     try {
       const r = await fetch(
