@@ -10,6 +10,7 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { repReplyTo } from "../_shared/repReplyTo.ts";
 import { changeOrderEmail, estimateEmail, tenantStylePhotoUrl } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
+import { enqueueGhlEmailCheck } from "../_shared/ghlEmailCheck.ts";
 import { buildFormalEstimatePdf, pdfCustomerFrom } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 // The customer block, the logo and the per-builder validity on the quote documents (2026-10-05).
@@ -4106,6 +4107,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           liveMode: true,
           sentTo: { email: recipients },
         };
+        // Before the POST: GHL adds the email row while answering it, and the check finds that row
+        // by its time.
+        const sendStartedAt = new Date().toISOString();
         const r = await fetch(
           `https://services.leadconnectorhq.com/invoices/estimate/${estimateId}/send`,
           { method: "POST", headers: ghlHeaders, body: JSON.stringify(sendBody) }
@@ -4126,7 +4130,29 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             message: `GHL estimate email send failed (${r.status}): ${sendRaw.slice(0, 2000)}`,
             context: { designId: String(designId) },
           });
-        } else console.log("Estimate send OK:", r.status);
+        } else {
+          console.log("Estimate send OK:", r.status);
+          // A 201 means GHL took the request, not that the email left. ghl-email-check comes back to
+          // read what happened (_shared/ghlEmailCheck.ts). A failure to queue is logged and goes no
+          // further: the quote has already gone to GHL.
+          if (contactId && recipients.length) {
+            const queued = await enqueueGhlEmailCheck(supabase, {
+              clientId,
+              shortCode: String(designId),
+              estimateId,
+              contactId: String(contactId),
+              sendStartedAt,
+              testInbox: Boolean(redirectToTestInbox),
+            });
+            if (!queued.ok) {
+              logEdgeError({
+                fn: "submit-estimate", req, clientId, code: "ghl_email_check_enqueue_failed",
+                message: `queueing the quote email check failed: ${queued.error}`,
+                context: { designId: String(designId) },
+              }).catch(() => {});
+            }
+          }
+        }
       }
     } else {
       sendDebug.body = "no estimateId after create/update";

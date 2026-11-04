@@ -365,6 +365,42 @@ describe("the single every-minute tick", () => {
     expect(net.rpcCalls("usage_charges_enqueue")).toHaveLength(0); // cost capture off (helpers)
   });
 
+  it("the quote email check asks the edge function on :03, :08, :13 ... and on no other minute", async () => {
+    const net = new FakeNet().install();
+    net.on("GET", /\/health\?warm=1/, () => jsonRes({ ok: true, warm: true }));
+    net.on("GET", /\/Recordings\.json\?/, () => jsonRes({ recordings: [], next_page_uri: null }));
+    net.on("POST", /\/functions\/v1\/meeting-reminders$/, () => jsonRes({ ok: true }));
+    net.on("POST", /\/functions\/v1\/crm-rules-tick$/, () => jsonRes({ ok: true }));
+    net.on("POST", /\/functions\/v1\/ghl-email-check$/, () => jsonRes({ ok: true }));
+    const env = makeEnv();
+    const run = async (iso: string) => { const c = new FakeCtx(); await worker.scheduled(tick(iso), env, c as unknown as ExecutionContext); await c.settle(); };
+    const asked = () => net.to(/\/functions\/v1\/ghl-email-check$/);
+
+    for (const minute of ["00", "01", "02", "04", "05"]) await run(`2026-09-29T10:${minute}:00Z`);
+    expect(asked()).toHaveLength(0);
+
+    await run("2026-09-29T10:03:00Z");
+    expect(asked()).toHaveLength(1);
+    expect(asked()[0].headers.get("authorization")).toBe(`Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`);
+    expect(asked()[0].headers.get("apikey")).toBe(env.SUPABASE_SERVICE_ROLE_KEY);
+
+    await run("2026-09-29T10:08:00Z");
+    expect(asked()).toHaveLength(2);
+  });
+
+  it("a quote email check that fails leaves a fault in app_errors and never stops the tick", async () => {
+    const net = new FakeNet().install();
+    net.on("GET", /\/health\?warm=1/, () => jsonRes({ ok: true, warm: true }));
+    net.on("POST", /\/functions\/v1\/ghl-email-check$/, () => jsonRes({ error: "boom" }, 500));
+    net.rest("POST", "app_errors", () => []);
+    const c = new FakeCtx();
+    await worker.scheduled(tick("2026-09-29T10:03:00Z"), makeEnv(), c as unknown as ExecutionContext);
+    await c.settle();
+    const faults = net.writes("app_errors").map((s) => s.json);
+    expect(faults.some((f) => f?.code === "ghl_email_check_failed")).toBe(true);
+    expect(faults.some((f) => f?.code === "cron_failed")).toBe(false);
+  });
+
   it("the usage charges run on :02, :07, :12 ... and on no other minute", async () => {
     const net = new FakeNet().install();
     net.on("GET", /\/health\?warm=1/, () => jsonRes({ ok: true, warm: true }));

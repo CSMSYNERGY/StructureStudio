@@ -7,6 +7,14 @@
 // paged by `page` or by the last contact's `searchAfter`, with rate limits and refusals on demand.
 // Used by _shared/ghlContactImport.test.ts and _test_stubs/ghlContactImportWiring_test.ts.
 //
+// And the three reads the quote email check makes (2026-11-04, migration 357): conversation search,
+// a conversation's email rows, one email. These answer the way a tenant's stored key does, NOT the
+// way a browser session does: no `events`, no channel, no attachments unless a test plants them, and
+// `pending` for the silent failure. Every row and email also carries the planted CUSTOMER values, so
+// a test can prove none of them reach a report. The email route answers only to
+// meta.email.messageIds[0]; the row's own id gets the same 400 GHL gives. Used by
+// _shared/ghlEmailCheck.test.ts and _test_stubs/ghlEmailCheckWiring_test.ts.
+//
 // Dependency-free, so the self-contained _shared suite can use it too. It answers only the URLs
 // those reads build and throws on anything else, so a new CRM call fails a test instead of being
 // answered by accident. Ids are made up.
@@ -21,6 +29,36 @@ export type FakeContact = {
   dnd?: boolean; dndSettings?: Record<string, { status?: string }>;
   [k: string]: unknown;
 };
+
+/** Customer values planted in every conversation answer, for tests that prove they go no further. */
+export const CUSTOMER = {
+  name: "Planted Customer Name",
+  email: "planted.customer@example.test",
+  phone: "+15555550142",
+  subject: "Planted quote subject",
+  body: "Planted email body",
+  fileUrl: "https://planted.example.test/floor-plan.pdf",
+};
+
+/** One outbound email as the two routes answer it through a stored key. */
+export type FakeEmail = {
+  /** The message row's own id. The email route refuses it. */
+  rowId: string;
+  /** meta.email.messageIds[0]. Leave undefined for a row with no ids. */
+  emailId?: string;
+  dateAdded: string;
+  direction?: string;
+  /** The row's status, which the key often leaves null. */
+  rowStatus?: string | null;
+  rowError?: string;
+  /** The email route's status and error. */
+  status?: string | null;
+  error?: string;
+  /** Only when a test plants it: the key does not show one. */
+  channel?: string;
+};
+export type FakeConversation = { id: string; contactId: string; emails: FakeEmail[] };
+export type ConversationRead = { path: string; auth: string | null; version: string | null };
 
 export type GhlWorld = {
   estimates: FakeEstimate[];
@@ -50,16 +88,28 @@ export type GhlWorld = {
   stuckSearchAfter?: boolean;
   /** Leave `total` out of the answer. */
   noContactTotal?: boolean;
+  /** The location's conversations, for the three quote email check reads. */
+  conversations?: FakeConversation[];
+  /** Answer this status on this route, as GHL does for a missing scope (401) or a rate limit (429). */
+  failConversationRoute?: { route: "search" | "messages" | "email"; status: number };
+  /** The email route's answer with no `emailMessage` wrapper. Earlier reads handled both shapes. */
+  bareEmailAnswer?: boolean;
 };
 
 export type ContactSearch = { method: string; body: Record<string, unknown>; auth: string | null; version: string | null };
-export type GhlTrace = { calls: string[]; inFlight: number; maxInFlight: number; contactSearches: ContactSearch[] };
+export type GhlTrace = {
+  calls: string[];
+  inFlight: number;
+  maxInFlight: number;
+  contactSearches: ContactSearch[];
+  conversationReads: ConversationRead[];
+};
 
 const BASE = "https://services.leadconnectorhq.com";
 const PAGE = 100;
 
 export function ghlFake(world: GhlWorld): { fetch: typeof fetch; trace: GhlTrace } {
-  const trace: GhlTrace = { calls: [], inFlight: 0, maxInFlight: 0, contactSearches: [] };
+  const trace: GhlTrace = { calls: [], inFlight: 0, maxInFlight: 0, contactSearches: [], conversationReads: [] };
   const answer = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -94,6 +144,92 @@ export function ghlFake(world: GhlWorld): { fetch: typeof fetch; trace: GhlTrace
         : { ...c }
     );
     return answer(world.noContactTotal ? { contacts: page } : { contacts: page, total: pool.length });
+  };
+
+  // The answers below keep the customer's values in, as GHL's do: a check that copied a whole
+  // answer into a report would carry them, and the test looks for exactly that.
+  const conversationRoute = (u: URL): Response | null => {
+    const pool = world.conversations ?? [];
+    const fail = (route: "search" | "messages" | "email") =>
+      world.failConversationRoute?.route === route
+        ? answer({ statusCode: world.failConversationRoute.status, message: "The token is not authorized for this scope." }, world.failConversationRoute.status)
+        : null;
+
+    if (u.pathname === "/conversations/search") {
+      const failed = fail("search");
+      if (failed) return failed;
+      if (!u.searchParams.get("locationId")) return answer({ message: "locationId is required" }, 422);
+      const contactId = u.searchParams.get("contactId") ?? "";
+      const found = pool.filter((c) => c.contactId === contactId);
+      if (!found.length) return answer({ canonicalCode: "CONVERSATIONS_CONTACT_NOT_FOUND", message: `Contact not found for id:${contactId}` }, 400);
+      const limit = Number(u.searchParams.get("limit") ?? 20);
+      return answer({
+        conversations: found.slice(0, limit).map((c) => ({
+          id: c.id, contactId: c.contactId, fullName: CUSTOMER.name, contactName: CUSTOMER.name, email: CUSTOMER.email, phone: CUSTOMER.phone,
+        })),
+        total: found.length,
+      });
+    }
+
+    const email = /^\/conversations\/messages\/email\/([^/]+)$/.exec(u.pathname);
+    if (email) {
+      const failed = fail("email");
+      if (failed) return failed;
+      const id = decodeURIComponent(email[1]);
+      const e = pool.flatMap((c) => c.emails).find((x) => x.emailId === id);
+      if (!e) return answer({ canonicalCode: "CONVERSATIONS_EMAIL_NOT_FOUND", message: `Email message does not exist with id ${id}`, statusCode: 400 }, 400);
+      const detail = {
+        id,
+        dateAdded: e.dateAdded,
+        direction: e.direction ?? "outbound",
+        to: [CUSTOMER.email],
+        from: `${CUSTOMER.name} <${CUSTOMER.email}>`,
+        subject: CUSTOMER.subject,
+        body: CUSTOMER.body,
+        snippet: CUSTOMER.body,
+        files: [CUSTOMER.fileUrl],
+        attachmentsMetadata: [],
+        ...(e.status ? { status: e.status } : {}),
+        ...(e.error ? { error: e.error } : {}),
+        ...(e.channel ? { meta: { email: { channel: e.channel } } } : {}),
+      };
+      return answer(world.bareEmailAnswer ? detail : { emailMessage: detail });
+    }
+
+    const messages = /^\/conversations\/([^/]+)\/messages$/.exec(u.pathname);
+    if (messages) {
+      const failed = fail("messages");
+      if (failed) return failed;
+      if (u.searchParams.get("type") !== "TYPE_EMAIL") throw new Error(`the fake CRM only knows TYPE_EMAIL rows, got ${u.href}`);
+      const conv = pool.find((c) => c.id === decodeURIComponent(messages[1]));
+      if (!conv) return answer({ canonicalCode: "CONVERSATIONS_CONVERSATION_NOT_FOUND", message: "No conversation found" }, 400);
+      const limit = Number(u.searchParams.get("limit") ?? 20);
+      const rows = [...conv.emails]
+        .sort((a, b) => b.dateAdded.localeCompare(a.dateAdded))
+        .slice(0, limit)
+        .map((e) => ({
+          id: e.rowId,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          dateAdded: e.dateAdded,
+          direction: e.direction ?? "outbound",
+          additionalToEmail: CUSTOMER.email,
+          body: CUSTOMER.body,
+          ...(e.rowStatus ? { status: e.rowStatus } : {}),
+          ...(e.rowError ? { error: e.rowError } : {}),
+          meta: {
+            email: {
+              name: CUSTOMER.name,
+              email: CUSTOMER.email,
+              subject: CUSTOMER.subject,
+              messageIds: e.emailId ? [e.emailId] : [],
+              ...(e.channel ? { channel: e.channel } : {}),
+            },
+          },
+        }));
+      return answer({ messages: { lastMessageId: rows[rows.length - 1]?.id ?? null, nextPage: false, messages: rows } });
+    }
+    return null;
   };
 
   const route = (u: URL): Response => {
@@ -147,6 +283,12 @@ export function ghlFake(world: GhlWorld): { fetch: typeof fetch; trace: GhlTrace
         return searchContacts(body);
       }
       if (method !== "GET") throw new Error(`the fake CRM has no ${method} ${u.pathname}`);
+      if (u.pathname.startsWith("/conversations/")) {
+        const h = new Headers(init?.headers);
+        trace.conversationReads.push({ path: u.pathname + u.search, auth: h.get("authorization"), version: h.get("version") });
+        const answered = conversationRoute(u);
+        if (answered) return answered;
+      }
       return route(u);
     } finally {
       trace.inFlight--;

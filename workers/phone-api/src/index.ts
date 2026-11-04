@@ -46,6 +46,7 @@ import { runTranscriptions } from "./cron/transcribe";
 import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
 import { runMeetingReminders } from "./cron/meetingReminders";
 import { runCrmRules } from "./cron/crmRules";
+import { runGhlEmailCheck } from "./cron/ghlEmailCheck";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_DAILY = "0 9 * * *";
@@ -82,6 +83,12 @@ export const MEETINGS_MINUTE_MOD5 = 4;
  * minutes, and a queued message is retried on the next tick.
  */
 export const CRM_RULES_MINUTE_MOD5 = 1;
+/**
+ * The quote email check (migration 357), every five minutes. A fourth offset for the same reason
+ * as the others: it can make up to CHECKS_PER_RUN x 3 calls to GHL, through the edge function.
+ * Five minutes is well inside what it cares about, since each email is read at about 5 and 60 minutes.
+ */
+export const GHL_EMAIL_CHECK_MINUTE_MOD5 = 3;
 
 // ── Twilio ──────────────────────────────────────────────────────────────────────────
 
@@ -323,6 +330,7 @@ export default {
     const usageDue = tick && at.getUTCMinutes() % 5 === USAGE_MINUTE_MOD5;
     const meetingsDue = tick && at.getUTCMinutes() % 5 === MEETINGS_MINUTE_MOD5;
     const crmRulesDue = tick && at.getUTCMinutes() % 5 === CRM_RULES_MINUTE_MOD5;
+    const ghlEmailCheckDue = tick && at.getUTCMinutes() % 5 === GHL_EMAIL_CHECK_MINUTE_MOD5;
     const run = async () => {
       if (tick) await job("keep_warm", () => keepWarm(env));
       if (sweepDue) {
@@ -345,6 +353,11 @@ export default {
         // asked for. The same borrowed scheduler as the reminders above and for the same reason —
         // pg_cron is not installed — so read cron/crmRules.ts before moving it.
         await job("crm_rules", () => runCrmRules(env));
+      }
+      if (ghlEmailCheckDue) {
+        // What became of quote emails GHL accepted (migration 357). The same borrowed scheduler, so
+        // read cron/ghlEmailCheck.ts before moving it.
+        await job("ghl_email_check", () => runGhlEmailCheck(env));
       }
       if (dailyDue) {
         await job("retention", () => retention(env));

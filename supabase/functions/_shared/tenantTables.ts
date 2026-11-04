@@ -71,6 +71,8 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   crm_rule_actions: { fate: "cascade", parent: "crm_rules", export: true, why: "What one rule does, in order." },
   crm_rule_runs: { fate: "cascade", parent: "crm_rules", export: true, why: "The run log, and the once-per-card guard." },
   crm_rule_outbox: { fate: "cascade", parent: "crm_rule_runs", export: true, why: "Texts and emails a rule queued (cascades from the run, which cascades from the rule)." },
+  // 357: GHL ids and a status word, no customer text, so nothing worth exporting.
+  ghl_email_checks: { fate: "wipe", why: "What became of each quote email GHL accepted (our own monitoring)." },
   // Migration 330. The builder's own fields on a contact and on a deal, and their relabels of
   // ours. WIPE: it is per-tenant configuration, like the pipelines and statuses above, and a
   // recreated slug must not inherit the old builder's field list. Exported, because the VALUES

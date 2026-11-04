@@ -334,3 +334,6 @@ verify_jwt = true
 
 [functions.crm-rules-tick]
 verify_jwt = true
+
+[functions.ghl-email-check]
+verify_jwt = true
