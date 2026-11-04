@@ -1229,18 +1229,58 @@ const FUNCTIONS_DIR = "supabase/functions";
 // DEP0190 deprecation warning to stderr, and this gate's contract is that zero output means
 // go — a permanent warning on every clean push would train everyone to ignore its output.
 //
-// EVERY ARG MUST BE SPACE-FREE: the ENOENT retry below joins them into one command string
-// (an args array there would reintroduce DEP0190). Callers pass relative paths with `cwd`
-// rather than absolute ones, which keeps that true even under a username with a space.
+// The ENOENT retry below joins the args into one command string (an args array there would
+// reintroduce DEP0190), so an arg holding a space is quoted by hand. Unquoted, --allow-read=<root>
+// under a path like "D:\New folder\..." splits in two and deno takes the rest for a test file
+// ("Import ... failed, not found"), failing every group with nothing wrong in any test.
 function runDeno(args, cwd) {
   const opts = { encoding: "utf8", ...(cwd ? { cwd } : {}) };
   const res = spawnSync("deno", args, opts);
   // Windows: a scoop/choco/npm-shim install is deno.cmd, which CreateProcess will not
   // resolve. Only then is a shell worth the trouble.
   if (res.error && res.error.code === "ENOENT") {
-    return spawnSync(["deno", ...args].join(" "), { ...opts, shell: true });
+    const quoted = args.map((a) => (/\s/.test(a) ? `"${a}"` : a));
+    return spawnSync(["deno", ...quoted].join(" "), { ...opts, shell: true });
   }
   return res;
+}
+
+// That retry goes through cmd.exe, which refuses a command line over 8191 characters with "The
+// command line is too long". No test has run at that point, yet it read as "deno test failed in
+// _test_stubs" (2026-11-04, 174 files). Finding the real deno.exe would only move the wall: it
+// stops at 32767 (ENAMETOOLONG), and _test_stubs gained 108 files in October 2026 alone. So every
+// file list runs in batches that fit, on every platform, which means the path CI exercises is the
+// path this machine runs. 7000 leaves room for what the shim adds: its own path, and the quotes above.
+const DENO_COMMAND_LIMIT = 7000;
+
+// In order, every file exactly once, no empty batch. Pure, so --self-test can check it directly.
+function denoBatches(args, files) {
+  const base = ["deno", ...args].join(" ").length;
+  const batches = [];
+  let used = Infinity;
+  for (const f of files) {
+    if (used + 1 + f.length > DENO_COMMAND_LIMIT) {
+      batches.push([]);
+      used = base;
+    }
+    batches[batches.length - 1].push(f);
+    used += 1 + f.length;
+  }
+  return batches;
+}
+
+// Runs `deno <args> <files>` batch by batch and returns one error per failed batch, so a failure
+// in any batch fails the gate and the batches after it still run and report. A run that never
+// finished (ENOBUFS on a flood of output, say) has status null and no verdict, and says so,
+// rather than printing an empty "failed" that reads like a broken test.
+function denoFailures(args, files, cwd, what) {
+  return denoBatches(args, files).flatMap((batch) => {
+    const res = runDeno([...args, ...batch], cwd);
+    if (res.status === 0) return [];
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
+    const why = res.error ? `deno did not finish, so this is not a test verdict: ${res.error.message}\n${out}` : out;
+    return [`edge functions: deno ${what} (${batch.length} of ${files.length} file(s))\n${why}`];
+  });
 }
 
 // One entrypoint per function directory. `_shared/` is skipped because it has no index.ts
@@ -1893,29 +1933,21 @@ function denoInstalled() {
 // Returns { errors, skipped, why }. Deno is not an npm devDependency, so a teammate may
 // simply not have it: warn and continue, mirroring the hook's freshness check failing open
 // when origin is unreachable. A gate that makes the repo unpushable is worse than the bugs
-// it catches.
-function denoCheck() {
-  const entrypoints = edgeEntrypoints();
+// it catches. The parameters exist so --self-test can drive it on a fixture.
+function denoCheck(entrypoints = edgeEntrypoints(), cwd = join(root, FUNCTIONS_DIR)) {
   if (!entrypoints.length) return { errors: [], skipped: true, why: `no function entrypoints under ${FUNCTIONS_DIR}/` };
   if (!denoInstalled()) return { errors: [], skipped: true, why: "deno is not installed or not on PATH" };
 
-  // ONE invocation for all entrypoints, not one per function: the module graph and download
-  // cache are shared, which is ~3s for all of them versus ~30s serially.
+  // ONE invocation for all entrypoints while they fit on a command line (they take about a sixth
+  // of it today), not one per function: the module graph and download cache are shared, which is
+  // ~3s for all of them versus ~30s serially.
   //
   // --node-modules-dir=none is MANDATORY. This repo's own `npm install` (for the eslint
   // above) leaves a root node_modules that Deno then discovers and dies on — "Could not
   // find a matching package for 'npm:@supabase/realtime-js'". The functions are fine; the
   // resolver isn't. See the pre-push section of CLAUDE.md.
-  const args = ["check", "--quiet", "--node-modules-dir=none", ...entrypoints];
-  const res = runDeno(args, join(root, FUNCTIONS_DIR));
-  if (res.status === 0) return { errors: [], skipped: false, count: entrypoints.length };
-
-  const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
-  return {
-    errors: [`edge functions: deno check failed (${entrypoints.length} entrypoint(s) checked)\n${out}`],
-    skipped: false,
-    count: entrypoints.length,
-  };
+  const args = ["check", "--quiet", "--node-modules-dir=none"];
+  return { errors: denoFailures(args, entrypoints, cwd, "check failed"), skipped: false, count: entrypoints.length };
 }
 
 // ── Edge functions: deno test ────────────────────────────────────────────────────────────
@@ -2003,8 +2035,8 @@ function testGroups() {
 }
 
 
-function denoTest() {
-  const groups = testGroups();
+// `groups` is a parameter so --self-test can drive it on a fixture.
+function denoTest(groups = testGroups()) {
   const total = groups.reduce((n, g) => n + g.files.length, 0);
   if (!total) return { errors: [], skipped: true, why: `no test files under ${FUNCTIONS_DIR}/_shared/ or ${PHONE_TESTS_DIR}/` };
   if (!denoInstalled()) return { errors: [], skipped: true, why: "deno is not installed or not on PATH" };
@@ -2023,12 +2055,7 @@ function denoTest() {
     // own headers document (g.readFlag); the edge groups keep the repo-scoped grant.
     const args = ["test", "--quiet", "--allow-env", g.readFlag ?? `--allow-read=${root}`, "--node-modules-dir=none"];
     if (g.importMap) args.push(`--import-map=${g.importMap}`);
-    args.push(...g.files);
-    const res = runDeno(args, g.cwd ?? join(root, FUNCTIONS_DIR));
-    if (res.status !== 0) {
-      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
-      errors.push(`edge functions: deno test failed in ${g.label} (${g.files.length} file(s))\n${out}`);
-    }
+    errors.push(...denoFailures(args, g.files, g.cwd ?? join(root, FUNCTIONS_DIR), `test failed in ${g.label}`));
   }
   return { errors, skipped: false, count: total, groups: groups.length };
 }
@@ -3110,8 +3137,7 @@ if (process.argv.includes("--self-test")) {
   }
   const tmp = mkdtempSync(join(tmpdir(), "ss-preflight-"));
   try {
-    // Written to a temp dir and checked as a RELATIVE path with cwd — the absolute path can
-    // contain a space (any username with one), which runDeno's shell fallback cannot carry.
+    // Written to a temp dir and checked as a RELATIVE path with cwd, the way the gate passes its own files.
     writeFileSync(join(tmp, "bad.ts"), 'const n: number = "not a number";\nconsole.log(n);\n');
     const res = runDeno(["check", "--quiet", "--node-modules-dir=none", "bad.ts"], tmp);
     if (res.status === 0) {
@@ -3171,6 +3197,60 @@ if (process.argv.includes("--self-test")) {
     rmSync(tmpT, { recursive: true, force: true });
   }
   console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered (${phoneGroup.files.length} in ${PHONE_TESTS_DIR})`);
+
+  // ── Deno's file lists vs the command-line limit (2026-11-04) ───────────────
+  // The batching on its own first, because it holds on every platform: a list far over the limit,
+  // under a long --allow-read, comes back split, in order, complete, and every batch fits. Plus
+  // the constant itself, since Linux CI would never see cmd.exe refuse a limit raised past it.
+  const longArgs = ["test", `--allow-read=${"r".repeat(300)}`];
+  const longFiles = Array.from({ length: 2000 }, (_, i) => `_shared/_test_stubs/${"x".repeat(60)}_${i}_test.ts`);
+  const longSplit = denoBatches(longArgs, longFiles);
+  const batchFits = (b) => ["deno", ...longArgs, ...b].join(" ").length <= DENO_COMMAND_LIMIT;
+  if (DENO_COMMAND_LIMIT >= 8191 || longSplit.length < 2 || !longSplit.every((b) => b.length && batchFits(b))
+    || longSplit.flat().join() !== longFiles.join()) {
+    console.error("self-test FAILED: denoBatches did not split a long file list into complete, ordered batches under cmd.exe's 8191-character limit");
+    process.exit(1);
+  }
+  // Then the real runner, on a real list over 8191 characters, in a directory with a space, through
+  // whatever `deno` is on this machine. On the npm shim that is cmd.exe, so if batching or the
+  // quoting ever goes, the clean run below stops being clean ("The command line is too long", or
+  // "Import ... not found"). The shipped.txt read proves the quoted --allow-read reached deno.
+  const tmpL = mkdtempSync(join(tmpdir(), "ss preflight long-"));
+  try {
+    const passes = 'Deno.test("reads a granted file", () => { Deno.readTextFileSync("shipped.txt"); });\n';
+    const throws = 'Deno.test("deliberately failing", () => { throw new Error("boom"); });\n';
+    const names = Array.from({ length: 100 }, (_, i) => `${"a".repeat(80)}_${i}_test.ts`);
+    writeFileSync(join(tmpL, "shipped.txt"), "x");
+    for (const n of names) writeFileSync(join(tmpL, n), passes);
+    if (names.join(" ").length <= 8191) {
+      console.error("self-test FAILED: the long-list fixture no longer exceeds cmd.exe's limit, so it proves nothing");
+      process.exit(1);
+    }
+    const group = { label: "fixture", files: names, importMap: null, cwd: tmpL, readFlag: `--allow-read=${tmpL}` };
+    const clean = [...denoTest([group]).errors, ...denoCheck(names, tmpL).errors];
+    if (clean.length) {
+      console.error(`self-test FAILED: a passing file list over the command-line limit did not pass:\n${clean.join("\n").slice(0, 2000)}`);
+      process.exit(1);
+    }
+    // A failure in the FIRST batch and one in the LAST: both must be reported, so a failed batch
+    // fails the gate wherever it falls, and does not hide the batches after it.
+    writeFileSync(join(tmpL, names[0]), throws);
+    writeFileSync(join(tmpL, names[names.length - 1]), throws);
+    const red = denoTest([group]).errors;
+    if (red.length !== 2 || !red.every((e) => /deno test failed in fixture/.test(e) && /deliberately failing/.test(e))) {
+      console.error(`self-test FAILED: failures in the first and last batch were not both reported (${red.length} error(s))`);
+      process.exit(1);
+    }
+    writeFileSync(join(tmpL, names[names.length - 1]), 'const n: number = "not a number";\nconsole.log(n);\n');
+    const redCheck = denoCheck(names, tmpL).errors;
+    if (redCheck.length !== 1 || !/deno check failed/.test(redCheck[0])) {
+      console.error(`self-test FAILED: a type error in the last batch did not fail deno check (${redCheck.length} error(s))`);
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpL, { recursive: true, force: true });
+  }
+  console.log("self-test passed: a deno file list over cmd.exe's limit runs in batches, and a failure in any batch fails the gate");
 
   // ── The migration-test step (tests/sql, PGlite) ────────────────────────────
   // Three directions, on fixture directories so nothing needs PGlite installed: with no
