@@ -3622,33 +3622,45 @@ if (process.argv.includes("--self-test")) {
     for (const e of rmClean) console.error("  " + e);
     process.exit(1);
   }
+  // Each case below breaks a real file by editing its text. An edit that matches nothing hands the
+  // rule its clean input, and the case then blames the rule for a fixture that went stale, so a
+  // missing edit stops here and names the text. The edits stay inside one line because line endings
+  // differ by file: crmRules.ts is CRLF on Windows, the .jsx is LF everywhere.
+  const rmEdit = (text, find, to) => {
+    const edited = text.replace(find, to);
+    if (edited === text) {
+      console.error(`self-test: could not find ${find} in the rule vocabularies — update the self-test`);
+      process.exit(1);
+    }
+    return edited;
+  };
   // (a) an action the editor offers and the server does not: the builder picks it from the list
   //     and is told to pick one from the list.
-  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmTs.replace('"create_card", ', ""), pip: rmPip })
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, '"create_card",', ""), pip: rmPip })
         .some((e) => /"create_card" is in SS_RULE_ACTIONS/.test(e))) {
     console.error("self-test FAILED: an action kind missing from the server's list passed the rule mirror");
     process.exit(1);
   }
   // (b) the other way: the server accepts something nothing can ask for, which reads as unbuilt.
-  if (!checkRuleMirror({}, { jsx: rmJsx.replace('  ["reopen", "Reopen it if it was lost"],\n', ""), ts: rmTs, pip: rmPip })
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '  ["reopen", "Reopen it if it was lost"],', ""), ts: rmTs, pip: rmPip })
         .some((e) => /"reopen" is in RULE_ACTION_KINDS/.test(e))) {
     console.error("self-test FAILED: an action kind missing from the editor's list passed the rule mirror");
     process.exit(1);
   }
   // (c) a clock anchor dropped on the server side.
-  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmTs.replace(/^  last_contact:.*$/m, ""), pip: rmPip })
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, /^  last_contact:.*$/m, ""), pip: rmPip })
         .some((e) => /clock anchors: "last_contact"/.test(e))) {
     console.error("self-test FAILED: a dropped clock anchor passed the rule mirror");
     process.exit(1);
   }
   // (d) BLIND DETECTION. A renamed list must read as "this rule has gone blind", never as a pass
   //     — the exact failure checkAreaMirror was caught by.
-  if (!checkRuleMirror({}, { jsx: rmJsx.replace("const SS_RULE_ACTIONS = [", "const SS_RULE_ACTIONS_V2 = ["), ts: rmTs, pip: rmPip })
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, "const SS_RULE_ACTIONS = [", "const SS_RULE_ACTIONS_V2 = ["), ts: rmTs, pip: rmPip })
         .some((e) => /cannot read `SS_RULE_ACTIONS`/.test(e))) {
     console.error("self-test FAILED: a renamed SS_RULE_ACTIONS reported clean — the rule mirror is blind");
     process.exit(1);
   }
-  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmTs.replace("const RULE_ACTION_KINDS = [", "const RULE_ACTION_KINDS_V2 = ["), pip: rmPip })
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, "const RULE_ACTION_KINDS = [", "const RULE_ACTION_KINDS_V2 = ["), pip: rmPip })
         .some((e) => /cannot read `RULE_ACTION_KINDS`/.test(e))) {
     console.error("self-test FAILED: a renamed RULE_ACTION_KINDS reported clean — the rule mirror is blind");
     process.exit(1);
