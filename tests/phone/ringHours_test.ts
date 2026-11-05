@@ -243,7 +243,10 @@ Deno.test("inside Customer Hub a rep sees Phone and Meetings only; an owner sees
     assertEquals(nav.ssCustomerHubTabs({ access, phoneOffered: false }).map((t) => t[0]), ["meetings"], `${title}, calling not offered`);
   }
   assertEquals(nav.ssCustomerHubTabs({ isAdmin: true, access: PRESETS.sales_rep, phoneOffered: true }).map((t) => t[0]),
-    ["pipelines", "customer-login", "forms", "email-templates", "email", "sms", "phone", "meetings", "fields"]);
+    // AUTOMATIONS joined on 2026-11-04, straight after Pipelines. The rep assertions above are the
+    // other half of this and did NOT change: automations is settings_crm, which a rep does not hold,
+    // so it is filtered out for them exactly as the configuration tabs around it are.
+    ["pipelines", "automations", "customer-login", "forms", "email-templates", "email", "sms", "phone", "meetings", "fields"]);
   assertEquals(nav.ssCustomerHubTabs({ access: null, phoneOffered: false }).map((t) => t[0]).includes("phone"), false,
     "Phone stays hidden wherever calling is not offered");
 });
