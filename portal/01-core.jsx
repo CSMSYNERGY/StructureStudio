@@ -2850,7 +2850,7 @@ function EmbedCodeBlock({ clientId }) {
 // checklist's padlocked rows; keep the keys in step with _shared/featureCheck.ts's
 // FEATURE_KEYS, which is what the operator editor validates against.
 const SS_FEATURE_LABELS = {
-  schedule_builds:     { label: "Scheduling",           buyable: true },
+  schedule_builds:     { label: "Shed Scheduler",       buyable: true },
   quickbooks_sync:     { label: "QuickBooks Sync",      buyable: true },
   on_demand_pricing:   { label: "Real-Time Pricing",    buyable: true },
   crm:                 { label: "the Customer Hub",     buyable: true },
