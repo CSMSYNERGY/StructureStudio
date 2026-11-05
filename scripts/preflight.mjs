@@ -2151,6 +2151,39 @@ function denoTest(groups = testGroups()) {
   return { errors, skipped: false, count: total, groups: groups.length };
 }
 
+// ── The quick tests (2026-11-05) ─────────────────────────────────────────────────────────
+// Carolyn, 2026-11-05: "this was a small change... I need it completed." Her pushes kept failing
+// on tests that read the portal's shipped source. Some cut a block out of it and run that block
+// with only the names they list, so a new name inside the block is a ReferenceError even when the
+// portal works. Others pin an exact line or list. All of it came back only after the slow steps
+// had finished, so each round of fixing cost a whole gate, 5 to 10 rounds in a row.
+//
+// Those tests are about a fifth of the Deno files and take about 30 seconds of a gate that runs
+// 20 minutes or more, so they run right after the lint and a failure stops the gate there (see
+// FAST STOP below). The full `deno test` step still runs every one of them again. That path is
+// untouched on purpose: a push that gets through proves exactly what it proved before.
+const QUICK_TEST_SUBJECT = "portal/";
+// Pure, so --self-test can check it directly. Discovered from each test's own text rather than
+// listed, so a new test that reads the portal is quick from the day it lands.
+function quickTestGroups(groups, read) {
+  return groups
+    .map((g) => ({ ...g, files: g.files.filter((f) => read(g, f).includes(QUICK_TEST_SUBJECT)) }))
+    .filter((g) => g.files.length);
+}
+function readTestFile(g, f) {
+  return readFileSync(join(g.cwd ?? join(root, FUNCTIONS_DIR), f), "utf8");
+}
+// `npm run ship` reads "preflight:" and "push refused" as a real refusal, so it stops instead of
+// retrying as if it had lost a race. Keep both words in the first line.
+function refuseEarly(errors) {
+  if (!errors.length) return;
+  console.error(`preflight: ${errors.length} error(s) in the fast checks, push refused\n`);
+  for (const e of errors) console.error("  " + e);
+  console.error("\nThe slower checks did not run, so they may still find more. Fix the above and push again,");
+  console.error("or in a genuine emergency: git push --no-verify (and say so in the commit).");
+  process.exit(1);
+}
+
 // ── Migration tests: tests/sql/*.test.cjs (PGlite) ───────────────────────────────────────
 // Each file applies a migration to Postgres-in-WASM and drives it (migration254.test.cjs,
 // migration255.test.cjs). Their one dependency, @electric-sql/pglite, lives in tests/sql's OWN
@@ -3289,6 +3322,64 @@ if (process.argv.includes("--self-test")) {
   }
   console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered (${phoneGroup.files.length} in ${PHONE_TESTS_DIR})`);
 
+  // ── The quick tests and the fast stop (2026-11-05) ─────────────────────────
+  // The selection on its own: only files naming the subject, and each keeps how its group runs.
+  const quickPick = quickTestGroups(
+    [{ label: "a", files: ["reads.ts", "other.ts"], importMap: "m.json", cwd: "x", readFlag: "--allow-read" },
+      { label: "b", files: ["none.ts"], importMap: null }],
+    (_g, f) => (f === "reads.ts" ? 'new URL("../portal/01-core.jsx")' : "no source here"),
+  );
+  if (quickPick.length !== 1 || quickPick[0].files.join() !== "reads.ts" || quickPick[0].importMap !== "m.json"
+    || quickPick[0].cwd !== "x" || quickPick[0].readFlag !== "--allow-read") {
+    console.error("self-test FAILED: quickTestGroups did not keep only the files that read the portal, run as their group runs");
+    process.exit(1);
+  }
+  // On the real repo: the tests that cut the core block must be picked, or the failure this exists
+  // for goes back to arriving last. And it must stay a subset, or it has stopped being quick.
+  const quickFiles = quickTestGroups(groups, readTestFile).flatMap((g) => g.files);
+  for (const want of ["_shared/_test_stubs/tabClamp_test.ts", `${PHONE_TESTS_DIR}/ringHours_test.ts`]) {
+    if (!quickFiles.includes(want)) {
+      console.error(`self-test FAILED: the quick tests no longer include ${want}`);
+      process.exit(1);
+    }
+  }
+  if (quickFiles.length >= found.length) {
+    console.error(`self-test FAILED: the quick tests picked all ${found.length} test files, so they are not quick any more`);
+    process.exit(1);
+  }
+  // End to end on a fixture: a failing test that reads the portal fails the step, and one that
+  // does not is left for the full step.
+  const tmpQ = mkdtempSync(join(tmpdir(), "ss-preflight-quick-"));
+  try {
+    writeFileSync(join(tmpQ, "reads_test.ts"), '// portal/01-core.jsx\nDeno.test("quick one fails", () => { throw new Error("boom"); });\n');
+    writeFileSync(join(tmpQ, "other_test.ts"), 'Deno.test("slow one fails", () => { throw new Error("boom"); });\n');
+    const quickFixture = [{ label: "fixture", files: ["reads_test.ts", "other_test.ts"], importMap: null, cwd: tmpQ, readFlag: `--allow-read=${tmpQ}` }];
+    const quickRed = denoTest(quickTestGroups(quickFixture, readTestFile)).errors;
+    if (quickRed.length !== 1 || !/quick one fails/.test(quickRed[0]) || /slow one fails/.test(quickRed[0])) {
+      console.error(`self-test FAILED: the quick step did not run exactly the test that reads the portal (${quickRed.length} error(s))`);
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpQ, { recursive: true, force: true });
+  }
+  // Where they sit is the whole point: the first stop right after the lint and before the artifact
+  // check, the second before the first slow step, both behind the CI guard so the promotion's gate
+  // still reports everything.
+  const ownSource = readFileSync(join(root, "scripts", "preflight.mjs"), "utf8");
+  const atLint = ownSource.indexOf("\nconst errors = run(load());");
+  const atFirstStop = ownSource.indexOf("\n// ── FAST STOP");
+  const atFirstGuard = ownSource.indexOf("\nif (!process.env.CI) {", atFirstStop);
+  const atArtifacts = ownSource.indexOf("\nerrors.push(...await artifactCheck());");
+  const atSecondStop = ownSource.indexOf("\n// ── SECOND STOP");
+  const atSecondGuard = ownSource.indexOf("\nif (!process.env.CI) {", atSecondStop);
+  const atSlow = ownSource.indexOf("\nconst deno = denoCheck();");
+  if (atLint < 0 || atFirstStop < atLint || atFirstGuard < atFirstStop || atArtifacts < atFirstGuard
+    || atSecondStop < atArtifacts || atSecondGuard < atSecondStop || atSlow < atSecondGuard) {
+    console.error("self-test FAILED: the two early stops no longer sit where they save the time, behind their CI guards");
+    process.exit(1);
+  }
+  console.log(`self-test passed: ${quickFiles.length} of ${found.length} test files run first, and a failure there stops the gate before the slow steps`);
+
   // ── Deno's file lists vs the command-line limit (2026-11-04) ───────────────
   // The batching on its own first, because it holds on every platform: a list far over the limit,
   // under a long --allow-read, comes back split, in order, complete, and every batch fits. Plus
@@ -4122,7 +4213,24 @@ if (process.argv.includes("--self-test")) {
 
 const errors = run(load());
 
+// ── FAST STOP (2026-11-05) ───────────────────────────────────────────────────────────────
+// See "The quick tests". The lint above took seconds and so do these, so a failure in any of them
+// refuses the push now, before the artifact check (minutes) and the slow steps. Not under CI:
+// nobody is waiting on the promotion's gate, and its report should name everything it finds.
+if (!process.env.CI) {
+  errors.push(...checkMigrationNumbers(), ...denoTest(quickTestGroups(testGroups(), readTestFile)).errors);
+  refuseEarly(errors);
+}
+
 errors.push(...await artifactCheck());
+
+// ── SECOND STOP (2026-11-05) ─────────────────────────────────────────────────────────────
+// Same idea, one step later: the artifact check and the wording rules cost a few minutes, the
+// steps below cost the rest of the gate, so what has failed so far refuses the push here.
+if (!process.env.CI) {
+  errors.push(...checkEstimateWording(), ...checkCustomerHubWording());
+  refuseEarly(errors);
+}
 
 const deno = denoCheck();
 errors.push(...deno.errors);
