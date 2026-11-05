@@ -62,6 +62,8 @@ export const FEATURE_KEYS = [
   "on_demand_pricing",
   "crm",
   "self_serve_displays",
+  "smartbuild_sync",
+  "project_management",
 ];
 
 /** Features a subscription is the ONLY way into — no exempt/transition blanket, and no

@@ -30,9 +30,9 @@
 //      owner" suffix), the portal logs it as an INFO row (a refusal, not a fault), and the button
 //      is usable again.
 //
-// Monthly checks only ever look at PLAN-TILE toggles (button[data-plan-interval]). The Synergy CRM
-// card has its own Monthly/Yearly buttons; they are a display-only toggle beside an external
-// sign-up link, deliberately untouched, and must never satisfy a check here.
+// Monthly checks only ever look at PLAN-TILE toggles (button[data-plan-interval]). The tab once carried
+// an external "Synergy CRM" card whose own Monthly/Yearly buttons were display-only; it was
+// removed on 2026-11-04. The scoping stays: a non-plan toggle must never satisfy a check here.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the
 // portal-billing `status` answer has the real function's full shape (portal-billing/index.ts,
@@ -288,7 +288,7 @@ const tile = async (page, name) => (await tiles(page)).find((t) => t.name === na
 const tileLoc = (page, name) => page.locator(`[data-harness-tile="${name}"]`);
 // The plan tile's Monthly button: the data-plan-interval hook, else (an artifact older than the
 // hook) the tile's own button labelled Monthly. Both are scoped to ONE plan tile, so neither can
-// reach the Synergy CRM card.
+// reach any other toggle on the page.
 async function tileMonthly(page, name) {
   const t = tileLoc(page, name);
   const hooked = t.locator('button[data-plan-interval="monthly"]');
@@ -334,7 +334,7 @@ async function monthlyChecks(p, S, names) {
     monthly.length > 0 && monthly.every((h) => h.ariaDisabled === "true" && h.title === HOVER_TITLE && h.cursor === "not-allowed" && Number(h.opacity) < 1 && !h.disabledProp),
     JSON.stringify(monthly[0] || null));
   ok(`${p}: monthly: the Yearly toggles carry no such marking`, hooks.filter((h) => h.k === "annual").every((h) => h.ariaDisabled !== "true" && !h.title));
-  ok(`${p}: monthly: the hook is on plan tiles only (never the Synergy CRM card)`, hooks.length > 0 && hooks.every((h) => h.inTile));
+  ok(`${p}: monthly: the hook is on plan tiles only (never another toggle on the page)`, hooks.length > 0 && hooks.every((h) => h.inTile));
   const copy = await text(S.page);
   ok(`${p}: monthly: the tile copy says founding members pay yearly`, copy.includes("Founding members pay yearly"));
   for (const name of names.click) {

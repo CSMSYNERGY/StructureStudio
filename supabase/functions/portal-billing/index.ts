@@ -536,7 +536,20 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     return { cents: sources.reduce((a, x) => a + x.cents, 0), sources };
   };
 
-  const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
+  // THE GATE KEYS ON "ANY PAID FEATURE", NOT ON A REQUIRED ONE (2026-11-04). Simple Layout was
+  // `required` while StructureStudio was a shed-only product: no designer, nothing to let anyone
+  // into. It is not any more — a post-frame builder buys Customer Hub and SmartBuild Sync and
+  // never wants the designer, and the checkout used to refuse that cart outright. Migration 359
+  // clears the flag, so `plans.filter(p => p.required)` is now empty for every row.
+  //
+  // ⚠️ DO NOT restore a `requiredFeatures.length > 0` branch around this. An empty required list
+  // meant the whole gate was skipped and `entState` kept its "active" initialiser, so EVERY
+  // non-exempt tenant read as unlocked — a non-paying builder would get the entire portal and
+  // nothing would look wrong. Keying on the subscriptions themselves cannot fail that way.
+  //
+  // `featureState` is built from `subs` alone — operator grants never put an entry in it — so
+  // "has a usable entry" means "has paid for something", which is exactly the rule.
+  const gateStates = [...featureState.values()];
   // PAID-ONLY features: for a CUSTOMER, a real subscription is the only way in. The
   // transition blanket (`billing_exempt_until`) still does not cover these.
   //
@@ -653,27 +666,21 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   let graceEndsAt: string | null = null;
   if (internal) { entState = "exempt"; reason = "internal"; }
   else if (exempt) { entState = "exempt"; reason = "exempt"; }
-  else if (requiredFeatures.length > 0) {
-    // The gate turns on the REQUIRED feature(s) — today that's Simple Layout, which is
-    // the product itself; without it there is nothing to let them into.
-    const states = requiredFeatures.map((f) => featureState.get(f));
-    // cancelled_paid classifies as ACTIVE, not as a warning state: they paid for this
-    // period and nothing is wrong — the only difference is that no renewal will happen,
-    // which the Billing tab's cancelled row already shows.
-    if (states.some((s) => s?.state === "active" || s?.state === "cancelled_paid")) { entState = "active"; reason = "active"; }
-    else if (states.some((s) => s?.state === "grace")) {
-      entState = "grace"; reason = "past_due";
-      const ends = Math.max(...states.map((s) => s?.graceEnds ?? 0));
-      graceEndsAt = new Date(ends).toISOString();
-    } else {
-      entState = "locked";
-      const seen = requiredFeatures.flatMap((f) =>
-        subs.filter((s) => planById.get(s.plan_id)?.feature === f).map((s) => String(s.status)));
-      reason = seen.includes("past_due") ? "past_due"
-        : seen.includes("paused") ? "paused"
-        : seen.includes("cancelled") ? "cancelled"
-        : "never_paid";
-    }
+  // cancelled_paid classifies as ACTIVE, not as a warning state: they paid for this
+  // period and nothing is wrong — the only difference is that no renewal will happen,
+  // which the Billing tab's cancelled row already shows.
+  else if (gateStates.some((s) => s.state === "active" || s.state === "cancelled_paid")) { entState = "active"; reason = "active"; }
+  else if (gateStates.some((s) => s.state === "grace")) {
+    entState = "grace"; reason = "past_due";
+    graceEndsAt = new Date(Math.max(...gateStates.map((s) => s.graceEnds ?? 0))).toISOString();
+  } else {
+    // Nothing usable. A tenant who never subscribed has no subs at all and lands on never_paid.
+    entState = "locked";
+    const seen = subs.map((s) => String(s.status));
+    reason = seen.includes("past_due") ? "past_due"
+      : seen.includes("paused") ? "paused"
+      : seen.includes("cancelled") ? "cancelled"
+      : "never_paid";
   }
   // A dated free period rescues an otherwise-locked account, and ONLY that case: an active
   // or in-grace subscription already speaks for itself, and a permanent exemption was
@@ -686,10 +693,14 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     transitionEndsAt = new Date(exemptUntilMs).toISOString();
   }
 
-  // The required feature's price AS THIS TENANT WOULD PAY IT, so a transition banner can
-  // state the actual rate instead of sending them off to find it.
+  // The ENTRY price AS THIS TENANT WOULD PAY IT, so a transition banner can state an actual
+  // rate instead of sending them off to find it. It used to read `p.required`; nothing is
+  // required any more (see the gate above), so it names the entry feature directly. The field
+  // keeps its shipped name because the browser reads `entitlement.requiredRate` — it is a
+  // price to quote, NOT a statement that anything must be bought.
+  const ENTRY_RATE_FEATURE = "simple_layout";
   const requiredRate = (() => {
-    const rp = plans.filter((p) => p.required);
+    const rp = plans.filter((p) => p.feature === ENTRY_RATE_FEATURE);
     const mo = rp.find((p) => p.billing_interval === "monthly");
     const yr = rp.find((p) => p.billing_interval === "annual");
     const anchor = mo ?? yr;
@@ -1091,11 +1102,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         upgrade = { plan: p, credit: creditForBundle(p!.feature), supersedes: superseded };
       }
     }
-    // Required base (Simple Layout) must be covered — directly, via a bundle in the cart, or already live.
-    const cartCovers = new Set(chosen.flatMap((p) => expandFeature(p!.feature)));
-    if (!cartCovers.has("simple_layout") && !liveFeatures.has("simple_layout")) {
-      return json({ error: "Simple Layout is the required base plan — add it (or the Suite) to your selection." }, 400);
-    }
+    // NO REQUIRED BASE (2026-11-04). This used to refuse any cart that did not cover
+    // `simple_layout`. A post-frame builder buying only Customer Hub and SmartBuild Sync is a
+    // legitimate cart now, and that check was the one thing rejecting it. Nothing replaces it:
+    // each line is bought on its own, and `baseFailed` below can no longer trip, so one line
+    // failing at the gateway never skips the others.
 
     // ── The card, and who agreed (317) ───────────────────────────────────────────────────
     // A card on file is reused. A NEW card is no longer vaulted here, ahead of any charge: it
@@ -1268,10 +1279,12 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // gateway_plan_id survives in billing_plans only as the plan_name label sent below.
     const created: any[] = [];
     const failed: { planId: string; error: string }[] = [];
-    // Required base first: if Simple Layout cannot be started, charging for add-ons would
-    // take money for features behind a portal that is about to be locked.
-    const orderedChosen = [...chosen].sort((a, b) => Number(b!.required) - Number(a!.required));
-    let baseFailed = false;
+    // Cart order is the cart's own order. There USED to be a "required base first" sort and a
+    // `baseFailed` flag that skipped the rest of the cart when Simple Layout could not be
+    // started — both gone with the required base (2026-11-04). Every line now stands on its
+    // own: one feature failing at the gateway does not make the others unusable, and silently
+    // skipping a line the builder chose and could have had would be the wrong call.
+    const orderedChosen = [...chosen];
     let newCardTried = false;
     let newCardUnknown = false;
     for (const p of orderedChosen) {
@@ -1288,10 +1301,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       const ext = isUpgrade ? extendedRenewalOf(p!.billing_interval, chargeCents) : { at: renewalOf(p!.billing_interval), days: 0 };
       const renewal = ext.at;
 
-      if (baseFailed && !p!.required && !liveFeatures.has(requiredFeatures[0] ?? "")) {
-        failed.push({ planId: p!.id, error: "Skipped - the required base plan could not be started, and this feature would be unusable without it." });
-        continue;
-      }
       // A new card is stored by the first approved initial below. If that one was declined, the
       // card is not on file and its one-use token is spent: nothing else in this cart can be paid.
       if (!vault && newCardTried) {
@@ -1314,7 +1323,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       // a non-upgrade plan at zero is still refused exactly as before.
       if (firstCents === 0 && !isUpgrade) {
         failed.push({ planId: p!.id, error: "This account's discount makes this feature free - use the Non-billable setting instead of a 100% discount." });
-        if (p!.required) baseFailed = true;
         continue;
       }
 
@@ -1325,7 +1333,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         .select("id").eq("client_id", clientId).eq("plan_id", p!.id).eq("state", "closed_unknown").limit(1);
       if (unknownPrior && unknownPrior.length) {
         failed.push({ planId: p!.id, error: "A previous payment attempt for this feature could not be verified. To avoid a double charge, contact CSM Synergy before trying again." });
-        if (p!.required) baseFailed = true;
         continue;
       }
       // An 'open' attempt older than 10 minutes means a checkout DIED mid-flight — the one
@@ -1344,7 +1351,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         } else {
           failed.push({ planId: p!.id, error: "Another checkout for this feature is already in progress. Give it a moment, then refresh." });
         }
-        if (p!.required) baseFailed = true;
         continue;
       }
       // Inserting the 'open' row is also the concurrency guard: a simultaneous second
@@ -1354,7 +1360,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         .select("id").maybeSingle();
       if (attErr || !attempt) {
         failed.push({ planId: p!.id, error: "Another checkout for this feature is already in progress. Give it a moment, then refresh." });
-        if (p!.required) baseFailed = true;
         continue;
       }
       // What the processor said about the COF flags, written with the outcome (317).
@@ -1452,7 +1457,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
               }).then(() => undefined, () => undefined);
             }
             failed.push({ planId: p!.id, error: "We could not confirm whether your card was charged. Do NOT try again - contact CSM Synergy and we will confirm and finish the setup." });
-            if (p!.required) baseFailed = true;
             continue;
           }
           // A refused billing_method whose 'recurring' retry failed too (nmiPostCof keeps the first
@@ -1472,7 +1476,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
               ? (se as Error).message
               : `Your bank did not accept a $0 check on your card on file (${(se as Error).message}). Replace the card in the Wallet tab, then try again.`,
           });
-          if (p!.required) baseFailed = true;
           continue;
         }
         // 2. Register the recurring so its first gateway charge is the RENEWAL.
@@ -1630,7 +1633,6 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           await closeAttempt("closed_declined", (e as Error).message, saleTxn);
           failed.push({ planId: p!.id, error: saleTxn ? `${(e as Error).message} - the charge was reversed.` : (e as Error).message });
         }
-        if (p!.required) baseFailed = true;
       }
     }
     // The agreement backs every subscription this checkout started; the first one's initial is

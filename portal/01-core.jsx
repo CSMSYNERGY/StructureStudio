@@ -2857,6 +2857,10 @@ const SS_FEATURE_LABELS = {
   simple_layout:       { label: "Simple Layout",        buyable: true },
   self_serve_displays: { label: "Self Serve Displays",  buyable: false },
   view_3d:             { label: "3D",                   buyable: true },
+  // Not built yet, so not buyable — the Billing tab shows them with a Coming soon overlay and
+  // no Subscribe button. Flip `buyable` with the plans' availability, not before.
+  smartbuild_sync:     { label: "SmartBuild Sync",      buyable: false },
+  project_management:  { label: "Project Management",   buyable: false },
 };
 const ssFeatureLabel = (key) => (SS_FEATURE_LABELS[key] || {}).label || "an add-on";
 
@@ -2925,6 +2929,7 @@ function ssSavedHubView(holder) {
 // say why. `full_suite` is absent on purpose: it is a bundle you buy, never a requirement.
 const SS_SETUP_FEATURE_CHOICES = [
   "schedule_builds", "quickbooks_sync", "on_demand_pricing", "crm", "view_3d", "self_serve_displays", "simple_layout",
+  "smartbuild_sync", "project_management",
 ];
 
 // The portal's padlock, in one place. The nav rail draws its own copy inline (12-shell.jsx

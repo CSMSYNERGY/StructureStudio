@@ -1333,13 +1333,6 @@ async function readXlsxWorkbook(file, ExcelJS) {
   });
 }
 
-// The brand teal, and the ONE card on the Billing tab that wears it: Synergy CRM. Everything
-// else here is ACCENT purple, which on this tab means "buy this, now, from us". Synergy CRM is
-// a different product bought on a different site, so it gets the other half of the header
-// gradient (01-core.jsx: linear-gradient(#3D3672 → #1B7895)) rather than a colour invented for
-// it. Don't reuse this for a purchasable feature — the whole job it does is being the exception.
-const SYNERGY_TEAL = "#1B7895";
-
 // Wallet top-up presets, in cents. Round numbers a builder recognises rather than multiples
 // of the $20 meter price -- "$100" is a decision, "$140 (7 generations)" is arithmetic
 // homework. The floor and cap are NOT here: the server sends them (wallet.minTopupCents /
@@ -1722,7 +1715,6 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   // back the shell's entitlement re-read until the customer presses Continue: see subscribe().
   const [holdSignal, setHoldSignal] = useState(false);
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
-  const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
   const [demoNote, setDemoNote] = useState(false); // our own account pressed checkout — see demoView
   // Wallet top-up (migration 164). `topupSel` is a preset in cents; `topupCustom` is the raw
   // DOLLARS string from the Other field. Exactly one is ever set -- picking a preset clears
@@ -1765,12 +1757,11 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   // Group the plan rows into features (monthly + annual pair per feature).
   const features = []; const byFeature = {};
   plans.forEach((p) => {
-    if (!byFeature[p.feature]) { byFeature[p.feature] = { feature: p.feature, name: p.name, availability: p.availability, required: p.required, setup: p.setup_fee_cents, priceVisible: p.price_visible !== false, plans: {} }; features.push(byFeature[p.feature]); }
+    if (!byFeature[p.feature]) { byFeature[p.feature] = { feature: p.feature, name: p.name, availability: p.availability, setup: p.setup_fee_cents, priceVisible: p.price_visible !== false, plans: {} }; features.push(byFeature[p.feature]); }
     byFeature[p.feature].plans[p.billing_interval] = p;
   });
   const liveSubs = subs.filter((s) => s.status !== "cancelled");
   const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
-  const baseLive = !!liveFeatures["simple_layout"];
   // NON-BILLABLE ACCOUNT. Since 2026-09-21 the operator's Non-billable flag confers every
   // feature (migration 228), but the tiles below are built from liveFeatures — REAL
   // subscription rows — so without this a comped account sees a full price list with working
@@ -1794,20 +1785,20 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const demoView = !!(data && data.entitlement && data.entitlement.reason === "internal");
   const comped = !!(data && data.entitlement && data.entitlement.exempt) && !demoView;
 
-  // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
-  // (in the cart) or already live, its member features are covered — shown "Included" and not
-  // separately purchasable — and it satisfies the required base in place of Simple Layout.
+  // The Structure Studio Suite bundles these six (NOT Self Serve Displays, Project Management or
+  // SmartBuild Sync — those are sold separately). When it's chosen (in the cart) or already live,
+  // its member features are covered — shown "Included" and not separately purchasable. The tile
+  // prints this list, so a builder can read what the Suite is without selecting it and watching
+  // six other tiles grey out.
   const SUITE_MEMBERS = ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing", "crm"];
   const suiteChosen = !!sel["full_suite"] || !!liveFeatures["full_suite"];
   const memberCovered = (feat) => SUITE_MEMBERS.includes(feat) && suiteChosen;
 
-  // Simple Layout is required: preselect it (yearly) until it's subscribed — unless the Suite
-  // (which includes it) is chosen or already live.
-  useEffect(() => {
-    if (data && data.configured && !baseLive && !sel["full_suite"] && !liveFeatures["full_suite"] && byFeature["simple_layout"] && !sel["simple_layout"]) {
-      setSel((p) => ({ ...p, simple_layout: "annual" }));
-    }
-  }, [data]);
+  // NOTHING IS PRESELECTED (2026-11-04). Simple Layout used to be seeded into every cart here,
+  // because it was the required base. It isn't any more: StructureStudio stopped being a
+  // shed-only product, and a post-frame builder may buy Customer Hub and SmartBuild Sync and
+  // never want the designer. The cart starts empty and the builder picks. See portal-billing's
+  // gate — "any paid feature unlocks the account" — which replaced the required-base rule.
 
   const fmt$ = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
   // What this tenant actually pays. charge_cents is computed server-side from their
@@ -2106,19 +2097,12 @@ This charges the card they have on file${asked ? "" : ", without them asking: th
   const toggleFeature = (f) => {
     if (comped || f.availability !== "available" || liveFeatures[f.feature] || busy) return;
     if (memberCovered(f.feature)) return;                      // covered by the Suite — not separately selectable
-    // Only block REMOVING the required base (it's in `sel` and the click would delete it);
-    // re-adding must always work. Blocking both directions stranded the cart: selecting the
-    // Suite deletes Simple Layout from `sel`, deselecting the Suite then left NEITHER in the
-    // cart, and this guard refused the click that would put the base back — checkout dead
-    // until a reload re-ran the [data] preselect (the server 400s a cart without the base).
-    if (f.required && !baseLive && !sel["full_suite"] && sel[f.feature]) return; // Simple Layout stays unless the Suite covers it
+    // Every tile is freely selectable and deselectable now — no feature is required, so there is
+    // nothing to keep in the cart and nothing to re-seed when the Suite is deselected.
     setSel((p) => {
       const n = { ...p };
       if (n[f.feature]) {
         delete n[f.feature];
-        // Deselecting the Suite re-seeds the required base — the [data] preselect effect
-        // only re-runs on a reload, so without this the cart strands with neither.
-        if (f.feature === "full_suite" && !baseLive && !liveFeatures["full_suite"] && byFeature["simple_layout"]) n.simple_layout = "annual";
       }
       else {
         n[f.feature] = "annual";
@@ -2688,7 +2672,6 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
               const iv = sel[f.feature];
               const on = !!iv;
               const shown = f.plans[iv || "annual"];
-              const lockedBase = f.required && !baseLive;
               return (
                 <div key={f.feature} onClick={(covered || comped) ? undefined : () => toggleFeature(f)}
                   style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: veiled ? "default" : "pointer", overflow: "hidden" }}>
@@ -2700,9 +2683,15 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   <div style={{ opacity: veiled ? 0.45 : 1 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                       <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>{f.name}</span>
-                      {f.required && <span style={{ background: "#75E6DA", color: "#134E4A", borderRadius: 20, padding: "2px 8px", fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5 }}>Required</span>}
-                      {!veiled && !lockedBase && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
+                      {!veiled && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
                     </div>
+                    {/* The Suite's contents, read off SUITE_MEMBERS so this line and the
+                        entitlement map cannot drift. Every other tile is its own feature. */}
+                    {f.feature === "full_suite" && (
+                      <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5, marginBottom: 8 }}>
+                        Includes {SUITE_MEMBERS.map((k) => byFeature[k] && byFeature[k].name).filter(Boolean).join(", ")}.
+                      </div>
+                    )}
                     {!veiled && (
                       <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
                         {["monthly", "annual"].map((k) => {
@@ -2833,58 +2822,16 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           )}
 
           <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 14 }}>
-            StructureStudio integrates with your CRM — CRM setup is available for an additional fee.
             Card details are entered in a secure form served by the payment gateway; they never pass through StructureStudio.
           </p>
         </div>
       )}
 
-      {/* Synergy CRM — a separate offering with tiered per-user pricing. Sign-up is EXTERNAL (its
-          own enrollment page), not the in-app Deposyt checkout, so this is an informational card
-          with an outbound link rather than a purchasable billing_plans feature.
-          
-          TEAL, NOT PURPLE, and that is the point (Carolyn 2026-08-29). Since Built-in CRM went
-          on sale there are two cards on this tab with "CRM" in the name, and they are not
-          alternatives: one is a feature of Structure Studio bought right here, the other is a
-          separate per-user product bought somewhere else. Purple is the buy-here colour — it is
-          on every plan tile, the Suite, the toggles and the Subscribe button — so wearing it made
-          this card look like a fourth plan in the same list. The brand's teal (already half of
-          the header gradient) says "related, but not the same thing" without a word of
-          explanation, and the left edge carries it so the difference survives a glance. */}
-      <div style={{ ...S.card, borderLeft: `4px solid ${SYNERGY_TEAL}` }}>
-        <div style={{ ...S.h2, color: SYNERGY_TEAL }}>Synergy CRM</div>
-        <p style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          The CRM that runs your sales — leads, pipelines, and follow-up. Priced by number of users; enroll on the sign-up page.
-        </p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 16 }}>
-          {[
-            { tier: "1 User", monthly: 20000, annual: 200000 },
-            { tier: "2-3 Users", monthly: 30000, annual: 300000 },
-            { tier: "Unlimited Users", monthly: 50000, annual: 500000 },
-          ].map((t) => {
-            const iv = crmIv[t.tier] || "annual";
-            const cents = iv === "annual" ? t.annual : t.monthly;
-            return (
-              <div key={t.tier} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 16 }}>
-                <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", marginBottom: 8 }}>{t.tier}</div>
-                <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
-                  {["monthly", "annual"].map((k) => (
-                    <button key={k} type="button" onClick={() => setCrmIv((p) => ({ ...p, [t.tier]: k }))}
-                      style={{ background: iv === k ? SYNERGY_TEAL : "transparent", color: iv === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-                      {k === "annual" ? "Yearly" : "Monthly"}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ fontSize: 19, fontWeight: 800, color: SYNERGY_TEAL }}>{fmt$(cents)}{iv === "annual" ? "/yr" : "/mo"}</div>
-              </div>
-            );
-          })}
-        </div>
-        <a href="https://streamlinedconstructionsystem.com/saas-enrollment" target="_blank" rel="noopener noreferrer"
-          style={{ ...S.btn(SYNERGY_TEAL, "#FFF"), display: "inline-block", textDecoration: "none" }}>
-          Sign up for Synergy CRM →
-        </a>
-      </div>
+      {/* The external "Synergy CRM" card was REMOVED on 2026-11-04 (Carolyn: "it isn't linked to
+          anything... and I am not promoting it at all"). It advertised a separate per-user product
+          with an outbound enrollment link, and it is not being sold. Customer Hub (`crm`) is the
+          CRM this tab sells, and it is a plan tile like any other. The footer sentence about
+          "integrates with your CRM — setup available for an additional fee" went with it. */}
       </>)}
     </div>
   );
