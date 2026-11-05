@@ -95,6 +95,33 @@ export async function sendLeadAlert(clientId: string, to: string[], tpl: Tpl, to
   }
 }
 
+/**
+ * A NOTE TO THE BUILDER'S OWN TEAM from an automation (migration 365's notify_team). Plain text the
+ * builder wrote, from the platform address like the lead alert — our product telling the team
+ * something, never the builder writing to a customer. Same switch as sendLeadAlert; never throws.
+ */
+export async function sendTeamNote(clientId: string, to: string[], subject: string, text: string): Promise<{ sent: number; error: string | null }> {
+  try {
+    if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
+    if (!to.length) return { sent: 0, error: "no recipient" };
+    // Escaped, not interpolated: the merge values are customers' names.
+    const html = `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#1E293B">${
+      text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string)).replace(/\r?\n/g, "<br>")}</div>`;
+    const subj = subject.replace(/[\r\n]+/g, " ").slice(0, 200) || "A note from your automations";
+    return await bounded((async () => {
+      const results = await Promise.allSettled(to.map((addr) => rsSendEmail({
+        from: PLATFORM_NOTIFY_FROM, to: addr, subject: subj, html, text,
+        tags: [{ name: "kind", value: "team_note" }, { name: "client_id", value: clientId }],
+      })));
+      const failed = results.filter((x): x is PromiseRejectedResult => x.status === "rejected");
+      if (!failed.length) return { sent: to.length, error: null };
+      return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent` };
+    })(), { sent: 0, error: "timed out waiting for the email provider" });
+  } catch {
+    return { sent: 0, error: "team note failed unexpectedly" };
+  }
+}
+
 export async function sendAutoreply(admin: Db, clientId: string, to: string, contactId: string | null, tpl: Tpl, tokens: Tokens): Promise<{ sent: boolean; reason?: string }> {
   try {
     const r = renderEmailDesign(tpl.design, tokens, tpl.preheader);

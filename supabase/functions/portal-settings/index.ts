@@ -270,7 +270,7 @@ import {
 // function only writes what the builder authored.
 import {
   actionAllowedForScope, actionScopeError, parseRuleConditions, parseRuleSave, RULE_ACTION_LABELS,
-  RULE_ACTIONS_MAX, type RuleActionIn, type RuleActionKind, type RuleCondition, triggerAllowedForScope,
+  RULE_ACTIONS_MAX, RULE_SCOPES, type RuleActionIn, type RuleActionKind, type RuleCondition, triggerAllowedForScope,
 } from "../_shared/crmRules.ts";
 // Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
 // account CSM sets up in Admin. paymentSettings.ts only, never the gateway client (cardpointe.ts).
@@ -637,6 +637,10 @@ const GATES: GateTable = {
   // contacts:view the board's crm_pipelines_list carries: a sales rep has no business reading the
   // account's automations.
   crm_rules_list:        { area: "settings_crm", level: "view" },
+  // 365: "this would reach 312 customers now" — the number the builder arms a schedule with.
+  crm_rule_audience:     { area: "settings_crm", level: "view" },
+  // 365: the account's time zone, which schedules run in. A setting, so an edit.
+  crm_rules_time_zone:   { area: "settings_crm", level: "edit" },
   crm_rule_save:         { area: "settings_crm", level: "edit" },
   crm_rules_reorder:     { area: "settings_crm", level: "edit" },
   crm_rule_log:          { area: "settings_crm", level: "view" },
@@ -11430,7 +11434,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // on beta; `rulesVersionWiring_test` pins this one into the response.
   const RULES_MISSING_TABLE = new Set(["42P01", "PGRST205"]);
   const RULES_MISSING_COLUMN = new Set(["42703", "PGRST204"]);
-  const RULE_COLS = "id, name, scope_kind, pipeline_id, trigger_kind, trigger_event, elapsed_anchor, elapsed_days, conditions, once_per_card, enabled, applies_from, position, created_at";
+  const RULE_COLS = "id, name, scope_kind, pipeline_id, trigger_kind, trigger_event, elapsed_anchor, elapsed_days, conditions, once_per_card, enabled, applies_from, position, created_at, schedule, next_run_at, armed_count, max_per_run";
 
   /** What on a stored rule no longer points anywhere — shown as an amber line on its row, so a
    *  rule that will fail is visible BEFORE it fails rather than only in the run log after. */
@@ -11488,7 +11492,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const ids = (rules ?? []).map((r: any) => r.id);
     const none = Promise.resolve({ data: [] as any[], error: null });
-    const [acts, runs, tags, tz] = await Promise.all([
+    const [acts, runs, tags, tz, cf] = await Promise.all([
       ids.length ? admin.from("crm_rule_actions").select("id, rule_id, kind, params, position")
         .eq("client_id", clientId).in("rule_id", ids).order("position", { ascending: true }) : none,
       ids.length ? admin.from("crm_rule_runs").select("rule_id, outcome, fired_at")
@@ -11497,8 +11501,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // writer, so on most accounts this is short or empty; the picker also takes a typed one.
       admin.from("crm_contacts").select("labels").eq("client_id", clientId).is("merged_into", null)
         .neq("labels", "{}").limit(2000),
-      // Tolerant: 363 added the column, and nothing reads it in round 1 but this line.
+      // Tolerant: 363 added the column.
       admin.from("client_settings").select("time_zone").eq("client_id", clientId).maybeSingle(),
+      // The customer's DATE fields, for "on the date in their record" (365).
+      readCustomFields(admin, clientId, "contact"),
     ]);
     if ((acts as any).error) return dbFail(req, clientId, "load your automations", (acts as any).error);
     const last = new Map<string, any>();
@@ -11524,6 +11530,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           conditions: Array.isArray(r.conditions) ? r.conditions : [],
           oncePerCard: r.once_per_card === true, enabled: r.enabled === true,
           appliesFrom: r.applies_from, position: r.position, actions,
+          schedule: r.schedule ?? null, nextRunAt: r.next_run_at ?? null,
+          armedCount: r.armed_count ?? null, maxPerRun: r.max_per_run ?? 200,
           lastRun: ran ? { outcome: ran.outcome, firedAt: ran.fired_at } : null,
           stale: ruleStale(r, actions, pipes),
         };
@@ -11531,7 +11539,53 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       labels: [...labels.values()].sort((a, b) => a.localeCompare(b)).slice(0, 200),
       timeZone: ((tz as any).data?.time_zone as string) || "America/Chicago",
       timeZoneSet: !!(tz as any).data?.time_zone,
+      dateFields: "fields" in (cf as any)
+        ? ((cf as any).fields as any[]).filter((f) => f.field_type === "date" && f.key).map((f) => ({ key: `custom:${f.key}`, label: f.label }))
+        : [],
     });
+  }
+
+  if (action === "crm_rule_audience") {
+    // WHO A DRAFT WOULD REACH NOW, counted by the SAME predicate the sweep uses (migration 365's
+    // crm_rule_audience_preview) — a count computed here in TypeScript would drift from it, and
+    // this is the number a builder arms a schedule with.
+    const scope = String(payload?.scopeKind ?? "");
+    if (!(RULE_SCOPES as readonly string[]).includes(scope)) return json({ error: "Pick who the rule is for." }, 400);
+    const pipelineId = scope === "pipeline" ? String(payload?.pipelineId ?? "").toLowerCase() : null;
+    if (scope === "pipeline" && !isUuidLike(pipelineId)) return json({ error: "Pick the pipeline the rule runs on." }, 400);
+    const pc = parseRuleConditions(payload?.conditions ?? [], scope);
+    if (!pc.ok) return json({ error: pc.error }, 400);
+    const { data, error } = await admin.rpc("crm_rule_audience_preview", {
+      p_client: clientId, p_scope: scope, p_pipeline: pipelineId, p_conditions: pc.conditions,
+    });
+    if (error) {
+      // Before 365 there is nothing to count with; the editor hides the line rather than lying.
+      if (String((error as any).code) === "42883" || String((error as any).code) === "PGRST202") return json({ ok: true, count: null, sample: [] });
+      return dbFail(req, clientId, "count who that rule reaches", error);
+    }
+    return json({ ok: true, count: Number((data as any)?.count ?? 0), sample: ((data as any)?.sample ?? []).slice(0, 5) });
+  }
+
+  if (action === "crm_rules_time_zone") {
+    // The account's time zone (363's client_settings.time_zone). Every schedule moves with it —
+    // 365's crm_rules_tz_changed recomputes their next runs. Validated by the runtime's own zone
+    // list; the database CHECK (ss_valid_time_zone) is the backstop.
+    const tz = String(payload?.timeZone ?? "").trim().slice(0, 64);
+    try {
+      if (!tz) throw new Error("empty");
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    } catch {
+      return json({ error: "Pick a time zone from the list." }, 400);
+    }
+    const { data: hit, error } = await admin.from("client_settings").update({ time_zone: tz })
+      .eq("client_id", clientId).select("client_id");
+    if (error) return dbFail(req, clientId, "save your time zone", error);
+    if (!hit || !hit.length) {
+      const { error: iErr } = await admin.from("client_settings").insert({ client_id: clientId, time_zone: tz });
+      if (iErr) return dbFail(req, clientId, "save your time zone", iErr);
+    }
+    audit("crm_rules_time_zone", 1, `tz=${tz}`).catch(() => {});
+    return json({ ok: true, timeZone: tz });
   }
 
   if (action === "crm_rule_save") {
@@ -11544,7 +11598,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     let stored: any = null;
     if (rl.id) {
       const { data: row, error } = await admin.from("crm_rules")
-        .select("id, scope_kind, pipeline_id, trigger_kind, conditions")
+        .select("id, scope_kind, pipeline_id, trigger_kind, elapsed_anchor, schedule, conditions")
         .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null).maybeSingle();
       if (error) return dbFail(req, clientId, "find that rule", error);
       if (!row) return json({ error: "That rule wasn't found." }, 404);
@@ -11582,8 +11636,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         pipeName = pipe.name ?? "";
       }
     }
-    if ((checkAll || rl.triggerKind) && !triggerAllowedForScope({ triggerKind }, scope)) {
-      return json({ error: "That kind of trigger doesn't work for who this rule is for." }, 400);
+    const elapsedAnchor = rl.triggerKind ? rl.elapsedAnchor : (stored?.elapsed_anchor ?? null);
+    const scheduleFreq = rl.triggerKind ? (rl.schedule?.freq ?? null) : (stored?.schedule?.freq ?? null);
+    if ((checkAll || rl.triggerKind) && !triggerAllowedForScope({ triggerKind, elapsedAnchor, scheduleFreq }, scope)) {
+      return json({
+        error: scope === "none" ? "A rule for nobody can only run on a schedule."
+          : "That kind of trigger doesn't work for who this rule is for.",
+      }, 400);
     }
 
     // ── THE ACTIONS, against the rule as it will be ──────────────────────────────────────────
@@ -11619,6 +11678,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           if (a.kind === "move_stage" && !okSg.has(String(a.params.stageId))) offending.push({ index: i, kind: a.kind, why: "stage" });
         });
       }
+      // 365: a person an action names must be on THIS builder's team (assign, a task's owner, a
+      // team email's recipients) — the evaluator refuses one who is not, but only by failing on
+      // every customer it reaches.
+      const people = [...new Set(toCheck.flatMap((a, i) => flagged.has(i) ? [] : [
+        ...(a.kind === "assign_owner" ? [String(a.params.userId)] : []),
+        ...(a.kind === "create_task" && a.params.assigneeUserId ? [String(a.params.assigneeUserId)] : []),
+        ...(a.kind === "notify_team" && Array.isArray(a.params.userIds) ? (a.params.userIds as unknown[]).map(String) : []),
+      ]))];
+      if (people.length) {
+        const { data: team, error } = await admin.from("client_users").select("user_id")
+          .eq("client_id", clientId).in("user_id", people);
+        if (error) return dbFail(req, clientId, "check that rule's people", error);
+        const onTeam = new Set((team ?? []).map((x: any) => x.user_id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i)) return;
+          const whom = a.kind === "assign_owner" ? [String(a.params.userId)]
+            : a.kind === "create_task" && a.params.assigneeUserId ? [String(a.params.assigneeUserId)]
+            : a.kind === "notify_team" && Array.isArray(a.params.userIds) ? (a.params.userIds as unknown[]).map(String) : [];
+          if (whom.some((u) => !onTeam.has(u))) offending.push({ index: i, kind: a.kind, why: "person" });
+        });
+      }
       const wantPipes = named("create_card", "pipelineId");
       if (wantPipes.length) {
         const { data: livePipes, error } = await admin.from("crm_pipelines").select("id")
@@ -11647,6 +11727,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           error = `Action ${first.index + 1} (${label(first)}) points at the pipeline this rule is on. Pick a different pipeline.`;
         } else if (first.why === "pipeline") {
           error = `Action ${first.index + 1} (${label(first)}) points at a pipeline that has been removed. Pick another.`;
+        } else if (first.why === "person") {
+          error = `Action ${first.index + 1} (${label(first)}) names someone who is not on your team. Pick another person.`;
         } else {
           // THE MOVE'S OWN SENTENCE: name every action that still points at the old pipeline, so
           // the builder knows exactly which rows to re-pick (the editor marks the same ones red).
@@ -11707,8 +11789,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const { data: made, error } = await admin.from("crm_rules").insert({
         client_id: clientId, scope_kind: scope, pipeline_id: pipelineId, name: rl.name,
         trigger_kind: rl.triggerKind, trigger_event: rl.triggerEvent,
-        elapsed_anchor: rl.elapsedAnchor, elapsed_days: rl.elapsedDays,
+        elapsed_anchor: rl.elapsedAnchor, elapsed_days: rl.elapsedDays, schedule: rl.schedule,
         conditions: conditions ?? [],
+        ...(rl.arm === true ? { armed_count: rl.armedCount } : {}),
         ...(rl.oncePerCard === undefined ? {} : { once_per_card: rl.oncePerCard }),
         ...(rl.enabled === undefined ? {} : { enabled: rl.enabled }),
         position: (Number(top?.position) || 0) + 1024,
@@ -11733,7 +11816,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       patch.trigger_event = rl.triggerEvent;
       patch.elapsed_anchor = rl.elapsedAnchor;
       patch.elapsed_days = rl.elapsedDays;
+      patch.schedule = rl.schedule;
     }
+    // THE ARM (365). Written in the SAME update as any change to who the rule reaches, so the
+    // database's reset (which withdraws an arm on such a change) keeps this one — the builder saw
+    // the new count when they pressed Arm.
+    if (rl.arm === true) patch.armed_count = rl.armedCount;
+    else if (rl.arm === false) patch.armed_count = null;
     if (rl.oncePerCard !== undefined) patch.once_per_card = rl.oncePerCard;
     if (rl.enabled !== undefined) patch.enabled = rl.enabled;
     if (conditions !== undefined) patch.conditions = conditions;

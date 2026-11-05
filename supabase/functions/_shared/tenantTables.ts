@@ -70,6 +70,9 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   crm_rules: { fate: "wipe", export: true, why: "The account's automations (when this happens, do this); one-pipeline rules also cascade from crm_pipelines." },
   crm_rule_actions: { fate: "cascade", parent: "crm_rules", export: true, why: "What one rule does, in order." },
   crm_rule_runs: { fate: "cascade", parent: "crm_rules", export: true, why: "The run log, and the once-per-card guard." },
+  // 365: facts waiting for the tick (a missed call, a tag added…), kept a week after they fire.
+  // Ids and event names, no customer text, so nothing worth exporting.
+  crm_rule_events: { fate: "wipe", why: "Facts queued for the account's automations (a week's history)." },
   crm_rule_outbox: { fate: "cascade", parent: "crm_rule_runs", export: true, why: "Texts and emails a rule queued (cascades from the run, which cascades from the rule)." },
   // 357: GHL ids and a status word, no customer text, so nothing worth exporting.
   ghl_email_checks: { fate: "wipe", why: "What became of each quote email GHL accepted (our own monitoring)." },

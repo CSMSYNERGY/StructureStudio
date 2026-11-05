@@ -1567,6 +1567,10 @@ function checkRuleMirror(files = {}, inject = null) {
     ["condition fields", lineKeys(jsx, "SS_RULE_CONDITION_FIELDS"), "SS_RULE_CONDITION_FIELDS", objRecordKeys(ts, "RULE_CONDITION_FIELDS"), "RULE_CONDITION_FIELDS"],
     ["condition tests", lineKeys(jsx, "SS_RULE_CONDITION_OPS"), "SS_RULE_CONDITION_OPS", constKeys(ts, "RULE_CONDITION_OPS"), "RULE_CONDITION_OPS"],
     ["card sources", lineKeys(jsx, "SS_RULE_DEAL_SOURCES"), "SS_RULE_DEAL_SOURCES", recordKeys(ts, "RULE_DEAL_SOURCES"), "RULE_DEAL_SOURCES"],
+    // 365: the facts the tables now raise, how often a schedule runs, and where a customer came from.
+    ["customer events", lineKeys(jsx, "SS_RULE_CONTACT_EVENTS"), "SS_RULE_CONTACT_EVENTS", recordKeys(ts, "RULE_CONTACT_EVENTS"), "RULE_CONTACT_EVENTS"],
+    ["schedule frequencies", lineKeys(jsx, "SS_RULE_SCHEDULE_FREQS"), "SS_RULE_SCHEDULE_FREQS", constKeys(ts, "RULE_SCHEDULE_FREQS"), "RULE_SCHEDULE_FREQS"],
+    ["customer sources", lineKeys(jsx, "SS_RULE_CONTACT_SOURCES"), "SS_RULE_CONTACT_SOURCES", recordKeys(ts, "RULE_CONTACT_SOURCES"), "RULE_CONTACT_SOURCES"],
     ["clock anchors", pairKeys(jsx, "SS_RULE_ANCHORS"), "SS_RULE_ANCHORS", recordKeys(ts, "RULE_ANCHORS"), "RULE_ANCHORS"],
     // The events are deliberately ONE list on each side (SS_STATUS_EVENTS, and STATUS_EVENTS via
     // `RULE_EVENTS = STATUS_EVENTS`), shared with the status ladder — so this arm also catches the
@@ -1637,14 +1641,14 @@ function checkRuleMirror(files = {}, inject = null) {
     const m = /const\s+SS_RULE_CONDITION_FIELDS\s*=\s*\[/.exec(jsx);
     if (!m) return null;
     const end = jsx.indexOf("\n];", m.index);
-    return end < 0 ? null : new Map([...jsx.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_.]+)",\s*"[^"]*",\s*"([a-z]+)",\s*"([a-z]+)",\s*\[([^\]]*)\]/gm)]
+    return end < 0 ? null : new Map([...jsx.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_.]+)",\s*"[^"]*",\s*"([a-z_]+)",\s*"([a-z_]+)",\s*\[([^\]]*)\]/gm)]
       .map((x) => [x[1], `${x[2]}|${x[3]}|${[...x[4].matchAll(/"([a-z_]+)"/g)].map((o) => o[1]).sort().join(",")}`]));
   })();
   const fieldsTs = (() => {
     const m = /const\s+RULE_CONDITION_FIELDS\s*:\s*Record<[^>]+>\s*=\s*\{/.exec(ts);
     if (!m) return null;
     const end = ts.indexOf("\n};", m.index);
-    return end < 0 ? null : new Map([...ts.slice(m.index, end).matchAll(/^\s{2}"([a-z_.]+)":\s*\{\s*label:\s*"[^"]*",\s*type:\s*"([a-z]+)",\s*needs:\s*"([a-z]+)",\s*ops:\s*\[([^\]]*)\]/gm)]
+    return end < 0 ? null : new Map([...ts.slice(m.index, end).matchAll(/^\s{2}"([a-z_.]+)":\s*\{\s*label:\s*"[^"]*",\s*type:\s*"([a-z_]+)",\s*needs:\s*"([a-z_]+)",\s*ops:\s*\[([^\]]*)\]/gm)]
       .map((x) => [x[1], `${x[2]}|${x[3]}|${[...x[4].matchAll(/"([a-z_]+)"/g)].map((o) => o[1]).sort().join(",")}`]));
   })();
   if (!fieldsJsx || !fieldsJsx.size || !fieldsTs || !fieldsTs.size) {
@@ -3768,6 +3772,12 @@ if (process.argv.includes("--self-test")) {
   if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '"deal.value", "The card\'s value", "money", "deal", ["gt", "lt", "eq", "neq"]', '"deal.value", "The card\'s value", "money", "deal", ["gt", "lt", "eq", "neq", "has"]'), ts: rmTs, pip: rmPip })
         .some((e) => /condition field "deal\.value"/.test(e))) {
     console.error("self-test FAILED: a condition field offering a test the server refuses passed the rule mirror");
+    process.exit(1);
+  }
+  // (i) 365: a customer event the server does not know — the editor would offer a fact no rule can save.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '  ["call_missed", "A call from them is missed"],', '  ["call_missed", "A call from them is missed"],\n  ["call_hangup", "They hang up"],'), ts: rmTs, pip: rmPip })
+        .some((e) => /customer events: "call_hangup"/.test(e))) {
+    console.error("self-test FAILED: an unknown customer event in the editor passed the rule mirror");
     process.exit(1);
   }
   // (h) 363: blind on a rename of the condition fields.

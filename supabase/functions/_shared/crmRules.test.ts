@@ -10,6 +10,7 @@ import {
   parseRuleAction, parseRuleConditions, parseRuleSave, RULE_ACTION_KINDS, RULE_ACTION_NEEDS,
   RULE_ACTIONS_MAX, RULE_ANCHORS, RULE_CONDITION_FIELDS, RULE_CONDITION_OPS, RULE_CONDITIONS_MAX,
   RULE_DAYS_MAX, RULE_EVENTS, RULE_SCOPES, RULE_SMS_MAX, ruleSentence, triggerAllowedForScope,
+  parseRuleSchedule, RULE_CONTACT_EVENTS, RULE_SCHEDULE_FREQS, scheduleWords,
 } from "./crmRules.ts";
 
 function eq(a: unknown, b: unknown, msg: string) {
@@ -33,7 +34,14 @@ Deno.test("the event vocabulary is the SAME eight a status uses", () => {
     "build_scheduled", "contact_made", "delivered", "design_submitted",
     "estimate_accepted", "estimate_sent", "invoiced", "paid_in_full",
   ], "events");
-  eq(Object.keys(RULE_ANCHORS).sort(), ["delivered", "expected_close", "last_contact", "stage_entered"], "anchors");
+  eq(Object.keys(RULE_ANCHORS).sort(), ["contact_created", "delivered", "expected_close", "last_contact", "stage_entered"], "anchors");
+  // 365's facts — pinned against the CHECK on crm_rules.trigger_event.
+  eq(Object.keys(RULE_CONTACT_EVENTS).sort(), [
+    "call_missed", "contact_created", "deal_lost", "deal_reopened", "form_submitted", "label_added",
+    "meeting_booked", "meeting_cancelled", "meeting_completed", "meeting_no_show",
+    "stage_changed", "text_received", "voicemail_left",
+  ], "365 events");
+  eq([...RULE_SCHEDULE_FREQS], ["daily", "weekly", "monthly", "yearly", "date_field"], "schedule freqs");
 });
 
 Deno.test("an action's params are refused when they would make the rule throw", () => {
@@ -151,9 +159,9 @@ Deno.test("every action says what it needs, and every scope gives what it should
   eq(RULE_ACTION_KINDS.filter((k) => !actionAllowedForScope(k, "all_pipelines")), ["set_status", "move_stage"], "every pipeline");
   // CUSTOMERS: nothing that writes to a card.
   eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "contacts")),
-    ["add_note", "create_card", "send_sms", "send_email"], "customers");
-  // NOBODY: nothing a round-1 action can do.
-  eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "none")), [], "nobody");
+    ["add_note", "create_card", "add_label", "remove_label", "assign_owner", "create_task", "notify_team", "send_sms", "send_email"], "customers");
+  // NOBODY: only telling the team.
+  eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "none")), ["notify_team"], "nobody");
   eq(actionAllowedForScope("nope", "pipeline"), false, "an unknown action is never allowed");
 });
 
@@ -161,9 +169,15 @@ Deno.test("a trigger fits who the rule is for", () => {
   eq(triggerAllowedForScope({ triggerKind: "event" }, "all_pipelines"), true, "event, every pipeline");
   eq(triggerAllowedForScope({ triggerKind: "event" }, "contacts"), true, "event, customers");
   eq(triggerAllowedForScope({ triggerKind: "elapsed" }, "all_pipelines"), true, "clock, every pipeline");
-  // Every round-1 clock counts from something on the CARD.
-  eq(triggerAllowedForScope({ triggerKind: "elapsed" }, "contacts"), false, "clock, customers");
+  // A customer clock counts only from a customer's own dates; a card clock never from "added".
+  eq(triggerAllowedForScope({ triggerKind: "elapsed", elapsedAnchor: "delivered" }, "contacts"), false, "delivered, customers");
+  eq(triggerAllowedForScope({ triggerKind: "elapsed", elapsedAnchor: "last_contact" }, "contacts"), true, "no contact, customers");
+  eq(triggerAllowedForScope({ triggerKind: "elapsed", elapsedAnchor: "contact_created" }, "pipeline"), false, "added, a card");
   eq(triggerAllowedForScope({ triggerKind: "event" }, "none"), false, "nobody hears an event");
+  eq(triggerAllowedForScope({ triggerKind: "schedule", scheduleFreq: "weekly" }, "none"), true, "nobody, weekly");
+  // "On the date in their record" is a customer's record.
+  eq(triggerAllowedForScope({ triggerKind: "schedule", scheduleFreq: "date_field" }, "contacts"), true, "date field, customers");
+  eq(triggerAllowedForScope({ triggerKind: "schedule", scheduleFreq: "date_field" }, "pipeline"), false, "date field, cards");
 });
 
 Deno.test("a rule says who it is for — and the bundle that only knew pipelines still works", () => {
@@ -179,9 +193,9 @@ Deno.test("a rule says who it is for — and the bundle that only knew pipelines
   const all = parseRuleSave({ ...ev, scopeKind: "all_pipelines", pipelineId: P });
   good(all, "every pipeline");
   eq((all as any).pipelineId, null, "the stray id is dropped");
-  // Round 2's scopes are refused in words, not with a constraint error.
-  bad(parseRuleSave({ ...ev, scopeKind: "contacts" }), "customers, not yet");
-  bad(parseRuleSave({ ...ev, scopeKind: "none" }), "nobody, not yet");
+  // 365: customers is live; nobody is, but only on a schedule.
+  good(parseRuleSave({ ...ev, scopeKind: "contacts", actions: [{ kind: "add_note", params: { body: "x" } }] }), "customers");
+  bad(parseRuleSave({ ...ev, scopeKind: "none" }), "nobody hears an event");
 });
 
 Deno.test("an action the scope cannot carry is refused, and says which one", () => {
@@ -209,8 +223,9 @@ Deno.test("the condition vocabulary is the one migration 363's crm_rule_facts bu
   // Rename one of these without the SQL and every rule using it silently stops: the database reads
   // a field it does not know as FALSE. So the list is pinned, and so is the SQL (363 PART 6).
   eq(Object.keys(RULE_CONDITION_FIELDS).sort(), [
-    "contact.has_email", "contact.has_phone", "contact.label", "contact.owner",
-    "deal.lost", "deal.source", "deal.stage", "deal.status", "deal.value",
+    "contact.days_since_contact", "contact.days_since_created",
+    "contact.has_email", "contact.has_phone", "contact.label", "contact.owner", "contact.source",
+    "deal.lost", "deal.source", "deal.stage", "deal.status", "deal.value", "event.label",
   ], "fields");
   eq([...RULE_CONDITION_OPS], ["eq", "neq", "gt", "lt", "has", "lacks", "is_empty", "not_empty"], "ops");
   for (const [k, f] of Object.entries(RULE_CONDITION_FIELDS)) {
@@ -289,4 +304,69 @@ Deno.test("merge fields fill, and an unknown one is left visible", () => {
   // Left alone deliberately: a builder who typed {{price}} must see their own mistake in the
   // preview rather than a sentence with a hole in it.
   eq(fillMergeFields("It costs {{price}}", v), "It costs {{price}}", "unknown field survives");
+});
+
+// ── ROUND 2a (migration 365) ───────────────────────────────────────────────────────────────────
+
+Deno.test("a schedule is refused when the sweep could never run it", () => {
+  bad(parseRuleSchedule({}), "nothing");
+  bad(parseRuleSchedule({ freq: "hourly", at: "08:00" }), "unknown freq");
+  bad(parseRuleSchedule({ freq: "daily", at: "8:00" }), "not HH:MM");
+  bad(parseRuleSchedule({ freq: "daily", at: "24:00" }), "no 24:00");
+  bad(parseRuleSchedule({ freq: "weekly", at: "08:00", days: [] }), "a week with no days");
+  bad(parseRuleSchedule({ freq: "weekly", at: "08:00", days: [8] }), "day 8");
+  bad(parseRuleSchedule({ freq: "monthly", at: "08:00", dayOfMonth: 32 }), "the 32nd");
+  bad(parseRuleSchedule({ freq: "yearly", at: "08:00", month: 13, day: 1 }), "month 13");
+  bad(parseRuleSchedule({ freq: "date_field", at: "08:00", field: "birthday" }), "a field that is not a custom one");
+  eq((parseRuleSchedule({ freq: "weekly", at: "08:00", days: [4, 1, 4], extra: "x" }) as any).schedule,
+    { freq: "weekly", at: "08:00", days: [1, 4], every: 1 }, "canonical");
+  eq((parseRuleSchedule({ freq: "date_field", at: "09:30", field: "custom:install_date", offsetDays: -3, yearly: true }) as any).schedule,
+    { freq: "date_field", at: "09:30", field: "custom:install_date", offsetDays: -3, yearly: true }, "date field");
+});
+
+Deno.test("a schedule reads back the way a person says it", () => {
+  eq(scheduleWords({ freq: "daily", at: "08:00" }), "every day at 8:00 am", "daily");
+  eq(scheduleWords({ freq: "weekly", at: "13:30", days: [1, 4], every: 1 }), "every Monday and Thursday at 1:30 pm", "weekly");
+  eq(scheduleWords({ freq: "weekly", at: "08:00", days: [5], every: 2 }), "every 2 weeks on Friday at 8:00 am", "fortnightly");
+  eq(scheduleWords({ freq: "monthly", at: "09:00", dayOfMonth: 1 }), "on the 1st of every month at 9:00 am", "monthly");
+  eq(scheduleWords({ freq: "date_field", at: "09:00", field: "custom:bday", offsetDays: 0, yearly: true }),
+    "on the date in their record, every year, at 9:00 am", "birthday");
+  eq(ruleSentence({ triggerKind: "schedule", schedule: { freq: "weekly", at: "08:00", days: [1], every: 1 }, actions: [{ kind: "send_sms" }] }),
+    "When every Monday at 8:00 am → Send the customer a text", "the row's sentence");
+});
+
+Deno.test("a scheduled rule: once per run, team-only allowed, scheduled email not yet", () => {
+  const sch = { triggerKind: "schedule", schedule: { freq: "weekly", at: "08:00", days: [1] } };
+  good(parseRuleSave({ ...sch, scopeKind: "contacts", actions: [{ kind: "send_sms", params: { body: "Hi" } }] }), "a Monday text");
+  bad(parseRuleSave({ ...sch, scopeKind: "contacts", oncePerCard: false, actions: [{ kind: "send_sms", params: { body: "Hi" } }] }), "repeating");
+  good(parseRuleSave({ ...sch, scopeKind: "none", actions: [{ kind: "notify_team", params: { subject: "Lot", body: "Walk it" } }] }), "team only");
+  bad(parseRuleSave({ ...sch, scopeKind: "none", actions: [{ kind: "send_sms", params: { body: "Hi" } }] }), "nobody cannot text a customer");
+  const em = parseRuleSave({ ...sch, scopeKind: "contacts", actions: [{ kind: "send_email", params: { subject: "Hi", body: "Hi" } }] });
+  bad(em, "scheduled email waits for unsubscribe");
+  if (!/unsubscribe/.test((em as any).error)) throw new Error((em as any).error);
+  // The arm: a count, or nothing.
+  const armed = parseRuleSave({ id: R, arm: true, armedCount: 12 });
+  eq([(armed as any).arm, (armed as any).armedCount], [true, 12], "armed");
+  bad(parseRuleSave({ id: R, arm: true }), "armed with no count");
+  eq((parseRuleSave({ id: R, arm: false }) as any).arm, false, "disarmed");
+});
+
+Deno.test("the new actions are refused when they would fail on every customer", () => {
+  bad(parseRuleAction({ kind: "add_label", params: {} }), "no tag");
+  good(parseRuleAction({ kind: "remove_label", params: { label: " Lot visitor " } }), "remove a tag");
+  bad(parseRuleAction({ kind: "assign_owner", params: { userId: "Pat" } }), "an owner by name");
+  good(parseRuleAction({ kind: "assign_owner", params: { userId: P } }), "an owner by id");
+  bad(parseRuleAction({ kind: "create_task", params: {} }), "a task with no title");
+  eq((parseRuleAction({ kind: "create_task", params: { title: "Call them" } }) as any).params, { title: "Call them", dueDays: 0 }, "due today by default");
+  bad(parseRuleAction({ kind: "notify_team", params: { subject: "x" } }), "no body");
+  bad(parseRuleAction({ kind: "notify_team", params: { subject: "x", body: "y", userIds: ["nope"] } }), "a junk person");
+  good(parseRuleAction({ kind: "notify_team", params: { subject: "x", body: "y" } }), "owners and admins by default");
+});
+
+Deno.test("365's condition fields read days and sources", () => {
+  good(parseRuleConditions([{ field: "contact.days_since_contact", op: "gt", value: "30" }], "contacts"), "no contact for 30 days");
+  bad(parseRuleConditions([{ field: "contact.days_since_contact", op: "gt", value: 2.5 }], "contacts"), "half a day");
+  good(parseRuleConditions([{ field: "contact.source", op: "eq", value: "form" }], "contacts"), "came from a form");
+  bad(parseRuleConditions([{ field: "contact.source", op: "eq", value: "carrier pigeon" }], "contacts"), "a source not in the list");
+  good(parseRuleConditions([{ field: "event.label", op: "eq", value: "Hot" }], "contacts"), "the tag that was added");
 });

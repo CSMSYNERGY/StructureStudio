@@ -91,6 +91,12 @@ const RULES = [
     triggerKind: "event", triggerEvent: "estimate_sent", elapsedAnchor: null, elapsedDays: null,
     conditions: [], oncePerCard: true, enabled: true, position: 3072, stale: [], lastRun: null,
     actions: [{ id: U(630), kind: "set_follow_up", params: { days: 3 }, position: 1024 }] },
+  // 365: a Monday text to lot visitors — saved, but NOT ARMED, so it must say it will not send.
+  { id: U(603), name: "Monday lot text", scopeKind: "contacts", pipelineId: null,
+    triggerKind: "schedule", triggerEvent: null, elapsedAnchor: null, elapsedDays: null,
+    schedule: { freq: "weekly", at: "08:00", days: [1], every: 1 }, nextRunAt: "2026-11-09T14:00:00Z", armedCount: null,
+    conditions: [{ field: "contact.label", op: "has", value: "Lot visitor" }], oncePerCard: true, enabled: true, position: 4096, stale: [], lastRun: null,
+    actions: [{ id: U(640), kind: "send_sms", params: { body: "New sheds on the lot this week!" }, position: 1024 }] },
 ];
 const PIPELINES = [
   { id: U(1), name: "Shed Deals", position: 1024, lostReasons: ["Price", "Timing"], seedKind: "shed_deals", feedsDesigns: true,
@@ -148,6 +154,7 @@ const handler = async (route) => {
           stages: x.stages.map((t) => ({ id: t.id, name: t.name })), statuses: x.statuses.map((t) => ({ id: t.id, name: t.name, color: t.color })) })),
         team: [{ userId: USER.id, name: "Pat Owner", title: "Owner" }],
         labels: ["Lot visitor", "VIP"], timeZone: "America/Chicago", timeZoneSet: true,
+        dateFields: [{ key: "custom:install_date", label: "Install date" }],
         canManage: true, me: USER.id,
       });
     case "crm_status_save": {
@@ -209,6 +216,11 @@ const handler = async (route) => {
       }
       return json(route, { ok: true, id: body.id });
     }
+    case "crm_rule_audience":
+      // 365: who a draft would reach now — the number a schedule is armed with.
+      return json(route, { ok: true, count: 312, sample: ["Dale Smith", "Pat Lee"] });
+    case "crm_rules_time_zone":
+      return json(route, { ok: true, timeZone: body.timeZone });
     case "crm_rules_reorder": {
       // 363: the ACCOUNT's whole list, every id, and no pipeline.
       const next = (body.ids || []).map((id) => RULES.find((r) => r.id === id)).filter(Boolean);
@@ -432,9 +444,9 @@ try {
   // RUNS ON — her four cards, the pipeline drop-down inside the first, the round-2 two disabled.
   const scopeState = await page.evaluate(() => [...document.querySelectorAll("[data-ss-rule-scope-option]")].map((l) => ({
     k: l.getAttribute("data-ss-rule-scope-option"), off: l.querySelector("input").disabled, on: l.querySelector("input").checked })));
-  ok("E7 'Runs on' offers Carolyn's four choices, one pipeline first and picked, the round-2 two not yet",
+  ok("E7 'Runs on' offers Carolyn's four choices, all of them live (365), one pipeline first and picked",
     JSON.stringify(scopeState.map((x) => x.k)) === JSON.stringify(["pipeline", "all_pipelines", "contacts", "none"])
-    && scopeState[0].on && !scopeState[0].off && !scopeState[1].off && scopeState[2].off && scopeState[3].off
+    && scopeState[0].on && scopeState.every((x) => !x.off)
     && (await ed.locator("[data-ss-rule-pipeline]").inputValue()) === PIPELINES[0].id,
     JSON.stringify(scopeState));
   // THE PICKER DRIVES WHAT CAN BE DONE. One pipeline can set a status; every pipeline cannot —
@@ -563,6 +575,79 @@ try {
     && /Ask for a review:/.test(await page.locator("[data-ss-rules-recent-log]").innerText()),
     JSON.stringify([lastLog, pageLog]));
   await page.screenshot({ path: join(shots, "rule-log.png"), fullPage: true });
+
+  // ── ROUND 2a (365): customers, team-only, schedules, the arm ───────────────────────────
+  const unarmedRow = page.locator(`[data-ss-rule-row="${U(603)}"]`);
+  ok("E21 a scheduled text that is not armed says so on its row, with its next run, and who it is for",
+    (await unarmedRow.locator("[data-ss-rule-unarmed]").count()) === 1
+    && (await unarmedRow.locator("[data-ss-rule-next]").count()) === 1
+    && /every Monday at 8:00 am/.test(await unarmedRow.innerText())
+    && /customers tagged lot visitor/i.test(await unarmedRow.locator("[data-ss-rule-audience]").innerText()),
+    (await unarmedRow.innerText()).replace(/\s+/g, " ").slice(0, 200));
+
+  await page.locator("[data-ss-rules-add]").click();
+  await page.waitForTimeout(400);
+  // CUSTOMERS: the customer facts are offered, card-only actions are not, and the count appears.
+  await ed.locator("[data-ss-rule-scope-option='contacts'] input").check();
+  await page.waitForTimeout(900);
+  const evs = await ed.locator("select[aria-label='Which event']").evaluate((s) => [...s.options].map((o) => o.value));
+  await ed.locator("button", { hasText: "+ Add action" }).click();
+  await page.waitForTimeout(200);
+  const cKinds = await kinds();
+  ok("E22 a rule on customers hears customer facts, offers tags and tasks, and no card actions",
+    evs.includes("label_added") && evs.includes("call_missed") && evs.includes("meeting_no_show")
+    && cKinds.includes("add_label") && cKinds.includes("create_task") && cKinds.includes("assign_owner")
+    && !cKinds.includes("set_status") && !cKinds.includes("mark_lost"),
+    JSON.stringify({ evs: evs.length, cKinds }));
+  // THE MONDAY TEXT: tagged Lot visitor, weekly Mon + Thu at 08:00, a text — armed with the count.
+  await ed.locator("select[aria-label='When the rule runs']").selectOption("schedule");
+  await page.waitForTimeout(250);
+  const thu = ed.locator("[data-ss-rule-weekday='4']");
+  await thu.click();
+  await ed.locator("input[aria-label='At']").fill("08:00");
+  await ed.locator("[data-ss-rule-conditions] button", { hasText: "+ Add condition" }).click();
+  await page.waitForTimeout(150);
+  await ed.locator("[data-ss-rule-condition='0'] select[aria-label='Condition field']").selectOption("contact.label");
+  await page.waitForTimeout(150);
+  await ed.locator("[data-ss-rule-condition='0'] input[aria-label='Condition value']").fill("Lot visitor");
+  await ed.locator("[data-ss-rule-actions] select[aria-label='What it does']").first().selectOption("send_sms");
+  await page.waitForTimeout(200);
+  await ed.locator("textarea[aria-label='Text message']").fill("New sheds on the lot this week, {{first_name}}!");
+  await page.waitForTimeout(1200);
+  const schedOpts = await ed.locator("[data-ss-rule-actions] select[aria-label='What it does']").first().evaluate((s) => [...s.options].map((o) => o.value));
+  const tzVal = await ed.locator("[data-ss-rule-timezone] select").inputValue();
+  const prev = (await ed.locator("[data-ss-rule-audience-preview]").innerText()).replace(/\s+/g, " ");
+  ok("E23 a schedule names the time zone, counts who it reaches, and offers no scheduled email yet",
+    tzVal === "America/Chicago" && /312 customers now/.test(prev) && /Dale Smith/.test(prev)
+    && !schedOpts.includes("send_email") && (await ed.locator("[data-ss-rule-arm]").count()) === 1,
+    JSON.stringify({ tzVal, prev, schedOpts }));
+  await ed.locator("[data-ss-rule-arm] input").check();
+  await page.screenshot({ path: join(shots, "rule-schedule.png") });
+  await ed.locator("[data-ss-rule-save]").click();
+  await page.waitForTimeout(800);
+  const sched = sent.filter((b) => b.action === "crm_rule_save").pop();
+  ok("E24 the Monday text posts its schedule, its filter, and the arm WITH the count on screen",
+    !!sched && sched.scopeKind === "contacts" && !("pipelineId" in sched) && sched.triggerKind === "schedule"
+    && JSON.stringify(sched.schedule) === JSON.stringify({ freq: "weekly", at: "08:00", days: [1, 4], every: 1 })
+    && JSON.stringify(sched.conditions) === JSON.stringify([{ field: "contact.label", op: "has", value: "Lot visitor" }])
+    && sched.arm === true && sched.armedCount === 312 && sched.oncePerCard === true,
+    JSON.stringify(sched));
+
+  // NOBODY — JUST THE TEAM: a schedule, and the only thing it can do is email the team.
+  await page.locator("[data-ss-rules-add]").click();
+  await page.waitForTimeout(400);
+  await ed.locator("[data-ss-rule-scope-option='none'] input").check();
+  await page.waitForTimeout(250);
+  const whenOpts = await ed.locator("select[aria-label='When the rule runs']").evaluate((s) => [...s.options].map((o) => o.value));
+  await ed.locator("button", { hasText: "+ Add action" }).click();
+  await page.waitForTimeout(200);
+  const teamKinds = await kinds();
+  ok("E25 a rule for nobody runs only on a schedule, and can only email the team — with no arm to press",
+    JSON.stringify(whenOpts) === JSON.stringify(["schedule"]) && JSON.stringify(teamKinds) === JSON.stringify(["notify_team"])
+    && (await ed.locator("[data-ss-rule-arm]").count()) === 0,
+    JSON.stringify({ whenOpts, teamKinds }));
+  await ed.locator("button", { hasText: "Cancel" }).click();
+  await page.waitForTimeout(300);
 
   // ── E19: the database cannot store this shape of rule yet ───────────────────────────────
   // The function reaches production the moment it is deployed, and the migration is a separate

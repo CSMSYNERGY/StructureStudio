@@ -4,6 +4,7 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { fillMergeFields } from "../_shared/crmRules.ts";
+import { sendTeamNote, teamEmails } from "../_shared/leadFormMail.ts";
 
 // CRM-RULES-TICK — the half of per-pipeline rules (migration 355) that needs a clock and a
 // network. Two jobs, in this order:
@@ -112,13 +113,27 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
   if (!callerAllowed(req.headers.get("authorization"))) return json({ error: "unauthorized" }, 401);
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  let sweepErrorPre: string | null = null;
+
+  // ── 0. THE FACTS (migration 365) ───────────────────────────────────────────────────────────
+  // A missed call, a text in, a tag added, a meeting booked… are QUEUED by triggers on the tables
+  // that record them (never evaluated in that write — the phone Worker is waiting on it) and fired
+  // here. Before the sweep, so a fact and a clock due on the same tick run in the order they came.
+  let drained: number | null = null;
+  try {
+    const { data, error } = await admin.rpc("crm_rules_drain_events", { p_limit: 300 });
+    if (error) throw error;
+    drained = Number(data ?? 0);
+  } catch (e) {
+    sweepErrorPre = (e as Error)?.message ?? String(e);
+  }
 
   // ── 1. THE SWEEP ───────────────────────────────────────────────────────────────────────────
   // crm_rules_sweep raises nothing a caller has to handle and records every firing itself. A
   // failure here must not stop the outbox: the two jobs are independent, and a message already
   // queued has nothing to do with whether new ones were found.
   let swept: number | null = null;
-  let sweepError: string | null = null;
+  let sweepError: string | null = sweepErrorPre;
   try {
     const { data, error } = await admin.rpc("crm_rules_sweep", { p_limit: SWEEP_LIMIT });
     if (error) throw error;
@@ -195,7 +210,8 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
     const { data: contact } = r.contact_id
       ? await admin.from("crm_contacts").select("id, name, company, phone, email").eq("client_id", clientId).eq("id", r.contact_id).maybeSingle()
       : { data: null };
-    if (!contact || (r.deal_id && !deal)) {
+    // "Email your team" (365) may have no customer at all — a rule for nobody.
+    if ((r.contact_id && !contact) || (r.deal_id && !deal) || (r.kind !== "notify_team" && !contact)) {
       // The card or the customer was deleted between the rule firing and this tick. Not a
       // failure to retry — there is nobody to send to.
       await fail("The card or the customer is no longer there.", "skipped");
@@ -204,12 +220,24 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
 
     const { data: settings } = await admin.from("client_settings")
       .select("business_name").eq("client_id", clientId).maybeSingle();
-    const vals = mergeValues(contact as Record<string, unknown>, deal as Record<string, unknown> | null,
+    const vals = mergeValues((contact ?? {}) as Record<string, unknown>, deal as Record<string, unknown> | null,
       String(settings?.business_name ?? ""));
     const shortCode = ((deal as Record<string, unknown> | null)?.short_code as string | null) ?? null;
 
     try {
-      if (r.kind === "send_sms") {
+      if (r.kind === "notify_team") {
+        // To the people the rule names, or the owners and admins when it names none.
+        const to = await teamEmails(admin, clientId, Array.isArray(params.userIds) ? (params.userIds as string[]) : []);
+        const c = (contact ?? null) as Record<string, unknown> | null;
+        const about = c ? `\n\nCustomer: ${[c.name, c.phone, c.email].filter(Boolean).join(" · ")}` : "";
+        const out = await sendTeamNote(clientId, to,
+          fillMergeFields(String(params.subject ?? ""), vals),
+          fillMergeFields(String(params.body ?? ""), vals) + about);
+        if (out.sent > 0) { await markSent(out.error); sent++; }
+        else if (out.error === "platform email is not configured" || out.error === "no recipient") {
+          await fail(out.error === "no recipient" ? "Nobody on your team has an email address to send to." : "Team email isn't switched on yet.", "skipped");
+        } else await fail(out.error ?? "Not sent.");
+      } else if (r.kind === "send_sms") {
         const phone = String((contact as Record<string, unknown>).phone ?? "").trim();
         if (!phone) { await fail("That customer has no phone number.", "skipped"); continue; }
         const body = fillMergeFields(String(params.body ?? ""), vals);
@@ -219,7 +247,7 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         // gets the same text twice.
         if (before > 0) {
           const { data: prior } = await admin.from("sms_messages").select("id")
-            .eq("client_id", clientId).eq("contact_id", contact.id).eq("direction", "out")
+            .eq("client_id", clientId).eq("contact_id", contact!.id).eq("direction", "out")
             .eq("body", body).gte("created_at", String(r.queued_at)).not("provider_sid", "is", null).limit(1);
           if (prior && prior.length) { await markSent("Recovered: it had already gone out."); recovered++; continue; }
         }
@@ -232,7 +260,7 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         const out = await sendTenantSms(admin, clientId, {
           toPhone: phone,
           body,
-          contactId: String(contact.id),
+          contactId: String(contact!.id),
           shortCode,
           bypassQuietHours: false,
         });
@@ -266,7 +294,7 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         // The same proof for email: Resend's message id on a matching send since this was queued.
         if (before > 0) {
           const { data: prior } = await admin.from("email_sends").select("id")
-            .eq("client_id", clientId).eq("contact_id", contact.id).eq("subject", subject)
+            .eq("client_id", clientId).eq("contact_id", contact!.id).eq("subject", subject)
             .gte("created_at", String(r.queued_at)).not("provider_message_id", "is", null).limit(1);
           if (prior && prior.length) { await markSent("Recovered: it had already gone out."); recovered++; continue; }
         }
@@ -288,7 +316,7 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
               .replace(/\r?\n/g, "<br>")
           }</div>`,
           text: body,
-          contactId: String(contact.id),
+          contactId: String(contact!.id),
           shortCode,
         });
         if (out.sent) {
@@ -305,5 +333,5 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
     }
   }
 
-  return json({ ok: true, swept, sweepError, sent, failed, skipped, held, recovered, considered: (queued ?? []).length });
+  return json({ ok: true, drained, swept, sweepError, sent, failed, skipped, held, recovered, considered: (queued ?? []).length });
 }));

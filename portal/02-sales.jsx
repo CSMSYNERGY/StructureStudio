@@ -7463,6 +7463,44 @@ const SS_RULE_ANCHORS = [
   ["last_contact", "anyone last spoke to them"],
   // This one can come due BEFORE its anchor is reached, which is why every label reads "after".
   ["expected_close", "the expected close date"],
+  // 365: a customer's own, for a rule on customers.
+  ["contact_created", "they were added"],
+];
+// 365: the facts the product records but never raised before — queued by the tables that record
+// them and fired by the tick. Mirrors RULE_CONTACT_EVENTS (and the CHECK on crm_rules).
+const SS_RULE_CONTACT_EVENTS = [
+  ["contact_created", "A customer is added"],
+  ["label_added", "A tag is added to a customer"],
+  ["form_submitted", "A website form is submitted"],
+  ["call_missed", "A call from them is missed"],
+  ["voicemail_left", "They leave a voicemail"],
+  ["text_received", "They send a text"],
+  ["meeting_booked", "A meeting is booked"],
+  ["meeting_cancelled", "A meeting is cancelled"],
+  ["meeting_completed", "A meeting is marked done"],
+  ["meeting_no_show", "They don't show up to a meeting"],
+  ["stage_changed", "A card moves to another stage"],
+  ["deal_lost", "A card is marked lost"],
+  ["deal_reopened", "A lost card is reopened"],
+];
+// The three a customer can produce at will: an "every time" rule on them still fires at most once
+// a day per customer (365), and never for a stranger.
+const SS_RULE_INBOUND_EVENTS = ["call_missed", "voicemail_left", "text_received"];
+// How often a schedule runs. Mirrors RULE_SCHEDULE_FREQS.
+const SS_RULE_SCHEDULE_FREQS = [
+  ["daily", "Every day"],
+  ["weekly", "Every week"],
+  ["monthly", "Every month"],
+  ["yearly", "Every year"],
+  ["date_field", "On a date in their record"],
+];
+const SS_RULE_WEEKDAYS = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const SS_RULE_MONTHS = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+// The zones a US builder picks from; anything else Postgres knows is still accepted by the server.
+const SS_US_TIME_ZONES = [
+  ["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"],
+  ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"],
+  ["Pacific/Honolulu", "Hawaii"],
 ];
 // Mirrors RULE_ACTION_LABELS. Inside the Hub first, reaching the customer last — the order of how
 // much a mistake costs, which is also the order a builder should read them in.
@@ -7475,6 +7513,11 @@ const SS_RULE_ACTIONS = [
   ["set_close_date", "Set the expected close date in… days"],
   ["add_note", "Add a note to the customer"],
   ["create_card", "Create a card in another pipeline"],
+  ["add_label", "Add a tag"],
+  ["remove_label", "Remove a tag"],
+  ["assign_owner", "Assign the customer to…"],
+  ["create_task", "Create a task…"],
+  ["notify_team", "Email your team"],
   ["send_sms", "Send the customer a text"],
   ["send_email", "Send the customer an email"],
 ];
@@ -7496,7 +7539,7 @@ const SS_RULE_SCOPES = [
 ];
 // What can be SAVED today. The other two need the audience query and the schedule (round 2); they
 // are shown, disabled, so the picker reads as the whole idea rather than half of it.
-const SS_RULE_SCOPES_LIVE = ["pipeline", "all_pipelines"];
+const SS_RULE_SCOPES_LIVE = ["pipeline", "all_pipelines", "contacts", "none"];
 // What each action needs from its subject. Mirrors RULE_ACTION_NEEDS, compared VALUE by value.
 const SS_RULE_ACTION_NEEDS = [
   ["set_status", "pipeline"],
@@ -7507,6 +7550,11 @@ const SS_RULE_ACTION_NEEDS = [
   ["set_close_date", "deal"],
   ["add_note", "contact"],
   ["create_card", "contact"],
+  ["add_label", "contact"],
+  ["remove_label", "contact"],
+  ["assign_owner", "contact"],
+  ["create_task", "contact"],
+  ["notify_team", "any"],
   ["send_sms", "contact"],
   ["send_email", "contact"],
 ];
@@ -7539,6 +7587,10 @@ const SS_RULE_CONDITION_FIELDS = [
   ["contact.has_email", "The customer has an email address", "bool", "contact", ["eq"]],
   ["contact.owner", "The customer's owner", "owner", "contact", ["eq", "neq", "is_empty", "not_empty"]],
   ["contact.label", "The customer's tags", "label", "contact", ["has", "lacks"]],
+  ["contact.source", "Where the customer came from", "contact_source", "contact", ["eq", "neq"]],
+  ["contact.days_since_contact", "Days since anyone spoke to them", "number", "contact", ["gt", "lt"]],
+  ["contact.days_since_created", "Days since they were added", "number", "contact", ["gt", "lt"]],
+  ["event.label", "The tag that was added", "text", "contact", ["eq", "neq"]],
 ];
 const SS_RULE_DEAL_SOURCES = [
   ["manual", "Added by hand"],
@@ -7548,17 +7600,63 @@ const SS_RULE_DEAL_SOURCES = [
   ["design", "A design"],
   ["form", "A lead form"],
 ];
+const SS_RULE_CONTACT_SOURCES = [
+  ["design", "A design"],
+  ["captured_lead", "The designer's lead capture"],
+  ["manual", "Added by hand"],
+  ["import", "Imported"],
+  ["phone", "A phone call"],
+  ["ghl_import", "GoHighLevel import"],
+  ["booking", "A booking"],
+  ["form", "A lead form"],
+];
 
 function ssRuleProvides(scope, need) { return (SS_RULE_SCOPE_PROVIDES[scope] || []).indexOf(need) >= 0; }
 function ssRuleActionAllowed(kind, scope) {
   const need = (SS_RULE_ACTION_NEEDS.find(([k]) => k === kind) || [])[1];
   return !!need && ssRuleProvides(scope, need);
 }
-/** Mirrors triggerAllowedForScope: every round-1 clock counts from something on the CARD. */
-function ssRuleTriggerAllowed(triggerKind, scope) {
+/** Mirrors triggerAllowedForScope: a rule for nobody has only a schedule; a customer rule counts
+ *  only from a customer's own dates; "a date in their record" is a customer's record. */
+function ssRuleTriggerAllowed(triggerKind, scope, anchor, freq) {
+  if (triggerKind === "schedule") return freq !== "date_field" || scope === "contacts";
   if (scope === "none") return false;
-  if (triggerKind === "elapsed") return ssRuleProvides(scope, "deal");
+  if (triggerKind === "elapsed") {
+    if (!anchor) return true;
+    return scope === "contacts" ? anchor === "last_contact" || anchor === "contact_created" : anchor !== "contact_created";
+  }
   return triggerKind === "event";
+}
+function ssRuleEventLabel(k) {
+  return (SS_STATUS_EVENTS.find(([x]) => x === k) || SS_RULE_CONTACT_EVENTS.find(([x]) => x === k) || [null, null])[1];
+}
+function ssRuleClock12(at) {
+  const parts = String(at || "09:00").split(":").map(Number);
+  const h = parts[0] || 0;
+  return `${h % 12 === 0 ? 12 : h % 12}:${String(parts[1] || 0).padStart(2, "0")} ${h < 12 ? "am" : "pm"}`;
+}
+/** "every Monday and Thursday at 8:00 am" — the server's scheduleWords, word for word. */
+function ssRuleScheduleWords(sch) {
+  if (!sch) return "on a schedule";
+  const at = ssRuleClock12(sch.at);
+  const full = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  const ord = (n) => `${n}${n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th"}`;
+  if (sch.freq === "daily") return `every day at ${at}`;
+  if (sch.freq === "weekly") {
+    const d = (sch.days || []).map((x) => full[x]);
+    const list = d.length > 1 ? `${d.slice(0, -1).join(", ")} and ${d[d.length - 1]}` : d[0] || "Monday";
+    return `${(sch.every || 1) > 1 ? `every ${sch.every} weeks on` : "every"} ${list} at ${at}`;
+  }
+  if (sch.freq === "monthly") return `on the ${ord(sch.dayOfMonth || 1)} of every month at ${at}`;
+  if (sch.freq === "yearly") return `every year on ${SS_RULE_MONTHS[sch.month || 1]} ${sch.day || 1} at ${at}`;
+  const off = sch.offsetDays || 0;
+  const lead = off === 0 ? "on" : `${Math.abs(off)} day${Math.abs(off) === 1 ? "" : "s"} ${off < 0 ? "before" : "after"}`;
+  return `${lead} the date in their record${sch.yearly ? ", every year," : ""} at ${at}`;
+}
+/** A schedule that messages a GROUP must be armed (365): the database will not send it otherwise. */
+function ssRuleNeedsArm(r) {
+  return r.triggerKind === "schedule" && (r.scopeKind || "pipeline") !== "none"
+    && (r.actions || []).some((a) => SS_RULE_OUTBOUND.indexOf(a.kind) >= 0);
 }
 function ssRuleConditionSpec(field) {
   const f = SS_RULE_CONDITION_FIELDS.find(([k]) => k === field);
@@ -7613,9 +7711,10 @@ function ssRuleStaleConditions(conditions, scope, pipeline) {
  *  back what the builder wrote rather than a form they have to re-interpret. */
 function ssRuleSentence(r) {
   const anchor = (SS_RULE_ANCHORS.find(([k]) => k === r.elapsedAnchor) || [null, "then"])[1];
-  const ev = (SS_STATUS_EVENTS.find(([k]) => k === r.triggerEvent) || [null, "something happens"])[1];
+  const ev = ssRuleEventLabel(r.triggerEvent) || "something happens";
   const when = r.triggerKind === "elapsed"
     ? `${r.elapsedDays == null ? 0 : r.elapsedDays} day${r.elapsedDays === 1 ? "" : "s"} after ${anchor}`
+    : r.triggerKind === "schedule" ? ssRuleScheduleWords(r.schedule)
     : ev;
   const what = (r.actions || []).map((a) => ((SS_RULE_ACTIONS.find(([k]) => k === a.kind) || [null, a.kind])[1]).replace(/…$/, "").trim());
   return `When ${when.charAt(0).toLowerCase() + when.slice(1)} → ${what.length ? what.join(", then ") : "nothing yet"}`;
@@ -7646,7 +7745,8 @@ function ssRuleConditionsSentence(conditions, rule, meta) {
 function ssRuleTriggerWords(trigger) {
   const m = /^elapsed:([a-z_]+)\+(\d+)d$/.exec(String(trigger || ""));
   if (m) return `${m[2]} day${m[2] === "1" ? "" : "s"} after ${(SS_RULE_ANCHORS.find(([k]) => k === m[1]) || [null, m[1]])[1]}`;
-  return (SS_STATUS_EVENTS.find(([k]) => k === trigger) || [null, trigger])[1];
+  if (/^schedule:/.test(String(trigger || ""))) return "On its schedule";
+  return ssRuleEventLabel(trigger) || trigger;
 }
 
 /**
@@ -7656,7 +7756,7 @@ function ssRuleTriggerWords(trigger) {
  * run, which nobody would ever go looking for from this screen. `pipeline` is the one the rule is
  * on — null for an every-pipeline rule, which cannot carry the two actions that need one.
  */
-function SsRuleActionFields({ action, pipeline, pipelines, onChange, disabled }) {
+function SsRuleActionFields({ action, pipeline, pipelines, meta, onChange, disabled }) {
   const p = action.params || {};
   const set = (patch) => onChange({ ...action, params: { ...p, ...patch } });
   const inp = { ...S.input, flex: "1 1 160px", minWidth: 120, padding: "5px 8px" };
@@ -7713,6 +7813,55 @@ function SsRuleActionFields({ action, pipeline, pipelines, onChange, disabled })
         {!others.length && <span style={{ fontSize: 11.5, fontWeight: 600, color: "#B45309" }}>Add a second pipeline first.</span>}
         <input aria-label="New card title" disabled={disabled} style={{ ...inp, flex: "1 1 120px" }} maxLength={200}
           value={p.title || ""} onChange={(e) => set({ title: e.target.value })} placeholder="Card title (optional)" />
+      </>
+    );
+  }
+  if (action.kind === "add_label" || action.kind === "remove_label") {
+    return (
+      <input aria-label="Tag" list="ss-rule-labels" disabled={disabled} style={inp} maxLength={60}
+        value={p.label || ""} onChange={(e) => set({ label: e.target.value })} placeholder="A tag, e.g. Lot visitor" />
+    );
+  }
+  const team = (meta && meta.team) || [];
+  if (action.kind === "assign_owner") {
+    return (
+      <select aria-label="Owner" disabled={disabled} style={inp} value={p.userId || ""} onChange={(e) => set({ userId: e.target.value })}>
+        <option value="">Pick a person…</option>
+        {team.map((m) => <option key={m.userId} value={m.userId}>{m.name || "Unnamed"}</option>)}
+      </select>
+    );
+  }
+  if (action.kind === "create_task") {
+    // It lists under the customer's Planned section, due at 9am on the day in your time zone.
+    return (
+      <>
+        <input aria-label="Task" disabled={disabled} style={{ ...inp, flex: "2 1 200px" }} maxLength={200}
+          value={p.title || ""} onChange={(e) => set({ title: e.target.value })} placeholder="What to do, e.g. Call about the review" />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#64748B", fontWeight: 700 }}>due in
+          <input aria-label="Due in days" type="number" min={0} max={3650} disabled={disabled} style={{ ...S.input, width: 70, padding: "5px 8px" }}
+            value={p.dueDays == null ? "" : p.dueDays} onChange={(e) => set({ dueDays: e.target.value === "" ? "" : Number(e.target.value) })} />days
+        </label>
+        <select aria-label="Assign to" disabled={disabled} style={inp} value={p.assigneeUserId || ""} onChange={(e) => set({ assigneeUserId: e.target.value })}>
+          <option value="">The customer's owner</option>
+          {team.map((m) => <option key={m.userId} value={m.userId}>{m.name || "Unnamed"}</option>)}
+        </select>
+      </>
+    );
+  }
+  if (action.kind === "notify_team") {
+    const chosen = Array.isArray(p.userIds) ? p.userIds : [];
+    return (
+      <>
+        <select aria-label="Who to email" disabled={disabled} style={inp} value={chosen[0] || ""}
+          onChange={(e) => set({ userIds: e.target.value ? [e.target.value] : [] })}>
+          <option value="">Owners and admins</option>
+          {team.map((m) => <option key={m.userId} value={m.userId}>{m.name || "Unnamed"}</option>)}
+        </select>
+        <input aria-label="Team email subject" disabled={disabled} style={{ ...S.input, flex: "1 1 100%" }} maxLength={200}
+          value={p.subject || ""} onChange={(e) => set({ subject: e.target.value })} placeholder="Subject" />
+        <textarea aria-label="Team email body" disabled={disabled} style={{ ...S.input, flex: "1 1 100%", minHeight: 56 }} maxLength={4000}
+          value={p.body || ""} onChange={(e) => set({ body: e.target.value })}
+          placeholder={`What the team needs to know   (merge fields: ${SS_RULE_MERGE_HINT})`} />
       </>
     );
   }
@@ -7832,10 +7981,24 @@ function SsRuleConditions({ conditions, onChange, scope, pipeline, meta, stale, 
                 {((meta && meta.team) || []).map((m) => <option key={m.userId} value={m.userId}>{m.name || "Unnamed"}</option>)}
               </select>
             );
-          } else if (spec.type === "label") {
+          } else if (spec.type === "label" || spec.type === "text") {
             value = (
               <input aria-label="Condition value" list="ss-rule-labels" disabled={disabled} maxLength={60} style={{ ...inp, flex: "1 1 160px" }}
                 value={c.value || ""} onChange={(e) => vset(e.target.value)} placeholder="A tag, e.g. Lot visitor" />
+            );
+          } else if (spec.type === "number") {
+            value = (
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12.5, color: "#475569", fontWeight: 700 }}>
+                <input aria-label="Condition value" type="number" min={0} step={1} disabled={disabled} style={{ ...inp, width: 90 }}
+                  value={c.value === "" || c.value == null ? "" : c.value} onChange={(e) => vset(e.target.value === "" ? "" : Number(e.target.value))} />days
+              </label>
+            );
+          } else if (spec.type === "contact_source") {
+            value = (
+              <select aria-label="Condition value" disabled={disabled} style={{ ...inp, flex: "1 1 160px" }} value={c.value || ""} onChange={(e) => vset(e.target.value)}>
+                <option value="">Pick one…</option>
+                {SS_RULE_CONTACT_SOURCES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              </select>
             );
           }
         }
@@ -7872,6 +8035,106 @@ function SsRuleConditions({ conditions, onChange, scope, pipeline, meta, stale, 
   );
 }
 
+/** THE SCHEDULE (365): how often, at what time, in the ACCOUNT's time zone — which is named, and
+ *  changeable, right here, because it is the one thing about "8:00 am" nobody would otherwise see. */
+function SsRuleSchedule({ schedule, onChange, scope, meta, onTimeZone, disabled }) {
+  const sch = schedule || { freq: "weekly", at: "08:00", days: [1], every: 1 };
+  const set = (patch) => onChange({ ...sch, ...patch });
+  const inp = { ...S.input, width: "auto", padding: "5px 8px" };
+  const dateFields = (meta && meta.dateFields) || [];
+  const freqs = SS_RULE_SCHEDULE_FREQS.filter(([k]) => k !== "date_field" || (scope === "contacts" && dateFields.length));
+  const [tzBusy, setTzBusy] = useState(false);
+  const [tzErr, setTzErr] = useState(null);
+  const tz = (meta && meta.timeZone) || "America/Chicago";
+  const changeTz = (next) => {
+    setTzBusy(true); setTzErr(null);
+    ssPipeCall("crm_rules_time_zone", { timeZone: next })
+      .then(() => { setTzBusy(false); if (onTimeZone) onTimeZone(next); })
+      .catch((e) => { setTzErr(e.message); setTzBusy(false); });
+  };
+  const pick = (freq) => {
+    if (freq === "weekly") onChange({ freq, at: sch.at || "08:00", days: [1], every: 1 });
+    else if (freq === "monthly") onChange({ freq, at: sch.at || "09:00", dayOfMonth: 1 });
+    else if (freq === "yearly") onChange({ freq, at: sch.at || "09:00", month: 1, day: 1 });
+    else if (freq === "date_field") onChange({ freq, at: sch.at || "09:00", field: (dateFields[0] || {}).key || "", offsetDays: 0, yearly: false });
+    else onChange({ freq, at: sch.at || "08:00" });
+  };
+  return (
+    <div data-ss-rule-schedule="" style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", flex: "1 1 100%" }}>
+      <select aria-label="How often" disabled={disabled} style={inp} value={sch.freq} onChange={(e) => pick(e.target.value)}>
+        {freqs.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+      </select>
+      {sch.freq === "weekly" && (
+        <>
+          {[1, 2, 3, 4, 5, 6, 7].map((d) => {
+            const on = (sch.days || []).indexOf(d) >= 0;
+            return (
+              <button key={d} type="button" data-ss-rule-weekday={d} aria-pressed={on} disabled={disabled}
+                onClick={() => {
+                  const next = on ? (sch.days || []).filter((x) => x !== d) : (sch.days || []).concat([d]).sort((a, b) => a - b);
+                  if (next.length) set({ days: next });
+                }}
+                style={{ padding: "4px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  border: `1px solid ${on ? ACCENT : "#CBD5E1"}`, background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155" }}>
+                {SS_RULE_WEEKDAYS[d]}
+              </button>
+            );
+          })}
+          <select aria-label="Every" disabled={disabled} style={inp} value={sch.every || 1} onChange={(e) => set({ every: Number(e.target.value) })}>
+            <option value={1}>every week</option>
+            <option value={2}>every 2 weeks</option>
+            <option value={3}>every 3 weeks</option>
+            <option value={4}>every 4 weeks</option>
+          </select>
+        </>
+      )}
+      {sch.freq === "monthly" && (
+        <select aria-label="Day of month" disabled={disabled} style={inp} value={sch.dayOfMonth || 1} onChange={(e) => set({ dayOfMonth: Number(e.target.value) })}>
+          {Array.from({ length: 31 }, (_x, i) => i + 1).map((d) => <option key={d} value={d}>on day {d}</option>)}
+        </select>
+      )}
+      {sch.freq === "yearly" && (
+        <>
+          <select aria-label="Month" disabled={disabled} style={inp} value={sch.month || 1} onChange={(e) => set({ month: Number(e.target.value) })}>
+            {SS_RULE_MONTHS.slice(1).map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+          </select>
+          <select aria-label="Day" disabled={disabled} style={inp} value={sch.day || 1} onChange={(e) => set({ day: Number(e.target.value) })}>
+            {Array.from({ length: 31 }, (_x, i) => i + 1).map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </>
+      )}
+      {sch.freq === "date_field" && (
+        <>
+          <input aria-label="Days offset" type="number" min={-365} max={365} disabled={disabled} style={{ ...inp, width: 70 }}
+            value={sch.offsetDays == null ? 0 : sch.offsetDays} onChange={(e) => set({ offsetDays: e.target.value === "" ? 0 : Number(e.target.value) })} />
+          <span style={{ fontSize: 12.5, color: "#475569", fontWeight: 600 }}>days from</span>
+          <select aria-label="Date field" disabled={disabled} style={inp} value={sch.field || ""} onChange={(e) => set({ field: e.target.value })}>
+            {dateFields.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+          </select>
+          <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12.5, color: "#475569" }}>
+            <input type="checkbox" aria-label="Every year" disabled={disabled} checked={!!sch.yearly} onChange={(e) => set({ yearly: e.target.checked })} />every year
+          </label>
+        </>
+      )}
+      <span style={{ fontSize: 12.5, color: "#475569", fontWeight: 600 }}>at about</span>
+      <input aria-label="At" type="time" step={300} disabled={disabled} style={{ ...inp, width: 110 }}
+        value={sch.at || "08:00"} onChange={(e) => set({ at: e.target.value || "08:00" })} />
+      <span data-ss-rule-timezone="" style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12, color: "#64748B" }}>
+        your time,
+        <select aria-label="Time zone" disabled={disabled || tzBusy} style={{ ...inp, padding: "3px 6px", fontSize: 12 }} value={tz}
+          onChange={(e) => changeTz(e.target.value)}>
+          {!SS_US_TIME_ZONES.some(([k]) => k === tz) && <option value={tz}>{tz}</option>}
+          {SS_US_TIME_ZONES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
+      </span>
+      {tzErr && <span style={{ fontSize: 12, color: "#B91C1C" }}>{tzErr}</span>}
+      <span style={{ flex: "1 1 100%", fontSize: 11.5, color: "#94A3B8" }}>
+        It reaches each customer once each time it runs, and a text waits for 8am if it is night where the customer lives.
+      </span>
+    </div>
+  );
+}
+
 /**
  * ONE RULE, EDITED IN PLACE UNDER THE LIST — the shape Carolyn asked the pipeline editor to take on
  * 2026-11-02 ("not a pop-up"), because the reason is the same: the other rules stay readable while
@@ -7881,26 +8144,40 @@ function SsRuleConditions({ conditions, onChange, scope, pipeline, meta, stale, 
  * meaning rather than decoration — two actions on one rule see each other's writes — and a
  * half-saved list would be a rule that does something nobody wrote.
  */
-function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
+function SsRuleEditor({ meta, rule, onSaved, onCancel, onTimeZone }) {
   const pipelines = (meta && meta.pipelines) || [];
   const [draft, setDraft] = useState(() => (rule ? {
     name: rule.name || "",
     scopeKind: rule.scopeKind || "pipeline", pipelineId: rule.pipelineId || "",
     triggerKind: rule.triggerKind, triggerEvent: rule.triggerEvent || "delivered",
     elapsedAnchor: rule.elapsedAnchor || "delivered", elapsedDays: rule.elapsedDays == null ? 30 : rule.elapsedDays,
+    schedule: rule.schedule || { freq: "weekly", at: "08:00", days: [1], every: 1 },
+    armed: rule.armedCount != null,
     oncePerCard: rule.oncePerCard !== false, enabled: rule.enabled !== false,
     conditions: (rule.conditions || []).map((c) => ({ ...c })),
     actions: (rule.actions || []).map((a) => ({ kind: a.kind, params: { ...(a.params || {}) } })),
   } : {
     name: "", scopeKind: "pipeline", pipelineId: (pipelines[0] || {}).id || "",
     triggerKind: "event", triggerEvent: "delivered", elapsedAnchor: "delivered", elapsedDays: 30,
+    schedule: { freq: "weekly", at: "08:00", days: [1], every: 1 }, armed: false,
     oncePerCard: true, enabled: true, conditions: [], actions: [],
   }));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const ref = useRef(null);
   useEffect(() => { const el = ref.current; if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, []);
-  const patch = (p) => { setErr(null); setDraft((d) => ({ ...d, ...p })); };
+  const patch = (p) => {
+    setErr(null);
+    setDraft((d) => {
+      const next = { ...d, ...p };
+      // Anything that changes WHO the rule reaches withdraws the arm — the database does the same
+      // (363's reset) — so the count it was armed with is never a count of somebody else.
+      if ("scopeKind" in p || "pipelineId" in p || "conditions" in p || "triggerKind" in p) {
+        if (!("armed" in p)) next.armed = false;
+      }
+      return next;
+    });
+  };
   const sm = { ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px" };
   const setAction = (i, next) => { setErr(null); setDraft((d) => ({ ...d, actions: d.actions.map((a, k) => (k === i ? next : a)) })); };
   const moveAction = (i, dir) => setDraft((d) => {
@@ -7917,7 +8194,26 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
   const stuck = staleActions.length + staleConds.length;
   const outbound = draft.actions.some((a) => SS_RULE_OUTBOUND.indexOf(a.kind) >= 0);
   const moved = !!rule && (scope !== (rule.scopeKind || "pipeline") || (scope === "pipeline" && draft.pipelineId !== rule.pipelineId));
-  const offeredActions = SS_RULE_ACTIONS.filter(([k]) => ssRuleActionAllowed(k, scope));
+  // A scheduled EMAIL waits for the unsubscribe link (round 2b); the server refuses it in words.
+  const offeredActions = SS_RULE_ACTIONS.filter(([k]) => ssRuleActionAllowed(k, scope)
+    && !(draft.triggerKind === "schedule" && k === "send_email"));
+  const needsArm = ssRuleNeedsArm({ ...draft, scopeKind: scope });
+  // WHO IT WOULD REACH NOW — the same count the sweep uses (365's crm_rule_audience_preview). Asked
+  // for customer rules and schedules, where "how many?" is the question that matters.
+  const [aud, setAud] = useState(null);
+  const wantsAudience = scope === "contacts" || (draft.triggerKind === "schedule" && scope !== "none");
+  const audKey = JSON.stringify([scope, draft.pipelineId, draft.conditions, wantsAudience]);
+  useEffect(() => {
+    if (!wantsAudience) { setAud(null); return undefined; }
+    let live = true;
+    const t = setTimeout(() => {
+      ssPipeCall("crm_rule_audience", {
+        scopeKind: scope, pipelineId: scope === "pipeline" ? draft.pipelineId : undefined,
+        conditions: draft.conditions.map((c) => ({ field: c.field, op: c.op, value: c.op === "is_empty" || c.op === "not_empty" ? null : c.value })),
+      }).then((r) => { if (live) setAud(r); }).catch(() => { if (live) setAud(null); });
+    }, 600);
+    return () => { live = false; clearTimeout(t); };
+  }, [audKey]);
 
   const save = () => {
     setBusy(true); setErr(null);
@@ -7927,12 +8223,15 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
       ...(scope === "pipeline" ? { pipelineId: draft.pipelineId } : {}),
       name: draft.name.trim(),
       triggerKind: draft.triggerKind,
-      ...(draft.triggerKind === "event"
-        ? { triggerEvent: draft.triggerEvent }
+      ...(draft.triggerKind === "event" ? { triggerEvent: draft.triggerEvent }
+        : draft.triggerKind === "schedule" ? { schedule: draft.schedule }
         : { elapsedAnchor: draft.elapsedAnchor, elapsedDays: Number(draft.elapsedDays) }),
+      // THE ARM, with the number on screen when it was pressed.
+      ...(needsArm && draft.armed && aud && aud.count != null ? { arm: true, armedCount: aud.count }
+        : needsArm && !draft.armed && rule && rule.armedCount != null ? { arm: false } : {}),
       // A time rule's switch is locked on, so send what the database will accept rather than
       // whatever the draft happened to be carrying from when it was an event rule.
-      oncePerCard: draft.triggerKind === "elapsed" ? true : draft.oncePerCard,
+      oncePerCard: draft.triggerKind === "event" ? draft.oncePerCard : true,
       enabled: draft.enabled,
       conditions: draft.conditions.map((c) => ({ field: c.field, op: c.op, value: c.op === "is_empty" || c.op === "not_empty" ? null : c.value })),
       actions: draft.actions,
@@ -7951,7 +8250,9 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
 
       <span style={S.lbl}>Runs on</span>
       <SsRuleScopePicker scope={scope} pipelineId={draft.pipelineId} pipelines={pipelines} disabled={busy}
-        onChange={(p) => patch(p)} />
+        onChange={(p) => patch({ ...p, ...(p.scopeKind === "none" ? { triggerKind: "schedule" } : {}),
+          ...(p.scopeKind && p.scopeKind !== "contacts" && draft.triggerKind === "elapsed" && draft.elapsedAnchor === "contact_created" ? { elapsedAnchor: "delivered" } : {}),
+          ...(p.scopeKind === "contacts" && draft.triggerKind === "elapsed" && ["last_contact", "contact_created"].indexOf(draft.elapsedAnchor) < 0 ? { elapsedAnchor: "last_contact" } : {}) })} />
       {/* A MOVE starts the rule afresh (migration 363 resets it in the database): a clock rule
           moved onto a pipeline must not fire on everything that pipeline already did. Said here,
           before Save, because it is the one thing about a move nobody would guess. */}
@@ -7963,15 +8264,24 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
 
       <span style={S.lbl}>When</span>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
-        <select aria-label="When the rule runs" disabled={busy} style={{ ...S.input, flex: "0 0 150px", padding: "5px 8px" }}
+        <select aria-label="When the rule runs" disabled={busy} style={{ ...S.input, flex: "0 0 170px", padding: "5px 8px" }}
           value={draft.triggerKind} onChange={(e) => patch({ triggerKind: e.target.value })}>
-          <option value="event">Something happens</option>
-          {ssRuleTriggerAllowed("elapsed", scope) && <option value="elapsed">Time passes</option>}
+          {scope !== "none" && <option value="event">Something happens</option>}
+          {scope !== "none" && <option value="elapsed">Time passes</option>}
+          <option value="schedule">On a schedule</option>
         </select>
-        {draft.triggerKind === "event" ? (
+        {draft.triggerKind === "schedule" ? (
+          <SsRuleSchedule schedule={draft.schedule} scope={scope} meta={meta} disabled={busy} onTimeZone={onTimeZone}
+            onChange={(next) => setDraft((d) => ({ ...d, schedule: next }))} />
+        ) : draft.triggerKind === "event" ? (
           <select aria-label="Which event" disabled={busy} style={{ ...S.input, flex: "1 1 240px", minWidth: 200, padding: "5px 8px" }}
             value={draft.triggerEvent} onChange={(e) => patch({ triggerEvent: e.target.value })}>
-            {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            <optgroup label="Estimates, invoices, building and delivery">
+              {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </optgroup>
+            <optgroup label="Customers, calls, texts and meetings">
+              {SS_RULE_CONTACT_EVENTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </optgroup>
           </select>
         ) : (
           <>
@@ -7980,7 +8290,7 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
             <span style={{ fontSize: 12.5, color: "#475569", fontWeight: 600 }}>days after</span>
             <select aria-label="Counted from" disabled={busy} style={{ ...S.input, flex: "1 1 200px", minWidth: 170, padding: "5px 8px" }}
               value={draft.elapsedAnchor} onChange={(e) => patch({ elapsedAnchor: e.target.value })}>
-              {SS_RULE_ANCHORS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              {SS_RULE_ANCHORS.filter(([k]) => ssRuleTriggerAllowed("elapsed", scope, k)).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </select>
           </>
         )}
@@ -8006,7 +8316,7 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
                 {!allowed && <option value={a.kind}>{(SS_RULE_ACTIONS.find(([k]) => k === a.kind) || [a.kind, a.kind])[1]} (needs one pipeline)</option>}
                 {offeredActions.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
               </select>
-              <SsRuleActionFields action={a} pipeline={pipeline} pipelines={pipelines} disabled={busy} onChange={(next) => setAction(i, next)} />
+              <SsRuleActionFields action={a} pipeline={pipeline} pipelines={pipelines} meta={meta} disabled={busy} onChange={(next) => setAction(i, next)} />
               <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => moveAction(i, -1)} style={sm}>↑</button>
               <button type="button" title="Move down" disabled={busy || i === draft.actions.length - 1} onClick={() => moveAction(i, 1)} style={sm}>↓</button>
               <button type="button" title="Remove this action" disabled={busy}
@@ -8027,7 +8337,18 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
           crm_rules_elapsed_is_once). "30 days after delivered" is true of a card from the moment
           it comes due and stays true, so a repeating one would fire on every sweep — the same
           customer texted every few minutes. The switch is shown locked rather than hidden. */}
-      {draft.triggerKind === "elapsed" ? (
+      {draft.triggerKind === "event" && SS_RULE_INBOUND_EVENTS.indexOf(draft.triggerEvent) >= 0 && (
+        <div data-ss-rule-inbound-note="" style={{ fontSize: 12, color: "#475569", background: "#F1F5F9", borderRadius: 8, padding: "6px 8px", marginBottom: 8, lineHeight: 1.45 }}>
+          Runs only for customers already in your Customer Hub — never a stranger — and at most once a day each.
+          A text goes only to people who have texted you before or ticked the texting box, so most missed callers will not get one.
+        </div>
+      )}
+      {draft.triggerKind === "schedule" ? (
+        <div data-ss-rule-once-locked="" style={{ display: "flex", gap: 8, marginBottom: 8, fontSize: 12.5, color: "#334155" }}>
+          <input type="checkbox" checked disabled readOnly aria-label="Once each time it runs" />
+          <span><b>Once each time it runs.</b> Nobody gets it twice on the same day.</span>
+        </div>
+      ) : draft.triggerKind === "elapsed" ? (
         <div data-ss-rule-once-locked="" style={{ display: "flex", gap: 8, marginBottom: 8, fontSize: 12.5, color: "#334155" }}>
           <input type="checkbox" checked disabled readOnly aria-label="Only once per card" />
           <span><b>Only once per card.</b> A time rule always runs once: once it comes due it stays due.</span>
@@ -8045,6 +8366,23 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel }) {
           has opted out, and wait for the morning if it is night where the customer lives. Try it on one
           card before you leave it running.
         </div>
+      )}
+      {wantsAudience && aud && aud.count != null && (
+        <div data-ss-rule-audience-preview="" style={{ fontSize: 12.5, color: "#334155", marginBottom: 8 }}>
+          <b>This would reach {aud.count} {aud.count === 1 ? "customer" : "customers"} now</b>
+          {aud.sample && aud.sample.length ? ` (${aud.sample.filter(Boolean).join(", ")}${aud.count > aud.sample.length ? ", …" : ""})` : ""}.
+        </div>
+      )}
+      {/* ⛔ THE ARM (365). A schedule that texts customers reaches every match at once, so it does
+          not send until it is armed with the count on screen — and the database refuses it too. */}
+      {needsArm && (
+        <label data-ss-rule-arm="" style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 8, fontSize: 12.5, color: "#7C2D12",
+          background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 8, padding: "8px 10px" }}>
+          <input type="checkbox" aria-label="Armed" disabled={busy || !aud || aud.count == null} checked={!!draft.armed}
+            onChange={(e) => setDraft((d) => ({ ...d, armed: e.target.checked }))} />
+          <span><b>Arm it{aud && aud.count != null ? ` — send to ${aud.count} ${aud.count === 1 ? "customer" : "customers"} each time it runs` : ""}.</b>{" "}
+            Until it is armed it will not send anything. Changing who it reaches takes the arm off again.</span>
+        </label>
       )}
       {err && <div data-ss-rule-save-error="" style={S.err}>{err}</div>}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -8111,6 +8449,7 @@ function SsRuleLog({ log, page = false }) {
 /** EVERY RULE ON THE ACCOUNT, IN ONE LIST (Carolyn 2026-11-04: "one flat list"), with who each is
  *  for on its own row, a filter, one editor in place under the list, and the run log on demand. */
 function SsRulesList({ meta, can, onChanged }) {
+  const pillColor = (k) => (k === "all_pipelines" ? ["#EDE9FE", "#5B21B6"] : k === "contacts" ? ["#DCFCE7", "#166534"] : k === "none" ? ["#FEF3C7", "#92400E"] : ["#E0F2FE", "#075985"]);
   const [editing, setEditing] = useState(null);   // rule object | "new" | null
   const [filter, setFilter] = useState("all");
   const [logFor, setLogFor] = useState(null);     // rule id whose runs are open
@@ -8125,6 +8464,9 @@ function SsRulesList({ meta, can, onChanged }) {
   const shown = rules.filter((r) => filter === "all"
     || (filter === "paused" && r.enabled === false)
     || (filter === "all_pipelines" && r.scopeKind === "all_pipelines")
+    || (filter === "contacts" && r.scopeKind === "contacts")
+    || (filter === "none" && r.scopeKind === "none")
+    || (filter === "schedule" && r.triggerKind === "schedule")
     || (filter.indexOf("pipe:") === 0 && r.scopeKind === "pipeline" && r.pipelineId === filter.slice(5)));
   // ⚠️ THE ORDER IS THE ORDER THE RULES RUN IN, across the whole account (363), so a reorder posts
   // every rule. Moving one rule within a filtered view would silently move it among rules the
@@ -8151,6 +8493,9 @@ function SsRulesList({ meta, can, onChanged }) {
           <option value="all">All rules ({rules.length})</option>
           <option value="paused">Paused</option>
           <option value="all_pipelines">Every pipeline</option>
+          <option value="contacts">Customers</option>
+          <option value="none">Your team</option>
+          <option value="schedule">On a schedule</option>
           {pipelines.map((p) => <option key={p.id} value={`pipe:${p.id}`}>{p.name}</option>)}
         </select>
         <span style={{ flex: 1 }} />
@@ -8183,7 +8528,7 @@ function SsRulesList({ meta, can, onChanged }) {
                     {/* WHO IT IS FOR, on every row — the whole point of a flat list is that this
                         is no longer implied by which group a rule sits in. */}
                     <span data-ss-rule-audience={r.scopeKind || "pipeline"}
-                      style={{ fontSize: 11, fontWeight: 700, padding: "1px 8px", borderRadius: 999, background: r.scopeKind === "all_pipelines" ? "#EDE9FE" : "#E0F2FE", color: r.scopeKind === "all_pipelines" ? "#5B21B6" : "#075985" }}>
+                      style={{ fontSize: 11, fontWeight: 700, padding: "1px 8px", borderRadius: 999, background: pillColor(r.scopeKind)[0], color: pillColor(r.scopeKind)[1] }}>
                       {ssRuleAudienceLabel(r, pipelines)}
                     </span>
                   </div>
@@ -8194,6 +8539,12 @@ function SsRulesList({ meta, can, onChanged }) {
                   {r.enabled === false && <div data-ss-rule-paused="" style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>Paused — it will not run.</div>}
                   {r.oncePerCard === false && <div style={{ fontSize: 11.5, color: "#64748B" }}>Runs every time, not once per card.</div>}
                   {stale && <div data-ss-rule-stale="" style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>{stale}</div>}
+                  {ssRuleNeedsArm(r) && r.armedCount == null && r.enabled !== false && (
+                    <div data-ss-rule-unarmed="" style={{ fontSize: 11.5, fontWeight: 700, color: "#C2410C" }}>Not armed — it will not send. Edit it to arm it.</div>
+                  )}
+                  {r.triggerKind === "schedule" && r.nextRunAt && r.enabled !== false && (
+                    <div data-ss-rule-next="" style={{ fontSize: 11.5, color: "#64748B" }}>Next: {new Date(r.nextRunAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>
+                  )}
                 </div>
                 <button type="button" data-ss-rule-runs-toggle="" disabled={busy} style={sm}
                   onClick={() => {
@@ -8219,7 +8570,7 @@ function SsRulesList({ meta, can, onChanged }) {
         )}
       </div>
       {editing && (
-        <SsRuleEditor meta={meta} rule={editing === "new" ? null : editing}
+        <SsRuleEditor meta={meta} rule={editing === "new" ? null : editing} onTimeZone={() => onChanged()}
           onCancel={() => setEditing(null)} onSaved={() => { setEditing(null); onChanged(); }} />
       )}
       {err && <div style={S.err}>{err}</div>}
@@ -9012,10 +9363,10 @@ function AutomationsSettings({ viewing = false }) {
     <div style={S.card} data-ss-automations="">
       <div style={S.h2}>Automations</div>
       <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-        <b>When something happens → do this.</b> Each rule says who it is for — the cards in one pipeline, or in
-        every pipeline — and can carry <b>only if</b> conditions. It acts on its own: move the card, set a status,
-        add a note, or text or email the customer. Rules run in the order listed, and two rules on the same trigger
-        see each other's work.
+        <b>When something happens → do this.</b> Each rule says who it is for — the cards in one pipeline, every
+        pipeline, customers who match, or just your team — when it runs (something happens, time passes, or on a
+        schedule), and can carry <b>only if</b> conditions. It acts on its own: move a card, set a status, tag a
+        customer, create a task, text or email them, or email your team. Rules run in the order listed.
       </p>
       {err && <div style={S.err}>{err}</div>}
       {/* The database cannot store a rule yet. Say so plainly rather than offering buttons that

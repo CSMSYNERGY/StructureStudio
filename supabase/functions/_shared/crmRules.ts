@@ -16,8 +16,8 @@
 //
 // Carolyn, 2026-11-04 (migration 363): a rule is no longer the property of one pipeline. It says
 // WHO it is for — cards in one pipeline, cards in every pipeline, customers matching a filter, or
-// nobody — and may carry "only if" conditions. Round 1 ships the first two scopes; the parser
-// refuses the other two in words until round 2 builds what they need.
+// nobody — and may carry "only if" conditions. Round 1 (363) shipped the first two scopes; round
+// 2a (365) switches on the other two, schedules, the new facts and the new actions.
 //
 // Self-contained on purpose (no jsr:/npm: imports): preflight runs `_shared/*.test.ts` offline.
 
@@ -41,6 +41,42 @@ export const RULE_ANCHORS: Record<string, string> = {
   stage_entered: "it moved into its stage",
   last_contact: "anyone last spoke to them",
   expected_close: "the expected close date",
+  // 365: a customer's own, for a rule on customers ("7 days after they were added").
+  contact_created: "they were added",
+};
+/** The anchors a CUSTOMER rule can count from (365's crm_rules_anchor_fits_scope), and the one a
+ *  card rule cannot (the card sweep has no "added" date for a customer). */
+const CUSTOMER_ANCHORS = ["last_contact", "contact_created"];
+
+/**
+ * THE FACTS 365 RAISES, beside the eight a status uses (RULE_EVENTS). Queued by triggers on the
+ * tables that record them and fired by crm-rules-tick, never in the write itself. Mirrors the
+ * CHECK on crm_rules.trigger_event and SS_RULE_CONTACT_EVENTS in the browser.
+ */
+export const RULE_CONTACT_EVENTS: Record<string, string> = {
+  contact_created: "A customer is added",
+  label_added: "A tag is added to a customer",
+  form_submitted: "A website form is submitted",
+  call_missed: "A call from them is missed",
+  voicemail_left: "They leave a voicemail",
+  text_received: "They send a text",
+  meeting_booked: "A meeting is booked",
+  meeting_cancelled: "A meeting is cancelled",
+  meeting_completed: "A meeting is marked done",
+  meeting_no_show: "They don't show up to a meeting",
+  stage_changed: "A card moves to another stage",
+  deal_lost: "A card is marked lost",
+  deal_reopened: "A lost card is reopened",
+};
+const ruleEventLabel = (k: string): string | undefined => RULE_EVENTS[k] ?? RULE_CONTACT_EVENTS[k];
+
+/** How often a schedule runs. Mirrors SS_RULE_SCHEDULE_FREQS. date_field = "on the date in their
+ *  record" (a date custom field), which only a rule on customers can have. */
+export const RULE_SCHEDULE_FREQS = ["daily", "weekly", "monthly", "yearly", "date_field"] as const;
+export type RuleSchedule = {
+  freq: typeof RULE_SCHEDULE_FREQS[number]; at: string;
+  days?: number[]; every?: number; dayOfMonth?: number; month?: number; day?: number;
+  field?: string; offsetDays?: number; yearly?: boolean;
 };
 
 /** What a caller asking for a repeating clock rule is told (migration 355's own constraint). */
@@ -78,6 +114,8 @@ export const RULE_MERGE_FIELDS: Record<string, string> = {
 export const RULE_ACTION_KINDS = [
   "set_status", "move_stage", "mark_lost", "reopen",
   "set_follow_up", "set_close_date", "add_note", "create_card",
+  // 365
+  "add_label", "remove_label", "assign_owner", "create_task", "notify_team",
   "send_sms", "send_email",
 ] as const;
 export type RuleActionKind = typeof RULE_ACTION_KINDS[number];
@@ -91,6 +129,11 @@ export const RULE_ACTION_LABELS: Record<RuleActionKind, string> = {
   set_close_date: "Set the expected close date in… days",
   add_note: "Add a note to the customer",
   create_card: "Create a card in another pipeline",
+  add_label: "Add a tag",
+  remove_label: "Remove a tag",
+  assign_owner: "Assign the customer to…",
+  create_task: "Create a task…",
+  notify_team: "Email your team",
   send_sms: "Send the customer a text",
   send_email: "Send the customer an email",
 };
@@ -109,8 +152,7 @@ export type RuleScope = typeof RULE_SCOPES[number];
 
 /** The scopes a builder may SAVE today. 'contacts' needs the audience query and 'none' needs the
  *  schedule; both arrive in round 2, and the database already admits them (363). */
-export const RULE_SCOPES_LIVE: readonly RuleScope[] = ["pipeline", "all_pipelines"];
-export const RULE_SCOPE_NOT_YET = "Rules for customers and for your team are coming in the next update.";
+export const RULE_SCOPES_LIVE: readonly RuleScope[] = ["pipeline", "all_pipelines", "contacts", "none"];
 
 /** What a subject is able to give an action or a condition. A rule on one pipeline knows the card,
  *  the customer AND which pipeline's statuses and stages are meant; an every-pipeline rule knows
@@ -139,6 +181,12 @@ export const RULE_ACTION_NEEDS: Record<RuleActionKind, RuleNeed> = {
   set_close_date: "deal",
   add_note: "contact",
   create_card: "contact",
+  add_label: "contact",
+  remove_label: "contact",
+  assign_owner: "contact",
+  create_task: "contact",
+  // the only thing a rule for nobody can do
+  notify_team: "any",
   send_sms: "contact",
   send_email: "contact",
 };
@@ -148,11 +196,19 @@ export const actionAllowedForScope = (kind: string, scope: string): boolean => {
   return !!need && scopeProvides(scope, need);
 };
 
-/** A trigger a scope can hear. Every clock in round 1 counts from something on the CARD, so a
- *  customer rule cannot wait for one; an event reaches every subject scope (363's fan-out). */
-export function triggerAllowedForScope(t: { triggerKind: string | null }, scope: string): boolean {
-  if (scope === "none") return false;                     // round 2: schedules only
-  if (t.triggerKind === "elapsed") return scopeProvides(scope, "deal");
+/** A trigger a scope can hear. A rule for nobody has nothing to wait for but a schedule; a customer
+ *  rule can count only from a customer's own dates; "on the date in their record" is a customer's
+ *  record. Every event reaches every subject scope (363's fan-out). */
+export function triggerAllowedForScope(
+  t: { triggerKind: string | null; elapsedAnchor?: string | null; scheduleFreq?: string | null },
+  scope: string,
+): boolean {
+  if (t.triggerKind === "schedule") return t.scheduleFreq !== "date_field" || scope === "contacts";
+  if (scope === "none") return false;
+  if (t.triggerKind === "elapsed") {
+    if (!t.elapsedAnchor) return true;
+    return scope === "contacts" ? CUSTOMER_ANCHORS.includes(t.elapsedAnchor) : t.elapsedAnchor !== "contact_created";
+  }
   return t.triggerKind === "event";
 }
 
@@ -162,7 +218,8 @@ export function triggerAllowedForScope(t: { triggerKind: string | null }, scope:
 export const RULE_CONDITION_OPS = ["eq", "neq", "gt", "lt", "has", "lacks", "is_empty", "not_empty"] as const;
 export type RuleConditionOp = typeof RULE_CONDITION_OPS[number];
 
-export type RuleConditionType = "money" | "status" | "stage" | "bool" | "choice" | "owner" | "label";
+export type RuleConditionType = "money" | "status" | "stage" | "bool" | "choice" | "owner" | "label"
+  | "number" | "text" | "contact_source";
 export type RuleConditionField = { label: string; type: RuleConditionType; needs: RuleNeed; ops: readonly RuleConditionOp[] };
 
 /** Where a card came from — crm_deals.source's own list (325). */
@@ -172,6 +229,17 @@ export const RULE_DEAL_SOURCES: Record<string, string> = {
   booking: "A booking",
   phone: "A phone call",
   design: "A design",
+  form: "A lead form",
+};
+/** Where a customer came from — crm_contacts.source's own list (325). */
+export const RULE_CONTACT_SOURCES: Record<string, string> = {
+  design: "A design",
+  captured_lead: "The designer's lead capture",
+  manual: "Added by hand",
+  import: "Imported",
+  phone: "A phone call",
+  ghl_import: "GoHighLevel import",
+  booking: "A booking",
   form: "A lead form",
 };
 
@@ -191,6 +259,11 @@ export const RULE_CONDITION_FIELDS: Record<string, RuleConditionField> = {
   "contact.has_email": { label: "The customer has an email address", type: "bool", needs: "contact", ops: ["eq"] },
   "contact.owner": { label: "The customer's owner", type: "owner", needs: "contact", ops: ["eq", "neq", "is_empty", "not_empty"] },
   "contact.label": { label: "The customer's tags", type: "label", needs: "contact", ops: ["has", "lacks"] },
+  // 365
+  "contact.source": { label: "Where the customer came from", type: "contact_source", needs: "contact", ops: ["eq", "neq"] },
+  "contact.days_since_contact": { label: "Days since anyone spoke to them", type: "number", needs: "contact", ops: ["gt", "lt"] },
+  "contact.days_since_created": { label: "Days since they were added", type: "number", needs: "contact", ops: ["gt", "lt"] },
+  "event.label": { label: "The tag that was added", type: "text", needs: "contact", ops: ["eq", "neq"] },
 };
 export const RULE_CONDITIONS_MAX = 10;
 export const RULE_LABEL_MAX = 60;
@@ -242,7 +315,17 @@ export function parseRuleConditions(raw: unknown, scope: string): Parsed<{ condi
       const v = str(c.value, 32);
       if (!v || !(v in RULE_DEAL_SOURCES)) return { ok: false, error: `Condition ${n}: pick one from the list.` };
       value = v;
-    } else if (spec.type === "label") {
+    } else if (spec.type === "number") {
+      const v = Number(c.value);
+      if (c.value === "" || c.value === null || c.value === undefined || !Number.isInteger(v) || v < 0 || v > 36500) {
+        return { ok: false, error: `Condition ${n}: give a whole number of days.` };
+      }
+      value = v;
+    } else if (spec.type === "contact_source") {
+      const v = str(c.value, 32);
+      if (!v || !(v in RULE_CONTACT_SOURCES)) return { ok: false, error: `Condition ${n}: pick one from the list.` };
+      value = v;
+    } else if (spec.type === "label" || spec.type === "text") {
       const v = str(c.value, RULE_LABEL_MAX + 1);
       if (!v) return { ok: false, error: `Condition ${n}: name the tag.` };
       if (v.length > RULE_LABEL_MAX) return { ok: false, error: `Condition ${n}: keep the tag under ${RULE_LABEL_MAX} characters.` };
@@ -337,6 +420,45 @@ export function parseRuleAction(b: Record<string, unknown>): Parsed<RuleActionIn
     const title = str(p.title, 200);
     if (title) out.title = title;
 
+  } else if (kind === "add_label" || kind === "remove_label") {
+    const label = str(p.label, RULE_LABEL_MAX + 1);
+    if (!label) return { ok: false, error: "Name the tag." };
+    if (label.length > RULE_LABEL_MAX) return { ok: false, error: `Keep the tag under ${RULE_LABEL_MAX} characters.` };
+    out.label = label;
+
+  } else if (kind === "assign_owner") {
+    const id = str(p.userId, 64);
+    if (!isUuidLike(id)) return { ok: false, error: "Pick who to assign the customer to." };
+    out.userId = id!.toLowerCase();
+
+  } else if (kind === "create_task") {
+    const title = str(p.title, 201);
+    if (!title) return { ok: false, error: "Say what the task is." };
+    if (title.length > 200) return { ok: false, error: "Keep the task under 200 characters." };
+    const n = p.dueDays === undefined || p.dueDays === null || p.dueDays === "" ? 0 : days(p.dueDays);
+    if (n === "bad") return { ok: false, error: `Give the task a due date 0 to ${RULE_DAYS_MAX} days out.` };
+    out.title = title;
+    out.dueDays = n;
+    const who = str(p.assigneeUserId, 64);
+    if (who) {
+      if (!isUuidLike(who)) return { ok: false, error: "Pick who the task is for." };
+      out.assigneeUserId = who.toLowerCase();
+    }
+
+  } else if (kind === "notify_team") {
+    // To the chosen people, or — none chosen — the owners and admins (leadFormMail.teamEmails).
+    const to = Array.isArray(p.userIds) ? p.userIds.map((v) => String(v).toLowerCase()) : [];
+    if (to.length > 20 || to.some((v) => !isUuidLike(v))) return { ok: false, error: "Pick up to 20 people to email." };
+    const subject = str(p.subject, RULE_EMAIL_SUBJECT_MAX + 1);
+    if (!subject) return { ok: false, error: "Give the team email a subject." };
+    if (subject.length > RULE_EMAIL_SUBJECT_MAX) return { ok: false, error: `Keep the subject under ${RULE_EMAIL_SUBJECT_MAX} characters.` };
+    const body = str(p.body, RULE_NOTE_MAX + 1);
+    if (!body) return { ok: false, error: "Write what the team email should say." };
+    if (body.length > RULE_NOTE_MAX) return { ok: false, error: `Keep the team email under ${RULE_NOTE_MAX} characters.` };
+    out.userIds = [...new Set(to)];
+    out.subject = subject;
+    out.body = body;
+
   } else if (kind === "send_sms") {
     const body = str(p.body, RULE_SMS_MAX + 1);
     if (!body) return { ok: false, error: "Write the text the rule should send." };
@@ -357,16 +479,64 @@ export function parseRuleAction(b: Record<string, unknown>): Parsed<RuleActionIn
   return { ok: true, kind, params: out };
 }
 
+/** A schedule, refused here in words rather than becoming a rule whose next run is NULL — which the
+ *  sweep never picks up, i.e. a rule that silently never fires. Canonical key order, so a stored
+ *  schedule compares cleanly. */
+export function parseRuleSchedule(raw: unknown): Parsed<{ schedule: RuleSchedule }> {
+  const b = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const freq = str(b.freq, 16) as RuleSchedule["freq"] | null;
+  if (!freq || !(RULE_SCHEDULE_FREQS as readonly string[]).includes(freq)) return { ok: false, error: "Pick how often it runs." };
+  const at = str(b.at, 5);
+  if (!at || !/^([01]\d|2[0-3]):[0-5]\d$/.test(at)) return { ok: false, error: "Give the time as HH:MM, e.g. 08:00." };
+  const int = (v: unknown, lo: number, hi: number) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n >= lo && n <= hi ? n : null;
+  };
+  const out: RuleSchedule = { freq, at };
+  if (freq === "weekly") {
+    const daysIn = Array.isArray(b.days) ? b.days.map((v) => int(v, 1, 7)) : [];
+    if (!daysIn.length || daysIn.some((v) => v === null)) return { ok: false, error: "Pick at least one day of the week." };
+    out.days = [...new Set(daysIn as number[])].sort((x, y) => x - y);
+    const every = b.every === undefined || b.every === null || b.every === "" ? 1 : int(b.every, 1, 12);
+    if (every === null) return { ok: false, error: "Every 1 to 12 weeks." };
+    out.every = every;
+  } else if (freq === "monthly") {
+    const dom = int(b.dayOfMonth, 1, 31);
+    if (dom === null) return { ok: false, error: "Pick a day of the month, 1 to 31." };
+    out.dayOfMonth = dom;
+  } else if (freq === "yearly") {
+    const month = int(b.month, 1, 12);
+    const day = int(b.day, 1, 31);
+    if (month === null || day === null) return { ok: false, error: "Pick the month and the day." };
+    out.month = month;
+    out.day = day;
+  } else if (freq === "date_field") {
+    const field = str(b.field, 48);
+    if (!field || !/^custom:[a-z][a-z0-9_]{0,38}$/.test(field)) return { ok: false, error: "Pick which date in their record." };
+    const off = b.offsetDays === undefined || b.offsetDays === null || b.offsetDays === "" ? 0 : int(b.offsetDays, -365, 365);
+    if (off === null) return { ok: false, error: "Days before or after: -365 to 365." };
+    out.field = field;
+    out.offsetDays = off;
+    out.yearly = b.yearly === true;
+  }
+  return { ok: true, schedule: out };
+}
+
 export type RuleIn = {
   id: string | null;
   /** null on an edit that does not change who the rule is for. */
   scopeKind: RuleScope | null;
   pipelineId: string | null;
   name: string | null;
-  triggerKind: "event" | "elapsed" | null;
+  triggerKind: "event" | "elapsed" | "schedule" | null;
   triggerEvent: string | null;
   elapsedAnchor: string | null;
   elapsedDays: number | null;
+  schedule: RuleSchedule | null;
+  /** The ARM (365): true with the audience count the builder saw arms it; false disarms it;
+   *  undefined leaves it. The database withdraws it whenever who the rule reaches changes. */
+  arm?: boolean;
+  armedCount?: number;
   /** undefined = not being edited. */
   oncePerCard?: boolean;
   enabled?: boolean;
@@ -401,7 +571,6 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
   }
   const scopeKind: RuleScope | null = (scopeRaw as RuleScope | null) ?? (pipelineId ? "pipeline" : null);
   if (!id && !scopeKind) return { ok: false, error: "Pick who the rule is for." };
-  if (scopeKind && !RULE_SCOPES_LIVE.includes(scopeKind)) return { ok: false, error: RULE_SCOPE_NOT_YET };
   // Onto a pipeline means naming it; off one drops whatever id came along (the database refuses
   // the pair outright, 363's crm_rules_scope_pipeline).
   if (scopeKind === "pipeline" && !pipelineId) return { ok: false, error: "Pick the pipeline the rule runs on." };
@@ -410,13 +579,14 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
   if (name && name.length > RULE_NAME_MAX) return { ok: false, error: `Keep the rule name under ${RULE_NAME_MAX} characters.` };
 
   const archive = b.archive === true;
-  let triggerKind: "event" | "elapsed" | null = null;
+  let triggerKind: "event" | "elapsed" | "schedule" | null = null;
   let triggerEvent: string | null = null;
   let elapsedAnchor: string | null = null;
   let elapsedDays: number | null = null;
+  let schedule: RuleSchedule | null = null;
 
   const kindRaw = str(b.triggerKind, 16);
-  if (kindRaw && kindRaw !== "event" && kindRaw !== "elapsed") {
+  if (kindRaw && kindRaw !== "event" && kindRaw !== "elapsed" && kindRaw !== "schedule") {
     return { ok: false, error: "Pick when the rule runs." };
   }
   // A new rule must say; an edit that says nothing about the trigger keeps the one it has. The
@@ -427,7 +597,7 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
   if (kindRaw === "event") {
     triggerKind = "event";
     triggerEvent = str(b.triggerEvent, 32);
-    if (!triggerEvent || !(triggerEvent in RULE_EVENTS)) return { ok: false, error: "Pick what happens from the list." };
+    if (!triggerEvent || !ruleEventLabel(triggerEvent)) return { ok: false, error: "Pick what happens from the list." };
   } else if (kindRaw === "elapsed") {
     triggerKind = "elapsed";
     elapsedAnchor = str(b.elapsedAnchor, 32);
@@ -440,6 +610,13 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
     // a rule allowed to run every time would fire on every sweep — a text to the same customer
     // every few minutes. Refused in words rather than left to the constraint's 23514.
     if (b.oncePerCard === false) return { ok: false, error: ELAPSED_IS_ONCE };
+  } else if (kindRaw === "schedule") {
+    triggerKind = "schedule";
+    const ps = parseRuleSchedule(b.schedule);
+    if (!ps.ok) return { ok: false, error: ps.error };
+    schedule = ps.schedule;
+    // 365's crm_rules_schedule_is_once: once per customer per day it runs, always.
+    if (b.oncePerCard === false) return { ok: false, error: "A scheduled rule reaches each customer once each time it runs." };
   }
 
   let actions: RuleActionIn[] | undefined = undefined;
@@ -464,8 +641,27 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
     const i = actions.findIndex((a) => !actionAllowedForScope(a.kind, scopeKind));
     if (i >= 0) return { ok: false, error: actionScopeError(i, actions[i].kind) };
   }
-  if (scopeKind && triggerKind && !triggerAllowedForScope({ triggerKind }, scopeKind)) {
-    return { ok: false, error: "That kind of trigger doesn't work for who this rule is for." };
+  if (scopeKind && triggerKind && !triggerAllowedForScope({ triggerKind, elapsedAnchor, scheduleFreq: schedule?.freq ?? null }, scopeKind)) {
+    return {
+      ok: false,
+      error: scopeKind === "none" ? "A rule for nobody can only run on a schedule."
+        : "That kind of trigger doesn't work for who this rule is for.",
+    };
+  }
+  // ⏳ A SCHEDULED EMAIL waits for the unsubscribe link (round 2b): a weekly email with no way to
+  // stop it is the CAN-SPAM exposure the plan names. Texts can go now — STOP already works.
+  if (triggerKind === "schedule" && actions && actions.some((a) => a.kind === "send_email")) {
+    return { ok: false, error: "Scheduled emails switch on with the unsubscribe link, in the next update. A scheduled text works now." };
+  }
+  let arm: boolean | undefined = undefined;
+  let armedCount: number | undefined = undefined;
+  if (b.arm === true) {
+    const n = Number(b.armedCount);
+    if (!Number.isInteger(n) || n < 0) return { ok: false, error: "Arm it with the number of customers it will reach." };
+    arm = true;
+    armedCount = n;
+  } else if (b.arm === false) {
+    arm = false;
   }
 
   let conditions: unknown[] | undefined = undefined;
@@ -480,7 +676,7 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
     id: id ? id.toLowerCase() : null,
     scopeKind,
     pipelineId: scopeKind && scopeKind !== "pipeline" ? null : (pipelineId ? pipelineId.toLowerCase() : null),
-    name, triggerKind, triggerEvent, elapsedAnchor, elapsedDays,
+    name, triggerKind, triggerEvent, elapsedAnchor, elapsedDays, schedule, arm, armedCount,
     oncePerCard: b.oncePerCard === undefined ? undefined : b.oncePerCard === true,
     enabled: b.enabled === undefined ? undefined : b.enabled === true,
     actions,
@@ -500,13 +696,38 @@ export function actionScopeError(index: number, kind: string): string {
 
 /** One rule, said in a sentence, for the list row and the run log. The editor shows the same words
  *  so a builder reads back what they wrote rather than a form they have to re-interpret. */
+const WEEKDAYS = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const MONTHS = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const clock12 = (at: string): string => {
+  const [h, m] = at.split(":").map(Number);
+  return `${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, "0")} ${h < 12 ? "am" : "pm"}`;
+};
+const ordinal = (n: number): string => `${n}${n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th"}`;
+/** "every Monday and Thursday at 8:00 am". Mirrored as ssRuleScheduleWords in the browser. */
+export function scheduleWords(s: RuleSchedule | null | undefined): string {
+  if (!s) return "on a schedule";
+  const at = clock12(s.at || "09:00");
+  if (s.freq === "daily") return `every day at ${at}`;
+  if (s.freq === "weekly") {
+    const d = (s.days ?? []).map((x) => WEEKDAYS[x]);
+    const list = d.length > 1 ? `${d.slice(0, -1).join(", ")} and ${d[d.length - 1]}` : d[0] ?? "Monday";
+    return `${(s.every ?? 1) > 1 ? `every ${s.every} weeks on` : "every"} ${list} at ${at}`;
+  }
+  if (s.freq === "monthly") return `on the ${ordinal(s.dayOfMonth ?? 1)} of every month at ${at}`;
+  if (s.freq === "yearly") return `every year on ${MONTHS[s.month ?? 1]} ${s.day ?? 1} at ${at}`;
+  const off = s.offsetDays ?? 0;
+  const lead = off === 0 ? "on" : `${Math.abs(off)} day${Math.abs(off) === 1 ? "" : "s"} ${off < 0 ? "before" : "after"}`;
+  return `${lead} the date in their record${s.yearly ? ", every year," : ""} at ${at}`;
+}
+
 export function ruleSentence(r: {
   triggerKind: string; triggerEvent?: string | null; elapsedAnchor?: string | null; elapsedDays?: number | null;
-  actions?: { kind: string }[];
+  schedule?: RuleSchedule | null; actions?: { kind: string }[];
 }): string {
   const when = r.triggerKind === "elapsed"
     ? `${r.elapsedDays ?? 0} day${r.elapsedDays === 1 ? "" : "s"} after ${RULE_ANCHORS[r.elapsedAnchor ?? ""] ?? "then"}`
-    : (RULE_EVENTS[r.triggerEvent ?? ""] ?? "something happens");
+    : r.triggerKind === "schedule" ? scheduleWords(r.schedule)
+    : (ruleEventLabel(r.triggerEvent ?? "") ?? "something happens");
   const what = (r.actions ?? []).map((a) => RULE_ACTION_LABELS[a.kind as RuleActionKind] ?? a.kind)
     .map((s) => s.replace(/…$/, "").trim());
   return `When ${when.charAt(0).toLowerCase() + when.slice(1)} → ${what.length ? what.join(", then ") : "nothing yet"}`;
