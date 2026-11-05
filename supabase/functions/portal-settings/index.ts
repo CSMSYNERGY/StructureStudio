@@ -265,10 +265,13 @@ import {
   parseStageSave, parseStatusOrder, parseStatusSave, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
   stageSetRefusal, type StageKind as PipeStageKind,
 } from "../_shared/crmPipelines.ts";
-// Per-pipeline RULES (migration 355): the request shapes and the action vocabulary. The evaluator
-// itself is in Postgres (crm_rules_run) and the sending is crm-rules-tick's; this function only
-// writes what the builder authored.
-import { parseRuleOrder, parseRuleSave, RULE_ACTIONS_MAX } from "../_shared/crmRules.ts";
+// AUTOMATIONS (migrations 355 + 363): the request shapes and the vocabulary. The evaluator itself
+// is in Postgres (crm_rule_event → crm_rules_run) and the sending is crm-rules-tick's; this
+// function only writes what the builder authored.
+import {
+  actionAllowedForScope, actionScopeError, parseRuleConditions, parseRuleSave, RULE_ACTION_LABELS,
+  RULE_ACTIONS_MAX, type RuleActionIn, type RuleActionKind, type RuleCondition, triggerAllowedForScope,
+} from "../_shared/crmRules.ts";
 // Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
 // account CSM sets up in Admin. paymentSettings.ts only, never the gateway client (cardpointe.ts).
 import { cpEnvOf, cpMerchant, midLast4, readPaymentSettings } from "../_shared/paymentSettings.ts";
@@ -626,11 +629,14 @@ const GATES: GateTable = {
   crm_deal_set_status:   { area: "contacts", level: "edit" },
   crm_status_save:       { area: "settings_crm", level: "edit" },
   crm_statuses_reorder:  { area: "settings_crm", level: "edit" },
-  // RULES (migration 355): "when ‹this happens› → ‹do this›", one list per pipeline, edited in
-  // the same place as that pipeline's stages and statuses. The same write gate, and deliberately
-  // not a weaker one: a rule can text a builder's customer, so whoever may write one is whoever
-  // may already reshape the pipeline. The run log is a read — it is how "the review text never
-  // went out" gets an answer, and anyone who can see the settings may look.
+  // AUTOMATIONS (migrations 355 + 363): "when ‹this happens› → ‹do this›", one flat list per
+  // account on Settings → Customer Hub → Automations. The same write gate as reshaping a
+  // pipeline, and deliberately not a weaker one: a rule can text a builder's customer. The list
+  // and the run log are reads — the log is how "the review text never went out" gets an answer,
+  // and anyone who can see the settings may look. crm_rules_list is settings_crm, NOT the
+  // contacts:view the board's crm_pipelines_list carries: a sales rep has no business reading the
+  // account's automations.
+  crm_rules_list:        { area: "settings_crm", level: "view" },
   crm_rule_save:         { area: "settings_crm", level: "edit" },
   crm_rules_reorder:     { area: "settings_crm", level: "edit" },
   crm_rule_log:          { area: "settings_crm", level: "view" },
@@ -10685,7 +10691,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   };
 
   /** The tenant's live pipelines with their live stages, seeding the statuses and Shed Deals once. */
-  const readPipelines = async (): Promise<{ pipelines: any[]; statuses: any[]; rulesReady: boolean } | { dbError: unknown }> => {
+  const readPipelines = async (): Promise<{ pipelines: any[]; statuses: any[] } | { dbError: unknown }> => {
     const read = () => admin.from("crm_pipelines")
       .select("id, name, position, lost_reasons, seed_kind, feeds_designs")
       .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
@@ -10713,31 +10719,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           .order("position", { ascending: true })
       : { data: [], error: null };
     if (sErr) return { dbError: sErr };
-    // RULES (migration 355), read in two queries rather than a join because the actions carry a
-    // jsonb column and PostgREST's embedded select would flatten the ordering we need: a rule's
-    // actions run in `position` order, and that order is part of what the builder wrote.
-    //
-    // ⚠️ A MISSING TABLE DEGRADES TO "no rules", it does not fail this read. Beta and production
-    // share ONE Supabase project, so this function can be live for both before 355 is applied —
-    // and failing here would take Settings → Pipelines down for every tenant on both, over a
-    // feature nobody is using yet. `rulesReady: false` is what the editor keys on, so it hides
-    // the Rules section rather than offering a + Add rule that cannot save. Any OTHER error is
-    // still a real failure and is reported as one.
-    const MISSING_TABLE = new Set(["42P01", "PGRST205", "PGRST204"]);
-    const { data: rules, error: rErr } = ids.length
-      ? await admin.from("crm_rules")
-          .select("id, pipeline_id, name, trigger_kind, trigger_event, elapsed_anchor, elapsed_days, once_per_card, enabled, position")
-          .eq("client_id", clientId).in("pipeline_id", ids).is("archived_at", null)
-          .order("position", { ascending: true })
-      : { data: [], error: null };
-    const rulesReady = !(rErr && MISSING_TABLE.has(String((rErr as any)?.code)));
-    if (rErr && rulesReady) return { dbError: rErr };
-    const ruleIds = rulesReady ? (rules ?? []).map((r: any) => r.id) : [];
-    const { data: ruleActions, error: raErr } = ruleIds.length
-      ? await admin.from("crm_rule_actions").select("id, rule_id, kind, params, position")
-          .eq("client_id", clientId).in("rule_id", ruleIds).order("position", { ascending: true })
-      : { data: [], error: null };
-    if (raErr && !MISSING_TABLE.has(String((raErr as any)?.code))) return { dbError: raErr };
+    // ⛔ NO RULES HERE (363). They were nested per pipeline while a rule belonged to one; since
+    // Carolyn's 2026-11-04 decision a rule says who it is for and may belong to none, so grouping
+    // them here would silently drop every every-pipeline rule from the page that edits it. The
+    // flat list is crm_rules_list's, and the board — which never read them — no longer pays for
+    // two extra queries on every open.
     return {
       pipelines: (pipes ?? []).map((p: any) => ({
         // feedsDesigns: new designs land in this one, in its first open stage (Shed Deals since 303).
@@ -10750,26 +10736,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // stages now all hang off the pipeline, which is what Settings → Pipelines edits.
         statuses: (statuses ?? []).filter((t: any) => t.pipeline_id === p.id)
           .map((t: any) => ({ id: t.id, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
-        // A RULE BELONGS TO THIS PIPELINE TOO (355), so it is edited in the same panel. There is
-        // no tenant-wide rule on purpose: "when delivered" means one thing in the shed pipeline
-        // and another in a reviews pipeline, and a shared rule would fire on both.
-        rules: (rules ?? []).filter((r: any) => r.pipeline_id === p.id).map((r: any) => ({
-          id: r.id, name: r.name ?? null, triggerKind: r.trigger_kind,
-          triggerEvent: r.trigger_event ?? null, elapsedAnchor: r.elapsed_anchor ?? null,
-          elapsedDays: r.elapsed_days ?? null,
-          oncePerCard: r.once_per_card === true, enabled: r.enabled === true, position: r.position,
-          actions: (ruleActions ?? []).filter((a: any) => a.rule_id === r.id)
-            .map((a: any) => ({ id: a.id, kind: a.kind, params: a.params ?? {}, position: a.position })),
-        })),
       })),
       // The UNION, still flat and still called `statuses`: a status PILL is drawn from an id alone
       // (SsStatusPill, CrmDealStatusPill, the record's rows), and the card carrying it may belong to
       // any pipeline. Keeping it costs one array and means every pill lookup keeps working; the
       // per-pipeline lists above are what the board's filter and the settings editor read.
       statuses: (statuses ?? []).map((t: any) => ({ id: t.id, pipelineId: t.pipeline_id ?? null, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
-      // FALSE means migration 355 is not on this database yet, so the editor hides the Rules
-      // section entirely rather than offering a + Add rule that cannot save. See the read above.
-      rulesReady,
     };
   };
 
@@ -10921,12 +10893,6 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ok: true,
       pipelines: r.pipelines,
       statuses: r.statuses,
-      // ⚠️ MUST BE PASSED THROUGH. The browser offers the Rules section only when this is true
-      // (a positive test, because the migration, this function and the bundle deploy separately).
-      // Leaving it out reads to the browser exactly like a pre-355 database, so the section never
-      // appears however well everything else works — which is what shipped on 2026-11-03, caught
-      // only by opening the page on beta. `rulesReadyWiring_test` now fails the push instead.
-      rulesReady: r.rulesReady,
       team: (roster ?? []).map((m: any) => ({ userId: m.user_id, name: m.full_name ?? null, title: m.title ?? null })),
       canManage: canEdit("settings_crm"),
       canWrite: canEdit("contacts"),
@@ -11443,82 +11409,306 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
-  // ── RULES (migration 355) ────────────────────────────────────────────────────────────────
-  // "When ‹this happens› → ‹do this›", one list per pipeline. The evaluator is in Postgres
-  // (crm_rules_run) and the sending is crm-rules-tick's; all this does is write what the builder
-  // authored — and REFUSE what the evaluator could only record as a failure.
+  // ── AUTOMATIONS (migrations 355 + 363) ──────────────────────────────────────────────────────
+  // "When ‹this happens› → ‹do this›". Since 363 (Carolyn, 2026-11-04) a rule is not the property
+  // of a pipeline: it says WHO it is for — one pipeline's cards or every pipeline's cards today,
+  // customers or nobody in round 2 — and may carry "only if" conditions. The evaluator is in
+  // Postgres (crm_rule_event → crm_rules_run) and the sending is crm-rules-tick's; all this does is
+  // write what the builder authored, and REFUSE what the evaluator could only record as a failure.
   //
-  // That refusal is the point of the long block below. 355 stores an action's params as unchecked
-  // jsonb, and a rule naming another pipeline's status is not a syntax error: it parses, it saves,
-  // and then it throws on every card for ever while the run log fills with 'failed'. Nobody would
-  // find that from the editor, so the ids are resolved HERE, against this pipeline, at save time.
+  // That refusal is the point of the long block in crm_rule_save. 355 stores an action's params as
+  // unchecked jsonb, and a rule naming another pipeline's status is not a syntax error: it parses,
+  // it saves, and then it throws on every card for ever while the run log fills with 'failed'.
+  // Nobody would find that from the editor, so the ids are resolved HERE at save time — and since
+  // 363 against the pipeline the rule will be on AFTER the save, which a move changes.
+
+  // ⚠️ "IS THE DATABASE READY?" IS ANSWERED BY THE READ ITSELF. A missing table means 355 is not
+  // applied; a missing column means 363 is not. Beta and production share ONE Supabase project, so
+  // this function can be live before either, and the browser tests `rulesVersion >= 2` POSITIVELY —
+  // so it shows "not switched on yet" rather than an editor that cannot save. On 2026-11-03 the
+  // old flag was computed and then not passed through, and the Rules section was silently absent
+  // on beta; `rulesVersionWiring_test` pins this one into the response.
+  const RULES_MISSING_TABLE = new Set(["42P01", "PGRST205"]);
+  const RULES_MISSING_COLUMN = new Set(["42703", "PGRST204"]);
+  const RULE_COLS = "id, name, scope_kind, pipeline_id, trigger_kind, trigger_event, elapsed_anchor, elapsed_days, conditions, once_per_card, enabled, applies_from, position, created_at";
+
+  /** What on a stored rule no longer points anywhere — shown as an amber line on its row, so a
+   *  rule that will fail is visible BEFORE it fails rather than only in the run log after. */
+  const ruleStale = (r: any, actions: { kind: string; params: any }[], pipes: Map<string, any>): string[] => {
+    const out: string[] = [];
+    const pipe = r.scope_kind === "pipeline" ? pipes.get(r.pipeline_id) : null;
+    if (r.scope_kind === "pipeline" && !pipe) out.push("pipeline_gone");
+    actions.forEach((a, i) => {
+      if (!actionAllowedForScope(a.kind, r.scope_kind)) out.push(`action:${i}`);
+      else if (a.kind === "set_status" && pipe && !pipe.statuses.some((t: any) => t.id === a.params?.statusId)) out.push(`action:${i}`);
+      else if (a.kind === "move_stage" && pipe && !pipe.stages.some((t: any) => t.id === a.params?.stageId)) out.push(`action:${i}`);
+      else if (a.kind === "create_card" && !pipes.has(a.params?.pipelineId)) out.push(`action:${i}`);
+    });
+    (Array.isArray(r.conditions) ? r.conditions : []).forEach((c: any, i: number) => {
+      if (c?.field === "deal.status" && pipe && !pipe.statuses.some((t: any) => t.id === c.value)) out.push(`condition:${i}`);
+      if (c?.field === "deal.stage" && pipe && !pipe.stages.some((t: any) => t.id === c.value)) out.push(`condition:${i}`);
+    });
+    return out;
+  };
+
+  if (action === "crm_rules_list") {
+    const { data: rules, error: rErr } = await admin.from("crm_rules").select(RULE_COLS)
+      .eq("client_id", clientId).is("archived_at", null)
+      .order("position", { ascending: true }).order("created_at", { ascending: true });
+    const rCode = String((rErr as any)?.code ?? "");
+    if (rErr && !RULES_MISSING_TABLE.has(rCode) && !RULES_MISSING_COLUMN.has(rCode)) {
+      return dbFail(req, clientId, "load your automations", rErr);
+    }
+    const rulesVersion = !rErr ? 2 : RULES_MISSING_COLUMN.has(rCode) ? 1 : 0;
+    const pr = await readPipelines();
+    if ("dbError" in pr) return dbFail(req, clientId, "load your pipelines", pr.dbError);
+    // The roster names the owner a condition can test. client_users is unreadable to a portal user
+    // (client_users_select_own), so it comes from here — crm_pipelines_list's reasoning.
+    const { data: roster } = await admin.from("client_users")
+      .select("user_id, full_name, title").eq("client_id", clientId)
+      .order("full_name", { ascending: true, nullsFirst: false }).limit(200);
+    // Only what the editor needs from each pipeline: its name, and the statuses, stages and lost
+    // reasons an action or a condition can name.
+    const pipelines = pr.pipelines.map((x: any) => ({
+      id: x.id, name: x.name,
+      stages: x.stages.map((t: any) => ({ id: t.id, name: t.name })),
+      statuses: x.statuses.map((t: any) => ({ id: t.id, name: t.name, color: t.color })),
+      lostReasons: x.lostReasons,
+    }));
+    const base = {
+      ok: true,
+      // ⚠️ MUST BE SENT (see above). The browser offers nothing unless this is 2 or more.
+      rulesVersion,
+      pipelines,
+      team: (roster ?? []).map((m: any) => ({ userId: m.user_id, name: m.full_name ?? null, title: m.title ?? null })),
+      canManage: canEdit("settings_crm"),
+      me: selfUserId ?? null,
+    };
+    if (rulesVersion < 2) return json({ ...base, rules: [], labels: [], timeZone: "America/Chicago", timeZoneSet: false });
+
+    const ids = (rules ?? []).map((r: any) => r.id);
+    const none = Promise.resolve({ data: [] as any[], error: null });
+    const [acts, runs, tags, tz] = await Promise.all([
+      ids.length ? admin.from("crm_rule_actions").select("id, rule_id, kind, params, position")
+        .eq("client_id", clientId).in("rule_id", ids).order("position", { ascending: true }) : none,
+      ids.length ? admin.from("crm_rule_runs").select("rule_id, outcome, fired_at")
+        .eq("client_id", clientId).in("rule_id", ids).order("fired_at", { ascending: false }).limit(500) : none,
+      // The tags in use, for the conditions' tag picker. GoHighLevel's import is still their only
+      // writer, so on most accounts this is short or empty; the picker also takes a typed one.
+      admin.from("crm_contacts").select("labels").eq("client_id", clientId).is("merged_into", null)
+        .neq("labels", "{}").limit(2000),
+      // Tolerant: 363 added the column, and nothing reads it in round 1 but this line.
+      admin.from("client_settings").select("time_zone").eq("client_id", clientId).maybeSingle(),
+    ]);
+    if ((acts as any).error) return dbFail(req, clientId, "load your automations", (acts as any).error);
+    const last = new Map<string, any>();
+    for (const n of (((runs as any).data) ?? [])) if (!last.has(n.rule_id)) last.set(n.rule_id, n);
+    const labels = new Map<string, string>();
+    for (const c of (((tags as any).data) ?? [])) {
+      for (const l of (c.labels ?? [])) {
+        const t = String(l ?? "").trim();
+        if (t && !labels.has(t.toLowerCase())) labels.set(t.toLowerCase(), t);
+      }
+    }
+    const pipes = new Map<string, any>(pipelines.map((x: any) => [x.id, x]));
+    return json({
+      ...base,
+      rules: (rules ?? []).map((r: any) => {
+        const actions = (((acts as any).data) ?? []).filter((a: any) => a.rule_id === r.id)
+          .map((a: any) => ({ id: a.id, kind: a.kind, params: a.params ?? {}, position: a.position }));
+        const ran = last.get(r.id);
+        return {
+          id: r.id, name: r.name ?? null, scopeKind: r.scope_kind, pipelineId: r.pipeline_id ?? null,
+          triggerKind: r.trigger_kind, triggerEvent: r.trigger_event ?? null,
+          elapsedAnchor: r.elapsed_anchor ?? null, elapsedDays: r.elapsed_days ?? null,
+          conditions: Array.isArray(r.conditions) ? r.conditions : [],
+          oncePerCard: r.once_per_card === true, enabled: r.enabled === true,
+          appliesFrom: r.applies_from, position: r.position, actions,
+          lastRun: ran ? { outcome: ran.outcome, firedAt: ran.fired_at } : null,
+          stale: ruleStale(r, actions, pipes),
+        };
+      }),
+      labels: [...labels.values()].sort((a, b) => a.localeCompare(b)).slice(0, 200),
+      timeZone: ((tz as any).data?.time_zone as string) || "America/Chicago",
+      timeZoneSet: !!(tz as any).data?.time_zone,
+    });
+  }
+
   if (action === "crm_rule_save") {
     const rl = parseRuleSave((payload ?? {}) as Record<string, unknown>);
     if (!rl.ok) return json({ error: rl.error }, 400);
     const now = new Date().toISOString();
 
-    // Which pipeline this rule is on: the posted one for a new rule, the stored one for an edit.
-    // An edit must never be allowed to carry its rule to another pipeline — the actions were
-    // validated against the one it is on.
-    let pipelineId = rl.pipelineId;
+    // The rule as it stands. An edit may post any subset, and whatever it does not post is checked
+    // AS STORED against the rule as it will be after this save.
+    let stored: any = null;
     if (rl.id) {
-      const { data: row, error: rErr } = await admin.from("crm_rules").select("pipeline_id")
+      const { data: row, error } = await admin.from("crm_rules")
+        .select("id, scope_kind, pipeline_id, trigger_kind, conditions")
         .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null).maybeSingle();
-      if (rErr) return dbFail(req, clientId, "find that rule", rErr);
+      if (error) return dbFail(req, clientId, "find that rule", error);
       if (!row) return json({ error: "That rule wasn't found." }, 404);
-      pipelineId = row.pipeline_id;
-    } else {
-      const { data: pipe, error: pErr } = await admin.from("crm_pipelines").select("id")
-        .eq("client_id", clientId).eq("id", pipelineId).is("archived_at", null).maybeSingle();
-      if (pErr) return dbFail(req, clientId, "add that rule", pErr);
-      if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
+      stored = row;
     }
 
-    // Every id an action names, checked against THIS pipeline and this tenant.
-    if (rl.actions && rl.actions.length) {
-      const wantStatuses = [...new Set(rl.actions.filter((a) => a.kind === "set_status").map((a) => String(a.params.statusId)))];
-      const wantStages = [...new Set(rl.actions.filter((a) => a.kind === "move_stage").map((a) => String(a.params.stageId)))];
-      const wantPipes = [...new Set(rl.actions.filter((a) => a.kind === "create_card").map((a) => String(a.params.pipelineId)))];
-      if (wantStatuses.length) {
-        const { data: live, error } = await admin.from("crm_statuses").select("id")
-          .eq("client_id", clientId).eq("pipeline_id", pipelineId).in("id", wantStatuses).is("archived_at", null);
-        if (error) return dbFail(req, clientId, "check that rule's statuses", error);
-        if ((live ?? []).length !== wantStatuses.length) {
-          // 354's own refusal sentence, in the editor's voice: crm_set_deal_status raises exactly
-          // this when a rule points at another pipeline's rung, and that raise is invisible.
-          return json({ error: "Pick a status from this pipeline — a status belongs to one pipeline." }, 409);
-        }
+    // Removing a rule checks nothing: a rule whose pipeline has gone must always be removable.
+    if (rl.id && rl.archive) {
+      const { error } = await admin.from("crm_rules").update({ archived_at: now, updated_at: now })
+        .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null);
+      if (error) return dbFail(req, clientId, "remove that rule", error);
+      audit("crm_rule_save", 1, `rule=${rl.id} archive=true`).catch(() => {});
+      return json({ ok: true, id: rl.id });
+    }
+
+    const scope: string = rl.scopeKind ?? stored?.scope_kind ?? "pipeline";
+    const pipelineId: string | null = scope === "pipeline" ? (rl.pipelineId ?? stored?.pipeline_id ?? null) : null;
+    // A MOVE (decision 2, 2026-11-04): the rule changes who it is for. The database resets the
+    // rule's forward-only line itself (363's crm_rules_guard_reset), so a 30-day rule moved onto a
+    // pipeline with two years of deliveries does not fire on any of them.
+    const moved = !!stored && (scope !== stored.scope_kind || pipelineId !== (stored.pipeline_id ?? null));
+    const triggerKind = rl.triggerKind ?? stored?.trigger_kind ?? null;
+    // Everything is checked on a new rule and on a move; otherwise what was posted. A rename or a
+    // pause checks nothing, so pausing a rule that has gone stale always works.
+    const checkAll = !rl.id || moved;
+
+    let pipeName = "";
+    if (scope === "pipeline") {
+      if (!pipelineId) return json({ error: "Pick the pipeline the rule runs on." }, 400);
+      if (checkAll) {
+        const { data: pipe, error } = await admin.from("crm_pipelines").select("id, name")
+          .eq("client_id", clientId).eq("id", pipelineId).is("archived_at", null).maybeSingle();
+        if (error) return dbFail(req, clientId, "check that pipeline", error);
+        if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
+        pipeName = pipe.name ?? "";
       }
-      if (wantStages.length) {
-        const { data: live, error } = await admin.from("crm_pipeline_stages").select("id")
-          .eq("client_id", clientId).eq("pipeline_id", pipelineId).in("id", wantStages).is("archived_at", null);
-        if (error) return dbFail(req, clientId, "check that rule's stages", error);
-        if ((live ?? []).length !== wantStages.length) {
-          return json({ error: "Pick a stage from this pipeline — a card stays in its pipeline." }, 409);
-        }
+    }
+    if ((checkAll || rl.triggerKind) && !triggerAllowedForScope({ triggerKind }, scope)) {
+      return json({ error: "That kind of trigger doesn't work for who this rule is for." }, 400);
+    }
+
+    // ── THE ACTIONS, against the rule as it will be ──────────────────────────────────────────
+    // On a move the STORED ones are checked even though none were posted: they were validated
+    // against the pipeline the rule is leaving.
+    let toCheck: RuleActionIn[] | undefined = rl.actions;
+    if (toCheck === undefined && checkAll && rl.id) {
+      const { data: had, error } = await admin.from("crm_rule_actions").select("kind, params")
+        .eq("client_id", clientId).eq("rule_id", rl.id).order("position", { ascending: true });
+      if (error) return dbFail(req, clientId, "check that rule's actions", error);
+      toCheck = (had ?? []).map((a: any) => ({ kind: a.kind as RuleActionKind, params: a.params ?? {} }));
+    }
+    if (toCheck && toCheck.length) {
+      const offending: { index: number; kind: string; why: string }[] = [];
+      toCheck.forEach((a, i) => { if (!actionAllowedForScope(a.kind, scope)) offending.push({ index: i, kind: a.kind, why: "scope" }); });
+      const flagged = new Set(offending.map((o) => o.index));
+      const named = (kind: string, key: string) => [...new Set(toCheck!.filter((a, i) => a.kind === kind && !flagged.has(i)).map((a) => String(a.params[key])))];
+      if (scope === "pipeline") {
+        const wantStatuses = named("set_status", "statusId");
+        const wantStages = named("move_stage", "stageId");
+        const [{ data: liveSt, error: e1 }, { data: liveSg, error: e2 }] = await Promise.all([
+          wantStatuses.length ? admin.from("crm_statuses").select("id").eq("client_id", clientId)
+            .eq("pipeline_id", pipelineId).in("id", wantStatuses).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+          wantStages.length ? admin.from("crm_pipeline_stages").select("id").eq("client_id", clientId)
+            .eq("pipeline_id", pipelineId).in("id", wantStages).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+        ]);
+        if (e1 || e2) return dbFail(req, clientId, "check that rule's actions", e1 ?? e2);
+        const okSt = new Set((liveSt ?? []).map((x: any) => x.id));
+        const okSg = new Set((liveSg ?? []).map((x: any) => x.id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i)) return;
+          if (a.kind === "set_status" && !okSt.has(String(a.params.statusId))) offending.push({ index: i, kind: a.kind, why: "status" });
+          if (a.kind === "move_stage" && !okSg.has(String(a.params.stageId))) offending.push({ index: i, kind: a.kind, why: "stage" });
+        });
       }
+      const wantPipes = named("create_card", "pipelineId");
       if (wantPipes.length) {
-        // Creating the card in the pipeline the rule is already on would mean every delivery adds
-        // a second card beside the first. Refused rather than silently skipped, because the
-        // builder meant something and we cannot tell what.
-        if (wantPipes.includes(String(pipelineId))) {
-          return json({ error: "Pick a different pipeline — the card is already in this one." }, 409);
-        }
-        const { data: live, error } = await admin.from("crm_pipelines").select("id")
+        const { data: livePipes, error } = await admin.from("crm_pipelines").select("id")
           .eq("client_id", clientId).in("id", wantPipes).is("archived_at", null);
         if (error) return dbFail(req, clientId, "check that rule's pipelines", error);
-        if ((live ?? []).length !== wantPipes.length) return json({ error: "That pipeline wasn't found." }, 404);
+        const okP = new Set((livePipes ?? []).map((x: any) => x.id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i) || a.kind !== "create_card") return;
+          const target = String(a.params.pipelineId);
+          // Creating the card in the pipeline the rule is already on would put a second card
+          // beside the first on every firing. Refused rather than skipped: the builder meant
+          // something and we cannot tell what.
+          if (scope === "pipeline" && target === pipelineId) offending.push({ index: i, kind: a.kind, why: "same_pipeline" });
+          else if (!okP.has(target)) offending.push({ index: i, kind: a.kind, why: "pipeline" });
+        });
       }
+      if (offending.length) {
+        offending.sort((x, y) => x.index - y.index);
+        const label = (o: { index: number; kind: string }) =>
+          `${(RULE_ACTION_LABELS[o.kind as RuleActionKind] ?? o.kind).replace(/…$/, "").trim()}`;
+        const first = offending[0];
+        let error: string;
+        if (first.why === "scope") {
+          error = actionScopeError(first.index, first.kind);
+        } else if (first.why === "same_pipeline") {
+          error = `Action ${first.index + 1} (${label(first)}) points at the pipeline this rule is on. Pick a different pipeline.`;
+        } else if (first.why === "pipeline") {
+          error = `Action ${first.index + 1} (${label(first)}) points at a pipeline that has been removed. Pick another.`;
+        } else {
+          // THE MOVE'S OWN SENTENCE: name every action that still points at the old pipeline, so
+          // the builder knows exactly which rows to re-pick (the editor marks the same ones red).
+          const list = offending.filter((o) => o.why === "status" || o.why === "stage")
+            .map((o, k) => `${k === 0 ? "Action" : "action"} ${o.index + 1} (${label(o)})`);
+          const joined = list.length > 1 ? `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}` : list[0];
+          error = `${joined} ${list.length > 1 ? "point" : "points"} at a status or stage from another pipeline. `
+            + `Re-pick ${list.length > 1 ? "them" : "it"}${pipeName ? ` for ${pipeName}` : ""}, then save.`;
+        }
+        return json({ error, code: "actions_stale", offending }, 409);
+      }
+    }
+
+    // ── THE CONDITIONS, the same way ──────────────────────────────────────────────────────────
+    const rawConditions = rl.conditions ?? (checkAll ? (stored?.conditions ?? []) : undefined);
+    let conditions: RuleCondition[] | undefined;
+    if (rawConditions !== undefined) {
+      const pc = parseRuleConditions(rawConditions, scope);
+      // 400 for what was posted; 409 for what was stored and no longer fits the rule's new scope.
+      if (!pc.ok) return json({ error: pc.error, code: "conditions_stale" }, rl.conditions !== undefined ? 400 : 409);
+      const offending: { index: number; field: string; why: string }[] = [];
+      const want = (f: string) => [...new Set(pc.conditions.filter((c) => c.field === f && c.value != null).map((c) => String(c.value)))];
+      const [wSt, wSg, wOwn] = [want("deal.status"), want("deal.stage"), want("contact.owner")];
+      const [{ data: cSt, error: e1 }, { data: cSg, error: e2 }, { data: cOwn, error: e3 }] = await Promise.all([
+        wSt.length ? admin.from("crm_statuses").select("id").eq("client_id", clientId)
+          .eq("pipeline_id", pipelineId).in("id", wSt).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+        wSg.length ? admin.from("crm_pipeline_stages").select("id").eq("client_id", clientId)
+          .eq("pipeline_id", pipelineId).in("id", wSg).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+        wOwn.length ? admin.from("client_users").select("user_id").eq("client_id", clientId)
+          .in("user_id", wOwn) : Promise.resolve({ data: [], error: null }),
+      ]);
+      if (e1 || e2 || e3) return dbFail(req, clientId, "check that rule's conditions", e1 ?? e2 ?? e3);
+      const okSt = new Set((cSt ?? []).map((x: any) => x.id));
+      const okSg = new Set((cSg ?? []).map((x: any) => x.id));
+      const okOwn = new Set((cOwn ?? []).map((x: any) => x.user_id));
+      pc.conditions.forEach((c, i) => {
+        if (c.field === "deal.status" && !okSt.has(String(c.value))) offending.push({ index: i, field: c.field, why: "status" });
+        if (c.field === "deal.stage" && !okSg.has(String(c.value))) offending.push({ index: i, field: c.field, why: "stage" });
+        if (c.field === "contact.owner" && c.value != null && !okOwn.has(String(c.value))) offending.push({ index: i, field: c.field, why: "owner" });
+      });
+      if (offending.length) {
+        const o = offending[0];
+        return json({
+          error: o.why === "owner"
+            ? `Condition ${o.index + 1} names someone who is no longer on your team. Pick another person.`
+            : `Condition ${o.index + 1} points at a ${o.why} from another pipeline. Re-pick it${pipeName ? ` for ${pipeName}` : ""}, then save.`,
+          code: "conditions_stale", offending,
+        }, 409);
+      }
+      if (rl.conditions !== undefined) conditions = pc.conditions;
     }
 
     if (!rl.id) {
+      // Positions are the ACCOUNT's now (363): one list, and the order is the order rules run in.
       const { data: top } = await admin.from("crm_rules").select("position")
-        .eq("client_id", clientId).eq("pipeline_id", pipelineId).is("archived_at", null)
+        .eq("client_id", clientId).is("archived_at", null)
         .order("position", { ascending: false }).limit(1).maybeSingle();
       const { data: made, error } = await admin.from("crm_rules").insert({
-        client_id: clientId, pipeline_id: pipelineId, name: rl.name,
+        client_id: clientId, scope_kind: scope, pipeline_id: pipelineId, name: rl.name,
         trigger_kind: rl.triggerKind, trigger_event: rl.triggerEvent,
         elapsed_anchor: rl.elapsedAnchor, elapsed_days: rl.elapsedDays,
+        conditions: conditions ?? [],
         ...(rl.oncePerCard === undefined ? {} : { once_per_card: rl.oncePerCard }),
         ...(rl.enabled === undefined ? {} : { enabled: rl.enabled }),
         position: (Number(top?.position) || 0) + 1024,
@@ -11527,16 +11717,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (error) return dbFail(req, clientId, "add that rule", error);
       const wrote = await writeRuleActions(made.id, rl.actions ?? []);
       if (wrote) return dbFail(req, clientId, "save that rule's actions", wrote);
-      audit("crm_rule_save", 1, `created=${made.id} pipeline=${pipelineId}`).catch(() => {});
+      audit("crm_rule_save", 1, `created=${made.id} scope=${scope} pipeline=${pipelineId ?? "-"}`).catch(() => {});
       return json({ ok: true, id: made.id });
     }
 
     const patch: Record<string, unknown> = { updated_at: now };
     if (rl.name !== null) patch.name = rl.name;
+    if (moved) {
+      patch.scope_kind = scope;
+      patch.pipeline_id = pipelineId;
+    }
     if (rl.triggerKind) {
-      // The trigger is replaced WHOLE, both halves, or the shape CHECK refuses the row: an
-      // event rule still carrying elapsed_days from when it was a clock is exactly what that
-      // constraint exists to stop.
+      // The trigger is replaced WHOLE, both halves, or 355's shape CHECK refuses the row.
       patch.trigger_kind = rl.triggerKind;
       patch.trigger_event = rl.triggerEvent;
       patch.elapsed_anchor = rl.elapsedAnchor;
@@ -11544,26 +11736,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     if (rl.oncePerCard !== undefined) patch.once_per_card = rl.oncePerCard;
     if (rl.enabled !== undefined) patch.enabled = rl.enabled;
-    if (rl.archive) patch.archived_at = now;
+    if (conditions !== undefined) patch.conditions = conditions;
     const { data, error } = await admin.from("crm_rules").update(patch)
       .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null).select("id");
     if (error) return dbFail(req, clientId, "save that rule", error);
     if (!data || !data.length) return json({ error: "That rule wasn't found." }, 404);
-    if (rl.actions !== undefined && !rl.archive) {
+    if (rl.actions !== undefined) {
       const wrote = await writeRuleActions(rl.id, rl.actions);
       if (wrote) return dbFail(req, clientId, "save that rule's actions", wrote);
     }
-    audit("crm_rule_save", 1, `rule=${rl.id} archive=${rl.archive}`).catch(() => {});
+    audit("crm_rule_save", 1, `rule=${rl.id} moved=${moved} scope=${scope} pipeline=${pipelineId ?? "-"}`).catch(() => {});
     return json({ ok: true, id: rl.id });
   }
 
   if (action === "crm_rules_reorder") {
-    // One PIPELINE'S rules, posted whole — the same shape as the stage and status reorders, and
-    // for the same reason: a subset of the account's rules can be checked against nothing.
-    const o = parseRuleOrder((payload ?? {}) as Record<string, unknown>);
+    // THE ACCOUNT'S rules, posted whole (363: one list, not one per pipeline). A subset can be
+    // checked against nothing, so it is refused — which is also what the 355 bundle, still posting
+    // one pipeline's rules, gets for the few minutes until the new one loads.
+    const o = parseIdOrder((payload ?? {}) as Record<string, unknown>);
     if (!o.ok) return json({ error: o.error }, 400);
     const { data: live, error } = await admin.from("crm_rules").select("id")
-      .eq("client_id", clientId).eq("pipeline_id", o.pipelineId).is("archived_at", null);
+      .eq("client_id", clientId).is("archived_at", null);
     if (error) return dbFail(req, clientId, "reorder those rules", error);
     const have = new Set((live ?? []).map((x: any) => x.id));
     if (have.size !== o.ids.length || o.ids.some((id) => !have.has(id))) {
@@ -11576,43 +11769,65 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (uErr) return dbFail(req, clientId, "reorder those rules", uErr);
     }
     // The order is the order the rules RUN in, not just how they are listed: two rules on one
-    // event see each other's writes, so "set the status, then create the review card" is a
-    // different thing from the reverse.
+    // event see each other's writes.
     return json({ ok: true });
   }
 
   if (action === "crm_rule_log") {
-    // WHY A RULE DID NOTHING. Without this the only answer to "the review text never went out"
-    // is a shrug — not whether the rule matched, not whether the once guard held it, not what
-    // Postgres said when it threw. One pipeline's recent runs, newest first.
-    const pipelineId = String(payload?.pipelineId ?? "");
-    if (!isUuidLike(pipelineId)) return json({ error: "Pick the pipeline." }, 400);
-    const { data: rules, error: rErr } = await admin.from("crm_rules").select("id, name, trigger_kind, trigger_event, elapsed_anchor, elapsed_days")
-      .eq("client_id", clientId).eq("pipeline_id", pipelineId);
+    // WHY A RULE DID NOTHING. One rule's history ({ruleId}), or the account's recent runs ({}).
+    // A run belongs to its RULE, not to a pipeline, so a moved rule keeps its history. The 355
+    // bundle's {pipelineId} is still answered for the minutes between deploys.
+    const ruleId = String(payload?.ruleId ?? "").toLowerCase();
+    const legacyPipe = String(payload?.pipelineId ?? "").toLowerCase();
+    if (ruleId && !isUuidLike(ruleId)) return json({ error: "That rule wasn't found." }, 400);
+    let q = admin.from("crm_rules").select("id, name").eq("client_id", clientId);
+    if (ruleId) q = q.eq("id", ruleId);
+    else if (isUuidLike(legacyPipe)) q = q.eq("pipeline_id", legacyPipe);
+    // Archived rules are read too, deliberately: their runs are still the answer to "what sent that?"
+    const { data: rules, error: rErr } = await q;
     if (rErr) return dbFail(req, clientId, "read the rule log", rErr);
     const ids = (rules ?? []).map((r: any) => r.id);
     if (!ids.length) return json({ ok: true, runs: [], outbox: [] });
-    const { data: runs, error: nErr } = await admin.from("crm_rule_runs")
-      .select("id, rule_id, deal_id, trigger, outcome, detail, fired_at")
-      .eq("client_id", clientId).in("rule_id", ids)
-      .order("fired_at", { ascending: false }).limit(100);
+    const cap = ruleId ? 100 : 50;
+    const [{ data: runs, error: nErr }, { data: outbox, error: oErr }] = await Promise.all([
+      admin.from("crm_rule_runs").select("id, rule_id, deal_id, contact_id, trigger, outcome, detail, occurrence, fired_at")
+        .eq("client_id", clientId).in("rule_id", ids).order("fired_at", { ascending: false }).limit(cap),
+      // The queue beside the log: a message still queued (or held for the morning) is the
+      // commonest answer to "it did not send", and it is NOT a failure.
+      admin.from("crm_rule_outbox").select("id, rule_id, deal_id, contact_id, kind, state, attempts, last_error, hold_until, queued_at, sent_at")
+        .eq("client_id", clientId).in("rule_id", ids).order("queued_at", { ascending: false }).limit(cap),
+    ]);
     if (nErr) return dbFail(req, clientId, "read the rule log", nErr);
-    // The queue beside the log, because a message that is still queued is the commonest answer
-    // to "it did not send" and it is NOT a failure — the tick simply has not run yet.
-    const { data: outbox, error: oErr } = await admin.from("crm_rule_outbox")
-      .select("id, rule_id, deal_id, kind, state, attempts, last_error, queued_at, sent_at")
-      .eq("client_id", clientId).in("rule_id", ids)
-      .order("queued_at", { ascending: false }).limit(100);
     if (oErr) return dbFail(req, clientId, "read the rule log", oErr);
+    // WHO each line was about, so the log reads "Dale Smith — ran" rather than a column of ids.
+    const dealIds = [...new Set([...(runs ?? []), ...(outbox ?? [])].map((x: any) => x.deal_id).filter(Boolean))].slice(0, 200);
+    const contactIds = [...new Set([...(runs ?? []), ...(outbox ?? [])].map((x: any) => x.contact_id).filter(Boolean))].slice(0, 200);
+    const [{ data: deals }, { data: people }] = await Promise.all([
+      dealIds.length ? admin.from("crm_deals").select("id, title, short_code").eq("client_id", clientId).in("id", dealIds) : Promise.resolve({ data: [] }),
+      contactIds.length ? admin.from("crm_contacts").select("id, name").eq("client_id", clientId).in("id", contactIds) : Promise.resolve({ data: [] }),
+    ]);
+    const dealBy = new Map((deals ?? []).map((d: any) => [d.id, d]));
+    const nameBy = new Map((people ?? []).map((c: any) => [c.id, c.name]));
+    const ruleName = new Map((rules ?? []).map((r: any) => [r.id, r.name ?? null]));
+    const who = (x: any) => {
+      const person = x.contact_id ? nameBy.get(x.contact_id) : null;
+      const card = x.deal_id ? dealBy.get(x.deal_id) : null;
+      const cardWord = card ? (card.title || card.short_code || null) : null;
+      return [person, cardWord].filter(Boolean).join(" — ") || null;
+    };
     return json({
       ok: true,
       runs: (runs ?? []).map((r: any) => ({
-        id: r.id, ruleId: r.rule_id, dealId: r.deal_id, trigger: r.trigger,
+        id: r.id, ruleId: r.rule_id, ruleName: ruleName.get(r.rule_id) ?? null,
+        dealId: r.deal_id ?? null, contactId: r.contact_id ?? null, who: who(r),
+        trigger: r.trigger, occurrence: r.occurrence ?? "",
         outcome: r.outcome, detail: r.detail ?? {}, firedAt: r.fired_at,
       })),
       outbox: (outbox ?? []).map((o: any) => ({
-        id: o.id, ruleId: o.rule_id, dealId: o.deal_id, kind: o.kind, state: o.state,
-        attempts: o.attempts, lastError: o.last_error ?? null, queuedAt: o.queued_at, sentAt: o.sent_at,
+        id: o.id, ruleId: o.rule_id, ruleName: ruleName.get(o.rule_id) ?? null,
+        dealId: o.deal_id ?? null, contactId: o.contact_id ?? null, who: who(o),
+        kind: o.kind, state: o.state, attempts: o.attempts, lastError: o.last_error ?? null,
+        holdUntil: o.hold_until ?? null, queuedAt: o.queued_at, sentAt: o.sent_at,
       })),
     });
   }

@@ -6,9 +6,10 @@
 // through becomes a rule that silently never works, on a feature whose whole point is that it
 // works while nobody is watching.
 import {
-  fillMergeFields, isOutboundAction, parseRuleAction, parseRuleOrder, parseRuleSave,
-  RULE_ACTION_KINDS, RULE_ACTIONS_MAX, RULE_ANCHORS, RULE_DAYS_MAX, RULE_EVENTS, RULE_SMS_MAX,
-  ruleSentence,
+  actionAllowedForScope, actionScopeError, audienceLabel, fillMergeFields, isOutboundAction,
+  parseRuleAction, parseRuleConditions, parseRuleSave, RULE_ACTION_KINDS, RULE_ACTION_NEEDS,
+  RULE_ACTIONS_MAX, RULE_ANCHORS, RULE_CONDITION_FIELDS, RULE_CONDITION_OPS, RULE_CONDITIONS_MAX,
+  RULE_DAYS_MAX, RULE_EVENTS, RULE_SCOPES, RULE_SMS_MAX, ruleSentence, triggerAllowedForScope,
 } from "./crmRules.ts";
 
 function eq(a: unknown, b: unknown, msg: string) {
@@ -138,12 +139,135 @@ Deno.test("a rule with nothing to do is refused, and ten actions is the cap", ()
   good(parseRuleSave({ id: R, archive: true }), "archiving needs nothing else");
 });
 
-Deno.test("a reorder names its pipeline and sends each rule once", () => {
-  bad(parseRuleOrder({ ids: [R] }), "no pipeline");
-  bad(parseRuleOrder({ pipelineId: P, ids: [] }), "empty");
-  bad(parseRuleOrder({ pipelineId: P, ids: [R, R] }), "duplicate");
-  bad(parseRuleOrder({ pipelineId: P, ids: ["nope"] }), "junk id");
-  good(parseRuleOrder({ pipelineId: P, ids: [R, S] }), "two rules");
+// ── WHO A RULE IS FOR (migration 363) ──────────────────────────────────────────────────────────
+
+Deno.test("every action says what it needs, and every scope gives what it should", () => {
+  // A second list would drift; this one is compared to the browser's VALUE by value in preflight.
+  eq(Object.keys(RULE_ACTION_NEEDS).sort(), [...RULE_ACTION_KINDS].sort(), "a need for every action");
+  eq([...RULE_SCOPES], ["pipeline", "all_pipelines", "contacts", "none"], "the picker's order");
+  // ONE PIPELINE: everything.
+  for (const k of RULE_ACTION_KINDS) eq(actionAllowedForScope(k, "pipeline"), true, `pipeline + ${k}`);
+  // EVERY PIPELINE: a status or a stage belongs to ONE pipeline (354), so those two cannot be named.
+  eq(RULE_ACTION_KINDS.filter((k) => !actionAllowedForScope(k, "all_pipelines")), ["set_status", "move_stage"], "every pipeline");
+  // CUSTOMERS: nothing that writes to a card.
+  eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "contacts")),
+    ["add_note", "create_card", "send_sms", "send_email"], "customers");
+  // NOBODY: nothing a round-1 action can do.
+  eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "none")), [], "nobody");
+  eq(actionAllowedForScope("nope", "pipeline"), false, "an unknown action is never allowed");
+});
+
+Deno.test("a trigger fits who the rule is for", () => {
+  eq(triggerAllowedForScope({ triggerKind: "event" }, "all_pipelines"), true, "event, every pipeline");
+  eq(triggerAllowedForScope({ triggerKind: "event" }, "contacts"), true, "event, customers");
+  eq(triggerAllowedForScope({ triggerKind: "elapsed" }, "all_pipelines"), true, "clock, every pipeline");
+  // Every round-1 clock counts from something on the CARD.
+  eq(triggerAllowedForScope({ triggerKind: "elapsed" }, "contacts"), false, "clock, customers");
+  eq(triggerAllowedForScope({ triggerKind: "event" }, "none"), false, "nobody hears an event");
+});
+
+Deno.test("a rule says who it is for — and the bundle that only knew pipelines still works", () => {
+  const ev = { triggerKind: "event", triggerEvent: "delivered", actions: [{ kind: "reopen" }] };
+  bad(parseRuleSave({ ...ev }), "no scope and no pipeline");
+  bad(parseRuleSave({ ...ev, scopeKind: "somewhere" }), "unknown scope");
+  // The 355 bundle posts a pipeline and no scope: that IS a one-pipeline rule.
+  const legacy = parseRuleSave({ ...ev, pipelineId: P });
+  good(legacy, "pipeline only");
+  eq((legacy as any).scopeKind, "pipeline", "defaults to one pipeline");
+  bad(parseRuleSave({ ...ev, scopeKind: "pipeline" }), "one pipeline, but which?");
+  // Every pipeline drops a stray pipeline id rather than letting the database refuse the pair.
+  const all = parseRuleSave({ ...ev, scopeKind: "all_pipelines", pipelineId: P });
+  good(all, "every pipeline");
+  eq((all as any).pipelineId, null, "the stray id is dropped");
+  // Round 2's scopes are refused in words, not with a constraint error.
+  bad(parseRuleSave({ ...ev, scopeKind: "contacts" }), "customers, not yet");
+  bad(parseRuleSave({ ...ev, scopeKind: "none" }), "nobody, not yet");
+});
+
+Deno.test("an action the scope cannot carry is refused, and says which one", () => {
+  const base = { scopeKind: "all_pipelines", triggerKind: "event", triggerEvent: "delivered" };
+  const r = parseRuleSave({ ...base, actions: [{ kind: "reopen" }, { kind: "set_status", params: { statusId: S } }] });
+  bad(r, "a status on every pipeline");
+  if (!/Action 2 \(Set the status to\)/.test((r as any).error)) throw new Error(`names the action: ${(r as any).error}`);
+  good(parseRuleSave({ ...base, actions: [{ kind: "reopen" }, { kind: "send_sms", params: { body: "Hi" } }] }), "card + customer actions");
+  // A clock rule on every pipeline is fine; the anchor is on each card.
+  good(parseRuleSave({
+    scopeKind: "all_pipelines", triggerKind: "elapsed", elapsedAnchor: "stage_entered", elapsedDays: 7,
+    actions: [{ kind: "set_follow_up", params: { days: 1 } }],
+  }), "a clock on every pipeline");
+  if (!/needs one pipeline/.test(actionScopeError(0, "move_stage"))) throw new Error("move_stage sentence");
+  if (!/needs a card/.test(actionScopeError(2, "mark_lost"))) throw new Error("mark_lost sentence");
+  // An edit that does not say who the rule is for is NOT checked here — only the handler knows
+  // the stored scope — but it is not refused either.
+  good(parseRuleSave({ id: R, actions: [{ kind: "set_status", params: { statusId: S } }] }), "an edit with no scope");
+  eq((parseRuleSave({ id: R, name: "x" }) as any).scopeKind, null, "an edit leaves the scope alone");
+});
+
+// ── "ONLY IF" (migration 363) ──────────────────────────────────────────────────────────────────
+
+Deno.test("the condition vocabulary is the one migration 363's crm_rule_facts builds", () => {
+  // Rename one of these without the SQL and every rule using it silently stops: the database reads
+  // a field it does not know as FALSE. So the list is pinned, and so is the SQL (363 PART 6).
+  eq(Object.keys(RULE_CONDITION_FIELDS).sort(), [
+    "contact.has_email", "contact.has_phone", "contact.label", "contact.owner",
+    "deal.lost", "deal.source", "deal.stage", "deal.status", "deal.value",
+  ], "fields");
+  eq([...RULE_CONDITION_OPS], ["eq", "neq", "gt", "lt", "has", "lacks", "is_empty", "not_empty"], "ops");
+  for (const [k, f] of Object.entries(RULE_CONDITION_FIELDS)) {
+    for (const op of f.ops) if (!(RULE_CONDITION_OPS as readonly string[]).includes(op)) throw new Error(`${k}: ${op}`);
+  }
+});
+
+Deno.test("a condition is refused when the database could only read it as false", () => {
+  good(parseRuleConditions(undefined, "pipeline"), "none at all");
+  bad(parseRuleConditions({ field: "deal.value" }, "pipeline"), "not a list");
+  bad(parseRuleConditions([{ field: "deal.colour", op: "eq", value: "red" }], "pipeline"), "unknown field");
+  bad(parseRuleConditions([{ field: "deal.value", op: "has", value: 1 }], "pipeline"), "an op that field does not take");
+  bad(parseRuleConditions([{ field: "deal.value", op: "gt", value: "lots" }], "pipeline"), "not an amount");
+  bad(parseRuleConditions([{ field: "deal.value", op: "gt", value: -5 }], "pipeline"), "a negative amount");
+  bad(parseRuleConditions([{ field: "deal.value", op: "gt", value: "" }], "pipeline"), "a blank amount");
+  bad(parseRuleConditions([{ field: "deal.stage", op: "eq", value: "Stage One" }], "pipeline"), "a stage by name");
+  bad(parseRuleConditions([{ field: "deal.lost", op: "eq", value: "yes" }], "pipeline"), "yes as a word");
+  bad(parseRuleConditions([{ field: "deal.source", op: "eq", value: "carrier pigeon" }], "pipeline"), "a source not in the list");
+  bad(parseRuleConditions([{ field: "contact.label", op: "has", value: "  " }], "pipeline"), "a blank tag");
+  bad(parseRuleConditions(Array.from({ length: RULE_CONDITIONS_MAX + 1 }, () => ({ field: "deal.lost", op: "eq", value: false })), "pipeline"), "over the cap");
+
+  const ok = parseRuleConditions([
+    { field: "deal.value", op: "gt", value: "10000" },
+    { field: "deal.stage", op: "eq", value: S.toUpperCase() },
+    { field: "contact.label", op: "has", value: " Lot visitor " },
+    { field: "contact.owner", op: "is_empty", value: "ignored" },
+  ], "pipeline");
+  good(ok, "four conditions");
+  eq((ok as any).conditions, [
+    { field: "deal.value", op: "gt", value: 10000 },
+    { field: "deal.stage", op: "eq", value: S },
+    { field: "contact.label", op: "has", value: "Lot visitor" },
+    { field: "contact.owner", op: "is_empty", value: null },
+  ], "normalised");
+});
+
+Deno.test("a condition must fit who the rule is for", () => {
+  const stage = [{ field: "deal.stage", op: "eq", value: S }];
+  good(parseRuleConditions(stage, "pipeline"), "a stage on one pipeline");
+  const r = parseRuleConditions(stage, "all_pipelines");
+  bad(r, "a stage on every pipeline");
+  if (!/needs one pipeline/.test((r as any).error)) throw new Error((r as any).error);
+  good(parseRuleConditions([{ field: "deal.value", op: "gt", value: 1 }], "all_pipelines"), "a value on every pipeline");
+  bad(parseRuleConditions([{ field: "deal.value", op: "gt", value: 1 }], "contacts"), "a card field on customers");
+  good(parseRuleConditions([{ field: "contact.has_phone", op: "eq", value: true }], "contacts"), "a customer field on customers");
+});
+
+Deno.test("each row says who its rule is for", () => {
+  const pipes = [{ id: P, name: "Shed Deals" }];
+  eq(audienceLabel({ scopeKind: "pipeline", pipelineId: P }, pipes), "Shed Deals", "one pipeline");
+  eq(audienceLabel({ pipelineId: P }, pipes), "Shed Deals", "a 355 rule with no scope");
+  eq(audienceLabel({ scopeKind: "pipeline", pipelineId: S }, pipes), "A pipeline that was removed", "gone");
+  eq(audienceLabel({ scopeKind: "all_pipelines" }, pipes), "Every pipeline", "every");
+  eq(audienceLabel({ scopeKind: "contacts", conditions: [{ field: "contact.label", op: "has", value: "Lot visitor" }] }, pipes),
+    "Customers tagged Lot visitor", "a tag");
+  eq(audienceLabel({ scopeKind: "contacts", conditions: [] }, pipes), "All customers", "everyone");
+  eq(audienceLabel({ scopeKind: "none" }, pipes), "Your team", "nobody");
 });
 
 Deno.test("the sentence reads back what was written", () => {

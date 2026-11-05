@@ -5543,7 +5543,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
           with the same teaser: every crm_rule_* action refuses an unentitled tenant by the crm_
           prefix, so without it this would be a screen whose every button 403s. The page itself
           also hides the rules when the DATABASE cannot store one yet — a different question, and
-          it is answered by the server's `rulesReady` inside AutomationsSettings. */}
+          it is answered by the server's `rulesVersion` inside AutomationsSettings. */}
       {sub === "automations" && (crmUnlocked || crmPending
         ? <AutomationsSettings viewing={!!viewingLabel} />
         : <div style={S.card}><div style={S.h2}>Automations</div><p style={{ fontSize: 13, color: "#64748B" }}>Rules that run by themselves are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}

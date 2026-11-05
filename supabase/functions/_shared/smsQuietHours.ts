@@ -133,7 +133,12 @@ function isUsDst(utc: Date): boolean {
   return utc >= secondSundayMarch && utc < firstSundayNov;
 }
 
-export type QuietVerdict = { allowed: true } | { allowed: false; reason: string; localHour: number };
+/** `opensAt`: the next 8am where the customer lives. An automation's text WAITS until then
+ *  (crm-rules-tick parks it on hold_until, migration 363) — before 2026-11-04 it was retried like a
+ *  failure and given up on twenty minutes later, which is to say dropped. On the night the clocks
+ *  change it can be an hour out either way; the send is checked again when it comes due, so an
+ *  early wake-up simply waits again. */
+export type QuietVerdict = { allowed: true } | { allowed: false; reason: string; localHour: number; opensAt: Date };
 
 /**
  * @param phoneKey the 10-digit NANP key (smsPhoneKey output)
@@ -158,9 +163,12 @@ export function quietHoursVerdict(phoneKey: string, now: Date = new Date()): Qui
   if (hour >= 8 && hour < closeHour) return { allowed: true };
 
   const closeLabel = z.earlyClose ? "8pm" : "9pm";
+  // Today at 8am local when it is still the small hours, tomorrow when it is the evening.
+  const opensLocal = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + (hour >= 8 ? 1 : 0), 8);
   return {
     allowed: false,
     localHour: hour,
+    opensAt: new Date(opensLocal - offset * 3600_000),
     reason: zone
       ? `It is ${formatHour(hour)} where this customer lives. Texts can only go out between 8am and ${closeLabel} their time — try again then, or call them instead.`
       : `We cannot tell what time it is where this customer lives, so we use the strictest window: 8am to 8pm Eastern. It is ${formatHour(hour)} Eastern now.`,

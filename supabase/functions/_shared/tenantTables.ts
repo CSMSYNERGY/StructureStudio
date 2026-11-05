@@ -61,13 +61,13 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   // the archived tenant-wide rows 354 retired have no pipeline, and a plain wipe is what clears
   // those. Exported either way.
   crm_statuses: { fate: "wipe", export: true, why: "Statuses (live ones cascade from crm_pipelines; the pre-354 tenant-wide rows do not)." },
-  // 355: a pipeline's RULES, and everything they produced. All four hang off crm_rules, which
-  // hangs off crm_pipelines (ON DELETE CASCADE throughout), so wiping the pipelines takes the
-  // whole set. Listed as cascades rather than wipes so the chain is readable here: a reader
-  // asking "what happens to a builder's rules" should not have to open the migration. Exported
-  // like every other table — the rules are the builder's own configuration, and the run log is
-  // the record of what their rules did to their customers.
-  crm_rules: { fate: "cascade", parent: "crm_pipelines", export: true, why: "A pipeline's rules (when this happens, do this)." },
+  // 355: the account's RULES, and everything they produced. The other three hang off crm_rules
+  // (ON DELETE CASCADE throughout). crm_rules itself is a WIPE since 363 (Carolyn 2026-11-04): a
+  // rule may be on every pipeline, so its pipeline_id is nullable and deleting the pipelines no
+  // longer reaches it — the same reason crm_statuses above is a wipe. A rule that IS on one
+  // pipeline still goes with it. Exported like every other table — the rules are the builder's
+  // own configuration, and the run log is the record of what their rules did to their customers.
+  crm_rules: { fate: "wipe", export: true, why: "The account's automations (when this happens, do this); one-pipeline rules also cascade from crm_pipelines." },
   crm_rule_actions: { fate: "cascade", parent: "crm_rules", export: true, why: "What one rule does, in order." },
   crm_rule_runs: { fate: "cascade", parent: "crm_rules", export: true, why: "The run log, and the once-per-card guard." },
   crm_rule_outbox: { fate: "cascade", parent: "crm_rule_runs", export: true, why: "Texts and emails a rule queued (cascades from the run, which cascades from the rule)." },

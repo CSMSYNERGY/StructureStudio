@@ -35,6 +35,9 @@ export type SmsOutcome = {
   reason?: "not_active" | "opted_out" | "no_consent" | "bad_number" | "damaged_number" | "quiet_hours" | "wallet_empty" | "failed";
   error?: string;
   id?: string;
+  /** quiet_hours only: when the customer's window opens (ISO). An automation holds the message
+   *  until then rather than counting the refusal as a failed attempt. */
+  retryAt?: string;
 };
 
 export type TenantSms = {
@@ -240,7 +243,7 @@ export async function sendTenantSms(
     // pressing send on one text to one customer is exempt (bypassQuietHours).
     if (!msg.bypassQuietHours) {
       const quiet = quietHoursVerdict(key);
-      if (!quiet.allowed) return { sent: false, reason: "quiet_hours", error: quiet.reason };
+      if (!quiet.allowed) return { sent: false, reason: "quiet_hours", error: quiet.reason, retryAt: quiet.opensAt.toISOString() };
     }
 
     if (msg.contactId) {

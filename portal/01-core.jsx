@@ -1080,7 +1080,8 @@ const SETTINGS_TAB_AREA = {
   // settings and customer hub". The rules were a section inside each pipeline's panel until
   // then. Same area they had there — crm_rule_save / crm_rules_reorder are settings_crm:edit
   // and crm_rule_log is settings_crm:view — so this is a relocation in the UI and not a change
-  // of access, the shape every move into this hub has had.
+  // of access, the shape every move into this hub has had. Its list (crm_rules_list, migration
+  // 363) is settings_crm:view too; the board's crm_pipelines_list no longer carries the rules.
   automations: "settings_crm",
   // The Customer login code card (migration 231), lifted off the connection page into the
   // Customer Hub. Same area it had there — it saves through portal-settings' global `save`,
@@ -2129,12 +2130,12 @@ function ssBillingTabs() {
 function ssCustomerHubTabs({ isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
     ["pipelines", "Pipelines", "Each pipeline's stages, its statuses and when each one is set, and its lost reasons"],
-    // AUTOMATIONS, straight after Pipelines because a rule belongs to one (Carolyn 2026-11-04).
-    // ⚠️ A RULE IS STILL PER PIPELINE — that is migration 355's decision and this tab does not
-    // change it: "when delivered" means something different in a shed pipeline and in a reviews
-    // one. The page therefore groups the rules BY pipeline, and the group you add in is what
-    // chooses the pipeline. Do not read this tab as a tenant-wide rule list.
-    ["automations", "Automations", "Rules that run by themselves: when something happens on a card, do this"],
+    // AUTOMATIONS, straight after Pipelines (Carolyn 2026-11-04). ONE LIST of the account's
+    // rules: the same day she took them off the pipeline — "I do not want it connected to a
+    // specific pipeline… there needs to be an option to select which pipeline in the rules
+    // portion" — so each rule says who it is for (one pipeline, every pipeline; customers or
+    // nobody in round 2) and the pipeline is picked inside the editor (migration 363).
+    ["automations", "Automations", "Rules that run by themselves: when something happens, do this"],
     // Lifted off the connection page, where it sat under the GHL credentials and read as part
     // of them. It never was: "Every tenant, CRM or not: the login is ours either way" (the
     // card's own note in 03-catalog.jsx), which is precisely why it belongs here.

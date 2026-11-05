@@ -1485,6 +1485,14 @@ const listMigrations = () => {
  *
  * Compared as SETS, both directions, by key only: the labels are allowed to differ (the server's
  * are for its own sentences) and are not this rule's business. Refuses to run blind.
+ *
+ * MIGRATION 363 (Carolyn, 2026-11-04: a rule says WHO it is for, and may carry "only if"
+ * conditions) added four more pairs — the scopes, the condition fields, the condition tests and
+ * the card sources — and two pairs compared VALUE by value, because there the keys agreeing is not
+ * enough: what each action NEEDS (a browser that thought "set the status" worked on every pipeline
+ * would offer it there, and a status belongs to one pipeline), and each condition field's type,
+ * scope and allowed tests (an op the browser offers and the server refuses is a condition nobody
+ * can save).
  */
 function checkRuleMirror(files = {}, inject = null) {
   const errors = [];
@@ -1535,8 +1543,30 @@ function checkRuleMirror(files = {}, inject = null) {
     return [...src.slice(m.index, end).matchAll(/^\s{2}([a-z_]+):/gm)].map((x) => x[1]);
   };
 
+  // 363's lists: one entry per LINE, read by the line's first string, because the condition
+  // fields carry a nested list of tests and a bare `["` match would read "gt" as a field name.
+  const lineKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*=\\s*\\[`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n];", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_.]+)"/gm)].map((x) => x[1]);
+  };
+  // A Record whose value is an object, and whose keys may be quoted ("deal.value": { … }).
+  const objRecordKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*:\\s*Record<[^>]+>\\s*=\\s*\\{`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n};", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/^\s{2}"?([a-z_.]+)"?:/gm)].map((x) => x[1]);
+  };
+
   const pairs = [
     ["action kinds", pairKeys(jsx, "SS_RULE_ACTIONS"), "SS_RULE_ACTIONS", constKeys(ts, "RULE_ACTION_KINDS"), "RULE_ACTION_KINDS"],
+    ["scopes", lineKeys(jsx, "SS_RULE_SCOPES"), "SS_RULE_SCOPES", constKeys(ts, "RULE_SCOPES"), "RULE_SCOPES"],
+    ["condition fields", lineKeys(jsx, "SS_RULE_CONDITION_FIELDS"), "SS_RULE_CONDITION_FIELDS", objRecordKeys(ts, "RULE_CONDITION_FIELDS"), "RULE_CONDITION_FIELDS"],
+    ["condition tests", lineKeys(jsx, "SS_RULE_CONDITION_OPS"), "SS_RULE_CONDITION_OPS", constKeys(ts, "RULE_CONDITION_OPS"), "RULE_CONDITION_OPS"],
+    ["card sources", lineKeys(jsx, "SS_RULE_DEAL_SOURCES"), "SS_RULE_DEAL_SOURCES", recordKeys(ts, "RULE_DEAL_SOURCES"), "RULE_DEAL_SOURCES"],
     ["clock anchors", pairKeys(jsx, "SS_RULE_ANCHORS"), "SS_RULE_ANCHORS", recordKeys(ts, "RULE_ANCHORS"), "RULE_ANCHORS"],
     // The events are deliberately ONE list on each side (SS_STATUS_EVENTS, and STATUS_EVENTS via
     // `RULE_EVENTS = STATUS_EVENTS`), shared with the status ladder — so this arm also catches the
@@ -1568,6 +1598,63 @@ function checkRuleMirror(files = {}, inject = null) {
         errors.push(`rule ${what}: "${k}" is in ${bName} (${TS}) but NOT in ${aName} (${JSX}) — `
           + "the server accepts it and nothing can ask for it, so it reads as unbuilt. Add it to both, "
           + "in the same commit.");
+      }
+    }
+  }
+
+  // ── VALUE BY VALUE (363) ────────────────────────────────────────────────────────────────────
+  // What each action NEEDS from the rule's subject. `["set_status", "pipeline"],` against
+  // `  set_status: "pipeline",`.
+  const needsJsx = (() => {
+    const m = /const\s+SS_RULE_ACTION_NEEDS\s*=\s*\[/.exec(jsx);
+    if (!m) return null;
+    const end = jsx.indexOf("\n];", m.index);
+    return end < 0 ? null : new Map([...jsx.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_]+)"\s*,\s*"([a-z_]+)"\s*\]/gm)].map((x) => [x[1], x[2]]));
+  })();
+  const needsTs = (() => {
+    const m = /const\s+RULE_ACTION_NEEDS\s*:\s*Record<[^>]+>\s*=\s*\{/.exec(ts);
+    if (!m) return null;
+    const end = ts.indexOf("\n};", m.index);
+    return end < 0 ? null : new Map([...ts.slice(m.index, end).matchAll(/^\s{2}([a-z_]+):\s*"([a-z_]+)"/gm)].map((x) => [x[1], x[2]]));
+  })();
+  if (!needsJsx || !needsJsx.size) {
+    errors.push(`${JSX}: cannot read \`SS_RULE_ACTION_NEEDS\` — what each action needs is now unchecked; `
+      + "re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  } else if (!needsTs || !needsTs.size) {
+    errors.push(`${TS}: cannot read \`RULE_ACTION_NEEDS\` — what each action needs is now unchecked; `
+      + "re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  } else {
+    for (const k of new Set([...needsJsx.keys(), ...needsTs.keys()])) {
+      if (needsJsx.get(k) !== needsTs.get(k)) {
+        errors.push(`rule action needs: "${k}" needs "${needsJsx.get(k) ?? "(missing)"}" in SS_RULE_ACTION_NEEDS (${JSX}) `
+          + `but "${needsTs.get(k) ?? "(missing)"}" in RULE_ACTION_NEEDS (${TS}) — the editor would offer it `
+          + "where the server refuses it, or hide it where it works. Make them match.");
+      }
+    }
+  }
+  // Each condition field's type, what it needs, and the tests it takes.
+  const fieldsJsx = (() => {
+    const m = /const\s+SS_RULE_CONDITION_FIELDS\s*=\s*\[/.exec(jsx);
+    if (!m) return null;
+    const end = jsx.indexOf("\n];", m.index);
+    return end < 0 ? null : new Map([...jsx.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_.]+)",\s*"[^"]*",\s*"([a-z]+)",\s*"([a-z]+)",\s*\[([^\]]*)\]/gm)]
+      .map((x) => [x[1], `${x[2]}|${x[3]}|${[...x[4].matchAll(/"([a-z_]+)"/g)].map((o) => o[1]).sort().join(",")}`]));
+  })();
+  const fieldsTs = (() => {
+    const m = /const\s+RULE_CONDITION_FIELDS\s*:\s*Record<[^>]+>\s*=\s*\{/.exec(ts);
+    if (!m) return null;
+    const end = ts.indexOf("\n};", m.index);
+    return end < 0 ? null : new Map([...ts.slice(m.index, end).matchAll(/^\s{2}"([a-z_.]+)":\s*\{\s*label:\s*"[^"]*",\s*type:\s*"([a-z]+)",\s*needs:\s*"([a-z]+)",\s*ops:\s*\[([^\]]*)\]/gm)]
+      .map((x) => [x[1], `${x[2]}|${x[3]}|${[...x[4].matchAll(/"([a-z_]+)"/g)].map((o) => o[1]).sort().join(",")}`]));
+  })();
+  if (!fieldsJsx || !fieldsJsx.size || !fieldsTs || !fieldsTs.size) {
+    errors.push(`${!fieldsJsx || !fieldsJsx.size ? JSX : TS}: cannot read the condition fields' shapes — their types, `
+      + "scopes and tests are now unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  } else {
+    for (const [k, v] of fieldsJsx) {
+      if (fieldsTs.has(k) && fieldsTs.get(k) !== v) {
+        errors.push(`rule condition field "${k}": the editor has ${v} (type|needs|tests) but the server has ${fieldsTs.get(k)} — `
+          + "a condition built in the editor would be refused on save. Make them match.");
       }
     }
   }
@@ -3665,8 +3752,33 @@ if (process.argv.includes("--self-test")) {
     console.error("self-test FAILED: a renamed RULE_ACTION_KINDS reported clean — the rule mirror is blind");
     process.exit(1);
   }
+  // (e) 363: a scope the server dropped, so the editor offers who-it-is-for that cannot save.
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, '"pipeline", "all_pipelines", "contacts", "none"', '"pipeline", "all_pipelines", "contacts"'), pip: rmPip })
+        .some((e) => /scopes: "none" is in SS_RULE_SCOPES/.test(e))) {
+    console.error("self-test FAILED: a scope missing from the server's list passed the rule mirror");
+    process.exit(1);
+  }
+  // (f) 363: an action whose NEED differs — the editor would offer "set the status" on every pipeline.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '  ["set_status", "pipeline"],', '  ["set_status", "deal"],'), ts: rmTs, pip: rmPip })
+        .some((e) => /rule action needs: "set_status"/.test(e))) {
+    console.error("self-test FAILED: an action-needs mismatch passed the rule mirror");
+    process.exit(1);
+  }
+  // (g) 363: a condition field whose tests differ — and the nested list is NOT read as field names.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '"deal.value", "The card\'s value", "money", "deal", ["gt", "lt", "eq", "neq"]', '"deal.value", "The card\'s value", "money", "deal", ["gt", "lt", "eq", "neq", "has"]'), ts: rmTs, pip: rmPip })
+        .some((e) => /condition field "deal\.value"/.test(e))) {
+    console.error("self-test FAILED: a condition field offering a test the server refuses passed the rule mirror");
+    process.exit(1);
+  }
+  // (h) 363: blind on a rename of the condition fields.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, "const SS_RULE_CONDITION_FIELDS = [", "const SS_RULE_CONDITION_FIELDS_V2 = ["), ts: rmTs, pip: rmPip })
+        .some((e) => /cannot read `SS_RULE_CONDITION_FIELDS`/.test(e))) {
+    console.error("self-test FAILED: a renamed SS_RULE_CONDITION_FIELDS reported clean — the rule mirror is blind");
+    process.exit(1);
+  }
   console.log("self-test passed: the rule vocabularies' mirror is clean on the real files, fires in both "
-    + "directions for actions and anchors, and refuses to run blind on a rename");
+    + "directions for actions and anchors, catches a dropped scope, a mismatched action need and a "
+    + "condition field's tests, and refuses to run blind on a rename");
 
   // ── The access.ts <-> area_level_for() mirror ──
   // Proves all four directions, because this rule exists precisely BECAUSE a claim that it

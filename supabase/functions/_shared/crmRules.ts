@@ -14,6 +14,11 @@
 // template library is a feature of its own, and pretending these pointed at one would mean a
 // drop-down with nothing in it.
 //
+// Carolyn, 2026-11-04 (migration 363): a rule is no longer the property of one pipeline. It says
+// WHO it is for — cards in one pipeline, cards in every pipeline, customers matching a filter, or
+// nobody — and may carry "only if" conditions. Round 1 ships the first two scopes; the parser
+// refuses the other two in words until round 2 builds what they need.
+//
 // Self-contained on purpose (no jsr:/npm: imports): preflight runs `_shared/*.test.ts` offline.
 
 import { isUuidLike, type Parsed, STATUS_EVENTS } from "./crmPipelines.ts";
@@ -94,6 +99,177 @@ export const RULE_ACTION_LABELS: Record<RuleActionKind, string> = {
  *  the editor's warning, the outbox, and the tick's opt-out check. */
 export const RULE_OUTBOUND: readonly RuleActionKind[] = ["send_sms", "send_email"];
 export const isOutboundAction = (k: string): boolean => (RULE_OUTBOUND as readonly string[]).includes(k);
+
+// ── WHO A RULE IS FOR (migration 363) ─────────────────────────────────────────────────────────
+
+/** The "runs on" picker, in the order the editor shows it. Mirrored in portal/02-sales.jsx as
+ *  SS_RULE_SCOPES; preflight's checkRuleMirror compares the two. */
+export const RULE_SCOPES = ["pipeline", "all_pipelines", "contacts", "none"] as const;
+export type RuleScope = typeof RULE_SCOPES[number];
+
+/** The scopes a builder may SAVE today. 'contacts' needs the audience query and 'none' needs the
+ *  schedule; both arrive in round 2, and the database already admits them (363). */
+export const RULE_SCOPES_LIVE: readonly RuleScope[] = ["pipeline", "all_pipelines"];
+export const RULE_SCOPE_NOT_YET = "Rules for customers and for your team are coming in the next update.";
+
+/** What a subject is able to give an action or a condition. A rule on one pipeline knows the card,
+ *  the customer AND which pipeline's statuses and stages are meant; an every-pipeline rule knows
+ *  the card and the customer but not the ladder; a customer rule knows only the customer. */
+export type RuleNeed = "pipeline" | "deal" | "contact" | "any";
+const SCOPE_PROVIDES: Record<RuleScope, readonly RuleNeed[]> = {
+  pipeline: ["pipeline", "deal", "contact", "any"],
+  all_pipelines: ["deal", "contact", "any"],
+  contacts: ["contact", "any"],
+  none: ["any"],
+};
+const scopeProvides = (scope: string, need: RuleNeed): boolean =>
+  ((SCOPE_PROVIDES as Record<string, readonly RuleNeed[]>)[scope] ?? []).includes(need);
+
+/**
+ * What each action needs from its subject. Mirrored as SS_RULE_ACTION_NEEDS and compared VALUE by
+ * value by preflight, because a browser that thought "set the status" worked on every pipeline
+ * would offer it there — and a status belongs to exactly one pipeline (354), so it cannot.
+ */
+export const RULE_ACTION_NEEDS: Record<RuleActionKind, RuleNeed> = {
+  set_status: "pipeline",
+  move_stage: "pipeline",
+  mark_lost: "deal",
+  reopen: "deal",
+  set_follow_up: "deal",
+  set_close_date: "deal",
+  add_note: "contact",
+  create_card: "contact",
+  send_sms: "contact",
+  send_email: "contact",
+};
+
+export const actionAllowedForScope = (kind: string, scope: string): boolean => {
+  const need = (RULE_ACTION_NEEDS as Record<string, RuleNeed>)[kind];
+  return !!need && scopeProvides(scope, need);
+};
+
+/** A trigger a scope can hear. Every clock in round 1 counts from something on the CARD, so a
+ *  customer rule cannot wait for one; an event reaches every subject scope (363's fan-out). */
+export function triggerAllowedForScope(t: { triggerKind: string | null }, scope: string): boolean {
+  if (scope === "none") return false;                     // round 2: schedules only
+  if (t.triggerKind === "elapsed") return scopeProvides(scope, "deal");
+  return t.triggerKind === "event";
+}
+
+// ── "ONLY IF" (migration 363) ─────────────────────────────────────────────────────────────────
+
+/** How a condition compares. Mirrored as SS_RULE_CONDITION_OPS. */
+export const RULE_CONDITION_OPS = ["eq", "neq", "gt", "lt", "has", "lacks", "is_empty", "not_empty"] as const;
+export type RuleConditionOp = typeof RULE_CONDITION_OPS[number];
+
+export type RuleConditionType = "money" | "status" | "stage" | "bool" | "choice" | "owner" | "label";
+export type RuleConditionField = { label: string; type: RuleConditionType; needs: RuleNeed; ops: readonly RuleConditionOp[] };
+
+/** Where a card came from — crm_deals.source's own list (325). */
+export const RULE_DEAL_SOURCES: Record<string, string> = {
+  manual: "Added by hand",
+  import: "Imported",
+  booking: "A booking",
+  phone: "A phone call",
+  design: "A design",
+  form: "A lead form",
+};
+
+/**
+ * THE CLOSED VOCABULARY, keyed EXACTLY as migration 363's crm_rule_facts builds its object — the
+ * database compares by these names and knows no others (an unknown one reads FALSE there, so a
+ * rename here that missed the SQL would silently stop every rule that used it). Mirrored as
+ * SS_RULE_CONDITION_FIELDS in the browser.
+ */
+export const RULE_CONDITION_FIELDS: Record<string, RuleConditionField> = {
+  "deal.value": { label: "The card's value", type: "money", needs: "deal", ops: ["gt", "lt", "eq", "neq"] },
+  "deal.status": { label: "The card's status", type: "status", needs: "pipeline", ops: ["eq", "neq"] },
+  "deal.stage": { label: "The card's stage", type: "stage", needs: "pipeline", ops: ["eq", "neq"] },
+  "deal.lost": { label: "The card is lost", type: "bool", needs: "deal", ops: ["eq"] },
+  "deal.source": { label: "Where the card came from", type: "choice", needs: "deal", ops: ["eq", "neq"] },
+  "contact.has_phone": { label: "The customer has a phone number", type: "bool", needs: "contact", ops: ["eq"] },
+  "contact.has_email": { label: "The customer has an email address", type: "bool", needs: "contact", ops: ["eq"] },
+  "contact.owner": { label: "The customer's owner", type: "owner", needs: "contact", ops: ["eq", "neq", "is_empty", "not_empty"] },
+  "contact.label": { label: "The customer's tags", type: "label", needs: "contact", ops: ["has", "lacks"] },
+};
+export const RULE_CONDITIONS_MAX = 10;
+export const RULE_LABEL_MAX = 60;
+
+export type RuleCondition = { field: string; op: RuleConditionOp; value: unknown };
+
+/**
+ * A rule's conditions, whole. ALL must hold. Refused here rather than at run time, because the
+ * evaluator reads anything it does not understand as FALSE — a rule that quietly never fires.
+ */
+export function parseRuleConditions(raw: unknown, scope: string): Parsed<{ conditions: RuleCondition[] }> {
+  if (raw === undefined || raw === null) return { ok: true, conditions: [] };
+  if (!Array.isArray(raw)) return { ok: false, error: "Send the conditions as a list." };
+  if (raw.length > RULE_CONDITIONS_MAX) return { ok: false, error: `Keep it to ${RULE_CONDITIONS_MAX} conditions in one rule.` };
+  const out: RuleCondition[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const c = (raw[i] && typeof raw[i] === "object" ? raw[i] : {}) as Record<string, unknown>;
+    const n = i + 1;
+    const field = str(c.field, 64);
+    const spec = field ? RULE_CONDITION_FIELDS[field] : undefined;
+    if (!field || !spec) return { ok: false, error: `Condition ${n}: pick what it checks from the list.` };
+    if (!scopeProvides(scope, spec.needs)) {
+      return {
+        ok: false,
+        error: spec.needs === "pipeline"
+          ? `Condition ${n} (${spec.label}) needs one pipeline — a status or stage belongs to one pipeline.`
+          : `Condition ${n} (${spec.label}) needs a card, and this rule runs on customers.`,
+      };
+    }
+    const op = str(c.op, 16) as RuleConditionOp | null;
+    if (!op || !spec.ops.includes(op)) return { ok: false, error: `Condition ${n}: pick how it compares.` };
+    let value: unknown = null;
+    if (op === "is_empty" || op === "not_empty") {
+      value = null;
+    } else if (spec.type === "money") {
+      const v = Number(c.value);
+      if (c.value === "" || c.value === null || c.value === undefined || !Number.isFinite(v) || v < 0 || v > 100_000_000) {
+        return { ok: false, error: `Condition ${n}: give an amount in dollars.` };
+      }
+      value = Math.round(v * 100) / 100;
+    } else if (spec.type === "status" || spec.type === "stage" || spec.type === "owner") {
+      const v = str(c.value, 64);
+      if (!isUuidLike(v)) return { ok: false, error: `Condition ${n}: pick ${spec.type === "owner" ? "a person" : `a ${spec.type}`}.` };
+      value = v!.toLowerCase();
+    } else if (spec.type === "bool") {
+      if (c.value !== true && c.value !== false) return { ok: false, error: `Condition ${n}: pick yes or no.` };
+      value = c.value;
+    } else if (spec.type === "choice") {
+      const v = str(c.value, 32);
+      if (!v || !(v in RULE_DEAL_SOURCES)) return { ok: false, error: `Condition ${n}: pick one from the list.` };
+      value = v;
+    } else if (spec.type === "label") {
+      const v = str(c.value, RULE_LABEL_MAX + 1);
+      if (!v) return { ok: false, error: `Condition ${n}: name the tag.` };
+      if (v.length > RULE_LABEL_MAX) return { ok: false, error: `Condition ${n}: keep the tag under ${RULE_LABEL_MAX} characters.` };
+      value = v;
+    }
+    out.push({ field, op, value });
+  }
+  return { ok: true, conditions: out };
+}
+
+/** Who a rule is for, in the words the list shows on each row. */
+export function audienceLabel(
+  r: { scopeKind?: string | null; pipelineId?: string | null; conditions?: { field: string; op: string; value: unknown }[] },
+  pipelines: { id: string; name: string }[],
+): string {
+  const scope = r.scopeKind || "pipeline";
+  if (scope === "pipeline") {
+    const p = pipelines.find((x) => x.id === r.pipelineId);
+    return p ? p.name : "A pipeline that was removed";
+  }
+  if (scope === "all_pipelines") return "Every pipeline";
+  if (scope === "none") return "Your team";
+  const tag = (r.conditions ?? []).find((c) => c.field === "contact.label" && c.op === "has");
+  if (tag) return `Customers tagged ${String(tag.value)}`;
+  const n = (r.conditions ?? []).length;
+  return n ? `Customers matching ${n} condition${n === 1 ? "" : "s"}` : "All customers";
+}
 
 const str = (v: unknown, max: number): string | null => {
   if (v === undefined || v === null) return null;
@@ -183,6 +359,8 @@ export function parseRuleAction(b: Record<string, unknown>): Parsed<RuleActionIn
 
 export type RuleIn = {
   id: string | null;
+  /** null on an edit that does not change who the rule is for. */
+  scopeKind: RuleScope | null;
   pipelineId: string | null;
   name: string | null;
   triggerKind: "event" | "elapsed" | null;
@@ -194,6 +372,10 @@ export type RuleIn = {
   enabled?: boolean;
   /** undefined = leave the actions alone (a rename); an array REPLACES them whole. */
   actions?: RuleActionIn[];
+  /** Same: undefined = leave them alone; an array replaces them whole. Shape only here — the
+   *  HANDLER validates them with parseRuleConditions against the effective scope, which on an
+   *  edit that posts no scope only it knows. */
+  conditions?: unknown[];
   archive: boolean;
 };
 
@@ -209,8 +391,20 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
   const id = str(b.id, 64);
   if (id && !isUuidLike(id)) return { ok: false, error: "That rule wasn't found." };
   const pipelineId = str(b.pipelineId, 64);
-  if (pipelineId && !isUuidLike(pipelineId)) return { ok: false, error: "Pick the pipeline the rule belongs to." };
-  if (!id && !isUuidLike(pipelineId)) return { ok: false, error: "Pick the pipeline the rule belongs to." };
+  if (pipelineId && !isUuidLike(pipelineId)) return { ok: false, error: "Pick the pipeline the rule runs on." };
+
+  // WHO IT IS FOR (363). A caller that names only a pipeline — the bundle that shipped with 355 —
+  // means a one-pipeline rule, so that is the default rather than a refusal.
+  const scopeRaw = str(b.scopeKind, 32);
+  if (scopeRaw && !(RULE_SCOPES as readonly string[]).includes(scopeRaw)) {
+    return { ok: false, error: "Pick who the rule is for." };
+  }
+  const scopeKind: RuleScope | null = (scopeRaw as RuleScope | null) ?? (pipelineId ? "pipeline" : null);
+  if (!id && !scopeKind) return { ok: false, error: "Pick who the rule is for." };
+  if (scopeKind && !RULE_SCOPES_LIVE.includes(scopeKind)) return { ok: false, error: RULE_SCOPE_NOT_YET };
+  // Onto a pipeline means naming it; off one drops whatever id came along (the database refuses
+  // the pair outright, 363's crm_rules_scope_pipeline).
+  if (scopeKind === "pipeline" && !pipelineId) return { ok: false, error: "Pick the pipeline the rule runs on." };
 
   const name = str(b.name, RULE_NAME_MAX + 1);
   if (name && name.length > RULE_NAME_MAX) return { ok: false, error: `Keep the rule name under ${RULE_NAME_MAX} characters.` };
@@ -264,26 +458,44 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
   }
   if (!id && actions === undefined && !archive) return { ok: false, error: "Give the rule something to do." };
 
+  // What a subject cannot carry is refused here when the request says who the rule is for. An
+  // edit that posts no scope is checked by the handler against the STORED one.
+  if (scopeKind && actions) {
+    const i = actions.findIndex((a) => !actionAllowedForScope(a.kind, scopeKind));
+    if (i >= 0) return { ok: false, error: actionScopeError(i, actions[i].kind) };
+  }
+  if (scopeKind && triggerKind && !triggerAllowedForScope({ triggerKind }, scopeKind)) {
+    return { ok: false, error: "That kind of trigger doesn't work for who this rule is for." };
+  }
+
+  let conditions: unknown[] | undefined = undefined;
+  if (b.conditions !== undefined) {
+    if (!Array.isArray(b.conditions)) return { ok: false, error: "Send the conditions as a list." };
+    if (b.conditions.length > RULE_CONDITIONS_MAX) return { ok: false, error: `Keep it to ${RULE_CONDITIONS_MAX} conditions in one rule.` };
+    conditions = b.conditions;
+  }
+
   return {
     ok: true,
     id: id ? id.toLowerCase() : null,
-    pipelineId: pipelineId ? pipelineId.toLowerCase() : null,
+    scopeKind,
+    pipelineId: scopeKind && scopeKind !== "pipeline" ? null : (pipelineId ? pipelineId.toLowerCase() : null),
     name, triggerKind, triggerEvent, elapsedAnchor, elapsedDays,
     oncePerCard: b.oncePerCard === undefined ? undefined : b.oncePerCard === true,
     enabled: b.enabled === undefined ? undefined : b.enabled === true,
     actions,
+    conditions,
     archive,
   };
 }
 
-/** A full ordering of one pipeline's rules: every id exactly once. The twin of parseStageOrder. */
-export function parseRuleOrder(b: Record<string, unknown>): Parsed<{ pipelineId: string; ids: string[] }> {
-  const pipelineId = str(b.pipelineId, 64);
-  if (!isUuidLike(pipelineId)) return { ok: false, error: "Pick the pipeline to reorder." };
-  if (!Array.isArray(b.ids) || !b.ids.length || b.ids.length > 100) return { ok: false, error: "Send the rules in their new order." };
-  const ids = b.ids.map((v) => String(v).toLowerCase());
-  if (ids.some((v) => !isUuidLike(v)) || new Set(ids).size !== ids.length) return { ok: false, error: "Send each rule once." };
-  return { ok: true, pipelineId: pipelineId.toLowerCase(), ids };
+/** "Action 2 (Set the status to) needs one pipeline …" — the sentence the save refuses with, in
+ *  one place so the parser and the handler (which checks STORED actions on an edit) agree. */
+export function actionScopeError(index: number, kind: string): string {
+  const label = (RULE_ACTION_LABELS[kind as RuleActionKind] ?? kind).replace(/…$/, "").trim();
+  return RULE_ACTION_NEEDS[kind as RuleActionKind] === "pipeline"
+    ? `Action ${index + 1} (${label}) needs one pipeline — a status or stage belongs to one pipeline. Pick a pipeline, or a different action.`
+    : `Action ${index + 1} (${label}) needs a card, and this rule runs on customers.`;
 }
 
 /** One rule, said in a sentence, for the list row and the run log. The editor shows the same words

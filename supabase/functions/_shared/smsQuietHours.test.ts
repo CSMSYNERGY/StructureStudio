@@ -82,6 +82,8 @@ Deno.test("the refusal names a time the builder can act on", () => {
   assert(!v.allowed);
   if (!v.allowed) {
     assertEquals(v.localHour, 2);
+    // Still the small hours in New York, so the window opens at 8am EST the SAME day: 13:00 UTC.
+    assertEquals(v.opensAt.toISOString(), JAN(13).toISOString());
     assert(/2am/.test(v.reason), "the message should say 2am, not a raw hour number");
     assert(/8am/.test(v.reason), "and should say when they CAN send");
   }
@@ -147,6 +149,8 @@ Deno.test("a duplicated 8pm code is refused with the 8pm sentence, not the 9pm o
   assert(!v.allowed);
   if (!v.allowed) {
     assertEquals(v.localHour, 20);
+    // 8pm in Hartford on the 14th: it opens at 8am on the 15th, 13:00 UTC.
+    assertEquals(v.opensAt.toISOString(), JAN(13).toISOString());
     assert(/8pm/.test(v.reason), "the refusal should name 8pm as the close");
     assert(!/9pm/.test(v.reason), "and must not offer 9pm to a state that closes at 8");
   }
@@ -166,4 +170,12 @@ Deno.test("Central and Mountain codes that were filed as Eastern follow their ow
   // El Paso is Mountain: 14:00 UTC = 07:00 MST (shut), 15:00 UTC = 08:00 MST (open).
   assert(!quietHoursVerdict("915", JAN(14)).allowed);
   assert(quietHoursVerdict("915", JAN(15)).allowed);
+});
+
+Deno.test("an automation's text waits for the morning where the customer is, in summer time too", () => {
+  // 415 is San Francisco. 05:00 UTC on 15 July is 10pm PDT on the 14th; the window opens at 8am
+  // PDT on the 15th, which is 15:00 UTC — not 16:00 (that would be standard time).
+  const v = quietHoursVerdict("415", JUL(5));
+  assert(!v.allowed);
+  if (!v.allowed) assertEquals(v.opensAt.toISOString(), JUL(15).toISOString());
 });
