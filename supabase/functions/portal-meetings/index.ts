@@ -611,6 +611,13 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
       let q = admin.from("meetings")
         .select("id, host_id, starts_at, ends_at, status, booked_time_zone, customer_notes, conference_provider, conference_url, conference_status, conference_error, calendar_status, calendar_invited, external_provider, meeting_types!inner(name, location_kind, location_detail), meeting_hosts!inner(public_name)")
         .eq("client_id", clientId).eq("contact_id", contactId)
+        // OPEN MEETINGS ONLY (Carolyn 2026-11-04). This list is the contact record's "Planned"
+        // section: what is still ahead of you. A meeting that was cancelled, marked done or
+        // marked a no-show is finished with, and the History tab below already records it —
+        // leaving it here printed the same meeting twice and never let the list get shorter.
+        // `booked` covers a meeting whose time has GONE but which nobody has marked yet: that
+        // is exactly what still needs doing, and the list labels it "Past" rather than hiding it.
+        .eq("status", "booked")
         .order("starts_at", { ascending: false }).limit(50);
       if (ownOnly) {
         if (!myHost) return json({ ok: true, meetings: [] });

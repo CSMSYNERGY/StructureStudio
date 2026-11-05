@@ -4677,12 +4677,16 @@ function ContactPlannedMeetings({ contact, viewing = false, rev = 0, onCount = n
   const cancel = (m) => run(async () => {
     if (!window.confirm(`Cancel the ${m.typeName || "meeting"} on ${fmtWhen(m.startsAt, m.timeZone)}?`)) return;
     await call("cancel", { id: m.id });
-    setMsg({ ok: "Cancelled." });
+    setMsg({ ok: "Cancelled — it's in History now." });
     await loadMine();
   });
 
+  // Marking a meeting takes it OUT of this list (Carolyn 2026-11-04): Planned is what is still
+  // ahead of you, and a meeting you have just dealt with isn't. Say so, or the row simply
+  // vanishes under the pointer and reads as a bug. The History tab below still has it.
   const mark = (m, status) => run(async () => {
     await call("set_status", { id: m.id, status });
+    setMsg({ ok: status === "no_show" ? "Marked a no-show — it's in History now." : "Marked done — it's in History now." });
     await loadMine();
   });
 
@@ -4702,6 +4706,9 @@ function ContactPlannedMeetings({ contact, viewing = false, rev = 0, onCount = n
     await loadMine();
   });
 
+  // The server sends OPEN meetings only, so in practice every row is `booked` and reads as
+  // Upcoming or Past. The finished statuses stay here on purpose: this map is what renders
+  // whatever arrives, and a row with no label at all would be the worse failure.
   const STATUS = {
     booked: ["#B45309", "Upcoming"],
     completed: ["#047857", "Completed"],
