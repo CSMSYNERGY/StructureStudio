@@ -7716,8 +7716,14 @@ function SsRuleEditor({ pipeline, pipelines, rule, onSaved, onCancel }) {
   );
 }
 
-/** This pipeline's rules: the list, one open editor, and the run log on demand. */
-function SsPipeRules({ pipeline, pipelines, onChanged }) {
+/** This pipeline's rules: the list, one open editor, and the run log on demand.
+ *
+ *  `heading` / `intro` exist because this renders in two shapes. On Automations it is one group
+ *  among several, so the heading is the PIPELINE'S NAME and the explanation is printed once at the
+ *  top of the page instead of above every group. Nothing else differs: the list, the editor, the
+ *  reorder and the log are the same component in both, which is the point of passing labels rather
+ *  than forking it. */
+function SsPipeRules({ pipeline, pipelines, onChanged, heading = "Rules", intro = true }) {
   const [editing, setEditing] = useState(null);   // rule object | "new" | null
   const [log, setLog] = useState(null);           // null = not asked for
   const [busy, setBusy] = useState(false);
@@ -7735,12 +7741,14 @@ function SsPipeRules({ pipeline, pipelines, onChanged }) {
 
   return (
     <div data-ss-pipeline-rules="" style={{ marginBottom: 14 }}>
-      <span style={S.lbl}>Rules</span>
-      <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
-        <b>When something happens → do this.</b> Rules run by themselves on cards in <b>{pipeline.name}</b>, in the
-        order below, and two rules on the same trigger see each other's work. This is also how a status
-        nothing sets gets reached: give it a rule.
-      </p>
+      <span style={S.lbl}>{heading}</span>
+      {intro && (
+        <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
+          <b>When something happens → do this.</b> Rules run by themselves on cards in <b>{pipeline.name}</b>, in the
+          order below, and two rules on the same trigger see each other's work. This is also how a status
+          nothing sets gets reached: give it a rule.
+        </p>
+      )}
       <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, marginBottom: 8 }}>
         {rules.map((r, i) => {
           const open = !!editing && editing !== "new" && editing.id === r.id;
@@ -7860,7 +7868,7 @@ function SsPipeInline({ title, onClose, children }) {
 // `pipelines`: every live pipeline, which a rule's "create a card in another pipeline" action needs
 // to offer a target. Only Settings passes it; the board's "Edit stages" does not, and the action's
 // drop-down says "Add a second pipeline first" rather than sitting there empty.
-function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onChanged = null, inline = false, rulesReady = true }) {
+function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onChanged = null, inline = false }) {
   const Shell = inline ? SsPipeInline : SsPipeModal;
   const [name, setName] = useState(pipeline ? pipeline.name : "");
   const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
@@ -8035,15 +8043,14 @@ function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onCh
       <label style={{ display: "block", marginBottom: 14 }}><span style={S.lbl}>Lost reasons, one per line</span>
         <textarea style={{ ...S.input, minHeight: 90 }} value={reasons} onChange={(e) => setReasons(e.target.value)}
           onBlur={() => run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, lostReasons: reasons.split("\n") }))} /></label>
-      {/* RULES LAST (355), after the stages, the statuses and the lost reasons they act on — a rule
-          names those, so reading the panel top to bottom means everything a rule can refer to has
-          already been seen.
-          ⚠️ SETTINGS ONLY, on purpose. Carolyn's standing rule is that a feature's settings live
-          under Settings and never as a panel on the working tab, and the board's own "Edit stages"
-          is the working tab. `onChanged` is the test because only Settings passes it: that is also
-          what re-reads the pipeline, and these rows are rendered from the PROP, so without it a
-          saved rule would never appear. */}
-      {onChanged && rulesReady && <SsPipeRules pipeline={pipeline} pipelines={pipelines || [pipeline]} onChanged={onChanged} />}
+      {/* ⛔ THE RULES ARE NOT HERE ANY MORE (Carolyn 2026-11-04): "move those automations to their
+          own nav tab in the settings and customer hub". They were the last section of this panel
+          for one day. They now live on Settings → Customer Hub → Automations, which is also the
+          only place they have ever been offered — this panel is reachable from the board's own
+          "Edit stages" too, and a feature's settings never belong on the working tab.
+          Do not add a Rules section back here: the one on Automations groups every pipeline's
+          rules together, and two editors over one list is how a saved rule appears in one place
+          and not the other. */}
       {err && <div style={S.err}>{err}</div>}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
         {/* The pipeline new designs land in can't be removed (the server refuses it too): without it
@@ -8484,9 +8491,10 @@ function PipelineSettings({ viewing = false }) {
   const [meta, setMeta] = useState(null);
   const [err, setErr] = useState(null);
   // THE OPEN PIPELINE IS HELD BY ID, NOT AS AN OBJECT (355). It used to be the object itself,
-  // which was fine while the editor's own state was seeded from it once. Rules are rendered
-  // straight from these props, so a stored object would have gone stale the moment `load()`
-  // returned — a rule would save, the server would answer, and the list would not change.
+  // which was fine while the editor's own state was seeded from it once. A stored object goes
+  // stale the moment `load()` returns, so anything rendered straight from the prop would save,
+  // get an answer from the server, and not change on screen. (The rules were what first needed
+  // this; they live on Automations now, and it is still the right way round for the statuses.)
   const [editing, setEditing] = useState(null);   // pipeline id | "new" | null
   const load = useCallback(async () => {
     try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
@@ -8545,15 +8553,92 @@ function PipelineSettings({ viewing = false }) {
           shell for a card, so the pipelines above stay readable while one of them is open. */}
       {openPipe && (
         <SsPipelineEditor inline pipeline={openPipe} pipelines={pipes}
-          /* ⚠️ POSITIVE TEST, deliberately: rules are offered only when the SERVER says it can
-             store them. A false says migration 355 is not on that database; a MISSING field says
-             the deployed portal-settings predates rules. Both mean a + Add rule that cannot save,
-             and the two deploys (function, migration) land separately from this bundle, so the
-             order they go out in must not matter. */
-          rulesReady={!!(meta && meta.rulesReady === true)}
           onClose={() => { setEditing(null); load(); }} onChanged={load} />
       )}
       {editing === "new" && <SsPipelineEditor inline pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}
     </>
+  );
+}
+
+// ══ Customer Hub → Automations (Carolyn 2026-11-04) ══════════════════════════════════════
+// "we are going to move those automations to their own nav tab in the settings and customer hub.
+// Lets add a tab called Automations and move all those rules to that page/tab"
+//
+// The rules shipped the day before as the last section of each pipeline's panel, which meant you
+// had to know they were in there, and you could only ever see one pipeline's at a time. This page
+// is every pipeline's rules in one list.
+//
+// ⚠️ A RULE STILL BELONGS TO ONE PIPELINE. That is migration 355's decision, with a reason that
+// has not changed — "when delivered" means something different in a shed pipeline and in a reviews
+// pipeline, and a shared rule would fire on both. So this page GROUPS BY PIPELINE, and the group
+// you press + Add rule in is what picks the pipeline. That is deliberately not a dropdown in the
+// editor: a picker would make the pipeline look like one more editable field, and moving a rule
+// between pipelines is not a thing the server supports (crm_rule_save resolves every id a rule
+// names against its own pipeline, and would refuse).
+//
+// It reads `crm_pipelines_list`, the same one call PipelineSettings makes — the rules already
+// arrive nested per pipeline, so this costs no new action and no new round trip.
+function AutomationsSettings({ viewing = false }) {
+  const [meta, setMeta] = useState(null);
+  const [err, setErr] = useState(null);
+  const load = useCallback(async () => {
+    try { setMeta(await ssPipeCall("crm_pipelines_list")); setErr(null); }
+    catch (e) { setErr(e.message); setMeta((m) => m || { pipelines: [] }); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  if (!meta) return <div style={S.card}><div style={S.h2}>Automations</div><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
+
+  const pipes = meta.pipelines || [];
+  // ⚠️ POSITIVE TEST, deliberately: rules are offered only when the SERVER says it can store
+  // them. A false says migration 355 is not on that database; a MISSING field says the deployed
+  // portal-settings predates rules. Both mean a + Add rule that cannot save, and the migration,
+  // the function and this bundle deploy separately, so the order they go out in must not matter.
+  const rulesReady = !!(meta && meta.rulesReady === true);
+  const can = !!meta.canManage && !viewing;
+  const total = pipes.reduce((n, p) => n + (p.rules || []).length, 0);
+
+  return (
+    <div style={S.card} data-ss-automations="">
+      <div style={S.h2}>Automations</div>
+      <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
+        <b>When something happens → do this.</b> A rule watches the cards in one pipeline and acts on its
+        own: move the card, set a status, add a note, or text or email the customer. Rules run in the
+        order they are listed, and two rules on the same trigger see each other's work. This is also how a
+        status nothing sets gets reached — give it a rule.
+      </p>
+      {err && <div style={S.err}>{err}</div>}
+      {/* The database cannot store a rule yet. Say so plainly rather than offering buttons that
+          cannot save: this is the deploy-ordering state, not a broken page. */}
+      {!rulesReady && (
+        <p data-ss-automations-unready="" style={{ fontSize: 12.5, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 10px", margin: 0 }}>
+          Automations are not switched on for your account yet. Nothing is wrong with this page — there is
+          nothing for it to save to. It will appear here by itself once that is done.
+        </p>
+      )}
+      {rulesReady && !can && (
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: 0 }}>
+          {viewing ? "You are viewing another account, so rules cannot be changed here." : "You do not have permission to change automations."}
+        </p>
+      )}
+      {/* ONE GROUP PER PIPELINE, in the pipelines' own order, INCLUDING the empty ones — an empty
+          group is what tells you the pipeline exists and has no rules, which is where you then add
+          one. Hiding them would leave a builder with no way to write their first rule. */}
+      {rulesReady && can && pipes.map((p) => (
+        <div key={p.id} data-ss-automations-group={p.id} style={{ borderTop: "1px solid #F1F5F9", paddingTop: 12, marginTop: 12 }}>
+          <SsPipeRules pipeline={p} pipelines={pipes} onChanged={load} intro={false} heading={p.name} />
+        </div>
+      ))}
+      {rulesReady && can && !pipes.length && (
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: 0 }}>
+          You have no pipelines yet, and a rule belongs to one. Make a pipeline under <b>Pipelines</b> first.
+        </p>
+      )}
+      {rulesReady && can && !!pipes.length && (
+        <p style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 12, marginBottom: 0 }}>
+          {total === 0 ? "No rules yet." : `${total} ${total === 1 ? "rule" : "rules"} across ${pipes.length} ${pipes.length === 1 ? "pipeline" : "pipelines"}.`}
+          {" "}A rule belongs to the pipeline it is listed under — add it in that pipeline's group.
+        </p>
+      )}
+    </div>
   );
 }

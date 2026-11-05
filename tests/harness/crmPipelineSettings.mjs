@@ -17,8 +17,10 @@
 //      SmartBuild pipeline whose rungs the webhooks will drive later.
 //   D  A reorder names its pipeline (without it the server cannot tell a subset from a mismatch),
 //      and nothing on either screen sends crm_deal_set_status or a statusId on a stage.
-//   E  RULES (migration 355, Part D): they live in the same panel, under the statuses they act
-//      on; a rule reads back as a sentence; a PAUSED one says so and one set to run every time
+//   E  AUTOMATIONS (Carolyn 2026-11-04 moved the rules of migration 355 to their own tab): the
+//      pipeline panel carries none of them any more, and the Automations page holds one group per
+//      pipeline — including the pipelines with no rules, which is where a first rule gets added.
+//      A rule reads back as a sentence; a PAUSED one says so and one set to run every time
 //      says that too; the editor opens in place rather than as a pop-up; switching to a clock
 //      rule LOCKS once-per-card on (355 makes that a CHECK — a repeating clock rule would text
 //      the same customer on every sweep); an action that messages the customer warns before the
@@ -319,15 +321,44 @@ try {
   // Shape and SAFETY, not wording. Two of these pin things that would be expensive to get
   // wrong in front of a builder's customers rather than merely untidy: a clock rule may not be
   // asked to repeat, and a rule that messages the customer says so before it is saved.
-  const rules = page.locator("[data-ss-pipeline-rules]");
-  ok("E1 the rules live in the same panel as the stages and statuses, under them",
-    (await rules.count()) === 1 && (await page.evaluate(() => {
-      const ed = document.querySelector("[data-ss-pipeline-editor]");
-      const rl = document.querySelector("[data-ss-pipeline-rules]");
-      const st = document.querySelector("[data-ss-pipeline-statuses]");
-      return !!(ed && rl && st && ed.contains(rl)
-        && (st.compareDocumentPosition(rl) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-    })));
+  // E0 FIRST, while the pipeline panel is still open: the rules are NOT in it any more.
+  ok("E0 the pipeline panel carries no rules — they moved to their own tab",
+    (await page.locator("[data-ss-pipeline-rules]").count()) === 0
+    && !/Add rule/.test(await page.evaluate(() => document.body.innerText)));
+
+  await go("/settings/automations");
+  await page.waitForTimeout(600);
+  const groups = page.locator("[data-ss-automations-group]");
+  ok("E1 the rules have their own tab, one group per pipeline, inside the Automations card",
+    (await page.locator("[data-ss-automations]").count()) === 1
+    && (await groups.count()) === PIPELINES.length
+    && (await page.locator("[data-ss-pipeline-rules]").count()) === PIPELINES.length
+    && (await page.evaluate(() => {
+      const card = document.querySelector("[data-ss-automations]");
+      const g = document.querySelectorAll("[data-ss-automations-group]");
+      return !!card && g.length > 0 && Array.from(g).every((x) => card.contains(x))
+        && Array.from(g).every((x) => !!x.querySelector("[data-ss-pipeline-rules]"));
+    })),
+    `groups=${await groups.count()} of ${PIPELINES.length}`);
+  // The tab bar says where you are, and a group is headed by the pipeline it belongs to — the
+  // only thing on this page that says which pipeline a rule will act on.
+  // ⚠️ innerText RESPECTS text-transform, and the group heading is uppercased in CSS (S.lbl), so
+  // it comes back "SHED DEALS" while the fixture says "Shed Deals". Compare case-insensitively —
+  // this check failed on exactly that the first time it ran, which is the harness earning its keep.
+  const autoText = (await page.locator("[data-ss-automations]").innerText()).toLowerCase();
+  const tab = await page.locator("a, button").evaluateAll((els) => els
+    .filter((e) => e.style && e.style.borderBottom && /solid/.test(e.style.borderBottom))
+    .map((e) => ({ label: (e.textContent || "").trim(), current: e.getAttribute("aria-current") === "page" })));
+  ok("E1b Automations is the current sub-tab, and each group is headed by its own pipeline",
+    tab.some((t) => t.label === "Automations" && t.current)
+    && autoText.includes(PIPELINES[0].name.toLowerCase())
+    && autoText.includes(PIPELINES[1].name.toLowerCase()),
+    JSON.stringify(tab.map((t) => (t.current ? `[${t.label}]` : t.label))));
+  // Every assertion below is about the FIRST pipeline's group: it is the one the fixture gives
+  // rules to, and an unscoped selector would reach into the other pipeline's list.
+  const rules = page.locator(`[data-ss-automations-group="${PIPELINES[0].id}"] [data-ss-pipeline-rules]`);
+  ok("E1c a pipeline with no rules still gets a group, so a first rule can be added there",
+    /No rules on this pipeline yet/.test(await page.locator(`[data-ss-automations-group="${PIPELINES[1].id}"]`).innerText()));
   const ruleText = (await rules.innerText()).replace(/\s+/g, " ");
   ok("E2 a rule reads back as a sentence, trigger and actions in order",
     /Ask for a review/.test(ruleText)
@@ -345,14 +376,14 @@ try {
 
   // The editor opens IN PLACE, the way Carolyn asked the pipeline panel to (2026-11-02), one
   // level down: measured as position, not as a label.
-  await page.locator("[data-ss-pipeline-rules] button", { hasText: "+ Add rule" }).click();
+  await rules.locator("button", { hasText: "+ Add rule" }).click();
   await page.waitForTimeout(400);
   ok("E5 the rule editor opens in place under the rules, not as a pop-up", await page.evaluate(() => {
     const ed = document.querySelector("[data-ss-rule-editor]");
     if (!ed) return false;
     const cs = getComputedStyle(ed);
     return cs.position === "static" && !ed.closest("[role=dialog]")
-      && !!document.querySelector("[data-ss-pipeline-rules]").contains(ed);
+      && !!ed.closest("[data-ss-automations-group]");
   }));
 
   // A CLOCK RULE MAY NOT REPEAT (355's crm_rules_elapsed_is_once). Once it comes due it stays
@@ -387,7 +418,7 @@ try {
   ok("E9 the new rule joins the list", /45 days after it was delivered/.test((await rules.innerText()).replace(/\s+/g, " ")),
     (await rules.innerText()).replace(/\s+/g, " ").slice(0, 300));
 
-  await page.locator("[data-ss-pipeline-rules] button", { hasText: "Recent runs" }).click();
+  await rules.locator("button", { hasText: "Recent runs" }).click();
   await page.waitForTimeout(600);
   const logText = (await page.locator("[data-ss-rule-log]").innerText()).replace(/\s+/g, " ");
   ok("E10 the run log explains a skip, a failure and a message still queued",
@@ -400,14 +431,22 @@ try {
   // the moment it is deployed, and the migration is a separate step.
   rulesReady = false;
   await go("/settings");
+  await go("/settings/automations");
+  await page.waitForTimeout(600);
+  ok("E11 with no rules tables on the database, Automations says so and offers nothing",
+    (await page.locator("[data-ss-automations-unready]").count()) === 1
+    && (await page.locator("[data-ss-pipeline-rules]").count()) === 0
+    && (await page.locator("[data-ss-automations-group]").count()) === 0
+    && !/Add rule/.test(await page.evaluate(() => document.body.innerText)),
+    (await page.locator("[data-ss-automations]").innerText()).replace(/\s+/g, " ").slice(0, 160));
+  // And the pipeline panel is unaffected either way: it has nothing to drop any more.
   await go("/settings/pipelines");
   await page.waitForTimeout(400);
   await page.locator("[data-ss-pipeline-row] button", { hasText: "Edit" }).first().click();
   await page.waitForTimeout(700);
-  ok("E11 with no rules tables on the database, the panel drops Rules and still edits statuses",
-    (await page.locator("[data-ss-pipeline-rules]").count()) === 0
-    && (await page.locator("input[aria-label='Status name']").count()) > 0
-    && !/Add rule/.test(await page.evaluate(() => document.body.innerText)));
+  ok("E12 the pipeline panel still edits statuses, with no rules to lose",
+    (await page.locator("input[aria-label='Status name']").count()) > 0
+    && (await page.locator("[data-ss-pipeline-rules]").count()) === 0);
 
   ok("Z no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {

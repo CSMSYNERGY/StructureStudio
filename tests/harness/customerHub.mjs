@@ -197,10 +197,18 @@ try {
   if (await pipeCard.count() > 0) {
     const tabs = await subTabs(page);
     const labels = tabs.map((t) => t.label);
-    ok("B: the hub's two tabs are on screen",
-      labels.includes("Pipelines & Statuses") && labels.includes("Customer login"), labels.join(" | "));
-    ok("B: Pipelines & Statuses is the current tab",
-      tabs.some((t) => t.label === "Pipelines & Statuses" && t.current), JSON.stringify(tabs));
+    // ⚠️ THE LABEL IS "Pipelines", not "Pipelines & Statuses" — it was renamed in b6985edc
+    // (2026-11-02), when each pipeline got its own ladder and the account-level status list went
+    // away, and these two checks sat red for two days because nobody re-pointed them. Keep them
+    // pointed at the label that is on screen, and keep this comment: a stale harness is a harness
+    // people stop running.
+    ok("B: the hub's tabs are on screen", labels.includes("Pipelines") && labels.includes("Customer login"), labels.join(" | "));
+    ok("B: Pipelines is the current tab",
+      tabs.some((t) => t.label === "Pipelines" && t.current), JSON.stringify(tabs));
+    // AUTOMATIONS joined the hub on 2026-11-04 (Carolyn: "add a tab called Automations and move
+    // all those rules to that page/tab"). Listed here so the hub's membership is asserted and not
+    // merely printed in the failure text of something else.
+    ok("B: Automations is a tab of this hub", labels.includes("Automations"), labels.join(" | "));
     ok("B: the address is untouched", await page.evaluate(() => location.pathname) === "/settings/pipelines");
     // A hub tab must light its HUB in the rail. Before the hub existed this slug lit its own
     // item; falling through the clamp instead would light Structures, on a perfectly valid URL.

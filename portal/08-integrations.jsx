@@ -5539,6 +5539,14 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
       {sub === "pipelines" && (crmUnlocked || crmPending
         ? <PipelineSettings viewing={!!viewingLabel} />
         : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}
+      {/* AUTOMATIONS (Carolyn 2026-11-04). Behind the CRM like Pipelines, for the same reason and
+          with the same teaser: every crm_rule_* action refuses an unentitled tenant by the crm_
+          prefix, so without it this would be a screen whose every button 403s. The page itself
+          also hides the rules when the DATABASE cannot store one yet — a different question, and
+          it is answered by the server's `rulesReady` inside AutomationsSettings. */}
+      {sub === "automations" && (crmUnlocked || crmPending
+        ? <AutomationsSettings viewing={!!viewingLabel} />
+        : <div style={S.card}><div style={S.h2}>Automations</div><p style={{ fontSize: 13, color: "#64748B" }}>Rules that run by themselves are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}
       {/* One card, its own section of SettingsView — the form state covers every field whichever
           section renders and this card posts only its own, so nothing else is touched. */}
       {sub === "customer-login" && <SettingsView section="customer-login" />}

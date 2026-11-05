@@ -42,9 +42,27 @@ Deno.test("crm_pipelines_list passes rulesReady to the browser", () => {
 });
 
 Deno.test("the browser's test stays POSITIVE, so any order of deploys is safe", () => {
-  assert(/rulesReady=\{!!\(meta && meta\.rulesReady === true\)\}/.test(sales),
-    "the Rules gate is no longer `meta.rulesReady === true`. A negative test (`!== false`) treats a "
+  assert(/const rulesReady = !!\(meta && meta\.rulesReady === true\);/.test(sales),
+    "the Automations gate is no longer `meta.rulesReady === true`. A negative test (`!== false`) treats a "
     + "function that predates rules as ready, and offers a + Add rule that cannot save.");
-  assert(/\{onChanged && rulesReady && <SsPipeRules/.test(sales),
-    "SsPipeRules is no longer gated on rulesReady; re-point this test");
+  assert(/\{!rulesReady && \(/.test(sales) && /data-ss-automations-unready/.test(sales),
+    "the Automations page no longer says anything when the database cannot store a rule; a silent empty "
+    + "page reads as broken, so re-point this test rather than deleting it");
+});
+
+// ⚠️ RULES RENDER IN EXACTLY ONE PLACE (Carolyn 2026-11-04 moved them to their own tab). They were
+// a section of the pipeline panel for a day, and that panel is reachable from the BOARD's "Edit
+// stages" as well as from Settings — so a copy there would both break her standing rule about
+// settings living under Settings, and give one list two editors, which is how a saved rule shows
+// up in one place and not the other.
+Deno.test("the rules list is rendered by the Automations page and by nothing else", () => {
+  const hosts = sales.match(/<SsPipeRules/g) || [];
+  assert(hosts.length === 1, `SsPipeRules is rendered in ${hosts.length} places, expected exactly 1`);
+  const at = sales.indexOf("function AutomationsSettings");
+  assert(at >= 0, "AutomationsSettings moved; re-point this test");
+  assert(sales.indexOf("<SsPipeRules") > at,
+    "SsPipeRules is rendered outside AutomationsSettings — most likely back inside the pipeline panel");
+  const ed = sales.slice(sales.indexOf("function SsPipelineEditor"), at);
+  assert(!/<SsPipeRules/.test(ed) && !/rulesReady/.test(ed),
+    "the pipeline panel carries rules again. They belong on Settings → Customer Hub → Automations.");
 });
