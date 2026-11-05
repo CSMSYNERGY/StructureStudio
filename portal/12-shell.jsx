@@ -3931,7 +3931,11 @@ function Dashboard({ session }) {
                 crmPending={viewing ? !viewedCtx : !entitlementSettled}
                 /* ...and offers only the views this person may open, the hub's own answer. */
                 hubReach={hubReach}
-                sub={sub} onSub={(x) => navigate("settings", x)} />
+                sub={sub} onSub={(x) => navigate("settings", x)}
+                /* Migration 364: the SAME shedsOn the rail above is built from. Without it the
+                   rail hid Sheds while the body, defaulting to sheds-on, still opened a bare
+                   /settings on the Building styles editor (found on beta, Joe's account). */
+                shedsOn={shedsOn} />
             )}
             {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real
                 feature lives in Settings → Structures. `available` because it HAS shipped:

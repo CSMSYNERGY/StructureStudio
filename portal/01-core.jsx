@@ -2283,9 +2283,13 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     // only call site, so the rail highlight and SettingsShell's clamp read one list.
     company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked })
       .filter(([id]) => shedsOn || SS_SHED_COMPANY_TABS.indexOf(id) === -1),
-    colors: ssColorTabs(),
+    // Options and Colors are shed-catalog hubs end to end (wall heights, doors, ramps, cladding,
+    // paint, shingles...). The rail already drops their entries for a builder who sells no sheds;
+    // emptying the hubs too is what stops a typed /settings/doors or /settings/shingles from
+    // still rendering, since a slug any hub knows is a page (migration 364).
+    colors: shedsOn ? ssColorTabs() : [],
     billing: ssBillingTabs(),
-    options: ssOptionTabs(),
+    options: shedsOn ? ssOptionTabs() : [],
     // Keyed on the rail id, like every entry here — which for Customer Hub is `pipelines`,
     // its first tab's slug. See ssCustomerHubTabs.
     // phoneOffered rides in because Phone is one of its tabs (2026-10-23); both callers pass the
