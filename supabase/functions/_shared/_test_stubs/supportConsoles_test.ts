@@ -80,6 +80,10 @@ interface World {
   advancedClampOn?: boolean;
   // The route's sub-page; both lifted clamps read it (only /portal/settings/myprofile cares).
   sub?: string | null;
+  // Does this builder sell sheds (migration 364)? Both lifted clamps read it. Defaults ON, which
+  // is every builder but the post-frame ones, and the nine shed routes are no part of what the
+  // Admin/Projects cases in this file pin.
+  shedsOn?: boolean;
 }
 // An owner-ish map for the support account's own row on the internal tenant. Deliberately wide:
 // "and yet Admin/Projects are refused" must not be an accident of a narrow map.
@@ -89,12 +93,13 @@ function shell(w: World) {
   const tenant = { role: w.role, access: OWN_MAP };
   const isAdmin = w.role === "owner" || w.role === "admin";
   const f = new Function(
-    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn", "sub",
+    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn", "sub", "shedsOn",
     [SUPPORT_VIEW, WEARING, CONSOLES_BARRED, CAN_ADMIN_FOR_URL, RESOLVED_TAB, GATES_RESOLVED, CAN_ADMIN, ACTIVE_TAB].join("\n") +
       `\nreturn { supportView, consolesBarred, resolvedTab, gatesResolved, canAdmin, activeTab, adminNav: !!(${NAV![1]}), adminMount: !!(${MOUNT![1]}) };`,
   );
   return f(ssClampTab, w.isOperator, w.isSupportOp, w.viewing, tenant, w.canProjects, w.tab, isAdmin, OWN_MAP,
-    w.entitlement === undefined ? { status: "active" } : w.entitlement, true, w.advancedClampOn === true, w.sub ?? null) as {
+    w.entitlement === undefined ? { status: "active" } : w.entitlement, true, w.advancedClampOn === true, w.sub ?? null,
+    w.shedsOn !== false) as {
       supportView: unknown; consolesBarred: unknown; resolvedTab: string; gatesResolved: boolean; canAdmin: boolean;
       activeTab: string; adminNav: boolean; adminMount: boolean;
     };
@@ -215,4 +220,36 @@ Deno.test("PROJECTS: the newest can_open_projects() answers a support_only row a
   assert(/support_only/.test(d1), `${latest.name}: door 1 no longer reads support_only — a support account would be offered Projects`);
   assert(/if found then\s*return v_support_only is not true;\s*end if;/.test(d1),
     `${latest.name}: door 1 must return (not fall through) for any operator row, false for support_only`);
+});
+
+Deno.test("NO SHED PRODUCT (migration 364): both lifted clamps refuse the nine shed routes", () => {
+  // The shell's `shedsOn` is the account SHAPE, not an entitlement (see migration 364). It is
+  // pinned HERE, from the shell's own clamp lines, for the same reason the Advanced case above is:
+  // the rule lives in ssClampTab (tabClamp_test drives that directly), but whether the SHELL
+  // actually hands it to both clamps is a wiring question, and that wiring was missing from one of
+  // the two call sites for a while before anything noticed.
+  const SHED_TABS = ["designer", "advanced", "view-3d", "inventory", "orders",
+    "build-schedule", "delivery-schedule", "repairs", "commissions"];
+  for (const isOperator of [false, true]) {
+    for (const tab of SHED_TABS) {
+      // Sheds OFF: refused, and never landed on another shed route — the fallback must be
+      // somewhere this builder can actually be. An owner is no exception; he is his own admin.
+      const off = shell({ isOperator, isSupportOp: false, viewing: null, role: "owner",
+        canProjects: false, tab, shedsOn: false, advancedClampOn: true });
+      assert(SHED_TABS.indexOf(off.resolvedTab) === -1,
+        `sheds off: the URL clamp left ${tab} on ${off.resolvedTab}`);
+      assert(SHED_TABS.indexOf(off.activeTab) === -1,
+        `sheds off: the render clamp left ${tab} on ${off.activeTab}`);
+    }
+    // …and with sheds on (every builder but the post-frame ones) nothing moved: the Designer is
+    // the one page an owner always has, so it is the honest canary for "this clamp is inert".
+    const on = shell({ isOperator, isSupportOp: false, viewing: null, role: "owner",
+      canProjects: false, tab: "designer" });
+    assertEquals([on.resolvedTab, on.activeTab], ["designer", "designer"]);
+  }
+  // The shape does not touch the consoles: an operator standing on a no-sheds builder still has
+  // the Accounts/Admin way out, which is the whole reason gateLockedFor exempts them.
+  const op = shell({ isOperator: true, isSupportOp: false, viewing: VIEWING, role: "owner",
+    canProjects: true, tab: "admin", shedsOn: false });
+  assertEquals(op.activeTab, "admin");
 });
