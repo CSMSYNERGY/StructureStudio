@@ -41,6 +41,12 @@ const lift = (block: string) => (new Function("window", `${block}; return { ssAd
 ) as { ssAdvancedOn: (e: unknown) => boolean }).ssAdvancedOn;
 const ssAdvancedOn = lift(CLAMP_BLOCK);
 const ssAdvancedOnLaunched = lift(CLAMP_BLOCK.replace(LAUNCH_LINE, "const SS_ADVANCED_FOR_BUILDERS = true;"));
+// The lifted gate below also derives `shedsOn` (migration 364) off the same entitlement, so the
+// sandbox must carry the real ssShedsOn — lifted from the same block, never a stub, so this file
+// cannot pass against a rule the portal does not run. Nothing here is about sheds.
+const ssShedsOn = (new Function("window", `${CLAMP_BLOCK}; return { ssShedsOn };`)(
+  { location: { hostname: "app.structurestudiosuite.com" } },
+) as { ssShedsOn: (e: unknown) => boolean }).ssShedsOn;
 
 // advancedCtx … advancedClampOn, whole, ending where the URL clamp begins.
 const GATE = between(SHELL, "const advancedCtx =", "const resolvedTab = ssClampTab(", "the Advanced gate in 12-shell.jsx");
@@ -56,10 +62,10 @@ interface W {
   launched?: boolean;
 }
 function gate(w: W) {
-  const f = new Function("ssAdvancedOn", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver",
+  const f = new Function("ssAdvancedOn", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver", "ssShedsOn",
     `${GATE}\nreturn { advancedOn, advancedAsked, advancedClampOn };`);
   return f(w.launched ? ssAdvancedOnLaunched : ssAdvancedOn, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
-    w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, w.advancedHoldOver ?? false) as
+    w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, w.advancedHoldOver ?? false, ssShedsOn) as
     { advancedOn: boolean; advancedAsked: boolean; advancedClampOn: boolean };
 }
 const INTERNAL = { reason: "internal", exempt: true, state: "exempt", granted: ["view_3d"] };
@@ -129,13 +135,13 @@ Deno.test("launched: the switch does not widen WHO gets the page: still owner/ad
 // and the menu item cannot disagree about whose answer it is or who may change it.
 const SWITCH = between(SHELL, "const advancedSwitch =", "// Accounts and Admin moved INTO this rail", "advancedSwitch in 12-shell.jsx");
 function switchFor(w: W & { advancedDirty?: boolean; confirmAnswer?: boolean }) {
-  const g = new Function("ssAdvancedOn", "SS_ADVANCED_FOR_BUILDERS", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver", "advancedDirtyRef", "navigate", "window",
+  const g = new Function("ssAdvancedOn", "SS_ADVANCED_FOR_BUILDERS", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver", "advancedDirtyRef", "navigate", "window", "ssShedsOn",
     `${GATE}\n${SWITCH}\nreturn advancedSwitch;`);
   const nav: string[] = [];
   const asked: string[] = [];
   const s = g(w.launched ? ssAdvancedOnLaunched : ssAdvancedOn, !!w.launched, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
     w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, false,
-    { current: !!w.advancedDirty }, (p: string) => nav.push(p), { confirm: (m: string) => { asked.push(m); return w.confirmAnswer ?? true; } });
+    { current: !!w.advancedDirty }, (p: string) => nav.push(p), { confirm: (m: string) => { asked.push(m); return w.confirmAnswer ?? true; } }, ssShedsOn);
   return { s, nav, asked };
 }
 
@@ -224,14 +230,16 @@ Deno.test("the hold's timer restarts per hold and lets a late yes win", () => {
 
 Deno.test("the nav item and the page mount both ask advancedOn, never the held clamp value", () => {
   // advancedClampOn is true while still asking; drawing from it would flash the item for everyone.
-  assert(/\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL), "the nav item must be gated on advancedOn");
+  // `shedsOn && ` in front since migration 364: a builder who sells no sheds has no Advanced either.
+  assert(/\{(shedsOn && )?advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL), "the nav item must be gated on advancedOn");
   assert(/\{advancedOpened && advancedOn && !gateLocked && \(/.test(SHELL), "the page mount must be gated on advancedOn");
   // …and the item sits directly under Sheds (the Designer nav item was relabelled Sheds on 2026-10-24).
-  assert(/\{navItem\("designer", "Shed Designer"\)\}\s*(\{\/\*[\s\S]*?\*\/\}\s*)?\{advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL),
+  assert(/\{(shedsOn && )?navItem\("designer", "Shed Designer"\)\}\s*(\{\/\*[\s\S]*?\*\/\}\s*)?\{(shedsOn && )?advancedOn && navItem\("advanced", "Advanced"\)\}/.test(SHELL),
     "the Advanced item must come straight after Shed Designer");
 });
 
 Deno.test("both route clamps are handed the gate", () => {
-  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn, sub\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
-  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn, sub\);/.test(SHELL), "the render clamp must pass advancedClampOn");
+  // …and since migration 364 both are handed `shedsOn` after `sub`, the clamp's ninth argument.
+  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
+  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn\);/.test(SHELL), "the render clamp must pass advancedClampOn");
 });
