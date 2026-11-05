@@ -6110,6 +6110,24 @@ const MEETING_PLACES = [
   ["custom", "Something else"],
 ];
 
+// MEETING COLOURS (Carolyn 2026-11-04: "different color options for the meetings so that it
+// shows in our calendar in that color so we can easily differenciate mtgs at a glance").
+//
+// These eleven ARE Google's event colours, by Google's own names, and that is not a style
+// choice: a Google event takes one of eleven fixed colour ids, never a hex, so any other colour
+// could only be approximated by whichever of the eleven sits nearest — the calendar would show
+// something the portal never offered. Keep this list byte-identical to GOOGLE_EVENT_COLORS in
+// _shared/googleCalendarApi.ts, which is what turns the saved hex back into the id Google wants.
+// A colour here with no match there simply goes to the calendar uncoloured.
+//
+// Outlook gets no colour: a Microsoft event is coloured by CATEGORY, and a category is only
+// coloured when it is in that mailbox's master list, which needs a permission we don't ask for.
+const MEETING_COLORS = [
+  ["#7986CB", "Lavender"], ["#33B679", "Sage"], ["#8E24AA", "Grape"], ["#E67C73", "Flamingo"],
+  ["#F6BF26", "Banana"], ["#F4511E", "Tangerine"], ["#039BE5", "Peacock"], ["#616161", "Graphite"],
+  ["#3F51B5", "Blueberry"], ["#0B8043", "Basil"], ["#D50000", "Tomato"],
+];
+
 // VIDEO PROVIDERS (migrations 328/329, Carolyn 2026-10-22: "We need to be able to connect
 // zoom, hangouts & teams to generate video meeting links for video meetings").
 //
@@ -6548,7 +6566,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
                 onClick={() => setEditType({
                   name: "", durationMinutes: 30, locationKind: "in_person", locationDetail: "",
                   description: "", bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
-                  minNoticeHours: 2, maxDaysAhead: 60, slotIntervalMinutes: 15, active: true,
+                  minNoticeHours: 2, maxDaysAhead: 60, slotIntervalMinutes: 15, active: true, color: null,
                   conferenceProvider: "none", conferenceUrl: "", conferenceNote: "", conferenceMode: "room",
                 })}>Add a meeting type</button>
             )
@@ -6693,6 +6711,25 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
             {MEETING_PLACES.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
           </select>
         </div>
+        {/* The colour this kind of meeting takes on the host's Google calendar. A swatch beside
+            the name, not an <input type="color"> — the choice is eleven fixed colours, and an
+            OS colour well would let someone pick a twelfth that the calendar cannot show. */}
+        <div style={{ flex: "0 0 170px" }}>
+          <span style={lbl}>Colour</span>
+          <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
+            <span style={{ width: 22, height: 22, borderRadius: 5, flex: "0 0 auto", border: "1px solid #CBD5E1", background: draft.color || "#FFF" }} />
+            <select aria-label="Colour" value={draft.color || ""} onChange={(e) => set("color", e.target.value || null)}
+              style={{ ...S.input, flex: 1, minWidth: 0, boxSizing: "border-box" }}>
+              <option value="">No colour</option>
+              {MEETING_COLORS.map(([hex, name]) => <option key={hex} value={hex}>{name}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10, lineHeight: 1.55 }}>
+        Every booking of this type takes that colour on the host&rsquo;s Google calendar, so a week
+        of meetings can be read at a glance. These are Google&rsquo;s own eleven event colours, by its
+        own names &mdash; it takes no others. Outlook calendars stay their usual colour.
       </div>
       <div style={{ marginBottom: 10 }}>
         <span style={lbl}>Where exactly (shown to the customer)</span>

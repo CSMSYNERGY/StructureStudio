@@ -1,7 +1,8 @@
 // calendarProviders.test.ts — the Google Calendar and Microsoft Graph calls (migration 341).
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  googleAuthorizeUrl, googleCreateEvent, googleDeleteEvent, googleFreeBusy, googleListCalendars, googleRefresh,
+  GOOGLE_EVENT_COLORS, googleAuthorizeUrl, googleColorIdFor, googleCreateEvent, googleDeleteEvent,
+  googleFreeBusy, googleListCalendars, googleRefresh,
 } from "./googleCalendarApi.ts";
 import { msAuthorizeUrl, msBusy, msCancelEvent, msCreateEvent, msCredsFromEnv, msRefresh } from "./microsoftGraphApi.ts";
 import { ProviderError, type CalendarEventInput } from "./providerHttp.ts";
@@ -100,6 +101,32 @@ Deno.test("a Meet link still being made is read back once", async () => {
   let n = 0;
   const s = stub(() => (n++ === 0 ? json({ id: "ev1" }) : json({ id: "ev1", hangoutLink: "https://meet.google.com/x" })));
   assertEquals((await googleCreateEvent("T", "primary", { ...EV, withVideo: true }, s.f)).joinUrl, "https://meet.google.com/x");
+});
+
+// COLOUR (Carolyn 2026-11-04). The meeting type's colour reaches Google as a colorId, which is
+// the only colour a Google event takes — there is no hex field to send.
+Deno.test("a type's colour goes to Google as its colorId", async () => {
+  const s = stub(() => json({ id: "ev1" }));
+  await googleCreateEvent("T", "primary", { ...EV, colorId: "5" }, s.f);
+  assertEquals(JSON.parse(String(s.calls[0].init!.body)).colorId, "5");
+});
+
+Deno.test("no colour leaves colorId off the event, so the calendar keeps its own", async () => {
+  const s = stub(() => json({ id: "ev1" }));
+  await googleCreateEvent("T", "primary", EV, s.f);
+  assert(!("colorId" in JSON.parse(String(s.calls[0].init!.body))));
+});
+
+Deno.test("every offered colour maps to the id Google knows, and nothing else does", () => {
+  for (const c of GOOGLE_EVENT_COLORS) {
+    assertEquals(googleColorIdFor(c.hex), c.id);
+    assertEquals(googleColorIdFor(c.hex.toLowerCase()), c.id, "a hex saved in lower case is the same colour");
+  }
+  // A colour from outside the eleven is NOT snapped to the nearest one: the event goes up
+  // uncoloured, because a colour nobody chose is worse than the calendar's default.
+  assertEquals(googleColorIdFor("#123456"), null);
+  assertEquals(googleColorIdFor(null), null);
+  assertEquals(googleColorIdFor(""), null);
 });
 
 Deno.test("deleting a Google event that is already gone counts as done", async () => {

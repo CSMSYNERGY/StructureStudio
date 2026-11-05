@@ -88,6 +88,14 @@ export interface CalendarEventInput {
   withVideo: boolean;
   /** Idempotency key for Google's conference request: the meeting id. */
   requestId: string;
+  /**
+   * The meeting type's colour, so a glance at the calendar says what KIND of meeting it is
+   * (Carolyn 2026-11-04). GOOGLE ONLY, and not a hex: Google takes one of eleven fixed event
+   * colours by id. Microsoft has no per-event colour at all — an Outlook event is coloured by
+   * CATEGORY, and a category only shows a colour when it is in that mailbox's master list,
+   * which needs a permission we do not ask for. Null = leave it on the calendar's own colour.
+   */
+  colorId?: string | null;
 }
 
 export interface CreatedEvent {

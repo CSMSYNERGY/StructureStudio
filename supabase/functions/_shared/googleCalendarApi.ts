@@ -166,6 +166,42 @@ export async function googleFreeBusy(
   return out;
 }
 
+/**
+ * Google's eleven event colours, by the names its own UI uses.
+ *
+ * An event takes a colorId, NEVER a hex: you cannot put an arbitrary colour on a Google event.
+ * So the colour a meeting type offers has to BE one of these eleven, and the hex here is only
+ * what the portal paints its own swatch with. These are the classic palette the API hands back
+ * from /colors; Google has since re-rendered some of them a shade differently in the web UI, so
+ * a swatch can sit slightly off what the calendar draws. The ID is what decides the colour, and
+ * that part is exact.
+ */
+export const GOOGLE_EVENT_COLORS: ReadonlyArray<{ id: string; name: string; hex: string }> = [
+  { id: "1", name: "Lavender", hex: "#7986CB" },
+  { id: "2", name: "Sage", hex: "#33B679" },
+  { id: "3", name: "Grape", hex: "#8E24AA" },
+  { id: "4", name: "Flamingo", hex: "#E67C73" },
+  { id: "5", name: "Banana", hex: "#F6BF26" },
+  { id: "6", name: "Tangerine", hex: "#F4511E" },
+  { id: "7", name: "Peacock", hex: "#039BE5" },
+  { id: "8", name: "Graphite", hex: "#616161" },
+  { id: "9", name: "Blueberry", hex: "#3F51B5" },
+  { id: "10", name: "Basil", hex: "#0B8043" },
+  { id: "11", name: "Tomato", hex: "#D50000" },
+];
+
+/**
+ * The colorId for a stored hex, or null for anything we do not recognise — a colour saved
+ * before this existed, or one put in the column by hand. Null leaves the event on the
+ * calendar's own colour, which is what it always had, rather than guessing a nearest match:
+ * a wrong colour is worse than no colour when the whole point is telling meetings apart.
+ */
+export function googleColorIdFor(hex: string | null | undefined): string | null {
+  if (!hex) return null;
+  const want = String(hex).trim().toUpperCase();
+  return GOOGLE_EVENT_COLORS.find((c) => c.hex === want)?.id ?? null;
+}
+
 function eventBody(ev: CalendarEventInput) {
   return {
     summary: ev.title.slice(0, 250),
@@ -173,6 +209,7 @@ function eventBody(ev: CalendarEventInput) {
     location: ev.location ? ev.location.slice(0, 500) : undefined,
     start: { dateTime: ev.startsAt, timeZone: ev.timeZone },
     end: { dateTime: ev.endsAt, timeZone: ev.timeZone },
+    colorId: ev.colorId || undefined,
   };
 }
 
@@ -209,7 +246,10 @@ export async function googleCreateEvent(
 }
 
 export async function googlePatchEvent(
-  token: string, calendarId: string, eventId: string, ev: Pick<CalendarEventInput, "startsAt" | "endsAt" | "timeZone" | "location" | "description" | "title">,
+  token: string, calendarId: string, eventId: string,
+  // colorId rides along so a reschedule re-asserts the type's colour instead of quietly
+  // dropping it, and so a type recoloured since the booking follows on the next move.
+  ev: Pick<CalendarEventInput, "startsAt" | "endsAt" | "timeZone" | "location" | "description" | "title" | "colorId">,
   notify: boolean, f: FetchLike = fetch,
 ): Promise<void> {
   const url = `${CAL}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=${notify ? "all" : "none"}`;

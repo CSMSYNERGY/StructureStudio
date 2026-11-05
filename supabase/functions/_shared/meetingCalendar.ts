@@ -31,7 +31,7 @@ import {
 } from "./providerHttp.ts";
 import { providerAccess, withProvider, type TokenConn } from "./providerTokens.ts";
 import {
-  googleCreateEvent, googleCredsFromEnv, googleDeleteEvent, googleFreeBusy, googlePatchEvent, googleRefresh,
+  googleColorIdFor, googleCreateEvent, googleCredsFromEnv, googleDeleteEvent, googleFreeBusy, googlePatchEvent, googleRefresh,
 } from "./googleCalendarApi.ts";
 import {
   msBusy, msCancelEvent, msCreateEvent, msCredsFromEnv, msPatchEvent, msRefresh,
@@ -221,7 +221,7 @@ const MEETING_COLS =
   "id, client_id, host_id, status, starts_at, ends_at, customer_name, customer_email, customer_notes, cancel_token, " +
   "conference_provider, conference_url, conference_note, conference_external_id, conference_status, " +
   "external_event_id, external_provider, external_calendar_id, calendar_invited, calendar_status, calendar_attempted_at, " +
-  "meeting_types!inner(name, location_kind, location_detail, conference_mode, conference_provider), " +
+  "meeting_types!inner(name, location_kind, location_detail, conference_mode, conference_provider, color), " +
   "meeting_hosts!inner(public_name, time_zone, calendar_provider)";
 
 /** Which calendar this booking goes on, and whether that event makes the video link. */
@@ -268,6 +268,9 @@ function eventFor(m: any, biz: string, joinUrl: string | null): Omit<CalendarEve
     endsAt: m.ends_at,
     timeZone: m.meeting_hosts?.time_zone || "UTC",
     attendee: m.customer_email ? { email: String(m.customer_email), name: String(m.customer_name || "") } : null,
+    // The type's colour, so the host's calendar says what KIND of meeting it is at a glance
+    // (Carolyn 2026-11-04). Google only, and it goes dark for a colour outside Google's eleven.
+    colorId: googleColorIdFor(t.color),
   };
 }
 
