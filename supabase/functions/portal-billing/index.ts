@@ -411,6 +411,17 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   const { data: advRow, error: advErr } = internal ? { data: null, error: null }
     : await admin.from("client_settings").select("advanced_mode").eq("client_id", clientId).maybeSingle();
   if (advErr) console.warn("advanced_mode read failed; treating Advanced as off:", advErr.message);
+  // The ACCOUNT SHAPE switch (migration 364): does this builder sell sheds at all? Read apart
+  // from the fatal select and fail-soft, like advanced_mode above and for the same reason — it
+  // offers and withholds PAGES, it grants nothing, so a failed read must never refuse an
+  // entitlement. ⚠️ THE FAILURE DIRECTION IS THE OPPOSITE of advanced_mode's, deliberately: a
+  // lost read here means sheds ON (the whole product visible), because hiding the designer from a
+  // shed builder would look like the product had vanished, while showing a post-frame builder a
+  // tab he does not need is cosmetic. Only an explicit `false` hides anything — here and in
+  // 01-core's ssShedsOn.
+  const { data: shedRow, error: shedErr } = await admin
+    .from("client_settings").select("sheds_enabled").eq("client_id", clientId).maybeSingle();
+  if (shedErr) console.warn("sheds_enabled read failed; treating the shed product as ON:", shedErr.message);
   // A DATED free period (migration 059) — an existing customer moving from free to paid gets
   // a warned window instead of a wall. Unlike billing_exempt this is visible (countdown
   // banner) and self-expiring, and it is deliberately checked AFTER the normal entitlement
@@ -761,6 +772,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // everyone on the account, like the rest of the entitlement; it names nothing commercial.
     // Strictly `=== true`: the column is NOT NULL, a missing row is off, and so is a failed read.
     advancedMode: internal || (!advErr && advRow?.advanced_mode === true),
+    // Does this builder sell sheds (migration 364)? ACCOUNT SHAPE, not an entitlement: the rail
+    // and ssClampTab read it to decide what is OFFERED, and nothing anywhere reads it to decide
+    // what is ALLOWED. 01-core.jsx ssShedsOn is the one reader. Strictly `=== false`, so a failed
+    // read, a missing row and a database without the column all answer true — see the read above.
+    shedsOn: !(!shedErr && shedRow?.sheds_enabled === false),
   };
 
   if (action === "status") {

@@ -953,6 +953,46 @@ function ssAdvancedOn(entitlement) {
     || (SS_ADVANCED_FOR_BUILDERS && entitlement.advancedMode === true)));
 }
 
+// ══ DOES THIS BUILDER SELL SHEDS? (migration 364, Carolyn 2026-11-05) ════════════════════
+// "Since I am making the decision to sell Structure Studio without a shed designer ... we don't
+// need Shed Designer on the side, we don't need Inventory, Orders, Build Schedule, Delivery
+// Schedule, Repairs, Commissions." Joe Dalmolin (TEXCO) bought the Customer Hub and the SmartBuild
+// integration and no designer. The rail is a SALES SURFACE — an unbought page stays visible with a
+// padlock so a builder can see the whole product — and for a shed builder in a trial that is right.
+// For a post-frame builder those pages are not "not yet", they are never, and eight padlocks he
+// will never open make the product look broken rather than bigger.
+//
+// ⚠️ THIS IS AN ACCOUNT SHAPE, NOT AN ENTITLEMENT AND NOT A PERMISSION. It grants nothing and
+// refuses nothing: every gate, padlock and 403 behaves exactly as before. It decides what is
+// OFFERED (the rail) and what resolves (ssClampTab) — the same two-part treatment the Coming Soon
+// group has, because hiding a nav item never removed its URL.
+//
+// ⚠️ FAIL OPEN, and read it only as an explicit `false`. A null entitlement (still loading), an
+// older portal-billing that does not send the field, a failed read on the server — all of them
+// mean sheds ON. Hiding the designer from a shed builder is the product disappearing; showing a
+// post-frame builder one tab too many is cosmetic. Never invert this test.
+function ssShedsOn(entitlement) {
+  return !entitlement || entitlement.shedsOn !== false;
+}
+
+// The SETTINGS rail items that belong to the shed product. GHL Connection is here rather than
+// under a switch of its own because this shape IS "quotes elsewhere, customers here": the builder
+// works leads in our Hub and prices in SmartBuild (Carolyn: "definitely not go high level"). If a
+// post-frame builder ever wants GoHighLevel, that is a SECOND switch — say so rather than quietly
+// widening this one. Billing and QuickBooks are deliberately NOT here (her call): neither is
+// shed-specific, and a builder should not have to ask us before connecting their accounting.
+const SS_SHED_SETTINGS = ["sheds", "options", "colors", "designer", "online-inventory", "connection"];
+// Inside Company: the tabs that configure the designer's public link and our own paperwork.
+// Business Details and Team stay — "he only needs like the company set up".
+const SS_SHED_COMPANY_TABS = ["branding", "locations", "tax", "payments", "commissions"];
+// Inside Customer Hub: one tab. Customer login exists so a customer can accept an estimate and pay
+// an invoice — paperwork this builder does not issue ("he's not emailing quotes from here").
+const SS_SHED_HUB_TABS = ["customer-login"];
+// The WORKSPACE pages, for the rail and for ssClampTab. `advanced` and `view-3d` ride along
+// because both are the designer wearing a different hat.
+const SS_SHED_TABS = ["designer", "advanced", "view-3d", "inventory", "orders",
+  "build-schedule", "delivery-schedule", "repairs", "commissions"];
+
 // AN OLD /portal ADDRESS HEALS THE MOMENT THE APP LOADS (2026-10-13). On beta and production the
 // host has already 301'd it, so this only acts where nothing did: a local static server, a tab
 // opened before the redirect shipped, /portal.html itself. The address bar then shows the root
@@ -1896,7 +1936,8 @@ window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: 
 // all. Carolyn 2026-09-11: Structures / Options / Colors / Designer "aren't grouped … they
 // have their own nav on the side" — they are top-level items, like Designer and Contacts are
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
-function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false } = {}) {
+function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false,
+  shedsOn = true } = {}) {
   return [
     ["sheds", "Sheds", "Shed styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
@@ -2002,6 +2043,10 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
   // instead of an empty shell. `access` is null until the status call lands, and a sub-tab
   // the server refuses is still refused — this only decides what is worth showing.
   .filter(([id]) => {
+    // NO SHED PRODUCT (migration 364) — FIRST, above the isAdmin bypass, because the builder
+    // reading this rail IS their own admin: anywhere lower and Joe would see every shed page.
+    // ssShedsOn fails open, so this only ever fires on an explicit false.
+    if (!shedsOn && SS_SHED_SETTINGS.indexOf(id) !== -1) return false;
     if (isAdmin || !access) return true;
     // COMPANY gated itself above, as a hub over six areas. It must be exempt here or this
     // line silently undoes that: SETTINGS_TAB_AREA.company is settings_branding, so a
@@ -2231,9 +2276,13 @@ function ssOptionTabs() {
 // real /settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
 // light nothing in the rail or fall back to Structures on a valid URL.
-function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false, phoneOffered = false } = {}) {
+function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false,
+  phoneOffered = false, shedsOn = true } = {}) {
   return {
-    company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked }),
+    // The shed tabs are filtered HERE rather than inside each builder because this is their
+    // only call site, so the rail highlight and SettingsShell's clamp read one list.
+    company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked })
+      .filter(([id]) => shedsOn || SS_SHED_COMPANY_TABS.indexOf(id) === -1),
     colors: ssColorTabs(),
     billing: ssBillingTabs(),
     options: ssOptionTabs(),
@@ -2241,7 +2290,8 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     // its first tab's slug. See ssCustomerHubTabs.
     // phoneOffered rides in because Phone is one of its tabs (2026-10-23); both callers pass the
     // same ssPhoneOffered answer they give ssSettingsTabs, so the rail and the hub agree.
-    pipelines: ssCustomerHubTabs({ isAdmin, access, phoneOffered }),
+    pipelines: ssCustomerHubTabs({ isAdmin, access, phoneOffered })
+      .filter(([id]) => shedsOn || SS_SHED_HUB_TABS.indexOf(id) === -1),
   };
 }
 
@@ -2462,7 +2512,14 @@ function ssFallbackTab(access) {
 // `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /settings/myprofile.
 // The shell's two route clamps pass it; every other caller asks about a non-settings tab and
 // leaves it null, which changes nothing for them.
-function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false, sub = null) {
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator,
+  advancedOn = false, sub = null, shedsOn = true) {
+  // NO SHED PRODUCT (migration 364). FIRST — above the advanced branch, which recurses into
+  // "designer": with sheds off that target is barred too, so letting it recurse would land
+  // someone on a page the rail does not offer. Above the canAdmin bypass for the same reason
+  // the settings filter is: the builder is their own admin. Defaults true, so every existing
+  // caller is unchanged — the treatment supportView and advancedOn each got.
+  if (!shedsOn && SS_SHED_TABS.indexOf(tab) !== -1) return ssFallbackTab(access);
   // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);

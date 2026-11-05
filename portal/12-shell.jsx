@@ -1125,6 +1125,12 @@ function Dashboard({ session }) {
   // the builder's map, not the owner's chair — and isSupportOp null (still asking) is not yet a yes.
   const advancedMayRun = viewing ? (!!isOperator && isSupportOp === false) : !!canAdminForUrl;
   const advancedOn = ssAdvancedOn(advancedEnt) && advancedMayRun;
+  // Does this builder sell sheds (migration 364)? Read off the SAME entitlement Advanced reads —
+  // the VIEWED tenant's in view-as — so an operator standing in Joe's portal sees Joe's shape and
+  // not their own. Unlike Advanced there is no hold: ssShedsOn fails OPEN, so a cold load shows
+  // the whole rail and then settles, which is the harmless direction. Nothing is held back while
+  // the entitlement is out, and nothing flashes away for a shed builder.
+  const shedsOn = ssShedsOn(advancedEnt);
   // The entitlement arrives AFTER the tenant, so a cold /advanced first renders with no
   // answer. Refusing then would rewrite our own account's address bar to /designer and
   // mount the Designer, only to jump back when the answer lands. So while it is out the route is
@@ -1141,7 +1147,7 @@ function Dashboard({ session }) {
   // projects branches, so passing it here refuses those two routes to a support account on
   // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub, shedsOn);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -2594,7 +2600,7 @@ function Dashboard({ session }) {
   // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub, shedsOn);
   // The Advanced route while it is HELD (see advancedClampOn): nobody has been given the page yet,
   // so the topbar must not name it either — for a builder without Advanced that was a flash of it.
   const advancedHeld = activeTab === "advanced" && !advancedOn;
@@ -2936,7 +2942,7 @@ function Dashboard({ session }) {
   // Needed whenever we are ON a settings page (the topbar reads them) OR the rail is up (it
   // draws them) — which are no longer the same condition.
   const settingsTabs = (settingsPage || settingsMode)
-    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered })
+    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered, shedsOn })
     : null;
   // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /settings, and
   // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
@@ -2953,7 +2959,7 @@ function Dashboard({ session }) {
   // must light COMPANY and /settings/shingles must light COLORS, rather than falling
   // through the clamp to Structures. Same lists the pages themselves render, same gates.
   const hubs = (settingsPage || settingsMode)
-    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked, phoneOffered })
+    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked, phoneOffered, shedsOn })
     : null;
   // Which hub owns the slug in the URL, if any: [rail id, that tab's tuple].
   const hubHit = onSettingsPage
@@ -3035,12 +3041,18 @@ function Dashboard({ session }) {
         <div className="ss-ws-nav">
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
-          {navItem("designer", "Shed Designer")}
+          {/* THE SHED PRODUCT (migration 364). Carolyn 2026-11-05: "we don't need Shed Designer
+              on the side we don't need inventory orders build schedule delivery schedule repairs
+              commissions so those should all just go away." Every unbought page normally STAYS
+              here with a padlock, to sell it; for a builder who does not sell sheds these are
+              never going to be bought, and a rail of padlocks he cannot open reads as broken.
+              ssClampTab refuses the same nine routes, so none of this is hidden-but-reachable. */}
+          {shedsOn && navItem("designer", "Shed Designer")}
           {/* Directly under Designer (Carolyn 2026-09-28), and only where ssAdvancedOn says so —
               our own account, and a builder who turned Advanced mode on in Settings → Designer.
               `advancedOn` is false until the entitlement answers, so the item arrives late on a
               cold load and never flashes for anyone else. */}
-          {advancedOn && navItem("advanced", "Advanced")}
+          {shedsOn && advancedOn && navItem("advanced", "Advanced")}
           {/* ONE item again (Carolyn 2026-10-12): "One place." This page holds the contact list,
               the Design list and every pipeline as tabs of its own (ContactsHub, 02-sales), so
               the separate Pipeline item is gone. Its addresses still land here (ssCanonRoute).
@@ -3055,14 +3067,14 @@ function Dashboard({ session }) {
               unlike the hub, which stays in the rail to sell it, one locked item there is enough.
               A typed /conversations without it still lands on the CRM card below. */}
           {crmUnlocked && navItem("conversations", "Conversations")}
-          {navItem("inventory", "Inventory")}
-          {navItem("orders", "Orders")}
+          {shedsOn && navItem("inventory", "Inventory")}
+          {shedsOn && navItem("orders", "Orders")}
           {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order. The In Dev
               badges came off 2026-08-05 (Carolyn); content stays entitlement-gated inside. */}
-          {navItem("build-schedule", "Build Schedule")}
-          {navItem("delivery-schedule", "Delivery Schedule")}
-          {navItem("repairs", "Repairs")}
-          {navItem("commissions", "Commissions")}
+          {shedsOn && navItem("build-schedule", "Build Schedule")}
+          {shedsOn && navItem("delivery-schedule", "Delivery Schedule")}
+          {shedsOn && navItem("repairs", "Repairs")}
+          {shedsOn && navItem("commissions", "Commissions")}
           {/* My Synergy Phone's report. Only where calling is offered (ssPhoneOffered) — a Calls page
               on an account that cannot call is a list of zeros that reads as broken. The route
               itself still resolves for anyone with phone access, for old links. */}
@@ -3408,7 +3420,7 @@ function Dashboard({ session }) {
                    across tab switches, and a real navigation would throw away whatever is
                    on the canvas. ssClampTab first, same as the record page's Orders link —
                    sending someone to a tab they cannot open is its own dead end. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null} />
             </div>
           )}
@@ -3593,7 +3605,7 @@ function Dashboard({ session }) {
                    ssClampTab first, because a crew leader may hold the record and not
                    Orders -- and dumping them on a list they cannot read is the same trap
                    the onNavigate comment above documents. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null}
                 /* THE SALES TAX CARD (Avalara stage). Three separate questions, each the area
                    its server action gates on: moving a quote to another sales location is
