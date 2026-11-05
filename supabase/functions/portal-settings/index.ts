@@ -613,6 +613,9 @@ const GATES: GateTable = {
   crm_deal_reopen:       { area: "contacts", level: "edit" },
   crm_deal_archive:      { area: "contacts", level: "edit" },
   crm_pipeline_save:     { area: "settings_crm", level: "edit" },
+  // Migration 360: a whole starter pipeline in one call (stages + its own status ladder). Same
+  // gate as making one by hand — it writes nothing crm_pipeline_save could not.
+  crm_pipeline_add_starter: { area: "settings_crm", level: "edit" },
   crm_stage_save:        { area: "settings_crm", level: "edit" },
   crm_stages_reorder:    { area: "settings_crm", level: "edit" },
   // Card STATUSES (migration 302): the status list itself is a Settings → Pipelines card. Since
@@ -11233,6 +11236,42 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!data || !data.length) return json({ error: "That pipeline wasn't found." }, 404);
     audit("crm_pipeline_save", 1, `pipeline=${p.id} archive=${p.archive}`).catch(() => {});
     return json({ ok: true, id: p.id });
+  }
+
+  // A whole starter pipeline in one call (migration 360). The SmartBuild one is six stages plus a
+  // six-rung status ladder; typing that in by hand for every builder who quotes in SmartBuild is
+  // the thing this removes.
+  if (action === "crm_pipeline_add_starter") {
+    // Allow-listed, NOT passed through to the seeder. crm_seed_pipeline also knows 'shed_deals'
+    // (seeded for every new account already, and the one new designs feed) and 'outreach' (CSM's
+    // own manufacturer-recruiting board). Neither is something to hand a builder from this button,
+    // and an un-allow-listed kind reaching the seeder raises inside Postgres instead of answering.
+    const STARTER_KINDS = new Set(["smartbuild"]);
+    const kind = String((payload as Record<string, unknown> | null)?.kind ?? "").trim();
+    if (!STARTER_KINDS.has(kind)) return json({ error: "That isn't a starter pipeline we offer." }, 400);
+
+    const { data: seeded, error } = await admin.rpc("crm_seed_pipeline", { p_client_id: clientId, p_kind: kind });
+    if (error) return dbFail(req, clientId, "add that pipeline", error);
+    const id = typeof seeded === "string" ? seeded : null;
+    if (!id) return dbFail(req, clientId, "add that pipeline", { message: "crm_seed_pipeline returned no pipeline id" });
+
+    // ⚠️ The seeder is idempotent on (client_id, seed_kind) and crm_pipelines_seed_once COUNTS
+    // ARCHIVED ROWS, so a builder who added this starter and later removed it gets the archived
+    // row's id back and no new pipeline. Restoring it is the only answer that matches the button:
+    // without this the editor opens a pipeline the board does not list, which reads as a failed add.
+    const { data: row, error: rErr } = await admin.from("crm_pipelines")
+      .select("archived_at").eq("client_id", clientId).eq("id", id).maybeSingle();
+    if (rErr) return dbFail(req, clientId, "add that pipeline", rErr);
+    let restored = false;
+    if (row?.archived_at) {
+      const { error: uErr } = await admin.from("crm_pipelines")
+        .update({ archived_at: null, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", id);
+      if (uErr) return dbFail(req, clientId, "restore that pipeline", uErr);
+      restored = true;
+    }
+    audit("crm_pipeline_add_starter", 1, `kind=${kind} pipeline=${id} restored=${restored}`).catch(() => {});
+    return json({ ok: true, id, restored });
   }
 
   if (action === "crm_stage_save") {
