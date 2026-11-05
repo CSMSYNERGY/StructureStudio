@@ -7889,9 +7889,9 @@ function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onCh
   if (!pipeline) {
     return (
       <Shell title="New pipeline" onClose={onClose} width={400}>
-        {/* The SmartBuild starter (migration 360). A builder who prices in SmartBuild needs the
-            same six stages and the same status ladder every time, and building that by hand is
-            twelve saves in the editor. Above the name field on purpose: for those builders this
+        {/* The SmartBuild starter (migrations 360 + 361). A builder who prices in SmartBuild needs
+            the same eight stages and the same status ladder every time, and building that by hand
+            is sixteen saves in the editor. Above the name field on purpose: for those builders this
             IS the answer, and the empty-pipeline path below is the fallback.
             ⚠️ Do not list the stage names here. This file is scanned by preflight's
             checkEstimateWording and two of them carry the word it refuses in anything a person
@@ -7899,8 +7899,8 @@ function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onCh
         <div style={{ border: "1px solid #E2E8F0", background: "#F8FAFC", borderRadius: 8, padding: 12, marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Start from a template</div>
           <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5, marginBottom: 10 }}>
-            <strong>SmartBuild Jobs</strong> — six stages from a new lead through to nurture, plus SmartBuild's
-            own status ladder, waiting for the sync.
+            <strong>SmartBuild Jobs</strong> — eight stages from a new lead through to nurture, plus
+            SmartBuild's own status ladder, waiting for the sync.
           </div>
           <button type="button" disabled={busy} style={{ ...S.btn("#1E293B", "#FFF"), opacity: busy ? 0.6 : 1 }}
             onClick={() => run(async () => { const r = await ssPipeCall("crm_pipeline_add_starter", { kind: "smartbuild" }); onCreated(r.id); })}>
