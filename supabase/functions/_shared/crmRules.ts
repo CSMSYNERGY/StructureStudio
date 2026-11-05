@@ -648,11 +648,8 @@ export function parseRuleSave(b: Record<string, unknown>): Parsed<RuleIn> {
         : "That kind of trigger doesn't work for who this rule is for.",
     };
   }
-  // ⏳ A SCHEDULED EMAIL waits for the unsubscribe link (round 2b): a weekly email with no way to
-  // stop it is the CAN-SPAM exposure the plan names. Texts can go now — STOP already works.
-  if (triggerKind === "schedule" && actions && actions.some((a) => a.kind === "send_email")) {
-    return { ok: false, error: "Scheduled emails switch on with the unsubscribe link, in the next update. A scheduled text works now." };
-  }
+  // A scheduled EMAIL is allowed since 366: every automated email carries a working unsubscribe
+  // link (crm-rules-tick), and the tick refuses anyone whose Email box is ticked.
   let arm: boolean | undefined = undefined;
   let armedCount: number | undefined = undefined;
   if (b.arm === true) {

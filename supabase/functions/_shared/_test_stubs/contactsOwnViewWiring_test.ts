@@ -58,6 +58,9 @@ const SETTINGS_WRITES = [
   // on that customer's record, so "view only" fills nothing in — the same answer the decision
   // gives for every row above. The DEFINITIONS are settings_crm and deliberately not here.
   "crm_contact_custom_save", "crm_deal_custom_save",
+  // Migration 366: a customer's Do Not Disturb boxes. Turning someone's texts or emails off (or
+  // back on) is writing on their record, so "view only" switches nothing.
+  "crm_contact_dnd",
 ];
 
 Deno.test("portal-settings: every customer-record write is a contacts:'edit' gate, and own_view fails each one", () => {

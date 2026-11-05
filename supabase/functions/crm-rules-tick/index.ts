@@ -5,6 +5,7 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { fillMergeFields } from "../_shared/crmRules.ts";
 import { sendTeamNote, teamEmails } from "../_shared/leadFormMail.ts";
+import { unsubscribeUrl } from "../_shared/unsubscribe.ts";
 
 // CRM-RULES-TICK — the half of per-pipeline rules (migration 355) that needs a clock and a
 // network. Two jobs, in this order:
@@ -208,7 +209,7 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
       ? await admin.from("crm_deals").select("id, title, short_code, contact_id").eq("client_id", clientId).eq("id", r.deal_id).maybeSingle()
       : { data: null };
     const { data: contact } = r.contact_id
-      ? await admin.from("crm_contacts").select("id, name, company, phone, email").eq("client_id", clientId).eq("id", r.contact_id).maybeSingle()
+      ? await admin.from("crm_contacts").select("id, name, company, phone, email, dnd_all_at, dnd_email_at").eq("client_id", clientId).eq("id", r.contact_id).maybeSingle()
       : { data: null };
     // "Email your team" (365) may have no customer at all — a rule for nobody.
     if ((r.contact_id && !contact) || (r.deal_id && !deal) || (r.kind !== "notify_team" && !contact)) {
@@ -223,6 +224,18 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
     const vals = mergeValues((contact ?? {}) as Record<string, unknown>, deal as Record<string, unknown> | null,
       String(settings?.business_name ?? ""));
     const shortCode = ((deal as Record<string, unknown> | null)?.short_code as string | null) ?? null;
+
+    // ⛔ DO NOT DISTURB (366): the customer's own panel, checked before anything goes to them. A
+    // refusal, not a failure — nothing about it changes on a retry. (Texting's own STOP is smsSend's.)
+    const cc = (contact ?? {}) as Record<string, unknown>;
+    if ((r.kind === "send_sms" || r.kind === "send_email") && cc.dnd_all_at) {
+      await fail("Do Not Disturb is on for this customer.", "skipped");
+      continue;
+    }
+    if (r.kind === "send_email" && cc.dnd_email_at) {
+      await fail("Email is off for this customer (Do Not Disturb).", "skipped");
+      continue;
+    }
 
     try {
       if (r.kind === "notify_team") {
@@ -298,6 +311,11 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
             .gte("created_at", String(r.queued_at)).not("provider_message_id", "is", null).limit(1);
           if (prior && prior.length) { await markSent("Recovered: it had already gone out."); recovered++; continue; }
         }
+        // ⚠️ THE UNSUBSCRIBE LINK (366), on every automated email: in the footer, and as the
+        // List-Unsubscribe header Gmail and Apple Mail turn into their own button. It sets this
+        // customer's Email box, which the check above refuses on. The builder never writes it.
+        const unsub = await unsubscribeUrl(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, clientId, String(contact!.id));
+        const biz = String(settings?.business_name ?? "").trim() || "us";
         // kind 'conversation': a rule's email IS a message to the customer and belongs in their
         // thread. There is no 'rule' kind, and adding one would mean a migration on
         // email_sends.kind plus the union in emailSend.ts — for a send that is exactly a
@@ -314,8 +332,11 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
           html: `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#1E293B">${
             body.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string))
               .replace(/\r?\n/g, "<br>")
-          }</div>`,
-          text: body,
+          }</div><p style="font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#94A3B8;margin-top:24px">You're getting this from ${
+            biz.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string))
+          }. <a href="${unsub}" style="color:#64748B">Unsubscribe</a></p>`,
+          text: `${body}\n\n--\nYou're getting this from ${biz}. Unsubscribe: ${unsub}`,
+          headers: { "List-Unsubscribe": `<${unsub}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
           contactId: String(contact!.id),
           shortCode,
         });

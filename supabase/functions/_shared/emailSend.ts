@@ -136,6 +136,9 @@ export type TenantMail = {
    * its invite is the SEQUENCE, which lives on the meeting (meetings.ics_sequence).
    */
   attachments?: { filename: string; content: string; contentType?: string }[];
+  /** Extra headers (366): the List-Unsubscribe pair on an automated email. Message-ID, when the
+   *  thread sets one, still wins — it is what keeps a reply in its conversation. */
+  headers?: Record<string, string>;
 };
 
 /**
@@ -523,7 +526,8 @@ export async function sendTenantEmail(
         html: mail.html,
         ...(mail.text ? { text: mail.text } : {}),
         ...(replyTo.length ? { replyTo } : {}),
-        ...(threadId ? { headers: { "Message-ID": threadId } } : {}),
+        ...(threadId || (mail.headers && Object.keys(mail.headers).length)
+          ? { headers: { ...(mail.headers ?? {}), ...(threadId ? { "Message-ID": threadId } : {}) } } : {}),
         ...(mail.attachments && mail.attachments.length ? { attachments: mail.attachments } : {}),
         // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
         // them to Resend's charset so a dotted tenant slug degrades the TAG rather than

@@ -617,9 +617,9 @@ try {
   const schedOpts = await ed.locator("[data-ss-rule-actions] select[aria-label='What it does']").first().evaluate((s) => [...s.options].map((o) => o.value));
   const tzVal = await ed.locator("[data-ss-rule-timezone] select").inputValue();
   const prev = (await ed.locator("[data-ss-rule-audience-preview]").innerText()).replace(/\s+/g, " ");
-  ok("E23 a schedule names the time zone, counts who it reaches, and offers no scheduled email yet",
+  ok("E23 a schedule names the time zone, counts who it reaches, and (366) may send email",
     tzVal === "America/Chicago" && /312 customers now/.test(prev) && /Dale Smith/.test(prev)
-    && !schedOpts.includes("send_email") && (await ed.locator("[data-ss-rule-arm]").count()) === 1,
+    && schedOpts.includes("send_email") && (await ed.locator("[data-ss-rule-arm]").count()) === 1,
     JSON.stringify({ tzVal, prev, schedOpts }));
   await ed.locator("[data-ss-rule-arm] input").check();
   await page.screenshot({ path: join(shots, "rule-schedule.png") });

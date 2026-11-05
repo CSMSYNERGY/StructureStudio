@@ -641,6 +641,8 @@ const GATES: GateTable = {
   crm_rule_audience:     { area: "settings_crm", level: "view" },
   // 365: the account's time zone, which schedules run in. A setting, so an edit.
   crm_rules_time_zone:   { area: "settings_crm", level: "edit" },
+  // 366: the Do Not Disturb panel on a customer — the same altitude as editing the customer.
+  crm_contact_dnd:       { area: "contacts", level: "edit" },
   crm_rule_save:         { area: "settings_crm", level: "edit" },
   crm_rules_reorder:     { area: "settings_crm", level: "edit" },
   crm_rule_log:          { area: "settings_crm", level: "view" },
@@ -1588,6 +1590,8 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     noCode?: boolean;
   }> = {
     crm_save_contact:      { contactKeys: ["id"] },
+    // 366: names its customer outright, like crm_save_contact.
+    crm_contact_dnd:       { contactKeys: ["id"] },
     // Migration 330. The contact one names its contact outright; the deal one names a deal, so it
     // finds the deal's contact the way the other three deal verbs do.
     crm_contact_custom_save: { contactKeys: ["id"] },
@@ -11564,6 +11568,66 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return dbFail(req, clientId, "count who that rule reaches", error);
     }
     return json({ ok: true, count: Number((data as any)?.count ?? 0), sample: ((data as any)?.sample ?? []).slice(0, 5) });
+  }
+
+  if (action === "crm_contact_dnd") {
+    // ── DO NOT DISTURB (migration 366, Carolyn 2026-11-05) ──────────────────────────────────
+    // "I like the view and simplicity GHL has" — five boxes on the customer: all channels, email,
+    // texts, calls, inbound. And "GHL lets us uncheck the box... how can they let that and we
+    // can't" — so EVERY box can be unticked here, the customer's own STOP and unsubscribe included.
+    //
+    // TEXTS ARE NOT A NEW FLAG. They are the STOP register smsSend already refuses on
+    // (sms_opt_outs, keyed on the PHONE, and the older crm_contacts.sms_opt_out_at), written the
+    // way portal-sms set_opt_out writes it, with the consent log recording that a PERSON did it.
+    // Unticking a customer's own STOP clears ours; their carrier (Twilio) keeps its own block
+    // until they reply START, and the panel says so — that one is not ours to clear.
+    const id = String(payload?.id ?? "").toLowerCase();
+    const channel = String(payload?.channel ?? "");
+    const on = payload?.on === true;
+    if (!isUuidLike(id)) return json({ error: "That customer wasn't found." }, 400);
+    const COL: Record<string, string> = { all: "dnd_all_at", email: "dnd_email_at", calls: "dnd_calls_at", inbound: "dnd_inbound_at" };
+    if (channel !== "text" && !COL[channel]) return json({ error: "Pick which kind of contact to switch." }, 400);
+    const { data: c, error: cErr } = await admin.from("crm_contacts").select("id, phone_digits")
+      .eq("client_id", clientId).eq("id", id).is("merged_into", null).maybeSingle();
+    if (cErr) return dbFail(req, clientId, "find that customer", cErr);
+    if (!c) return json({ error: "That customer wasn't found." }, 404);
+    const now = new Date().toISOString();
+
+    if (channel === "text") {
+      const digits = String(c.phone_digits ?? "").replace(/\D/g, "").slice(-10);
+      if (digits.length !== 10) return json({ error: "This customer has no US mobile number to switch texting for." }, 400);
+      if (on) {
+        const { error } = await admin.from("sms_opt_outs").upsert({
+          client_id: clientId, phone_digits: digits, reason: "operator",
+          requested_at: now, effective_at: now, note: "Do Not Disturb panel",
+        }, { onConflict: "client_id,phone_digits" });
+        if (error) return dbFail(req, clientId, "turn texting off", error);
+        await admin.from("crm_contacts").update({ sms_opt_out_at: now, updated_at: now }).eq("client_id", clientId).eq("id", id);
+        await admin.from("sms_consent_log").insert({
+          client_id: clientId, phone_digits: digits, action: "revoked", source: "operator",
+          detail: { by: userId ?? null, note: "Do Not Disturb panel" },
+        });
+      } else {
+        const { error } = await admin.from("sms_opt_outs").delete().eq("client_id", clientId).eq("phone_digits", digits);
+        if (error) return dbFail(req, clientId, "turn texting back on", error);
+        // The older per-contact flag, on every customer with this number: smsSend still refuses on
+        // it, and the register above is keyed on the phone, so the two must agree.
+        await admin.from("crm_contacts").update({ sms_opt_out_at: null, updated_at: now })
+          .eq("client_id", clientId).eq("phone_digits", c.phone_digits).not("sms_opt_out_at", "is", null);
+        await admin.from("sms_consent_log").insert({
+          client_id: clientId, phone_digits: digits, action: "granted", source: "operator",
+          detail: { by: userId ?? null, note: "Do Not Disturb panel" },
+        });
+      }
+    } else {
+      const patch: Record<string, unknown> = { [COL[channel]]: on ? now : null, updated_at: now };
+      // Who turned email off — the panel says "they unsubscribed" only when they did.
+      if (channel === "email") patch.dnd_email_source = on ? "builder" : null;
+      const { error } = await admin.from("crm_contacts").update(patch).eq("client_id", clientId).eq("id", id);
+      if (error) return dbFail(req, clientId, "save Do Not Disturb", error);
+    }
+    audit("crm_contact_dnd", 1, `contact=${id} channel=${channel} on=${on}`).catch(() => {});
+    return json({ ok: true });
   }
 
   if (action === "crm_rules_time_zone") {

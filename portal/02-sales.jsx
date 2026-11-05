@@ -5689,7 +5689,13 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     }
     if (key === "details") {
       return kind === "contact" ? (
-        <div style={{ fontSize: 13, color: "#475569" }}>First seen {fmtDate(data.contact.first_seen_at)}</div>
+        <div>
+          <div style={{ fontSize: 13, color: "#475569" }}>First seen {fmtDate(data.contact.first_seen_at)}</div>
+          {/* 366: the customer's Do Not Disturb boxes, with their own details. */}
+          {data.contact && data.contact.id && (
+            <CrmDndPanel contact={data.contact} sms={data.sms} canEdit={canEdit} onChanged={load} />
+          )}
+        </div>
       ) : (
         <div style={{ fontSize: 13, color: "#475569" }}>{sel.style || "—"} · {sel.size || "—"}</div>
       );
@@ -7436,6 +7442,64 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
   );
 }
 
+// ══ DO NOT DISTURB (migration 366, Carolyn 2026-11-05) ══════════════════════════════════
+// "I like the view and simplicity GHL has... can we do that?" — five boxes on the customer, and
+// "GHL lets us uncheck the box... how can they let that and we can't": every box can be unticked,
+// a customer's own STOP and unsubscribe included. Automations check these before every text and
+// email (crm-rules-tick); the unsubscribe link in an automated email ticks Email by itself.
+//
+// TEXTS are the STOP register smsSend already refuses on, not a new flag — so a STOP texted by the
+// customer shows here ticked, and unticking it clears OUR block. Their carrier keeps its own until
+// they reply START; the row says so, because that one is not ours to clear.
+//
+// Calls and inbound are SHOWN, and saved, but the phone system reads them in a coming update —
+// said on the row rather than leaving a box that looks like it works.
+function CrmDndPanel({ contact, sms, canEdit, onChanged }) {
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  const fmt = (iso) => (iso ? new Date(iso).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "");
+  const textOff = !!((sms && sms.optedOut) || contact.sms_opt_out_at);
+  const stopByThem = textOff && !!(sms && sms.optedOut) && sms.optOutReason !== "team" && sms.optOutReason !== "other";
+  const set = (channel, on) => {
+    if (channel === "text" && !on && stopByThem && !window.confirm(
+      "This customer texted STOP. Turning texting back on clears our block, but their phone company keeps its own "
+      + "until they reply START to your number. Call or email them and ask them to text START.\n\nTurn texting back on?")) return;
+    setBusy(channel); setErr(null);
+    ssPipeCall("crm_contact_dnd", { id: contact.id, channel, on })
+      .then(() => { setBusy(null); onChanged(); })
+      .catch((e) => { setErr(e.message); setBusy(null); });
+  };
+  const row = (channel, label, checked, note, opts = {}) => (
+    <label key={channel} data-ss-dnd={channel} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 0", fontSize: 13,
+      color: opts.off ? "#94A3B8" : "#1E293B", cursor: canEdit && !opts.off ? "pointer" : "default" }}>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        {label}
+        {note && <span style={{ display: "block", fontSize: 11.5, color: opts.warn ? "#B45309" : "#64748B", lineHeight: 1.4 }}>{note}</span>}
+      </span>
+      <input type="checkbox" aria-label={label} checked={!!checked} disabled={!canEdit || !!busy || !!opts.off || !!opts.noPhone}
+        onChange={(e) => set(channel, e.target.checked)} style={{ marginTop: 3 }} />
+    </label>
+  );
+  return (
+    <div data-ss-dnd-panel="" style={{ marginTop: 10, border: "1px solid #E2E8F0", borderRadius: 8, padding: "6px 10px", background: "#FFF" }}>
+      <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, letterSpacing: 0.3, marginBottom: 2 }}>DO NOT DISTURB</div>
+      {row("all", "DND all channels", contact.dnd_all_at, contact.dnd_all_at ? `On since ${fmt(contact.dnd_all_at)} — no automated texts or emails.` : null)}
+      <div style={{ textAlign: "center", fontSize: 10.5, color: "#94A3B8", fontWeight: 800, margin: "2px 0" }}>OR</div>
+      {row("email", "Email", contact.dnd_email_at,
+        contact.dnd_email_at ? (contact.dnd_email_source === "customer"
+          ? `They unsubscribed on ${fmt(contact.dnd_email_at)}.` : `Turned off by your team on ${fmt(contact.dnd_email_at)}.`) : null)}
+      {row("text", "Text messages", textOff,
+        !contact.phone ? "No phone number on file."
+          : stopByThem ? "They texted STOP. Their phone company blocks texts until they reply START."
+          : textOff ? "Turned off by your team." : null,
+        { noPhone: !contact.phone, warn: stopByThem })}
+      {row("calls", "Calls & voicemail", contact.dnd_calls_at, "Coming — the phone system will honour this in an update.", { off: true })}
+      {row("inbound", "Inbound calls and texts", contact.dnd_inbound_at, "Coming — the phone system will honour this in an update.", { off: true })}
+      {err && <div style={{ ...S.err, marginTop: 4, marginBottom: 4 }}>{err}</div>}
+    </div>
+  );
+}
+
 // ── AUTOMATIONS: "when ‹this happens› → ‹do this›" (migrations 355 + 363) ──────────────────────
 // Part D of the Customer Hub rework. 354 gave each pipeline its own status ladder but left the
 // rungs no built-in event sets unreachable; rules are the general answer, so a builder says what
@@ -8194,9 +8258,8 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel, onTimeZone }) {
   const stuck = staleActions.length + staleConds.length;
   const outbound = draft.actions.some((a) => SS_RULE_OUTBOUND.indexOf(a.kind) >= 0);
   const moved = !!rule && (scope !== (rule.scopeKind || "pipeline") || (scope === "pipeline" && draft.pipelineId !== rule.pipelineId));
-  // A scheduled EMAIL waits for the unsubscribe link (round 2b); the server refuses it in words.
-  const offeredActions = SS_RULE_ACTIONS.filter(([k]) => ssRuleActionAllowed(k, scope)
-    && !(draft.triggerKind === "schedule" && k === "send_email"));
+  // A scheduled email is allowed since 366: every automated email carries a working unsubscribe.
+  const offeredActions = SS_RULE_ACTIONS.filter(([k]) => ssRuleActionAllowed(k, scope));
   const needsArm = ssRuleNeedsArm({ ...draft, scopeKind: scope });
   // WHO IT WOULD REACH NOW — the same count the sweep uses (365's crm_rule_audience_preview). Asked
   // for customer rules and schedules, where "how many?" is the question that matters.

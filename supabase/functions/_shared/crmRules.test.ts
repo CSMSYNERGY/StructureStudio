@@ -335,15 +335,14 @@ Deno.test("a schedule reads back the way a person says it", () => {
     "When every Monday at 8:00 am → Send the customer a text", "the row's sentence");
 });
 
-Deno.test("a scheduled rule: once per run, team-only allowed, scheduled email not yet", () => {
+Deno.test("a scheduled rule: once per run, team-only allowed, and email since 366", () => {
   const sch = { triggerKind: "schedule", schedule: { freq: "weekly", at: "08:00", days: [1] } };
   good(parseRuleSave({ ...sch, scopeKind: "contacts", actions: [{ kind: "send_sms", params: { body: "Hi" } }] }), "a Monday text");
   bad(parseRuleSave({ ...sch, scopeKind: "contacts", oncePerCard: false, actions: [{ kind: "send_sms", params: { body: "Hi" } }] }), "repeating");
   good(parseRuleSave({ ...sch, scopeKind: "none", actions: [{ kind: "notify_team", params: { subject: "Lot", body: "Walk it" } }] }), "team only");
   bad(parseRuleSave({ ...sch, scopeKind: "none", actions: [{ kind: "send_sms", params: { body: "Hi" } }] }), "nobody cannot text a customer");
-  const em = parseRuleSave({ ...sch, scopeKind: "contacts", actions: [{ kind: "send_email", params: { subject: "Hi", body: "Hi" } }] });
-  bad(em, "scheduled email waits for unsubscribe");
-  if (!/unsubscribe/.test((em as any).error)) throw new Error((em as any).error);
+  // 366: every automated email carries a working unsubscribe link, so a scheduled one is allowed.
+  good(parseRuleSave({ ...sch, scopeKind: "contacts", actions: [{ kind: "send_email", params: { subject: "Hi", body: "Hi" } }] }), "a scheduled email");
   // The arm: a count, or nothing.
   const armed = parseRuleSave({ id: R, arm: true, armedCount: 12 });
   eq([(armed as any).arm, (armed as any).armedCount], [true, 12], "armed");
