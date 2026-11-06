@@ -3275,7 +3275,8 @@ function Dashboard({ session }) {
               are in the Settings rail but are ordinary pages, so they keep TAB_META. */}
           <div className="ttl">
             {settingsActive ? settingsActive[1] : advancedHeld ? "One moment" : (TAB_META[activeTab] || [activeTab])[0]}
-            <span>{settingsActive ? settingsActive[2] : advancedHeld ? "" : (TAB_META[activeTab] || [])[1]}</span>
+            {/* "their designs" is the shed product's; a builder without it has none (migration 364). */}
+            <span>{settingsActive ? settingsActive[2] : advancedHeld ? "" : (activeTab === "contacts" && !shedsOn) ? "Everyone who has enquired, and your pipelines" : (TAB_META[activeTab] || [])[1]}</span>
           </div>
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."

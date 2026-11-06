@@ -28,7 +28,7 @@ function ssQuoteDaysOk(v) {
   return n >= 1 && n <= 365;
 }
 
-function SettingsView({ section, view3d = false, onOpenTax = null }) {
+function SettingsView({ section, view3d = false, onOpenTax = null, shedsOn = true }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
   // display + testing). No section = all (legacy). Form state always covers
@@ -1088,7 +1088,11 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
           component says so, and it is why this split needs no new save path. */}
       {show("company") && (<>
       <div style={S.card}>
-        <div style={S.h2}>Business Details (shown on estimates)</div>
+        {/* A builder without the shed product issues no Structure Studio estimates (SmartBuild
+            quotes them, migration 364), so the estimate half of this card is not theirs: the
+            heading's promise, the logo's PDF line, the terms and the valid-for days. Hidden, not
+            cleared: the save is global and still carries whatever the form holds. */}
+        <div style={S.h2}>{shedsOn ? "Business Details (shown on estimates)" : "Business Details"}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
           <div><span style={S.lbl}>Business name</span><input style={S.input} value={form.businessName} onChange={set("businessName")} /></div>
           <div><span style={S.lbl}>Phone</span><input style={S.input} value={form.businessPhone} onChange={set("businessPhone")} placeholder="+17075551234" /></div>
@@ -1105,7 +1109,7 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
             </div>
             {/* The quote PDF fetches the logo server-side, and only from where Upload puts it
                 (_shared/pdfLogo.ts). A pasted link from another site still shows in emails. */}
-            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your estimate PDFs.</div>
+            {shedsOn && <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your estimate PDFs.</div>}
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
@@ -1114,11 +1118,11 @@ function SettingsView({ section, view3d = false, onOpenTax = null }) {
           <div><span style={S.lbl}>State</span><input style={S.input} value={form.addrState} onChange={set("addrState")} /></div>
           <div><span style={S.lbl}>Zip</span><input style={S.input} value={form.addrZip} onChange={set("addrZip")} /></div>
         </div>
-        <div><span style={S.lbl}>Estimate terms</span>
-          <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+        {shedsOn && <div><span style={S.lbl}>Estimate terms</span>
+          <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>}
         {/* Carolyn 2026-08-06: "estimate good for X amount of days". Prints as the "Valid until"
             date on every quote PDF, and is the expiry date on estimates your CRM sends. */}
-        {quoteDaysReady && (
+        {shedsOn && quoteDaysReady && (
           <div style={{ marginTop: 12 }}>
             <label htmlFor="ss-quote-valid-days" style={S.lbl}>Estimates are good for</label>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

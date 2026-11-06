@@ -625,7 +625,7 @@ function ssJoinWords(list) {
   return list.length < 2 ? (list[0] || "") : list.slice(0, -1).join(", ") + " and " + list[list.length - 1];
 }
 
-function EmailSendingView({ clientId, viewingLabel = null }) {
+function EmailSendingView({ clientId, viewingLabel = null, shedsOn = true }) {
   const [status, setStatus] = useState(null);   // email_status response; null = loading
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);      // any action in flight
@@ -1105,7 +1105,10 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
         <div style={S.card}>
           <div style={S.h2}>Send from your own email address</div>
           <p style={{ fontSize: 13, color: "#64748B", lineHeight: 1.55, marginBottom: 14 }}>
-            Send estimates and invoices from your own email address, like info@yourbusiness.com.
+            {/* Without the shed product there are no estimates or invoices to send (migration 364);
+                the domain carries the Customer Hub's emails, and until it verifies those go out
+                from the platform address (sendTenantEmail's paperwork-mode opening). */}
+            {shedsOn ? "Send estimates and invoices" : "Send the emails your customers get"} from your own email address, like info@yourbusiness.com.
             Connect your domain here, add the DNS records we give you at your DNS host, and your
             emails arrive from your business instead of a shared address.
           </p>
@@ -2517,7 +2520,20 @@ function CommissionTeamInner({ shedsOn = true }) {
   const memberPage = Math.min(page, memberPages);
   const pagedMembers = members.slice((memberPage - 1) * pageSize, memberPage * pageSize);
   // Areas, titles and presets all come from the server (accessMetadata) — see AccessGrid.
-  const meta = data.meta || { areas: [], titles: [], presets: {} };
+  // Without the shed product three settings switches are named for pages this builder does
+  // not have ("Branding & Estimates", "CRM Connection"), so they are named for the pages they
+  // DO open here (SETTINGS_TAB_AREA): Business Details, the Customer Hub's settings, Email
+  // Settings. Labels and hints only; the keys, levels and the server's list are unchanged.
+  const SB_AREA_NAMES = {
+    settings_branding: ["Business Details", "Your business name, phone, address and logo"],
+    settings_crm: ["Customer Hub settings", "Pipelines, fields, automations, forms and email templates"],
+    settings_email: ["Email Settings", "Send your customer emails from your own domain"],
+  };
+  const meta0 = data.meta || { areas: [], titles: [], presets: {} };
+  const meta = shedsOn ? meta0 : {
+    ...meta0,
+    areas: (meta0.areas || []).map((a) => SB_AREA_NAMES[a.key] ? { ...a, label: SB_AREA_NAMES[a.key][0], hint: SB_AREA_NAMES[a.key][1] } : a),
+  };
   // WHAT IS OFFERED, not what is labelled (migration 364). A builder without the shed product is
   // not offered its areas or its job titles (SS_SHED_AREAS / SS_SHED_TITLES). `meta` itself stays
   // whole, because it also names what people already hold: a Driver added before the switch keeps
@@ -5506,7 +5522,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
       {/* view3d: Business Details shows the four-corner quote switch only where 3D is unlocked. */}
       {/* No serial numbers without the shed product (migration 364): they number buildings sold
           through the designer and lots, and a SmartBuild builder has neither. */}
-      {sub === "company" && (<><SettingsView section="company" view3d={view3d} />{shedsOn && <SerialNumbersCard />}</>)}
+      {sub === "company" && (<><SettingsView section="company" view3d={view3d} shedsOn={shedsOn} />{shedsOn && <SerialNumbersCard />}</>)}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} shedsOn={shedsOn} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
@@ -5579,7 +5595,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
         : <div style={S.card}><div style={S.h2}>Meetings</div><p style={{ fontSize: 13, color: "#64748B" }}>Meeting types and booking pages are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}
       {/* EMAIL SETTINGS, TEXT MESSAGING, PHONE — moved in from the rail on 2026-10-23 with their
           slugs, props and canEdit rules exactly as they were in SettingsShell. */}
-      {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
+      {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} shedsOn={shedsOn} />}
       {/* Self-serve carrier registration. canEdit mirrors the server's own split: reading the
           status is contacts-level, but every action that submits or spends is
           settings_billing:'edit'. The component still renders read-only for everyone else

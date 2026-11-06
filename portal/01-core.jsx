@@ -2325,8 +2325,11 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     // its first tab's slug. See ssCustomerHubTabs.
     // phoneOffered rides in because Phone is one of its tabs (2026-10-23); both callers pass the
     // same ssPhoneOffered answer they give ssSettingsTabs, so the rail and the hub agree.
+    // Email Settings' caption promises estimates and invoices, which a builder without the shed
+    // product never sends, so it names the emails they do send (same .map as Business Details).
     pipelines: ssCustomerHubTabs({ isAdmin, access, phoneOffered })
-      .filter(([id]) => shedsOn || SS_SHED_HUB_TABS.indexOf(id) === -1),
+      .filter(([id]) => shedsOn || SS_SHED_HUB_TABS.indexOf(id) === -1)
+      .map((t) => (shedsOn || t[0] !== "email") ? t : [t[0], t[1], "Send the emails your customers get from your own email domain"]),
   };
 }
 
