@@ -17,8 +17,9 @@
 
 import {
   AUTO_TOPUP_DAILY_MAX, cardFromPayload, COF_CONSENT_TEMPLATES, COF_CONSENT_VERSION, cofCardPhrase, cofMoney,
-  cofRecurringPhrase, cofTodayPhrase, consentCoversOperatorTopups, consentProblem, recordConsent, renderCofConsent,
+  cofRecurringPhrase, cofTodayPhrase, CONSENT_ROW_KIND, consentCoversOperatorTopups, consentProblem, recordConsent, renderCofConsent,
 } from "./cofConsent.ts";
+import { cardRequestEmail } from "./cardRequestEmail.ts";
 import { cofFields, isFieldRefusal, NmiDeclined, nmiPostCof } from "./nmi.ts";
 import { sendTopupReceipt, topupReceiptEmail } from "./walletReceipt.ts";
 
@@ -280,10 +281,34 @@ Deno.test("a retry that fails too keeps the first refusal on the thrown error", 
 Deno.test("the top-up and card-replacement sentences disclose top-ups CSM Synergy adds; the version check holds", () => {
   assert(/CSM Synergy adds funds to my wallet for me/.test(COF_CONSENT_TEMPLATES.topup), "topup");
   assert(/top-ups CSM Synergy adds to my wallet for me/.test(COF_CONSENT_TEMPLATES.cardUpdate), "cardUpdate");
+  assert(/top-ups CSM Synergy adds to my wallet for me/.test(COF_CONSENT_TEMPLATES.cardAdd), "cardAdd");
   assert(consentCoversOperatorTopups(COF_CONSENT_VERSION), "the current version covers it");
   assert(consentCoversOperatorTopups("2027-01-01.1"), "a later version still covers it");
   assert(!consentCoversOperatorTopups("2026-01-01.1"), "an earlier one does not");
   for (const junk of [null, undefined, "", "v2", 5]) assert(!consentCoversOperatorTopups(junk), `junk ${String(junk)}`);
+});
+
+Deno.test("add a card (2026-11-05): a fifth sentence, its row kind, and the version it was born under", () => {
+  const t = COF_CONSENT_TEMPLATES.cardAdd;
+  assert(!/\{\w+\}/.test(t), "no placeholders: the sentence is fixed, like cardUpdate");
+  assert(/any subscription I buy in Billing/.test(t), "it names the one card slot's every use, a later subscription included");
+  assert(/automatic top-ups I switch on/.test(t) && /receipt/.test(t), "automatic top-ups and the receipt");
+  assertEquals(CONSENT_ROW_KIND.cardAdd, "card_add");
+  // ADDING a sentence does not bump the version (cofConsent.ts says why: production's tab keeps
+  // sending the old one until the next promotion). Bump this expectation only with a real change.
+  assertEquals(COF_CONSENT_VERSION, "2026-10-20.1");
+  assertEquals(Object.keys(COF_CONSENT_TEMPLATES).sort(), Object.keys(CONSENT_ROW_KIND).sort(), "every template has a row kind");
+});
+
+Deno.test("the add-a-card reminder names the tab and the link, and nobody", () => {
+  const m = cardRequestEmail({ link: "https://beta.structurestudiosuite.com/portal/settings/wallet" });
+  assert(/Settings > Billing > Wallet/.test(m.text) && /"Add a card"/.test(m.text), m.text);
+  assert(m.text.includes("https://beta.structurestudiosuite.com/portal/settings/wallet"), m.text);
+  assert(m.html.includes(`href="https://beta.structurestudiosuite.com/portal/settings/wallet"`), "the html carries the link as an anchor");
+  assert(/\$0/.test(m.text) && /Nothing is charged/.test(m.text), "it says the check is for $0");
+  assert(/support@csmsynergy.com/.test(m.text), "a way to ask");
+  assert(!/\{\w+\}/.test(m.text), "no placeholders");
+  assertEquals(m.subject, "Please add a card to your StructureStudio wallet");
 });
 
 Deno.test("a receipt for a charge that is not credited yet says so, and shows no balance", () => {

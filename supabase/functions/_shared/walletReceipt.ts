@@ -66,6 +66,18 @@ export function topupReceiptEmail(i: ReceiptInput): { subject: string; text: str
 // deno-lint-ignore no-explicit-any
 type Admin = any;
 
+/** The tenant's OWNERS' addresses, at most MAX_RECIPIENTS, lower-cased and de-duplicated. Billing
+ *  is the owners' area, so platform mail about the card goes to them and nobody else. Shared with
+ *  _shared/cardRequestEmail.ts (2026-11-05) so the two can never disagree about who an owner is. */
+export async function ownerEmails(admin: Admin, clientId: string): Promise<string[]> {
+  const { data: users } = await admin.from("client_users").select("user_id, role")
+    .eq("client_id", clientId).eq("role", "owner");
+  const emails = await Promise.all((users ?? []).slice(0, MAX_RECIPIENTS * 2).map(async (u: { user_id: string }) => {
+    try { const { data } = await admin.auth.admin.getUserById(u.user_id); return String(data?.user?.email ?? "").trim().toLowerCase(); } catch { return ""; }
+  }));
+  return [...new Set(emails.filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)))].slice(0, MAX_RECIPIENTS);
+}
+
 export type ReceiptDeps = { send?: typeof rsSendEmail; configured?: () => boolean; log?: typeof logEdgeError; fn?: string };
 
 /** Send the receipt to the tenant's owners and record the outcome on the attempt row. */
@@ -86,12 +98,7 @@ export async function sendTopupReceipt(
     outcome = await Promise.race([
       (async () => {
         if (!configured()) return { sent: 0, error: "platform email is not configured" };
-        const { data: users } = await admin.from("client_users").select("user_id, role")
-          .eq("client_id", clientId).eq("role", "owner");
-        const emails = await Promise.all((users ?? []).slice(0, MAX_RECIPIENTS * 2).map(async (u: { user_id: string }) => {
-          try { const { data } = await admin.auth.admin.getUserById(u.user_id); return String(data?.user?.email ?? "").trim().toLowerCase(); } catch { return ""; }
-        }));
-        const to = [...new Set(emails.filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)))].slice(0, MAX_RECIPIENTS);
+        const to = await ownerEmails(admin, clientId);
         if (!to.length) return { sent: 0, error: "no owner email on file" };
         const mail = topupReceiptEmail(input);
         const results = await Promise.allSettled(to.map((addr) => send({

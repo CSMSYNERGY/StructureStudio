@@ -66,7 +66,7 @@ const COF = { version: COF_CONSENT_VERSION, templates: COF_CONSENT_TEMPLATES, au
 const features = (on) => ({ simple_layout: on, crm: on });
 const BASE_SUB = { id: "sub-1", plan_id: "simple_layout_annual", status: "active", price_cents: 195000, current_period_start: "2026-08-01T00:00:00Z", current_period_end: "2027-08-01T00:00:00Z", canceled_at: null, created_at: "2026-08-01T00:00:00Z", past_due_since: null };
 
-function status({ hasCard, card = null, initial = false, auto = {}, active = false, operatorTopupAllowed = false }) {
+function status({ hasCard, card = null, initial = false, auto = {}, active = false, operatorTopupAllowed = false, cardRequest = null }) {
   return {
     configured: true,
     entitlement: active
@@ -80,7 +80,7 @@ function status({ hasCard, card = null, initial = false, auto = {}, active = fal
     upgradeCredits: {},
     hasCard,
     card,
-    cof: { ...COF, topupNeedsAgreement: !initial, operatorTopupAllowed },
+    cof: { ...COF, topupNeedsAgreement: !initial, operatorTopupAllowed, cardRequest },
     discount: { percent: 0, features: [] },
     plans: PLANS,
     subscriptions: active ? [BASE_SUB] : [],
@@ -172,6 +172,10 @@ try {
   {
     const S = await open("a", status({ hasCard: false }), "/settings/billing");
     await waitText(S.page, "Choose your features");
+    // Nothing is preselected since 11a161d8 (no required base plan): choose Simple Layout, which
+    // the tab puts on yearly, so the sentence below has a cart to describe.
+    await S.page.getByText("Simple Layout", { exact: true }).first().click();
+    await S.page.waitForTimeout(400);
     const want = render(COF_CONSENT_TEMPLATES.subscription, { card: "this card", today: "$1,950 today", recurring: "$1,950 a year" });
     ok("a: the subscription sentence is shown, filled with today's charge and the yearly renewal", (await boxText(S.page, "subscription")) === want, String(await boxText(S.page, "subscription")));
     const btn = S.page.getByRole("button", { name: "Continue to secure card entry" });
@@ -352,13 +356,63 @@ try {
     await S.ctx.close();
   }
 
-  // j: an operator on a tenant with no card at all is told why Add funds is held.
+  // j: an operator on a tenant with no card at all is told why Add funds is held, and can only ASK
+  //    the owner (2026-11-05): "Email the owner" posts request_card_email and nothing else.
   {
-    const S = await open("j", status({ hasCard: false, active: true }), `/settings/wallet?view=${CLIENT}`, { operator: true });
+    const S = await open("j", status({ hasCard: false, active: true, cardRequest: { lastSentAt: null, cooldownHours: 24 } }), `/settings/wallet?view=${CLIENT}`, { operator: true });
     await waitText(S.page, "Add funds", 20000);
     await S.page.getByRole("button", { name: "$100", exact: true }).first().click();
-    ok("j: the reason is on the page", (await text(S.page)).includes(`${CLIENT} has no card on file. The owner has to add funds once themselves.`));
+    ok("j: the reason is on the page", (await text(S.page)).includes(`${CLIENT} has no card on file. Only the owner can add one, from Settings > Billing > Wallet.`));
     ok("j: and Add funds stays held", await S.page.getByRole("button", { name: "Add $100", exact: true }).first().isDisabled());
+    ok("j: no Add a card for an operator", (await S.page.getByRole("button", { name: "Add a card", exact: true }).count()) === 0);
+    const email = S.page.getByRole("button", { name: "Email the owner", exact: true });
+    ok("j: Email the owner is offered, never sent yet", (await email.count()) === 1 && !(await email.first().isDisabled()));
+    await email.first().click();
+    ok("j: ...and says so", await waitText(S.page, "Emailed the owner."));
+    const sends = acts(S, "request_card_email");
+    ok("j: one request_card_email, carrying nothing but the action", sends.length === 1 && Object.keys(sends[0]).filter((k) => k !== "targetClientId").join() === "action", JSON.stringify(sends));
+    ok("j: no card request of any other kind went out", acts(S, "add_card").length === 0 && acts(S, "topup").length === 0);
+    ok("j: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
+    await S.ctx.close();
+  }
+
+  // l: a builder with no card can ADD one without adding funds (2026-11-05): the card-add
+  //    sentence, the button held until it is ticked, and an add_card carrying token, card,
+  //    agreement and the tab marker. The lightbox is the stub above: nothing real is tokenized.
+  {
+    const S = await open("l", status({ hasCard: false, active: true }), "/settings/wallet");
+    await waitText(S.page, "Add funds", 20000);
+    ok("l: the no-card help names Add a card", (await text(S.page)).includes("No card on file yet. Add a card below"));
+    ok("l: the auto top-up hint names it too", (await text(S.page)).includes("Add a card, or add funds once, and it is kept on file"));
+    await S.page.getByRole("button", { name: "Add a card", exact: true }).first().click();
+    ok("l: Add a card shows the card-add sentence, verbatim", (await boxText(S.page, "card-add")) === COF_CONSENT_TEMPLATES.cardAdd, String(await boxText(S.page, "card-add")));
+    const enter = S.page.getByRole("button", { name: "Enter the card", exact: true }).first();
+    ok("l: Enter the card is held until the box is ticked", await enter.isDisabled());
+    ok("l: ...and says the check is for $0", (await text(S.page)).includes("Your bank checks the card for $0. Nothing is charged."));
+    await box(S.page, "card-add").locator("input").check();
+    ok("l: ...then it is live", !(await enter.isDisabled()));
+    await enter.click();
+    await S.page.waitForTimeout(1200);
+    const add = acts(S, "add_card")[0] || {};
+    ok("l: the lightbox was opened once", await S.page.evaluate(() => window.__collect.started) === 1);
+    ok("l: add_card carries the token, the masked card, the agreement and the tab marker",
+      add.paymentToken === "harness-token" && add.card && add.card.last4 === "4242" && add.card.brand === "visa"
+        && JSON.stringify(add.consent) === JSON.stringify(CONSENT) && add.cofTab === COF_CONSENT_VERSION, JSON.stringify(add));
+    ok("l: and the page says the card is saved and nothing was charged", await waitText(S.page, "Card saved. Top-ups use it from now on"));
+    ok("l: no top-up was sent", acts(S, "topup").length === 0);
+    ok("l: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
+    await S.ctx.close();
+  }
+
+  // m: an operator who emailed the owner an hour ago is held for the rest of the day, and told.
+  {
+    const at = new Date(Date.now() - 3600 * 1000).toISOString();
+    const S = await open("m", status({ hasCard: false, active: true, cardRequest: { lastSentAt: at, cooldownHours: 24 } }), `/settings/wallet?view=${CLIENT}`, { operator: true });
+    await waitText(S.page, "Add funds", 20000);
+    const email = S.page.getByRole("button", { name: "Email the owner", exact: true });
+    ok("m: Email the owner is held inside the cooldown", (await email.count()) === 1 && (await email.first().isDisabled()));
+    ok("m: ...and the page says when it went", (await text(S.page)).includes("Emailed the owner on ") && (await text(S.page)).includes("Another reminder can be sent 24 hours later."));
+    ok("m: nothing was sent", acts(S, "request_card_email").length === 0);
     await S.ctx.close();
   }
 

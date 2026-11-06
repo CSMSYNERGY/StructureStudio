@@ -12,6 +12,8 @@ import {
   stampConsent,
 } from "../_shared/cofConsent.ts";
 import { sendTopupReceipt } from "../_shared/walletReceipt.ts";
+import { sendCardRequestEmail } from "../_shared/cardRequestEmail.ts";
+import { portalWalletUrl } from "../_shared/customerPortalUrl.ts";
 import {
   FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS, monthlyPlansRefused,
 } from "../_shared/foundingPricing.ts";
@@ -47,6 +49,12 @@ const GATES: GateTable = {
   topup_settings: { area: "settings_billing", level: "edit" },
   // Replacing the card on file (317). It changes what every renewal and top-up charges.
   update_card:    { area: "settings_billing", level: "edit" },
+  // Adding one with a $0 check, no purchase (2026-11-05): it stores the card every top-up (and
+  // any subscription bought here later) charges, so the same audience as update_card.
+  add_card:       { area: "settings_billing", level: "edit" },
+  // The operator's "please add a card" email to the owners. Operator-only inside the branch; the
+  // gate keeps a builder's non-billing roles out of it, like every card action.
+  request_card_email: { area: "settings_billing", level: "edit" },
   // The wallet's full ledger (usage billing, 259). A READ, so view level: the same people who
   // see the wallet card and its ten-line list in `status`. That list sits behind `mine`, which
   // also keeps it from an operator without can_bill; resolveTenant lets such an operator make
@@ -82,6 +90,8 @@ const GATES: GateTable = {
 //   { action: "topup", amountCents, confirmChargeCents, paymentToken?, card?, consent?, cardholderPresent? }
 //   { action: "topup_settings", enabled, thresholdCents?, amountCents?, consent? }
 //   { action: "update_card", paymentToken, card?, consent }
+//   { action: "add_card", paymentToken, card?, consent }   a $0 check; stores the card, charges nothing
+//   { action: "request_card_email" }                       operator: email the owners a link to add one
 //   { action: "wallet_transactions", filter?, cursor?, limit?, from?, to?, format?: "csv", tz? }
 //
 // ══ STORED CREDENTIALS (Visa/Mastercard COF framework, migration 317) ══
@@ -100,6 +110,10 @@ const GATES: GateTable = {
 //                    refused there.
 //   update_card      a $0 validate that replaces the vaulted card and becomes the new unscheduled
 //                    initial (NMI: a card change is a new initial transaction).
+//   add_card         a $0 validate with customer_vault=add_customer that STORES a card where there
+//                    was none (a builder who pays by bank transfer), and is its unscheduled
+//                    initial from the start. NMI keeps the card only "if the transaction is
+//                    successful", so a refused card leaves nothing (2026-11-05).
 // And every agreement a builder makes is recorded (billing_consents) BEFORE the charge it covers,
 // with the sentence from _shared/cofConsent.ts rendered from the server's own numbers: the first
 // card entry or first top-up, each subscription checkout, switching automatic top-ups on, and a
@@ -124,6 +138,11 @@ function json(body: unknown, status = 200) {
     headers: { ...cors, "Content-Type": "application/json" },
   });
 }
+
+// The operator's "please add a card" email (2026-11-05): the audit action its throttle keys on
+// (written only after a send went out) and how long one send holds the next.
+const CARD_REQUEST_AUDIT = "operator_card_request_email";
+const CARD_REQUEST_COOLDOWN_H = 24;
 
 // The gateway client lives in _shared/nmi.ts since 2026-08-29 — portal-settings needs it too
 // (wallet auto-recharge charges a card at debit time), and two copies of isGatewayUnknown is
@@ -340,8 +359,8 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   const cardLast4: string | null = typeof vaultRow?.card_last4 === "string" ? vaultRow.card_last4 : null;
   const cardBrand: string | null = typeof vaultRow?.card_brand === "string" ? vaultRow.card_brand : null;
 
-  // THE AGREEMENT BEHIND THE CARD'S CURRENT UNSCHEDULED INITIAL (317): the topup_card or
-  // card_update row stamped with that very transaction. Read once, on demand, and only where it
+  // THE AGREEMENT BEHIND THE CARD'S CURRENT UNSCHEDULED INITIAL (317): the topup_card,
+  // card_update or card_add row stamped with that very transaction. Read once, on demand, and only where it
   // decides something:
   //   * a builder's top-up is a LATER one (customer + used) only when such an agreement exists.
   //     An initial without one (a first top-up from the pre-317 tab, or a stamp that failed) makes
@@ -355,7 +374,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     if (agreementVersions) return agreementVersions;
     if (!unscheduledInitial) return (agreementVersions = []);
     const { data, error } = await admin.from("billing_consents").select("wording_version")
-      .eq("client_id", clientId).in("kind", ["topup_card", "card_update"]).eq("transaction_id", unscheduledInitial)
+      .eq("client_id", clientId).in("kind", ["topup_card", "card_update", "card_add"]).eq("transaction_id", unscheduledInitial)
       .limit(5);
     agreementVersions = error || !Array.isArray(data) ? [] : data.map((r: { wording_version?: unknown }) => String(r.wording_version ?? ""));
     return agreementVersions;
@@ -943,6 +962,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       }
     }
 
+    // The operator's "please add a card" email (2026-11-05): when it last went, so the view-as
+    // Wallet tab can show it and hold the button inside the cooldown. Only asked for an operator
+    // on a tenant with no card. A failed read is "never sent" here; the branch re-checks before
+    // sending, so the worst case is a refused click, not a second email.
+    let cardRequest: { lastSentAt: string | null; cooldownHours: number } | null = null;
+    if (mine && operator && !vaultId) {
+      const last = await admin.from("admin_audit").select("created_at")
+        .eq("action", CARD_REQUEST_AUDIT).eq("target_client_id", clientId)
+        .order("created_at", { ascending: false }).limit(1);
+      const at = !last.error && Array.isArray(last.data) && last.data[0]?.created_at ? String(last.data[0].created_at) : null;
+      cardRequest = { lastSentAt: at, cooldownHours: CARD_REQUEST_COOLDOWN_H };
+    }
+
     return json({
       configured,
       entitlement,
@@ -961,6 +993,8 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
             ...cofConsentForBrowser(),
             topupNeedsAgreement: !unscheduledInitial || !(await topupAgreementOnFile()),
             operatorTopupAllowed: operator ? await ownerAgreedToOperatorTopups() : false,
+            // Null for a builder, and for any tenant with a card (see above).
+            cardRequest,
           },
           discount: { percent: discountPct, features: discountFeatures },
           plans: publicPlans,
@@ -1871,6 +1905,102 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     return json({ ok: true });
   }
 
+  // ── ADD A CARD, NO PURCHASE (2026-11-05) ────────────────────────────────────────────────
+  // A builder who pays for StructureStudio by bank transfer has nothing at the gateway, so their
+  // wallet had no card and no way to get one short of a $20 top-up. This is update_card's
+  // sibling: a $0 validate that STORES the card (customer_vault=add_customer: NMI keeps it only
+  // "if the transaction is successful", so a refused card leaves nothing), and whose id is the
+  // vault's unscheduled initial, the transaction automatic top-ups and operator top-ups name.
+  // One card slot per tenant (billing_customers), so the sentence the owner ticks names every use
+  // the slot has, a subscription bought here later included.
+  //
+  // No money moves, so no attempt row (update_card's posture): the record is the agreement row,
+  // stamped with the validate, and billing_customers. Every outcome that is not clean files an
+  // app_errors row naming the tenant, because an orphan vault is a stored card nobody knows
+  // about. The builder's own card only, like every card entry.
+  if (action === "add_card") {
+    const paymentToken = String(payload?.paymentToken || "").trim();
+    if (operator) {
+      return json({ error: "An operator cannot enter a card on a tenant's behalf. Ask the owner to add their card from their own Billing tab." }, 400);
+    }
+    if (vaultId) {
+      return json({ error: "There is already a card on file. Use Replace card to change it.", code: "card_on_file" }, 409);
+    }
+    if (!paymentToken) return json({ error: "paymentToken is required." }, 400);
+    const problem = consentProblem(payload);
+    if (problem) return json({ error: problem, code: "consent_required" }, 400);
+    const entered = cardFromPayload(payload);
+
+    let consentId: number;
+    try {
+      consentId = await recordConsent(admin, {
+        clientId, kind: "cardAdd", wording: COF_CONSENT_TEMPLATES.cardAdd,
+        terms: { purpose: "wallet_card", new_card: true }, userId, userEmail: userEmail || null, cardLast4: entered.last4, req,
+      });
+    } catch (e) {
+      return json({ error: (e as Error).message }, 503);
+    }
+
+    let txn: string | null = null;
+    let newVault: string | null = null;
+    let cofSupported: string | null = null;
+    try {
+      const { res, cofSupported: cs } = await nmiPostCof({
+        type: "validate",
+        customer_vault: "add_customer",
+        payment_token: paymentToken,
+        first_name: String(payload?.firstName || ""),
+        last_name: String(payload?.lastName || ""),
+        email: String(payload?.email || userEmail || ""),
+        merchant_defined_field_1: clientId,
+        order_description: "StructureStudio card on file added ($0 check)",
+      }, "cit_initial_unscheduled");
+      txn = res.transactionid || null;
+      newVault = String(res.customer_vault_id || "").trim() || null;
+      cofSupported = cs;
+    } catch (e) {
+      if (isGatewayUnknown(e)) {
+        // The validate moves no money, but the gateway MAY have stored the card on a vault nobody
+        // here knows about. Say so where support will read it, and tell the builder to look
+        // before entering it again (a retry can make a second vault; the row says to delete it).
+        await admin.from("app_errors").insert({
+          source: "edge:portal-billing", severity: "error", code: "card_add_unknown",
+          message: `${clientId}: add card (validate + add_customer) outcome unverifiable: ${(e as Error).message}. If a customer vault was created (merchant_defined_field_1 = ${clientId}), record it on billing_customers with the validate as unscheduled_initial_txn, or delete it at the gateway.`,
+          client_id: clientId,
+        }).then(() => undefined, () => undefined);
+        return json({ error: "We could not confirm whether your card was saved. Nothing was charged. Wait a minute and refresh this page; if no card shows, enter it again." }, 502);
+      }
+      return json({ error: `Your bank did not accept this card: ${(e as Error).message}` }, 402);
+    }
+    if (!newVault) {
+      await admin.from("app_errors").insert({
+        source: "edge:portal-billing", severity: "error", code: "card_add_no_vault",
+        message: `${clientId}: the $0 validate was approved (${txn ?? "?"}, cof_supported ${cofSupported ?? "?"}) but the gateway returned no customer_vault_id. Check whether a vault with merchant_defined_field_1 = ${clientId} exists; record it or delete it.`,
+        client_id: clientId,
+      }).then(() => undefined, () => undefined);
+      return json({ error: "Your bank accepted the card but the payment gateway did not confirm it was saved. Nothing was charged. CSM Synergy has been told; please do not enter it again until they confirm." }, 502);
+    }
+
+    const now = new Date().toISOString();
+    const { error: upErr } = await admin.from("billing_customers").upsert({
+      client_id: clientId, vault_id: newVault, updated_at: now,
+      card_last4: entered.last4, card_brand: entered.brand, card_saved_at: now,
+      unscheduled_initial_txn: txn, unscheduled_initial_at: txn ? now : null,
+    }, { onConflict: "client_id" });
+    await stampConsent(admin, consentId, txn);
+    if (upErr) {
+      // Unlike update_card, this does not answer ok: the tab would reload to "no card on file" and
+      // invite a second entry, which would store a second vault.
+      await admin.from("app_errors").insert({
+        source: "edge:portal-billing", severity: "error", code: "card_add_unrecorded",
+        message: `${clientId}: the gateway stored the card on a new vault ${newVault} (validate ${txn ?? "?"}) but billing_customers was not written: ${upErr.message}. Set vault_id, card_last4 and unscheduled_initial_txn by hand.`,
+        client_id: clientId,
+      }).then(() => undefined, () => undefined);
+      return json({ error: "Your card was saved with the payment gateway but we could not record it. CSM Synergy has been told. Please do not enter it again." }, 500);
+    }
+    return json({ ok: true, card: { last4: entered.last4, brand: entered.brand } });
+  }
+
   // ── REPLACE THE CARD ON FILE (317) ──────────────────────────────────────────────────────
   // NMI: a card change must be stored as a NEW initial transaction. A $0 validate with
   // customer_vault=update_customer replaces the vaulted card only "if the transaction is
@@ -1956,6 +2086,42 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       }).then(() => undefined, () => undefined);
     }
     return json({ ok: true, card: { last4: entered.last4, brand: entered.brand } });
+  }
+
+  // ── ASK THE OWNER TO ADD A CARD (2026-11-05) ────────────────────────────────────────────
+  // The operator view of a tenant with no card: an operator can never enter one, so the most CSM
+  // Synergy can do is email the tenant's owners a link to the Wallet tab. Operator only (a
+  // builder's admin can walk over to their owner), once a day per tenant: the window is the
+  // admin_audit row written AFTER a send, so a failed send never shuts it, and a failed read lets
+  // the send go ahead (this guards an inbox, not money). Counts in the audit, never addresses.
+  if (action === "request_card_email") {
+    if (!operator) return json({ error: "Only CSM Synergy can send this reminder." }, 403);
+    if (vaultId) return json({ error: "This tenant already has a card on file." }, 409);
+    const since = new Date(Date.now() - CARD_REQUEST_COOLDOWN_H * 3600_000).toISOString();
+    const recent = await admin.from("admin_audit").select("created_at")
+      .eq("action", CARD_REQUEST_AUDIT).eq("target_client_id", clientId).gte("created_at", since)
+      .order("created_at", { ascending: false }).limit(1);
+    const lastAt = !recent.error && Array.isArray(recent.data) && recent.data[0]?.created_at ? String(recent.data[0].created_at) : null;
+    if (lastAt) {
+      const when = new Date(lastAt);
+      const retryAfterSeconds = Math.max(60, Math.ceil((when.getTime() + CARD_REQUEST_COOLDOWN_H * 3600_000 - Date.now()) / 1000));
+      const shown = Number.isFinite(when.getTime())
+        ? when.toLocaleString("en-US", { month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/Chicago" })
+        : "earlier today";
+      return json({
+        error: `The owner was emailed on ${shown}. Another reminder can be sent ${CARD_REQUEST_COOLDOWN_H} hours after that.`,
+        lastSentAt: lastAt, retryAfterSeconds,
+      }, 429);
+    }
+    const out = await sendCardRequestEmail(admin, clientId, { link: portalWalletUrl(req) }, req, { fn: "portal-billing" });
+    if (out.sent === 0) {
+      if (out.error === "no owner email on file") return json({ error: "This tenant has no owner with an email address on file." }, 409);
+      if (out.error === "platform email is not configured") return json({ error: "Platform email is not switched on for this deployment, so the reminder cannot be sent." }, 503);
+      return json({ error: `The reminder could not be sent: ${out.error ?? "unknown"}.` }, 502);
+    }
+    const sentAt = new Date().toISOString();
+    await audit(CARD_REQUEST_AUDIT, out.sent, "owners emailed a link to add a card");
+    return json({ ok: true, sent: out.sent, sentAt });
   }
 
   if (action === "cancel") {

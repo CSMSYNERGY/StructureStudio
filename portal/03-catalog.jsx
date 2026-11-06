@@ -1737,8 +1737,13 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const [topupPhone, setTopupPhone] = useState(null);
   const [replacing, setReplacing] = useState(false);
   const [replaceAgree, setReplaceAgree] = useState(false);
+  // Add a card (2026-11-05): the box is open, its agreement is ticked, the owner email is on its way.
+  const [adding, setAdding] = useState(false);
+  const [addAgree, setAddAgree] = useState(false);
+  const [emailing, setEmailing] = useState(false);
   useEffect(() => {
     setSubAgree(false); setTopupAgree(false); setAutoAgree(false); setTopupPhone(null); setReplaceAgree(false);
+    setAddAgree(false); setAdding(false);
   }, [section, viewingLabel]);
 
   // The shell's own entitlement is refreshed through ssEntitlementChanged (subscribe and cancel
@@ -2022,6 +2027,57 @@ This charges the card they have on file${asked ? "" : ", without them asking: th
       await load();
     }
     setBusy(false);
+  };
+
+  // ADD A CARD (2026-11-05). A $0 check that stores the card where there was none: the way a
+  // builder who pays for StructureStudio by bank transfer gets a wallet card without buying
+  // credit first. It is then the card on file, full stop: top-ups, automatic top-ups, and any
+  // subscription bought here later. The builder's own card only, like every card entry.
+  const addCard = async () => {
+    if (!addAgree) { setMsg({ err: "Tick the box to agree to how the card will be used." }); return; }
+    setMsg(null); setBusy(true);
+    try {
+      const t = await getPaymentToken(null);
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", {
+        body: { action: "add_card", paymentToken: t.token, card: t.card, ...tabMark, ...consentBody },
+      });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: "Card saved. Top-ups use it from now on, and you can switch on automatic top-ups. Nothing was charged." });
+      setAdding(false); setAddAgree(false);
+      await load();
+    } catch (e) {
+      setMsg({ err: e.message });
+      // An unverifiable add can still have stored the card at the gateway, and the server may have
+      // recorded it: re-read rather than keep showing "no card on file".
+      await load();
+    }
+    setBusy(false);
+  };
+
+  // EMAIL THE OWNER (operator, 2026-11-05). An operator can never enter a card for a tenant; this
+  // asks the owners to, with a link to this tab. The server holds it to once a day per tenant and
+  // answers with the sentence to show when it is held.
+  const emailOwner = async () => {
+    setMsg(null); setEmailing(true);
+    try {
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "request_card_email" } });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: "Emailed the owner." });
+    } catch (e) {
+      setMsg({ err: e.message });
+    }
+    await load();
+    setEmailing(false);
   };
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
@@ -2458,7 +2514,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
                   {data.hasCard
                     ? "Charged to the card on file. Funds are added straight away."
-                    : "You'll enter your card in a secure form served by the payment gateway — it never passes through StructureStudio."}
+                    : "No card on file yet. Add a card below (checked for $0, nothing charged), or enter one as you add funds. Either way the card goes into the payment gateway's secure form and never passes through StructureStudio."}
                 </div>
                 {topupNeedsAgree && agreeBox(topupAgree, setTopupAgree, topupConsentText, "topup")}
                 {/* "Not asked" is a merchant-initiated charge, allowed only when the owner's own
@@ -2472,7 +2528,58 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 )}
                 {viewingLabel && !data.hasCard && (
                   <div style={{ fontSize: 12, color: "#92400E", marginTop: 6 }}>
-                    {viewingLabel} has no card on file. The owner has to add funds once themselves.
+                    <div>{viewingLabel} has no card on file. Only the owner can add one, from Settings &gt; Billing &gt; Wallet.</div>
+                    {/* The most an operator can do (2026-11-05): ask. cof.cardRequest comes only to an
+                        operator on a tenant with no card; the server holds a second send for 24 hours
+                        and this holds the button for the same window. */}
+                    {cof && cof.cardRequest && (() => {
+                      const last = cof.cardRequest.lastSentAt ? new Date(cof.cardRequest.lastSentAt) : null;
+                      const hours = cof.cardRequest.cooldownHours || 24;
+                      const held = emailing || busy || !!(last && Date.now() - last.getTime() < hours * 3600 * 1000);
+                      return (
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
+                          <button type="button" onClick={emailOwner} disabled={held}
+                            style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12.5, opacity: held ? 0.5 : 1, cursor: held ? "default" : "pointer" }}>
+                            {emailing ? "Sending…" : "Email the owner"}
+                          </button>
+                          {last && (
+                            <span style={{ fontSize: 12, color: "#64748B" }}>
+                              Emailed the owner on {last.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}. Another reminder can be sent {hours} hours later.
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* NO CARD YET (2026-11-05): the builder's own "Add a card", a $0 check with no purchase.
+                    Gated on the server sending the sentence, so an older portal-billing shows nothing. */}
+                {!data.hasCard && !viewingLabel && !demoView && cof && cof.templates && cof.templates.cardAdd && (
+                  <div style={{ marginTop: 12, fontSize: 12.5, color: "#475569", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>Card on file: <b>none</b></span>
+                    {!adding && (
+                      <button type="button" onClick={() => { setAdding(true); setAddAgree(false); }} disabled={busy}
+                        style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                        Add a card
+                      </button>
+                    )}
+                  </div>
+                )}
+                {adding && !data.hasCard && !viewingLabel && cof && cof.templates && cof.templates.cardAdd && (
+                  <div style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px" }}>
+                    {agreeBox(addAgree, setAddAgree, cof.templates.cardAdd, "card-add")}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button type="button" onClick={addCard} disabled={busy || !addAgree}
+                        style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12.5, opacity: busy || !addAgree ? 0.5 : 1 }}>
+                        {busy ? "Working…" : "Enter the card"}
+                      </button>
+                      <button type="button" onClick={() => setAdding(false)} disabled={busy}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5 }}>
+                        Cancel
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>Your bank checks the card for $0. Nothing is charged.</div>
                   </div>
                 )}
 
@@ -2528,7 +2635,9 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   )}
                   {!data.hasCard ? (
                     <div style={{ fontSize: 12, color: "#94A3B8" }}>
-                      Add funds once and your card is kept on file — then you can turn on automatic top-ups.
+                      {viewingLabel
+                        ? "Automatic top-ups can be switched on by the owner once a card is on file."
+                        : "Add a card, or add funds once, and it is kept on file — then you can turn on automatic top-ups."}
                     </div>
                   ) : (cof && w.autoTopup && w.autoTopup.ready === false && !w.autoTopup.enabled) ? (
                     // 317: automatic top-ups link to the builder's own first top-up. A card saved by

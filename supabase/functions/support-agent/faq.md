@@ -199,6 +199,10 @@ nothing is charged, and the new card then pays renewals and top-ups. Settings > 
 shows what you pay, your features and the next renewal; it has no card controls. Only an owner, or an
 admin an owner has given Billing, can change these.
 
+No card yet? Press "Add a card" on the Wallet tab, tick the agreement and enter it in the secure form:
+your bank checks it for $0, nothing is charged, and it then pays your top-ups (and any subscription you
+buy by card). Builders who pay their subscription by bank transfer add their wallet card the same way.
+
 ### How do I text customers from my own number?
 Settings > Customer Hub > Text Messaging. Texting doesn't switch on by itself when the carriers approve
 you. After you submit your business details (this needs your business's EIN), an owner, or an admin with

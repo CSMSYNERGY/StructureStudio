@@ -34,7 +34,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
-import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
+import { stubAuth, stubDb, stubRpc, stubUsers } from "./supabase_stub.ts";
 import { AUTO_TOPUP_DAILY_MAX, COF_CONSENT_TEMPLATES, COF_CONSENT_VERSION, renderCofConsent } from "../cofConsent.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
@@ -97,6 +97,10 @@ type World = {
   consents?: Record<string, unknown>[];
   /** wallet_credit fails after an approved sale (charged, not credited). */
   creditFails?: boolean;
+  /** admin_audit rows already on file (what a select there answers): the add-a-card reminder's throttle. */
+  auditRows?: Record<string, unknown>[];
+  /** Platform email is configured (RESEND_API_KEY + PLATFORM_EMAIL_DOMAIN_READY): sends land in trace.emails. */
+  email?: boolean;
 };
 type Trace = {
   seq: string[];                                // gateway calls and db writes, in order
@@ -110,6 +114,7 @@ type Trace = {
   errors: Record<string, unknown>[];
   audit: Record<string, unknown>[];
   rpcs: { fn: string; args: Record<string, unknown> }[];
+  emails: Record<string, unknown>[];                // what went to the email provider
 };
 
 const USER_ID = "00000000-0000-4000-8000-00000000c0f1";
@@ -152,8 +157,11 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     case "client_feature_grants":
       return { data: [], error: null };
     case "admin_audit":
-      trace.audit.push(arg("insert"));
-      return { data: null, error: null };
+      if (has("insert")) {
+        trace.audit.push(arg("insert"));
+        return { data: null, error: null };
+      }
+      return { data: (world.auditRows ?? []).map((r) => ({ ...r })), error: null };
     case "app_errors":
       trace.errors.push(arg("insert"));
       return { data: null, error: null };
@@ -225,14 +233,20 @@ function approve(p: Record<string, string>, n: number): string {
 }
 
 async function drive(payload: Record<string, unknown>, world: World = {}) {
-  const trace: Trace = { seq: [], gateway: [], writes: [], consents: [], customers: [], attempts: [], subRows: [], wallet: [], errors: [], audit: [], rpcs: [] };
-  const env = { ...ENV, COF_REQUIRE_CONSENT: world.strict ? "1" : "" };
+  const trace: Trace = { seq: [], gateway: [], writes: [], consents: [], customers: [], attempts: [], subRows: [], wallet: [], errors: [], audit: [], rpcs: [], emails: [] };
+  // The email keys are always set (to "" when the world has no provider), so a key in the
+  // machine's environment can never make a receipt or a reminder "send" from a test.
+  const env = {
+    ...ENV, COF_REQUIRE_CONSENT: world.strict ? "1" : "",
+    RESEND_API_KEY: world.email ? "re_harness" : "", PLATFORM_EMAIL_DOMAIN_READY: world.email ? "true" : "",
+  };
   const savedEnv = Object.fromEntries(Object.keys(env).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(env)) Deno.env.set(k, v);
   const realFetch = globalThis.fetch;
   const realTimeout = AbortSignal.timeout;
   stubAuth.user = world.operator ? { id: OPERATOR_ID, email: "operator@example.test" } : { id: USER_ID, email: "owner@example.test" };
   stubAuth.error = null;
+  stubUsers[USER_ID] = { email: "owner@example.test" };
   stubDb.from = (table: string) => chain(world, trace, table, []);
   stubRpc.rpc = (fn: string, args: any) => {
     trace.rpcs.push({ fn, args });
@@ -242,6 +256,14 @@ async function drive(payload: Record<string, unknown>, world: World = {}) {
   Object.defineProperty(AbortSignal, "timeout", { configurable: true, writable: true, value: () => new AbortController().signal });
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.startsWith("https://api.resend.com/")) {
+      // The email provider: record what was sent, answer an id. Only reachable with world.email.
+      let sent: Record<string, unknown> = {};
+      try { sent = JSON.parse(String(init?.body ?? "{}")); } catch { /* not JSON */ }
+      trace.emails.push(sent);
+      trace.seq.push("email");
+      return Promise.resolve(new Response(JSON.stringify({ id: `e${trace.emails.length}` }), { status: 200, headers: { "content-type": "application/json" } }));
+    }
     if (!url.startsWith(`${GATEWAY}/`)) throw new Error(`unexpected fetch: ${url}`);
     const params = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")));
     delete params.security_key;
@@ -267,6 +289,7 @@ async function drive(payload: Record<string, unknown>, world: World = {}) {
     stubDb.from = null;
     stubRpc.rpc = null;
     stubAuth.user = null;
+    delete stubUsers[USER_ID];
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) Deno.env.delete(k);
       else Deno.env.set(k, v);
@@ -604,6 +627,109 @@ Deno.test("update_card: an unverifiable replacement clears the initial so no aut
   assert(r.trace.errors.some((e) => e.code === "card_update_unknown"), JSON.stringify(r.trace.errors));
 });
 
+// ════ ADD A CARD, NO PURCHASE (2026-11-05) ════════════════════════════════════════════════════
+
+const addCard = (extra: Record<string, unknown> = {}) => ({ action: "add_card", paymentToken: "tok-9", ...CONSENT, ...CARD, ...TAB, ...extra });
+const ADDED: Vault = { vault_id: "V-NEW", unscheduled_initial_txn: "T1", card_last4: "4242", card_brand: "visa" };
+const ADD_AGREED = [{ kind: "card_add", wording_version: COF_CONSENT_VERSION, transaction_id: "T1" }];
+
+Deno.test("add_card: one $0 validate with add_customer stores the card (customer + stored), and its id is the vault's unscheduled initial", async () => {
+  const r = await drive(addCard(), { vault: null });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  assertEquals(r.trace.gateway.length, 1);
+  const g = r.trace.gateway[0];
+  assertEquals([g.type, g.customer_vault, g.payment_token, g.amount, g.customer_vault_id], ["validate", "add_customer", "tok-9", undefined, undefined]);
+  assertEquals(cofOf(g), { initiated_by: "customer", stored_credential_indicator: "stored" });
+  assertEquals(g.merchant_defined_field_1, TENANT, "what support searches the gateway by");
+  assertEquals(r.trace.customers.length, 1);
+  const up = r.trace.customers[0];
+  assertEquals(up.op, "upsert");
+  assertEquals([up.row.client_id, up.row.vault_id, up.row.card_last4, up.row.card_brand, up.row.unscheduled_initial_txn], [TENANT, "V-NEW", "4242", "visa", "T1"]);
+  assertEquals([r.trace.consents[0].kind, r.trace.consents[0].transaction_id, r.trace.consents[0].wording], ["card_add", "T1", COF_CONSENT_TEMPLATES.cardAdd]);
+  assert(r.trace.seq.indexOf("db:billing_consents:insert") < r.trace.seq.indexOf("gw:validate"), `the agreement is recorded BEFORE the gateway is asked: ${r.trace.seq.join(" ")}`);
+  assertEquals(r.trace.attempts, [], "no money moves, so no attempt row");
+  assertEquals(r.trace.rpcs.filter((x) => x.fn === "wallet_credit"), [], "nothing is credited");
+  assertEquals(r.body.card, { last4: "4242", brand: "visa" });
+  assert(!JSON.stringify(r.body).includes("V-NEW"), "the vault id never leaves the server");
+});
+
+Deno.test("add_card: a card on file, an operator, no box, or no token: refused before the gateway, nothing touched", async () => {
+  for (const [payload, world, status, code] of [
+    [addCard(), { vault: ON_FILE }, 409, "card_on_file"],
+    [addCard(), { operator: true, vault: null }, 400, undefined],
+    [{ action: "add_card", paymentToken: "tok", ...CARD, ...TAB }, { vault: null }, 400, "consent_required"],
+    [{ action: "add_card", ...CONSENT, ...CARD, ...TAB }, { vault: null }, 400, undefined],
+  ] as const) {
+    const r = await drive(payload as any, world as World);
+    assertEquals(r.status, status, JSON.stringify(r.body));
+    if (code) assertEquals(r.body.code, code);
+    nothingTouched(r.trace);
+  }
+});
+
+Deno.test("add_card: a refused card stores nothing; an unverifiable one, or an approval with no vault id, stores nothing here and files a row", async () => {
+  const declined = await drive(addCard(), { vault: null, gateway: () => "response=2&responsetext=DECLINE&response_code=200" });
+  assertEquals(declined.status, 402, JSON.stringify(declined.body));
+  assertEquals(declined.trace.customers, []);
+  assertEquals(declined.trace.consents[0].transaction_id, undefined, "the agreement is stamped with nothing");
+  const unknown = await drive(addCard(), { vault: null, gateway: () => "unknown" });
+  assertEquals(unknown.status, 502, JSON.stringify(unknown.body));
+  assertEquals(unknown.trace.customers, []);
+  assert(unknown.trace.errors.some((e) => e.code === "card_add_unknown" && String(e.message).includes(TENANT)), JSON.stringify(unknown.trace.errors));
+  const noVault = await drive(addCard(), { vault: null, gateway: () => "response=1&responsetext=SUCCESS&transactionid=T1" });
+  assertEquals(noVault.status, 502, JSON.stringify(noVault.body));
+  assertEquals(noVault.trace.customers, []);
+  assert(noVault.trace.errors.some((e) => e.code === "card_add_no_vault"), JSON.stringify(noVault.trace.errors));
+});
+
+Deno.test("after add_card: a top-up needs no box, automatic top-ups are ready, and an operator's 'not asked' top-up names its validate", async () => {
+  const st = await drive({ action: "status" }, { vault: ADDED, consents: ADD_AGREED });
+  assertEquals([st.body.cof.topupNeedsAgreement, st.body.wallet.autoTopup.ready, st.body.cof.cardRequest], [false, true, null]);
+  const op = await drive({ action: "status" }, { operator: true, vault: ADDED, consents: ADD_AGREED });
+  assertEquals(op.body.cof.operatorTopupAllowed, true);
+  const mit = await drive(topup(5000, { cardholderPresent: false, ...TAB }), { operator: true, vault: ADDED, consents: ADD_AGREED });
+  assertEquals(mit.status, 200, JSON.stringify(mit.body));
+  assertEquals(cofOf(sales(mit.trace)[0]), { initiated_by: "merchant", stored_credential_indicator: "used", initial_transaction_id: "T1" });
+  // The fake answers every consent select the same, so the kind list is pinned from the source.
+  assert(SOURCE.includes(`.in("kind", ["topup_card", "card_update", "card_add"])`), "agreementsBehindInitial reads card_add rows");
+});
+
+Deno.test("request_card_email: operator only, no card only, emails the owners once a day, and audits a count", async () => {
+  const builder = await drive({ action: "request_card_email" }, { vault: null, email: true });
+  assertEquals(builder.status, 403, JSON.stringify(builder.body));
+  const withCard = await drive({ action: "request_card_email" }, { operator: true, vault: ON_FILE, email: true });
+  assertEquals(withCard.status, 409, JSON.stringify(withCard.body));
+  assertEquals(builder.trace.emails.length + withCard.trace.emails.length, 0);
+  const sent = await drive({ action: "request_card_email" }, { operator: true, vault: null, email: true });
+  assertEquals(sent.status, 200, JSON.stringify(sent.body));
+  assertEquals([sent.body.sent, sent.trace.emails.length], [1, 1]);
+  const mail = sent.trace.emails[0];
+  assertEquals(([] as unknown[]).concat(mail.to as unknown[])[0], "owner@example.test");
+  assert(String(mail.text).includes("https://app.structurestudiosuite.com/portal/settings/wallet"), String(mail.text));
+  assert(!String(mail.text).includes(TENANT) && !String(mail.text).includes("operator@"), "no builder slug, no operator, in the note");
+  const row = sent.trace.audit.find((a) => a && a.action === "operator_card_request_email");
+  assert(row && row.row_count === 1 && !JSON.stringify(row).includes("owner@example.test"), JSON.stringify(sent.trace.audit));
+  const held = await drive({ action: "request_card_email" }, { operator: true, vault: null, email: true, auditRows: [{ created_at: new Date(Date.now() - 3600_000).toISOString() }] });
+  assertEquals(held.status, 429, JSON.stringify(held.body));
+  assertEquals(held.trace.emails, []);
+  assert(/Another reminder can be sent 24 hours/.test(String(held.body.error)), String(held.body.error));
+  const noMail = await drive({ action: "request_card_email" }, { operator: true, vault: null });
+  assertEquals(noMail.status, 503, JSON.stringify(noMail.body));
+  assertEquals(noMail.trace.audit.filter((a) => a && a.action === "operator_card_request_email"), [], "a send that did not go out holds nothing");
+});
+
+Deno.test("status tells an operator when the owner was last emailed, and nothing to a builder or about a tenant with a card", async () => {
+  const at = new Date(Date.now() - 3600_000).toISOString();
+  const op = await drive({ action: "status" }, { operator: true, vault: null, auditRows: [{ created_at: at }] });
+  assertEquals(op.body.cof.cardRequest, { lastSentAt: at, cooldownHours: 24 });
+  const never = await drive({ action: "status" }, { operator: true, vault: null });
+  assertEquals(never.body.cof.cardRequest, { lastSentAt: null, cooldownHours: 24 });
+  const builder = await drive({ action: "status" }, { vault: null });
+  assertEquals(builder.body.cof.cardRequest, null);
+  const card = await drive({ action: "status" }, { operator: true, vault: ON_FILE });
+  assertEquals(card.body.cof.cardRequest, null);
+});
+
 // ════ BEFORE 317 / STATUS ═════════════════════════════════════════════════════════════════════
 
 Deno.test("against a database without 317, no card action runs (503), and cancel still does", async () => {
@@ -751,7 +877,7 @@ Deno.test("update_card: a replacement the database could not record still clears
 
 Deno.test("wiring: every card request the Billing tab sends carries the cofTab marker", async () => {
   const jsx = await read("../../../../portal/03-catalog.jsx");
-  for (const action of ["subscribe", "topup", "topup_settings", "update_card"]) {
+  for (const action of ["subscribe", "topup", "topup_settings", "update_card", "add_card"]) {
     const i = jsx.indexOf(`action: "${action}"`);
     assert(i > 0, `${action} body not found`);
     const line = jsx.slice(i, jsx.indexOf("\n", i) + 400);

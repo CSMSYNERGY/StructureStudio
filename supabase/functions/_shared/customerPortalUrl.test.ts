@@ -1,6 +1,6 @@
 // Deliberately dependency-free (no jsr:/npm: imports), like the other _shared tests, so it
 // runs on a machine with no registry access. Preflight discovers _shared/*.test.ts itself.
-import { bookManageUrl, customerHomeUrl, myQuotesUrl, portalOrderUrl } from "./customerPortalUrl.ts";
+import { bookManageUrl, customerHomeUrl, myQuotesUrl, portalOrderUrl, portalWalletUrl } from "./customerPortalUrl.ts";
 
 function assertEq(actual: unknown, expected: unknown, msg?: string) {
   if (actual !== expected) {
@@ -58,6 +58,13 @@ Deno.test("customerHomeUrl: an unknown view is quotes, and a ref that is not a s
   assertEq(customerHomeUrl("x", null, { ref: "  SS-ABC234 " }), `${base}&q=SS-ABC234`, "surrounding space trimmed");
   // The old link is untouched by the new one.
   assertEq(myQuotesUrl("x"), "https://app.structurestudiosuite.com/my-quotes?client=x");
+});
+
+Deno.test("portalWalletUrl: the Wallet tab, /portal on purpose, on the same host rule", () => {
+  assertEq(portalWalletUrl(), "https://app.structurestudiosuite.com/portal/settings/wallet");
+  assertEq(portalWalletUrl(null), "https://app.structurestudiosuite.com/portal/settings/wallet");
+  assertEq(portalWalletUrl(withOrigin("https://beta.structurestudiosuite.com")), "https://beta.structurestudiosuite.com/portal/settings/wallet");
+  assertEq(portalWalletUrl(withOrigin("https://evil.example")), "https://app.structurestudiosuite.com/portal/settings/wallet");
 });
 
 Deno.test("bookManageUrl: the capability link, on the same host rule, and the token is encoded", () => {

@@ -8,6 +8,11 @@
 /** Set by the test to control what auth.getUser() returns for the next call. */
 export const stubAuth: { user: any; error: any } = { user: null, error: null };
 
+/** The users auth.admin.getUserById() knows, by id (cofCharges_test: the owner lookup behind the
+ *  wallet receipt and the add-a-card reminder). Empty by default: an id not here answers no user,
+ *  which the lookups read as "no email on file". Reset it when the test is done. */
+export const stubUsers: Record<string, { email: string }> = {};
+
 /** Opt-in data surface for a test that drives a whole request handler
  *  (customerAuthSlots_test.ts): set `from` to a hand-rolled fake and every
  *  createClient(...).from(...) call goes to it. Left null, from() still throws, so no other
@@ -29,6 +34,10 @@ export function createClient(_url: string, _key: string, _opts?: any) {
     auth: {
       // deno-lint-ignore require-await
       getUser: async () => ({ data: { user: stubAuth.user }, error: stubAuth.error }),
+      admin: {
+        // deno-lint-ignore require-await
+        getUserById: async (id: string) => ({ data: { user: stubUsers[id] ? { id, email: stubUsers[id].email } : null }, error: null }),
+      },
     },
     // TYPE-ONLY surface: postmarkEvents_test.ts imports postmark-events/index.ts, which
     // pulls _shared/logError.ts into this import-mapped graph, and both call

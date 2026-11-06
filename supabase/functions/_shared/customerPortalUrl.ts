@@ -39,6 +39,13 @@ export function portalInventoryUrl(req?: Request | null): string {
   return `https://${hostFor(req)}/portal/inventory`;
 }
 
+/** The builder's Wallet tab (Settings > Billing > Wallet), for the operator's "please add a card"
+ *  email (2026-11-05). /portal on purpose, like the two links beside it: it reaches the tab on
+ *  both hosts in one hop until production serves the root-address _redirects. */
+export function portalWalletUrl(req?: Request | null): string {
+  return `https://${hostFor(req)}/portal/settings/wallet`;
+}
+
 /**
  * Where a customer manages one booking: `/book?manage=<token>` (migration 327).
  *

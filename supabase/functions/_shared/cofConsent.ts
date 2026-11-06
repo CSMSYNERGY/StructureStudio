@@ -13,6 +13,12 @@
 //
 // CHANGING A SENTENCE means bumping COF_CONSENT_VERSION in the same commit. A stored agreement is
 // evidence of what someone saw; two different sentences under one version make it worthless.
+//
+// ADDING a sentence does NOT bump it (cardAdd, 2026-11-05). No existing sentence changes, so every
+// stored agreement still says what its version says. A bump would also break production: this
+// module deploys to one Supabase project that serves beta AND production, production's Billing
+// tab keeps sending the version it was built with until the next promotion, and consentProblem
+// would refuse every subscribe and top-up there with "the wording changed" for days.
 
 export const COF_CONSENT_VERSION = "2026-10-20.1";
 
@@ -37,6 +43,13 @@ export const COF_CONSENT_TEMPLATES = {
   // Replacing the card on file.
   cardUpdate:
     "I agree that CSM Synergy may keep this card on file in place of my current one and use it for my subscription renewals, top-ups I make, top-ups CSM Synergy adds to my wallet for me, and any automatic top-ups I have switched on. I will get an email receipt for every top-up I do not make myself. I can cancel or turn these off at any time in Billing.",
+  // Adding a card with a $0 check and no purchase (2026-11-05): a builder who pays for
+  // StructureStudio by bank transfer has nothing at the gateway, and this is how their wallet
+  // gets a card without buying credit first. One card slot per tenant, so it names every use the
+  // slot has: the builder's own top-ups, the operator's, automatic ones, and a subscription bought
+  // here later. The wording is Carolyn's, approved 2026-11-05.
+  cardAdd:
+    "I agree that CSM Synergy may keep this card on file and use it for top-ups I make, top-ups CSM Synergy adds to my wallet for me, any automatic top-ups I switch on, and any subscription I buy in Billing. I will get an email receipt for every top-up I do not make myself. I can cancel or turn these off at any time in Billing.",
 } as const;
 
 /** The first sentence version whose top-up and card-replacement wording discloses top-ups CSM
@@ -56,6 +69,7 @@ export const CONSENT_ROW_KIND: Record<CofConsentKind, string> = {
   topup: "topup_card",
   autoTopup: "auto_topup",
   cardUpdate: "card_update",
+  cardAdd: "card_add",
 };
 
 /** Money exactly as the Billing tab prints it (its fmt$): whole dollars without cents. */
