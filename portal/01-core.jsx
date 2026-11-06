@@ -817,6 +817,12 @@ function ssCanonRoute(page, sub) {
   if (page === "pipelines") {
     return { page: "contacts", sub: sub && SS_UUID_RE.test(sub) ? "p-" + sub.toLowerCase() : SS_HUB_PIPELINE };
   }
+  // THE INTERNAL BOARD MOVED (2026-11-05): /projects is the customers' Project Management page, which
+  // has no sub-pages, so /projects/<anything> can only be an old board link — it becomes
+  // /workbench/<anything>, and ssClampTab decides (once canProjects answers) who may open it. Mapped
+  // HERE, not in the clamp: the shell drops the sub of any route the clamp sends somewhere else, so a
+  // clamp-time redirect lost the board and left the reader on the teaser (found on beta).
+  if (page === "projects" && sub) return { page: "workbench", sub };
   return { page, sub };
 }
 // The page a ROOT address's first segment names, or null. Every page's slug is its id except the
@@ -2549,12 +2555,6 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // the settings filter is: the builder is their own admin. Defaults true, so every existing
   // caller is unchanged — the treatment supportView and advancedOn each got.
   if (!shedsOn && SS_SHED_TABS.indexOf(tab) !== -1) return ssFallbackTab(access);
-  // AN OLD BOARD LINK STILL OPENS THE BOARD (2026-11-05). /projects was the internal board until
-  // it went to the customers' Project Management page, and the board moved to /workbench. That page
-  // has no sub-pages, so /projects/<anything> can only ever have meant a board — for the people
-  // who may open one, it lands on Workbench with the sub intact. Above the Coming Soon line,
-  // which would otherwise turn it away on production before it got here.
-  if (tab === "projects" && sub && canProjects && !supportView) return "workbench";
   // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);

@@ -124,9 +124,13 @@ Deno.test("ssCanonRoute maps an old page id the shell is handed, and nothing els
   assertEquals(K.ssCanonRoute("designs", "d-SS-ABCD2345"), { page: "contacts", sub: "d-SS-ABCD2345" });
   assertEquals(K.ssCanonRoute("designs", null), { page: "contacts", sub: null });
   assertEquals(K.ssCanonRoute("pipelines", B), { page: "contacts", sub: "p-" + B });
-  for (const [p, s] of [["contacts", "people"], ["orders", null], ["settings", "pipelines"], ["conversations", "texts"]]) {
+  for (const [p, s] of [["contacts", "people"], ["orders", null], ["settings", "pipelines"], ["conversations", "texts"], ["projects", null]]) {
     assertEquals(K.ssCanonRoute(p, s), { page: p, sub: s });
   }
+  // 2026-11-05: the internal board moved to /workbench, and /projects (no sub) is the customers'
+  // Project Management page — so only a sub marks an old board link.
+  assertEquals(K.ssCanonRoute("projects", "setup"), { page: "workbench", sub: "setup" });
+  assertEquals(K.ssCanonRoute("projects", "bugs"), { page: "workbench", sub: "bugs" });
   assertEquals(K.ssHubPipeId("p-" + A.toUpperCase()), A);
   for (const bad of [null, "", "p-", "p-12", "pipeline", "people", "x-" + A]) assertEquals(K.ssHubPipeId(bad), null, String(bad));
 });

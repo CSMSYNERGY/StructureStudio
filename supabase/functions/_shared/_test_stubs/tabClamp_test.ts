@@ -283,13 +283,13 @@ Deno.test("Project Management: every builder opens /projects on beta, and nobody
   assertEquals(clampShed("projects", false, false, SALES_REP, false, false, false, null, false), "projects");
 });
 
-Deno.test("an old /projects/<board> link opens Workbench for the people who may, everywhere", () => {
+// An old /projects/<board> link is mapped to /workbench/<board> by ssCanonRoute (contactsHub_test),
+// before the clamp; here, the clamp then judges /workbench exactly as it judges a typed one.
+Deno.test("an old board link, once mapped to Workbench, opens only for the people who may", () => {
   for (const clamp of [ssClampTab, onBeta]) {
-    assertEquals(clamp("projects", true, true, OWNER_MAP, false, true, false, "bugs"), "workbench");
-    // A support operator is barred from the board, so the link does not smuggle them in.
-    assert(clamp("projects", true, false, OWNER_MAP, true, true, false, "bugs") !== "workbench");
-    // Nor does it for a builder: no canProjects, no board.
-    assert(clamp("projects", false, false, SALES_REP, false, false, false, "bugs") !== "workbench");
+    assertEquals(clamp("workbench", true, true, OWNER_MAP, false, true, false, "bugs"), "workbench");
+    assert(clamp("workbench", true, false, OWNER_MAP, true, true, false, "bugs") !== "workbench", "support is barred");
+    assert(clamp("workbench", false, false, SALES_REP, false, false, false, "bugs") !== "workbench", "a builder is barred");
   }
 });
 

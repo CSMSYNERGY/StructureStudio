@@ -370,7 +370,7 @@ function SsHubTabs({ lists, pipes, active, onPick, hrefFor }) {
 //   sub          the address's sub under /contacts (records never reach here)
 //   onRoute(sub, replace)              moves the address (navigate("contacts", sub, replace))
 //   onOpenRecord(code, contactId, fromSub)  opens a card's customer or design, Back to `fromSub`
-function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked = false, crmKnown = true, saved = null, refreshKey = 0,
+function ContactsHub({ clientId, shedsOn = true, sub = null, viewing = false, reach, crmUnlocked = false, crmKnown = true, saved = null, refreshKey = 0,
   onRoute, onOpenRecord, people = null, designs = null, locked = null }) {
   const canPipes = !!crmUnlocked && !!reach.people;
   const { pipelines, error, replace } = useSsPipelineList(clientId, canPipes);
@@ -424,7 +424,7 @@ function ContactsHub({ clientId, sub = null, viewing = false, reach, crmUnlocked
           from every edge. The hub's other views keep their card; the board IS the page. */}
       {r.view === "pipe" && (
         <div data-ss-hub-view="pipe">
-          <SalesPipelines embedded hosted clientId={clientId} viewing={viewing} refreshKey={refreshKey}
+          <SalesPipelines embedded hosted clientId={clientId} viewing={viewing} refreshKey={refreshKey} shedsOn={shedsOn}
             urlPipelineId={r.pipeId}
             onPickPipeline={(id) => onRoute("p-" + String(id).toLowerCase(), false)}
             onPipelines={replace}
@@ -8816,7 +8816,7 @@ function SsPipeInline({ title, onClose, children }) {
 // `pipelines` is no longer read here. It fed the rules section's "create a card in another
 // pipeline" target; the rules left this panel on 2026-11-04 (see below), and the parameter stays
 // only so the callers that pass it need not change.
-function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onChanged = null, inline = false }) {
+function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onChanged = null, inline = false, shedsOn = true }) {
   const Shell = inline ? SsPipeInline : SsPipeModal;
   const [name, setName] = useState(pipeline ? pipeline.name : "");
   const [stages, setStages] = useState(pipeline ? pipeline.stages.map((s) => ({ ...s })) : []);
@@ -8921,7 +8921,9 @@ function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onCh
           onBlur={() => { if (name.trim() && name.trim() !== pipeline.name) run(() => ssPipeCall("crm_pipeline_save", { id: pipeline.id, name })); }} /></label>
       <span style={S.lbl}>Stages</span>
       <p style={{ fontSize: 12, color: "#64748B", margin: "0 0 6px", lineHeight: 1.45 }}>
-        {pipeline.feedsDesigns ? "New designs land in this pipeline, in its first stage. " : ""}
+        {/* Not without the shed product (migration 364): no designer, so nothing lands. Only the
+            SENTENCE — feedsDesigns still keeps the Remove button away below, as the server does. */}
+        {shedsOn && pipeline.feedsDesigns ? "New designs land in this pipeline, in its first stage. " : ""}
         Name, colour and order the stages however you work — each one is a step in your process, so there is
         no Won or Lost column: a sold job shows as Invoiced, and a card is marked lost from the card itself,
         where it stays. Moving a card between stages never changes its status: statuses are set automatically
@@ -9039,7 +9041,7 @@ function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onCh
 // next, next, next"), and urlPipelineId names the tab's pipeline. `onPipelines` hands the hub every
 // fresh list this board loads, so a pipeline added, renamed or removed from "+ Pipeline" or "Edit
 // stages" shows in the tab row at once.
-function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = false, refreshKey = 0, urlPipelineId = null, onPickPipeline = null, onPipelines = null, onOpenRecord = null }) {
+function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = false, hosted = false, refreshKey = 0, urlPipelineId = null, onPickPipeline = null, onPipelines = null, onOpenRecord = null }) {
   const [meta, setMeta] = useState(null);      // { pipelines, team, canManage, canWrite, ownOnly, me }
   const [deals, setDeals] = useState(null);    // null = loading
   const [err, setErr] = useState(null);
@@ -9422,7 +9424,7 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
           onClose={() => setDialog(null)} onOpenRecord={onOpenRecord ? (contactId) => onOpenRecord(null, contactId) : null}
           onAdded={(r) => { setDialog(null); loadDeals(); }} />
       )}
-      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} onClose={() => { setDialog(null); loadMeta(); loadDeals(); }} />}
+      {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} shedsOn={shedsOn} onClose={() => { setDialog(null); loadMeta(); loadDeals(); }} />}
       {dialog === "new" && <SsPipelineEditor pipeline={null} onClose={() => setDialog(null)}
         onCreated={async (id) => { setDialog(null); await loadMeta(); pick(id); }} />}
       {dialog && dialog.lost && (
@@ -9524,7 +9526,7 @@ function PipelineSettings({ viewing = false, shedsOn = true }) {
       {/* IN PLACE, UNDER THE LIST (Carolyn 2026-11-02) — not a pop-up. `inline` swaps the modal
           shell for a card, so the pipelines above stay readable while one of them is open. */}
       {openPipe && (
-        <SsPipelineEditor inline pipeline={openPipe} pipelines={pipes}
+        <SsPipelineEditor inline pipeline={openPipe} pipelines={pipes} shedsOn={shedsOn}
           onClose={() => { setEditing(null); load(); }} onChanged={load} />
       )}
       {editing === "new" && <SsPipelineEditor inline pipeline={null} onClose={() => setEditing(null)} onCreated={() => { setEditing(null); load(); }} />}

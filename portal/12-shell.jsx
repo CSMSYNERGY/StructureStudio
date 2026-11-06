@@ -3680,7 +3680,7 @@ function Dashboard({ session }) {
                 below), and the Design list is what the tab opens on (C14). */}
             {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
               <ContactsHub key={"h-" + effClientId} clientId={effClientId} sub={sub}
-                viewing={!!viewing} reach={hubReach} crmUnlocked={crmUnlocked}
+                viewing={!!viewing} reach={hubReach} crmUnlocked={crmUnlocked} shedsOn={shedsOn}
                 /* On your own portal crmUnlocked reads false until portal-billing answers, so the
                    hub holds its loading body until then rather than painting the Design list and
                    snapping to the board. entitlementSettled ends the wait on a failure or a hang
