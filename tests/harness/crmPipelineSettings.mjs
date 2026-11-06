@@ -98,6 +98,12 @@ const RULES = [
     conditions: [{ field: "contact.label", op: "has", value: "Lot visitor" }], oncePerCard: true, enabled: true, position: 4096, stale: [], lastRun: null,
     actions: [{ id: U(640), kind: "send_sms", params: { body: "New sheds on the lot this week!" }, position: 1024 }] },
 ];
+// 370: the builder's saved emails an email action may send, and whether GoHighLevel is connected.
+const TPL1 = U(900);
+const TEMPLATES = [
+  { id: TPL1, name: "Thank-you note", subject: "Thanks, {{contact.first_name}}", purpose: "general" },
+  { id: U(901), name: "Warranty reminder", subject: "Your warranty", purpose: "general" },
+];
 const PIPELINES = [
   { id: U(1), name: "Shed Deals", position: 1024, lostReasons: ["Price", "Timing"], seedKind: "shed_deals", feedsDesigns: true,
     stages: SHED_STAGES, statuses: rungs(100) },
@@ -155,6 +161,7 @@ const handler = async (route) => {
         team: [{ userId: USER.id, name: "Pat Owner", title: "Owner" }],
         labels: ["Lot visitor", "VIP"], timeZone: "America/Chicago", timeZoneSet: true,
         dateFields: [{ key: "custom:install_date", label: "Install date" }],
+        emailTemplates: TEMPLATES, ghlConnected: false,
         canManage: true, me: USER.id,
       });
     case "crm_status_save": {
@@ -192,7 +199,8 @@ const handler = async (route) => {
           elapsedDays: body.elapsedDays == null ? null : body.elapsedDays, conditions: body.conditions || [],
           oncePerCard: body.oncePerCard !== false, enabled: body.enabled !== false, position: (RULES.length + 1) * 1024,
           stale: [], lastRun: null,
-          actions: (body.actions || []).map((a, i) => ({ id: U(750 + i), kind: a.kind, params: a.params || {}, position: (i + 1) * 1024 })),
+          actions: (body.actions || []).map((a, i) => ({ id: U(750 + i), kind: a.kind, position: (i + 1) * 1024,
+            params: a.kind === "webhook" && !(a.params || {}).secret ? { ...(a.params || {}), secret: "ab".repeat(32) } : (a.params || {}) })),
         };
         RULES.push(made);
         return json(route, { ok: true, id: made.id });
@@ -665,10 +673,91 @@ try {
   await ed.locator("button", { hasText: "+ Add action" }).click();
   await page.waitForTimeout(200);
   const teamKinds = await kinds();
-  ok("E25 a rule for nobody runs only on a schedule, and can only email the team — with no arm to press",
-    JSON.stringify(whenOpts) === JSON.stringify(["schedule"]) && JSON.stringify(teamKinds) === JSON.stringify(["notify_team"])
+  ok("E25 a rule for nobody runs only on a schedule, and can only email the team or (370) call a webhook — with no arm to press",
+    JSON.stringify(whenOpts) === JSON.stringify(["schedule"]) && JSON.stringify(teamKinds) === JSON.stringify(["notify_team", "webhook"])
     && (await ed.locator("[data-ss-rule-arm]").count()) === 0,
     JSON.stringify({ whenOpts, teamKinds }));
+  await ed.locator("button", { hasText: "Cancel" }).click();
+  await page.waitForTimeout(300);
+
+  // ── E27-E30 (370): a webhook, a GoHighLevel push and a saved email ─────────────────────
+  await page.locator("[data-ss-rules-add]").click();
+  await page.waitForTimeout(400);
+  await ed.locator("[data-ss-rule-scope-option='contacts'] input").check();
+  await page.waitForTimeout(300);
+  const act = (i) => ed.locator(`[data-ss-rule-action='${i}']`);
+  await ed.locator("button", { hasText: "+ Add action" }).click();
+  await page.waitForTimeout(150);
+  await act(0).locator("select[aria-label='What it does']").selectOption("webhook");
+  await page.waitForTimeout(150);
+  await ed.locator("[data-ss-rule-webhook-url]").fill("http://hooks.example.com/catch/1");
+  await page.waitForTimeout(100);
+  const httpWarn = /starting with https/.test(await act(0).innerText());
+  await ed.locator("[data-ss-rule-webhook-url]").fill("https://hooks.example.com/catch/1");
+  await page.waitForTimeout(100);
+  const httpsQuiet = !/starting with https/.test(await act(0).innerText());
+  const pending = await ed.locator("[data-ss-rule-webhook-secret='pending']").count();
+  await ed.locator("button", { hasText: "+ Add action" }).click();
+  await page.waitForTimeout(150);
+  await act(1).locator("select[aria-label='What it does']").selectOption("ghl_push");
+  await page.waitForTimeout(150);
+  await ed.locator("[data-ss-rule-ghl-tags]").fill("lot-buyer, review");
+  const ghlOff = await ed.locator("[data-ss-rule-ghl-off]").count();
+  // A schedule for customers that only HANDS THEM ON still needs the arm (370's RULE_ARMED), but it
+  // is not "messaging the customer", so that warning stays away.
+  await ed.locator("select[aria-label='When the rule runs']").selectOption("schedule");
+  await page.waitForTimeout(1200);
+  const armForHandoff = await ed.locator("[data-ss-rule-arm]").count();
+  const outboundWarn = await ed.locator("[data-ss-rule-outbound-warning]").count();
+  ok("E27 (370) a webhook asks for https and says it will be signed; a GoHighLevel push takes tags and says when it isn't connected; on a schedule either needs the arm, without the 'messages the customer' warning",
+    httpWarn && httpsQuiet && pending === 1 && ghlOff === 1 && armForHandoff === 1 && outboundWarn === 0,
+    JSON.stringify({ httpWarn, httpsQuiet, pending, ghlOff, armForHandoff, outboundWarn }));
+  await ed.locator("button", { hasText: "+ Add action" }).click();
+  await page.waitForTimeout(150);
+  await act(2).locator("select[aria-label='What it does']").selectOption("send_email");
+  await page.waitForTimeout(150);
+  const srcOpts = await act(2).locator("[data-ss-rule-email-source]").evaluate((sel) => [...sel.options].map((o) => o.textContent));
+  await act(2).locator("[data-ss-rule-email-source]").selectOption(TPL1);
+  await page.waitForTimeout(150);
+  const tplHint = (await ed.locator("[data-ss-rule-email-template]").innerText()).replace(/\s+/g, " ");
+  const typedGone = (await act(2).locator("input[aria-label='Email subject']").count()) === 0;
+  ok("E28 (370) an email can be one of the saved emails instead of typed words, and shows that email's subject",
+    JSON.stringify(srcOpts) === JSON.stringify(["Words written here", "Saved email: Thank-you note", "Saved email: Warranty reminder"])
+    && /Subject: Thanks, \{\{contact\.first_name\}\}/.test(tplHint) && /unsubscribe/i.test(tplHint) && typedGone,
+    JSON.stringify({ srcOpts, tplHint, typedGone }));
+  await ed.locator("[data-ss-rule-arm] input").check();
+  await page.screenshot({ path: join(shots, "rule-webhook-ghl-template.png") });
+  await ed.locator("[data-ss-rule-save]").click();
+  await page.waitForTimeout(900);
+  const posted = sent.filter((b) => b.action === "crm_rule_save").pop() || {};
+  const pa = posted.actions || [];
+  ok("E29 (370) the three actions post their own shapes, armed with the count on screen, and the browser makes no secret",
+    pa.length === 3
+    && pa[0].kind === "webhook" && pa[0].params.url === "https://hooks.example.com/catch/1" && !("secret" in pa[0].params)
+    && pa[1].kind === "ghl_push" && JSON.stringify(pa[1].params.tags) === JSON.stringify(["lot-buyer", "review"])
+    && pa[2].kind === "send_email" && pa[2].params.templateId === TPL1
+    && posted.arm === true && posted.armedCount === 312,
+    JSON.stringify(posted));
+  // SAVED: the server made the secret. Then the thank-you note is deleted from Email Templates.
+  const madeId = RULES[RULES.length - 1].id;
+  TEMPLATES.splice(0, 1);
+  await go("/settings");
+  await go("/settings/automations");
+  await page.waitForTimeout(700);
+  await page.locator(`[data-ss-rule-row="${madeId}"] button`, { hasText: "Edit" }).click();
+  await page.waitForTimeout(500);
+  const secTxt = (await ed.locator("[data-ss-rule-webhook-secret]").innerText()).replace(/\s+/g, " ");
+  const masked = /•{12}abab/.test(secTxt) && !secTxt.includes("ab".repeat(32));
+  await ed.locator("[data-ss-rule-webhook-secret] button", { hasText: "Show" }).click();
+  await page.waitForTimeout(100);
+  const shown = (await ed.locator("[data-ss-rule-webhook-secret] code").first().innerText()) === "ab".repeat(32);
+  const staleEmail = await ed.locator("[data-ss-rule-action='2'][data-ss-rule-action-stale]").count();
+  const deletedOpt = /deleted/.test(await act(2).locator("[data-ss-rule-email-source]").evaluate((sel) => sel.options[sel.selectedIndex].textContent));
+  const saveTxt2 = (await ed.locator("[data-ss-rule-save]").innerText()).trim();
+  const saveOff2 = await ed.locator("[data-ss-rule-save]").isDisabled();
+  ok("E30 (370) a saved webhook shows its signing secret hidden until asked; an email whose saved email was deleted is marked and holds Save",
+    masked && shown && staleEmail === 1 && deletedOpt && saveOff2 && /Re-pick 1 item first/.test(saveTxt2),
+    JSON.stringify({ secTxt, shown, staleEmail, deletedOpt, saveTxt2 }));
   await ed.locator("button", { hasText: "Cancel" }).click();
   await page.waitForTimeout(300);
 

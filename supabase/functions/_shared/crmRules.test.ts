@@ -11,6 +11,7 @@ import {
   RULE_ACTIONS_MAX, RULE_ANCHORS, RULE_CONDITION_FIELDS, RULE_CONDITION_OPS, RULE_CONDITIONS_MAX,
   RULE_DAYS_MAX, RULE_EVENTS, RULE_SCOPES, RULE_SMS_MAX, ruleSentence, triggerAllowedForScope,
   parseRuleSchedule, RULE_CONTACT_EVENTS, RULE_SCHEDULE_FREQS, scheduleWords,
+  needsArmAction, RULE_ARMED, RULE_GHL_TAGS_MAX,
 } from "./crmRules.ts";
 
 function eq(a: unknown, b: unknown, msg: string) {
@@ -163,9 +164,10 @@ Deno.test("every action says what it needs, and every scope gives what it should
   eq(RULE_ACTION_KINDS.filter((k) => !actionAllowedForScope(k, "all_pipelines")), ["set_status", "move_stage"], "every pipeline");
   // CUSTOMERS: nothing that writes to a card.
   eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "contacts")),
-    ["add_note", "create_card", "add_label", "remove_label", "assign_owner", "create_task", "notify_team", "send_sms", "send_email"], "customers");
-  // NOBODY: only telling the team.
-  eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "none")), ["notify_team"], "nobody");
+    ["add_note", "create_card", "add_label", "remove_label", "assign_owner", "create_task", "notify_team",
+     "webhook", "ghl_push", "send_sms", "send_email"], "customers");
+  // NOBODY: telling the team, or (370) telling another system.
+  eq(RULE_ACTION_KINDS.filter((k) => actionAllowedForScope(k, "none")), ["notify_team", "webhook"], "nobody");
   eq(actionAllowedForScope("nope", "pipeline"), false, "an unknown action is never allowed");
 });
 
@@ -372,4 +374,59 @@ Deno.test("365's condition fields read days and sources", () => {
   good(parseRuleConditions([{ field: "contact.source", op: "eq", value: "form" }], "contacts"), "came from a form");
   bad(parseRuleConditions([{ field: "contact.source", op: "eq", value: "carrier pigeon" }], "contacts"), "a source not in the list");
   good(parseRuleConditions([{ field: "event.label", op: "eq", value: "Hot" }], "contacts"), "the tag that was added");
+});
+
+// ── 370: webhook, GoHighLevel push, a saved email ─────────────────────────────────────────────
+
+const T = "44444444-5555-4666-8777-888888888888";
+const HEX = "0123456789abcdef".repeat(4);
+
+Deno.test("370: a schedule for a group must be armed to message them OR hand them to another system", () => {
+  eq([...RULE_ARMED], ["send_sms", "send_email", "webhook", "ghl_push"], "armed set");
+  eq(RULE_ACTION_KINDS.filter((k) => needsArmAction(k)), ["webhook", "ghl_push", "send_sms", "send_email"], "in editor order");
+  // The customer-messaging set is unchanged: the editor's "it messages the customer" warning reads it.
+  eq(RULE_ACTION_KINDS.filter((k) => isOutboundAction(k)), ["send_sms", "send_email"], "outbound set unchanged");
+});
+
+Deno.test("370: a webhook address goes through the guard at save", () => {
+  const ok = parseRuleAction({ kind: "webhook", params: { url: "  https://hooks.zapier.com/hooks/catch/1/abc/  " } });
+  good(ok, "a zapier hook");
+  eq((ok as { params: Record<string, unknown> }).params, { url: "https://hooks.zapier.com/hooks/catch/1/abc/" }, "normalised, no secret yet");
+  for (const url of ["", "http://hooks.zapier.com/x", "https://10.0.0.1/x", "https://hooks.example.com:8080/x",
+                     "https://user:pw@hooks.example.com/", "https://localhost/x", "https://printer.local/x", "file:///etc/passwd", "javascript:alert(1)"]) {
+    bad(parseRuleAction({ kind: "webhook", params: { url } }), `refused: ${url}`);
+  }
+});
+
+Deno.test("370: a webhook's secret is kept only in its own shape", () => {
+  const kept = parseRuleAction({ kind: "webhook", params: { url: "https://h.example.com/x", secret: HEX } }) as { params: Record<string, unknown> };
+  eq(kept.params.secret, HEX, "kept");
+  for (const secret of ["short", HEX.toUpperCase(), HEX + "0", { a: 1 }]) {
+    const r = parseRuleAction({ kind: "webhook", params: { url: "https://h.example.com/x", secret } }) as { params: Record<string, unknown> };
+    eq("secret" in r.params, false, `dropped: ${JSON.stringify(secret)}`);
+  }
+});
+
+Deno.test("370: GoHighLevel tags are trimmed, de-duplicated and capped", () => {
+  const r = parseRuleAction({ kind: "ghl_push", params: { tags: [" lot-buyer ", "Lot-Buyer", "", 7, "review"] } }) as { ok: boolean; params: Record<string, unknown> };
+  good(r, "tags");
+  eq(r.params.tags, ["lot-buyer", "review"], "cleaned");
+  good(parseRuleAction({ kind: "ghl_push", params: {} }), "no tags is just a push");
+  bad(parseRuleAction({ kind: "ghl_push", params: { tags: ["x".repeat(61)] } }), "a long tag");
+  bad(parseRuleAction({ kind: "ghl_push", params: { tags: Array.from({ length: RULE_GHL_TAGS_MAX + 1 }, (_v, i) => `t${i}`) } }), "too many tags");
+});
+
+Deno.test("370: an email is EITHER a saved template OR typed words", () => {
+  const t = parseRuleAction({ kind: "send_email", params: { templateId: T.toUpperCase(), subject: "ignored", body: "ignored" } }) as { ok: boolean; params: Record<string, unknown> };
+  good(t, "a template");
+  eq(t.params, { templateId: T }, "only the template is kept");
+  bad(parseRuleAction({ kind: "send_email", params: { templateId: "not-a-uuid" } }), "a junk template id");
+  // An empty templateId is the typed kind, with its own refusals.
+  bad(parseRuleAction({ kind: "send_email", params: { templateId: "", subject: "Hi" } }), "typed, no body");
+  good(parseRuleAction({ kind: "send_email", params: { templateId: "", subject: "Hi", body: "Hello" } }), "typed");
+});
+
+Deno.test("370: who the new actions are for", () => {
+  eq([actionAllowedForScope("webhook", "none"), actionAllowedForScope("ghl_push", "none")], [true, false], "nobody");
+  eq([actionAllowedForScope("webhook", "contacts"), actionAllowedForScope("ghl_push", "contacts")], [true, true], "customers");
 });

@@ -7,12 +7,12 @@
 // events the product already records AND a clock, and an action may reach the customer by text or
 // email, not only write inside the Customer Hub.
 //
-// ⚠️ THERE IS NO MESSAGE TEMPLATE LIBRARY IN THIS PRODUCT, and the plan's wording ("send a text
-// from template ‹…›") assumed one. `email_template_copy` is the builder's wording for FIXED
-// documents — the estimate, the invoice — keyed by document kind; it cannot hold "the review
-// request". So a messaging action carries its own text, with the merge fields below. A real
-// template library is a feature of its own, and pretending these pointed at one would mean a
-// drop-down with nothing in it.
+// A messaging action carries its own text, with the merge fields below. `email_template_copy` is
+// the builder's wording for FIXED documents (the estimate, the invoice) and cannot hold "the review
+// request". Since migration 370 an EMAIL may instead name one of the builder's saved designs from
+// Settings → Customer Hub → Email Templates (325's email_templates), rendered by the same
+// renderEmailDesign the template editor previews with. A text still carries its own words: there
+// is no text template library.
 //
 // Carolyn, 2026-11-04 (migration 363): a rule is no longer the property of one pipeline. It says
 // WHO it is for — cards in one pipeline, cards in every pipeline, customers matching a filter, or
@@ -22,6 +22,8 @@
 // Self-contained on purpose (no jsr:/npm: imports): preflight runs `_shared/*.test.ts` offline.
 
 import { isUuidLike, type Parsed, STATUS_EVENTS } from "./crmPipelines.ts";
+// A leaf module with no imports of its own, so this file stays self-contained for the offline tests.
+import { guardUrl } from "./safeFetchText.ts";
 
 /** The events a rule can fire on. The SAME eight as a status's "set automatically when", from the
  *  same object, because they are the same facts — a second copy would drift. */
@@ -134,6 +136,8 @@ export const RULE_ACTION_KINDS = [
   "set_follow_up", "set_close_date", "add_note", "create_card",
   // 365
   "add_label", "remove_label", "assign_owner", "create_task", "notify_team",
+  // 370: they leave StructureStudio, but they do not message the customer themselves.
+  "webhook", "ghl_push",
   "send_sms", "send_email",
 ] as const;
 export type RuleActionKind = typeof RULE_ACTION_KINDS[number];
@@ -152,6 +156,8 @@ export const RULE_ACTION_LABELS: Record<RuleActionKind, string> = {
   assign_owner: "Assign the customer to…",
   create_task: "Create a task…",
   notify_team: "Email your team",
+  webhook: "Send it to a webhook",
+  ghl_push: "Push the customer to GoHighLevel",
   send_sms: "Send the customer a text",
   send_email: "Send the customer an email",
 };
@@ -160,6 +166,20 @@ export const RULE_ACTION_LABELS: Record<RuleActionKind, string> = {
  *  the editor's warning, the outbox, and the tick's opt-out check. */
 export const RULE_OUTBOUND: readonly RuleActionKind[] = ["send_sms", "send_email"];
 export const isOutboundAction = (k: string): boolean => (RULE_OUTBOUND as readonly string[]).includes(k);
+
+/** What a SCHEDULE for a group must be ARMED to do (365's arm, widened by 370). The messages, and the
+ *  two actions that hand the customer to another system: a GoHighLevel tag can start a GoHighLevel
+ *  workflow that texts them, and a webhook can feed a Zapier step that emails them, so "every Monday,
+ *  everyone tagged X" is the same kind of mistake either way. Mirrored as SS_RULE_ARMED; the sweep
+ *  (370's crm_rules_sweep) refuses an unarmed one on the same list. */
+export const RULE_ARMED: readonly RuleActionKind[] = ["send_sms", "send_email", "webhook", "ghl_push"];
+export const needsArmAction = (k: string): boolean => (RULE_ARMED as readonly string[]).includes(k);
+
+/** GoHighLevel tags one push may add. Each is a tag in THEIR account, where it may start a workflow. */
+export const RULE_GHL_TAGS_MAX = 5;
+/** A webhook's signing secret: 32 random bytes as hex, made by portal-settings when the action is
+ *  saved without one. One that arrives in this shape is kept, so an edit does not change it. */
+export const RULE_WEBHOOK_SECRET = /^[0-9a-f]{64}$/;
 
 // ── WHO A RULE IS FOR (migration 363) ─────────────────────────────────────────────────────────
 
@@ -203,8 +223,11 @@ export const RULE_ACTION_NEEDS: Record<RuleActionKind, RuleNeed> = {
   remove_label: "contact",
   assign_owner: "contact",
   create_task: "contact",
-  // the only thing a rule for nobody can do
+  // the only things a rule for nobody can do
   notify_team: "any",
+  // 370: a webhook can say "it is Monday" with nobody attached; a push needs somebody to push.
+  webhook: "any",
+  ghl_push: "contact",
   send_sms: "contact",
   send_email: "contact",
 };
@@ -482,6 +505,43 @@ export function parseRuleAction(b: Record<string, unknown>): Parsed<RuleActionIn
     if (!body) return { ok: false, error: "Write the text the rule should send." };
     if (body.length > RULE_SMS_MAX) return { ok: false, error: `Keep the text under ${RULE_SMS_MAX} characters.` };
     out.body = body;
+
+  } else if (kind === "webhook") {
+    // ⚠️ THE ADDRESS IS A STRANGER'S URL, fetched from inside our functions: safeFetchText's guard
+    // decides (https, no port, no credentials, no IP literal, no private name), here at save and
+    // again by the tick before every send, which also refuses to follow a redirect.
+    const url = str(p.url, 4096);
+    if (!url) return { ok: false, error: "Paste the web address to send it to." };
+    const g = guardUrl(url);
+    if (!g.ok) return { ok: false, error: g.reason };
+    out.url = g.url.toString();
+    // Kept only in its own shape; anything else is dropped, and the save makes a new one.
+    const secret = str(p.secret, 128);
+    if (secret && RULE_WEBHOOK_SECRET.test(secret)) out.secret = secret;
+
+  } else if (kind === "ghl_push") {
+    // The customer is created or updated in the builder's GoHighLevel, and these tags ADDED to them
+    // there (never a replacement of the tags they already carry).
+    const raw = Array.isArray(p.tags) ? p.tags : [];
+    const tags: string[] = [];
+    const seen = new Set<string>();
+    for (const t of raw) {
+      const v = typeof t === "string" ? t.trim() : "";
+      if (!v) continue;
+      if (v.length > RULE_LABEL_MAX) return { ok: false, error: `Keep each tag under ${RULE_LABEL_MAX} characters.` };
+      if (seen.has(v.toLowerCase())) continue;
+      seen.add(v.toLowerCase());
+      tags.push(v);
+    }
+    if (tags.length > RULE_GHL_TAGS_MAX) return { ok: false, error: `Add at most ${RULE_GHL_TAGS_MAX} GoHighLevel tags.` };
+    out.tags = tags;
+
+  } else if (kind === "send_email" && str(p.templateId, 64)) {
+    // 370: one of the builder's saved emails. EITHER a template OR typed words, never both, so
+    // nobody has to guess which one goes out. portal-settings checks the template is theirs.
+    const tpl = str(p.templateId, 64);
+    if (!isUuidLike(tpl)) return { ok: false, error: "Pick which saved email to send." };
+    out.templateId = tpl!.toLowerCase();
 
   } else if (kind === "send_email") {
     const subject = str(p.subject, RULE_EMAIL_SUBJECT_MAX + 1);

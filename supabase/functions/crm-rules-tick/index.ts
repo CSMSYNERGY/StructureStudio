@@ -4,7 +4,10 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { fillMergeFields } from "../_shared/crmRules.ts";
-import { sendTeamNote, teamEmails } from "../_shared/leadFormMail.ts";
+import { companyTokens, sendTeamNote, teamEmails } from "../_shared/leadFormMail.ts";
+import { cleanDesign, fillText, renderEmailDesign } from "../_shared/emailBlocks.ts";
+import { postWebhook, webhookPayload } from "../_shared/ruleWebhook.ts";
+import { pushContactToGhl } from "../_shared/ghlPush.ts";
 import { unsubscribeUrl } from "../_shared/unsubscribe.ts";
 
 // CRM-RULES-TICK — the half of per-pipeline rules (migration 355) that needs a clock and a
@@ -252,8 +255,11 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
     // messages stop here. This mattered little while a failing message gave up in twenty minutes;
     // with a day of retries, a builder who switches off a rule that texted the wrong people during
     // an outage would otherwise see every one of those messages go out when sending came back.
+    // The rule row is kept: a webhook (370) says which rule fired and on what.
+    let ruleRow: Record<string, unknown> | null = null;
     if (r.rule_id) {
-      const { data: rule, error: ruleErr } = await admin.from("crm_rules").select("enabled, archived_at")
+      const { data: rule, error: ruleErr } = await admin.from("crm_rules")
+        .select("id, name, enabled, archived_at, trigger_kind, trigger_event, elapsed_anchor, elapsed_days, schedule")
         .eq("client_id", clientId).eq("id", r.rule_id).maybeSingle();
       // A read that FAILED is not a rule that is gone: back on the retry schedule, never "skipped".
       if (ruleErr) {
@@ -264,17 +270,18 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         await fail("The rule was paused or removed, so this was not sent.", "skipped");
         continue;
       }
+      ruleRow = rule as Record<string, unknown>;
     }
 
     // A customer rule's message has no card (363); a card is read only when the row names one.
     const { data: deal } = r.deal_id
-      ? await admin.from("crm_deals").select("id, title, short_code, contact_id").eq("client_id", clientId).eq("id", r.deal_id).maybeSingle()
+      ? await admin.from("crm_deals").select("id, title, short_code, contact_id, value_cents").eq("client_id", clientId).eq("id", r.deal_id).maybeSingle()
       : { data: null };
     const { data: contact } = r.contact_id
-      ? await admin.from("crm_contacts").select("id, name, company, phone, email, dnd_all_at, dnd_email_at").eq("client_id", clientId).eq("id", r.contact_id).maybeSingle()
+      ? await admin.from("crm_contacts").select("id, name, company, phone, email, labels, dnd_all_at, dnd_email_at").eq("client_id", clientId).eq("id", r.contact_id).maybeSingle()
       : { data: null };
-    // "Email your team" (365) may have no customer at all — a rule for nobody.
-    if ((r.contact_id && !contact) || (r.deal_id && !deal) || (r.kind !== "notify_team" && !contact)) {
+    // "Email your team" (365) and a webhook (370) may have no customer at all — a rule for nobody.
+    if ((r.contact_id && !contact) || (r.deal_id && !deal) || (r.kind !== "notify_team" && r.kind !== "webhook" && !contact)) {
       // The card or the customer was deleted between the rule firing and this tick. Not a
       // failure to retry — there is nobody to send to.
       await fail("The card or the customer is no longer there.", "skipped");
@@ -314,6 +321,60 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         else if (out.error === "platform email is not configured" || out.error === "no recipient") {
           await fail(out.error === "no recipient" ? "Nobody on your team has an email address to send to." : "Team email isn't switched on yet.", "skipped");
         } else await fail(out.error ?? "Not sent.");
+      } else if (r.kind === "webhook") {
+        // 370. To the builder's own system, so no Do Not Disturb: it is not a message to the
+        // customer (and a schedule for a group must be armed to do it, like a text). The same
+        // delivery id on every try, so the far end can drop a repeat of one it already has.
+        const c = contact as Record<string, unknown> | null;
+        const d = deal as Record<string, unknown> | null;
+        const rr = (ruleRow ?? {}) as Record<string, unknown>;
+        const delivery = `crm-outbox-${id}`;
+        const payload = webhookPayload({
+          deliveryId: delivery,
+          firedAt: new Date(String(r.queued_at)).toISOString(),
+          business: String(settings?.business_name ?? ""),
+          rule: {
+            id: String(rr.id ?? r.rule_id ?? ""), name: (rr.name as string | null) ?? null,
+            trigger_kind: (rr.trigger_kind as string | null) ?? null, trigger_event: (rr.trigger_event as string | null) ?? null,
+            elapsed_anchor: (rr.elapsed_anchor as string | null) ?? null, elapsed_days: (rr.elapsed_days as number | null) ?? null,
+            schedule: (rr.schedule as { freq?: string } | null) ?? null,
+          },
+          contact: c ? {
+            id: String(c.id), name: (c.name as string | null) ?? null, email: (c.email as string | null) ?? null,
+            phone: (c.phone as string | null) ?? null, company: (c.company as string | null) ?? null,
+            labels: (c.labels as string[] | null) ?? [],
+          } : null,
+          card: d ? {
+            id: String(d.id), title: (d.title as string | null) ?? null, short_code: (d.short_code as string | null) ?? null,
+            value_cents: (d.value_cents as number | null) ?? null,
+          } : null,
+        });
+        const out = await postWebhook(fetch, String(params.url ?? ""), typeof params.secret === "string" ? params.secret : null, payload, delivery);
+        if (out.ok) { await markSent(); sent++; }
+        else await fail(out.error, "failed", !out.retry);
+      } else if (r.kind === "ghl_push") {
+        // 370. Into the builder's own GoHighLevel with their saved key: create or update this
+        // customer there, and ADD the rule's tags. Not a message, so no Do Not Disturb; GoHighLevel
+        // keeps its own. A retry repeats an upsert and a tag add, both of which are safe twice.
+        const { data: ghl, error: gErr } = await admin.from("client_settings")
+          .select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle();
+        if (gErr) { await fail(`Could not read the GoHighLevel connection: ${gErr.message ?? "read failed"}`); continue; }
+        if (!ghl?.ghl_location_id || !ghl?.ghl_api_key) {
+          await fail("GoHighLevel isn't connected for this account (Settings → GHL Connection).", "skipped");
+          continue;
+        }
+        const c = contact as Record<string, unknown>;
+        const out = await pushContactToGhl(fetch, {
+          locationId: String(ghl.ghl_location_id), apiKey: String(ghl.ghl_api_key),
+          contact: {
+            name: (c.name as string | null) ?? null, email: (c.email as string | null) ?? null,
+            phone: (c.phone as string | null) ?? null, company: (c.company as string | null) ?? null,
+          },
+          tags: Array.isArray(params.tags) ? (params.tags as unknown[]).map(String) : [],
+        });
+        if (out.ok) { await markSent(); sent++; }
+        else if (out.code === "no_identity") await fail(out.error, "skipped");
+        else await fail(out.error, "failed", !out.retry);
       } else if (r.kind === "send_sms") {
         const phone = String((contact as Record<string, unknown>).phone ?? "").trim();
         if (!phone) { await fail("That customer has no phone number.", "skipped"); continue; }
@@ -364,10 +425,33 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         } else {
           await fail(out.error ?? `Not sent: ${out.reason ?? "unknown"}.`);
         }
-      } else {
+      } else if (r.kind === "send_email") {
         const email = String((contact as Record<string, unknown>).email ?? "").trim();
         if (!email) { await fail("That customer has no email address.", "skipped"); continue; }
-        const subject = fillMergeFields(String(params.subject ?? ""), vals);
+        // 370: one of the builder's saved emails (Settings → Customer Hub → Email Templates),
+        // rendered by the same renderEmailDesign their editor previews with — or the words typed on
+        // the rule. A deleted template is a refusal, never the built-in starter in its place: the
+        // starter says "thanks for reaching out", which is not what this rule was written to say.
+        let designed: { subject: string; html: string; text: string } | null = null;
+        if (params.templateId) {
+          const { data: tpl, error: tErr } = await admin.from("email_templates").select("subject, preheader, design")
+            .eq("client_id", clientId).eq("id", String(params.templateId)).maybeSingle();
+          if (tErr) { await fail(`Could not read the saved email: ${tErr.message ?? "read failed"}`); continue; }
+          if (!tpl) { await fail("The saved email this rule sends has been deleted. Pick another one on the rule.", "skipped"); continue; }
+          const company = await companyTokens(admin, clientId);
+          const tokens = {
+            contact: { first_name: vals.first_name, name: vals.name, email, phone: String((contact as Record<string, unknown>).phone ?? "") },
+            company,
+          };
+          const rendered = renderEmailDesign(cleanDesign(tpl.design), tokens, String(tpl.preheader ?? ""));
+          designed = {
+            subject: fillText(String(tpl.subject ?? ""), tokens).replace(/[\r\n]+/g, " ").trim().slice(0, 200)
+              || `A note from ${company.name || "us"}`,
+            html: rendered.html,
+            text: rendered.text,
+          };
+        }
+        const subject = designed ? designed.subject : fillMergeFields(String(params.subject ?? ""), vals);
         // ⚠️ NO SUBJECT-MATCH PROOF FOR EMAIL ANY MORE (2026-11-06). There used to be one, like the
         // text's above: any sent email to this customer with the same subject since this row was
         // queued counted as this one. It matched on nothing unique to the row, so a DIFFERENT rule's
@@ -385,6 +469,12 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         // email_sends.kind plus the union in emailSend.ts — for a send that is exactly a
         // conversation email with nobody typing it.
         const body = fillMergeFields(String(params.body ?? ""), vals);
+        const escHtml = (t: string) => t.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch] as string));
+        // A designed email gets the same footer, centred under its card, before </body>.
+        const footer = `<p style="font:12px/1.5 Arial,Helvetica,sans-serif;color:#94A3B8;text-align:center;margin:0 0 24px">You're getting this from ${
+          escHtml(biz)}. <a href="${unsub}" style="color:#64748B">Unsubscribe</a></p>`;
+        const designedHtml = !designed ? ""
+          : /<\/body>/i.test(designed.html) ? designed.html.replace(/<\/body>/i, `${footer}</body>`) : designed.html + footer;
         const out = await sendTenantEmail(admin, clientId, {
           kind: "conversation",
           to: email,
@@ -393,13 +483,13 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
           // body is builder-authored but the MERGE VALUES are a customer's own name and company,
           // so an apostrophe or an angle bracket in somebody's business name must not become
           // markup in every other customer's email.
-          html: `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#1E293B">${
+          html: designed ? designedHtml : `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#1E293B">${
             body.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string))
               .replace(/\r?\n/g, "<br>")
           }</div><p style="font:12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#94A3B8;margin-top:24px">You're getting this from ${
             biz.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string))
           }. <a href="${unsub}" style="color:#64748B">Unsubscribe</a></p>`,
-          text: `${body}\n\n--\nYou're getting this from ${biz}. Unsubscribe: ${unsub}`,
+          text: `${designed ? designed.text : body}\n\n--\nYou're getting this from ${biz}. Unsubscribe: ${unsub}`,
           headers: { "List-Unsubscribe": `<${unsub}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
           contactId: String(contact!.id),
           shortCode,
@@ -417,6 +507,11 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         } else {
           await fail(out.error ?? `Not sent: ${out.reason ?? "unknown"}.`, "failed", out.permanent === true);
         }
+      } else {
+        // A kind this version does not know (a newer migration ahead of this function). Stopped, not
+        // guessed at: until 370 the email branch was this `else`, and a new kind would have gone out
+        // as an empty email.
+        await fail(`This kind of action (${String(r.kind)}) isn't known to the sender yet.`, "failed", true);
       }
     } catch (e) {
       await fail((e as Error)?.message ?? String(e));

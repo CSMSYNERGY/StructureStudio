@@ -7605,10 +7605,16 @@ const SS_RULE_ACTIONS = [
   ["assign_owner", "Assign the customer to…"],
   ["create_task", "Create a task…"],
   ["notify_team", "Email your team"],
+  ["webhook", "Send it to a webhook"],
+  ["ghl_push", "Push the customer to GoHighLevel"],
   ["send_sms", "Send the customer a text"],
   ["send_email", "Send the customer an email"],
 ];
+// Reaches the customer by itself: the editor's "it messages the customer" warning.
 const SS_RULE_OUTBOUND = ["send_sms", "send_email"];
+// What a schedule for a group must be ARMED to do. Mirrors RULE_ARMED (370): the messages, and the two
+// actions that hand the customer to another system, where a tag or a Zapier step can message them.
+const SS_RULE_ARMED = ["send_sms", "send_email", "webhook", "ghl_push"];
 const SS_RULE_MERGE_HINT = "{{first_name}} {{name}} {{company}} {{business}} {{deal_title}}";
 const SS_RULE_ACTIONS_MAX = 10;
 const SS_RULE_CONDITIONS_MAX = 10;
@@ -7642,6 +7648,8 @@ const SS_RULE_ACTION_NEEDS = [
   ["assign_owner", "contact"],
   ["create_task", "contact"],
   ["notify_team", "any"],
+  ["webhook", "any"],
+  ["ghl_push", "contact"],
   ["send_sms", "contact"],
   ["send_email", "contact"],
 ];
@@ -7740,10 +7748,11 @@ function ssRuleScheduleWords(sch) {
   const lead = off === 0 ? "on" : `${Math.abs(off)} day${Math.abs(off) === 1 ? "" : "s"} ${off < 0 ? "before" : "after"}`;
   return `${lead} the date in their record${sch.yearly ? ", every year," : ""} at ${at}`;
 }
-/** A schedule that messages a GROUP must be armed (365): the database will not send it otherwise. */
+/** A schedule that messages a GROUP, or hands it to GoHighLevel or a webhook, must be armed (365,
+ *  widened by 370): the database will not run it otherwise. */
 function ssRuleNeedsArm(r) {
   return r.triggerKind === "schedule" && (r.scopeKind || "pipeline") !== "none"
-    && (r.actions || []).some((a) => SS_RULE_OUTBOUND.indexOf(a.kind) >= 0);
+    && (r.actions || []).some((a) => SS_RULE_ARMED.indexOf(a.kind) >= 0);
 }
 function ssRuleConditionSpec(field) {
   const f = SS_RULE_CONDITION_FIELDS.find(([k]) => k === field);
@@ -7770,7 +7779,7 @@ function ssRuleAudienceLabel(r, pipelines) {
  * and Save waits for her to re-pick them — the server refuses the same ones, by name, if this ever
  * lets one through. An action not yet picked is NOT stale; it is unfinished, and Save says so.
  */
-function ssRuleStaleActions(actions, scope, pipeline, pipelines) {
+function ssRuleStaleActions(actions, scope, pipeline, pipelines, templates) {
   const out = [];
   (actions || []).forEach((a, i) => {
     const p = a.params || {};
@@ -7779,6 +7788,8 @@ function ssRuleStaleActions(actions, scope, pipeline, pipelines) {
     else if (a.kind === "move_stage" && p.stageId && !(pipeline && (pipeline.stages || []).some((t) => t.id === p.stageId))) out.push(i);
     else if (a.kind === "create_card" && p.pipelineId
       && (!(pipelines || []).some((x) => x.id === p.pipelineId) || (scope === "pipeline" && pipeline && p.pipelineId === pipeline.id))) out.push(i);
+    // 370: a saved email that was deleted. Only when the server sent the list (an older one sends none).
+    else if (a.kind === "send_email" && p.templateId && Array.isArray(templates) && !templates.some((t) => t.id === p.templateId)) out.push(i);
   });
   return out;
 }
@@ -7843,6 +7854,37 @@ function ssRuleTriggerWords(trigger) {
  * run, which nobody would ever go looking for from this screen. `pipeline` is the one the rule is
  * on — null for an every-pipeline rule, which cannot carry the two actions that need one.
  */
+/** A webhook's signing secret (370), made by the server the first time the rule is saved. Hidden
+ *  until asked for, and copyable, because it belongs in the receiver's settings and nowhere else. */
+function SsRuleWebhookSecret({ secret }) {
+  const [show, setShow] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const sm = { ...S.btn("#F1F5F9", "#334155"), padding: "3px 8px", fontSize: 11.5 };
+  if (!secret) {
+    return (
+      <span data-ss-rule-webhook-secret="pending" style={{ flex: "1 1 100%", fontSize: 11.5, color: "#64748B" }}>
+        Every call is signed. Its signing secret is made when you save the rule.
+      </span>
+    );
+  }
+  return (
+    <div data-ss-rule-webhook-secret="" style={{ flex: "1 1 100%", fontSize: 11.5, color: "#475569", lineHeight: 1.5 }}>
+      <span style={{ fontWeight: 700 }}>Signing secret: </span>
+      <code style={{ fontSize: 11, background: "#F1F5F9", borderRadius: 4, padding: "1px 4px", wordBreak: "break-all" }}>
+        {show ? secret : `${"•".repeat(12)}${secret.slice(-4)}`}
+      </code>{" "}
+      <button type="button" style={sm} onClick={() => setShow((v) => !v)}>{show ? "Hide" : "Show"}</button>{" "}
+      <button type="button" style={sm} onClick={() => {
+        try { navigator.clipboard.writeText(secret).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {}); } catch (e) { /* no clipboard */ }
+      }}>{copied ? "Copied" : "Copy"}</button>
+      <span style={{ display: "block", color: "#64748B" }}>
+        To check a call came from us: the <code>X-SS-Signature</code> header reads <code>t=…,v1=…</code>, and v1 is the
+        HMAC-SHA256 of “t.body” (the t value, a full stop, then the raw body) keyed with this secret.
+      </span>
+    </div>
+  );
+}
+
 function SsRuleActionFields({ action, pipeline, pipelines, meta, onChange, disabled }) {
   const p = action.params || {};
   const set = (patch) => onChange({ ...action, params: { ...p, ...patch } });
@@ -7960,13 +8002,73 @@ function SsRuleActionFields({ action, pipeline, pipelines, meta, onChange, disab
     );
   }
   if (action.kind === "send_email") {
+    // 370: words written here, OR one of the builder's saved emails (Settings → Customer Hub → Email
+    // Templates). The server keeps only the template when one is picked, so nobody wonders which goes.
+    const tpls = (meta && meta.emailTemplates) || [];
+    const tpl = p.templateId ? tpls.find((t) => t.id === p.templateId) : null;
+    const hint = { flex: "1 1 100%", fontSize: 11.5, color: "#64748B", lineHeight: 1.45 };
     return (
       <>
-        <input aria-label="Email subject" disabled={disabled} style={{ ...S.input, flex: "1 1 100%" }} maxLength={200}
-          value={p.subject || ""} onChange={(e) => set({ subject: e.target.value })} placeholder="Subject" />
-        <textarea aria-label="Email body" disabled={disabled} style={{ ...S.input, flex: "1 1 100%", minHeight: 90 }} maxLength={8000}
-          value={p.body || ""} onChange={(e) => set({ body: e.target.value })}
-          placeholder={`Hi {{first_name}}, …   (merge fields: ${SS_RULE_MERGE_HINT})`} />
+        <select aria-label="What the email is" data-ss-rule-email-source="" disabled={disabled} style={{ ...inp, flex: "1 1 100%" }}
+          value={p.templateId || ""} onChange={(e) => set({ templateId: e.target.value })}>
+          <option value="">Words written here</option>
+          {p.templateId && !tpl && <option value={p.templateId}>A saved email that was deleted — pick another</option>}
+          {tpls.map((t) => <option key={t.id} value={t.id}>Saved email: {t.name}</option>)}
+        </select>
+        {p.templateId ? (
+          <span data-ss-rule-email-template="" style={hint}>
+            {tpl ? <>Subject: <b>{tpl.subject || "(none)"}</b>. Edit it under Settings → Customer Hub → Email Templates.</> : "Pick another saved email, or write the words here."}
+            {" "}An unsubscribe link is added under it.
+          </span>
+        ) : (
+          <>
+            <input aria-label="Email subject" disabled={disabled} style={{ ...S.input, flex: "1 1 100%" }} maxLength={200}
+              value={p.subject || ""} onChange={(e) => set({ subject: e.target.value })} placeholder="Subject" />
+            <textarea aria-label="Email body" disabled={disabled} style={{ ...S.input, flex: "1 1 100%", minHeight: 90 }} maxLength={8000}
+              value={p.body || ""} onChange={(e) => set({ body: e.target.value })}
+              placeholder={`Hi {{first_name}}, …   (merge fields: ${SS_RULE_MERGE_HINT})`} />
+            {!tpls.length && <span style={hint}>Want a designed email? Make one under Settings → Customer Hub → Email Templates and pick it here.</span>}
+          </>
+        )}
+      </>
+    );
+  }
+  if (action.kind === "webhook") {
+    // 370. The server checks the address (https, a public name, no port) at save and again before
+    // every call, and never follows a redirect.
+    const url = String(p.url || "");
+    const notHttps = url.trim() && !/^https:\/\//i.test(url.trim());
+    return (
+      <>
+        <input aria-label="Webhook address" data-ss-rule-webhook-url="" type="url" disabled={disabled} style={{ ...inp, flex: "1 1 100%" }} maxLength={2048}
+          value={url} onChange={(e) => set({ url: e.target.value })} placeholder="https://hooks.zapier.com/hooks/catch/…" />
+        {notHttps && <span style={{ flex: "1 1 100%", fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>Use the full address, starting with https://</span>}
+        <span data-ss-rule-webhook-help="" style={{ flex: "1 1 100%", fontSize: 11.5, color: "#64748B", lineHeight: 1.45 }}>
+          Sends who it is about (name, email, phone, tags and the card), which rule and when, as JSON, to that address — a
+          Zapier or Make catch hook, or your own server. If it doesn't answer, it is tried again later.
+        </span>
+        <SsRuleWebhookSecret secret={p.secret || ""} />
+      </>
+    );
+  }
+  if (action.kind === "ghl_push") {
+    // 370. Into THEIR GoHighLevel with the key saved under Settings → GHL Connection.
+    const text = p.tagsText != null ? p.tagsText : (Array.isArray(p.tags) ? p.tags.join(", ") : "");
+    const connected = !meta || meta.ghlConnected !== false;
+    return (
+      <>
+        <input aria-label="GoHighLevel tags" data-ss-rule-ghl-tags="" disabled={disabled} style={{ ...inp, flex: "1 1 100%" }} maxLength={400}
+          value={text} placeholder="Tags to add there, separated by commas (optional), e.g. lot-buyer"
+          onChange={(e) => set({ tagsText: e.target.value, tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) })} />
+        <span data-ss-rule-ghl-help="" style={{ flex: "1 1 100%", fontSize: 11.5, color: "#64748B", lineHeight: 1.45 }}>
+          Creates or updates this customer in your GoHighLevel and adds these tags there. A tag can start a GoHighLevel
+          workflow, so check what yours do before you leave this running.
+        </span>
+        {!connected && (
+          <span data-ss-rule-ghl-off="" style={{ flex: "1 1 100%", fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>
+            GoHighLevel isn't connected for this account (Settings → GHL Connection), so this is skipped until it is.
+          </span>
+        )}
       </>
     );
   }
@@ -8276,7 +8378,7 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel, onTimeZone }) {
 
   const scope = draft.scopeKind;
   const pipeline = scope === "pipeline" ? pipelines.find((x) => x.id === draft.pipelineId) || null : null;
-  const staleActions = ssRuleStaleActions(draft.actions, scope, pipeline, pipelines);
+  const staleActions = ssRuleStaleActions(draft.actions, scope, pipeline, pipelines, meta && meta.emailTemplates);
   const staleConds = ssRuleStaleConditions(draft.conditions, scope, pipeline);
   const stuck = staleActions.length + staleConds.length;
   const outbound = draft.actions.some((a) => SS_RULE_OUTBOUND.indexOf(a.kind) >= 0);
@@ -8498,7 +8600,7 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel, onTimeZone }) {
  *  database said when it threw. */
 function SsRuleLog({ log, page = false }) {
   const row = { padding: "6px 10px", fontSize: 12, borderBottom: "1px solid #F1F5F9" };
-  const kindWord = (k) => (k === "send_sms" ? "Text" : "Email");
+  const kindWord = (k) => ({ send_sms: "Text", notify_team: "Team email", webhook: "Webhook", ghl_push: "GoHighLevel push" }[k] || "Email");
   const reason = (r) => {
     const why = r.detail && r.detail.reason;
     if (why === "conditions") return "its conditions did not match";

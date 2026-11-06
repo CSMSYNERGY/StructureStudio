@@ -270,7 +270,8 @@ import {
 // function only writes what the builder authored.
 import {
   actionAllowedForScope, actionScopeError, parseRuleConditions, parseRuleSave, RULE_ACTION_LABELS,
-  RULE_ACTIONS_MAX, RULE_SCOPES, type RuleActionIn, type RuleActionKind, type RuleCondition, triggerAllowedForScope,
+  RULE_ACTIONS_MAX, RULE_SCOPES, RULE_WEBHOOK_SECRET, type RuleActionIn, type RuleActionKind, type RuleCondition,
+  triggerAllowedForScope,
 } from "../_shared/crmRules.ts";
 // Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
 // account CSM sets up in Admin. paymentSettings.ts only, never the gateway client (cardpointe.ts).
@@ -10768,7 +10769,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (dErr) return dErr;
     if (!actions.length) return null;
     const rows = actions.slice(0, RULE_ACTIONS_MAX).map((a, i) => ({
-      client_id: clientId, rule_id: ruleId, kind: a.kind, params: a.params, position: (i + 1) * 1024,
+      client_id: clientId, rule_id: ruleId, kind: a.kind, position: (i + 1) * 1024,
+      // 370: a webhook saved without its signing secret gets one, made HERE and never in a browser.
+      // One posted back in its own shape (an edit of a saved rule) is kept, so the receiver's copy
+      // keeps working; parseRuleAction already dropped anything else.
+      params: a.kind === "webhook" && !RULE_WEBHOOK_SECRET.test(String(a.params?.secret ?? ""))
+        ? { ...a.params, secret: [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("") }
+        : a.params,
     }));
     const { error: iErr } = await admin.from("crm_rule_actions").insert(rows);
     return iErr ?? null;
@@ -11442,7 +11449,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   /** What on a stored rule no longer points anywhere — shown as an amber line on its row, so a
    *  rule that will fail is visible BEFORE it fails rather than only in the run log after. */
-  const ruleStale = (r: any, actions: { kind: string; params: any }[], pipes: Map<string, any>): string[] => {
+  const ruleStale = (r: any, actions: { kind: string; params: any }[], pipes: Map<string, any>, templates?: Set<string>): string[] => {
     const out: string[] = [];
     const pipe = r.scope_kind === "pipeline" ? pipes.get(r.pipeline_id) : null;
     if (r.scope_kind === "pipeline" && !pipe) out.push("pipeline_gone");
@@ -11451,6 +11458,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       else if (a.kind === "set_status" && pipe && !pipe.statuses.some((t: any) => t.id === a.params?.statusId)) out.push(`action:${i}`);
       else if (a.kind === "move_stage" && pipe && !pipe.stages.some((t: any) => t.id === a.params?.stageId)) out.push(`action:${i}`);
       else if (a.kind === "create_card" && !pipes.has(a.params?.pipelineId)) out.push(`action:${i}`);
+      else if (a.kind === "send_email" && a.params?.templateId && templates && !templates.has(a.params.templateId)) out.push(`action:${i}`);
     });
     (Array.isArray(r.conditions) ? r.conditions : []).forEach((c: any, i: number) => {
       if (c?.field === "deal.status" && pipe && !pipe.statuses.some((t: any) => t.id === c.value)) out.push(`condition:${i}`);
@@ -11496,7 +11504,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const ids = (rules ?? []).map((r: any) => r.id);
     const none = Promise.resolve({ data: [] as any[], error: null });
-    const [acts, runs, tags, tz, cf] = await Promise.all([
+    const [acts, runs, tags, tz, cf, tpls, ghl] = await Promise.all([
       ids.length ? admin.from("crm_rule_actions").select("id, rule_id, kind, params, position")
         .eq("client_id", clientId).in("rule_id", ids).order("position", { ascending: true }) : none,
       ids.length ? admin.from("crm_rule_runs").select("rule_id, outcome, fired_at")
@@ -11509,6 +11517,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("client_settings").select("time_zone").eq("client_id", clientId).maybeSingle(),
       // The customer's DATE fields, for "on the date in their record" (365).
       readCustomFields(admin, clientId, "contact"),
+      // 370: the saved emails an email action may send (325's email_templates), by name.
+      admin.from("email_templates").select("id, name, subject, purpose").eq("client_id", clientId)
+        .order("name", { ascending: true }).limit(200),
+      // 370: whether "push to GoHighLevel" has somewhere to go. Only the yes/no leaves this function.
+      admin.from("client_settings").select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle(),
     ]);
     if ((acts as any).error) return dbFail(req, clientId, "load your automations", (acts as any).error);
     const last = new Map<string, any>();
@@ -11521,11 +11534,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
     const pipes = new Map<string, any>(pipelines.map((x: any) => [x.id, x]));
+    // A failed read is NOT "no templates": it would mark every templated email stale. Unknown, so
+    // nothing is marked, and the picker shows what it has.
+    const tplRows: any[] = (tpls as any).error ? [] : (((tpls as any).data) ?? []);
+    const tplIds = (tpls as any).error ? undefined : new Set<string>(tplRows.map((t: any) => t.id));
+    const mayEdit = canEdit("settings_crm");
     return json({
       ...base,
       rules: (rules ?? []).map((r: any) => {
         const actions = (((acts as any).data) ?? []).filter((a: any) => a.rule_id === r.id)
-          .map((a: any) => ({ id: a.id, kind: a.kind, params: a.params ?? {}, position: a.position }));
+          .map((a: any) => {
+            const params = { ...(a.params ?? {}) };
+            // A webhook's signing secret is for whoever sets up the receiver: shown to someone who
+            // may edit the rule, withheld from someone who may only look.
+            if (a.kind === "webhook" && !mayEdit) delete params.secret;
+            return { id: a.id, kind: a.kind, params, position: a.position };
+          });
         const ran = last.get(r.id);
         return {
           id: r.id, name: r.name ?? null, scopeKind: r.scope_kind, pipelineId: r.pipeline_id ?? null,
@@ -11537,12 +11561,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           schedule: r.schedule ?? null, nextRunAt: r.next_run_at ?? null,
           armedCount: r.armed_count ?? null, maxPerRun: r.max_per_run ?? 200,
           lastRun: ran ? { outcome: ran.outcome, firedAt: ran.fired_at } : null,
-          stale: ruleStale(r, actions, pipes),
+          stale: ruleStale(r, actions, pipes, tplIds),
         };
       }),
       labels: [...labels.values()].sort((a, b) => a.localeCompare(b)).slice(0, 200),
       timeZone: ((tz as any).data?.time_zone as string) || "America/Chicago",
       timeZoneSet: !!(tz as any).data?.time_zone,
+      emailTemplates: tplRows.map((t: any) => ({ id: t.id, name: t.name, subject: t.subject ?? "", purpose: t.purpose })),
+      ghlConnected: !!((ghl as any).data?.ghl_location_id && (ghl as any).data?.ghl_api_key),
       dateFields: "fields" in (cf as any)
         ? ((cf as any).fields as any[]).filter((f) => f.field_type === "date" && f.key).map((f) => ({ key: `custom:${f.key}`, label: f.label }))
         : [],
@@ -11763,6 +11789,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           if (whom.some((u) => !onTeam.has(u))) offending.push({ index: i, kind: a.kind, why: "person" });
         });
       }
+      // 370: a saved email must be one of THIS builder's templates. The tick refuses a missing one
+      // too, but only by skipping on every customer it reaches.
+      const wantTpls = [...new Set(toCheck.filter((a, i) => a.kind === "send_email" && a.params.templateId && !flagged.has(i))
+        .map((a) => String(a.params.templateId)))];
+      if (wantTpls.length) {
+        const { data: liveTpls, error } = await admin.from("email_templates").select("id")
+          .eq("client_id", clientId).in("id", wantTpls);
+        if (error) return dbFail(req, clientId, "check that rule's saved emails", error);
+        const okT = new Set((liveTpls ?? []).map((x: any) => x.id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i) || a.kind !== "send_email" || !a.params.templateId) return;
+          if (!okT.has(String(a.params.templateId))) offending.push({ index: i, kind: a.kind, why: "template" });
+        });
+      }
       const wantPipes = named("create_card", "pipelineId");
       if (wantPipes.length) {
         const { data: livePipes, error } = await admin.from("crm_pipelines").select("id")
@@ -11791,6 +11831,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           error = `Action ${first.index + 1} (${label(first)}) points at the pipeline this rule is on. Pick a different pipeline.`;
         } else if (first.why === "pipeline") {
           error = `Action ${first.index + 1} (${label(first)}) points at a pipeline that has been removed. Pick another.`;
+        } else if (first.why === "template") {
+          error = `Action ${first.index + 1} (${label(first)}) names a saved email that has been deleted. Pick another one.`;
         } else if (first.why === "person") {
           error = `Action ${first.index + 1} (${label(first)}) names someone who is not on your team. Pick another person.`;
         } else {
