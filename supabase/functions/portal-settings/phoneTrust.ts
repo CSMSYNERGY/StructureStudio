@@ -167,14 +167,14 @@ export function trustProfileFor(o: {
   }
   // A builder with no profile yet: one who only calls, or whose texting is not submitted. Not a
   // dead end any more (Workstream 2, phase 6): Structure Studio makes the profile from the
-  // business's details (phone_trust_profile), or the Text Messaging registration makes it.
+  // business's details (phone_trust_profile), or the SMS - A2P registration makes it.
   return { ok: false, code: NO_PROFILE_CODE, error: NO_PROFILE_SENTENCE };
 }
 
 /** The refusal's code, which the Phone tab answers with the business-profile form (operators). */
 export const NO_PROFILE_CODE = "no_business_profile";
 export const NO_PROFILE_SENTENCE =
-  "Caller ID registration needs this business's details at Twilio first. Structure Studio adds them here, or the Text Messaging registration adds them when it is submitted.";
+  "Caller ID registration needs this business's details at Twilio first. Structure Studio adds them here, or the SMS - A2P registration adds them when it is submitted.";
 
 /** A builder registered for texting WITHOUT an EIN (sole proprietor): no business profile to build
  *  caller ID on, and none can be added here without one (trustProfileFor, runTrustProfile). */

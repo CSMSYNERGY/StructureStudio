@@ -1,7 +1,7 @@
 // The texting-consent box switch (Carolyn 2026-11-01). client_settings.lead_sms_consent_box
 // (migration 242) had no screen: the form designer told builders it was "switched off in
 // Settings" and there was nothing in Settings to find. portal-sms now reads it into `status` and
-// writes it with `save_consent_box`, on Customer Hub → Text Messaging.
+// writes it with `save_consent_box`, on Customer Hub → SMS - A2P.
 //
 // Pinned against the shipped source, the way smsCopyPrefill_test.ts pins its neighbours, because
 // this file's GATES table is NOT cross-checked by preflight (it dispatches with `switch`), so a

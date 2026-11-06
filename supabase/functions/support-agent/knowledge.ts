@@ -373,7 +373,7 @@ your bank checks it for $0, nothing is charged, and it then pays your top-ups (a
 buy by card). Builders who pay their subscription by bank transfer add their wallet card the same way.
 
 ### How do I text customers from my own number?
-Settings > Customer Hub > Text Messaging. Texting doesn't switch on by itself when the carriers approve
+Settings > Customer Hub > SMS - A2P. Texting doesn't switch on by itself when the carriers approve
 you. After you submit your business details (this needs your business's EIN), an owner, or an admin with
 Billing, presses the paid "Register with the carriers" step. When the business is approved, press
 Continue to send how you'll use texting for a final review. When that's approved, choose a phone number

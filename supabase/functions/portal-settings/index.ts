@@ -12216,7 +12216,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // The tenant's numbers: EVERY live sms_numbers row, OLDEST first (migration 266, per-person
   // numbers; plan D6's one number per builder is lifted to MAX_NUMBERS). The first is the number
   // every screen before 266 called "your number", and a request that names no number (an older
-  // portal bundle) means it (phone.ts pickNumber). Bought on the Text Messaging tab (calls and
+  // portal bundle) means it (phone.ts pickNumber). Bought on the SMS - A2P tab (calls and
   // texts), or on the Phone tab as calling-only numbers (no messaging_service_sid), which texting
   // adopts or joins once its registration clears.
   //
@@ -12657,7 +12657,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // deno-lint-ignore no-explicit-any
     const n: any = picked.n;
     if (!n) {
-      return json({ error: "Get a number on the Text Messaging tab first, then choose who answers it." }, 409);
+      return json({ error: "Get a number on the SMS - A2P tab first, then choose who answers it." }, 409);
     }
     const p = (payload ?? {}) as Record<string, unknown>;
     const hasLabel = Object.prototype.hasOwnProperty.call(p, "label");
@@ -13400,7 +13400,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // safe to repeat. Spends nothing; the number texts once its own carrier registration clears.
   //
   // ⚠️ THE TEXTING-SETUP AUTHORITY TOO, not only phone:edit. This puts a number into the
-  // business's own carrier registration, which every change on the Text Messaging tab keeps to
+  // business's own carrier registration, which every change on the SMS - A2P tab keeps to
   // settings_billing:'edit' (portal-sms), and the purchase's own join is behind the same check
   // (mayBuyPhoneNumber). phone_settings_get says who may (`canJoinTexting`).
   if (action === "phone_number_texting") {
@@ -13422,7 +13422,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (n.messaging_service_sid) return json({ ok: true, number: { id: n.id, callingOnly: false }, already: true });
     const serviceSid = await textingServiceSid();
     if (!serviceSid) {
-      return json({ error: "Texting isn't on for this account yet. Finish the Text Messaging tab first; your main number is used for texting when the carriers approve it." }, 409);
+      return json({ error: "Texting isn't on for this account yet. Finish the SMS - A2P tab first; your main number is used for texting when the carriers approve it." }, 409);
     }
     const tw = await tenantTwilio();
     if (!tw.ok) return tenantTwilioRefused(tw.error);

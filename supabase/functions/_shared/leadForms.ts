@@ -549,7 +549,7 @@ export function recommendations(def: FormDefinition, published: unknown, smsBoxA
     }
   }
   const ownWords = consentBoxes.some((f) => consentTextOk(f.consentText));
-  if (types.has("sms_consent") && !smsBoxAllowed && !ownWords) out.push({ id: "sms_box_off", text: "Your texting box is hidden: texting consent is off for your business. Turn it on in Customer Hub → Text Messaging." });
+  if (types.has("sms_consent") && !smsBoxAllowed && !ownWords) out.push({ id: "sms_box_off", text: "Your texting box is hidden: texting consent is off for your business. Turn it on in Customer Hub → SMS - A2P." });
   else if (types.has("sms_consent")) out.push({ id: "a2p", text: "A texting consent box on your website is a new opt-in page. Check your texting registration lists this page before you text these leads." });
   if (!def.footerLinks.privacy) out.push({ id: "no_privacy", text: "Add your Privacy Policy link (Settings tab of this form)." });
   if (published && JSON.stringify(published) !== JSON.stringify(def)) out.push({ id: "unpublished", text: "You have changes that aren't live yet. Press Publish to put them on your website." });

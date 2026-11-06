@@ -45,7 +45,7 @@ Deno.test("the builder's own Secondary Customer Profile; the platform's primary 
     { ok: true, profileSid: PRIMARY, which: "primary" });
   // A customer is NEVER signed as us, however the env is set.
   const cust = trustProfileFor({ secondaryProfileSid: null, internal: false, primaryProfileSid: PRIMARY });
-  assert(!cust.ok && /Text Messaging registration/.test(cust.error));
+  assert(!cust.ok && /SMS - A2P registration/.test(cust.error));
   const noEnv = trustProfileFor({ secondaryProfileSid: "junk", internal: true, primaryProfileSid: "" });
   assert(!noEnv.ok && /isn't configured/.test(noEnv.error));
   // An internal tenant whose number is ALREADY on the primary (put there by hand) stays there: a
@@ -107,7 +107,7 @@ Deno.test("chooseTrustProfile asks Twilio ONLY when it decides: internal, with b
     assertEquals(out, want, JSON.stringify(o));
   }
   const cust = await chooseTrustProfile({ ...INTERNAL_BOTH, internal: false, secondaryProfileSid: null }, primaryReads(false).deps);
-  assert(!cust.ok && cust.kind === "refused" && cust.status === 409 && /Text Messaging registration/.test(cust.error));
+  assert(!cust.ok && cust.kind === "refused" && cust.status === 409 && /SMS - A2P registration/.test(cust.error));
 });
 
 Deno.test("the handler takes the profile from chooseTrustProfile, and no read of Twilio is swallowed into a guess", () => {
