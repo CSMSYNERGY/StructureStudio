@@ -6656,7 +6656,7 @@ function MeetingsSettings({ clientId, viewingLabel = null, mode = "business" }) 
           </div>
           {/* ⚠️ Text reminders are NOT a switch here, and that is deliberate rather than
               unfinished: a text to somebody who never opted in runs into the registration,
-              consent and STOP rules in Settings → Text Messaging, and it is a compliance
+              consent and STOP rules in Settings → Customer Hub → SMS - A2P, and it is a compliance
               question before it is a feature. Said plainly so nobody goes looking for the
               toggle. */}
           <div style={{ ...sub, marginBottom: 12 }}>
@@ -6981,7 +6981,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "quickbooks" && (qboUnlocked
         ? <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />
         : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}
-      {/* Email Settings, Text Messaging and Phone render inside CustomerHubShell since 2026-10-23
+      {/* Email Settings, SMS - A2P (Text Messaging until 2026-11-05) and Phone render inside CustomerHubShell since 2026-10-23
           (same slugs, same props, same canEdit rules) — see ssCustomerHubTabs. */}
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
@@ -7397,7 +7397,7 @@ function FormEditor({ id, clientId, canEdit, meta, onClose }) {
     fields.splice(to > from ? to - 1 : to, 0, f);
     setFields(fields);
   };
-  // The texting-consent switch lives on Text Messaging. Save first: leaving unmounts the editor,
+  // The texting-consent switch lives on SMS - A2P. Save first: leaving unmounts the editor,
   // and its autosave is on a timer that would otherwise never fire.
   const goSms = async () => {
     if (dirty && canEdit && !(await save())) return;
@@ -7989,7 +7989,7 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled, 
         {t === "sms_consent" && (<>
           {/* Carolyn 2026-11-01: "what does this mean? it is quite unclear". The plain fact first
               (is this box on my website or not?), then where to change it. The switch is
-              client_settings.lead_sms_consent_box, now on Customer Hub → Text Messaging. */}
+              client_settings.lead_sms_consent_box, now on Customer Hub → SMS - A2P. */}
           {/* Own wording (2026-11-03): an account whose texting registration lists a different
               sentence (Carolyn's own, whose standard box is off by migration 242) pastes theirs.
               A box with valid own wording shows even with the standard box off — see lead-form. */}
@@ -8001,7 +8001,7 @@ function SsfFieldPanel({ field: f, meta, onChange, onClose, onRemove, disabled, 
               {!shown ? (
                 <div style={{ fontSize: 12.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: 10, marginBottom: 12, lineHeight: 1.5 }}>
                   <b>Hidden on your website.</b> Texting consent is turned off for your business, so customers won't see this box{own ? "" : " unless you use your own registered wording below"}.
-                  {!disabled && onGoSms && <div style={{ marginTop: 6 }}><button type="button" onClick={onGoSms} style={{ background: "none", border: "none", padding: 0, color: "#92400E", textDecoration: "underline", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>Turn it on in Customer Hub → Text Messaging</button></div>}
+                  {!disabled && onGoSms && <div style={{ marginTop: 6 }}><button type="button" onClick={onGoSms} style={{ background: "none", border: "none", padding: 0, color: "#92400E", textDecoration: "underline", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>Turn it on in Customer Hub → SMS - A2P</button></div>}
                 </div>
               ) : (
                 <div style={{ fontSize: 12.5, color: "#166534", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: 10, marginBottom: 12 }}><b>Shows on your website.</b></div>

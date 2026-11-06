@@ -2174,31 +2174,19 @@ function ssBillingTabs() {
 // the rail item appears at all.
 function ssCustomerHubTabs({ isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
+    // TAB ORDER (Carolyn 2026-11-05): "Pipelines, Fields, Meetings, Automations, Phone, SMS -A2P,
+    // Email Settings, Email Templates, Forms". Customer login was not in that list; it is kept,
+    // last, rather than dropped, because it is the only page for how a customer gets their login
+    // code. Pipelines stays first for the reason above. A rep, who sees only Meetings and Phone
+    // here, now lands on Meetings: the hub opens on the first tab its reader may see.
     ["pipelines", "Pipelines", "Each pipeline's stages, its statuses and when each one is set, and its lost reasons"],
-    // AUTOMATIONS, straight after Pipelines (Carolyn 2026-11-04). ONE LIST of the account's
-    // rules: the same day she took them off the pipeline — "I do not want it connected to a
-    // specific pipeline… there needs to be an option to select which pipeline in the rules
-    // portion" — so each rule says who it is for (one pipeline, every pipeline; customers or
-    // nobody in round 2) and the pipeline is picked inside the editor (migration 363).
-    ["automations", "Automations", "Rules that run by themselves: when something happens, do this"],
-    // Lifted off the connection page, where it sat under the GHL credentials and read as part
-    // of them. It never was: "Every tenant, CRM or not: the login is ours either way" (the
-    // card's own note in 03-catalog.jsx), which is precisely why it belongs here.
-    ["customer-login", "Customer login", "How customers get the code that logs them in to accept estimates and pay invoices"],
-    // Website lead forms and the emails they send (migration 325, Carolyn 2026-10-22: "build out
-    // forms for websites so we can capture leads, and build out email templates ... This should go
-    // into the customer hub settings tab"). settings_crm like the two above, and part of the built-in
-    // CRM (CustomerHubShell shows the teaser without it; the server refuses regardless).
-    ["forms", "Forms", "Lead forms for your website: design, publish, and see who filled them in"],
-    ["email-templates", "Email Templates", "Designed emails your forms send: the lead's auto-reply and your team's alert"],
-    // EMAIL SETTINGS, TEXT MESSAGING, PHONE — rail items until 2026-10-23 (Carolyn: "These need to
-    // move to customer hub... maintain the current urls"). Same slugs, same areas, same pages: the
-    // move changes where they are listed and nothing about who may open them. "Email Settings",
-    // not "Email Sending" (Carolyn 2026-09-11). Phone is offered only where ssPhoneOffered says
-    // (see there for why a builder on production may not see it yet).
-    ["email", "Email Settings", "Send estimates and invoices from your own email domain"],
-    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business"],
-    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps"]] : []),
+    // FIELDS (migration 330, Carolyn 2026-10-22): "We need to show all the current fields for
+    // contacts and designs/deals in the customer hub tab under its own tab called fields. We need
+    // to allow to add as many custom fields as desired." A register first and an editor second —
+    // it lists what a contact and a design/deal already hold, which nothing in the product has
+    // ever shown in one place, and lets a builder add their own beside them. settings_crm like
+    // every tab here, and behind the built-in CRM (CustomerHubShell shows the teaser without it).
+    ["fields", "Fields", "Every field on a contact and on a design/deal, and your own custom fields"],
     // MEETINGS moved in here on 2026-10-22 at Carolyn's request ("I also want the meetings tab
     // in Customer hub"). It was a rail item of its own for a few hours.
     //
@@ -2212,13 +2200,32 @@ function ssCustomerHubTabs({ isAdmin = false, access = null, phoneOffered = fals
     //   * for such a rep this hub shows exactly ONE tab, labelled "Customer Hub". That reads a
     //     little oddly for them and is the accepted cost of the grouping owners asked for.
     ["meetings", "Meetings", "The meeting types your team chooses from, and the booking pages. Your own link and hours are in My Profile"],
-    // FIELDS (migration 330, Carolyn 2026-10-22): "We need to show all the current fields for
-    // contacts and designs/deals in the customer hub tab under its own tab called fields. We need
-    // to allow to add as many custom fields as desired." A register first and an editor second —
-    // it lists what a contact and a design/deal already hold, which nothing in the product has
-    // ever shown in one place, and lets a builder add their own beside them. settings_crm like
-    // every tab here, and behind the built-in CRM (CustomerHubShell shows the teaser without it).
-    ["fields", "Fields", "Every field on a contact and on a design/deal, and your own custom fields"],
+    // AUTOMATIONS (Carolyn 2026-11-04). ONE LIST of the account's rules: the same day she
+    // took them off the pipeline — "I do not want it connected to a
+    // specific pipeline… there needs to be an option to select which pipeline in the rules
+    // portion" — so each rule says who it is for (one pipeline, every pipeline; customers or
+    // nobody in round 2) and the pipeline is picked inside the editor (migration 363).
+    ["automations", "Automations", "Rules that run by themselves: when something happens, do this"],
+    // PHONE, SMS - A2P, EMAIL SETTINGS — rail items until 2026-10-23 (Carolyn: "These need to
+    // move to customer hub... maintain the current urls"). Same slugs, same areas, same pages: the
+    // move changes where they are listed and nothing about who may open them. "Email Settings",
+    // not "Email Sending" (Carolyn 2026-09-11). Phone is offered only where ssPhoneOffered says
+    // (see there for why a builder on production may not see it yet).
+    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps"]] : []),
+    // "SMS - A2P" was "Text Messaging" until 2026-11-05 (Carolyn: "SMS -A2P (Change to this
+    // name)"). Label only: the slug stays `sms`, so /settings/sms and every link to it still work.
+    ["sms", "SMS - A2P", "Text customers from your own number, once the carriers approve your business"],
+    ["email", "Email Settings", "Send estimates and invoices from your own email domain"],
+    // Website lead forms and the emails they send (migration 325, Carolyn 2026-10-22: "build out
+    // forms for websites so we can capture leads, and build out email templates ... This should go
+    // into the customer hub settings tab"). settings_crm like Pipelines, and part of the built-in
+    // CRM (CustomerHubShell shows the teaser without it; the server refuses regardless).
+    ["email-templates", "Email Templates", "Designed emails your forms send: the lead's auto-reply and your team's alert"],
+    ["forms", "Forms", "Lead forms for your website: design, publish, and see who filled them in"],
+    // Lifted off the connection page, where it sat under the GHL credentials and read as part
+    // of them. It never was: "Every tenant, CRM or not: the login is ours either way" (the
+    // card's own note in 03-catalog.jsx), which is precisely why it belongs here.
+    ["customer-login", "Customer login", "How customers get the code that logs them in to accept estimates and pay invoices"],
   ]
   // PER-TAB AREAS (2026-10-23). The hub spans five areas now — settings_crm, meetings,
   // settings_email, settings_billing and phone — so each tab appears only to someone who can read

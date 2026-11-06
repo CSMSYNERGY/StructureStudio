@@ -239,14 +239,16 @@ Deno.test("a sales rep, dealer or sales manager reaches Settings › Customer Hu
 Deno.test("inside Customer Hub a rep sees Phone and Meetings only; an owner sees every tab", () => {
   for (const title of ["sales_rep", "dealer", "sales_manager"] as const) {
     const access = PRESETS[title];
-    assertEquals(nav.ssCustomerHubTabs({ access, phoneOffered: true }).map((t) => t[0]), ["phone", "meetings"], title);
+    assertEquals(nav.ssCustomerHubTabs({ access, phoneOffered: true }).map((t) => t[0]), ["meetings", "phone"], title);
     assertEquals(nav.ssCustomerHubTabs({ access, phoneOffered: false }).map((t) => t[0]), ["meetings"], `${title}, calling not offered`);
   }
   assertEquals(nav.ssCustomerHubTabs({ isAdmin: true, access: PRESETS.sales_rep, phoneOffered: true }).map((t) => t[0]),
     // AUTOMATIONS joined on 2026-11-04, straight after Pipelines. The rep assertions above are the
     // other half of this and did NOT change: automations is settings_crm, which a rep does not hold,
     // so it is filtered out for them exactly as the configuration tabs around it are.
-    ["pipelines", "automations", "customer-login", "forms", "email-templates", "email", "sms", "phone", "meetings", "fields"]);
+    // REORDERED on 2026-11-05 at Carolyn's request; Customer login kept, last. The rep line above
+    // flipped with it: Meetings now comes before Phone, so a rep lands on Meetings.
+    ["pipelines", "fields", "meetings", "automations", "phone", "sms", "email", "email-templates", "forms", "customer-login"]);
   assertEquals(nav.ssCustomerHubTabs({ access: null, phoneOffered: false }).map((t) => t[0]).includes("phone"), false,
     "Phone stays hidden wherever calling is not offered");
 });

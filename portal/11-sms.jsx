@@ -594,7 +594,7 @@ function smsE164(raw) {
   return "";
 }
 
-/** The "find a number" box (Text Messaging's "Choose your number", Settings → Phone): an area
+/** The "find a number" box (SMS - A2P's "Choose your number", Settings → Phone): an area
  *  code, or the area code and up to three more digits, the way the old phone system searched
  *  (the 2026-10-12 call). Typed or pasted ("816-300", "+1 816 300") → digits only, a leading 1
  *  dropped (no US area code starts with 1, so it is a pasted country code), at most six. The
@@ -1409,7 +1409,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           {readOnly ? (
             <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
               Only an owner — or an admin an owner has given billing access to — can start the
-              paid registration. Ask them to open Settings → Text Messaging.
+              paid registration. Ask them to open Settings → Customer Hub → SMS - A2P.
             </div>
           ) : (
             <button type="button" disabled={busy}
@@ -1527,7 +1527,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           {readOnly ? (
             <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
               An owner — or an admin with billing access — can rewrite this and send it again
-              from Settings &rarr; Text Messaging.
+              from Settings &rarr; Customer Hub &rarr; SMS - A2P.
             </div>
           ) : (
             <>
@@ -1673,7 +1673,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
    MY SYNERGY PHONE — calling setup, install links and the Calls report (2026-09-29)
 
    Plan sections 6 and 12, SPEC section 5. CALLING ONLY: the number is bought and
-   registered on the Text Messaging tab above, and nothing here buys, registers or
+   registered on the SMS - A2P tab above, and nothing here buys, registers or
    texts. What lives here is the owner's ONE-TIME SETUP (Ahsan, 09-29: "owner sets
    up the phone once, and the users assigned to that number get the calls
    automatically"), the switch, "Sign out all devices", and the report.
@@ -2413,7 +2413,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     // buy_number adopts a calling-only number, plan phase 6), so there is no caveat to give.
     if (!window.confirm(numbers.length
       ? `Add ${phoneDisplay(e164)} as another business number? It takes calls right away${data.textingActive ? ", and it can text once the carriers approve it" : ""}. You can give it a name and a person after.`
-      : `Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the Text Messaging tab.`)) return;
+      : `Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the SMS - A2P tab.`)) return;
     setBusy(true); setNumNote(null);
     try {
       const d = await phoneAction("phone_buy_number", { phoneNumber: e164 });
@@ -2487,7 +2487,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         ? "Calls only for now. Add it to your texting below and it can text too, once the carriers approve it."
         : "Calls only for now. The account owner, or someone with Billing access, can add it to your texting.";
     }
-    return n.id === mainId ? "Calls only for now. Texting uses this same number once the carriers approve your business on the Text Messaging tab." : "Calls only for now.";
+    return n.id === mainId ? "Calls only for now. Texting uses this same number once the carriers approve your business on the SMS - A2P tab." : "Calls only for now.";
   };
   const ownerBadge = (n) => (
     <span data-ss-phone-number-owner={n.assignedUserId || "team"} style={{
@@ -2590,9 +2590,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           {onOpenTexting ? (
             <button type="button" onClick={onOpenTexting}
               style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
-              {data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "start on the Text Messaging tab" : "Get one on the Text Messaging tab"}
+              {data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "start on the SMS - A2P tab" : "Get one on the SMS - A2P tab"}
             </button>
-          ) : "Get one on the Text Messaging tab"}{data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "." : ", then come back to choose who answers it."}
+          ) : "Get one on the SMS - A2P tab"}{data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "." : ", then come back to choose who answers it."}
         </div>
       )}
 
@@ -3479,7 +3479,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {!ro && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
           <button type="button" disabled={busy || !sel} onClick={save} data-ss-phone-save
-            title={sel ? "" : "Get a number on the Text Messaging tab first"}
+            title={sel ? "" : "Get a number on the SMS - A2P tab first"}
             style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !sel ? 0.6 : 1 }}>
             {busy ? "Saving…" : sel && sel.route ? (many ? `Save ${selName}` : "Save phone settings") : "Save and finish setup"}
           </button>

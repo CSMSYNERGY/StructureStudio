@@ -35,5 +35,5 @@ Deno.test("status reports what the designer shows: a missing row reads as on", (
 Deno.test("Text Messaging draws the switch and the form designer stops pointing at nothing", () => {
   assert(UI.includes('call("save_consent_box", { on })'));
   assert(!FORMS.includes("switched off in Settings"), "the old note named a setting that did not exist");
-  assert(FORMS.includes("Turn it on in Customer Hub → Text Messaging"));
+  assert(FORMS.includes("Turn it on in Customer Hub → SMS - A2P"));
 });
