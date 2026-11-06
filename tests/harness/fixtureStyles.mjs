@@ -31,7 +31,6 @@
 //
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/fixtureStyles.mjs          (exit 0 = every check held; SS_SKIP_3D=1 skips F)
 //
 // Shots land in %TEMP%/ss-harness/fixture-styles (SS_SHOTS overrides). Fixtures are made up (a
@@ -455,7 +454,7 @@ async function portalRun(browser) {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     await settle(page, 600);
-    await page.evaluate(() => { history.pushState({}, "", "/portal/settings/vents"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await page.evaluate(() => { history.pushState({}, "", "/settings/vents"); window.dispatchEvent(new PopStateEvent("popstate")); });
     await page.waitForFunction(() => document.body.innerText.includes("Louvered window vent"), null, { timeout: 20000 }).catch(() => {});
     await settle(page, 600);
     const rowOf = (name) => page.locator("[draggable]").filter({ has: page.getByText(name, { exact: true }) }).first();

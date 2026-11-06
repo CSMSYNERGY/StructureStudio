@@ -304,7 +304,7 @@ Deno.test("one refetch counter: declared above both entitlement reads, in both t
   const decl = SHELL.indexOf("const [entitlementRev, setEntitlementRev] = useState(0);");
   assert(decl > 0, "entitlementRev is gone");
   const own = SHELL.indexOf("}, [session.access_token, viewing, entitlementRev]);");
-  const viewed = SHELL.indexOf("}, [mirrorView, viewing && viewing.clientId, session.access_token, entitlementRev]);");
+  const viewed = SHELL.indexOf("}, [mirrorView, viewing && viewing.clientId, viewing && viewing.asUser && viewing.asUser.userId,");
   assert(own > decl, "your own entitlement effect does not refetch on the counter (or sits above its declaration)");
   assert(viewed > decl, "the view-as entitlement effect does not refetch on the counter (or sits above its declaration)");
   const listen = codeBetween(SHELL, "const [entitlementRev, setEntitlementRev] = useState(0);", "// Fetches the entitlement declared above", "the listener");
@@ -312,7 +312,7 @@ Deno.test("one refetch counter: declared above both entitlement reads, in both t
   assert(listen.includes("window.removeEventListener(SS_ENTITLEMENT_CHANGED, bump);"));
   assert(listen.includes("setEntitlementRev((n) => n + 1)"));
   // The viewed tenant's effect really is the one that reads portal-billing for view-as.
-  const viewedEffect = codeBetween(SHELL, "const [viewedCtx, setViewedCtx] = useState(null);", "}, [mirrorView, viewing && viewing.clientId, session.access_token, entitlementRev]);", "viewedCtx effect");
+  const viewedEffect = codeBetween(SHELL, "const [viewedCtx, setViewedCtx] = useState(null);", "}, [mirrorView, viewing && viewing.clientId, viewing && viewing.asUser && viewing.asUser.userId,", "viewedCtx effect");
   assert(viewedEffect.includes(`sb.functions.invoke("portal-billing", { body: { action: "status" } })`));
 });
 

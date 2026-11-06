@@ -7,15 +7,18 @@
 //
 //  * number (60200 bad number, 60205 landline) and locked (60203, 60202): Twilio sent nothing,
 //    so all three slots go back.
-//  * config (60204 twice, 20404, 21608): Twilio refuses every text for the tenant until an
+//  * config (60204, 20404, 21608): Twilio refuses every text for the tenant until an
 //    operator fixes the setup. ONLY THE PHONE SLOT is kept. Giving all three back left nothing
 //    capping repeat requests; keeping all three (the version before this one) meant twenty
 //    refused texts from one venue Wi-Fi locked EMAIL login for that IP, and sixty closed email
 //    for the whole tenant, while the 503 sends those same shoppers to email.
 //  * transient (429, 5xx, network): all three are kept, since a text may have gone out.
 //  * Twilio not configured after the claim: all three go back.
-//  * the brand fallback (60204 on the branded send, then the unbranded resend works): one text,
-//    each slot charged once.
+//  * the builder's own Verify service (migration 323): the code goes out on it with the sub's key;
+//    when it refuses as unusable the same request goes once to the parent's service (one text,
+//    each slot charged once); a transient refusal is never resent; the check asks the parent's
+//    service once more when the builder's says expired; a moved name renames the service in the
+//    background without holding up the code. Nothing ever carries CustomFriendlyName.
 //
 // It also pins the log volume of a config refusal: at most one app_errors row per isolate per
 // Twilio code, and no per-request info row from withErrorLog, because only the per-number cap
@@ -34,8 +37,8 @@
 // text or email can leave the box.
 
 // deno-lint-ignore-file no-explicit-any
-import { stubDb } from "./supabase_stub.ts";
-import { _resetBrandRefusedForTests } from "../twilioVerify.ts";
+import { stubDb, stubRpc } from "./supabase_stub.ts";
+import { _resetTwilioAccountCaches } from "../twilioAccount.ts";
 import { EMAIL_OTP_MAX_ATTEMPTS, hashEmailOtp } from "../emailOtp.ts";
 
 function assertEquals<T>(actual: T, expected: T, msg = ""): void {
@@ -102,6 +105,13 @@ class Query {
   upsert(row: Row, _opts?: unknown) { this.op = "upsert"; this.payload = row; return this; }
   delete() { this.op = "delete"; return this; }
   eq(col: string, val: unknown) { this.filters.push((r) => r[col] === val); return this; }
+  // Only the provisioning lock's shape (twilioVerifyService.ts's sync takes it).
+  or(expr: string) {
+    const m = /^provision_lock_until\.is\.null,provision_lock_until\.lt\.(.+)$/.exec(expr);
+    if (!m) throw new Error(`FakeDb: unexpected or(${expr})`);
+    this.filters.push((r) => r.provision_lock_until == null || String(r.provision_lock_until) < m[1]);
+    return this;
+  }
   lt(col: string, val: string) { this.filters.push((r) => String(r[col]) < val); return this; }
   is(col: string, val: null) { this.filters.push((r) => (r[col] ?? null) === val); return this; }
   maybeSingle() {
@@ -183,34 +193,66 @@ const twilioSent = () =>
     headers: { "Content-Type": "application/json" },
   });
 
-type TwilioCall = { branded: boolean };
-type Stubs = { db: FakeDb; twilio: TwilioCall[]; resend: number[] };
+/** One code request to Twilio Verify (a start or a check): which service, with whose key. */
+type TwilioCall = { branded: boolean; service: string; endpoint: string; user: string };
+/** Any other Verify request (the background sync reading or naming a service). */
+type AdminCall = { method: string; url: string; user: string; form: Record<string, string> };
+type Stubs = {
+  db: FakeDb; twilio: TwilioCall[]; resend: number[]; admin: AdminCall[];
+  /** Answers the AdminCalls; by default Twilio is down for them (500). */
+  adminAnswer: (c: AdminCall) => Response;
+  /** twilio_account_creds' row for the tenant (the sub's credentials), or null for none. */
+  creds: Row | null;
+};
 
-/** Install a fresh database, the env, and fakes for Twilio (answering call n with
- *  `answer(n)`, 1-based) and Resend (always accepts). Module state the handler keeps between
- *  requests (the learned brand refusal, the config faults already logged) is reset first, so
- *  every test starts from a fresh isolate whatever ran before it. */
+const userOf = (init?: RequestInit) => {
+  const h = new Headers(init?.headers ?? {}).get("Authorization") ?? "";
+  try { return atob(h.replace(/^Basic /, "")).split(":")[0]; } catch { return ""; }
+};
+
+/** Install a fresh database, the env, and fakes for Twilio (answering code request n with
+ *  `answer(n, call)`, 1-based) and Resend (always accepts). Module state the handler keeps between
+ *  requests (the config faults already logged, the builder fallbacks and syncs tried) is reset
+ *  first, so every test starts from a fresh isolate whatever ran before it. */
 async function withStubs(
-  answer: (n: number) => Response | Promise<Response>,
+  answer: (n: number, call: TwilioCall) => Response | Promise<Response>,
   body: (s: Stubs) => Promise<void>,
+  env: Record<string, string> = {},
 ): Promise<void> {
-  _resetBrandRefusedForTests();
   customerAuth._resetConfigFaultLoggedForTests();
-  const s: Stubs = { db: new FakeDb(), twilio: [], resend: [] };
+  customerAuth._takeBackgroundWorkForTests();
+  _resetTwilioAccountCaches();
+  const s: Stubs = { db: new FakeDb(), twilio: [], resend: [], admin: [], adminAnswer: () => new Response("down", { status: 500 }), creds: null };
   const realFetch = globalThis.fetch;
-  const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
+  const allEnv = { ...ENV, ...env };
+  const savedEnv = Object.fromEntries([...Object.keys(allEnv), "TWILIO_SUBACCOUNTS"].map((k) => [k, Deno.env.get(k)]));
   stubDb.from = s.db.from;
-  for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
+  stubRpc.rpc = (fn: string, args: any) => {
+    if (fn !== "twilio_account_creds") throw new Error(`unexpected rpc ${fn}`);
+    return Promise.resolve({ data: s.creds && s.creds.client_id === args?.p_client_id ? [{ ...s.creds }] : [], error: null });
+  };
+  Deno.env.delete("TWILIO_SUBACCOUNTS");
+  for (const [k, v] of Object.entries(allEnv)) Deno.env.set(k, v);
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (url.startsWith("https://verify.twilio.com/v2/Services/")) {
+    const code = /^https:\/\/verify\.twilio\.com\/v2\/Services\/([^/]+)\/(Verifications|VerificationCheck)$/.exec(url);
+    if (code) {
       const form = new URLSearchParams(String(init?.body ?? ""));
-      s.twilio.push({ branded: form.has("CustomFriendlyName") });
+      const call = { branded: form.has("CustomFriendlyName"), service: code[1], endpoint: code[2], user: userOf(init) };
+      s.twilio.push(call);
       try {
-        return Promise.resolve(answer(s.twilio.length));
+        return Promise.resolve(answer(s.twilio.length, call));
       } catch (e) {
         return Promise.reject(e);
       }
+    }
+    if (url.startsWith("https://verify.twilio.com/v2/Services")) {
+      const call = {
+        method: String(init?.method ?? "GET"), url, user: userOf(init),
+        form: Object.fromEntries(new URLSearchParams(String(init?.body ?? ""))),
+      };
+      s.admin.push(call);
+      return Promise.resolve(s.adminAnswer(call));
     }
     if (url === "https://api.resend.com/emails") {
       s.resend.push(1);
@@ -220,9 +262,11 @@ async function withStubs(
   }) as typeof fetch;
   try {
     await body(s);
+    await Promise.all(customerAuth._takeBackgroundWorkForTests());
   } finally {
     globalThis.fetch = realFetch;
     stubDb.from = null;
+    stubRpc.rpc = null;
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) Deno.env.delete(k);
       else Deno.env.set(k, v);
@@ -257,12 +301,12 @@ Deno.test("module registered exactly one handler through Deno.serve", () => {
 
 // config ─────────────────────────────────────────────────────────────────────────────────────
 
-Deno.test("config 60204 (branded send and the unbranded resend both refused): phone slot kept, IP and tenant slots back to 0", async () => {
+Deno.test("config 60204: phone slot kept, IP and tenant slots back to 0, and nothing is resent", async () => {
   await withStubs(() => twilioRefusal(60204, 403), async ({ db, twilio }) => {
     const res = await textMeACode();
     assertEquals(res.status, 503, "config refusal answers not-available");
     assertEquals(slots(db), [1, 0, 0], "phone kept; IP and tenant released");
-    assertEquals(twilio.map((c) => c.branded), [true, false], "the branded send, then the one resend");
+    assertEquals(twilio.map((c) => c.branded), [false], "one plain send, no brand, no resend");
   });
 });
 
@@ -281,10 +325,10 @@ Deno.test("config: the kept phone slot is the cap, so a fourth tap on one number
   await withStubs(() => twilioRefusal(60204, 403), async ({ db, twilio }) => {
     for (let n = 1; n <= 3; n++) assertEquals((await textMeACode()).status, 503, `tap ${n}`);
     assertEquals(slots(db), [3, 0, 0]);
-    assertEquals(twilio.length, 6);
+    assertEquals(twilio.length, 3);
 
     assertEquals((await textMeACode()).status, 429, "the per-phone cap (3) binds");
-    assertEquals(twilio.length, 6, "the capped request never reached Twilio");
+    assertEquals(twilio.length, 3, "the capped request never reached Twilio");
     assertEquals(db.lockedUntil(ipKey(IP)), null, "the IP bucket is not locked");
   });
 });
@@ -380,38 +424,182 @@ Deno.test("transient failures (429, 500, network error) keep all three slots", a
 
 Deno.test("Twilio not configured after the claim gives all three slots back", async () => {
   await withStubs(() => twilioSent(), async ({ db, twilio }) => {
-    // The brand read sits after the configured check and before the claim; losing the service
-    // SID there makes twStartVerification throw TwilioNotConfigured with the slots claimed.
+    // The builder-service read (twilio_accounts, switch on) sits after the configured check and
+    // before the claim; losing the service SID there makes twStartVerification throw
+    // TwilioNotConfigured with the slots claimed. The tenant is pinned to the parent, so the
+    // parent's service is the one in use.
+    db.tables.twilio_accounts = [{ client_id: TENANT, kind: "parent", status: "active" }];
     db.onFrom = (table) => {
-      if (table === "client_settings") Deno.env.delete("TWILIO_VERIFY_SERVICE_SID");
+      if (table === "twilio_accounts") Deno.env.delete("TWILIO_VERIFY_SERVICE_SID");
     };
     const res = await textMeACode();
     assertEquals(res.status, 503);
     assertEquals(slots(db), [0, 0, 0], "all released");
     assertEquals(twilio.length, 0, "nothing reached Twilio");
+  }, { TWILIO_SUBACCOUNTS: "on" });
+});
+
+// the builder's own Verify service ─────────────────────────────────────────────────────────
+// Fake SIDs in the right shapes (the transport and the sync check them), all zeros.
+
+const z = (n: number) => "0".repeat(31) + String(n);
+const BUILDER_SVC = "VA" + z(4);
+const SUB_KEY = "SK" + z(2);
+const SUB = { client_id: TENANT, kind: "sub", status: "active", account_sid: "AC" + z(1), api_key_sid: SUB_KEY, api_secret: "sub-secret", auth_token: "sub-token" };
+const ON = { TWILIO_SUBACCOUNTS: "on" };
+
+/** The tenant as an active sub whose service is `BUILDER_SVC`, named `name`. */
+function asBuilder(s: Stubs, name = "Example Barns"): void {
+  s.db.tables.twilio_accounts = [{
+    client_id: TENANT, kind: "sub", status: "active", account_sid: SUB.account_sid,
+    verify_service_sid: BUILDER_SVC, verify_service_name: name, provision_lock_until: null,
+  }];
+  s.creds = { ...SUB };
+}
+
+Deno.test("builder service: the code goes out on the BUILDER's service with the sub's key, once, no brand", async () => {
+  await withStubs(() => twilioSent(), async (s) => {
+    asBuilder(s);
+    const res = await textMeACode();
+    assertEquals(res.status, 200);
+    assertEquals(s.twilio.map((c) => [c.service, c.endpoint, c.user, c.branded]), [[BUILDER_SVC, "Verifications", SUB_KEY, false]]);
+    assertEquals(slots(s.db), [1, 1, 1]);
+    assertEquals(s.admin, [], "the name matches: no sync");
+    assertEquals(s.db.tables.app_errors, []);
+  }, ON);
+});
+
+Deno.test("builder service: structure-studio's shape (a parent pin) and the switch off both use the parent's service", async () => {
+  await withStubs(() => twilioSent(), async (s) => {
+    s.db.tables.twilio_accounts = [{ client_id: TENANT, kind: "parent", status: "active" }];
+    assertEquals((await textMeACode()).status, 200);
+    assertEquals(s.twilio.map((c) => [c.service, c.user]), [["VAtestservicesid", "SKtestapikeysid"]]);
+  }, ON);
+  await withStubs(() => twilioSent(), async (s) => {
+    // No twilio_accounts table at all: with the switch off it is never read.
+    assertEquals((await textMeACode()).status, 200);
+    assertEquals(s.twilio.map((c) => c.service), ["VAtestservicesid"]);
   });
 });
 
-// brand fallback ─────────────────────────────────────────────────────────────────────────────
+Deno.test("rollback: a builder whose SID was cleared uses the parent's service, and no login makes a service again", async () => {
+  await withStubs(() => twilioSent(), async (s) => {
+    asBuilder(s);
+    Object.assign(s.db.tables.twilio_accounts[0], { verify_service_sid: null, verify_service_name: null });
+    s.db.tables.client_settings[0].business_name = "A Brand New Name";
+    assertEquals((await textMeACode()).status, 200);
+    assertEquals(s.twilio.map((c) => c.service), ["VAtestservicesid"]);
+    assertEquals(customerAuth._takeBackgroundWorkForTests().length, 0, "no background sync");
+    assertEquals(s.admin, [], "Twilio was never asked to make or name a service");
+  }, ON);
+});
 
-Deno.test("brand fallback (60204, then the unbranded resend succeeds): one text, each slot charged once", async () => {
-  await withStubs((n) => n === 1 ? twilioRefusal(60204, 403) : twilioSent(), async ({ db, twilio }) => {
-    const res = await textMeACode();
+Deno.test("builder service unusable (404/20404 deleted, 401 key revoked): resent ONCE on the parent's, one text, slots once, one warn row", async () => {
+  for (const [code, status] of [[20404, 404], [20003, 401]]) {
+    await withStubs((n) => n === 1 ? twilioRefusal(code, status) : twilioSent(), async (s) => {
+      asBuilder(s);
+      const res = await textMeACode();
+      assertEquals(res.status, 200, `${status}/${code}`);
+      assertEquals(s.twilio.map((c) => c.service), [BUILDER_SVC, "VAtestservicesid"], `${status}/${code}: the builder's, then the parent's`);
+      assertEquals(slots(s.db), [1, 1, 1], `${status}/${code}: one text, charged once`);
+      await Promise.all(customerAuth._takeBackgroundWorkForTests());
+      assertEquals(
+        s.db.tables.app_errors.map((r) => [r.code, r.severity]),
+        [["twilio_verify_builder_fallback", "warn"], ["twilio_verify_sync_failed", "warn"]],
+        `${status}/${code}: the fallback said once, and the repair (Twilio down for it here) said once`,
+      );
+      const again = await textMeACode(7);
+      assertEquals(again.status, 200);
+      assertEquals(s.db.tables.app_errors.length, 2, "the same fallback is not filed twice in an isolate");
+    }, ON);
+  }
+});
+
+Deno.test("builder service transient (429, 500): NOT resent on the parent's (a text may have gone), slots kept", async () => {
+  for (const [code, status] of [[20429, 429], [0, 500]]) {
+    await withStubs(() => code ? twilioRefusal(code, status) : new Response("down", { status }), async (s) => {
+      asBuilder(s);
+      const res = await textMeACode();
+      assertEquals(res.status, 502);
+      assertEquals(s.twilio.length, 1, `${status}: one request only`);
+      assertEquals(slots(s.db), [1, 1, 1]);
+    }, ON);
+  }
+});
+
+Deno.test("builder service: a number refusal (60200) is not resent either, and gives the slots back", async () => {
+  await withStubs(() => twilioRefusal(60200, 400), async (s) => {
+    asBuilder(s);
+    assertEquals((await textMeACode()).status, 400);
+    assertEquals(s.twilio.length, 1);
+    assertEquals(slots(s.db), [0, 0, 0]);
+  }, ON);
+});
+
+const approved = () => new Response(JSON.stringify({ status: "approved" }), { status: 200, headers: { "Content-Type": "application/json" } });
+const checkCode = () => post({ action: "verify_code", clientId: TENANT, phone: phone(6), code: "123456" });
+
+Deno.test("check: on the builder's service with the sub's key; the parent's is never asked when it answers", async () => {
+  await withStubs(() => approved(), async (s) => {
+    asBuilder(s);
+    s.db.tables.customer_sessions = [];
+    const res = await checkCode();
     assertEquals(res.status, 200);
-    assertEquals(res.body, { ok: true });
-    assertEquals(twilio.map((c) => c.branded), [true, false], "refused branded send, then one unbranded send");
-    assertEquals(slots(db), [1, 1, 1], "the resend is the same text, charged once");
-    assertEquals(
-      db.tables.app_errors.map((r) => [r.code, r.severity]),
-      [["twilio_brand_refused", "warn"]],
-    );
+    assertEquals(s.twilio.map((c) => [c.service, c.endpoint, c.user]), [[BUILDER_SVC, "VerificationCheck", SUB_KEY]]);
+  }, ON);
+});
 
-    // The isolate has learned: the next send goes unbranded straight away, one call, one charge.
-    const next = await textMeACode(7);
-    assertEquals(next.status, 200);
-    assertEquals(twilio.map((c) => c.branded), [true, false, false]);
-    assertEquals(slots(db, 7), [1, 2, 2]);
-  });
+Deno.test("check: the builder's service says expired (a code started on the parent's before) → the parent's approves it", async () => {
+  await withStubs((n) => n === 1 ? twilioRefusal(20404, 404) : approved(), async (s) => {
+    asBuilder(s);
+    s.db.tables.customer_sessions = [];
+    const res = await checkCode();
+    assertEquals(res.status, 200, "the customer is signed in");
+    assertEquals(s.twilio.map((c) => c.service), [BUILDER_SVC, "VAtestservicesid"]);
+    assertEquals(s.db.tables.customer_sessions.length, 1);
+  }, ON);
+});
+
+Deno.test("check: a wrong code on the builder's service is NOT asked of the parent's, and counts as a fail", async () => {
+  const pendingCheck = () => new Response(JSON.stringify({ status: "pending" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  await withStubs(() => pendingCheck(), async (s) => {
+    asBuilder(s);
+    s.db.tables.customer_otp_throttle.push({ bucket: phoneKey(6), send_count: 1, fail_count: 0, window_started_at: new Date().toISOString(), locked_until: null });
+    const res = await checkCode();
+    assertEquals(res.status, 401);
+    assertEquals(s.twilio.length, 1);
+    assertEquals(s.db.tables.customer_otp_throttle.find((r) => r.bucket === phoneKey(6))?.fail_count, 1);
+  }, ON);
+});
+
+Deno.test("rename: a moved name still gets its code at once, and the service is renamed in the background", async () => {
+  const parentSvc = { sid: "VAtestservicesid", friendly_name: "Structure Studio", code_length: 6, lookup_enabled: false };
+  await withStubs(() => twilioSent(), async (s) => {
+    asBuilder(s, "Old Name");
+    s.adminAnswer = (c) => {
+      const ok = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (c.method === "GET" && c.url.endsWith("/Services/VAtestservicesid")) return ok(parentSvc);
+      if (c.method === "GET" && c.url.endsWith("/Services?PageSize=50")) {
+        return ok({ services: [{ sid: BUILDER_SVC, friendly_name: "Old Name", code_length: 6, lookup_enabled: false }] });
+      }
+      if (c.method === "POST" && c.url.endsWith(`/Services/${BUILDER_SVC}`)) return ok({ sid: BUILDER_SVC, friendly_name: c.form.FriendlyName });
+      return new Response("unexpected", { status: 599 });
+    };
+    const res = await textMeACode();
+    assertEquals(res.status, 200, "the customer is not held up");
+    assertEquals(s.twilio.map((c) => c.service), [BUILDER_SVC], "this code still goes on their service (old name)");
+    await Promise.all(customerAuth._takeBackgroundWorkForTests());
+    const renames = s.admin.filter((c) => c.method === "POST");
+    assertEquals(renames.map((c) => [c.url.endsWith(BUILDER_SVC), c.user, c.form]), [[true, SUB_KEY, { FriendlyName: "Example Barns" }]]);
+    assertEquals(s.db.tables.twilio_accounts[0].verify_service_name, "Example Barns");
+    assertEquals(s.db.tables.twilio_accounts[0].provision_lock_until, null, "the lock is released");
+    assertEquals(s.db.tables.app_errors, []);
+
+    // Already tried in this isolate: a second code within the window starts no second sync.
+    s.db.tables.twilio_accounts[0].verify_service_name = "Older Still";
+    assertEquals((await textMeACode(7)).status, 200);
+    assertEquals(customerAuth._takeBackgroundWorkForTests().length, 0);
+  }, ON);
 });
 
 // email code guesses ────────────────────────────────────────────────────────────────────────

@@ -33,7 +33,6 @@
 //   X  across both: neither number in localStorage, sessionStorage, the URL, the console, the
 //      error log (log_error) or any request other than the one tokenize POST
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/achBankBoxes.mjs            (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> and SS_MY_QUOTES=<an older my-quotes.html>
@@ -399,7 +398,7 @@ try {
   // ── P: the portal's Record-a-payment modal ──
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-  await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/portal/orders/o-${ORDER_ID}`);
+  await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, `/orders/o-${ORDER_ID}`);
   const recordBtn = page.getByRole("button", { name: "Record a payment" });
   ok("P0: the order opens with Record a payment", await recordBtn.waitFor({ timeout: 20000 }).then(() => true, () => false));
   await page.waitForFunction(() => {

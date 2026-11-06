@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import { mintAccessToken, pushCredentialFor } from "../src/accessToken";
 import { b64urlDecodeJson } from "../src/b64";
 import { Auth, FakeNet, NUMBER_ID, SUPABASE_URL, USER_A, USER_C, appRequest, call, callerCtx, filter, jsonRes, makeEnv } from "./helpers";
-import { businessNumbersOf } from "../src/db";
+import { businessNumbersOf, callerContext, type Admin } from "../src/db";
 
 const HEX_A = USER_A.replace(/-/g, "");
+
+/** The read of the person's settings, not the one of their transcripts answer (test/aiConsent.test.ts). */
+const settingsRead = (net: FakeNet) => net.reads("phone_user_settings").find((r) => !String(r.url.searchParams.get("select")).includes("ai_transcripts"))!;
 
 function decode(jwt: string) {
   const [h, p, s] = jwt.split(".");
@@ -102,6 +105,21 @@ describe("POST /token", () => {
     const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" }));
     expect(res.status).toBe(200);
     expect(json.user.can_text_contacts).toBe(can);
+  });
+
+  // contacts:'own_view' (migration 286): own customers, view only. The apps hide the composer on
+  // can_text_contacts and narrow their lists on own_contacts_only, so they need no change of their own.
+  it.each([
+    ["the RPC says narrowed", true],
+    // A database before 286 answers own_contacts_only false for this level; the Worker narrows anyway.
+    ["the RPC says not narrowed (before 286)", false],
+  ])("contacts own_view: can_text_contacts false and own_contacts_only true when %s", async (_l, rpcOwn) => {
+    const { auth, env } = await setup(callerCtx({ contacts_level: "own_view", own_contacts_only: rpcOwn }));
+    const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" }));
+    expect(res.status).toBe(200);
+    expect(json.user).toMatchObject({ can_text_contacts: false, own_contacts_only: true });
+    // The level itself is not shipped to the apps (they never parse it).
+    expect(JSON.stringify(json)).not.toContain("own_view");
   });
 
   it("adds _dev only for the iPhone development client, with the development bundle's credential", async () => {
@@ -250,14 +268,62 @@ describe("POST /token", () => {
     expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
   });
 
+  it("recorded with the announcement off (2026-10-21) still says recorded, and its calls are still transcribed", async () => {
+    const quiet = { on: true, notice: false, notice_text: null, transcribe: true };
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod", app_version: "1" });
+    const s = await setup(callerCtx({ recording: quiet }));
+    const json = (await call(makeEnv({ CALL_RECORDING: "on", CALL_TRANSCRIBE: "on", TRANSCRIBE: "on" }), await req(s.auth))).json;
+    expect(json.recording).toEqual({ on: true });
+    expect(json.transcripts).toEqual({ calls: true, voicemail: true });
+    // The rail still wins.
+    expect((await call(makeEnv({ CALL_TRANSCRIBE: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
+  });
+
+  // App Store guideline 5.1.2(i): the apps tell the person which outside AI services make the
+  // transcripts and summaries before showing any, and need to know whether this business has them.
+  it("says whether this business's calls are transcribed (recorded, the owner's transcripts switch, CALL_TRANSCRIBE) and its voicemails (TRANSCRIBE)", async () => {
+    const on = { on: true, notice: true, notice_text: null, transcribe: true };
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod", app_version: "1" });
+    const all = { CALL_RECORDING: "on", CALL_TRANSCRIBE: "on", TRANSCRIBE: "on" };
+    const s = await setup(callerCtx({ recording: on }));
+    expect((await call(makeEnv(all), await req(s.auth))).json.transcripts).toEqual({ calls: true, voicemail: true });
+    // Each rail alone turns its half off.
+    expect((await call(makeEnv({ ...all, CALL_TRANSCRIBE: "off" }), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    expect((await call(makeEnv({ ...all, TRANSCRIBE: "off" }), await req(s.auth))).json.transcripts).toEqual({ calls: true, voicemail: false });
+    // Nothing recorded, nothing to transcribe: the rail off, or the owner's recording switch off.
+    expect((await call(makeEnv({ ...all, CALL_RECORDING: "off" }), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: { ...on, on: false } }));
+    expect((await call(makeEnv(all), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    // The owner turned transcripts off and left recording on.
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: { ...on, transcribe: false } }));
+    const off = (await call(makeEnv(all), await req(s.auth))).json;
+    expect(off.recording).toEqual({ on: true });
+    expect(off.transcripts).toEqual({ calls: false, voicemail: true });
+    // A database before 263 has no recording block: nothing is recorded, so no call transcripts.
+    s.net.rpc("phone_caller_context", () => callerCtx());
+    expect((await call(makeEnv(all), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: true });
+    // Unset rails read off.
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: on }));
+    expect((await call(makeEnv(), await req(s.auth))).json.transcripts).toEqual({ calls: false, voicemail: false });
+  });
+
+  it("says this Worker serves list search (features.list_search), on every platform", async () => {
+    const s = await setup();
+    for (const platform of ["chrome", "android", "ios"]) {
+      const req = appRequest("POST", "/token", await s.auth.token(USER_A), { platform, build_type: "prod", app_version: "1" });
+      const { json } = await call(s.env, req);
+      expect(json.features).toEqual({ handoff: true, recordings: true, list_search: true });
+    }
+  });
+
   // Migration 264: the apps show who rings in your place while you're away from this answer.
   it("settings carry the cover (null when none is chosen), read from the caller's own row", async () => {
     const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "chrome", build_type: "prod", app_version: "1" });
     const s = await setup(undefined, [{ dnd: true, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: USER_C }]);
     const { json } = await call(s.env, await req(s.auth));
     expect(json.settings).toEqual({ dnd: true, forward_to_cell: null, dnd_cover_user_id: USER_C, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
-    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("dnd_cover_user_id");
-    expect(filter(s.net.reads("phone_user_settings")[0], "user_id")).toBe(USER_A);
+    expect(settingsRead(s.net).url.searchParams.get("select")).toContain("dnd_cover_user_id");
+    expect(filter(settingsRead(s.net), "user_id")).toBe(USER_A);
     const none = await setup(undefined, []);
     expect((await call(none.env, await req(none.auth))).json.settings).toEqual({ dnd: false, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
   });
@@ -269,7 +335,7 @@ describe("POST /token", () => {
     const s = await setup(undefined, [{ dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: hours, ring_hours_tz: "America/Denver" }]);
     const { json } = await call(s.env, await req(s.auth));
     expect(json.settings).toMatchObject({ ring_hours: hours, ring_hours_tz: "America/Denver" });
-    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("ring_hours_tz");
+    expect(settingsRead(s.net).url.searchParams.get("select")).toContain("ring_hours_tz");
     // Anything but an object (a database fault, say) reads as always.
     const odd = await setup(undefined, [{ dnd: false, ring_hours: [["08:00", "17:00"]], ring_hours_tz: null }]);
     expect((await call(odd.env, await req(odd.auth))).json.settings).toMatchObject({ ring_hours: null, ring_hours_tz: null });
@@ -283,7 +349,7 @@ describe("POST /token", () => {
     const { json, text } = await call(s.env, await req(s.auth));
     expect(json.settings.greeting).toEqual({ set: true, updated_at: "2026-10-05T15:01:00Z" });
     expect(text).not.toContain(SID);
-    expect(s.net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("greeting_recording_sid");
+    expect(settingsRead(s.net).url.searchParams.get("select")).toContain("greeting_recording_sid");
     // A time with no recording is not a greeting.
     const stray = await setup(undefined, [{ dnd: false, greeting_recording_sid: null, greeting_updated_at: "2026-10-05T15:01:00Z" }]);
     expect((await call(stray.env, await req(stray.auth))).json.settings.greeting).toEqual({ set: false, updated_at: null });
@@ -332,5 +398,29 @@ describe("POST /token with more than one business number", () => {
     expect(businessNumbersOf(undefined, "+15555550100")).toEqual(["+15555550100"]);
     expect(businessNumbersOf(Array.from({ length: 80 }, (_, i) => `+1555555${String(1000 + i)}`), null)).toHaveLength(50);
     expect(NUMBER_ID).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+// db.ts callerContext, on its own: what the RPC answers about the contacts level, and what the
+// Worker keeps of it. contacts:'own_view' (migration 286) survives; an unknown level is 'none'.
+describe("callerContext keeps the contacts level", () => {
+  const rpcAnswering = (data: Record<string, unknown>) =>
+    ({ rpc: async () => ({ data: { ...callerCtx(), ...data }, error: null }) }) as unknown as Admin;
+  it.each([
+    [{ contacts_level: "own_view", own_contacts_only: true }, "own_view", true],
+    [{ contacts_level: "own_view", own_contacts_only: false }, "own_view", true],
+    [{ contacts_level: "own", own_contacts_only: false }, "own", true],
+    [{ contacts_level: "view", own_contacts_only: false }, "view", false],
+    [{ contacts_level: "edit", own_contacts_only: false }, "edit", false],
+    [{ contacts_level: "sideways", own_contacts_only: false }, "none", false],
+  ])("%j → contacts_level %s, own_contacts_only %s", async (data, level, own) => {
+    const ctx = await callerContext(rpcAnswering(data), USER_A);
+    expect(ctx?.contacts_level).toBe(level);
+    expect(ctx?.own_contacts_only).toBe(own);
+  });
+
+  it("the phone level never takes own_view", async () => {
+    const ctx = await callerContext(rpcAnswering({ phone_level: "own_view" }), USER_A);
+    expect(ctx?.phone_level).toBe("none");
   });
 });

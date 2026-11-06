@@ -29,7 +29,6 @@
 // cardOrder rule (both kinds, strings only, at most 40), so what the page reads back is what the
 // real whitelist would keep.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmCardOrder.mjs             (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-card-order (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an
@@ -81,7 +80,10 @@ const TITLES = { summary: "Summary", details: "Details", deals: "Deals", orders:
 const CONTACT_SHOWING = CONTACT_KEYS.filter((k) => k !== "tax");
 const SAVED_CONTACT = CONTACT_KEYS.slice().reverse();
 const SAVED_DESIGN = ["tax", "person", "summary", "details", "build", "delivery", "repairs", "overview"];
-const PREFS = { designsView: "pipeline", emailSignature: "Sam\nAcme Sheds", cardOrder: { contact: SAVED_CONTACT, design: SAVED_DESIGN } };
+// emailSignatureHtml rides along from 2026-11-01: a signature is TWO keys now, and a save
+// from this card must carry both of somebody else's untouched (_shared/savePrefs.ts).
+const SIG_HTML = "<p>Sam<br>Acme Sheds</p>";
+const PREFS = { designsView: "pipeline", emailSignature: "Sam\nAcme Sheds", emailSignatureHtml: SIG_HTML, cardOrder: { contact: SAVED_CONTACT, design: SAVED_DESIGN } };
 
 const { ok, failed } = reporter();
 const shots = shotsDir("crm-card-order");
@@ -95,7 +97,9 @@ const SENDS = ["crm_send_email", "crm_send_sms", "email_send_test", "resend_quot
 function savePrefs(raw, server) {
   const clean = {};
   if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+  if (typeof raw.contactsView === "string" && /^(people|designs|p-[0-9a-f-]{36})$/.test(raw.contactsView)) clean.contactsView = raw.contactsView;
   if (typeof raw.emailSignature === "string" && raw.emailSignature.trim()) clean.emailSignature = raw.emailSignature.trim();
+  if (typeof raw.emailSignatureHtml === "string" && raw.emailSignatureHtml.trim()) clean.emailSignatureHtml = raw.emailSignatureHtml.trim();
   const order = (raw.cardOrder && typeof raw.cardOrder === "object" && !Array.isArray(raw.cardOrder)) ? raw.cardOrder : null;
   if (order && server !== "old") {
     const co = {};
@@ -199,11 +203,11 @@ async function openRecord(s, path) {
     return { keys: heads.map((d) => byTitle[d.textContent]), titles: heads.map((d) => d.textContent) };
   }, TITLES);
 }
-const contactPath = `/portal/contacts/c-${CONTACT_ID}`;
-const designPath = `/portal/designs/d-${CODE}`;
+const contactPath = `/contacts/c-${CONTACT_ID}`;
+const designPath = `/designs/d-${CODE}`;
 
 async function openProfile(s) {
-  await s.go("/portal/settings/myprofile");
+  await s.go("/settings/myprofile");
   await s.page.waitForFunction(() => !!document.querySelector('[data-ss-card-order="contact"]'), null, { timeout: 20000 }).catch(() => {});
   await s.page.waitForTimeout(300);
 }
@@ -234,12 +238,12 @@ try {
 
     // ── D. My Profile ──
     await openProfile(s);
-    const hasCard = ok("D0 My Profile shows the Record card order card", (await orderCard(s.page).count()) > 0 && /On a contact/.test(await cardText(s.page)) && /On a deal/.test(await cardText(s.page)));
+    const hasCard = ok("D0 My Profile shows the Record card order card", (await orderCard(s.page).count()) > 0 && /On a contact/.test(await cardText(s.page)) && /On a design/.test(await cardText(s.page)));
     if (!hasCard) throw new Error("My Profile has no Record card order card; refusing to report the rest as passes");
     ok("D1 both lists hold every card the kind can show, in the saved order",
       same(await listKeys(s.page, "contact"), SAVED_CONTACT) && same(await listKeys(s.page, "design"), SAVED_DESIGN),
       JSON.stringify({ contact: await listKeys(s.page, "contact"), design: await listKeys(s.page, "design") }));
-    ok("D2 Sales tax says when it shows", /Shows for a deal with a StructureStudio quote/.test(await cardText(s.page)));
+    ok("D2 Sales tax says when it shows", /Shows for a deal with a StructureStudio estimate/.test(await cardText(s.page)));
     await orderCard(s.page).scrollIntoViewIfNeeded().catch(() => {});
     await s.page.screenshot({ path: join(shots, "D-profile-1440.png") });
 
@@ -253,7 +257,8 @@ try {
     ok("D4 save_prefs is posted once, with the FULL contact list in the new order", saves(s).length === before + 1 && sent.cardOrder && same(sent.cardOrder.contact, WANT),
       JSON.stringify(sent.cardOrder));
     ok("D5 the deal list rides along as it was", sent.cardOrder && same(sent.cardOrder.design, SAVED_DESIGN), JSON.stringify(sent.cardOrder));
-    ok("D6 and so do the person's other preferences", sent.emailSignature === "Sam\nAcme Sheds" && sent.designsView === "pipeline", JSON.stringify(sent));
+    ok("D6 and so do the person's other preferences, both halves of the signature included",
+      sent.emailSignature === "Sam\nAcme Sheds" && sent.emailSignatureHtml === SIG_HTML && sent.designsView === "pipeline", JSON.stringify(sent));
     ok("D7 the screen says Saved.", /(^|\n)Saved\.(\n|$)/.test(await cardText(s.page)), (await cardText(s.page)).split("\n").pop());
     await orderCard(s.page).screenshot({ path: join(shots, "D-saved.png") }).catch(() => {});
 
@@ -326,17 +331,18 @@ try {
     const s = await scenario(browser, { name: "slow-mixed", saveDelay: 900 });
     await openProfile(s);
     for (let i = 0; i < 2; i++) { await tap(arrow(s.page, "contact", "Overview", "down")); await s.page.waitForTimeout(60); }
-    // The first order save is out and the second is queued: switch the Pipeline default now.
-    await tap(s.page.getByRole("button", { name: "List", exact: true }));
+    // The first order save is out and the second is queued: switch the Contacts tab's default now.
+    await tap(s.page.locator('[data-ss-view-pick="designs"]'));
     await settle(s.page);
     await s.page.waitForTimeout(1500);
     const WANT2 = ["repairs", "delivery", "overview", "build", "tax", "orders", "deals", "details", "summary"];
     const sv = saves(s).map((x) => x.prefs);
     const last = sv[sv.length - 1] || {};
-    ok("E6 a Pipeline default saved mid-run rides along: the run's last save still says List",
-      sv.length >= 3 && last.designsView === "list" && same(last.cardOrder && last.cardOrder.contact, WANT2),
-      JSON.stringify(sv.map((p) => [p.designsView, p.cardOrder && p.cardOrder.contact && p.cardOrder.contact.slice(0, 3)])));
-    ok("E7 and the person's other preferences with it", last.emailSignature === "Sam\nAcme Sheds" && same(last.cardOrder && last.cardOrder.design, SAVED_DESIGN), JSON.stringify(last));
+    ok("E6 a Contacts default saved mid-run rides along: the run's last save still says the Design list",
+      sv.length >= 3 && last.contactsView === "designs" && last.designsView === "list" && same(last.cardOrder && last.cardOrder.contact, WANT2),
+      JSON.stringify(sv.map((p) => [p.contactsView, p.designsView, p.cardOrder && p.cardOrder.contact && p.cardOrder.contact.slice(0, 3)])));
+    ok("E7 and the person's other preferences with it", last.emailSignature === "Sam\nAcme Sheds"
+      && last.emailSignatureHtml === SIG_HTML && same(last.cardOrder && last.cardOrder.design, SAVED_DESIGN), JSON.stringify(last));
     await s.ctx.close();
   }
 

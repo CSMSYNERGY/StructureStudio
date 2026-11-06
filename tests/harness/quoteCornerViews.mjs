@@ -26,7 +26,6 @@
 // picture to show Carolyn. Supabase is stubbed at the network layer; nothing leaves the machine and
 // nothing is saved anywhere.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root, after npm run compile)
 //   node tests/harness/quoteCornerViews.mjs          (exit 0 = every check held)
 //
 // SS_SHOTS=<dir> puts the shots and the sample there. To prove the checks can fail, serve the tree
@@ -189,7 +188,7 @@ async function armViewerShot(page, shots, name) {
     let el = window.__ss3dEngine.renderer.domElement;
     while (el && el !== document.body && getComputedStyle(el).position !== "fixed") el = el.parentElement;
     const root = el || document.body;
-    const b = [...root.querySelectorAll("button")].find((x) => /📸|✓ /u.test(x.textContent) && /quote|Picture/.test(x.textContent));
+    const b = [...root.querySelectorAll("button")].find((x) => /📸|✓ /u.test(x.textContent) && /estimate|Picture/.test(x.textContent));
     return { button: b ? b.textContent.trim() : "", text: root.innerText };
   });
   const before = await read();
@@ -257,13 +256,13 @@ async function run(tag, { view3d = true, corners, door = false, breakSheet = fal
     if (armShot) {
       const v = await armViewerShot(page, shots, tag.trim().replace(/\W+/g, "-"));
       if (corners === true) {
-        ok(`${tag} the 3D viewer offers the framed view as the quote's picture, not "in my quote"`,
-          v.before.button === "📸 Use this view as my quote's picture" && !/in my quote/.test(v.before.text), v.before.button);
-        ok(`${tag} and once pressed says the picture is saved, never "Added to quote"`,
-          v.after.button === "✓ Picture saved — retake?" && !/Added to quote/.test(v.after.text), v.after.button);
+        ok(`${tag} the 3D viewer offers the framed view as the estimate's picture, not "in my estimate"`,
+          v.before.button === "📸 Use this view as my estimate's picture" && !/in my estimate/.test(v.before.text), v.before.button);
+        ok(`${tag} and once pressed says the picture is saved, never "Added to estimate"`,
+          v.after.button === "✓ Picture saved — retake?" && !/Added to estimate/.test(v.after.text), v.after.button);
       } else {
-        ok(`${tag} the 3D viewer still offers "Use this view in my quote"`, v.before.button === "📸 Use this view in my quote", v.before.button);
-        ok(`${tag} and once pressed says "Added to quote", because that view is page 2`, v.after.button === "✓ Added to quote — retake?", v.after.button);
+        ok(`${tag} the 3D viewer still offers "Use this view in my estimate"`, v.before.button === "📸 Use this view in my estimate", v.before.button);
+        ok(`${tag} and once pressed says "Added to estimate", because that view is page 2`, v.after.button === "✓ Added to estimate — retake?", v.after.button);
       }
     }
     // 555-01xx is reserved for fiction, the same number the e2e suite uses.

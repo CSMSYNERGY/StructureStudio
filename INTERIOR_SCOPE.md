@@ -183,6 +183,19 @@ axis-aligned, placed across the short span and stored in feet; its height is ful
 inches; its doors and windows are catalog fixtures held inside the wall, never wall items. Hidden
 until the builder prices it (each, per foot or per square foot of wall). See the PARTITION WALLS
 block in the designer twins and `_shared/partitionPricing.ts`.
+*Interior walls v2, slices 2 and 2b (2026-10-17):* customers read it as an "Interior wall" (the
+item key stays `partitionWall`, rule 4 below). A wall is a segment between two points at any angle
+(`x1Ft..y2Ft`; a v1 `{ axis, atFt, fromFt, toFt }` wall opens as the same wall), snapping to an
+outside wall, to another wall's end or body (T, L and X joins; walls in line may not overlap), to
+0/45/90/135 degrees unless Shift or "Free angle", then to the inch. A click still places the
+short-span wall; press-drag draws one. It is drawn as two lines at its real thickness (2x4 or 2x6
+stud plus half an inch per covered face), framed in the builder's standard stud unless an owner,
+admin or granted rep overrides it (customers never see the choice). Its height is stud wall height
+(the plate), a custom height, or to the rafters (its top follows the roof's underside, or a loft's
+floor framing, and per-sq-ft pricing uses that face area, clamped by the server). Rates come per
+stud size from `interior_wall_settings` (slice 1), falling back to the partitionWall layout row as
+the 2x4 rate. Coverings (`covers: { a, b }`, stored null), rough openings and hosted electrical are
+slices 3 to 5.
 
 **Electrical — package or per-addon.** Both, per Carolyn. Per-addon is a point item with a
 device type; the package is a single priced line that doesn't require placing anything. The

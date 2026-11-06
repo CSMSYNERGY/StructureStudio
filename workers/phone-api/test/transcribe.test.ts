@@ -1,14 +1,18 @@
 // Call transcripts and summaries (src/cron/transcribe.ts): nova-3's answer to labelled lines, the
-// queue (claim, back off, give up), the summary request, and the rule that no transcript text ever
-// reaches a log. Workers AI, Twilio and the edge function are stubs; every value is made up.
+// queue (claim, back off, give up), the summary request, the rule that nothing goes to Workers AI
+// or Claude unless everyone on the call allowed it (src/aiConsent.ts, migration 307), and the rule
+// that no transcript text ever reaches a log. Workers AI, Twilio and the edge function are stubs;
+// every value is made up.
 import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { adminClient } from "../src/db";
 import { installDenoShim } from "../src/env";
 import {
-  MAX_ATTEMPTS, requestCallSummary, runTranscriptions, sttCostMicros, transcriptOf, utterancesOf, utterancesToKeep,
+  MAX_ATTEMPTS, requestCallSummary, runTranscriptions, sttCostMicros, transcriptOf, utterancesOf, utterancesToKeep, withTeamName,
 } from "../src/cron/transcribe";
-import { CLIENT, FakeCtx, FakeNet, SUPABASE_URL, jsonRes, makeEnv, type Seen } from "./helpers";
+import {
+  CLIENT, FakeCtx, FakeNet, SUPABASE_URL, USER_A, USER_B, USER_C, allowed, jsonRes, makeEnv, serveConsent, type EventFixture, type Seen,
+} from "./helpers";
 
 const REC_ID = "00000000-0000-4000-8000-0000000ae001";
 const CALL_ID = "00000000-0000-4000-8000-0000000ca777";
@@ -44,10 +48,17 @@ const claimed = (over: Record<string, unknown> = {}) => ({
   id: REC_ID, call_id: CALL_ID, client_id: CLIENT, recording_sid: REC_SID, duration_s: 125, channel_map: { 0: "customer", 1: "team" }, attempts: 1, ...over,
 });
 
-function setup(opts: { rows?: unknown[]; wants?: boolean; media?: Response; due?: unknown[]; summaryStatus?: number } = {}) {
+/** The call's team by default: USER_A answered it, and has allowed transcripts. */
+const theCall = (over: Record<string, unknown> = {}) => ({ id: CALL_ID, placed_by: null, answered_by: USER_A, transferred_from: null, ...over });
+
+function setup(opts: {
+  rows?: unknown[]; wants?: boolean; media?: Response; due?: unknown[]; summaryStatus?: number;
+  calls?: Record<string, unknown>[]; events?: EventFixture[]; consent?: Record<string, unknown>[];
+} = {}) {
   const net = new FakeNet().install();
   net.rpc("phone_recordings_claim", () => opts.rows ?? [claimed()]);
   net.rest("GET", "client_settings", () => [{ client_id: CLIENT, phone_transcribe_calls: opts.wants !== false }]);
+  serveConsent(net, { calls: opts.calls ?? [theCall()], events: opts.events, consent: opts.consent ?? [allowed(USER_A)] });
   net.on("GET", (u) => u.pathname.endsWith(`/Recordings/${REC_SID}.mp3`), () => opts.media?.clone() ?? new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mpeg" } }));
   net.rest("PATCH", "phone_call_recordings", () => [{ id: REC_ID }]);
   net.rest("GET", "phone_call_recordings", () => opts.due ?? []);
@@ -86,6 +97,17 @@ describe("from nova-3's answer to labelled lines", () => {
 
   it("a map that says the channels the other way round is followed (a correction never relabels old rows)", () => {
     expect(transcriptOf(utterancesOf(novaWords(), { 0: "team", 1: "customer" })).split("\n")[0]).toBe("Team: Hi, is the 12x24 ready?");
+  });
+
+  it("withTeamName puts a name on our side's line labels only, on read (Carolyn 2026-10-23)", () => {
+    const t = transcriptOf(utterancesOf(novaWords(), null));
+    expect(withTeamName(t, "Jordan Lee")).toBe(t.replace(/^Team: /gm, "Jordan Lee: "));
+    expect(withTeamName("Customer: Is the Team: page open?\nTeam: Yes.", "Jordan Lee")).toBe("Customer: Is the Team: page open?\nJordan Lee: Yes.");
+    expect(withTeamName("Team: Hi.", null)).toBe("Team: Hi.");
+    expect(withTeamName("Team: Hi.", "  ")).toBe("Team: Hi.");
+    expect(withTeamName("Team: Hi.", "Pat $& Co")).toBe("Pat $& Co: Hi."); // a name, never a replacement pattern
+    expect(withTeamName("Team: Hi.", " Jordan\n Lee ")).toBe("Jordan Lee: Hi."); // a name never breaks a line
+    expect(withTeamName("Teamwork: no.\nTeam:tight", "Jordan Lee")).toBe("Teamwork: no.\nTeam:tight");
   });
 
   it("whole-channel transcripts when there are no words; silence is empty", () => {
@@ -184,6 +206,80 @@ describe("the queue", () => {
     expect(recPatches(net)[0]).toMatchObject({ transcript_status: "failed", last_error: "Twilio no longer has the recording" });
   });
 
+  it("NOTHING IS SENT WITHOUT A YES: no answer, a no, or an old notice's yes settles it off; no audio fetched, nothing to Workers AI", async () => {
+    for (const consent of [
+      [],
+      [{ user_id: USER_A, ai_transcripts: "declined", ai_transcripts_version: 1, ai_transcripts_at: "2026-10-13T12:00:00Z" }],
+      [{ user_id: USER_A, ai_transcripts: null, ai_transcripts_version: null, ai_transcripts_at: null }],
+      [allowed(USER_A, 0)],
+      [allowed(USER_B)],
+    ]) {
+      const net = setup({ consent });
+      const ai = new FakeAi(novaWords());
+      expect(await run(env, ai)).toMatchObject({ claimed: 1, off: 1, done: 0 });
+      expect(ai.calls).toEqual([]);
+      expect(net.to(/\.mp3/)).toEqual([]);
+      expect(recPatches(net)[0]).toMatchObject({ transcript_status: "off", summary_status: "off", next_try_at: null, lease_until: null });
+    }
+  });
+
+  it("reads who was on the call and their answers: the call's id, the Worker's transfers, the people found", async () => {
+    const net = setup();
+    await run(env);
+    expect(net.reads("phone_calls")[0].url.searchParams.get("id")).toBe(`in.(${CALL_ID})`);
+    const ev = net.reads("phone_call_events")[0].url.searchParams;
+    expect(ev.get("call_id")).toBe(`in.(${CALL_ID})`);
+    expect(ev.get("type")).toBe("in.(transfer,warm_transfer)");
+    const who = net.reads("phone_user_settings")[0].url.searchParams;
+    expect(who.get("user_id")).toBe(`in.(${USER_A})`);
+    expect(who.get("select")).toBe("user_id,ai_transcripts,ai_transcripts_version,ai_transcripts_at");
+  });
+
+  it("everyone on the call must have allowed it: whoever placed, answered, handed it on, or a transfer named", async () => {
+    // Placed by A, transferred by A to B: both must say yes.
+    const handed = theCall({ placed_by: USER_A, answered_by: USER_B, transferred_from: USER_A });
+    let net = setup({ calls: [handed], consent: [allowed(USER_A)] });
+    expect(await run(env)).toMatchObject({ off: 1 });
+    net = setup({ calls: [handed], consent: [allowed(USER_A), allowed(USER_B)] });
+    expect(await run(env)).toMatchObject({ done: 1 });
+    // A second hop: transferred_from moved on to B, but the Worker's own transfer event still names A.
+    const twoHops = theCall({ answered_by: USER_C, transferred_from: USER_B });
+    const hops: EventFixture[] = [
+      { call_id: CALL_ID, type: "transfer", at: "2026-10-04T11:50:00Z", data: { from: USER_A, to: USER_B } },
+      { call_id: CALL_ID, type: "transfer", at: "2026-10-04T11:52:00Z", data: { from: USER_B, to: USER_C } },
+    ];
+    net = setup({ calls: [twoHops], events: hops, consent: [allowed(USER_B), allowed(USER_C)] });
+    expect(await run(env)).toMatchObject({ off: 1 });
+    expect(net.reads("phone_user_settings")[0].url.searchParams.get("user_id")).toBe(`in.(${[USER_C, USER_B, USER_A].join(",")})`);
+    net = setup({ calls: [twoHops], events: hops, consent: [allowed(USER_A), allowed(USER_B), allowed(USER_C)] });
+    expect(await run(env)).toMatchObject({ done: 1 });
+    // A warm transfer's target counts even if they never picked up; an app's own mark never does.
+    const warm: EventFixture[] = [{ call_id: CALL_ID, type: "warm_transfer", at: "2026-10-04T11:51:00Z", data: { from: USER_A, to: USER_B } }];
+    net = setup({ events: warm, consent: [allowed(USER_A)] });
+    expect(await run(env)).toMatchObject({ off: 1 });
+    const appMark: EventFixture[] = [{ call_id: CALL_ID, type: "warm_transfer", at: "2026-10-04T11:51:00Z", data: { source: "app", to: USER_B } }];
+    net = setup({ events: appMark, consent: [allowed(USER_A)] });
+    expect(await run(env)).toMatchObject({ done: 1 });
+  });
+
+  it("a call with nobody from the team on it, or no row at all, is not sent", async () => {
+    let net = setup({ calls: [theCall({ answered_by: null })] });
+    expect(await run(env)).toMatchObject({ off: 1 });
+    expect(net.reads("phone_user_settings")).toEqual([]);
+    net = setup({ calls: [] });
+    expect(await run(env)).toMatchObject({ off: 1 });
+  });
+
+  it("the answers can't be read: nothing is sent this tick, and the rows are left for their leases to run out", async () => {
+    const net = setup();
+    net.rest("GET", "phone_user_settings", () => jsonRes({ code: "42703", message: "column phone_user_settings.ai_transcripts does not exist" }, 400));
+    const ai = new FakeAi(novaWords());
+    await expect(run(env, ai)).rejects.toThrow(/read transcript consent/);
+    expect(ai.calls).toEqual([]);
+    expect(net.to(/\.mp3/)).toEqual([]);
+    expect(recPatches(net)).toEqual([]);
+  });
+
   it("NO TRANSCRIPT TEXT IN ANY LOG: not in app_errors, not on the console, even when the write after it fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -205,7 +301,7 @@ describe("the queue", () => {
 
 describe("summaries", () => {
   it("each due summary is moved 2 minutes on (only if no other tick did), then asked for with the service key", async () => {
-    const net = setup({ rows: [], due: [{ id: REC_ID, client_id: CLIENT, summary_next_at: "2026-10-04T11:59:00.000Z", completed_at: "2026-10-04T11:50:00.000Z" }] });
+    const net = setup({ rows: [], due: [{ id: REC_ID, call_id: CALL_ID, client_id: CLIENT, summary_next_at: "2026-10-04T11:59:00.000Z", completed_at: "2026-10-04T11:50:00.000Z" }] });
     const out = await run(env);
     expect(out.summaries).toBe(1);
     const due = net.reads("phone_call_recordings")[0].url.searchParams;
@@ -222,17 +318,30 @@ describe("summaries", () => {
   });
 
   it("another tick moved it first: not asked twice", async () => {
-    const net = setup({ rows: [], due: [{ id: REC_ID, client_id: CLIENT, summary_next_at: "2026-10-04T11:59:00.000Z", completed_at: "2026-10-04T11:50:00.000Z" }] });
+    const net = setup({ rows: [], due: [{ id: REC_ID, call_id: CALL_ID, client_id: CLIENT, summary_next_at: "2026-10-04T11:59:00.000Z", completed_at: "2026-10-04T11:50:00.000Z" }] });
     net.rest("PATCH", "phone_call_recordings", () => []);
     expect((await run(env)).summaries).toBe(0);
     expect(net.to(/phone-call-summary/)).toEqual([]);
   });
 
   it("a summary still not written a day after the recording is given up", async () => {
-    const net = setup({ rows: [], due: [{ id: REC_ID, client_id: CLIENT, summary_next_at: "2026-10-04T11:59:00.000Z", completed_at: "2026-10-03T10:00:00.000Z" }] });
+    const net = setup({ rows: [], due: [{ id: REC_ID, call_id: CALL_ID, client_id: CLIENT, summary_next_at: "2026-10-04T11:59:00.000Z", completed_at: "2026-10-03T10:00:00.000Z" }] });
     await run(env);
     expect(recPatches(net)[0]).toMatchObject({ summary_status: "failed" });
     expect(net.to(/phone-call-summary/)).toEqual([]);
+  });
+
+  it("someone on the call said no since the transcript: the summary is settled off and Claude is never asked", async () => {
+    const net = setup({
+      rows: [],
+      due: [{ id: REC_ID, call_id: CALL_ID, client_id: CLIENT, summary_next_at: "2026-10-04T11:59:00.000Z", completed_at: "2026-10-04T11:50:00.000Z" }],
+      consent: [{ user_id: USER_A, ai_transcripts: "declined", ai_transcripts_version: 1, ai_transcripts_at: "2026-10-04T11:55:00Z" }],
+    });
+    expect((await run(env)).summaries).toBe(0);
+    expect(net.to(/phone-call-summary/)).toEqual([]);
+    const off = net.writes("phone_call_recordings", "PATCH")[0];
+    expect(off.json).toEqual({ summary_status: "off", summary_next_at: null, lease_until: null });
+    expect(off.url.searchParams.get("summary_status")).toBe("in.(pending,working)");
   });
 
   it("a refused request logs the HTTP status only, and never throws", async () => {

@@ -30,9 +30,9 @@
 //      owner" suffix), the portal logs it as an INFO row (a refusal, not a fault), and the button
 //      is usable again.
 //
-// Monthly checks only ever look at PLAN-TILE toggles (button[data-plan-interval]). The Synergy CRM
-// card has its own Monthly/Yearly buttons; they are a display-only toggle beside an external
-// sign-up link, deliberately untouched, and must never satisfy a check here.
+// Monthly checks only ever look at PLAN-TILE toggles (button[data-plan-interval]). The tab once carried
+// an external "Synergy CRM" card whose own Monthly/Yearly buttons were display-only; it was
+// removed on 2026-11-04. The scoping stays: a non-plan toggle must never satisfy a check here.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the
 // portal-billing `status` answer has the real function's full shape (portal-billing/index.ts,
@@ -42,7 +42,6 @@
 // host, which the catch-all aborts anyway). getPaymentToken uses window.CollectJS when it is
 // already there, so the page's own code path runs unchanged up to the network.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/billingFounding.mjs          (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<an older portal.app.compiled.js> serves that file instead, which is how to
@@ -55,7 +54,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, shotsDir, BASE, REF } from "./lib.mjs";
+import { launch, reporter, shotsDir, BASE, REF, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -173,7 +172,7 @@ const json = (route, body, status = 200) => route.fulfill({ status, contentType:
 // `operator`: the signed-in person is a platform operator (own tenant OPS_CLIENT, answered with
 // `ownStatus`), and `status` is the answer for the tenant they view with ?view= (body.targetClientId).
 // `statusAfterSubscribe`: what `status` answers once a subscribe has been answered 200.
-async function open(label, status, path = "/portal/settings/billing", { subscribeAnswer = null, operator = false, ownStatus = null, statusAfterSubscribe = null } = {}) {
+async function open(label, status, path = "/settings/billing", { subscribeAnswer = null, operator = false, ownStatus = null, statusAfterSubscribe = null } = {}) {
   const billing = [];   // every portal-billing request body, in order
   const logged = [];    // every log_error RPC body (what the portal files in app_errors)
   const pageErrors = [];
@@ -244,8 +243,8 @@ async function open(label, status, path = "/portal/settings/billing", { subscrib
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
-  // What _redirects does in production: every /portal/<page> is portal.html.
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  // What _redirects does in production: every app address is portal.html (and an old /portal one 301s).
+  await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
@@ -289,7 +288,7 @@ const tile = async (page, name) => (await tiles(page)).find((t) => t.name === na
 const tileLoc = (page, name) => page.locator(`[data-harness-tile="${name}"]`);
 // The plan tile's Monthly button: the data-plan-interval hook, else (an artifact older than the
 // hook) the tile's own button labelled Monthly. Both are scoped to ONE plan tile, so neither can
-// reach the Synergy CRM card.
+// reach any other toggle on the page.
 async function tileMonthly(page, name) {
   const t = tileLoc(page, name);
   const hooked = t.locator('button[data-plan-interval="monthly"]');
@@ -335,7 +334,7 @@ async function monthlyChecks(p, S, names) {
     monthly.length > 0 && monthly.every((h) => h.ariaDisabled === "true" && h.title === HOVER_TITLE && h.cursor === "not-allowed" && Number(h.opacity) < 1 && !h.disabledProp),
     JSON.stringify(monthly[0] || null));
   ok(`${p}: monthly: the Yearly toggles carry no such marking`, hooks.filter((h) => h.k === "annual").every((h) => h.ariaDisabled !== "true" && !h.title));
-  ok(`${p}: monthly: the hook is on plan tiles only (never the Synergy CRM card)`, hooks.length > 0 && hooks.every((h) => h.inTile));
+  ok(`${p}: monthly: the hook is on plan tiles only (never another toggle on the page)`, hooks.length > 0 && hooks.every((h) => h.inTile));
   const copy = await text(S.page);
   ok(`${p}: monthly: the tile copy says founding members pay yearly`, copy.includes("Founding members pay yearly"));
   for (const name of names.click) {
@@ -473,7 +472,7 @@ try {
 
   // ── e: the server's founding refusal, as the Billing tab shows it ──
   {
-    const S = await open("e", TENANTS.c, "/portal/settings/billing", { subscribeAnswer: REFUSAL });
+    const S = await open("e", TENANTS.c, "/settings/billing", { subscribeAnswer: REFUSAL });
     const loaded = await waitText(S.page, "Choose your features");
     ok("e: the plan picker loads", loaded);
     const btn = checkoutButton(S.page);
@@ -511,7 +510,7 @@ try {
   // and left behind the gate ("…unlock as soon as payment goes through", it says) until they
   // reloaded. A purchase now raises ssEntitlementChanged and the shell re-reads it.
   {
-    const S = await open("f", TENANTS.c, "/portal/designs", {
+    const S = await open("f", TENANTS.c, "/designs", {
       subscribeAnswer: { status: 200, body: { ok: true, subscriptions: [], failed: [] } },
       statusAfterSubscribe: ACTIVE_AFTER,
     });
@@ -532,18 +531,28 @@ try {
   // ── g: an operator viewing a LOCKED builder gets the picker in its view-as mode ──
   // BillingGate used to render BillingView with no viewingLabel, i.e. in the builder's own mode.
   {
-    const S = await open("g1", LAPSED_WITH_CARD, `/portal/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
+    const S = await open("g1", LAPSED_WITH_CARD, `/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
     const loaded = await waitText(S.page, "Choose your features", 20000);
     ok("g1: the operator sees the viewed builder's gate", loaded && (await text(S.page)).includes("Your subscription has ended"));
     const btn = checkoutButton(S.page);
     const label = (await btn.count()) ? (await btn.first().innerText()).trim() : null;
     ok(`g1: the checkout names the builder ("Subscribe ${CLIENT} with card on file")`, label === `Subscribe ${CLIENT} with card on file`, String(label));
+    // 317: with the agreement sentences in `status` (this stub sends none), the operator reads the
+    // owner the sentence and ticks it first; tests/harness/billingCof.mjs drives that. Tick it if shown.
+    const readOut = S.page.locator('[data-cof-consent="subscription-operator"] input');
+    if (await readOut.count()) { await readOut.first().scrollIntoViewIfNeeded(); await readOut.first().check(); }
     if (label) { await btn.first().scrollIntoViewIfNeeded(); await btn.first().click(); }
     await S.page.waitForTimeout(800);
     ok("g1: pressing it asks first, naming whose card is billed", S.dialogs.some((m) => m.includes(`This bills the card ${CLIENT} has on file`)), JSON.stringify(S.dialogs));
     ok("g1: …and a No sends no subscribe", actions(S, "subscribe").length === 0, JSON.stringify(actions(S, "subscribe")));
     const add = S.page.getByRole("button", { name: "$100", exact: true });
-    if (await add.count()) { await add.first().click(); await S.page.getByRole("button", { name: "Add $100", exact: true }).first().click(); }
+    if (await add.count()) {
+      await add.first().click();
+      // 317: the operator says whether the owner asked on the phone before a top-up can go.
+      const asked = S.page.locator('[data-cof-phone="1"] input[type="radio"]');
+      if (await asked.count()) await asked.first().check();
+      await S.page.getByRole("button", { name: "Add $100", exact: true }).first().click();
+    }
     await S.page.waitForTimeout(800);
     ok("g1: a wallet top-up asks first, naming the builder", S.dialogs.some((m) => m.includes(`Add $100 to ${CLIENT}'s wallet?`)), JSON.stringify(S.dialogs));
     ok("g1: …and a No sends no top-up", actions(S, "topup").length === 0, JSON.stringify(actions(S, "topup")));
@@ -551,7 +560,7 @@ try {
     await S.ctx.close();
   }
   {
-    const S = await open("g2", TENANTS.c, `/portal/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
+    const S = await open("g2", TENANTS.c, `/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
     const loaded = await waitText(S.page, "Choose your features", 20000);
     ok("g2: the operator sees the viewed builder's gate", loaded && (await text(S.page)).includes("Activate your account"));
     ok("g2: with no card on file it says the owner must add one", (await text(S.page)).includes(`${CLIENT} has no card on file`));

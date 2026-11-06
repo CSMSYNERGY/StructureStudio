@@ -38,7 +38,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, reporter, collectErrors, shotsDir, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
@@ -150,7 +150,7 @@ async function open(path, viewport = { width: 1440, height: 1000 }) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   page.on("dialog", (d) => d.accept());
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
@@ -221,7 +221,7 @@ const aimPanel = (page, eye, at) => page.evaluate(({ eye, at }) => {
 }, { eye, at });
 
 try {
-  const { ctx, page, errors, calls } = await open("/portal/advanced");
+  const { ctx, page, errors, calls } = await open("/advanced");
   const W = 12, L = 16;
 
   // 0 ── a slab (2026-10-03): nothing said draws one, and its ground can fall away too ──
@@ -427,7 +427,7 @@ try {
   await ctx.close();
 
   // 7 ── a phone's width ──
-  const ph = await open("/portal/advanced", { width: 390, height: 844 });
+  const ph = await open("/advanced", { width: 390, height: 844 });
   await ph.page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
   await radio(ph.page, "What it stands on", "Piers").click();
   await settle(ph.page, 300);

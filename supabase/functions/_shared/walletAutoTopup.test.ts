@@ -11,9 +11,15 @@
 // fake, and the logger is a recording fake. walletAutoTopup.ts statically imports logError.ts
 // (and so supabase-js), exactly like emailSend.test.ts's subject does; nothing here calls it.
 // Runs with --allow-read for one check against walletTopup.ts's shipped source.
+//
+// 317 (stored credentials) added three more properties, pinned at the bottom: it charges as a
+// merchant-initiated unscheduled charge naming the card's unscheduled initial, it charges only
+// when the builder's first top-up AND their recorded agreement exist (otherwise it switches
+// itself off, uncharged), and every charge sends the owners a receipt. Plus the daily cap.
 
 import { autoTopupCallerAllowed, runAutoTopup, type AutoTopupDeps } from "./walletAutoTopup.ts";
 import { AUTO_TOPUP_COOLDOWN_MS, type TopupResult } from "./walletTopup.ts";
+import { AUTO_TOPUP_DAILY_MAX } from "./cofConsent.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
   if (!cond) throw new Error(msg);
@@ -34,6 +40,7 @@ const DUE = {
   auto_topup_threshold_cents: 10000,
   auto_topup_amount_cents: 25000,
   auto_topup_last_at: null as string | null,
+  auto_topup_consent_id: 77 as number | null,
 };
 
 type Op = [string, ...unknown[]];
@@ -45,6 +52,12 @@ type World = {
   claimError?: { message: string } | null;
   /** Make the very first read throw, to drive the crash path. */
   explode?: boolean;
+  /** billing_customers.unscheduled_initial_txn. Default "init-1"; null = none. */
+  initial?: string | null;
+  /** MIT attempts in the last 24 h, as rows. Default none. */
+  recent?: unknown[];
+  /** The daily-count read fails. */
+  recentError?: { message: string } | null;
 };
 
 function fakeAdmin(world: World) {
@@ -55,12 +68,19 @@ function fakeAdmin(world: World) {
       const ops: Op[] = [];
       const q: Record<string, unknown> = {};
       const step = (name: string) => (...a: unknown[]) => { ops.push([name, ...a]); return q; };
-      for (const m of ["select", "update", "eq", "or", "is", "lt"]) q[m] = step(m);
+      for (const m of ["select", "update", "eq", "or", "is", "lt", "gte", "limit"]) q[m] = step(m);
       const isUpdate = () => ops.some((o) => o[0] === "update");
       q.maybeSingle = () => {
         if (table === "wallet_accounts") return Promise.resolve({ data: world.acct === undefined ? DUE : world.acct, error: null });
         if (table === "billing_customers") {
-          return Promise.resolve({ data: world.vault === null ? null : { vault_id: world.vault ?? "vault-1" }, error: null });
+          return Promise.resolve({
+            data: world.vault === null ? null : {
+              vault_id: world.vault ?? "vault-1",
+              unscheduled_initial_txn: world.initial === undefined ? "init-1" : world.initial,
+              card_last4: "4242",
+            },
+            error: null,
+          });
         }
         return Promise.resolve({ data: null, error: null });
       };
@@ -70,6 +90,8 @@ function fakeAdmin(world: World) {
         const isClaim = isUpdate() && ops.some((o) => o[0] === "or");
         const res = isClaim
           ? (world.claimError ? { data: null, error: world.claimError } : { data: world.claimRows ?? [{ client_id: "tenant-a" }], error: null })
+          : !isUpdate() && table === "billing_charge_attempts"
+          ? (world.recentError ? { data: null, error: world.recentError } : { data: world.recent ?? [], error: null })
           : { data: null, error: null };
         return Promise.resolve(res).then(ok, bad);
       };
@@ -79,11 +101,15 @@ function fakeAdmin(world: World) {
   return { admin, writes };
 }
 
-function harness(world: World, charge: TopupResult | (() => never) = { ok: true, balanceCents: 28000, saleTxn: "txn-1", alreadyCredited: false }, deps: AutoTopupDeps = {}) {
+const CHARGED: TopupResult = { ok: true, balanceCents: 28000, saleTxn: "txn-1", alreadyCredited: false, attemptId: 41, vaultId: "vault-1", cofSupported: "stored" };
+
+function harness(world: World, charge: TopupResult | (() => never) = CHARGED, deps: AutoTopupDeps = {}) {
   const { admin, writes } = fakeAdmin(world);
   const charges: Record<string, unknown>[] = [];
   const logs: Record<string, unknown>[] = [];
+  const receipts: unknown[][] = [];
   const full: AutoTopupDeps = {
+    sendReceipt: ((...a: unknown[]) => { receipts.push(a); return Promise.resolve({ sent: 1, error: null }); }) as unknown as AutoTopupDeps["sendReceipt"],
     now: () => NOW,
     chargeTopup: ((_a: unknown, opts: Record<string, unknown>) => {
       charges.push(opts);
@@ -92,7 +118,7 @@ function harness(world: World, charge: TopupResult | (() => never) = { ok: true,
     logError: ((input: Record<string, unknown>) => { logs.push(input); return Promise.resolve(); }) as unknown as AutoTopupDeps["logError"],
     ...deps,
   };
-  return { run: () => runAutoTopup(admin, "tenant-a", null, full), writes, charges, logs };
+  return { run: () => runAutoTopup(admin, "tenant-a", null, full), writes, charges, logs, receipts };
 }
 
 const updatesOf = (writes: { table: string; ops: Op[] }[]) =>
@@ -133,7 +159,7 @@ Deno.test("due: the cooldown is CLAIMED (stamp + still-outside-cooldown conditio
     ["or", `auto_topup_last_at.is.null,auto_topup_last_at.lte.${iso(NOW - AUTO_TOPUP_COOLDOWN_MS)}`]);
   assert(ops.some((o) => o[0] === "select"), "the claim reads back which rows it matched");
 
-  assertEquals(h.charges, [{ clientId: "tenant-a", vaultId: "vault-1", amountCents: 25000, actorUserId: null, auto: true }]);
+  assertEquals(h.charges, [{ clientId: "tenant-a", vaultId: "vault-1", amountCents: 25000, actorUserId: null, auto: true, cof: "mit_unscheduled", initialTxn: "init-1" }]);
   assertEquals(h.logs.length, 0, "a clean charge logs nothing");
 });
 
@@ -159,7 +185,11 @@ Deno.test("a DECLINE switches auto top-up off, records the reason, and logs it",
   assertEquals(await h.run(), { fired: true, ok: false, reason: "declined" });
   const ups = updatesOf(h.writes);
   assertEquals(ups.length, 2, "the claim, then the switch-off");
-  assertEquals(ups[1], { auto_topup_enabled: false, auto_topup_disabled_reason: long.slice(0, 300) });
+  assertEquals(ups[1], {
+    auto_topup_enabled: false, auto_topup_consent_id: null,
+    auto_topup_disabled_reason: `The card was declined (${long.slice(0, 200)}). Replace the card, then switch them back on.`,
+  });
+  assertEquals(h.receipts.length, 0, "no charge, no receipt");
   assertEquals(h.logs.map((l) => [l.code, l.fn]), [["auto_topup_declined", "wallet-autotopup"]]);
 });
 
@@ -252,4 +282,120 @@ Deno.test("the caller check: either key, constant-time, and an empty key never m
   assert(!autoTopupCallerAllowed("Bearer ", { serviceKey: "", secret: "" }), "nothing configured, nothing presented");
   assert(!autoTopupCallerAllowed("Bearer x", { serviceKey: "", secret: "" }), "nothing configured");
   assert(autoTopupCallerAllowed("Bearer runtime-key", { serviceKey: "runtime-key", secret: "" }), "secret unset: the runtime key alone");
+});
+
+// ── Stored credentials (317) ─────────────────────────────────────────────────────────
+
+Deno.test("317: the charge goes out merchant-initiated, naming the card's UNSCHEDULED initial", async () => {
+  const h = harness({ initial: "init-topup-9" });
+  assertEquals(await h.run(), { fired: true, ok: true, reason: "charged" });
+  assertEquals(h.charges.length, 1);
+  assertEquals(h.charges[0].cof, "mit_unscheduled");
+  assertEquals(h.charges[0].initialTxn, "init-topup-9");
+});
+
+Deno.test("317: no unscheduled initial (a card saved only by a subscription) -> switched OFF, never charged", async () => {
+  // The live case on 2026-10-20: auto top-up on, card vaulted by a subscribe sale, never topped up.
+  const h = harness({ initial: null });
+  assertEquals(await h.run(), { fired: false, ok: true, reason: "needs_agreement" });
+  assertEquals(h.charges.length, 0, "a card is never touched");
+  const ups = updatesOf(h.writes);
+  assertEquals(ups.length, 1, "no cooldown claim, only the switch-off");
+  assertEquals(ups[0].auto_topup_enabled, false);
+  assertEquals(ups[0].auto_topup_consent_id, null);
+  assert(String(ups[0].auto_topup_disabled_reason).includes("Add funds once"), String(ups[0].auto_topup_disabled_reason));
+  assertEquals(h.logs.map((l) => [l.code, l.severity]), [["auto_topup_needs_agreement", "info"]]);
+});
+
+Deno.test("317: no recorded agreement (switched on before 317) -> switched OFF, never charged", async () => {
+  const h = harness({ acct: { ...DUE, auto_topup_consent_id: null } });
+  assertEquals(await h.run(), { fired: false, ok: true, reason: "needs_agreement" });
+  assertEquals(h.charges.length, 0);
+});
+
+Deno.test("317: the agreement is only checked once it would really fire (above threshold stays untouched)", async () => {
+  const h = harness({ initial: null, acct: { ...DUE, auto_topup_consent_id: null, balance_cents: 50000 } });
+  assertEquals(await h.run(), { fired: false, ok: true, reason: "above threshold" });
+  assertEquals(h.writes.length, 0, "a tenant above threshold is not switched off over it");
+});
+
+Deno.test("317: the daily cap stops the charge once the agreed number is reached in 24 hours", async () => {
+  const atCap = harness({ recent: Array.from({ length: AUTO_TOPUP_DAILY_MAX }, (_, i) => ({ id: i })) });
+  assertEquals(await atCap.run(), { fired: false, ok: true, reason: "daily limit reached" });
+  assertEquals(atCap.charges.length, 0);
+  assertEquals(atCap.writes.length, 0, "no claim either");
+  const under = harness({ recent: Array.from({ length: AUTO_TOPUP_DAILY_MAX - 1 }, (_, i) => ({ id: i })) });
+  assertEquals(await under.run(), { fired: true, ok: true, reason: "charged" });
+});
+
+Deno.test("317: every charge sends the owners a receipt, with the amount, card and attempt it belongs to", async () => {
+  const h = harness({});
+  await h.run();
+  assertEquals(h.receipts.length, 1);
+  const [_admin, clientId, attemptId, input] = h.receipts[0] as [unknown, string, number, Record<string, unknown>];
+  assertEquals(clientId, "tenant-a");
+  assertEquals(attemptId, 41);
+  assertEquals(input.amountCents, 25000);
+  assertEquals(input.last4, "4242");
+  assertEquals(input.trigger, "auto");
+  assertEquals(input.thresholdCents, 10000);
+  assertEquals(input.saleTxn, "txn-1");
+});
+
+Deno.test("317: a receipt that fails does not turn a good charge into a failure", async () => {
+  const h = harness({}, CHARGED, { sendReceipt: () => Promise.reject(new Error("resend down")) });
+  assertEquals(await h.run(), { fired: true, ok: true, reason: "charged" });
+});
+
+Deno.test("317: a daily count that cannot be read charges nothing, and is logged", async () => {
+  const h = harness({ recentError: { message: "timeout" } });
+  assertEquals(await h.run(), { fired: false, ok: false, reason: "cap_unreadable" });
+  assertEquals(h.charges.length, 0);
+  assertEquals(h.writes.length, 0, "no claim");
+  assertEquals(h.logs.map((l) => l.code), ["auto_topup_cap_unreadable"]);
+});
+
+Deno.test("317: the daily count is read only once a charge is otherwise due", async () => {
+  // runAutoTopup runs on every 3D hold, usage charge and refused text; the cap read must not.
+  const reads: string[] = [];
+  const { admin } = fakeAdmin({ acct: { ...DUE, balance_cents: 50000 } });
+  const spy = { from: (t: string) => { reads.push(t); return admin.from(t); } };
+  await runAutoTopup(spy, "tenant-a", null, { now: () => NOW, logError: () => Promise.resolve() });
+  assert(!reads.includes("billing_charge_attempts"), reads.join(","));
+});
+
+Deno.test("317: the daily cap counts THIS tenant's merchant-initiated attempts in the last 24 hours", async () => {
+  // The fake answers any read with the rows it is given, so the filters themselves are pinned here.
+  const seen: Op[][] = [];
+  const { admin } = fakeAdmin({});
+  const spy = {
+    from: (t: string) => {
+      const q = admin.from(t) as Record<string, (...a: unknown[]) => unknown>;
+      if (t !== "billing_charge_attempts") return q;
+      const ops: Op[] = [];
+      seen.push(ops);
+      const wrap = (o: Record<string, unknown>): Record<string, unknown> => new Proxy(o, {
+        get(target, k) {
+          const v = target[k as string];
+          if (typeof v !== "function" || k === "then") return v;
+          return (...a: unknown[]) => { ops.push([String(k), ...a]); return wrap(v(...a) as Record<string, unknown>); };
+        },
+      });
+      return wrap(q as unknown as Record<string, unknown>);
+    },
+  };
+  await runAutoTopup(spy, "tenant-a", null, { now: () => NOW, logError: () => Promise.resolve(), chargeTopup: (() => Promise.resolve(CHARGED)) as unknown as AutoTopupDeps["chargeTopup"], sendReceipt: (() => Promise.resolve({ sent: 1, error: null })) as unknown as AutoTopupDeps["sendReceipt"] });
+  const read = seen.find((ops) => ops.some((o) => o[0] === "select")) ?? [];
+  assert(read.some((o) => o[0] === "eq" && o[1] === "client_id" && o[2] === "tenant-a"), JSON.stringify(read));
+  assert(read.some((o) => o[0] === "eq" && o[1] === "cof" && o[2] === "mit_unscheduled"), JSON.stringify(read));
+  assert(read.some((o) => o[0] === "gte" && o[1] === "created_at" && o[2] === iso(NOW - 24 * 60 * 60 * 1000)), JSON.stringify(read));
+  assert(read.some((o) => o[0] === "limit" && o[1] === AUTO_TOPUP_DAILY_MAX + 1), JSON.stringify(read));
+});
+
+Deno.test("317: charged but NOT credited still sends the receipt, marked as pending credit", async () => {
+  const h = harness({}, { ok: false, error: "Your card was charged but the balance did not update.", blocking: true, chargedTxn: "txn-9", attemptId: 44 });
+  assertEquals(await h.run(), { fired: true, ok: false, reason: "needs_review" });
+  assertEquals(h.receipts.length, 1);
+  const [, , attemptId, input] = h.receipts[0] as [unknown, string, number, Record<string, unknown>];
+  assertEquals([attemptId, input.saleTxn, input.pendingCredit, input.balanceCents], [44, "txn-9", true, null]);
 });

@@ -59,6 +59,7 @@ type World = {
   ledger?: Record<string, unknown>[]; // wallet_transactions rows, any order
   pre259?: boolean;                   // the database has not had migration 259
   meters?: Record<string, unknown>[]; // usage_prices rows
+  doorLooks?: boolean | "unread";     // client_settings.door_looks_beta (343); "unread" = that read fails
 };
 type Trace = { db: any[][]; ledgerReads: any[][]; errors: Record<string, unknown>[] };
 
@@ -140,6 +141,10 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     case "billing_customers":
       return one(null);
     case "client_settings":
+      if (colsOf(argOf(ops, "select")).includes("door_looks_beta")) {
+        if (world.doorLooks === "unread") return { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
+        return one({ door_looks_beta: world.doorLooks === true });
+      }
       return one({ billing_exempt: false, internal_account: false, discount_percent: 0 });
     case "wallet_accounts":
       return one({ balance_cents: 2500, held_cents: 0, metered_exempt: false, auto_topup_enabled: false });
@@ -294,18 +299,32 @@ Deno.test("an owner reads their own posted and held lines, newest first, with no
   assertEquals(r.trace.errors, []);
 });
 
-Deno.test("each chip narrows to its lines, and the four chips add up to All", async () => {
-  const want: Record<string, number[]> = { calls: [3, 2], texts: [5, 4], funds: [8, 1], other: [7, 6] };
+// Two sales-tax lines (2026-10-21): their own Tax chip, with the memo taxMeter.ts writes.
+const WITH_TAX = [
+  ...MIXED,
+  line(11, { meter_kind: "tax_lookup", memo: "Tax verification · SST-5021 · Minnesota", amount_cents: -10, amount_exact_micros: -100_000 }),
+  line(12, { meter_kind: "tax_invoice", memo: "Invoice tax check · Invoice 1042 · Missouri", amount_cents: -10, amount_exact_micros: -100_000 }),
+];
+
+Deno.test("each chip narrows to its lines, and the five chips add up to All", async () => {
+  const want: Record<string, number[]> = { calls: [3, 2], texts: [5, 4], tax: [12, 11], funds: [8, 1], other: [7, 6] };
   const seen: number[] = [];
   for (const [filter, ids] of Object.entries(want)) {
-    const r = await drive({ action: "wallet_transactions", filter }, { ledger: MIXED });
+    const r = await drive({ action: "wallet_transactions", filter }, { ledger: WITH_TAX });
     assertEquals(r.status, 200, JSON.stringify(r.body));
     assertCleanLedgerReads(r.trace);
     assertEquals(r.body.rows.map((x: any) => x.id), ids, `filter ${filter}`);
     assert(r.body.rows.every((x: any) => x.category === filter), `a ${filter} row is labelled another category`);
     seen.push(...ids);
   }
-  assertEquals(seen.sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8], "the chips partition the ledger");
+  assertEquals(seen.sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 11, 12], "the chips partition the ledger");
+  const all = await drive({ action: "wallet_transactions" }, { ledger: WITH_TAX });
+  assertEquals(all.body.rows.map((x: any) => x.id).sort((a: number, b: number) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 11, 12], "All is their sum");
+  const tax = await drive({ action: "wallet_transactions", filter: "tax" }, { ledger: WITH_TAX });
+  assertEquals(tax.body.rows.map((x: any) => x.description),
+    ["Invoice tax check · Invoice 1042 · Missouri", "Tax verification · SST-5021 · Minnesota"], "a tax line reads its memo: the document and the state");
+  assertEquals(allOf(tax.trace.ledgerReads[0], "in").map((o) => o.slice(1)),
+    [["state", ["posted", "held"]], ["meter_kind", ["tax_lookup", "tax_invoice"]]], "the Tax chip is the two tax meters");
 });
 
 Deno.test("the date range is from-inclusive, to-exclusive, on created_at", async () => {
@@ -449,6 +468,36 @@ Deno.test("status: calls and texts on the wallet card are described, never price
   // The ten-line list uses the same labels as the Transactions view.
   assertEquals(r.body.wallet.transactions.map((t: any) => t.label).slice(0, 2), ["Credit from CSM Synergy", "3D generation from a video"]);
   assertNoCostInBody(r.body.wallet);
+});
+
+// Making a door from a photo runs only where client_settings.door_looks_beta is on, so its price is
+// no business of any other builder's card once the meter is switched on (release review, 2026-10-29).
+const DOOR_METER = { kind: "door_look_generation", label: "Door from a photo", unit_label: "door", price_cents: 500, active: true, visible: true, pricing: "fixed" };
+
+Deno.test("status: the door-look price shows only to a builder with door looks on", async () => {
+  const doorReads = (r: { trace: Trace }) =>
+    r.trace.db.filter((d) => d[0] === "client_settings" && colsOf(argOf(d.slice(1), "select")).includes("door_looks_beta")).length;
+  const kinds = (r: { body: any }) => r.body.wallet.meters.map((m: any) => m.kind);
+
+  const off = await drive({ action: "status" }, { meters: [...METERS, DOOR_METER] });
+  assertEquals(off.status, 200, JSON.stringify(off.body));
+  assertEquals(kinds(off), ["sms_registration", "voice_minute", "sms_segment"]);
+
+  const on = await drive({ action: "status" }, { meters: [...METERS, DOOR_METER], doorLooks: true });
+  assertEquals(on.status, 200, JSON.stringify(on.body));
+  assertEquals(on.body.wallet.meters.at(-1), { kind: "door_look_generation", label: "Door from a photo", unitLabel: "door", priceCents: 500 });
+  assertEquals(doorReads(on), 1);
+
+  // A failed flag read hides the price and keeps the rest of the card.
+  const unread = await drive({ action: "status" }, { meters: [...METERS, DOOR_METER], doorLooks: "unread" });
+  assertEquals(unread.status, 200, JSON.stringify(unread.body));
+  assertEquals(kinds(unread), ["sms_registration", "voice_minute", "sms_segment"]);
+  assertEquals(unread.body.wallet.balanceCents, 2500);
+
+  // While the meter is inactive (not in the list) the card costs no extra read.
+  const inactive = await drive({ action: "status" }, { meters: METERS, doorLooks: true });
+  assertEquals(doorReads(inactive), 0);
+  assertEquals(kinds(inactive), ["sms_registration", "voice_minute", "sms_segment"]);
 });
 
 Deno.test("status before migration 259: the meter list still renders, priced as before", async () => {

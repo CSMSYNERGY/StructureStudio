@@ -1,5 +1,5 @@
 // Voicemail transcription behind env TRANSCRIBE=on (release 2).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { voicemailTwiml } from "../src/voicemail";
 import {
   Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CUSTOMER, FakeNet, USER_A, appRequest, attr, call, callerCtx, filter, makeEnv, member,
@@ -77,6 +77,26 @@ describe("/voice/transcription", () => {
       expect(net.writes("phone_voicemails")).toEqual([]);
       expect(net.writes("phone_call_events").map((s) => s.json.type)).toEqual(["transcription_failed"]);
     }
+  });
+
+  it("NO TRANSCRIPT TEXT IN ANY LOG: the call event carries its length, a refused write logs codes and ids only", async () => {
+    const WORDS = "Hi it's Jordan, call me on 4321 about the 12x24 shed";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stored = setup();
+    await post({ TranscriptionStatus: "completed", TranscriptionText: WORDS });
+    expect(stored.writes("phone_call_events")[0].json).toMatchObject({ type: "transcribed", data: { chars: WORDS.length } });
+    // A constraint error echoes the row in its details; the fault keeps the message only.
+    const refused = setup();
+    refused.rest("PATCH", "phone_voicemails", () => new Response(JSON.stringify({ code: "23514", message: "new row violates check constraint", details: `Failing row contains (${WORDS})` }), { status: 400, headers: { "content-type": "application/json" } }));
+    await post({ TranscriptionStatus: "completed", TranscriptionText: WORDS });
+    expect(refused.writes("app_errors").map((s) => s.json.code)).toEqual(["transcript_write_failed"]);
+    const logged = [
+      ...[stored, refused].flatMap((n) => [...n.writes("app_errors"), ...n.writes("phone_call_events")].map((s) => s.body)),
+      ...warn.mock.calls.map((c) => c.join(" ")),
+      ...log.mock.calls.map((c) => c.join(" ")),
+    ].join("\n");
+    for (const bit of ["Jordan", "4321", "12x24", "shed"]) expect(logged).not.toContain(bit);
   });
 
   it("is a Twilio endpoint: a wrong key is refused", async () => {

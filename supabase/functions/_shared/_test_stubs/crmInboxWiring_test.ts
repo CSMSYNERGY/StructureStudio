@@ -400,7 +400,7 @@ Deno.test("Mine keeps someone else's customer I once texted, asking only about m
 Deno.test("refusals: no CRM, no contacts access, an unknown filter or cursor, and a failed read", async () => {
   const unpaid = await call(world({ billingExempt: false }), { action: "crm_inbox" });
   assertEquals(unpaid.status, 403, unpaid.text);
-  assert(/CRM is not part of your subscription/.test(unpaid.body.error), unpaid.text);
+  assert(/Customer Hub is not part of your subscription/.test(unpaid.body.error), unpaid.text);
 
   const crew = await call(world({ role: "user", title: "crew_member", access: null }), { action: "crm_inbox" });
   assertEquals(crew.status, 403, crew.text);

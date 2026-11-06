@@ -12,7 +12,6 @@
 //   6. a design OPENED with a stale gable key keeps it exactly as saved (a load is never rewritten)
 //   7. ...and the customer's next style picks re-fit it like any other vent
 //
-//   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/ventStyle.mjs                    (SS_SHOTS=<dir> for the screenshots)
 import { pathToFileURL } from "node:url";
 import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, bypassGate, BASE, armVent } from "./lib.mjs";

@@ -117,8 +117,14 @@ Deno.test({
     assert(lines[2] === 'if (FOUNDING_ANNUAL_ONLY && iv === "monthly") return;', `the founding refusal is not the second statement: ${lines[2]}`);
     assert(lines[3].startsWith("setSel("), `the refusal is not followed straight by the cart write: ${lines[3]}`);
     // Every default that seeds the cart writes "annual", so nothing else can put monthly in it.
+    // ⚠️ The COUNT was `>= 3` until 2026-11-04 and is now `>= 1`. Two of those three sites were
+    // the required base seeding itself: the [data] effect that preselected simple_layout, and the
+    // re-seed when the Suite was deselected. Simple Layout stopped being required (migration 359),
+    // the cart starts empty, and only the tile click still seeds — so the old count would fail on
+    // a change that removed seeding rather than adding a monthly one. The assertion that matters
+    // is unchanged: whatever seeds the cart writes "annual", never "monthly".
     const seeds = [...src.matchAll(/(?:simple_layout|\[f\.feature\]|n\.simple_layout|n\[f\.feature\])\s*[:=]\s*"(monthly|annual)"/g)].map((m) => m[1]);
-    assert(seeds.length >= 3 && seeds.every((s) => s === "annual"), `a cart default writes something other than "annual": ${JSON.stringify(seeds)}`);
+    assert(seeds.length >= 1 && seeds.every((s) => s === "annual"), `a cart default writes something other than "annual": ${JSON.stringify(seeds)}`);
   },
 });
 

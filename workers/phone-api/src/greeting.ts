@@ -32,6 +32,7 @@ import type { TwilioParams } from "./twilioSignature";
 import { hangup, record, response, say } from "./twiml";
 import { deleteRecording, recordingMedia } from "./twilioRest";
 import { hook } from "./urls";
+import { envForClient, subaccountsOnFor } from "./twilioAccount";
 
 /** A Twilio recording sid as migration 264's check has it (lowercase hex, as Twilio writes them). */
 export const GREETING_SID_RE = /^RE[0-9a-f]{32}$/;
@@ -222,13 +223,19 @@ export async function greetingAudio(req: Request, env: Env, ec: Ctx): Promise<Re
   const userId = url.searchParams.get("u") ?? "";
   const sid = url.searchParams.get("v") ?? "";
   if (!UUID_RE.test(userId) || !GREETING_SID_RE.test(sid)) return notFound();
-  const { data, error } = await adminClient(env).from("phone_user_settings").select("greeting_recording_sid").eq("user_id", userId).maybeSingle();
+  // With sub-accounts on, the person's business too: the greeting lives in its account (phase 5).
+  const admin = adminClient(env);
+  const on = subaccountsOnFor(env);
+  const { data, error } = await admin.from("phone_user_settings").select(on ? "greeting_recording_sid, client_id" : "greeting_recording_sid")
+    .eq("user_id", userId).maybeSingle();
   if (error) throw new Error(`read greeting: ${error.message}`);
-  if ((data as { greeting_recording_sid?: string | null } | null)?.greeting_recording_sid !== sid) return notFound();
+  const row = data as { greeting_recording_sid?: string | null; client_id?: string | null } | null;
+  if (row?.greeting_recording_sid !== sid) return notFound();
 
   let media: Response;
   try {
-    media = await recordingMedia(env, sid, req.headers.get("range"));
+    const acct = on ? await envForClient(env, admin, String(row.client_id ?? "")) : env;
+    media = await recordingMedia(acct, sid, req.headers.get("range"));
   } catch {
     return new Response("Bad gateway", { status: 502 });
   }

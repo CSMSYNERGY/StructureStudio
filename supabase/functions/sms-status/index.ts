@@ -2,13 +2,18 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
-import { validateTwilioSignature, hasSignatureKey } from "../_shared/twilioSms.ts";
+import { validateTwilioSignature, hasSignatureKey, smsPhoneKey } from "../_shared/twilioSms.ts";
+// Twilio's 21610 in a delivery status: recorded exactly as smsSend.ts records it at send time.
+import { recordTwilioOptOut, TWILIO_OPTED_OUT } from "../_shared/smsOptOut.ts";
+// Workstream 2, phase 4: which Twilio account sent this (only while TWILIO_SUBACCOUNTS is "on").
+import { edgeWebhookAccount, subaccountsOn, webhookTenantVerdict, type WebhookAccount } from "../_shared/twilioAccount.ts";
 
 // Twilio delivery receipts → the outbound row's final status. The twin of postmark-events,
 // and the reason the Messages feed can say "delivered" rather than only "we handed it over".
 //
 // Twilio fires this several times per message (queued → sent → delivered), so it must be
-// idempotent and cheap. It updates by provider_sid and does nothing else.
+// idempotent and cheap. It updates by provider_sid, and does one thing more only for a text
+// that failed with 21610 (optedOutByStatus, below).
 //
 // ⚠️ ALWAYS 200 ONCE AUTHENTICATED, including when the SID matches no row — a status for a
 // message we never recorded is not a failure worth a retry storm, and Twilio disables a
@@ -48,6 +53,17 @@ export function mapStatus(status: string, errorCode: string | null): Patch | nul
   }
 }
 
+/**
+ * A text that failed because the customer opted out: Twilio error 21610 on a failed or
+ * undelivered status. Through a Messaging Service this is where a 21610 usually lands (the API
+ * took the text, then it failed), not at send time, so until 2026-10-13 the opt-out was only a
+ * failed text and the composer kept offering the number. Exported and pure for the tests.
+ */
+export function optedOutByStatus(patch: Patch | null): boolean {
+  return !!patch && (patch.status === "failed" || patch.status === "undelivered")
+    && patch.error_code === String(TWILIO_OPTED_OUT);
+}
+
 function ok() {
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
@@ -77,8 +93,38 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
   }
 
   // Same three-state signature handling as sms-inbound — see its header for why "no token"
-  // proceeds rather than refusing.
-  if (hasSignatureKey()) {
+  // proceeds rather than refusing. PER ACCOUNT while TWILIO_SUBACCOUNTS is "on", exactly as
+  // sms-inbound (Workstream 2, phase 4, _shared/twilioAccount.ts edgeWebhookAccount): a
+  // sub-account's callback must carry its own signature, and an AccountSid that is not ours is
+  // refused. Off, nothing here runs or is looked up, and the database client is made where it
+  // always was, below.
+  const envGet = (k: string) => Deno.env.get(k);
+  // deno-lint-ignore no-explicit-any
+  let early: any = null;
+  let account: WebhookAccount | null = null;
+  if (subaccountsOn(envGet)) {
+    early = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+      { auth: { persistSession: false } },
+    );
+    const sig = req.headers.get("X-Twilio-Signature") ?? "";
+    const perAccount = await edgeWebhookAccount(early, params.AccountSid, envGet, (token) =>
+      validateTwilioSignature(`${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${key}`, params, sig, token));
+    if (perAccount.kind === "refused") {
+      // Ours to fix only when the lookup failed; a stranger's AccountSid or a bad signature is a
+      // refusal like the parent's, which this function has never logged.
+      if (perAccount.reason === "lookup_failed") {
+        await logEdgeError({ fn: "sms-status", code: "sms_account_lookup_failed",
+          message: "The Twilio account a delivery status's AccountSid names could not be looked up; refused." }).catch(() => {});
+      }
+      return deny();
+    }
+    if (perAccount.kind !== "off") account = perAccount.account;
+  }
+  if (account?.source === "sub") {
+    // Signed with the sub's own token: checked by edgeWebhookAccount above.
+  } else if (hasSignatureKey()) {
     const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${key}`;
     const valid = await validateTwilioSignature(url, params, req.headers.get("X-Twilio-Signature") ?? "");
     if (!valid) return deny();
@@ -88,15 +134,39 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
   const patch = mapStatus(String(params.MessageStatus ?? params.SmsStatus ?? ""), String(params.ErrorCode ?? "") || null);
   if (!sid || !patch) return ok();
 
-  const admin = createClient(
+  const admin = early ?? createClient(
     Deno.env.get("SUPABASE_URL") ?? "",
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     { auth: { persistSession: false } },
   );
 
-  const { error } = await admin.from("sms_messages")
+  // Workstream 2, phase 4 (switch on only): a sub-account's callback may only move its own
+  // business's rows; the parent's only rows of a business that has no sub-account. Authenticated by
+  // now, so a refusal here is ALWAYS 200 (above): logged, nothing written.
+  let update = admin.from("sms_messages")
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq("provider_sid", sid);
+  if (account?.source === "sub") {
+    update = update.eq("client_id", account.clientId ?? "");
+  } else if (account) {
+    const { data: row } = await admin.from("sms_messages").select("client_id").eq("provider_sid", sid).limit(1).maybeSingle();
+    const owner = (row as { client_id?: string | null } | null)?.client_id ?? null;
+    if (owner) {
+      const verdict = await webhookTenantVerdict(admin, account, owner, envGet);
+      if (verdict !== "ok") {
+        await logEdgeError({
+          fn: "sms-status", clientId: owner,
+          code: verdict === "lookup_failed" ? "sms_account_lookup_failed" : "sms_account_mismatch",
+          message: verdict === "lookup_failed"
+            ? "The business's Twilio account could not be looked up; delivery status not recorded."
+            : "A delivery status came from a Twilio account this message's business does not live in; not recorded.",
+          context: { source: account.source },
+        }).catch(() => {});
+        return ok();
+      }
+    }
+  }
+  const { error } = await update;
   if (error) {
     await logEdgeError({
       fn: "sms-status",
@@ -104,6 +174,31 @@ Deno.serve(withErrorLog("sms-status", async (req: Request) => {
       message: `delivery status could not be recorded: ${error.message}`,
       context: { status: patch.status },
     }).catch(() => {});
+  }
+
+  // ── 21610: the customer opted out by a route we did not see ──────────────────────────
+  // Recorded where the send path looks, the same write smsSend.ts makes when Twilio refuses at
+  // send time (_shared/smsOptOut.ts): sms_opt_outs on the number, and the contact's flag. The
+  // number and contact come from OUR row for this text, never from the callback, and on the same
+  // terms as the update above: a sub-account's callback only finds its own business's row.
+  if (optedOutByStatus(patch)) {
+    let find = admin.from("sms_messages").select("client_id, contact_id, direction, to_number").eq("provider_sid", sid);
+    if (account?.source === "sub") find = find.eq("client_id", account.clientId ?? "");
+    const { data: found, error: findErr } = await find.limit(1).maybeSingle();
+    const row = found as { client_id: string; contact_id: string | null; direction: string; to_number: string | null } | null;
+    const failed = findErr
+      ? `sms_messages: ${findErr.code ?? "read failed"}`
+      : row && row.direction === "out" && row.to_number
+      ? await recordTwilioOptOut(admin, row.client_id, smsPhoneKey(row.to_number), row.contact_id)
+      : null;
+    if (failed) {
+      // Names the table and the database's code only: never the number.
+      await logEdgeError({
+        fn: "sms-status", clientId: row?.client_id ?? null,
+        code: "sms_opt_out_record_failed",
+        message: `Twilio reported an opt-out (21610) that could not be recorded (${failed}); the next text to this number will be refused by Twilio again.`,
+      }).catch(() => {});
+    }
   }
   // No row matched is a normal, uninteresting outcome (a status for a message from before
   // this table existed, or one whose claim row failed). Not logged, still 200.

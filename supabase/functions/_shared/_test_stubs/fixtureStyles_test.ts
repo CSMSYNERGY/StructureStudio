@@ -171,7 +171,9 @@ for (const [name, src] of [["structure-studio.component.js", SRC], ["StructureSt
     assert(src.includes("...(offeredWindows.length || roWindowTile ? { windowPicker: WINDOW_PICKER_CFG } : {}),"), "the Window button");
     // The door picker opened from a partition wall (migration 278) lists partitionDoors: the offered
     // doors that stand on the floor, so still the style's own list, never the placeable one.
-    for (const p of ["<DoorPicker doors={doorPick.partitionId != null ? partitionDoors : offeredDoors} ", "<RampPicker ramps={offeredRamps} ", "<WindowPicker windows={offeredWindows} ", "<VentPicker vents={offeredVents}\n"]) {
+    // An Included chip (2026-10-18) opens the picker holding only its own fixture (doorPick.fixtures /
+    // windowPick.fixtures): the one item that size includes, so never a wider list than offered.
+    for (const p of ["<DoorPicker doors={doorPick.fixtures || (doorPick.partitionId != null ? partitionDoors : offeredDoors)} ", "<RampPicker ramps={offeredRamps} ", "<WindowPicker windows={windowPick.fixtures || offeredWindows} ", "<VentPicker vents={offeredVents}\n"]) {
       assert(src.includes(p), p);
     }
     assert(src.includes("const partitionDoors = offeredDoors.filter((f) => !(Number(f.sillIn) > 0));"), "partitionDoors comes from the offered list");

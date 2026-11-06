@@ -28,7 +28,7 @@ if (i < 0 || j < 0) {
 }
 const BLOCK = SRC.slice(i, j);
 
-for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView", "ssAdvancedOn"]) {
+for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView", "ssAdvancedOn", "ssHubCan"]) {
   assert(BLOCK.includes(name), `extracted block is missing ${name}`);
 }
 
@@ -39,10 +39,17 @@ type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Acces
 // NON-beta host so the coming-soon routes behave as they do in production — that branch runs
 // before every role check, and a beta-host default would quietly skip it. (Deno 2 has no
 // `window` global, so the parameter is also what keeps the slice runnable at all.)
-const factory = new Function("window", `${BLOCK}; return { ssClampTab, ssFallbackTab, ssAdvancedOn };`);
-const { ssClampTab, ssFallbackTab, ssAdvancedOn } = factory(
+const factory = new Function("window", `${BLOCK}; return { ssClampTab, ssFallbackTab, ssAdvancedOn, ssHubCan };`);
+// The builder switch is not launched (SS_ADVANCED_FOR_BUILDERS = false, 2026-10-27). The launched
+// rule is still pinned: the same block with the one line flipped.
+const LAUNCH_LINE = "const SS_ADVANCED_FOR_BUILDERS = false;";
+assert(BLOCK.includes(LAUNCH_LINE), "the builder-switch launch line moved or changed; re-point this test");
+const ssAdvancedOnLaunched = (new Function("window", `${BLOCK.replace(LAUNCH_LINE, "const SS_ADVANCED_FOR_BUILDERS = true;")}; return { ssAdvancedOn };`)(
   { location: { hostname: "app.structurestudiosuite.com" } },
-) as { ssClampTab: Clamp; ssFallbackTab: (a: Access | null) => string; ssAdvancedOn: (e: unknown) => boolean };
+) as { ssAdvancedOn: (e: unknown) => boolean }).ssAdvancedOn;
+const { ssClampTab, ssFallbackTab, ssAdvancedOn, ssHubCan } = factory(
+  { location: { hostname: "app.structurestudiosuite.com" } },
+) as { ssClampTab: Clamp; ssFallbackTab: (a: Access | null) => string; ssAdvancedOn: (e: unknown) => boolean; ssHubCan: (v: string, c: boolean, a: Access | null) => boolean };
 
 // An owner's resolved map: edit everywhere. The support operator wears exactly this, which is
 // what makes "and yet admin/projects are still refused" a real assertion rather than a
@@ -58,15 +65,15 @@ const OWNER_MAP: Access = {
 };
 
 Deno.test("a platform operator keeps both consoles", () => {
-  for (const tab of ["accounts", "admin", "projects"]) {
+  for (const tab of ["accounts", "admin", "workbench"]) {
     assertEquals(ssClampTab(tab, true, true, OWNER_MAP, false), tab);
   }
 });
 
-Deno.test("a SUPPORT operator keeps Accounts but loses Admin and Projects", () => {
+Deno.test("a SUPPORT operator keeps Accounts but loses Admin and Workbench", () => {
   // Accounts is the switcher — without it support cannot reach the next builder at all.
   assertEquals(ssClampTab("accounts", true, false, OWNER_MAP, true), "accounts");
-  for (const tab of ["admin", "projects"]) {
+  for (const tab of ["admin", "workbench"]) {
     const got = ssClampTab(tab, true, false, OWNER_MAP, true);
     assert(got !== tab, `${tab} must not resolve for a support operator, got "${got}"`);
     assertEquals(got, ssFallbackTab(OWNER_MAP));
@@ -76,14 +83,14 @@ Deno.test("a SUPPORT operator keeps Accounts but loses Admin and Projects", () =
 Deno.test("support still reaches every tab the owner's map allows", () => {
   // The narrowing is about OUR consoles, not about the builder's own product. A support
   // operator who could not open Designs or Orders could not answer a support call.
-  for (const tab of ["designs", "orders", "inventory", "build-schedule", "settings"]) {
+  for (const tab of ["contacts", "orders", "inventory", "build-schedule", "settings"]) {
     assertEquals(ssClampTab(tab, true, false, OWNER_MAP, true), tab);
   }
 });
 
 Deno.test("a non-operator never reaches the operator routes, support flag or not", () => {
   for (const supportView of [false, true]) {
-    for (const tab of ["accounts", "admin", "projects"]) {
+    for (const tab of ["accounts", "admin", "workbench"]) {
       assert(ssClampTab(tab, false, false, OWNER_MAP, supportView) !== tab);
     }
   }
@@ -93,7 +100,7 @@ Deno.test("supportView defaults to FALSE so every existing caller is unchanged",
   // The 4-argument call shape still exists in the codebase; a default of true would have
   // silently taken the consoles away from every operator.
   assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("admin", true, true, OWNER_MAP), "admin");
-  assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("projects", true, true, OWNER_MAP), "projects");
+  assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("workbench", true, true, OWNER_MAP), "workbench");
 });
 
 Deno.test("canAdmin still unclamps everything, which is why support must not hold it", () => {
@@ -137,7 +144,7 @@ Deno.test("a refused Advanced lands where a refused Designer would", () => {
 });
 
 Deno.test("the Advanced argument changes no other tab", () => {
-  for (const tab of ["designer", "designs", "orders", "settings", "accounts", "admin", "projects"]) {
+  for (const tab of ["designer", "designs", "orders", "settings", "accounts", "admin", "workbench"]) {
     for (const on of [false, true]) {
       assertEquals(ssClampTab(tab, true, true, OWNER_MAP, false, true, on), ssClampTab(tab, true, true, OWNER_MAP, false, true));
     }
@@ -156,24 +163,31 @@ Deno.test("ssAdvancedOn reads the internal-account signal and the builder's own 
   }
   assertEquals(ssAdvancedOn({ reason: "internal" }), true);
   assertEquals(ssAdvancedOn({ reason: "internal", exempt: true, state: "exempt" }), true);
-  // The builder's switch (2026-10-05, client_settings.advanced_mode via portal-billing).
-  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: true }), true, "a builder who turned it on");
-  assertEquals(ssAdvancedOn({ reason: "exempt", exempt: true, advancedMode: true }), true);
-  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: false }), false, "turned off (or never on)");
-  // Our own account stays on whatever its column says.
+  // NOT LAUNCHED (2026-10-27): a builder's switch reads as off, ours stays on.
+  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: true }), false, "not launched: a builder's switch is ignored");
+  assertEquals(ssAdvancedOn({ reason: "exempt", exempt: true, advancedMode: true }), false, "not launched: exempt too");
   assertEquals(ssAdvancedOn({ reason: "internal", advancedMode: false }), true, "internal stays on with the column off");
+  // LAUNCHED: the builder's switch (2026-10-05, client_settings.advanced_mode via portal-billing).
+  const on = ssAdvancedOnLaunched;
+  assertEquals(on({ reason: "active", advancedMode: true }), true, "a builder who turned it on");
+  assertEquals(on({ reason: "exempt", exempt: true, advancedMode: true }), true);
+  assertEquals(on({ reason: "active", advancedMode: false }), false, "turned off (or never on)");
+  // Our own account stays on whatever its column says.
+  assertEquals(on({ reason: "internal", advancedMode: false }), true, "internal stays on with the column off");
   // Strictly true: nothing that merely looks like yes.
   for (const v of ["true", 1, "on", [true], { on: true }]) {
-    assertEquals(ssAdvancedOn({ reason: "active", advancedMode: v }), false, `advancedMode ${JSON.stringify(v)}`);
+    assertEquals(on({ reason: "active", advancedMode: v }), false, `advancedMode ${JSON.stringify(v)}`);
   }
 });
 
 Deno.test("a builder with Advanced mode on: /portal/advanced resolves for them like any page they may see", () => {
   // The shell passes ssAdvancedOn(...) && advancedMayRun as the 7th argument; with it true the route
   // is theirs, with it false it lands on the Designer — owners and operators included.
-  const on = ssAdvancedOn({ reason: "active", advancedMode: true });
+  // Launched rule (see ssAdvancedOnLaunched); not launched, the same builder lands on the Designer.
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, ssAdvancedOn({ reason: "active", advancedMode: true })), "designer");
+  const on = ssAdvancedOnLaunched({ reason: "active", advancedMode: true });
   assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, on), "advanced");
-  const off = ssAdvancedOn({ reason: "active", advancedMode: false });
+  const off = ssAdvancedOnLaunched({ reason: "active", advancedMode: false });
   assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, off), "designer");
   assertEquals(ssClampTab("advanced", true, true, OWNER_MAP, false, true, off), "designer");
 });
@@ -200,15 +214,91 @@ Deno.test("My Profile resolves for every role, settings area or not", () => {
 // SETTINGS_AREAS (Phone is a Settings card gated on the phone area itself), a rep's phone 'own'
 // rightly opens Settings, where their rail is Phone and My Profile.
 Deno.test("only My Profile: the rest of Settings still needs an area", () => {
-  for (const sub of [null, "structures", "team", "billing", "phone", "not-a-real-slug"]) {
+  for (const sub of [null, "sheds", "structures", "team", "billing", "phone", "not-a-real-slug"]) {
     assertEquals(ssClampTab("settings", false, false, DRIVER, false, false, false, sub), ssFallbackTab(DRIVER), String(sub));
   }
 });
 
 Deno.test("the sub argument changes no other tab", () => {
-  for (const tab of ["designer", "designs", "orders", "accounts", "admin", "projects", "advanced"]) {
+  for (const tab of ["designer", "designs", "orders", "accounts", "admin", "workbench", "advanced"]) {
     for (const access of [SALES_REP, OWNER_MAP]) {
       assertEquals(ssClampTab(tab, false, false, access, false, false, false, "myprofile"), ssClampTab(tab, false, false, access, false, false, false));
     }
+  }
+});
+
+// THE CONTACTS HUB (2026-10-12). One tab for the contact list, the Design list and the boards, so
+// EITHER area opens it, and each view inside still needs its own: nobody gains or loses a list.
+const CREW_LEADER: Access = { build_schedule: "edit", repairs: "edit", designs: "view", inventory: "view", orders: "view" };
+const CONTACTS_ONLY: Access = { contacts: "own", build_schedule: "view" };
+
+Deno.test("the Contacts hub opens with the designs area, the contacts area, or both", () => {
+  for (const access of [OWNER_MAP, CREW_LEADER, CONTACTS_ONLY, SALES_REP, null]) {
+    assertEquals(ssClampTab("contacts", false, false, access), "contacts", JSON.stringify(access));
+  }
+  // Neither: refused, and the driver lands where they always did.
+  assertEquals(ssClampTab("contacts", false, false, DRIVER), ssFallbackTab(DRIVER));
+  assert(ssFallbackTab(DRIVER) !== "contacts");
+});
+
+Deno.test("inside the hub each view asks for its own area", () => {
+  assertEquals([ssHubCan("people", false, CREW_LEADER), ssHubCan("designs", false, CREW_LEADER)], [false, true], "crew leader");
+  assertEquals([ssHubCan("people", false, CONTACTS_ONLY), ssHubCan("designs", false, CONTACTS_ONLY)], [true, false], "contacts only");
+  assertEquals([ssHubCan("people", false, SALES_REP), ssHubCan("designs", false, SALES_REP)], [true, true], "sales rep");
+  assertEquals([ssHubCan("people", false, DRIVER), ssHubCan("designs", false, DRIVER)], [false, false], "driver");
+  // Owners, admins and operators always; the pre-migration-100 shape (no map) saw both lists.
+  assertEquals([ssHubCan("people", true, {}), ssHubCan("designs", true, {})], [true, true]);
+  assertEquals([ssHubCan("people", false, null), ssHubCan("designs", false, null)], [true, true]);
+  // Not a view: never.
+  assertEquals(ssHubCan("pipelines", true, OWNER_MAP), false);
+});
+
+Deno.test("the landing page is the hub for anyone who holds either list", () => {
+  assertEquals(ssFallbackTab(OWNER_MAP), "contacts");
+  assertEquals(ssFallbackTab(CREW_LEADER), "contacts");
+  assertEquals(ssFallbackTab(CONTACTS_ONLY), "contacts");
+  assertEquals(ssFallbackTab(null), "contacts");
+  // "designs" and "pipelines" are no longer pages of their own.
+  assert(ssClampTab("designs", false, false, OWNER_MAP) !== "designs");
+  assert(ssClampTab("pipelines", false, false, OWNER_MAP) !== "pipelines");
+});
+
+// PROJECT MANAGEMENT AND WORKBENCH (2026-11-05). Carolyn: "customers get projects and ours becomes
+// workbench". /projects is a Coming Soon page for every builder (beta only, like the other three),
+// and the internal board moved to /workbench. The production-pinned factory above already proves
+// the board's console rules under the new name; these need the BETA host, where teasers exist.
+const onBeta = (new Function("window", `${BLOCK}; return { ssClampTab };`)(
+  { location: { hostname: "beta.structurestudiosuite.com" } },
+) as { ssClampTab: Clamp }).ssClampTab;
+const clampShed = onBeta as unknown as (t: string, o: boolean, c: boolean, a: Access | null, sv: boolean, cp: boolean, ad: boolean, sub: string | null, sh: boolean) => string;
+
+Deno.test("Project Management: every builder opens /projects on beta, and nobody on production", () => {
+  for (const access of [SALES_REP, DRIVER, OWNER_MAP]) {
+    assertEquals(onBeta("projects", false, false, access), "projects");
+    assertEquals(ssClampTab("projects", false, false, access), ssFallbackTab(access), "production has no teasers");
+  }
+  // An operator on a bare /projects sees the customers' page too: only a SUB means the old board.
+  assertEquals(onBeta("projects", true, true, OWNER_MAP, false, true, false, null), "projects");
+  // The shed shape does not hide it — it is every builder's.
+  assertEquals(clampShed("projects", false, false, SALES_REP, false, false, false, null, false), "projects");
+});
+
+// An old /projects/<board> link is mapped to /workbench/<board> by ssCanonRoute (contactsHub_test),
+// before the clamp; here, the clamp then judges /workbench exactly as it judges a typed one.
+Deno.test("an old board link, once mapped to Workbench, opens only for the people who may", () => {
+  for (const clamp of [ssClampTab, onBeta]) {
+    assertEquals(clamp("workbench", true, true, OWNER_MAP, false, true, false, "bugs"), "workbench");
+    assert(clamp("workbench", true, false, OWNER_MAP, true, true, false, "bugs") !== "workbench", "support is barred");
+    assert(clamp("workbench", false, false, SALES_REP, false, false, false, "bugs") !== "workbench", "a builder is barred");
+  }
+});
+
+Deno.test("no sheds: Rent to Own and Self Serve Displays are refused, Reports and Commissions stay", () => {
+  for (const tab of ["rent-to-own-contracts", "self-serve-display-units"]) {
+    assertEquals(clampShed(tab, false, true, OWNER_MAP, false, false, false, null, false), ssFallbackTab(OWNER_MAP));
+    assertEquals(clampShed(tab, false, true, OWNER_MAP, false, false, false, null, true), tab);
+  }
+  for (const tab of ["reports", "commissions"]) {
+    assertEquals(clampShed(tab, false, true, OWNER_MAP, false, false, false, null, false), tab);
   }
 });

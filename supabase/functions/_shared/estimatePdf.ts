@@ -32,6 +32,7 @@
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
 import type { PDFFont, PDFImage, PDFPage } from "npm:pdf-lib@1.17.1";
 import { addressFrom, type StopAddress } from "./contactAddress.ts";
+import { billTo, companyOf, NAMING } from "./customerNaming.ts";
 import { logoUnfit, sniffLogo } from "./pdfLogo.ts";
 import { shareCodeIsGuessable } from "./shareCode.ts";
 
@@ -58,6 +59,10 @@ export interface EstimatePdfBusiness {
 /** Who the document is for: designs.contact, read through pdfCustomerFrom below. */
 export interface EstimatePdfCustomer {
   name?: string | null;
+  /** The business the document is for (designs.contact.company, quote to a business entity,
+   *  2026-10-21). With one, the block prints the company, then "Attn: <name>". Absent = the block
+   *  it always was. */
+  company?: string | null;
   phone?: string | null;
   email?: string | null;
   /** The delivery address, as contactAddress.ts reads it from designs.contact. */
@@ -103,6 +108,10 @@ export interface EstimatePdfInput {
    *  (letterhead, table, totals, terms) is deliberately identical: the SS quote and the SS
    *  invoice describe the same sale and must not drift apart visually or numerically. */
   docKind?: "estimate" | "invoice";
+  /** The building's full serial number (orders.building_serial, migration 316), e.g.
+   *  1027-LBA-1216-REBUWHM-25698. Printed under the issue date when present; absent or blank
+   *  draws nothing, so every document without one is byte-for-byte what it was. */
+  serialNumber?: string | null;
   /**
    * Sales tax (migration 127). ABSENT renders the original two-row Subtotal/Total block,
    * byte for byte — which is what every pre-tax document, and every GHL-mode estimate, still
@@ -271,8 +280,10 @@ export function pdfCustomerFrom(contact: any, shortCode: string): EstimatePdfCus
   const s = (v: any): string | null =>
     typeof v === "string" && v.trim() ? v.trim() : typeof v === "number" && Number.isFinite(v) ? String(v) : null;
   const address = addressFrom(contact);
-  const out = { name: s(contact.name), phone: s(contact.phone), email: s(contact.email), address };
-  const any = out.name || out.phone || out.email || address.street || address.city || address.state || address.zip;
+  // The company only when there is one, so a contact without it yields the object it always did.
+  const company = companyOf(contact);
+  const out = { name: s(contact.name), phone: s(contact.phone), email: s(contact.email), address, ...(company ? { company } : {}) };
+  const any = out.name || company || out.phone || out.email || address.street || address.city || address.state || address.zip;
   return any ? out : null;
 }
 
@@ -390,6 +401,11 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   y -= 20;
   page.drawText(`Issued: ${fmtDate(issued)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: INK });
   y -= 14;
+  const serialText = sanitizeText(input?.serialNumber).trim();
+  if (serialText) {
+    page.drawText(`Serial #: ${serialText}`, { x: MARGIN, y: y - 10, size: 10, font: bold, color: INK });
+    y -= 14;
+  }
   if (!isInvoice) {
     // An invoice is a bill, not an offer — no validity window.
     page.drawText(`Valid until: ${fmtDate(validUntil)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: GRAY });
@@ -409,8 +425,18 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   const ca = cust?.address ?? {};
   const custCityState = [clean(ca.city), clean(ca.state)].filter(Boolean).join(", ");
   const custLocality = [custCityState, clean(ca.zip)].filter(Boolean).join(" ");
-  const custName = fit(cust?.name, bold, 10);
+  // With a company (quote to a business entity): the business in bold and "Attn: <person>" under
+  // it, or the person in bold and the business under it (NAMING.companyFirstOnDocuments, Carolyn's
+  // call). A name that only repeats the company drops the Attn line (billTo). Without a company
+  // this is the block it always was: the name in bold.
+  const who = billTo(cust);
+  const custName = who.company
+    ? (NAMING.companyFirstOnDocuments || !who.attn ? fit(who.company, bold, 10) : fit(who.attn, bold, 10))
+    : fit(cust?.name, bold, 10);
+  const custSub = !who.company || !who.attn ? []
+    : NAMING.companyFirstOnDocuments ? fit(`Attn: ${who.attn}`, helv, 9) : fit(who.company, helv, 9);
   const custRows = [
+    ...custSub,
     ...fit(ca.street, helv, 9),
     ...fit(custLocality, helv, 9),
     ...fit(cust?.phone, helv, 9),

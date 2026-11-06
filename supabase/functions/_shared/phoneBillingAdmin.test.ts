@@ -143,6 +143,44 @@ Deno.test("would-have-charged is cost × markup, rounded half up, capped at ceil
   assertEquals(previewChargeMicros(14000, 1, "minute", { ...s, markup: null }), null);
 });
 
+// ── Carolyn's prices (2026-10-06) ───────────────────────────────────────────────────────
+// Twilio's published US rates (the fallbacks already equal them) × 1.25, the whole margin.
+// The save goes through Admin › Billing (phone_billing_set), so these pin that the card's
+// exact save is accepted and audited, and that the report's "would have charged" is the same
+// figure workers/phone-api's chargeFor posts (test/usageCharge.test.ts pins the two equal over
+// a sweep of costs).
+
+Deno.test("×1.25 and the 1-hour fallback wait are a valid save, audited as they are", () => {
+  assertEquals(parseSettingsPatch({ markup: 1.25 }, ENVELOPE), { markup: 1.25 });
+  assertEquals(parseSettingsPatch({ fallback_after_hours: 1 }, ENVELOPE), { fallback_after_hours: 1 });
+  // What the card sends on one Save prices: only the two changed fields.
+  const patch = parseSettingsPatch({ action: "phone_billing_set", adminPassword: "x", markup: 1.25, fallback_after_hours: 1 }, ENVELOPE);
+  assertEquals(patch, { markup: 1.25, fallback_after_hours: 1 });
+  assertEquals(describeSettingsChange(SEED, { ...SEED, ...patch }), ["markup (none) -> 1.25", "fallback_after_hours 6 -> 1"]);
+  // numeric(6,3) serves it back as 1.250 (a number, or "1.250" as text): the card reads 1.25,
+  // so the next save does not send it again.
+  assertEquals(normalizeSettings({ ...SEED, markup: "1.250" }).markup, 1.25);
+  assertEquals(normalizeSettings({ ...SEED, markup: 1.250 }).markup, 1.25);
+});
+
+Deno.test("the worked prices at ×1.25, on the fallback (published) rates", () => {
+  const s = { markup: 1.25, ceiling_min_micros: null, ceiling_seg_micros: null };
+  const f = SEED;
+  // Outbound app call: (14,000 + 4,000) × 1.25 = $0.0225 a minute; 3 minutes $0.0675.
+  assertEquals(previewChargeMicros(f.fallback_out_min_micros + f.fallback_client_min_micros, 1, "minute", s), 22500);
+  assertEquals(previewChargeMicros(54000, 3, "minute", s), 67500);
+  // Inbound, answered in the app: (8,500 + 4,000) × 1.25 = $0.015625 a minute.
+  assertEquals(previewChargeMicros(f.fallback_in_min_micros + f.fallback_client_min_micros, 1, "minute", s), 15625);
+  // A text sent: (8,300 + 4,500) × 1.25 = $0.016; received: (8,300 + 3,500) × 1.25 = $0.01475.
+  assertEquals(previewChargeMicros(f.fallback_sms_seg_micros + f.carrier_fee_out_micros, 1, "segment", s), 16000);
+  assertEquals(previewChargeMicros(f.fallback_sms_seg_micros + f.carrier_fee_in_micros, 1, "segment", s), 14750);
+  // A voicemail: 1 minute in + the recording at $0.0025 a minute.
+  assertEquals(previewChargeMicros(8500 + 2500, 1, "minute", s), 13750);
+  // Half up on the quarter: 2.5 → 3, 1.25 → 1.
+  assertEquals(previewChargeMicros(2, 1, "segment", s), 3);
+  assertEquals(previewChargeMicros(1, 1, "segment", s), 1);
+});
+
 // ── monthRange ──────────────────────────────────────────────────────────────────────────
 
 Deno.test("a month is a UTC month, and Twilio's snapshots can only exist up to yesterday", () => {
@@ -254,6 +292,23 @@ Deno.test("a recorded call: its recording and transcript add no call minutes, an
   assertEquals(a.wouldChargeMicros, 30000 + 50000 + 120000);
   // Twilio billed the call and the recording; the transcript (Workers AI, Claude) is not on its bill.
   assertEquals([rep.account.twilioMicros, rep.account.ourCostCoveredMicros, rep.account.gapMicros], [165000, 165000, 0]);
+});
+
+Deno.test("a month at ×1.25: a quarter on top of each charged line's cost; a call recording is never charged", () => {
+  const rows: UsageChargeRow[] = [
+    row({ state: "charged", cost_micros: 54000, cost_source: "estimate", units: 3, charge_micros: 67500 }),
+    row({ source: "sms", unit: "segment", state: "charged", cost_micros: 12800, cost_source: "estimate", units: 1, charge_micros: 16000 }),
+    // Its meter (call_recording) stays inactive: a shadow row with its cost, absorbed by us.
+    row({ source: "recording", state: "shadow", cost_micros: 7500, cost_source: "estimate", units: 3 }),
+  ];
+  const rep = summarizePhoneUsage({
+    range: RANGE, rows, twilio: [], settings: { markup: 1.25, ceiling_min_micros: null, ceiling_seg_micros: null }, names: new Map(),
+  });
+  const a = rep.tenants[0];
+  assertEquals([a.calls, a.minutes, a.texts], [1, 3, 1], "the recording adds no call and no minutes");
+  assertEquals([a.chargedMicros, a.costMicros], [83500, 74300]);
+  assertEquals(a.marginMicros, (54000 + 12800) / 4 - 7500, "a quarter of the charged cost, less the recording we absorb");
+  assertEquals(a.wouldChargeMicros, 9375, "what the recording would have charged had its meter been on");
 });
 
 // ── small helpers ───────────────────────────────────────────────────────────────────────

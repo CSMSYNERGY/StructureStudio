@@ -26,6 +26,11 @@ type Tables = {
    *  caller's own client_users row — serving one array to both would let a test pass by
    *  reading the operator's own mapping and never notice the branch was skipped. */
   tenant_owner?: any[];
+  /** The row the ACTING-AS lookup finds (2026-10-23): one named person on the VIEWED tenant,
+   *  read by (client_id, user_id). Its own fixture for the same reason tenant_owner has one -
+   *  serving the caller's array here would let a test pass by reading the operator's own
+   *  mapping and never notice the branch was skipped. `null` is "not on this account". */
+  tenant_user?: any | null;
 };
 
 const audits: any[] = [];
@@ -73,6 +78,10 @@ function makeAdmin(t: Tables, opts: { auditFails?: boolean } = {}) {
         },
         maybeSingle: () => {
           if (table === "app_operators") return Promise.resolve({ data: t.app_operators ?? null, error: null });
+          // The acting-as lookup is the one client_users read filtered by user_id.
+          if (table === "client_users" && chain._eq && chain._eq.user_id) {
+            return Promise.resolve({ data: t.tenant_user ?? null, error: null });
+          }
           if (table === "client_configs") {
             // assertClient looks up by slug; `lastEq` captured below.
             return Promise.resolve({ data: chain._slug && (t.client_configs ?? []).includes(chain._slug) ? { client_id: chain._slug } : null, error: null });
@@ -505,4 +514,133 @@ Deno.test("SEVERAL owners: the ROW ORDER must not change who is mirrored", async
   assertEquals(aThenB.designs, "none", "…and it really is that row's map, not a default");
   // Billing stays clamped whichever row wins.
   assertEquals(aThenB.settings_billing, "none");
+});
+
+const AA_ID = "00000000-0000-4000-8000-0000000000aa";
+const BB_ID = "00000000-0000-4000-8000-0000000000bb";
+
+// == ACTING AS ONE PERSON ON THE VIEWED TENANT (2026-10-23) ===============================
+// Carolyn: pick a user inside the account you are viewing and "see their account in the exact
+// way that they do ... the same access they have / don't have". These cases pin the two halves
+// that make that true rather than decorative: the map really is theirs, and it is ENFORCED.
+
+const OP = { user_id: "u1", email: "op@csmsynergy.com", can_write: true, can_bill: true, support_only: false };
+const REP = { role: "user", title: "sales_rep", access: null };
+const OWNER_ROW = { role: "owner", title: "owner", access: null };
+const CFG = ["acme", "other"];
+// A gate the sales_rep preset does NOT satisfy (reps hold no settings_* area at all), and one
+// it does.
+const GATES_T = {
+  settings_save: { area: "settings_structures", level: "edit" },
+  designs_read: { area: "designs", level: "view" },
+} as const;
+
+Deno.test("acting as a sales rep is REFUSED where that rep would be refused", async () => {
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "settings_save", targetClientId: "other", targetUserId: AA_ID }),
+    makeAdmin({ client_users: OWNER, app_operators: OP, client_configs: CFG, tenant_user: REP }),
+    { gates: GATES_T as any, readActions: new Set() },
+  );
+  assertEquals(r.ok, false);
+  assertEquals((r as any).status, 403);
+});
+
+Deno.test("...and allowed where that rep would be allowed", async () => {
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "designs_read", targetClientId: "other", targetUserId: AA_ID }),
+    makeAdmin({ client_users: OWNER, app_operators: OP, client_configs: CFG, tenant_user: REP }),
+    { gates: GATES_T as any, readActions: new Set() },
+  );
+  assertEquals(r.ok, true);
+  assertEquals((r as any).ctx.operator.asUserId, AA_ID);
+  // The map really is the rep's: they read designs and hold no settings area.
+  assertEquals((r as any).ctx.canRead("designs"), true);
+  assertEquals((r as any).ctx.canEdit("settings_structures"), false);
+});
+
+Deno.test("WITHOUT acting-as the same operator is waved through, so the narrowing is the feature", async () => {
+  // The control for the case above. If this ever fails, the platform operator has lost the
+  // god view - a much bigger change than this feature.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "settings_save", targetClientId: "other" }),
+    makeAdmin({ client_users: OWNER, app_operators: OP, client_configs: CFG }),
+    { gates: GATES_T as any, readActions: new Set() },
+  );
+  assertEquals(r.ok, true);
+  assertEquals((r as any).ctx.operator.asUserId, null);
+  assertEquals((r as any).ctx.canEdit("settings_structures"), true);
+});
+
+Deno.test("a person who is not on the viewed account is 404, not 403", async () => {
+  // The same status an invisible row returns elsewhere, so a refusal never confirms that an
+  // account or a person exists.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "designs_read", targetClientId: "other", targetUserId: BB_ID }),
+    makeAdmin({ client_users: OWNER, app_operators: OP, client_configs: CFG, tenant_user: null }),
+    { gates: GATES_T as any, readActions: new Set() },
+  );
+  assertEquals((r as any).status, 404);
+});
+
+Deno.test("a targetUserId that is not a uuid is ignored, never queried", async () => {
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "settings_save", targetClientId: "other", targetUserId: "x' or 1=1 --" }),
+    makeAdmin({ client_users: OWNER, app_operators: OP, client_configs: CFG, tenant_user: REP }),
+    { gates: GATES_T as any, readActions: new Set() },
+  );
+  // Falls back to the ordinary operator view rather than wearing anything.
+  assertEquals(r.ok, true);
+  assertEquals((r as any).ctx.operator.asUserId, null);
+});
+
+Deno.test("acting as an OWNER still does not hand over Billing", async () => {
+  // "What this person sees" is the goal; the card that pays for the product is not part of
+  // answering a support question. A deliberate, visible difference from what that owner sees.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "designs_read", targetClientId: "other", targetUserId: AA_ID }),
+    makeAdmin({ client_users: OWNER, app_operators: OP, client_configs: CFG, tenant_user: OWNER_ROW }),
+    { gates: GATES_T as any, readActions: new Set() },
+  );
+  assertEquals(r.ok, true);
+  assertEquals((r as any).ctx.access.settings_billing, "none");
+  assertEquals((r as any).ctx.canEdit("settings_billing"), false);
+});
+
+Deno.test("a READ-ONLY operator stays read-only however permissive the person they wear", async () => {
+  // can_write and the worn map are separate axes, and this is the AND of them.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "designs_read", targetClientId: "other", targetUserId: AA_ID }),
+    makeAdmin({
+      client_users: OWNER, client_configs: CFG, tenant_user: OWNER_ROW,
+      app_operators: { ...OP, can_write: false },
+    }),
+    { gates: GATES_T as any, readActions: new Set(["designs_read"]) },
+  );
+  assertEquals(r.ok, true);
+  assertEquals((r as any).ctx.canEdit("designs"), false);
+});
+
+Deno.test("the audit still names the OPERATOR, with who they were wearing in the note", async () => {
+  // The one thing this feature must never do is put somebody else's name on an action they
+  // did not take.
+  signedIn();
+  audits.length = 0;
+  const r = await resolveTenant(
+    req({ action: "designs_read", targetClientId: "other", targetUserId: AA_ID }),
+    makeAdmin({ client_users: OWNER, app_operators: OP, client_configs: CFG, tenant_user: REP }),
+    { gates: GATES_T as any, readActions: new Set() },
+  );
+  assertEquals(r.ok, true);
+  await (r as any).ctx.auditStrict("opened_thing", 1, "a note");
+  assertEquals(audits.length, 1);
+  assertEquals(audits[0].actor_user_id, "u1");
+  assertEquals(audits[0].actor_email, "op@csmsynergy.com");
+  assertEquals(audits[0].note, "a note (acting as " + AA_ID + ")");
 });

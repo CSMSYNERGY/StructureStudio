@@ -21,7 +21,6 @@
 //
 // Supabase is stubbed at the network layer; nothing leaves the machine and NOTHING IS SAVED.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/rigidFoamFloor.mjs         (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/rigid-foam-floor (SS_SHOTS overrides). Served from the tree
@@ -278,7 +277,7 @@ async function portalRun(browser) {
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     await settle(page, 600);
-    await page.evaluate(() => { history.pushState({}, "", "/portal/settings/insulation"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await page.evaluate(() => { history.pushState({}, "", "/settings/insulation"); window.dispatchEvent(new PopStateEvent("popstate")); });
     await page.waitForFunction(() => document.body.innerText.includes("Offer insulation to customers"), null, { timeout: 20000 }).catch(() => {});
     await settle(page, 600);
     const text = async () => (await page.locator("body").innerText({ timeout: 3000 }).catch(() => "")).replace(/\s+/g, " ");

@@ -96,16 +96,48 @@ export class ResendApiError extends Error {
  *                         these, not a retry loop
  *   404 not_found         the domain/email id does not exist on this account
  *   422                   invalid or missing fields — the request must change to succeed
- * Everything else — 429, 5xx, network, an unrecognized shape, a 401 a key rotation would
- * fix without a code change — stays retryable.
+ *   409 invalid_idempotent_request   (2026-11-06) this Idempotency-Key was already used in
+ *                         the last 24 hours with a DIFFERENT body. Resend has had a version of
+ *                         this email already and may well have sent it; asking again under the
+ *                         same key can only fail the same way, and asking under a new key could
+ *                         send the customer a second copy. A person decides, not a retry loop.
+ * Everything else — 429, 5xx, network, a timeout, an unrecognized shape, a 401 a key rotation
+ * would fix without a code change, and the OTHER 409s (`concurrent_idempotent_requests`: the
+ * first request with this key is still running; `resource_locked`) — stays retryable.
  */
 function verdictOf(status: number, name_: string): boolean {
   if (status === 400 && name_ === "validation_error") return true;
   if (status === 403) return true;
   if (status === 404 && name_ === "not_found") return true;
   if (status === 422) return true;
+  if (status === 409 && name_ === "invalid_idempotent_request") return true;
   return false;
 }
+
+/**
+ * How long one Resend call may take before we stop waiting (2026-11-06).
+ *
+ * Before this, nothing bounded it: `fetch` has no default timeout, so a Resend that accepted
+ * the connection and then hung held the caller until the edge runtime's own wall clock killed
+ * the whole function — a rep's Send button spinning for minutes, or a tick that never got to
+ * the rest of its queue. Past it we report a TRANSIENT failure (status 0, name_ "timeout").
+ *
+ * ⚠️ IT IS A HANG BOUND, NOT A SLOW BOUND, and the difference is the whole point. A normal call
+ * answers in well under a second, but a call that answers in 15 seconds DID WORK: cutting it off
+ * turns a sent email into a "failed" one, and a caller with a fallback (submit-estimate's GHL path)
+ * then sends the customer a second copy. So the bound sits far past any slow answer we expect.
+ * (A pre-ship review on 2026-11-06 found exactly that double-send with the first value, 10 s.)
+ *
+ * ⚠️ A TIMED-OUT SEND MAY STILL HAVE BEEN SENT. We stopped listening; Resend may have finished.
+ * That is why a caller that tries again later (the automation and reminder ticks) passes an
+ * Idempotency-Key, which makes Resend answer with the first request's result instead of sending again.
+ */
+export const RS_TIMEOUT_MS = 30_000;
+
+/** Domain create gets longer still: it is the one provisioning call that cannot simply be asked
+ *  again. A create that finished on Resend's side after we gave up leaves a domain we never saved,
+ *  and the next Connect is refused as "already registered". */
+const CREATE_DOMAIN_TIMEOUT_MS = 60_000;
 
 /** Pull ONLY the enum-ish `name` out of a Resend error body. `message` is never read — see
  *  the header: it echoes recipient addresses. The charset gate is what makes `name` safe to
@@ -127,31 +159,51 @@ function requireKey(): string {
 }
 
 /** One authenticated round trip. Failures throw ResendApiError with the verdict attached;
- *  successes return the parsed JSON (null when the body is empty or unparsable). */
-async function rsFetch(key: string, path: string, init: RequestInit = {}): Promise<unknown> {
+ *  successes return the parsed JSON (null when the body is empty or unparsable).
+ *
+ *  `extraHeaders` exists for the Idempotency-Key and nothing else; ours are spread AFTER it,
+ *  so a caller can never replace the Authorization or Content-Type this function owns. */
+async function rsFetch(
+  key: string,
+  path: string,
+  init: RequestInit = {},
+  extraHeaders: Record<string, string> = {},
+  timeoutMs = RS_TIMEOUT_MS,
+): Promise<unknown> {
   let res: Response;
+  let text: string;
   try {
     res = await fetch(`${API_BASE}${path}`, {
       ...init,
       headers: {
+        ...extraHeaders,
         Accept: "application/json",
         Authorization: `Bearer ${key}`,
         ...(init.body ? { "Content-Type": "application/json" } : {}),
       },
+      // Covers the body read below as well as the connect, so a response that starts and
+      // then stalls is bounded too.
+      signal: AbortSignal.timeout(timeoutMs),
     });
+    text = await res.text();
   } catch (e) {
-    // Could not reach Resend at all — nothing about the REQUEST has been judged, so
-    // permanence cannot be claimed. The message carries only our own URL and the runtime's
-    // network error text, never provider or customer data.
+    // Could not reach Resend, or it stopped answering — nothing about the REQUEST has been
+    // judged, so permanence cannot be claimed. The message carries only our own URL and the
+    // runtime's network error text, never provider or customer data. A timeout gets its own
+    // name_ ("timeout", OURS, never Resend's — lowercase snake like theirs, so it reads the
+    // same in the ledger's `resend 0/timeout`) because "did not answer" and "could not
+    // connect" send whoever is reading the log to different places.
+    const timedOut = (e as Error)?.name === "TimeoutError";
     throw new ResendApiError({
-      message: `Could not reach Resend: ${(e as Error).message}`,
+      message: timedOut
+        ? `Resend did not answer within ${Math.round(timeoutMs / 1000)} s`
+        : `Could not reach Resend: ${(e as Error).message}`,
       status: 0,
-      name_: "",
+      name_: timedOut ? "timeout" : "",
       permanent: false,
     });
   }
 
-  const text = await res.text();
   if (!res.ok) {
     const name_ = errorNameOf(text);
     throw new ResendApiError({
@@ -401,7 +453,7 @@ export async function rsCreateDomain(
       // fail, which is where this flow already dies.
       ...(opts?.receiving ? { capabilities: { sending: "disabled", receiving: "enabled" } } : {}),
     }),
-  });
+  }, {}, CREATE_DOMAIN_TIMEOUT_MS);
   return toRsDomain(raw);
 }
 
@@ -627,12 +679,44 @@ export type RsSendInput = {
    */
   replyTo?: string | string[];
   tags?: { name: string; value: string }[];
+  /**
+   * Files to attach. `content` is BASE64 of the file's bytes — Resend's own field name and
+   * encoding (resend.com/docs/api-reference/emails/send-email). Added 2026-10-22 for the
+   * calendar invite a meeting confirmation carries (_shared/meetingIcs.ts).
+   *
+   * `contentType` is optional and worth passing: without it a .ics lands as
+   * application/octet-stream, which several mail clients show as a download rather than an
+   * invite the calendar offers to add.
+   *
+   * ⚠️ An attachment is the ONE part of a send whose size is not bounded by this codebase —
+   * Resend's limit is 40 MB across the whole message. Nothing here attaches anything but a
+   * ~1 KB .ics, so no cap is enforced; a future caller attaching a PDF should impose its own.
+   */
+  attachments?: { filename: string; content: string; contentType?: string }[];
   /** Custom RFC 5322 headers. Used for `Message-ID`, so a reply's In-Reply-To is matchable —
    *  the provider's own send id never is (see _shared/emailInbound.ts buildThreadMessageId).
    *  Omitted from the wire entirely when absent, so a caller that passes nothing sends
    *  exactly the bytes it sent before this field existed. */
   headers?: Record<string, string>;
+  /**
+   * Resend's `Idempotency-Key` (2026-11-06): the same key with the same body inside 24 hours
+   * gets the first request's answer back and NO second email. This is what makes a send safe
+   * to retry after a timeout, when we cannot know whether the first one went.
+   *
+   * ⚠️ THE KEY MUST NAME ONE MESSAGE, and the body sent under it must not change between tries:
+   * the same key with a different body is a 409 `invalid_idempotent_request`, which verdictOf
+   * calls permanent. 1 to 256 characters (Resend's limit); anything outside that, or blank, is
+   * left off the wire. A caller that will try again must make sure its key is valid: without
+   * it, a retry could send the email twice.
+   */
+  idempotencyKey?: string | null;
 };
+
+/** The key as it goes on the wire, or null to leave the header off. */
+function idempotencyKeyWire(v: unknown): string | null {
+  const k = typeof v === "string" ? v.trim() : "";
+  return k.length >= 1 && k.length <= 256 ? k : null;
+}
 
 /** Resend rejects the WHOLE send with a 422 when a tag name or value carries anything
  *  outside ASCII letters/numbers/underscores/dashes — so a tenant slug or short code with a
@@ -669,10 +753,28 @@ function replyToWire(v: string | string[] | undefined): string | string[] | unde
  * Send one email. Returns Resend's email `id` — persist it on the `email_sends` row
  * IMMEDIATELY: it is the only key delivery/bounce webhooks can match on, so a lost id is a
  * send whose fate is unknowable (the pmSendEmail rule, unchanged).
+ *
+ * ONE TRY, ALWAYS (2026-11-06). Bounded by RS_TIMEOUT_MS's hang bound, and carrying the caller's
+ * Idempotency-Key when it gave one. This function never asks twice itself: a caller that retries
+ * later does so with the same key, and Resend then answers from its memory instead of sending again.
+ *
+ * ⚠️ AN ASK-AGAIN LOOP USED TO LIVE HERE, AND WAS TAKEN OUT ON PURPOSE. Two pre-ship review rounds
+ * on 2026-11-06 each found it reporting a slow send that WORKED as failed (first a 10 s cut-off, then
+ * a pause list that ran out before its own deadline), which sends a person's quote twice through
+ * submit-estimate's GHL fallback, and it held the automation tick up for 16 to 45 s per failing email.
+ * The ticks already retry for hours under a key, so the loop bought little. Do not put it back
+ * without reading that history in the StructureStudio Email work log.
+ *
+ * `opts` is for tests (a short timeout) and nothing else.
  */
-export async function rsSendEmail(input: RsSendInput): Promise<{ id: string }> {
+export async function rsSendEmail(
+  input: RsSendInput,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ id: string }> {
   const key = requireKey();
-  const raw = await rsFetch(key, "/emails", {
+  const idem = idempotencyKeyWire(input.idempotencyKey);
+  const extra: Record<string, string> = idem ? { "Idempotency-Key": idem } : {};
+  const init: RequestInit = {
     method: "POST",
     // JSON.stringify drops undefined-valued keys, so optional fields the caller omitted
     // never appear on the wire.
@@ -686,8 +788,18 @@ export async function rsSendEmail(input: RsSendInput): Promise<{ id: string }> {
       // Undefined when the caller passed none, and JSON.stringify then drops the key.
       headers: input.headers && Object.keys(input.headers).length ? input.headers : undefined,
       tags: input.tags?.map((t) => ({ name: sanitizeTag(t.name), value: sanitizeTag(t.value) })),
+      // Undefined when the caller passed none, and JSON.stringify then drops the key — so
+      // every existing send goes out on exactly the wire it did before.
+      attachments: input.attachments?.length
+        ? input.attachments.map((a) => ({
+            filename: a.filename,
+            content: a.content,
+            content_type: a.contentType,
+          }))
+        : undefined,
     }),
-  });
+  };
+  const raw = await rsFetch(key, "/emails", init, extra, opts.timeoutMs ?? RS_TIMEOUT_MS);
   const msg = (raw ?? {}) as Record<string, unknown>;
   return { id: typeof msg.id === "string" ? msg.id : "" };
 }

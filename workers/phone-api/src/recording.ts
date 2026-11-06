@@ -1,5 +1,6 @@
 // Call recording (release B2): one dual-channel recording per call, on the CUSTOMER's leg,
-// announced first and started through Twilio's REST API when someone answers.
+// announced first (unless the owner turned the announcement off) and started through Twilio's
+// REST API when someone answers.
 //
 // ── WHY THE CUSTOMER'S LEG, AND WHY REST ───────────────────────────────────────────────────
 // The customer's leg (phone_calls.twilio_call_sid) is the one leg that lasts through hold, warm
@@ -10,21 +11,31 @@
 //
 // ── OFF AT THREE LEVELS ────────────────────────────────────────────────────────────────────
 //   1. env CALL_RECORDING must be exactly "on" (recordingEnvOn);
-//   2. the business turned it on (client_settings.phone_record_calls, owner only), with the
-//      announcement on (it is locked on; RecordingSettings.notice);
+//   2. the business's switch is on (client_settings.phone_record_calls: on by default since
+//      migration 287, and only the owner turns it off);
 //   3. the call is ARMED (phone_calls.recording_armed): written true by /voice/inbound and
-//      /voice/outbound only when the TwiML they answered with carried the announcement. Never for
-//      an emergency call, the 911 callback window, or a voicemail-only answer. Recording can only
-//      ever START on an armed call, so a setting switched on mid-call cannot record a call that
-//      never heard the notice.
+//      /voice/outbound when the TwiML they answered with rang someone on a recorded call. Never
+//      for an emergency call, the 911 callback window, or a voicemail-only answer. Recording can
+//      only ever START on an armed call, so a setting switched on mid-call cannot record a call
+//      that started unrecorded.
 // Pausing, resuming and stopping do not ask the env rail: a recording already running is still
 // paused on hold and stopped before voicemail after the rail is switched off.
+//
+// ── RECORDED IS NOT ANNOUNCED (2026-10-21) ─────────────────────────────────────────────────
+// The announcement is its own setting (client_settings.phone_recording_notice, default on;
+// RecordingSettings.notice). On, an armed call says it first: the inbound <Say>, the outbound
+// whisper (/voice/notice), and a `recording_notice` mark. Off, the call is armed and recorded all
+// the same, with no <Say> and no whisper, a `recording_unannounced` mark (UNANNOUNCED_MARK) written
+// with the call, and notice_text NULL on its recording row. Transcripts follow the recording, not
+// the announcement. Turning it off is the owner's legal call (all-party-consent states); until
+// portal-settings accepts false (phase 2), every business announces.
 //
 // ── THE LIFE OF ONE RECORDING (phone_call_recordings, migration 263) ───────────────────────
 //   answer      startCallRecording claims the row (insert ... on conflict do nothing: two answer
 //               callbacks, or a cold-transfer teammate answering, never start a second one) and
-//               asks Twilio to record. A refusal (4xx) marks the row failed and is logged; the call
-//               goes on unrecorded, and the next answer on it (a transfer) tries again. An answer
+//               asks Twilio to record. A refusal (4xx) marks the row failed and is logged (at info
+//               when Twilio shows the customer already hung up: 21220 on a leg that is over); the
+//               call goes on unrecorded, and the next answer on it (a transfer) tries again. An answer
 //               that was lost or broken (unreachable, 5xx, no SID) may mean Twilio IS recording,
 //               so the row stays starting: Twilio's own callbacks bind the SID, or the backstop
 //               settles it from Twilio's list, and no second recording is ever started.
@@ -48,12 +59,13 @@ import { UUID_RE } from "./http";
 import { logFault } from "./log";
 import type { TwilioParams } from "./twilioSignature";
 import {
-  fetchRecording, listCallRecordings, startRecording, TwilioError, twilioConfigured, updateRecording,
+  fetchCall, fetchRecording, listCallRecordings, startRecording, TwilioError, twilioConfigured, updateRecording,
   type StartedRecording, type TwilioRecording,
 } from "./twilioRest";
 import { response, say } from "./twiml";
 import { hook } from "./urls";
 import { noticeSaysRecorded } from "../../../supabase/functions/_shared/recordingNotice.ts";
+import { envForClient } from "./twilioAccount";
 
 // ── The switches ────────────────────────────────────────────────────────────────────────
 
@@ -68,18 +80,23 @@ export function callTranscribeOn(env: Env): boolean {
 }
 
 /**
- * May a call to or from this business be announced and recorded? The rail, the business's
- * switch and its announcement (locked on), and never an emergency call or the 911 callback
- * window. This is what phone_calls.recording_armed records.
+ * May a call to or from this business be recorded? The rail and the business's switch, and
+ * never an emergency call or the 911 callback window. This is what phone_calls.recording_armed
+ * records. Whether it is ANNOUNCED is announcementFor's question, not this one.
  */
 export function armedFor(env: Env, s: RecordingSettings, emergency = false): boolean {
-  return recordingEnvOn(env) && s.on && s.notice && !emergency;
+  return recordingEnvOn(env) && s.on && !emergency;
 }
+
+/** The call event an armed call that was NOT announced carries, written with the call. */
+export const UNANNOUNCED_MARK = "recording_unannounced";
 
 // ── The announcement ────────────────────────────────────────────────────────────────────
 
-export const STANDARD_NOTICE = "This call will be recorded.";
-export const STANDARD_NOTICE_TRANSCRIBED = "This call will be recorded and transcribed.";
+// Carolyn's wording (2026-10-06, migration 287). Word for word portal-settings/phone.ts and the
+// portal's Settings card, which only show it (tests/phone/callRecordingUi_test.ts pins all three).
+export const STANDARD_NOTICE = "This call may be recorded.";
+export const STANDARD_NOTICE_TRANSCRIBED = "This call may be recorded and transcribed.";
 
 /**
  * What the announcement says: the business's own sentence, else the standard one, which
@@ -91,6 +108,14 @@ export const STANDARD_NOTICE_TRANSCRIBED = "This call will be recorded and trans
 export function noticeText(env: Env, s: Pick<RecordingSettings, "notice_text" | "transcribe">): string {
   if (s.notice_text && s.notice_text.trim() && noticeSaysRecorded(s.notice_text)) return s.notice_text.trim();
   return s.transcribe && callTranscribeOn(env) ? STANDARD_NOTICE_TRANSCRIBED : STANDARD_NOTICE;
+}
+
+/**
+ * The sentence an armed call says before it rings or bridges, or null when the owner turned the
+ * announcement off: the call is still recorded (armedFor), unannounced.
+ */
+export function announcementFor(env: Env, s: RecordingSettings): string | null {
+  return s.notice ? noticeText(env, s) : null;
 }
 
 /**
@@ -147,6 +172,19 @@ export function startMayHaveLanded(e: unknown): boolean {
   return e.status === 0 || e.status >= 500 || (e.status >= 200 && e.status < 300);
 }
 
+/** Twilio's final call statuses: the leg is over, however it ended. */
+const LEG_OVER: ReadonlySet<string> = new Set(["completed", "busy", "no-answer", "canceled", "failed"]);
+
+/**
+ * Is the leg over, by Twilio's own record of it? A start refused with 21220 ("not in-progress")
+ * may come after the hang-up or before the answer, and only the leg's status says which. False
+ * for a leg still live and for a read that fails or finds nothing (404), so a doubt stays an error.
+ */
+async function legEnded(env: Env, callSid: string): Promise<boolean> {
+  const leg = await fetchCall(env, callSid).catch(() => null);
+  return !!leg && LEG_OVER.has(leg.status);
+}
+
 /** A fault's summary: the Twilio code and status, or the first line of anything else. Never a transcript. */
 function faultText(e: unknown): string {
   if (e instanceof TwilioError) return e.message;
@@ -180,14 +218,21 @@ async function claimStart(admin: Admin, call: RecCall, notice: string | null): P
 
 /**
  * The sentence this business's announcement says now, kept on the recording row as what the
- * caller heard (the call's notice played moments before the answer). Null when it cannot be read:
- * the row is still made, and the call's recording_notice mark still says a notice played.
+ * caller heard (the call's notice played moments before the answer). Null for a call that was not
+ * announced: it carries the unannounced mark, or the business has the announcement off now (either
+ * one, so a mark still landing never leaves a sentence nobody heard on the row). Null too when
+ * either cannot be read: the row is still made, and the call's marks still say what played.
  */
-async function noticeSnapshot(env: Env, admin: Admin, clientId: string): Promise<string | null> {
-  const { data, error } = await admin.from("client_settings")
-    .select("phone_recording_notice_text, phone_transcribe_calls").eq("client_id", clientId).maybeSingle();
-  if (error) return null;
-  const s = data as { phone_recording_notice_text?: string | null; phone_transcribe_calls?: boolean } | null;
+async function noticeSnapshot(env: Env, admin: Admin, call: Pick<RecCall, "id" | "client_id">): Promise<string | null> {
+  const [settings, marks] = await Promise.all([
+    admin.from("client_settings")
+      .select("phone_recording_notice, phone_recording_notice_text, phone_transcribe_calls").eq("client_id", call.client_id).maybeSingle(),
+    admin.from("phone_call_events").select("id").eq("call_id", call.id).eq("type", UNANNOUNCED_MARK).limit(1),
+  ]);
+  if (settings.error || marks.error) return null;
+  if (Array.isArray(marks.data) && marks.data.length) return null;
+  const s = settings.data as { phone_recording_notice?: boolean; phone_recording_notice_text?: string | null; phone_transcribe_calls?: boolean } | null;
+  if (s?.phone_recording_notice === false) return null;
   return noticeText(env, { notice_text: s?.phone_recording_notice_text ?? null, transcribe: s?.phone_transcribe_calls !== false });
 }
 
@@ -203,7 +248,7 @@ export async function startCallRecording(env: Env, admin: Admin, call: RecCall):
   if (!twilioConfigured(env)) return "skipped";
   let id: string;
   try {
-    const claimed = await claimStart(admin, call, await noticeSnapshot(env, admin, call.client_id));
+    const claimed = await claimStart(admin, call, await noticeSnapshot(env, admin, call));
     if (!claimed) return "exists";
     if ("existing" in claimed) {
       if (claimed.existing.status !== "paused") return "exists";
@@ -241,10 +286,26 @@ export async function startCallRecording(env: Env, admin: Admin, call: RecCall):
       });
       return "failed";
     }
-    await admin.from("phone_call_recordings").update({ status: "failed", last_error: why.slice(0, 500) })
+    // A customer who hangs up during the announcement ends the leg about a second before the start
+    // reaches Twilio, which refuses it with 400 / 21220. That is the call working as it should, so
+    // it is logged at info. 21220 alone is not proof, though: Twilio sends it for a leg that is
+    // still queued or ringing too, which is what a start sent before the answer (or on a wrong leg
+    // that is still ringing) would get on every call. So only Twilio's record of the leg, over,
+    // makes it info; a leg still live, or a read that fails, stays an error. A start sent on a
+    // stale leg that is already over would also read as info: the constant message is what the
+    // info repetition check (CLAUDE.md, app_errors severity) counts, so a flood still surfaces
+    // there. The extra read happens on 21220 only.
+    // Either way the row, the log and the call's mark keep Twilio's code (`why`).
+    const ended = e instanceof TwilioError && e.status === 400 && e.code === 21220 && await legEnded(env, call.twilio_call_sid);
+    await admin.from("phone_call_recordings")
+      .update({ status: "failed", last_error: (ended ? `The call ended before the recording started: ${why}` : why).slice(0, 500) })
       .eq("id", id).eq("status", "starting");
-    await logFault({ code: "recording_start_failed", clientId: call.client_id, message: `Twilio refused to record: ${why}`, context: { callId: call.id, recording: id } });
-    await addCallEvent(admin, call.id, "recording_failed", null);
+    await logFault({
+      code: "recording_start_failed", clientId: call.client_id, severity: ended ? "info" : "error",
+      message: ended ? `The call ended before the recording started: ${why}` : `Twilio refused to record: ${why}`,
+      context: { callId: call.id, recording: id, ...(ended ? { reason: "call_ended" } : {}) },
+    });
+    await addCallEvent(admin, call.id, "recording_failed", ended ? { reason: "call_ended" } : null);
     return "failed";
   }
 
@@ -438,11 +499,13 @@ export async function recordingCallback(env: Env, p: TwilioParams, url: URL, sig
 // ── /voice/notice (the outbound announcement) ───────────────────────────────────────────
 
 /**
- * The whisper an armed OUTBOUND call's <Number url> runs: the customer hears it after they pick
- * up and before the two sides are bridged, so it lands inside the recording, which starts on the
- * same answer. ?call is the phone_calls id and ?c the business, for its wording; a read that
- * fails still announces, in the standard words (the call IS armed, or this URL would not be on
- * it). Always valid TwiML: an error here would cost the customer the call.
+ * The whisper an armed, announced OUTBOUND call's <Number url> runs: the customer hears it after
+ * they pick up and before the two sides are bridged, so it lands inside the recording, which
+ * starts on the same answer. ?call is the phone_calls id and ?c the business, for its wording; a
+ * read that fails still announces, in the standard words (the call IS armed and announced, or this
+ * URL would not be on it, so a setting changed since does not silence it). An unannounced call has
+ * no whisper, so never reaches here or writes this mark. Always valid TwiML: an error here would
+ * cost the customer the call.
  */
 export async function noticeTwiml(env: Env, ec: Ctx, url: URL): Promise<string> {
   const callId = url.searchParams.get("call") ?? "";
@@ -507,7 +570,8 @@ export async function recordingBackstop(env: Env, admin: Admin, now = new Date()
     if (!c?.twilio_call_sid || !(since >= BACKSTOP_AFTER_MS)) continue;
     out.checked++;
     try {
-      const recs: TwilioRecording[] = await listCallRecordings(env, c.twilio_call_sid);
+      // In the account the call lives in (Workstream 2, phase 5). Off: `env` itself.
+      const recs: TwilioRecording[] = await listCallRecordings(await envForClient(env, admin, row.client_id), c.twilio_call_sid);
       const mine = row.recording_sid
         ? recs.find((r) => r.sid === row.recording_sid)
         : recs.find((r) => r.source === "StartCallRecordingAPI");

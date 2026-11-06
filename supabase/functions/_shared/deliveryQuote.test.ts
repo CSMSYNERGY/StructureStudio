@@ -367,3 +367,28 @@ Deno.test("a resolved distance is written to the cache for next time", async () 
     ["3 lot ave|dublin|ga|31021", 40],
   ]);
 });
+
+// ── The Online Shop's per-unit origin (2026-10-17) ───────────────────────────────────────
+
+Deno.test("originLocationId: an active lot of this tenant is the ONLY origin sent", async () => {
+  const { admin } = db();
+  const { impl, calls } = routesStub({ "Macon": 5 * MILES, "Perry": 12 * MILES, "Dublin": 40 * MILES });
+  const q = await quoteDelivery(admin, { clientId: CLIENT, address: DEST, repUserId: null, originLocationId: "lot-dublin", fetchImpl: impl });
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].origins.length, 1);
+  assertEquals(q.originName, "Dublin lot");
+  assertEquals(q.miles, 40);
+});
+
+Deno.test("originLocationId: an inactive, foreign or unknown lot is ignored and the mode decides", async () => {
+  for (const id of ["lot-closed", "nope"]) {
+    const { admin } = db();
+    const { impl } = routesStub({ "Macon": 60 * MILES, "Perry": 12 * MILES, "Dublin": 40 * MILES });
+    const q = await quoteDelivery(admin, { clientId: CLIENT, address: DEST, repUserId: null, originLocationId: id, fetchImpl: impl });
+    assertEquals(q.originName, "Perry lot", id);
+  }
+  const { admin } = db({ lots: [LOT_PERRY, { ...LOT_DUBLIN, client_id: "other" }] });
+  const { impl } = routesStub({ "Macon": 60 * MILES, "Perry": 12 * MILES, "Dublin": 1 * MILES });
+  const q = await quoteDelivery(admin, { clientId: CLIENT, address: DEST, repUserId: null, originLocationId: "lot-dublin", fetchImpl: impl });
+  assertEquals(q.originName, "Perry lot");
+});

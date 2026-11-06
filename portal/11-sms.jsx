@@ -115,6 +115,53 @@ const SMS_ERROR_HELP = {
   "30934": { title: "The privacy policy URL was missing from the submission", what: "The registration reached the carriers without a privacy policy address at all.", fix: "Fill in the privacy policy address and send it again." },
 };
 
+/** ── Registering WITHOUT an EIN (sole proprietor, 2026-10-27) ──────────────────────────────
+ *  Four codes a no-EIN builder can meet. 30903, 30914 and 30915 are CAMPAIGN verdicts (Twilio
+ *  help article "Campaign Registration Rejected"), so they arrive on the campaign_failed card
+ *  through `errors`, like every code above. 30701 is the BRAND's "invalid input" refusal and
+ *  lands on the status card's short list in brand_failed. Until this date none of the four had
+ *  an entry, so a sole proprietor refused for trading under a company name would have read
+ *  Twilio's own sentence and nothing else. The "get in touch" lines are deliberate: moving
+ *  between with- and without-EIN after the brand is in, and some 30701 fixes, need a new
+ *  registration or an operator, and no button here can do either.
+ *
+ *  ⚠️ A MAP OF ITS OWN, READ ONLY FOR brandTier "sole_proprietor" (smsErrorHelp below). 30701 is
+ *  Twilio's GENERIC "Brand Registration Failure: Invalid input parameters", not a sole-prop code,
+ *  so an EIN builder's brand can fail with it too, and the words here (a YES-text registration,
+ *  "your mobile") are written for a person registering as themselves. In SMS_ERROR_HELP they
+ *  replaced Twilio's field-specific description on an EIN builder's screen, which broke the rule
+ *  this route ships under: every byte an EIN builder sees is what it was. Kept apart, an EIN
+ *  builder's lookup is SMS_ERROR_HELP alone, exactly as before 2026-10-27. */
+const SOLE_PROP_ERROR_HELP = {
+  "30903": {
+    title: "The carriers did not accept this as a registration without an EIN",
+    what: "Registering without a tax ID is only for a person trading under their own name in the US or Canada. The carriers turn it down when the business has an EIN, or when the name, email, address or mobile on it does not check out. A Twilio, VoIP or Google Voice number used as the mobile is a common cause.",
+    fix: "If your business has an EIN, this is the wrong registration: get in touch and we will move you to the one with an EIN. If it really has none, check that your name, email, address and mobile are your own and spelled right, then send it again.",
+  },
+  "30914": {
+    title: "Your texts have to go out under your own name",
+    what: "Without an EIN you are registered as yourself, so the carriers expect the description and the example messages to name you, the same way your registration does. A business name, trading name or nickname that does not match gets this refusal.",
+    fix: "Where the description and the examples say who is texting, use your own first and last name exactly as you registered them, then send it again.",
+  },
+  "30915": {
+    title: "The carriers think your business is a company, not a person",
+    what: "Registering without an EIN is only for someone trading as themselves. A name with LLC, Inc., Corp. or similar in it, or a website or public record that shows a registered company, gets this refusal.",
+    fix: "If your business is an LLC, a corporation or a partnership, it has an EIN and needs the other registration: get in touch and we will move you over. If you really trade as yourself, take any company name out, and make sure the first name, last name and email all belong to you.",
+  },
+  "30701": {
+    title: "Some of your details were not in a shape the carriers accept",
+    what: "One of the details we sent was refused before anyone looked at it. Usually that is an address the postal check could not match, an email that does not look real, a phone number in the wrong format, or an answer that was too long.",
+    fix: "Check your street, city, state, ZIP, email and mobile for typos, and write the address the way the post office does. If it comes back again, get in touch, because some of these can only be corrected on our side.",
+  },
+};
+
+/** The help for one carrier code on THIS registration: a sole proprietor's own entries first,
+ *  then the shared ones; every other tier, SMS_ERROR_HELP and nothing else. */
+function smsErrorHelp(code, soleProp) {
+  const c = String(code || "");
+  return (soleProp && SOLE_PROP_ERROR_HELP[c]) || SMS_ERROR_HELP[c];
+}
+
 /** ⚠️ TWILIO NAMES THE FIELD, AND THE FIELD NAME IS THE MOST USEFUL THING IN THE PAYLOAD.
  *  `fields: ["MESSAGE_FLOW"]` is what turns "your campaign was rejected" into "the box on
  *  your screen labelled How do people agree to be texted". Rendered as the label the builder
@@ -129,15 +176,16 @@ const SMS_ERROR_FIELD_LABEL = {
   BRAND_NAME: "Legal business name",
 };
 
-/** The rejection reasons, each with what it means and what to change. */
-function SmsErrorList({ errors }) {
+/** The rejection reasons, each with what it means and what to change. `soleProp`: the
+ *  registration is a sole proprietor's, so SOLE_PROP_ERROR_HELP is asked first (smsErrorHelp). */
+function SmsErrorList({ errors, soleProp }) {
   const list = (errors || []).filter(Boolean);
   if (!list.length) return null;
   return (
     <div style={{ margin: "0 0 12px", display: "grid", gap: 10 }}>
       {list.map((e, i) => {
         const code = String((e && e.error_code) || "");
-        const help = SMS_ERROR_HELP[code];
+        const help = smsErrorHelp(code, soleProp);
         const fields = (e && Array.isArray(e.fields) ? e.fields : [])
           .map((f) => SMS_ERROR_FIELD_LABEL[f] || f);
         return (
@@ -546,6 +594,24 @@ function smsE164(raw) {
   return "";
 }
 
+/** The "find a number" box (SMS - A2P's "Choose your number", Settings → Phone): an area
+ *  code, or the area code and up to three more digits, the way the old phone system searched
+ *  (the 2026-10-12 call). Typed or pasted ("816-300", "+1 816 300") → digits only, a leading 1
+ *  dropped (no US area code starts with 1, so it is a pasted country code), at most six. The
+ *  server reads the same box the same way (_shared/numberSearch.ts numberSearchOf). */
+function phoneSearchDigits(raw) {
+  return String(raw == null ? "" : raw).replace(/\D/g, "").replace(/^1+/, "").slice(0, 6);
+}
+/** "816" → "816", "816300" → "816-300": a search, the way a sentence says it. */
+function phoneSearchLabel(d) {
+  return d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d;
+}
+/** What a search sends. Both keys: a server from before the longer search reads only areaCode
+ *  (three digits or nothing), so it still searches the right area code. */
+function phoneSearchBody(d) {
+  return { areaCode: d.slice(0, 3), startsWith: d };
+}
+
 function SmsField({ label, hint, children, wide }) {
   return (
     <label style={{ display: "block", marginBottom: 12, gridColumn: wide ? "1 / -1" : "auto" }}>
@@ -576,6 +642,265 @@ const SMS_TEXTAREA = {
   ...SMS_INPUT, minHeight: 92, lineHeight: 1.5, resize: "vertical", display: "block",
 };
 
+/* ── Texting WITHOUT an EIN: the sole-proprietor route (2026-10-27) ─────────────────────────────
+   Until this date a builder who answered "No" to the EIN question met a refusal box and nothing
+   else, because the carriers' no-tax-ID process (a Starter profile, a sole-proprietor bundle, a
+   SOLE_PROPRIETOR brand and a YES text to the owner's own mobile) was not built.
+
+   ⚠️ IT SHIPS DARK, AND THE SWITCH IS THE SERVER'S. portal-sms sends `soleProprietorAvailable`
+   from client_settings.sms_sole_prop (migration 342), which an operator flips per builder by SQL;
+   nothing on this screen can set it. While it is false (every builder, by default, and every
+   server from before 342, which sends no such key) a "No" still shows today's refusal box, word
+   for word, and nothing below it changes. A builder WITH an EIN never reaches any of this: every
+   one of their screens is the markup that was here before, untouched, not a re-creation of it.
+
+   What the carriers allow such a registration (Twilio's sole-proprietor guide): ONE number, about
+   3,000 texts a day across the US and 1,000 a day to T-Mobile, and a "reply YES" text from
+   +1 (915) 278-2000 that has to be answered within 24 hours, with the whole check done inside 30
+   days or the brand can be expired. The server sends those numbers as `soleProprietorLimits`; the
+   copy below reads them from there and falls back to the same values for a server that sends a
+   flag but no limits. */
+const SMS_SOLE_PROP_LIMITS = { numbers: 1, dailyTMobile: 1000, dailyTotalApprox: 3000, otpSender: "+19152782000", otpHours: 24, verifyWithinDays: 30 };
+function smsSoleLimits(data) {
+  const l = (data && data.soleProprietorLimits) || {};
+  const pick = (k) => (l[k] != null && l[k] !== "" ? l[k] : SMS_SOLE_PROP_LIMITS[k]);
+  return {
+    numbers: Number(pick("numbers")), dailyTMobile: Number(pick("dailyTMobile")),
+    dailyTotalApprox: Number(pick("dailyTotalApprox")), otpSender: String(pick("otpSender")),
+    otpHours: Number(pick("otpHours")), verifyWithinDays: Number(pick("verifyWithinDays")),
+  };
+}
+/** 3000 → "3,000"; the way a sentence writes a count. */
+function smsCount(n) {
+  return Number.isFinite(n) ? n.toLocaleString("en-US") : String(n);
+}
+
+/** The registration is with the carriers, they APPROVED it, and Twilio's YES text to the owner's
+ *  mobile is still unanswered. portal-sms keeps a sole proprietor in brand_pending until
+ *  identityStatus reads VERIFIED (brandReadyForCampaign), so this is the one brand_pending where
+ *  the next move is the BUILDER's, and the "nothing for you to do" line must not show. Null-safe:
+ *  it is asked above the view's early return, before `data` exists. VETTED_VERIFIED counts as a
+ *  YES too, as it does on the server (twilioTrustHub.ts brandReadyForCampaign, soleProp.ts otpWaiting). */
+function smsOtpWaiting(data) {
+  const identity = String(data && data.identityStatus || "").toUpperCase();
+  return !!data && data.status === "brand_pending" && data.brandTier === "sole_proprietor"
+    && String(data.brandStatus || "").toUpperCase() === "APPROVED"
+    && identity !== "VERIFIED" && identity !== "VETTED_VERIFIED";
+}
+
+/** What a sole proprietor's Save and Submit send as `intake`.
+ *
+ *  ⚠️ BUILT FROM SCRATCH, NOT `{ ...form }`. The form state is shared with the EIN branch, so a
+ *  builder who typed an EIN under "Yes" and then switched to "No" would otherwise post that EIN
+ *  with a registration that must not have one. The legal business name of a sole proprietor IS
+ *  the person: "First Last", trimmed and single-spaced, the same rule as soleProprietorBrandName
+ *  on the server (Twilio refuses a campaign whose brand is not the person's own name, 30914). */
+function smsSolePropIntake(form) {
+  const tidy = (v) => String(v == null ? "" : v).trim().replace(/\s+/g, " ");
+  const first = tidy(form.repFirstName), last = tidy(form.repLastName);
+  return {
+    legalBusinessName: [first, last].filter(Boolean).join(" "),
+    businessIndustry: form.businessIndustry || "CONSTRUCTION",
+    websiteUrl: tidy(form.websiteUrl),
+    street: form.street, city: form.city, region: form.region, postalCode: form.postalCode,
+    isoCountry: form.isoCountry === "CA" ? "CA" : "US",
+    repFirstName: first, repLastName: last, repEmail: tidy(form.repEmail),
+    repPhone: smsE164(form.repPhone),
+  };
+}
+
+/** The box a "No" shows once the route is switched on for this builder: who it is for, what it
+ *  allows, and the YES text, BEFORE they fill anything in. Same place and shape as the refusal it
+ *  replaces, so the answer still lands the moment they press No. */
+function SmsSolePropIntro({ limits }) {
+  const lim = limits;
+  const numbers = lim.numbers === 1 ? "One phone number" : `${smsCount(lim.numbers)} phone numbers`;
+  return (
+    <div data-ss-sms-sole-intro="" style={{
+      border: "1px solid #BFDBFE", background: "#EFF6FF", borderRadius: 8,
+      padding: "11px 13px", margin: "0 0 14px",
+    }}>
+      <div style={{ fontSize: 13, color: "#1E3A8A", fontWeight: 700, marginBottom: 5 }}>
+        Texting without an EIN
+      </div>
+      <div style={{ fontSize: 12.5, color: "#1E3A8A", lineHeight: 1.55 }}>
+        This is for a person running a business under their own name: no EIN, not an LLC or a
+        corporation, and based in the US or Canada. You register as yourself, so the carriers
+        see your own name on it.
+      </div>
+      <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12.5, color: "#1E3A8A", lineHeight: 1.6 }}>
+        <li>{numbers}, and about {smsCount(lim.dailyTotalApprox)} texts a day, with no more than{" "}
+          {smsCount(lim.dailyTMobile)} a day to T-Mobile customers.</li>
+        <li>After the paid step, Twilio texts your mobile from{" "}
+          <strong>{formatPhone(lim.otpSender)}</strong> asking you to reply YES. Reply within{" "}
+          {smsCount(lim.otpHours)} hours.</li>
+      </ul>
+    </div>
+  );
+}
+
+/** The no-EIN form: the person, their own mobile, an address, and the two policy pages. No EIN,
+ *  business type, legal business name, job title or role, because a sole proprietor's Starter
+ *  profile has none of them (Twilio ISV sole-prop guide, step 1). The website is optional for
+ *  them; the privacy and terms pages are not (Ahsan 2026-10-27: they bring their own). Country is
+ *  here because the route is open to Canada as well as the US, and an address with no way to say
+ *  so would make the box above a promise the form could not keep. */
+function SmsSolePropFields({ form, setForm, urls, setUrls, readOnly }) {
+  const ca = form.isoCountry === "CA";
+  return (
+    <div data-ss-sms-sole-form="">
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
+        <SmsField label="Legal first name" hint="Your own name, as on your ID. The carriers register you under it, so no nicknames or business names.">
+          <input style={SMS_INPUT} value={form.repFirstName} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, repFirstName: e.target.value })} />
+        </SmsField>
+        <SmsField label="Legal last name">
+          <input style={SMS_INPUT} value={form.repLastName} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, repLastName: e.target.value })} />
+        </SmsField>
+        <SmsField label="Email" hint="A personal address is fine. Use one you check, because Twilio may write to it about the registration.">
+          <input style={SMS_INPUT} value={form.repEmail} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, repEmail: e.target.value })} />
+        </SmsField>
+        <SmsField label="Your mobile number" hint="Your own mobile, not a Twilio, VoIP or Google Voice number. Twilio texts it asking you to reply YES.">
+          {/* formatPhone hoists from 12-shell.jsx; see the same note on the EIN form below. */}
+          <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="(555) 123-4567"
+            onChange={(e) => setForm({ ...form, repPhone: formatPhone(e.target.value) })} />
+        </SmsField>
+
+        <SmsField label="Street address" hint="A P.O. box is fine." wide>
+          <input style={SMS_INPUT} value={form.street} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, street: e.target.value })} />
+        </SmsField>
+        <SmsField label="City">
+          <input style={SMS_INPUT} value={form.city} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, city: e.target.value })} />
+        </SmsField>
+        <SmsField label={ca ? "Province / postal code" : "State / ZIP"}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={{ ...SMS_INPUT, width: 70 }} value={form.region} disabled={readOnly} placeholder={ca ? "ON" : "TX"} maxLength={2}
+              onChange={(e) => setForm({ ...form, region: e.target.value.toUpperCase() })} />
+            <input style={SMS_INPUT} value={form.postalCode} disabled={readOnly} placeholder={ca ? "K1A 0B1" : "78701"}
+              onChange={(e) => setForm({ ...form, postalCode: e.target.value })} />
+          </div>
+        </SmsField>
+        <SmsField label="Country">
+          <select style={SMS_INPUT} value={ca ? "CA" : "US"} disabled={readOnly}
+            onChange={(e) => setForm({ ...form, isoCountry: e.target.value })}>
+            <option value="US">United States</option>
+            <option value="CA">Canada</option>
+          </select>
+        </SmsField>
+
+        <SmsField label="Website (optional)" hint="Leave it blank if you don't have one. If you put one in, it has to be live and public." wide>
+          <input style={SMS_INPUT} value={form.websiteUrl} disabled={readOnly} placeholder="https://"
+            onChange={(e) => setForm({ ...form, websiteUrl: e.target.value })} />
+        </SmsField>
+        <SmsField label="Privacy policy page" hint="Required, website or not: a public page the carriers can open.">
+          <input style={SMS_INPUT} value={urls.privacyPolicyUrl} disabled={readOnly} placeholder="https://"
+            onChange={(e) => setUrls({ ...urls, privacyPolicyUrl: e.target.value })} />
+        </SmsField>
+        <SmsField label="Terms page" hint="Required too, and it should cover texting.">
+          <input style={SMS_INPUT} value={urls.termsUrl} disabled={readOnly} placeholder="https://"
+            onChange={(e) => setUrls({ ...urls, termsUrl: e.target.value })} />
+        </SmsField>
+      </div>
+    </div>
+  );
+}
+
+/** "Reply YES to Twilio's text": the one brand_pending card that asks the builder to DO something
+ *  (smsOtpWaiting). Twilio sends the first text by itself when the brand turns APPROVED; any later
+ *  one has to be asked for (POST BrandRegistrations/{BN}/SmsOtp), which is what "Text me again"
+ *  does through portal-sms resend_otp. The server holds a 10-minute cooldown and says when the
+ *  next ask is allowed in `otpResendAvailableAt`; the button stays greyed until then and says the
+ *  time, and the view re-renders at that moment by itself (the timer in SmsMessagingView), so it
+ *  never needs a refresh to come back. */
+function SmsOtpCard({ data, limits, busy, readOnly, card, onResend }) {
+  const lim = limits;
+  const at = Date.parse(data.otpResendAvailableAt || "");
+  const cooling = Number.isFinite(at) && at > Date.now();
+  const when = cooling ? new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+  return (
+    <div style={card} data-ss-sms-otp="">
+      <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Reply YES to Twilio&rsquo;s text</h4>
+      <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        The carriers approved you. To finish, Twilio has texted your mobile from{" "}
+        <strong>{formatPhone(lim.otpSender)}</strong> asking you to confirm. Reply{" "}
+        <strong>YES</strong> to that text within {smsCount(lim.otpHours)} hours of getting it. This
+        page moves on by itself once you have.
+      </p>
+      <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }}>
+        This has to be done within {smsCount(lim.verifyWithinDays)} days of registering. After that
+        the carriers can cancel the registration, and it has to be started over.
+      </div>
+      {readOnly ? (
+        <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+          Only an owner, or an admin with billing access, can ask Twilio for the text again.
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy || cooling} data-ss-sms-otp-resend="" onClick={onResend}
+            style={{ background: busy || cooling ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: busy || cooling ? "default" : "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
+            {busy ? "Sending…" : "Text me again"}
+          </button>
+          <span data-ss-sms-otp-when="" style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+            {cooling
+              ? `Sent. You can ask for another one at ${when}.`
+              : `Didn't get it, or it's been more than ${smsCount(lim.otpHours)} hours? Ask for a new one.`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// THE TEXTING-CONSENT BOX SWITCH (Carolyn 2026-11-01, "what does this mean? it is quite unclear").
+// client_settings.lead_sms_consent_box (migration 242) decides whether the builder's website forms,
+// the designer's lead gate and the public opt-in page show the optional "you may text me" box. It
+// had no screen: the form designer told builders it was "switched off in Settings" and there was
+// nothing in Settings to find. Turning it ON adds an opt-in the carriers review, so the warning
+// sits here, at the switch, where the decision is made.
+function SmsConsentBoxCard({ on, readOnly, card, onSave }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const save = async (next) => {
+    setBusy(true); setErr("");
+    try { await onSave(next); setConfirming(false); } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <div style={card} id="sms-consent-box">
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <h3 style={{ margin: 0, fontSize: 15 }}>Texting consent box on your website</h3>
+        <span style={{ fontSize: 12, fontWeight: 800, borderRadius: 999, padding: "3px 10px", color: on ? "#166534" : "#475569", background: on ? "#DCFCE7" : "#F1F5F9" }}>{on ? "On" : "Off"}</span>
+        {!readOnly && (
+          <button type="button" disabled={busy} onClick={() => (on ? save(false) : setConfirming(true))}
+            style={{ marginLeft: "auto", background: on ? "#FFF" : "#2563EB", color: on ? "#334155" : "#FFF", border: "1px solid " + (on ? "#CBD5E1" : "#2563EB"), borderRadius: 8, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+            {busy ? "Saving…" : on ? "Turn off" : "Turn on"}
+          </button>
+        )}
+      </div>
+      <p style={{ margin: "10px 0 0", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        When on, your website forms and the designer show an optional box letting customers agree to receive texts from you.
+        {!on && " It is off now, so customers don't see it anywhere."}
+      </p>
+      {confirming && (
+        <div style={{ marginTop: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", lineHeight: 1.5 }}>
+          <strong>Before you turn it on:</strong> your texting registration describes how customers opt in. Make sure it mentions your website forms and designer, or carriers may reject your messages.
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button type="button" disabled={busy} onClick={() => save(true)} style={{ background: "#2563EB", color: "#FFF", border: "none", borderRadius: 8, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>{busy ? "Saving…" : "Turn it on"}</button>
+            <button type="button" disabled={busy} onClick={() => setConfirming(false)} style={{ background: "#FFF", color: "#334155", border: "1px solid #CBD5E1", borderRadius: 8, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {readOnly && <div style={{ marginTop: 8, fontSize: 12, color: "#64748B" }}>Only someone who manages billing and texting for your business can change this.</div>}
+      {err && <div style={{ marginTop: 8, color: "#B91C1C", fontSize: 13 }}>{err}</div>}
+    </div>
+  );
+}
+
 function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN. This file's siblings guard with
   // early returns and a hook added below one white-screens the page on React #310 — which
@@ -584,7 +909,22 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   const [data, setData] = useState(() => ssCacheGet("portal-sms", "status", clientId));
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [hasEin, setHasEin] = useState(true);
+  // ⚠️ SEEDED FROM THE SERVER'S TIER, UNTIL THE PERSON ANSWERS (2026-10-27). This was a bare
+  // `true` and never looked at `brandTier`, so a builder registering WITHOUT an EIN came back the
+  // next day to the EIN form, and its Save would have quietly re-filed them as a company
+  // (save_intake sets brand_tier from this answer). The cache paints a revisit with the right
+  // answer synchronously; refresh() keeps it in step — but only while `einPicked` is false: once
+  // they have pressed Yes or No on this page, their answer is theirs and no status read (one runs
+  // after every action and every minute while pending) may flip it back mid-form. For a builder
+  // with an EIN, brandTier is never "sole_proprietor", so this is the old `true` exactly.
+  const [hasEin, setHasEin] = useState(() => {
+    const c = ssCacheGet("portal-sms", "status", clientId);
+    return !(c && c.brandTier === "sole_proprietor");
+  });
+  const einPicked = useRef(false);
+  // Re-renders the view at the moment the "Text me again" cooldown ends (SmsOtpCard). Only the
+  // setter is used: the render reads the clock itself, this just asks for one.
+  const [, setClockTick] = useState(0);
   const [form, setForm] = useState({
     legalBusinessName: "", ein: "", businessType: "Limited Liability Corporation",
     businessIndustry: "CONSTRUCTION", websiteUrl: "", street: "", city: "", region: "",
@@ -599,8 +939,9 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   const copy = copyBox.copy;
   const setCopy = useCallback((next) => setCopyBox((b) => ({ ...b, copy: typeof next === "function" ? next(b.copy) : next })), []);
   const copySuggested = !!copyBox.suggested;
-  const [areaCode, setAreaCode] = useState("");
+  const [areaCode, setAreaCode] = useState("");      // the search box: an area code, or up to 6 digits
   const [found, setFound] = useState(null);
+  const [foundFor, setFoundFor] = useState("");      // the digits `found` came back for
   const [problems, setProblems] = useState([]);
 
   const call = useCallback(async (action, body) => {
@@ -615,6 +956,9 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       setData(d);
       ssCachePut("portal-sms", "status", clientId, d);
       setErr(null);
+      // The EIN answer follows the registration's tier until the person answers it themselves
+      // (see `hasEin` above). A server that sends no brandTier reads as "has an EIN", as before.
+      if (!einPicked.current) setHasEin(d.brandTier !== "sole_proprietor");
       // Seed the form from the echo so a returning builder sees what they typed.
       if (d.intake && d.intake.legalBusinessName) {
         setForm((f) => ({ ...f, legalBusinessName: d.intake.legalBusinessName, websiteUrl: d.intake.websiteUrl || "" }));
@@ -661,13 +1005,24 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   // card below is the only way on, so the "nothing for you to do" line must not sit above it.
   const adoptUnfinished = !!data && data.status !== "campaign_approved" && SMS_ADOPT_STATES.includes(data.status)
     && !!smsAdoptNumber(data.numbers);
-  const waitingOnYou = data && (data.status === "profile_pending" || adoptUnfinished);
+  // A sole proprietor whose brand is approved but whose YES text is unanswered (smsOtpWaiting) is
+  // the builder's move too: the Reply-YES card is what moves it on. It stays `pending`, so the
+  // minute poll still picks up the VERIFIED the moment Twilio reports it.
+  const waitingOnYou = data && (data.status === "profile_pending" || adoptUnfinished || smsOtpWaiting(data));
   const pending = data && ["profile_pending", "brand_pending", "campaign_pending", "number_pending"].includes(data.status);
   useEffect(() => {
     if (!pending) return undefined;
     const t = setInterval(() => { refresh(); }, 60000);
     return () => clearInterval(t);
   }, [pending, refresh]);
+  // One re-render when the "Text me again" cooldown runs out, so the button comes back on its own.
+  const otpResendAt = data ? data.otpResendAvailableAt : null;
+  useEffect(() => {
+    const ms = otpResendAt ? Date.parse(otpResendAt) - Date.now() : NaN;
+    if (!(ms > 0)) return undefined;
+    const t = setTimeout(() => setClockTick((n) => n + 1), Math.min(ms + 250, 2147483000));
+    return () => clearTimeout(t);
+  }, [otpResendAt]);
 
   const act = async (fn) => {
     if (busy) return;
@@ -682,6 +1037,14 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   const status = data.status || "none";
   const copyFor = SMS_STATE_COPY[status] || SMS_STATE_COPY.none;
   const readOnly = !canEdit;
+  // The no-EIN form shows only for a "No" on a builder the route is switched on for. Everything
+  // else (a "Yes", or a "No" with the switch off) renders exactly what it did before 2026-10-27.
+  const soleForm = hasEin === false && !!data.soleProprietorAvailable;
+  const soleLimits = smsSoleLimits(data);
+  const otpWait = smsOtpWaiting(data);
+  // The intake every Save, Submit and Resubmit sends. With an EIN it is the expression these three
+  // buttons always sent; without one it is rebuilt clean (smsSolePropIntake).
+  const intakeOut = () => (soleForm ? smsSolePropIntake(form) : { ...form, repPhone: smsE164(form.repPhone) });
 
   const card = {
     background: "#fff", border: "1px solid #E2E8F0", borderRadius: 12, padding: 18, marginBottom: 14,
@@ -715,7 +1078,9 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           </button>
         </div>
         <SmsSteps status={status} />
-        <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>{copyFor.blurb}</p>
+        <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+          {otpWait ? "The carriers approved you. One last step is yours: reply YES to the text Twilio sent your mobile." : copyFor.blurb}
+        </p>
 
         {data.needsAttention && data.attentionNote && (
           <div style={{ marginTop: 12, background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#991B1B" }}>
@@ -727,7 +1092,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         {Array.isArray(data.errors) && data.errors.length > 0 && (
           <ul style={{ marginTop: 10, paddingLeft: 18, fontSize: 12, color: "#B91C1C" }}>
             {data.errors.slice(0, 5).map((e, i) => {
-              const help = SMS_ERROR_HELP[String((e && e.error_code) || "")];
+              const help = smsErrorHelp(e && e.error_code, data.brandTier === "sole_proprietor");
               return <li key={i} style={{ marginBottom: 3 }}>{help ? help.title : ((e && (e.description || e.message)) || String(e))}</li>;
             })}
           </ul>
@@ -743,6 +1108,14 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           </div>
         )}
       </div>
+
+      {typeof data.consentBox === "boolean" && (
+        <SmsConsentBoxCard on={data.consentBox} readOnly={readOnly} card={card}
+          onSave={async (on) => {
+            const d = await call("save_consent_box", { on });
+            setData((x) => { const n = { ...x, consentBox: d.consentBox }; ssCachePut("portal-sms", "status", clientId, n); return n; });
+          }} />
+      )}
 
       {/* ── What they have to have ready ─────────────────────────────────────
           ⚠️ THIS USED TO BE A HAND-WRITTEN LIST OF PROSE THAT NOTHING VERIFIED — five bullets
@@ -763,7 +1136,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         />
       )}
 
-      {["none", "intake", "aup_pending", "ready", "brand_failed"].includes(status) && (
+      {["none", "intake", "aup_pending", "ready", "brand_failed"].includes(status) && !soleForm && (
         <div style={card}>
           <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Two things we cannot check for you</h4>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#334155", lineHeight: 1.7 }}>
@@ -772,6 +1145,24 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
               the most expensive one on the list: it fails the paid step.</li>
             <li><strong>If your EIN was issued in the last 90 days, wait.</strong> It takes that
               long to reach the databases the carriers check, and registering early just fails.</li>
+          </ul>
+        </div>
+      )}
+      {/* The same card for a registration WITHOUT an EIN. The one above talks about the IRS
+          letter and the 90-day wait, which mean nothing to someone who has no EIN; these are the
+          two facts that fail THEIR paid step and that only they can know. The three-uses cap on
+          a mobile is TCR's, across every company that has ever registered it (Twilio's
+          sole-prop guide), so a number used up elsewhere is refused for a reason we cannot see. */}
+      {["none", "intake", "aup_pending", "ready", "brand_failed"].includes(status) && soleForm && (
+        <div style={card} data-ss-sms-sole-cannot-check="">
+          <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Two things we cannot check for you</h4>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#334155", lineHeight: 1.7 }}>
+            <li><strong>That your business really has no EIN.</strong> If it has one (every LLC
+              and corporation does), the carriers turn this registration down and the fee is not
+              refunded. Answer &ldquo;Yes&rdquo; above instead.</li>
+            <li><strong>That the mobile is your own, and has not been used too often.</strong> One
+              mobile can be used for at most three registrations like this, ever, with any company.
+              A number that has run out fails the paid step.</li>
           </ul>
         </div>
       )}
@@ -790,7 +1181,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             hint="Almost every LLC, Inc. or Corp. has one. If you file taxes under your own Social Security number instead, answer no.">
             <div style={{ display: "flex", gap: 8 }}>
               {[["yes", true], ["no", false]].map(([lbl, v]) => (
-                <button key={lbl} type="button" disabled={readOnly} onClick={() => setHasEin(v)}
+                <button key={lbl} type="button" disabled={readOnly} onClick={() => { einPicked.current = true; setHasEin(v); }}
                   style={{
                     padding: "8px 18px", borderRadius: 8, cursor: readOnly ? "default" : "pointer",
                     fontSize: 13, fontWeight: 700, fontFamily: "inherit",
@@ -803,11 +1194,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           </SmsField>
 
           {/* ⚠️ SAY IT THE MOMENT THEY ANSWER NO, not after they have filled fifteen fields.
-              The server refuses this intake (validateIntake), so without this the builder
-              completes the whole form and is turned away at Save — the worst possible place
-              to learn it. Sole proprietor needs a different Twilio chain that is not built:
-              a Starter profile, no EIN fields, and the mobile carried on the brand. */}
-          {hasEin === false && (
+              While the no-EIN route is switched OFF for this builder (every builder unless an
+              operator has set client_settings.sms_sole_prop, migration 342), the server refuses
+              this intake (portal-sms save_intake), so without this the builder completes the
+              whole form and is turned away at Save — the worst possible place to learn it. This
+              box and everything under it are byte-for-byte what they were before the route was
+              built (2026-10-27); with the switch ON, the box below takes its place instead. */}
+          {hasEin === false && !data.soleProprietorAvailable && (
             <div style={{
               border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 8,
               padding: "11px 13px", margin: "0 0 14px",
@@ -825,89 +1218,99 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             </div>
           )}
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
-            <SmsField label="Legal business name" hint="Exactly as it appears on your IRS letter." wide>
-              <input style={SMS_INPUT} value={form.legalBusinessName} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, legalBusinessName: e.target.value })} />
-            </SmsField>
-            {hasEin && (
-              <SmsField label="EIN" hint="Nine digits, like 12-3456789.">
-                <input style={SMS_INPUT} value={form.ein} disabled={readOnly} placeholder="12-3456789"
-                  onChange={(e) => setForm({ ...form, ein: e.target.value })} />
-              </SmsField>
-            )}
-            {hasEin && (
-              <SmsField label="Business type">
-                <select style={SMS_INPUT} value={form.businessType} disabled={readOnly}
-                  onChange={(e) => setForm({ ...form, businessType: e.target.value })}>
-                  {(data.businessTypes || []).map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </SmsField>
-            )}
-            <SmsField label="Website" hint="Must be live and public." wide>
-              <input style={SMS_INPUT} value={form.websiteUrl} disabled={readOnly} placeholder="https://"
-                onChange={(e) => setForm({ ...form, websiteUrl: e.target.value })} />
-            </SmsField>
-            <SmsField label="Privacy policy page">
-              <input style={SMS_INPUT} value={urls.privacyPolicyUrl} disabled={readOnly} placeholder="https://"
-                onChange={(e) => setUrls({ ...urls, privacyPolicyUrl: e.target.value })} />
-            </SmsField>
-            <SmsField label="Terms page">
-              <input style={SMS_INPUT} value={urls.termsUrl} disabled={readOnly} placeholder="https://"
-                onChange={(e) => setUrls({ ...urls, termsUrl: e.target.value })} />
-            </SmsField>
+          {soleForm && <SmsSolePropIntro limits={soleLimits} />}
 
-            <SmsField label="Street address" wide>
-              <input style={SMS_INPUT} value={form.street} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, street: e.target.value })} />
-            </SmsField>
-            <SmsField label="City">
-              <input style={SMS_INPUT} value={form.city} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, city: e.target.value })} />
-            </SmsField>
-            <SmsField label="State / ZIP">
-              <div style={{ display: "flex", gap: 8 }}>
-                <input style={{ ...SMS_INPUT, width: 70 }} value={form.region} disabled={readOnly} placeholder="TX" maxLength={2}
-                  onChange={(e) => setForm({ ...form, region: e.target.value.toUpperCase() })} />
-                <input style={SMS_INPUT} value={form.postalCode} disabled={readOnly} placeholder="78701"
-                  onChange={(e) => setForm({ ...form, postalCode: e.target.value })} />
+          {soleForm && <SmsSolePropFields form={form} setForm={setForm} urls={urls} setUrls={setUrls} readOnly={readOnly} />}
+
+          {/* Everything from here to the problems list is the form as it always was, for a "Yes"
+              and for a "No" with the switch off. Wrapped, not edited. */}
+          {!soleForm && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
+                <SmsField label="Legal business name" hint="Exactly as it appears on your IRS letter." wide>
+                  <input style={SMS_INPUT} value={form.legalBusinessName} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, legalBusinessName: e.target.value })} />
+                </SmsField>
+                {hasEin && (
+                  <SmsField label="EIN" hint="Nine digits, like 12-3456789.">
+                    <input style={SMS_INPUT} value={form.ein} disabled={readOnly} placeholder="12-3456789"
+                      onChange={(e) => setForm({ ...form, ein: e.target.value })} />
+                  </SmsField>
+                )}
+                {hasEin && (
+                  <SmsField label="Business type">
+                    <select style={SMS_INPUT} value={form.businessType} disabled={readOnly}
+                      onChange={(e) => setForm({ ...form, businessType: e.target.value })}>
+                      {(data.businessTypes || []).map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </SmsField>
+                )}
+                <SmsField label="Website" hint="Must be live and public." wide>
+                  <input style={SMS_INPUT} value={form.websiteUrl} disabled={readOnly} placeholder="https://"
+                    onChange={(e) => setForm({ ...form, websiteUrl: e.target.value })} />
+                </SmsField>
+                <SmsField label="Privacy policy page">
+                  <input style={SMS_INPUT} value={urls.privacyPolicyUrl} disabled={readOnly} placeholder="https://"
+                    onChange={(e) => setUrls({ ...urls, privacyPolicyUrl: e.target.value })} />
+                </SmsField>
+                <SmsField label="Terms page">
+                  <input style={SMS_INPUT} value={urls.termsUrl} disabled={readOnly} placeholder="https://"
+                    onChange={(e) => setUrls({ ...urls, termsUrl: e.target.value })} />
+                </SmsField>
+
+                <SmsField label="Street address" wide>
+                  <input style={SMS_INPUT} value={form.street} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, street: e.target.value })} />
+                </SmsField>
+                <SmsField label="City">
+                  <input style={SMS_INPUT} value={form.city} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, city: e.target.value })} />
+                </SmsField>
+                <SmsField label="State / ZIP">
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input style={{ ...SMS_INPUT, width: 70 }} value={form.region} disabled={readOnly} placeholder="TX" maxLength={2}
+                      onChange={(e) => setForm({ ...form, region: e.target.value.toUpperCase() })} />
+                    <input style={SMS_INPUT} value={form.postalCode} disabled={readOnly} placeholder="78701"
+                      onChange={(e) => setForm({ ...form, postalCode: e.target.value })} />
+                  </div>
+                </SmsField>
               </div>
-            </SmsField>
-          </div>
 
-          <h4 style={{ margin: "14px 0 10px", fontSize: 14 }}>Who the carriers can contact</h4>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
-            <SmsField label="First name">
-              <input style={SMS_INPUT} value={form.repFirstName} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repFirstName: e.target.value })} />
-            </SmsField>
-            <SmsField label="Last name">
-              <input style={SMS_INPUT} value={form.repLastName} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repLastName: e.target.value })} />
-            </SmsField>
-            <SmsField label="Work email" hint="Must be on your own company domain — not gmail, yahoo or outlook.">
-              <input style={SMS_INPUT} value={form.repEmail} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repEmail: e.target.value })} />
-            </SmsField>
-            <SmsField label="Mobile number" hint={hasEin ? "In case the carriers need to reach you." : "You will get a text with a code you must reply to within 24 hours."}>
-              {/* formatPhone lives in 12-shell.jsx, a LATER part — but the parts are
-                  concatenated into one IIFE and it is a `function` declaration, so it hoists
-                  across the whole scope. (The "part order is load-bearing" rule in CLAUDE.md
-                  is about `const`, which does not hoist. This is the exception.) */}
-              <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="(555) 123-4567"
-                onChange={(e) => setForm({ ...form, repPhone: formatPhone(e.target.value) })} />
-            </SmsField>
-            <SmsField label="Job title">
-              <input style={SMS_INPUT} value={form.repBusinessTitle} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repBusinessTitle: e.target.value })} />
-            </SmsField>
-            <SmsField label="Role">
-              <select style={SMS_INPUT} value={form.repJobPosition} disabled={readOnly}
-                onChange={(e) => setForm({ ...form, repJobPosition: e.target.value })}>
-                {(data.jobPositions || []).map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </SmsField>
-          </div>
+              <h4 style={{ margin: "14px 0 10px", fontSize: 14 }}>Who the carriers can contact</h4>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
+                <SmsField label="First name">
+                  <input style={SMS_INPUT} value={form.repFirstName} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repFirstName: e.target.value })} />
+                </SmsField>
+                <SmsField label="Last name">
+                  <input style={SMS_INPUT} value={form.repLastName} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repLastName: e.target.value })} />
+                </SmsField>
+                <SmsField label="Work email" hint="Must be on your own company domain — not gmail, yahoo or outlook.">
+                  <input style={SMS_INPUT} value={form.repEmail} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repEmail: e.target.value })} />
+                </SmsField>
+                <SmsField label="Mobile number" hint={hasEin ? "In case the carriers need to reach you." : "You will get a text with a code you must reply to within 24 hours."}>
+                  {/* formatPhone lives in 12-shell.jsx, a LATER part — but the parts are
+                      concatenated into one IIFE and it is a `function` declaration, so it hoists
+                      across the whole scope. (The "part order is load-bearing" rule in CLAUDE.md
+                      is about `const`, which does not hoist. This is the exception.) */}
+                  <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="(555) 123-4567"
+                    onChange={(e) => setForm({ ...form, repPhone: formatPhone(e.target.value) })} />
+                </SmsField>
+                <SmsField label="Job title">
+                  <input style={SMS_INPUT} value={form.repBusinessTitle} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repBusinessTitle: e.target.value })} />
+                </SmsField>
+                <SmsField label="Role">
+                  <select style={SMS_INPUT} value={form.repJobPosition} disabled={readOnly}
+                    onChange={(e) => setForm({ ...form, repJobPosition: e.target.value })}>
+                    {(data.jobPositions || []).map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </SmsField>
+              </div>
+            </>
+          )}
 
           {problems.length > 0 && (
             <ul style={{ margin: "6px 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
@@ -919,7 +1322,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             <button type="button" disabled={busy}
               onClick={() => act(async () => {
                 const d = await call("save_intake", {
-                  hasEin, intake: { ...form, repPhone: smsE164(form.repPhone) },
+                  hasEin, intake: intakeOut(),
                   privacyPolicyUrl: urls.privacyPolicyUrl, termsUrl: urls.termsUrl,
                 }).catch((e) => { throw e; });
                 void d;
@@ -971,7 +1374,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
               <button type="button" disabled={busy || smsCopyProblems(copy).length > 0}
                 onClick={() => act(async () => {
                   await call("save_copy", { copy });
-                  await call("advance", { intake: { ...form, repPhone: smsE164(form.repPhone) }, copy });
+                  await call("advance", { intake: intakeOut(), copy });
                 })}
                 style={{ background: smsCopyProblems(copy).length > 0 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", cursor: smsCopyProblems(copy).length > 0 ? "default" : "pointer", fontWeight: 800, fontSize: 14, fontFamily: "inherit" }}>
                 {busy ? "Submitting…" : "Submit to the carriers"}
@@ -1006,7 +1409,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           {readOnly ? (
             <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
               Only an owner — or an admin an owner has given billing access to — can start the
-              paid registration. Ask them to open Settings → Text Messaging.
+              paid registration. Ask them to open Settings → Customer Hub → SMS - A2P.
             </div>
           ) : (
             <button type="button" disabled={busy}
@@ -1036,6 +1439,14 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             </button>
           )}
         </div>
+      )}
+
+      {/* A sole proprietor's brand is approved and waiting on their YES (smsOtpWaiting). Without
+          this card the screen said "the carriers are checking your business" while the only
+          thing that could move it on was a text sitting unanswered on the builder's own phone. */}
+      {otpWait && (
+        <SmsOtpCard data={data} limits={soleLimits} busy={busy} readOnly={readOnly} card={card}
+          onResend={() => act(() => call("resend_otp"))} />
       )}
 
       {/* Brand approved → the campaign goes next, same copy form. */}
@@ -1077,7 +1488,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             after that it has to go through support.
           </p>
           <button type="button" disabled={busy || data.brandUpdatesLeft < 1}
-            onClick={() => act(() => call("advance", { intake: { ...form, repPhone: smsE164(form.repPhone) }, copy }))}
+            onClick={() => act(() => call("advance", { intake: intakeOut(), copy }))}
             style={{ background: data.brandUpdatesLeft < 1 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: data.brandUpdatesLeft < 1 ? "default" : "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
             Resubmit
           </button>
@@ -1104,7 +1515,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             charge for sending it again, and no limit on how many times you can.
           </p>
 
-          <SmsErrorList errors={data.errors} />
+          <SmsErrorList errors={data.errors} soleProp={data.brandTier === "sole_proprietor"} />
           {(data.errors || []).length === 0 && (
             <div style={{ margin: "0 0 12px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
               We are fetching the reasons from the carriers — press Refresh in a moment. If they
@@ -1116,7 +1527,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           {readOnly ? (
             <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
               An owner — or an admin with billing access — can rewrite this and send it again
-              from Settings &rarr; Text Messaging.
+              from Settings &rarr; Customer Hub &rarr; SMS - A2P.
             </div>
           ) : (
             <>
@@ -1198,18 +1609,23 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         <div style={card}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Choose your number</h4>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 12 }}>
-            <SmsField label="Area code">
-              <input style={{ ...SMS_INPUT, width: 110 }} value={areaCode} placeholder="512" maxLength={3}
-                onChange={(e) => setAreaCode(e.target.value.replace(/\D/g, ""))} />
+            <SmsField label="Area code or first digits">
+              {/* maxLength leaves room to paste a formatted number; phoneSearchDigits keeps six digits. */}
+              <input style={{ ...SMS_INPUT, width: 170 }} value={areaCode} placeholder="e.g. 816 or 816300" maxLength={20}
+                inputMode="numeric" onChange={(e) => setAreaCode(phoneSearchDigits(e.target.value))} data-ss-sms-areacode />
             </SmsField>
-            <button type="button" disabled={busy}
-              onClick={() => act(async () => { const d = await call("search_numbers", { areaCode }); setFound(d.numbers || []); })}
+            <button type="button" disabled={busy} data-ss-sms-search
+              onClick={() => act(async () => { const d = await call("search_numbers", phoneSearchBody(areaCode)); setFound(d.numbers || []); setFoundFor(areaCode); })}
               style={{ background: "#fff", border: "1px solid #CBD5E1", borderRadius: 8, padding: "9px 16px", cursor: "pointer", fontWeight: 700, fontSize: 13, marginBottom: 12, fontFamily: "inherit" }}>
               Search
             </button>
           </div>
           {found && found.length === 0 && (
-            <div style={{ fontSize: 13, color: "#64748B" }}>No numbers free in that area code — try a nearby one.</div>
+            <div style={{ fontSize: 13, color: "#64748B" }} data-ss-sms-search-empty>
+              {foundFor.length > 3
+                ? `No numbers start with ${phoneSearchLabel(foundFor)} right now — try fewer digits.`
+                : "No numbers free in that area code — try a nearby one."}
+            </div>
           )}
           {found && found.length > 0 && (
             <div style={{ display: "grid", gap: 8 }}>
@@ -1257,7 +1673,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
    MY SYNERGY PHONE — calling setup, install links and the Calls report (2026-09-29)
 
    Plan sections 6 and 12, SPEC section 5. CALLING ONLY: the number is bought and
-   registered on the Text Messaging tab above, and nothing here buys, registers or
+   registered on the SMS - A2P tab above, and nothing here buys, registers or
    texts. What lives here is the owner's ONE-TIME SETUP (Ahsan, 09-29: "owner sets
    up the phone once, and the users assigned to that number get the calls
    automatically"), the switch, "Sign out all devices", and the report.
@@ -1300,6 +1716,42 @@ const PHONE_VI_USE_CASES = [
   "Customer Support", "Phone System", "Appointment Scheduling", "Order Notifications",
   "Delivery Notifications", "Lead Management", "Click to Call", "Outbound Dialer",
 ];
+// Workstream 2, phase 6: the business profile an operator adds for a builder who only calls
+// (phone_trust_profile). Twilio's own lists (_shared/twilioTrustHub.ts BUSINESS_TYPES and
+// JOB_POSITIONS, which the server checks against; tests/phone/trustProfileCnam_test.ts pins them).
+const PHONE_BP_TYPES = ["Limited Liability Corporation", "Corporation", "Partnership", "Co-operative", "Non-profit Corporation"];
+const PHONE_BP_ROLES = ["CEO", "Director", "GM", "VP", "CFO", "General Counsel", "Other"];
+// CNAM's display name (Twilio's rules; the server's parseCnamDisplayName is the authority).
+function phoneCnamProblem(raw) {
+  const n = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!n) return "Enter the name callers should see.";
+  if (n.length > 15) return `That is ${n.length} characters; the carriers keep at most 15.`;
+  if (!/^[A-Za-z]/.test(n)) return "Start it with a letter.";
+  if (!/^[A-Za-z0-9., ]+$/.test(n)) return "Only letters, numbers, spaces, periods and commas.";
+  return null;
+}
+// "Bring your number": the server's rule for a PIN or an account number in a free-text box
+// (portal-settings numberRequests.ts looksSecret, and migration 298's checks), so the card says so
+// before anything is sent. Five or more digits even when spaced, dotted or dashed, or any digit soon
+// after a word like PIN or acct; in the timing note, dates and times are taken out first.
+function phonePortLooksSecret(v, dates) {
+  let s = String(v || "");
+  if (/\b(?:pin|passcode|pass\s*code|password|acct|account|ssn|security\s*code)\b(?:\s*(?:no|num|number)\b)?[^a-z0-9]{0,6}\d/i.test(s)) return true;
+  if (dates) {
+    s = s.replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, " ")
+      .replace(/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b/g, " ")
+      .replace(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)/gi, " ")
+      .replace(/\b\d{1,2}:\d{2}\b/g, " ")
+      .replace(/\b(?:19|20)\d{2}\b/g, " ");
+  }
+  return /\d(?:[\s./-]*\d){4,}/.test(s);
+}
+// Whether a CNAM product can be sent (again): never registered, a draft, or a rejection to fix.
+// Under review or approved nothing would be sent, so the name form is not offered (review
+// 2026-10-09: it stayed open, offering "Send again", after a status check moved it on).
+function phoneCnamSendable(st) {
+  return !st || st === "draft" || st === "twilio-rejected";
+}
 
 async function phoneAction(action, body) {
   const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action, ...(body || {}) } });
@@ -1383,6 +1835,164 @@ function SsPhoneInstallCard({ what = "call", compact = false, mobile = false, fr
         </div>
       )}
     </div>
+  );
+}
+
+// ── My Synergy Phone's download pop-up (Ahsan 2026-10-30) ──────────────────────────────────
+// A small card in the corner of every Settings page, for a person the app will let in: the business
+// has calling (ssPhoneOffered) AND the person holds the phone area, the Calls rail item's own rule
+// (12-shell mounts it; phone-api refuses a person whose phone level is none, no_phone_access). It
+// shows the Apple and Android logos and one line. Clicking it opens
+// the full-size card, a QR code for each store, so someone at a computer points their phone's camera
+// at the screen instead of searching a store. The × hides the small card in this browser for good
+// (localStorage, a nicety: a browser that refuses storage just shows it again); the Phone tab's
+// install card stays either way.
+// The codes are fixed module paths, made offline with the qrcode package (error correction M, one
+// unit per module, no quiet zone; the drawing adds 4) from SS_PHONE_LINKS' own two addresses, so
+// nothing is fetched and no QR library ships. A code whose `url` is not the link 01-core holds now
+// is not drawn, and the pop-up stays away until both are made again.
+// The logos are Simple Icons' Apple and Android marks (CC0), drawn in a 24-unit box.
+const SS_APP_QR = {
+  ios: { url: "https://apps.apple.com/app/id6819597681", size: 29,
+    path: "M0 0h7v1h-7zM9 0h1v1h-1zM11 0h1v1h-1zM15 0h5v1h-5zM22 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM9 1h1v1h-1zM11 1h2v1h-2zM17 1h1v1h-1zM20 1h1v1h-1zM22 1h1v1h-1zM28 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM8 2h5v1h-5zM14 2h1v1h-1zM16 2h1v1h-1zM20 2h1v1h-1zM22 2h1v1h-1zM24 2h3v1h-3zM28 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM8 3h1v1h-1zM12 3h1v1h-1zM17 3h1v1h-1zM19 3h1v1h-1zM22 3h1v1h-1zM24 3h3v1h-3zM28 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM8 4h1v1h-1zM13 4h3v1h-3zM18 4h3v1h-3zM22 4h1v1h-1zM24 4h3v1h-3zM28 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h2v1h-2zM11 5h1v1h-1zM13 5h4v1h-4zM18 5h1v1h-1zM20 5h1v1h-1zM22 5h1v1h-1zM28 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h7v1h-7zM8 7h1v1h-1zM10 7h1v1h-1zM13 7h1v1h-1zM15 7h1v1h-1zM19 7h2v1h-2zM0 8h1v1h-1zM2 8h5v1h-5zM9 8h3v1h-3zM14 8h2v1h-2zM17 8h1v1h-1zM19 8h1v1h-1zM22 8h5v1h-5zM3 9h1v1h-1zM5 9h1v1h-1zM8 9h2v1h-2zM15 9h1v1h-1zM19 9h4v1h-4zM24 9h1v1h-1zM28 9h1v1h-1zM1 10h1v1h-1zM3 10h2v1h-2zM6 10h1v1h-1zM9 10h1v1h-1zM15 10h1v1h-1zM18 10h1v1h-1zM20 10h1v1h-1zM22 10h2v1h-2zM1 11h1v1h-1zM3 11h2v1h-2zM7 11h1v1h-1zM10 11h2v1h-2zM14 11h2v1h-2zM18 11h2v1h-2zM21 11h2v1h-2zM24 11h2v1h-2zM27 11h1v1h-1zM0 12h1v1h-1zM4 12h3v1h-3zM9 12h2v1h-2zM15 12h3v1h-3zM23 12h1v1h-1zM25 12h2v1h-2zM0 13h2v1h-2zM5 13h1v1h-1zM7 13h1v1h-1zM9 13h1v1h-1zM11 13h1v1h-1zM13 13h2v1h-2zM16 13h1v1h-1zM19 13h6v1h-6zM28 13h1v1h-1zM0 14h1v1h-1zM5 14h2v1h-2zM8 14h2v1h-2zM12 14h3v1h-3zM16 14h1v1h-1zM18 14h1v1h-1zM21 14h1v1h-1zM24 14h3v1h-3zM0 15h4v1h-4zM8 15h1v1h-1zM11 15h3v1h-3zM16 15h1v1h-1zM18 15h3v1h-3zM24 15h1v1h-1zM27 15h1v1h-1zM0 16h1v1h-1zM2 16h1v1h-1zM5 16h5v1h-5zM11 16h2v1h-2zM14 16h1v1h-1zM17 16h3v1h-3zM23 16h1v1h-1zM25 16h2v1h-2zM0 17h1v1h-1zM4 17h1v1h-1zM7 17h1v1h-1zM9 17h1v1h-1zM11 17h1v1h-1zM16 17h4v1h-4zM22 17h3v1h-3zM26 17h1v1h-1zM28 17h1v1h-1zM0 18h1v1h-1zM2 18h3v1h-3zM6 18h2v1h-2zM10 18h1v1h-1zM16 18h2v1h-2zM20 18h2v1h-2zM24 18h1v1h-1zM26 18h1v1h-1zM0 19h1v1h-1zM4 19h1v1h-1zM7 19h3v1h-3zM14 19h2v1h-2zM20 19h2v1h-2zM24 19h1v1h-1zM27 19h1v1h-1zM0 20h1v1h-1zM4 20h4v1h-4zM17 20h1v1h-1zM20 20h5v1h-5zM26 20h3v1h-3zM8 21h2v1h-2zM11 21h1v1h-1zM13 21h2v1h-2zM17 21h2v1h-2zM20 21h1v1h-1zM24 21h5v1h-5zM0 22h7v1h-7zM13 22h2v1h-2zM18 22h3v1h-3zM22 22h1v1h-1zM24 22h3v1h-3zM0 23h1v1h-1zM6 23h1v1h-1zM8 23h2v1h-2zM11 23h3v1h-3zM19 23h2v1h-2zM24 23h1v1h-1zM0 24h1v1h-1zM2 24h3v1h-3zM6 24h1v1h-1zM8 24h2v1h-2zM12 24h1v1h-1zM14 24h1v1h-1zM17 24h1v1h-1zM20 24h5v1h-5zM26 24h1v1h-1zM28 24h1v1h-1zM0 25h1v1h-1zM2 25h3v1h-3zM6 25h1v1h-1zM8 25h1v1h-1zM10 25h1v1h-1zM12 25h2v1h-2zM18 25h1v1h-1zM23 25h1v1h-1zM25 25h2v1h-2zM0 26h1v1h-1zM2 26h3v1h-3zM6 26h1v1h-1zM8 26h8v1h-8zM19 26h2v1h-2zM22 26h6v1h-6zM0 27h1v1h-1zM6 27h1v1h-1zM9 27h1v1h-1zM15 27h1v1h-1zM18 27h1v1h-1zM20 27h2v1h-2zM23 27h3v1h-3zM27 27h1v1h-1zM0 28h7v1h-7zM8 28h1v1h-1zM10 28h1v1h-1zM14 28h3v1h-3zM18 28h2v1h-2zM21 28h1v1h-1zM24 28h1v1h-1zM26 28h1v1h-1z" },
+  android: { url: "https://play.google.com/store/apps/details?id=com.mysynergyphone.app", size: 37,
+    path: "M0 0h7v1h-7zM10 0h3v1h-3zM14 0h2v1h-2zM21 0h3v1h-3zM25 0h2v1h-2zM28 0h1v1h-1zM30 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM9 1h1v1h-1zM11 1h1v1h-1zM13 1h3v1h-3zM17 1h2v1h-2zM20 1h1v1h-1zM24 1h5v1h-5zM30 1h1v1h-1zM36 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM8 2h3v1h-3zM12 2h2v1h-2zM16 2h1v1h-1zM21 2h2v1h-2zM24 2h1v1h-1zM26 2h1v1h-1zM28 2h1v1h-1zM30 2h1v1h-1zM32 2h3v1h-3zM36 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM8 3h2v1h-2zM12 3h2v1h-2zM17 3h2v1h-2zM20 3h1v1h-1zM22 3h1v1h-1zM25 3h3v1h-3zM30 3h1v1h-1zM32 3h3v1h-3zM36 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM8 4h3v1h-3zM12 4h3v1h-3zM16 4h8v1h-8zM25 4h1v1h-1zM28 4h1v1h-1zM30 4h1v1h-1zM32 4h3v1h-3zM36 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h2v1h-2zM11 5h1v1h-1zM14 5h2v1h-2zM17 5h1v1h-1zM21 5h1v1h-1zM27 5h2v1h-2zM30 5h1v1h-1zM36 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h1v1h-1zM24 6h1v1h-1zM26 6h1v1h-1zM28 6h1v1h-1zM30 6h7v1h-7zM8 7h3v1h-3zM12 7h1v1h-1zM17 7h2v1h-2zM21 7h1v1h-1zM23 7h1v1h-1zM26 7h1v1h-1zM28 7h1v1h-1zM0 8h1v1h-1zM2 8h5v1h-5zM9 8h1v1h-1zM11 8h2v1h-2zM16 8h1v1h-1zM21 8h1v1h-1zM23 8h1v1h-1zM25 8h2v1h-2zM30 8h5v1h-5zM0 9h1v1h-1zM2 9h1v1h-1zM4 9h1v1h-1zM7 9h3v1h-3zM13 9h3v1h-3zM17 9h2v1h-2zM20 9h2v1h-2zM23 9h1v1h-1zM26 9h1v1h-1zM28 9h2v1h-2zM31 9h1v1h-1zM35 9h1v1h-1zM1 10h1v1h-1zM3 10h1v1h-1zM5 10h3v1h-3zM9 10h3v1h-3zM15 10h3v1h-3zM19 10h1v1h-1zM21 10h2v1h-2zM25 10h3v1h-3zM30 10h2v1h-2zM33 10h1v1h-1zM35 10h2v1h-2zM1 11h2v1h-2zM9 11h1v1h-1zM11 11h1v1h-1zM13 11h1v1h-1zM15 11h1v1h-1zM19 11h3v1h-3zM24 11h1v1h-1zM26 11h1v1h-1zM30 11h4v1h-4zM36 11h1v1h-1zM6 12h2v1h-2zM9 12h2v1h-2zM13 12h1v1h-1zM15 12h3v1h-3zM19 12h2v1h-2zM22 12h1v1h-1zM24 12h4v1h-4zM29 12h4v1h-4zM34 12h3v1h-3zM4 13h2v1h-2zM8 13h1v1h-1zM12 13h1v1h-1zM16 13h1v1h-1zM18 13h3v1h-3zM23 13h2v1h-2zM28 13h1v1h-1zM31 13h1v1h-1zM1 14h1v1h-1zM3 14h1v1h-1zM6 14h2v1h-2zM9 14h1v1h-1zM13 14h1v1h-1zM15 14h1v1h-1zM18 14h1v1h-1zM22 14h1v1h-1zM27 14h2v1h-2zM31 14h3v1h-3zM35 14h2v1h-2zM0 15h1v1h-1zM2 15h4v1h-4zM10 15h1v1h-1zM13 15h4v1h-4zM28 15h5v1h-5zM35 15h2v1h-2zM0 16h2v1h-2zM4 16h6v1h-6zM11 16h2v1h-2zM14 16h1v1h-1zM18 16h1v1h-1zM20 16h11v1h-11zM32 16h1v1h-1zM34 16h1v1h-1zM4 17h2v1h-2zM7 17h6v1h-6zM14 17h3v1h-3zM23 17h1v1h-1zM25 17h1v1h-1zM28 17h2v1h-2zM31 17h1v1h-1zM34 17h2v1h-2zM0 18h1v1h-1zM3 18h2v1h-2zM6 18h3v1h-3zM11 18h1v1h-1zM14 18h1v1h-1zM20 18h1v1h-1zM22 18h1v1h-1zM24 18h1v1h-1zM26 18h4v1h-4zM32 18h1v1h-1zM35 18h2v1h-2zM9 19h3v1h-3zM14 19h1v1h-1zM16 19h1v1h-1zM18 19h1v1h-1zM21 19h3v1h-3zM27 19h2v1h-2zM30 19h3v1h-3zM36 19h1v1h-1zM0 20h7v1h-7zM8 20h4v1h-4zM13 20h2v1h-2zM17 20h1v1h-1zM20 20h1v1h-1zM22 20h6v1h-6zM29 20h2v1h-2zM32 20h3v1h-3zM0 21h1v1h-1zM3 21h1v1h-1zM5 21h1v1h-1zM7 21h5v1h-5zM16 21h8v1h-8zM25 21h1v1h-1zM28 21h1v1h-1zM33 21h1v1h-1zM0 22h1v1h-1zM3 22h2v1h-2zM6 22h3v1h-3zM10 22h1v1h-1zM13 22h1v1h-1zM15 22h3v1h-3zM20 22h2v1h-2zM27 22h1v1h-1zM30 22h4v1h-4zM35 22h2v1h-2zM0 23h1v1h-1zM8 23h1v1h-1zM11 23h1v1h-1zM13 23h3v1h-3zM17 23h2v1h-2zM21 23h3v1h-3zM28 23h2v1h-2zM31 23h2v1h-2zM35 23h1v1h-1zM2 24h1v1h-1zM4 24h3v1h-3zM8 24h1v1h-1zM11 24h2v1h-2zM16 24h1v1h-1zM21 24h1v1h-1zM23 24h4v1h-4zM29 24h2v1h-2zM32 24h1v1h-1zM34 24h2v1h-2zM0 25h2v1h-2zM3 25h1v1h-1zM10 25h1v1h-1zM12 25h2v1h-2zM15 25h1v1h-1zM18 25h1v1h-1zM20 25h5v1h-5zM28 25h2v1h-2zM33 25h1v1h-1zM0 26h1v1h-1zM3 26h2v1h-2zM6 26h6v1h-6zM13 26h1v1h-1zM15 26h2v1h-2zM19 26h1v1h-1zM26 26h2v1h-2zM30 26h2v1h-2zM34 26h3v1h-3zM0 27h1v1h-1zM2 27h1v1h-1zM4 27h2v1h-2zM7 27h1v1h-1zM9 27h4v1h-4zM15 27h1v1h-1zM19 27h3v1h-3zM26 27h1v1h-1zM28 27h5v1h-5zM36 27h1v1h-1zM0 28h1v1h-1zM2 28h1v1h-1zM4 28h1v1h-1zM6 28h2v1h-2zM9 28h4v1h-4zM14 28h2v1h-2zM17 28h1v1h-1zM19 28h1v1h-1zM22 28h1v1h-1zM24 28h2v1h-2zM28 28h9v1h-9zM8 29h3v1h-3zM13 29h1v1h-1zM16 29h1v1h-1zM19 29h2v1h-2zM23 29h1v1h-1zM25 29h1v1h-1zM27 29h2v1h-2zM32 29h2v1h-2zM35 29h1v1h-1zM0 30h7v1h-7zM11 30h2v1h-2zM14 30h3v1h-3zM18 30h1v1h-1zM20 30h1v1h-1zM22 30h1v1h-1zM25 30h2v1h-2zM28 30h1v1h-1zM30 30h1v1h-1zM32 30h1v1h-1zM34 30h1v1h-1zM36 30h1v1h-1zM0 31h1v1h-1zM6 31h1v1h-1zM8 31h2v1h-2zM12 31h1v1h-1zM15 31h1v1h-1zM19 31h2v1h-2zM23 31h2v1h-2zM26 31h3v1h-3zM32 31h2v1h-2zM35 31h1v1h-1zM0 32h1v1h-1zM2 32h3v1h-3zM6 32h1v1h-1zM8 32h4v1h-4zM13 32h1v1h-1zM15 32h1v1h-1zM18 32h5v1h-5zM24 32h9v1h-9zM34 32h1v1h-1zM36 32h1v1h-1zM0 33h1v1h-1zM2 33h3v1h-3zM6 33h1v1h-1zM8 33h3v1h-3zM12 33h2v1h-2zM15 33h2v1h-2zM21 33h1v1h-1zM23 33h1v1h-1zM25 33h1v1h-1zM29 33h2v1h-2zM32 33h1v1h-1zM34 33h1v1h-1zM36 33h1v1h-1zM0 34h1v1h-1zM2 34h3v1h-3zM6 34h1v1h-1zM8 34h1v1h-1zM10 34h1v1h-1zM12 34h2v1h-2zM20 34h3v1h-3zM24 34h6v1h-6zM34 34h3v1h-3zM0 35h1v1h-1zM6 35h1v1h-1zM11 35h2v1h-2zM16 35h1v1h-1zM18 35h1v1h-1zM21 35h3v1h-3zM27 35h2v1h-2zM32 35h1v1h-1zM36 35h1v1h-1zM0 36h7v1h-7zM8 36h1v1h-1zM11 36h2v1h-2zM17 36h1v1h-1zM23 36h4v1h-4zM29 36h2v1h-2zM32 36h5v1h-5z" },
+};
+const SS_APP_LOGO = {
+  apple: "M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701",
+  android: "M18.4395 5.5586c-.675 1.1664-1.352 2.3318-2.0274 3.498-.0366-.0155-.0742-.0286-.1113-.043-1.8249-.6957-3.484-.8-4.42-.787-1.8551.0185-3.3544.4643-4.2597.8203-.084-.1494-1.7526-3.021-2.0215-3.4864a1.1451 1.1451 0 0 0-.1406-.1914c-.3312-.364-.9054-.4859-1.379-.203-.475.282-.7136.9361-.3886 1.5019 1.9466 3.3696-.0966-.2158 1.9473 3.3593.0172.031-.4946.2642-1.3926 1.0177C2.8987 12.176.452 14.772 0 18.9902h24c-.119-1.1108-.3686-2.099-.7461-3.0683-.7438-1.9118-1.8435-3.2928-2.7402-4.1836a12.1048 12.1048 0 0 0-2.1309-1.6875c.6594-1.122 1.312-2.2559 1.9649-3.3848.2077-.3615.1886-.7956-.0079-1.1191a1.1001 1.1001 0 0 0-.8515-.5332c-.5225-.0536-.9392.3128-1.0488.5449zm-.0391 8.461c.3944.5926.324 1.3306-.1563 1.6503-.4799.3197-1.188.0985-1.582-.4941-.3944-.5927-.324-1.3307.1563-1.6504.4727-.315 1.1812-.1086 1.582.4941zM7.207 13.5273c.4803.3197.5506 1.0577.1563 1.6504-.394.5926-1.1038.8138-1.584.4941-.48-.3197-.5503-1.0577-.1563-1.6504.4008-.6021 1.1087-.8106 1.584-.4941z",
+};
+const SS_APP_PROMO_HIDDEN = "ss.phoneAppPromo.hidden";
+
+function ssAppQrReady(which) {
+  const q = SS_APP_QR[which];
+  return !!q && ssPhoneLinkReady(SS_PHONE_LINKS[which]) && q.url === SS_PHONE_LINKS[which];
+}
+
+function SsAppLogo({ os, size = 18 }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" focusable="false" style={{ display: "block", flexShrink: 0 }}>
+      <path d={SS_APP_LOGO[os]} fill={os === "apple" ? "#000000" : "#34A853"} />
+    </svg>
+  );
+}
+
+function SsAppQr({ which, label }) {
+  const q = SS_APP_QR[which];
+  return (
+    <svg viewBox={`-4 -4 ${q.size + 8} ${q.size + 8}`} role="img" aria-label={label} data-ss-app-qr={which}
+      shapeRendering="crispEdges" style={{ display: "block", width: "100%", height: "auto", background: "#FFF" }}>
+      <path d={q.path} fill="#0F172A" />
+    </svg>
+  );
+}
+
+// `raised`: the Feedback pill is in the same corner (12-shell shows it when the Support switch is off
+// and nobody is viewing as someone else), so the card sits above it.
+function SsPhoneAppPromo({ raised = false }) {
+  const [hidden, setHidden] = useState(() => {
+    try { return window.localStorage.getItem(SS_APP_PROMO_HIDDEN) === "1"; } catch (_e) { return false; }
+  });
+  const [open, setOpen] = useState(false);
+  const openerRef = useRef(null);
+  const closeRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    const unlock = ssLockBodyScroll();
+    if (closeRef.current) closeRef.current.focus();
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      unlock();
+      // Back to the card that opened it, so a keyboard user is where they were.
+      if (openerRef.current) openerRef.current.focus();
+    };
+  }, [open]);
+  if (!ssAppQrReady("ios") || !ssAppQrReady("android")) return null;
+  if (hidden && !open) return null;
+
+  const hide = () => {
+    try { window.localStorage.setItem(SS_APP_PROMO_HIDDEN, "1"); } catch (_e) { /* shown again next time */ }
+    setHidden(true);
+  };
+  // On a phone's own browser the QR code is for someone else's phone, so the store button for the
+  // phone in hand comes first.
+  const phone = ssIsPhoneBrowser();
+  const android = phone && /Android/i.test(String(navigator.userAgent || ""));
+  const stores = [
+    { key: "ios", logo: "apple", name: "iPhone", store: "the App Store", url: SS_PHONE_LINKS.ios },
+    { key: "android", logo: "android", name: "Android", store: "Google Play", url: SS_PHONE_LINKS.android },
+  ];
+  if (android) stores.reverse();
+
+  return (
+    <>
+      <div data-ss-app-promo="small"
+        style={{ position: "fixed", right: 20, bottom: raised ? 72 : 20, zIndex: 880, maxWidth: "calc(100vw - 40px)" }}>
+        {/* No aria-label: the card's own words are its name, so a voice user says what they see. */}
+        <button ref={openerRef} type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open}
+          style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", background: "#FFF",
+            border: "1px solid #E2E8F0", borderRadius: 12, padding: "9px 34px 9px 10px", cursor: "pointer", fontFamily: "inherit",
+            boxShadow: "0 6px 20px rgba(15,23,42,0.16)" }}>
+          <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            {["apple", "android"].map((os) => (
+              <span key={os} style={{ width: 30, height: 30, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <SsAppLogo os={os} size={17} />
+              </span>
+            ))}
+          </span>
+          <span style={{ minWidth: 0 }}>
+            <span style={{ display: "block", fontSize: 13, fontWeight: 800, color: "#1E293B" }}>Get the phone app</span>
+            <span style={{ display: "block", fontSize: 11.5, color: "#64748B" }}>{phone ? "iPhone and Android: tap to install" : "iPhone and Android: scan to install"}</span>
+          </span>
+        </button>
+        <button type="button" onClick={hide} aria-label="Hide the phone app card" title="Hide"
+          style={{ position: "absolute", top: 4, right: 4, width: 24, height: 24, border: "none", borderRadius: 6, background: "transparent",
+            color: "#94A3B8", fontSize: 16, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+      </div>
+      {open && (
+        // The backdrop scrolls and the card centres by margin: auto, so a card taller than the screen
+        // starts at its top (title and Close in view) and scrolls. Centring with align-items, and
+        // capping the card at 100vh, cut its top off on a phone whose browser bar is showing.
+        <div onClick={() => setOpen(false)} role="presentation"
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.6)", display: "flex", padding: 16, zIndex: 1200, overflowY: "auto", overscrollBehavior: "contain" }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="ss-app-promo-title" data-ss-app-promo="full" className="ss-app-promo-pop"
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "#FFF", borderRadius: 14, width: "min(620px, 100%)", margin: "auto", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }}>
+            <div style={{ position: "relative", background: "linear-gradient(135deg, #3D3672, #1B7895)", color: "#FFF", padding: "18px 56px 18px 20px", borderRadius: "14px 14px 0 0" }}>
+              <div id="ss-app-promo-title" style={{ fontSize: 17, fontWeight: 800 }}>Get My Synergy Phone on your phone</div>
+              <div style={{ fontSize: 12.5, opacity: 0.92, marginTop: 4, lineHeight: 1.5 }}>
+                {phone ? "Tap your store below, or scan a code from another phone." : "Point your phone\u2019s camera at a code, then sign in with your Structure Studio login."}
+              </div>
+              <button ref={closeRef} type="button" onClick={() => setOpen(false)} aria-label="Close"
+                style={{ position: "absolute", top: 12, right: 12, width: 32, height: 32, border: "none", borderRadius: 8,
+                  background: "rgba(255,255,255,0.18)", color: "#FFF", fontSize: 20, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 14, padding: "18px 20px 6px" }}>
+              {stores.map((s) => (
+                <div key={s.key} data-ss-app-store={s.key}
+                  style={{ flex: "1 1 220px", border: "1px solid #E2E8F0", borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 800, color: "#1E293B" }}>
+                    <SsAppLogo os={s.logo} size={22} /> {s.name}
+                  </div>
+                  <div style={{ width: "100%", maxWidth: 190 }}>
+                    <SsAppQr which={s.key} label={`QR code: My Synergy Phone on ${s.store}`} />
+                  </div>
+                  <a href={s.url} target="_blank" rel="noopener noreferrer"
+                    style={{ ...S.btn(ACCENT, "#FFF"), textDecoration: "none", display: "inline-block", padding: "8px 14px", fontSize: 12.5 }}>
+                    Open {s.store}
+                  </a>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 12, color: "#64748B", padding: "8px 20px 18px", lineHeight: 1.5 }}>
+              Calls to your business number ring the app like a second line, even with the phone locked.
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1521,18 +2131,29 @@ function phoneNumberOwner(n, team) {
 }
 
 // ── Call recording (migration 263) ──────────────────────────────────────────────────────
-// The standard announcement, word for word portal-settings/phone.ts STANDARD_NOTICE and
-// STANDARD_NOTICE_TRANSCRIBED (tests/phone/callRecordingUi_test.ts pins the two copies). Shown
-// so the owner knows what callers hear when the wording box is left empty; the server stores an
-// empty box as "the standard wording", which follows the transcripts switch.
-const PHONE_REC_STANDARD = "This call will be recorded.";
-const PHONE_REC_STANDARD_TRANSCRIBED = "This call will be recorded and transcribed.";
+// On by default since migration 287. The standard announcement (Carolyn's wording, 2026-10-06),
+// word for word portal-settings/phone.ts STANDARD_NOTICE and STANDARD_NOTICE_TRANSCRIBED and the
+// phone-api Worker's (tests/phone/callRecordingUi_test.ts pins the three copies). Shown so the
+// owner knows what callers hear when the wording box is left empty; the server stores an empty
+// box as "the standard wording", which follows the transcripts switch.
+const PHONE_REC_STANDARD = "This call may be recorded.";
+const PHONE_REC_STANDARD_TRANSCRIBED = "This call may be recorded and transcribed.";
 // How long recordings are kept: client_settings_phone_recording_retention_chk's five lengths.
 const PHONE_REC_KEEP_WORDS = { 30: "30 days", 90: "90 days", 180: "6 months", 365: "1 year", 730: "2 years" };
+// The announcement is the owner's to turn off (2026-10-21, Carolyn's 10-20 ask; Ahsan: on by
+// default, a confirm and this warning when it's turned off). Calls are still recorded and
+// transcribed without it (the phone-api Worker's armedFor). Shown in the confirm and on the card
+// while it's off.
+const PHONE_REC_UNANNOUNCED_WARNING = "Recording a call without telling everyone on it is against the law in some states, "
+  + "including California, Florida, Illinois, Maryland, Massachusetts, Montana, New Hampshire, Pennsylvania and Washington. "
+  + "Those laws can apply when only your customer is in one of them, and an area code doesn't tell you where someone is. "
+  + "Recorded calls can also be transcribed by AI services. You're responsible for following the law, so check with your lawyer.";
 
 function phoneRecFormFrom(r) {
   return {
     on: !!(r && r.on),
+    // Announced unless the server says it's off (a server before 2026-10-21 always announced).
+    notice: !(r && r.notice === false),
     noticeText: (r && r.noticeText) || "",
     transcribe: !(r && r.transcribe === false),
     retentionDays: (r && r.retentionDays) || 365,
@@ -1574,12 +2195,30 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // search / purchase / connect said.
   const [numQ, setNumQ] = useState("");
   const [numResults, setNumResults] = useState(null);  // null = not searched yet
+  const [numFor, setNumFor] = useState("");            // the digits numResults came back for
   const [numNote, setNumNote] = useState(null);        // { ok } | { err }
   // Plan phase 6, caller ID (plan §14): what the last register / check said, and the Voice
   // Integrity answers an operator fills in (opened by its button).
   const [trustNote, setTrustNote] = useState(null);    // { ok } | { err }
   const [viOpen, setViOpen] = useState(false);
   const [viForm, setViForm] = useState({ useCase: "Customer Support", employeeCount: "", averageDailyCalls: "", notes: "" });
+  // Workstream 2, phase 6: CNAM's name (opened by its button) and the business-profile form an
+  // operator fills for a builder who only calls (phone_trust_profile).
+  const [cnamOpen, setCnamOpen] = useState(false);
+  const [cnamName, setCnamName] = useState("");
+  const [bpOpen, setBpOpen] = useState(false);
+  // Workstream 2, phase 8: "Bring your number" (the builder's request) and, for an operator, landing
+  // a moved number that has arrived (phone_adopt_number).
+  const [portOpen, setPortOpen] = useState(false);
+  const [portForm, setPortForm] = useState({ numbers: "", currentCarrier: "", isLcPhone: "", contactName: "", contactEmail: "", cutoverWindow: "" });
+  const [portNote, setPortNote] = useState(null);      // { ok } | { err }
+  const [adoptNum, setAdoptNum] = useState("");
+  const [adoptNote, setAdoptNote] = useState(null);    // { ok } | { err }
+  const [bpForm, setBpForm] = useState({
+    legalBusinessName: "", ein: "", businessType: "Limited Liability Corporation", businessIndustry: "CONSTRUCTION",
+    websiteUrl: "", street: "", city: "", region: "", postalCode: "", isoCountry: "US",
+    repFirstName: "", repLastName: "", repEmail: "", repPhone: "", repBusinessTitle: "Owner", repJobPosition: "CEO",
+  });
   // Call recording (migration 263): its own small form, saved on its own (phone_recording_save),
   // and what the last save said.
   const [recForm, setRecForm] = useState(null);
@@ -1762,8 +2401,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const searchNumbers = async () => {
     setBusy(true); setNumNote(null);
     try {
-      const d = await phoneAction("phone_search_numbers", { areaCode: numQ });
+      const d = await phoneAction("phone_search_numbers", phoneSearchBody(numQ));
       setNumResults(d.numbers || []);
+      setNumFor(numQ);
     } catch (e) { setNumNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -1773,7 +2413,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     // buy_number adopts a calling-only number, plan phase 6), so there is no caveat to give.
     if (!window.confirm(numbers.length
       ? `Add ${phoneDisplay(e164)} as another business number? It takes calls right away${data.textingActive ? ", and it can text once the carriers approve it" : ""}. You can give it a name and a person after.`
-      : `Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the Text Messaging tab.`)) return;
+      : `Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the SMS - A2P tab.`)) return;
     setBusy(true); setNumNote(null);
     try {
       const d = await phoneAction("phone_buy_number", { phoneNumber: e164 });
@@ -1847,7 +2487,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         ? "Calls only for now. Add it to your texting below and it can text too, once the carriers approve it."
         : "Calls only for now. The account owner, or someone with Billing access, can add it to your texting.";
     }
-    return n.id === mainId ? "Calls only for now. Texting uses this same number once the carriers approve your business on the Text Messaging tab." : "Calls only for now.";
+    return n.id === mainId ? "Calls only for now. Texting uses this same number once the carriers approve your business on the SMS - A2P tab." : "Calls only for now.";
   };
   const ownerBadge = (n) => (
     <span data-ss-phone-number-owner={n.assignedUserId || "team"} style={{
@@ -1864,16 +2504,22 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const searchBlock = (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <input value={numQ} inputMode="numeric" maxLength={3} placeholder="Area code, e.g. 816"
-          onChange={(e) => setNumQ(e.target.value.replace(/\D/g, "").slice(0, 3))}
-          style={{ ...S.input, width: 170 }} data-ss-phone-areacode />
+        {/* An area code, or the area code and up to three more digits (the 2026-10-12 call).
+            maxLength leaves room to paste a formatted number; phoneSearchDigits keeps six digits. */}
+        <input value={numQ} inputMode="numeric" maxLength={20} placeholder="Area code or first digits, e.g. 816 or 816300"
+          onChange={(e) => setNumQ(phoneSearchDigits(e.target.value))}
+          style={{ ...S.input, width: 320, maxWidth: "100%" }} data-ss-phone-areacode />
         <button type="button" disabled={busy} onClick={searchNumbers} data-ss-phone-search
           style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
           {busy && !numResults ? "Searching…" : "Search"}
         </button>
       </div>
       {numResults && numResults.length === 0 && (
-        <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 8 }}>No numbers available there right now. Try a nearby area code, or leave it empty.</div>
+        <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 8 }} data-ss-phone-search-empty>
+          {numFor.length > 3
+            ? `No numbers start with ${phoneSearchLabel(numFor)} right now — try fewer digits.`
+            : "No numbers available there right now. Try a nearby area code, or leave it empty."}
+        </div>
       )}
       {numResults && numResults.length > 0 && (
         <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
@@ -1944,9 +2590,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           {onOpenTexting ? (
             <button type="button" onClick={onOpenTexting}
               style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
-              {data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "start on the Text Messaging tab" : "Get one on the Text Messaging tab"}
+              {data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "start on the SMS - A2P tab" : "Get one on the SMS - A2P tab"}
             </button>
-          ) : "Get one on the Text Messaging tab"}{data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "." : ", then come back to choose who answers it."}
+          ) : "Get one on the SMS - A2P tab"}{data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "." : ", then come back to choose who answers it."}
         </div>
       )}
 
@@ -2108,14 +2754,40 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // Per number (migration 266): the open one's registrations, and each press names it.
   const cid = (sel && sel.callerId) || null;
   const trustSetup = async (product) => {
-    const what = product === "voice_integrity" ? "carrier spam-label protection (Voice Integrity)" : "verified caller ID (SHAKEN/STIR)";
+    const what = product === "voice_integrity" ? "carrier spam-label protection (Voice Integrity)"
+      : product === "cnam" ? `the caller name "${cnamName.replace(/\s+/g, " ").trim()}" (CNAM)` : "verified caller ID (SHAKEN/STIR)";
     if (!window.confirm(`Register ${phoneDisplay(sel.e164)} for ${what}? This sends the business details on its Twilio business profile for Twilio's review.`)) return;
     setBusy(true); setTrustNote(null);
     try {
-      const d = await phoneAction("phone_trust_setup", { product, numberId: sel.id, ...(product === "voice_integrity" ? { voiceIntegrity: viForm } : {}) });
+      const d = await phoneAction("phone_trust_setup", {
+        product, numberId: sel.id,
+        ...(product === "voice_integrity" ? { voiceIntegrity: viForm } : {}),
+        ...(product === "cnam" ? { cnam: { displayName: cnamName } } : {}),
+      });
       if (d.callerId) patchNumber(sel.id, { callerId: d.callerId });
       if (product === "voice_integrity") setViOpen(false);
-      setTrustNote({ ok: d.submitted ? "Submitted. Twilio usually reviews it within one to two business days." : "It's already with Twilio, so nothing was sent again." });
+      if (product === "cnam") setCnamOpen(false);
+      setTrustNote({ ok: d.submitted
+        ? (product === "cnam" ? "Submitted. Once Twilio approves it, the name reaches the carriers within 48 to 72 hours." : "Submitted. Twilio usually reviews it within one to two business days.")
+        : "It's already with Twilio, so nothing was sent again." });
+    } catch (e) {
+      // A builder with no business profile at Twilio yet (one who only calls): open its form.
+      if (/business's details at Twilio/.test(String(e.message || "")) && data.businessProfile && !data.businessProfile.exists) setBpOpen(true);
+      setTrustNote({ err: e.message });
+    }
+    finally { setBusy(false); }
+  };
+  // Workstream 2, phase 6: the business profile for a builder who only calls (operator only).
+  const addBusinessProfile = async () => {
+    if (!window.confirm(`Send these business details to Twilio for review? They become ${viewingLabel || "this business"}'s business profile, which caller ID (and later texting) is registered on.`)) return;
+    setBusy(true); setTrustNote(null);
+    try {
+      const d = await phoneAction("phone_trust_profile", { intake: { ...bpForm, repPhone: smsE164(bpForm.repPhone) } });
+      setData((x) => ({ ...x, businessProfile: d.businessProfile || { ...(x.businessProfile || {}), exists: true } }));
+      setBpOpen(false);
+      setTrustNote({ ok: d.created
+        ? "Sent to Twilio for review. Caller ID can be registered once Twilio approves the business, usually within a few days."
+        : "The business already has a profile at Twilio, so nothing new was made." });
     } catch (e) { setTrustNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -2124,12 +2796,20 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     try {
       const d = await phoneAction("phone_trust_status", { numberId: sel.id });
       if (d.callerId) patchNumber(sel.id, { callerId: d.callerId });
-      const codes = [...((d.errorCodes && d.errorCodes.shakenStir) || []), ...((d.errorCodes && d.errorCodes.voiceIntegrity) || [])];
+      const codes = [...((d.errorCodes && d.errorCodes.shakenStir) || []), ...((d.errorCodes && d.errorCodes.voiceIntegrity) || []), ...((d.errorCodes && d.errorCodes.cnam) || [])];
       setTrustNote({ ok: codes.length ? `Checked. Twilio's rejection codes: ${codes.join(", ")}.` : "Checked with Twilio just now." });
     } catch (e) { setTrustNote({ err: e.message }); }
     finally { setBusy(false); }
   };
   const trustRow = (key, label, blurb, product) => {
+    // CNAM before migration 297 (or from a server older than it): said, with nothing to press.
+    if (key === "cnam" && !(cid && cid.cnam && cid.cnam.available)) {
+      return (
+        <div data-ss-phone-trust="cnam" style={{ padding: "8px 0", borderTop: "1px solid #F1F5F9", fontSize: 12, color: "#64748B" }}>
+          {label}: not available on this account yet.
+        </div>
+      );
+    }
     const st = cid && cid[key] ? cid[key].status : null;
     const registered = !!(cid && cid[key] && cid[key].registered);
     // Offered while there is something to send: never registered, a draft, or a rejection to
@@ -2148,9 +2828,16 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         }}>
           {PHONE_TRUST_WORDS[st] || (registered ? "Status unknown" : "Not registered")}
         </span>
+        {key === "cnam" && cid.cnam.displayName && (
+          <span data-ss-phone-cnam-name style={{ fontSize: 12, fontWeight: 700, color: "#1E293B" }}>&ldquo;{cid.cnam.displayName}&rdquo;</span>
+        )}
         {data.canManageCallerId && canSend && (
           <button type="button" disabled={busy} data-ss-phone-trust-register={product}
-            onClick={() => (product === "voice_integrity" ? setViOpen((v) => !v) : trustSetup(product))}
+            onClick={() => {
+              if (product === "voice_integrity") setViOpen((v) => !v);
+              else if (product === "cnam") { setCnamName((n) => n || cid.cnam.displayName || ""); setCnamOpen((v) => !v); }
+              else trustSetup(product);
+            }}
             style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy ? 0.55 : 1 }}>
             {st === "twilio-rejected" ? "Submit again" : st === "draft" ? "Submit" : "Register"}
           </button>
@@ -2173,6 +2860,74 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         <>
           {trustRow("shakenStir", "Verified caller ID (SHAKEN/STIR)", "Your calls are signed at the highest trust level once Twilio approves it.", "shaken_stir")}
           {trustRow("voiceIntegrity", "Spam-label protection (Voice Integrity)", "Registers the number with the carriers' spam filters.", "voice_integrity")}
+          {trustRow("cnam", "Caller name (CNAM)", "Shows the business's name, up to 15 characters, on phones whose carrier looks it up. It reaches the carriers 48 to 72 hours after Twilio approves it.", "cnam")}
+          {data.canManageCallerId && cnamOpen && cid.cnam && cid.cnam.available && phoneCnamSendable(cid.cnam.status) && (
+            <div data-ss-phone-cnam-form style={{ display: "grid", gap: 8, padding: "10px 12px", margin: "6px 0", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+              <label style={{ fontSize: 12.5, color: "#1E293B" }}>The name callers see{" "}
+                <input value={cnamName} maxLength={15} placeholder="e.g. Acme Barns" data-ss-phone-cnam-input
+                  onChange={(e) => setCnamName(e.target.value)} style={{ ...S.input, width: 200 }} />
+              </label>
+              <div style={{ fontSize: 12, color: phoneCnamProblem(cnamName) ? "#B45309" : "#64748B" }}>
+                {phoneCnamProblem(cnamName) || "Up to 15 letters, numbers, spaces, periods or commas. It has to be this business's own name, not a town."}
+              </div>
+              <div>
+                <button type="button" disabled={busy || !!phoneCnamProblem(cnamName)} data-ss-phone-cnam-submit onClick={() => trustSetup("cnam")}
+                  style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy || phoneCnamProblem(cnamName) ? 0.55 : 1 }}>
+                  {cid.cnam.registered && cid.cnam.status ? "Send again with this name" : "Register this caller name"}
+                </button>
+              </div>
+            </div>
+          )}
+          {/* Workstream 2, phase 6: no business profile at Twilio yet (a builder who only calls).
+              An operator adds one from the business's details; the server keeps only an echo. */}
+          {data.canManageCallerId && data.businessProfile && !data.businessProfile.exists && (
+            <div data-ss-phone-business-profile style={{ padding: "10px 0", borderTop: "1px solid #F1F5F9" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12.5, color: "#475569", flex: "1 1 240px" }}>
+                  Caller ID needs this business&rsquo;s details at Twilio first (its business profile). Texting adds them when it is
+                  submitted; for a business that only calls, add them here.
+                </span>
+                <button type="button" disabled={busy} data-ss-phone-business-profile-open
+                  onClick={() => { setBpOpen((v) => !v); setBpForm((f) => (f.legalBusinessName ? f : { ...f, legalBusinessName: data.businessProfile.legalBusinessName || "", websiteUrl: data.businessProfile.websiteUrl || "" })); }}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", fontSize: 12.5 }}>
+                  {bpOpen ? "Close" : "Add the business details"}
+                </button>
+              </div>
+              {bpOpen && (
+                <div data-ss-phone-business-profile-form style={{ marginTop: 10, padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "0 12px" }}>
+                    {[["legalBusinessName", "Legal business name (as on the IRS letter)"], ["ein", "EIN (12-3456789)"], ["websiteUrl", "Website (https://)"],
+                      ["street", "Street address"], ["city", "City"], ["region", "State (2 letters)"], ["postalCode", "ZIP"],
+                      ["repFirstName", "Contact first name"], ["repLastName", "Contact last name"], ["repEmail", "Contact work email"],
+                      ["repPhone", "Contact mobile"], ["repBusinessTitle", "Contact job title"]].map(([k, l]) => (
+                      <SmsField key={k} label={l}>
+                        <input style={SMS_INPUT} value={bpForm[k]} data-ss-phone-bp={k}
+                          onChange={(e) => setBpForm((f) => ({ ...f, [k]: k === "region" ? e.target.value.toUpperCase().slice(0, 2) : k === "repPhone" ? formatPhone(e.target.value) : e.target.value }))} />
+                      </SmsField>
+                    ))}
+                    <SmsField label="Business type">
+                      <select style={SMS_INPUT} value={bpForm.businessType} onChange={(e) => setBpForm((f) => ({ ...f, businessType: e.target.value }))}>
+                        {PHONE_BP_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </SmsField>
+                    <SmsField label="Contact role">
+                      <select style={SMS_INPUT} value={bpForm.repJobPosition} onChange={(e) => setBpForm((f) => ({ ...f, repJobPosition: e.target.value }))}>
+                        {PHONE_BP_ROLES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </SmsField>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#64748B", margin: "4px 0 8px" }}>
+                    Sent to Twilio for review in this business&rsquo;s own Twilio account. Structure Studio keeps only the name, the EIN&rsquo;s last four digits,
+                    the email&rsquo;s domain and the website.
+                  </div>
+                  <button type="button" disabled={busy} data-ss-phone-business-profile-submit onClick={addBusinessProfile}
+                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy ? 0.55 : 1 }}>
+                    Send to Twilio for review
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {data.canManageCallerId && viOpen && (
             <div data-ss-phone-vi-form style={{ display: "grid", gap: 8, padding: "10px 12px", margin: "6px 0", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
               <div style={{ fontSize: 12.5, color: "#475569" }}>
@@ -2211,7 +2966,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
                 ? (cid.checkedAt ? `Last checked with Twilio ${phoneWhen(cid.checkedAt) || "recently"}.` : "Not checked with Twilio yet.")
                 : "Structure Studio registers your number. Ask us if you'd like it done."}
             </span>
-            {data.canManageCallerId && (cid.shakenStir.registered || cid.voiceIntegrity.registered) && (
+            {data.canManageCallerId && (cid.shakenStir.registered || cid.voiceIntegrity.registered || !!(cid.cnam && cid.cnam.registered)) && (
               <button type="button" disabled={busy} onClick={trustCheck} data-ss-phone-trust-check
                 style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", fontSize: 12.5 }}>
                 Check status
@@ -2225,44 +2980,200 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     </div>
   ) : null;
 
+  // ── Workstream 2, phase 8: "Bring your number" ─────────────────────────────────────────────
+  // For anyone who can change the phone setup (phone edit): ask Structure Studio to move numbers
+  // the business already has (phone_port_request). Only the numbers, the company they are with now,
+  // whether it is GoHighLevel, who can approve the move and when: no PIN, password, account number
+  // or bill is asked for or kept (the server refuses them too). `portRequests` null = the server or
+  // database doesn't have requests yet, and the card is not drawn. An operator also gets "Adopt a
+  // moved number" here, once the move has finished at Twilio (phone_adopt_number).
+  const PORT_WORDS = { new: "Sent to Structure Studio", in_progress: "Being moved", done: "Moved", cancelled: "Cancelled" };
+  const sendPortRequest = async () => {
+    setBusy(true); setPortNote(null);
+    try {
+      const d = await phoneAction("phone_port_request", { request: {
+        numbers: portForm.numbers.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean),
+        currentCarrier: portForm.currentCarrier,
+        isLcPhone: portForm.isLcPhone === "yes" ? true : portForm.isLcPhone === "no" ? false : null,
+        contactName: portForm.contactName, contactEmail: portForm.contactEmail, cutoverWindow: portForm.cutoverWindow,
+      } });
+      setData((x) => ({ ...x, portRequests: [d.request, ...(x.portRequests || [])] }));
+      setPortOpen(false);
+      setPortForm({ numbers: "", currentCarrier: "", isLcPhone: "", contactName: "", contactEmail: "", cutoverWindow: "" });
+      setPortNote({ ok: d.request && d.request.isLcPhone
+        ? `Sent. Structure Studio will contact ${d.request.contactName} to book it. A GoHighLevel number usually moves within one or two business days.`
+        : `Sent. Structure Studio will contact ${(d.request && d.request.contactName) || "you"} to book it. A number from another phone company takes at least a week, and the account holder signs the transfer by email.` });
+    } catch (e) { setPortNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const adoptMoved = async () => {
+    if (!window.confirm(`Add ${adoptNum.trim()} to ${viewingLabel || "this business"}? It has to be in their own Twilio account already (the move has finished). It then takes calls here, and it bills monthly from now on.`)) return;
+    setBusy(true); setAdoptNote(null);
+    try {
+      const d = await phoneAction("phone_adopt_number", { phoneNumber: adoptNum });
+      setAdoptNum("");
+      await load();
+      if (d.number && d.number.id) setSelId(d.number.id);
+      setAdoptNote(d.warning ? { err: d.warning } : { ok: d.already ? "That number is already on this account." : "Added. It is on this account now." });
+    } catch (e) { setAdoptNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const portValid = !!portForm.numbers.trim() && !!portForm.currentCarrier.trim() && portForm.contactName.trim().length >= 2
+    && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(portForm.contactEmail.trim());
+  const portSecret = phonePortLooksSecret(portForm.currentCarrier) || phonePortLooksSecret(portForm.contactName)
+    || phonePortLooksSecret(portForm.cutoverWindow, true);
+  const bringCard = data.scope === "team" && canEdit && Array.isArray(data.portRequests) ? (
+    <div style={PHONE_CARD} data-ss-phone-bring>
+      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Bring your number</h4>
+      <p style={{ margin: "0 0 8px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+        Already have a business number? Structure Studio can move it here, so customers keep calling and texting the number they know.
+        A GoHighLevel number usually moves within one or two business days; a number from another phone company takes at least a week.
+      </p>
+      {data.portRequests.length > 0 && (
+        <div data-ss-phone-bring-list style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+          {data.portRequests.map((r) => (
+            <div key={r.id} data-ss-phone-bring-request={r.status} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12.5 }}>
+              <span style={{ fontWeight: 800, color: "#1E293B" }}>{(r.numbers || []).map(phoneDisplay).join(", ")}</span>
+              <span style={{ color: "#64748B" }}>{r.isLcPhone ? "GoHighLevel" : r.currentCarrier}</span>
+              <span style={{ fontWeight: 800, borderRadius: 999, padding: "2px 9px", background: r.status === "done" ? "#ECFDF5" : "#F1F5F9", color: r.status === "done" ? "#047857" : "#475569" }}>
+                {PORT_WORDS[r.status] || r.status}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {!portOpen && (
+        <button type="button" disabled={busy} data-ss-phone-bring-open onClick={() => { setPortOpen(true); setPortNote(null); }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
+          Bring a number you already have
+        </button>
+      )}
+      {portOpen && (
+        <div data-ss-phone-bring-form style={{ padding: "10px 12px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0 12px" }}>
+            <SmsField label="The number (or numbers, separated by commas)">
+              <input style={SMS_INPUT} value={portForm.numbers} placeholder="(816) 555-0123" data-ss-phone-bring-numbers
+                onChange={(e) => setPortForm((f) => ({ ...f, numbers: e.target.value }))} />
+            </SmsField>
+            <SmsField label="The phone company it is with now">
+              <input style={SMS_INPUT} value={portForm.currentCarrier} placeholder="e.g. Verizon, or GoHighLevel" maxLength={80} data-ss-phone-bring-carrier
+                onChange={(e) => setPortForm((f) => ({ ...f, currentCarrier: e.target.value }))} />
+            </SmsField>
+            <SmsField label="Is it a GoHighLevel (LC Phone) number?">
+              <select style={SMS_INPUT} value={portForm.isLcPhone} data-ss-phone-bring-lc onChange={(e) => setPortForm((f) => ({ ...f, isLcPhone: e.target.value }))}>
+                <option value="">Not sure</option>
+                <option value="yes">Yes, it's in GoHighLevel</option>
+                <option value="no">No, another phone company</option>
+              </select>
+            </SmsField>
+            <SmsField label="Who can approve the move (the account holder)">
+              <input style={SMS_INPUT} value={portForm.contactName} maxLength={120} data-ss-phone-bring-name
+                onChange={(e) => setPortForm((f) => ({ ...f, contactName: e.target.value }))} />
+            </SmsField>
+            <SmsField label="Their email">
+              <input style={SMS_INPUT} value={portForm.contactEmail} maxLength={254} data-ss-phone-bring-email
+                onChange={(e) => setPortForm((f) => ({ ...f, contactEmail: e.target.value }))} />
+            </SmsField>
+            <SmsField label="When it can move (optional)">
+              <input style={SMS_INPUT} value={portForm.cutoverWindow} maxLength={200} placeholder="e.g. weekday evenings after the 20th" data-ss-phone-bring-window
+                onChange={(e) => setPortForm((f) => ({ ...f, cutoverWindow: e.target.value }))} />
+            </SmsField>
+          </div>
+          <div data-ss-phone-bring-nosecrets style={{ fontSize: 12, color: portSecret ? "#B45309" : "#64748B", margin: "2px 0 8px", lineHeight: 1.5 }}>
+            {portSecret
+              ? "That looks like an account number or a PIN. Leave those out: Structure Studio asks for them by phone when the move is booked, and never stores them."
+              : "Don't include a PIN, password, account number or bill. Structure Studio asks for what the move needs by phone, and the account holder signs the transfer by email."}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" disabled={busy || !portValid || portSecret} data-ss-phone-bring-send onClick={sendPortRequest}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", opacity: busy || !portValid || portSecret ? 0.55 : 1 }}>
+              Send to Structure Studio
+            </button>
+            <button type="button" disabled={busy} onClick={() => setPortOpen(false)}
+              style={{ background: "none", border: "none", padding: 0, color: "#64748B", fontSize: 12.5, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {portNote && portNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{portNote.ok}</div>}
+      {portNote && portNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{portNote.err}</div>}
+      {data.canAdoptNumber && (
+        <div data-ss-phone-adopt style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 6 }}>
+            Structure Studio only: once a move has finished and the number is in this business&rsquo;s own Twilio account, add it here.
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <input value={adoptNum} placeholder="(816) 555-0123" data-ss-phone-adopt-number onChange={(e) => setAdoptNum(e.target.value)} style={{ ...S.input, width: 190 }} />
+            <button type="button" disabled={busy || adoptNum.replace(/\D/g, "").length < 10} data-ss-phone-adopt-send onClick={adoptMoved}
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", opacity: busy || adoptNum.replace(/\D/g, "").length < 10 ? 0.55 : 1 }}>
+              Adopt a moved number
+            </button>
+          </div>
+          {adoptNote && adoptNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{adoptNote.ok}</div>}
+          {adoptNote && adoptNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{adoptNote.err}</div>}
+        </div>
+      )}
+    </div>
+  ) : null;
+
   // ── Call recording (migration 263) ─────────────────────────────────────────────────────
   // Shown to everyone on the team screen; only the business OWNER can change it (the server's
   // phone_recording_save rule, reported as canChangeRecording), because recording customers is
-  // the business's own legal decision. The announcement is locked on. It saves on its own, with
-  // its own button, so the routing form's Save never touches it. `recording` is null on a
-  // database before 263: the card says so and offers nothing.
+  // the business's own legal decision. So is the announcement (2026-10-21): on by default, and
+  // turning it off asks first with PHONE_REC_UNANNOUNCED_WARNING, which stays on the card while it
+  // is off. It saves on its own, with its own button, so the routing form's Save never touches
+  // it. `recording` is null on a database before 263: the card says so and offers nothing.
   // Calls are recorded only while the owner's `on` AND the server's switch (`serverOn`, the
   // phone-api Worker's CALL_RECORDING rail as portal-settings sees it) are both true. With the
   // owner's on and the server's off, the card says recording hasn't started yet: never that calls
-  // are recorded while nothing records.
+  // are recorded while nothing records. Transcripts the same: the owner's choice AND the server's
+  // (`transcribeServerOn`, the CALL_TRANSCRIBE rail). Until both, the standard sentence leaves out
+  // "and transcribed" (as the Worker does) and nothing promises a transcript.
+  // Recording is ON by default (migration 287, Carolyn 2026-10-06): a business whose owner never
+  // saved this card is on, and the card says that is the default rather than who changed it. The
+  // first save of such a business (no updatedAt yet) asks "Record calls?" too, even when only the
+  // retention changed: the save stamps the owner as having chosen recording, so that choice always
+  // went past the same words as turning it on.
   const rec = data.recording || null;
   const recLive = !!(rec && rec.on && rec.serverOn);
   const recEdit = !!data.canChangeRecording && canEdit && !!recForm;
   const recProblem = recForm ? phoneRecNoticeProblem(recForm.noticeText) : null;
   const recDirty = !!(rec && recForm) && (recForm.on !== rec.on || recForm.transcribe !== rec.transcribe
+    || recForm.notice !== (rec.notice !== false)
     || Number(recForm.retentionDays) !== Number(rec.retentionDays)
     || recForm.noticeText.replace(/\s+/g, " ").trim() !== String(rec.noticeText || ""));
+  // Unticking the announcement asks first, with the warning; ticking it back on doesn't.
+  const setRecNotice = (on) => {
+    if (!on && !window.confirm(`Turn off the announcement? Calls will still be recorded, but callers won't be told.\n\n${PHONE_REC_UNANNOUNCED_WARNING}`)) return;
+    setRecForm((f) => ({ ...f, notice: on }));
+  };
   const saveRecording = async () => {
     const keep = Number(recForm.retentionDays);
     const keepWords = PHONE_REC_KEEP_WORDS[keep] || `${keep} days`;
-    const recWho = `The people who can see a call can play its recording${recForm.transcribe ? " and read its transcript and summary" : ""}.`;
-    if (recForm.on && !rec.on && !window.confirm(rec.serverOn
-      ? `Record calls? From your next call on, every call to and from your business number is announced and then recorded. ${recWho}`
-      : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is announced and then recorded. ${recWho}`)) return;
+    const recWho = `The people who can see a call can play its recording${recForm.transcribe && rec.transcribeServerOn ? " and read its transcript and summary" : ""}.`;
+    const how = recForm.notice ? "announced and then recorded" : "recorded without an announcement";
+    if (recForm.on && (!rec.on || !rec.updatedAt) && !window.confirm(rec.serverOn
+      ? `Record calls? From your next call on, every call to and from your business number is ${how}. ${recWho}`
+      : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is ${how}. ${recWho}`)) return;
     if (keep < Number(rec.retentionDays) && !window.confirm(`Keep recordings for ${keepWords}? Recordings older than that, and their transcripts, are deleted at the next daily clean-up. Their summaries stay with the calls.`)) return;
     setBusy(true); setRecNote(null);
     try {
       const d = await phoneAction("phone_recording_save", {
         on: recForm.on,
+        notice: recForm.notice,
         noticeText: recForm.noticeText,
         transcribe: recForm.transcribe,
         retentionDays: keep,
       });
       setData((x) => ({ ...x, recording: d.recording }));
       setRecForm(phoneRecFormFrom(d.recording));
+      const told = !(d.recording && d.recording.notice === false);
       setRecNote({ ok: !(d.recording && d.recording.on) ? "Saved. Calls aren't recorded."
-        : d.recording.serverOn ? "Saved. Calls are announced and recorded from the next call on."
-        : "Saved. Calls will be announced and recorded once call recording starts on this account." });
+        : d.recording.serverOn
+          ? (told ? "Saved. Calls are announced and recorded from the next call on." : "Saved. Calls are recorded from the next call on, without an announcement.")
+          : (told ? "Saved. Calls will be announced and recorded once call recording starts on this account."
+            : "Saved. Calls will be recorded, without an announcement, once call recording starts on this account.") });
     } catch (e) { setRecNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -2272,7 +3183,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       <div style={{ fontSize: 13, color: "#64748B" }}>Call recording isn&rsquo;t available on this account yet.</div>
     </div>
   ) : (() => {
-    const standard = recForm.transcribe ? PHONE_REC_STANDARD_TRANSCRIBED : PHONE_REC_STANDARD;
+    const standard = recForm.transcribe && rec.transcribeServerOn ? PHONE_REC_STANDARD_TRANSCRIBED : PHONE_REC_STANDARD;
     const who = rec.updatedBy ? ((team.find((t) => t.userId === rec.updatedBy) || {}).name || null) : null;
     const when = phoneWhen(rec.updatedAt);
     const check = (checked, disabled, onChange, label, sub, key) => (
@@ -2302,16 +3213,17 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           </p>
         )}
         <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
-          When it&rsquo;s on, calls to and from your business number are recorded from the moment someone answers. Callers
-          hear the announcement below before the call rings your team, and on calls your team places, the customer hears it
-          when they pick up. Recording pauses while a customer is on hold, except while the call is being passed to a
+          When it&rsquo;s on, calls to and from your business number are recorded from the moment someone answers. While the
+          announcement is on, callers hear it before the call rings your team, and on calls your team places, the customer
+          hears it when they pick up. Recording pauses while a customer is on hold, except while the call is being passed to a
           teammate. Recordings play on the contact&rsquo;s page here and in My Synergy Phone,
           for the people who can see that call.
         </p>
         <div style={{ display: "grid", gap: 10 }}>
           {check(recForm.on, !recEdit, (e) => setRecForm((f) => ({ ...f, on: e.target.checked })), "Record calls", null, "on")}
-          {check(true, true, () => {}, "Announce it to callers",
-            "Always on: callers are told before anything is recorded.", "notice")}
+          {check(recForm.notice, !recEdit, (e) => setRecNotice(e.target.checked), "Announce it to callers",
+            recForm.notice ? "Callers are told before anything is recorded. On by default."
+              : "Off: calls are still recorded, but callers aren't told.", "notice")}
           <label style={{ display: "block" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>What callers hear (optional)</div>
             <input value={recForm.noticeText} disabled={!recEdit} maxLength={300} placeholder={standard}
@@ -2319,11 +3231,22 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
               style={S.input} data-ss-phone-recording-notice />
             <div style={{ fontSize: 11.5, color: recProblem ? "#B91C1C" : "#64748B", marginTop: 4, lineHeight: 1.45 }}>
               {recProblem || <>Leave it empty for the standard sentence: &ldquo;{standard}&rdquo; Your own wording has to say the call is recorded (10 to 300 characters).</>}
+              {!recProblem && !recForm.notice && (
+                <span data-ss-phone-recording-notice-unused style={{ display: "block" }}>Callers don&rsquo;t hear it while the announcement is off.</span>
+              )}
             </div>
           </label>
           {check(recForm.transcribe, !recEdit, (e) => setRecForm((f) => ({ ...f, transcribe: e.target.checked })),
             "Transcripts and summaries",
-            "A written transcript of each recorded call, and a short summary with any action items, a minute or two after the call ends. Cloudflare writes the transcript and Anthropic's Claude writes the summary.",
+            <>
+              A written transcript of each recorded call, and a short summary with any action items, a minute or two after the
+              call ends. Cloudflare writes the transcript and Anthropic&rsquo;s Claude writes the summary.
+              {!rec.transcribeServerOn && (
+                <span data-ss-phone-recording-transcripts-waiting style={{ display: "block", marginTop: 3, color: "#92400E" }}>
+                  Transcripts haven&rsquo;t started on this account yet. Your choice is saved and takes effect once they do.
+                </span>
+              )}
+            </>,
             "transcribe")}
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", flexWrap: "wrap" }}>
             Keep recordings for
@@ -2335,10 +3258,16 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
             <span style={{ fontSize: 12, color: "#64748B" }}>The recording and its transcript are deleted after that. The summary stays with the call.</span>
           </label>
         </div>
-        <div data-ss-phone-recording-legal style={{ fontSize: 12, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 10px", marginTop: 12, lineHeight: 1.5 }}>
-          Some states require everyone on a call to agree before it&rsquo;s recorded. The announcement tells every caller, but the
-          rules are yours to follow: check them with your lawyer for the states you and your customers are in.
-        </div>
+        {recForm.notice ? (
+          <div data-ss-phone-recording-legal style={{ fontSize: 12, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 10px", marginTop: 12, lineHeight: 1.5 }}>
+            Some states require everyone on a call to agree before it&rsquo;s recorded. The announcement tells every caller, but the
+            rules are yours to follow: check them with your lawyer for the states you and your customers are in.
+          </div>
+        ) : (
+          <div data-ss-phone-recording-legal="unannounced" role="alert" style={{ fontSize: 12, color: "#991B1B", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 10px", marginTop: 12, lineHeight: 1.5 }}>
+            <span style={{ fontWeight: 800 }}>Callers aren&rsquo;t told calls are recorded. </span>{PHONE_REC_UNANNOUNCED_WARNING}
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
           {recEdit && (
             <button type="button" disabled={busy || !recDirty || !!recProblem} onClick={saveRecording} data-ss-phone-recording-save
@@ -2352,6 +3281,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           {when && (
             <span style={{ fontSize: 12, color: "#64748B" }}>Last changed {when}{who ? ` by ${who}` : ""}.</span>
           )}
+          {!when && rec.on && (
+            <span data-ss-phone-recording-default style={{ fontSize: 12, color: "#64748B" }}>
+              On by default for every business. The business owner can turn it off.
+            </span>
+          )}
           {recNote && recNote.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{recNote.err}</span>}
           {recNote && recNote.ok && <span style={{ fontSize: 12.5, color: "#047857", fontWeight: 700 }}>{recNote.ok}</span>}
         </div>
@@ -2361,8 +3295,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
 
   // Someone with their OWN calls only: whether it is on, which number customers see, and where
   // to get the apps. The setup is the team's business (the server did not send it), but whether
-  // their calls are recorded is theirs to know (recording {on, serverOn}: said only when both are
-  // true, which is when calls really are recorded).
+  // their calls are recorded is theirs to know (recording {on, serverOn, notice}: said only when
+  // both switches are true, which is when calls really are recorded; and whether callers hear the
+  // announcement, which only a server from 2026-10-21 on sends as false).
   if (data.scope !== "team" || !form) {
     return (
       <div data-ss-phone-settings="own">
@@ -2372,8 +3307,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           Your owner chooses who answers the business number. Calls you place and take show on the Calls page.
           {data.recording && data.recording.on && data.recording.serverOn && (
             <span data-ss-phone-recording="own" style={{ display: "block", marginTop: 6 }}>
-              Calls on your business number are recorded. Callers hear an announcement first, and recordings play on the
-              contact&rsquo;s page and in My Synergy Phone.
+              {data.recording.notice === false
+                ? <>Calls on your business number are recorded. Your owner has turned the announcement off, so callers
+                  aren&rsquo;t told. Recordings play on the contact&rsquo;s page and in My Synergy Phone.</>
+                : <>Calls on your business number are recorded. Callers hear an announcement first, and recordings play on the
+                  contact&rsquo;s page and in My Synergy Phone.</>}
             </span>
           )}
         </div>
@@ -2456,6 +3394,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {numberCard}
       {thisNumberCard}
       {callerIdCard}
+      {bringCard}
 
       <div style={PHONE_CARD}>
         <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Who answers</h4>
@@ -2540,7 +3479,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {!ro && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
           <button type="button" disabled={busy || !sel} onClick={save} data-ss-phone-save
-            title={sel ? "" : "Get a number on the Text Messaging tab first"}
+            title={sel ? "" : "Get a number on the SMS - A2P tab first"}
             style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !sel ? 0.6 : 1 }}>
             {busy ? "Saving…" : sel && sel.route ? (many ? `Save ${selName}` : "Save phone settings") : "Save and finish setup"}
           </button>

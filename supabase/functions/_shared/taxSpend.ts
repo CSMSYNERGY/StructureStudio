@@ -58,7 +58,9 @@ import {
 } from "./salesTax.ts";
 import { stampTax } from "./taxChain.ts";
 import { claimLookup, DAILY_TAX_LOOKUP_CAP, finishLookup, TAX_LOOKUP_MINUTE_WINDOW_SECONDS } from "./taxLookups.ts";
-import { chargeTaxCalculation, type TaxChargeResult, type TaxMeterKind } from "./taxMeter.ts";
+import {
+  chargeTaxCalculation, recordLookupCharge, type TaxChargeResult, type TaxMeterKind,
+} from "./taxMeter.ts";
 
 // deno-lint-ignore no-explicit-any
 type Admin = any;
@@ -456,14 +458,36 @@ export function verifiedTax(input: {
  * Charge for a lookup — only one that came back with a rate, and keyed on its ledger row. The
  * caller runs this AFTER the document is written (Verify) or the invoice is recorded (invoice
  * check). Never throws; `no_rate` means nothing was attempted.
+ *
+ * WHAT THE CHARGE DID GOES ON THE ROW (migration 319): chargeTaxCalculation itself marks the row
+ * `pending` (with the price) only once the meter is armed and priced and the tenant is not exempt,
+ * just before the debit; this then records the outcome (charged with its cents, wallet row and
+ * time; exempt; inactive; unpriced; error, with the price attempted when it got that far), and
+ * `no_rate` on the row of a lookup that produced no rate. A lookup made while a meter is off goes
+ * straight to `inactive` and never passes through a state the retry replays. The writes are
+ * best-effort and never throw: they cannot change the answer the builder gets or the charge, and a
+ * write that fails (a database without 319, a blip) costs only the record. The wallet row, keyed
+ * on the ledger row, is still the truth, and admin-catalog tax_charge_retry links it first.
  */
 export async function chargeLookup(
   admin: Admin,
   lookup: PaidLookup,
   opts: { clientId: string; kind: TaxMeterKind; refType: string; refId: string | null; memo?: string | null; actorUserId?: string | null },
 ): Promise<TaxChargeResult | { charged: false; reason: "no_rate" }> {
-  if (!lookup.ok) return { charged: false, reason: "no_rate" };
-  return await chargeTaxCalculation(admin, { ...opts, lookupId: lookup.lookupId });
+  try {
+    if (!lookup.ok) {
+      const none = { charged: false as const, reason: "no_rate" as const };
+      if (lookup.lookupId) await recordLookupCharge(admin, lookup.lookupId, none);
+      return none;
+    }
+    const r = await chargeTaxCalculation(admin, { ...opts, lookupId: lookup.lookupId });
+    await recordLookupCharge(admin, lookup.lookupId, r);
+    return r;
+  } catch {
+    // Nothing above throws by contract. If something does, report it the way a failed charge is
+    // reported, so the caller logs it (a row chargeTaxCalculation had marked pending is retried).
+    return { charged: false, reason: "error" };
+  }
 }
 
 // ── send_invoice: the informational check ──────────────────────────────────────────────────

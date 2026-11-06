@@ -31,7 +31,6 @@
 //      (its ridge runs side to side) and both keys beside wings
 //   8. zero page errors
 //
-//   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/roofStep.mjs                              (SS_SHOTS=<dir> for the PNGs)
 //
 // Exit 0 = every assertion held.

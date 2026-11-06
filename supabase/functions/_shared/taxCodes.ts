@@ -1,6 +1,6 @@
 // Tax codes: which Avalara tax code each thing a builder sells falls under (migration 246,
-// 2026-09-17). The pure half — the headings a builder maps, the starter codes, payload parsing,
-// the search pattern, the save plan and the mapping of Avalara's ListTaxCodes rows. The database
+// 2026-09-17). The pure half — the headings a builder maps, payload parsing,
+// the Sales Tax list and its search, the save plan and the mapping of Avalara's ListTaxCodes rows. The database
 // stays in portal-settings (tax_codes_get / tax_codes_search / tax_codes_save) and the network in
 // taxCodeSync.ts.
 //
@@ -130,29 +130,79 @@ export function headingsView(): { key: string; label: string; group: TaxHeadingG
   return TAX_HEADINGS.map(({ key, label, group }) => ({ key, label, group }));
 }
 
-/**
- * The starter codes, in the order migration 246 seeds them and the picker lists them. Each hint
- * is a plain-English SUGGESTION of where the code is commonly used — never advice. Which code is
- * right depends on how and where the builder files (a delivered building is personal property in
- * one state and a real-property improvement in another; whether title passes before or after
- * delivery depends on the sales contract), so the builder or their accountant chooses.
- */
-export const COMMON_CODES: readonly { code: string; hint: string }[] = [
-  { code: "P0000000", hint: "General goods — the usual choice for a building sold as a finished product" },
-  { code: "NT", hint: "Not taxed (goods)" },
-  { code: "ON030000", hint: "Not taxed (fees and services)" },
-  { code: "SI020100", hint: "Installation that comes with the item you sold, shown separately on the bill" },
-  { code: "SI020200", hint: "Installation labor only, for an item you did not sell" },
-  { code: "SC150100", hint: "Construction work on real property (new construction)" },
-  { code: "FR010000", hint: "Delivery on your own truck" },
-  { code: "FR010100", hint: "Delivery on your own truck, when the building becomes the customer's at delivery" },
-  { code: "FR010200", hint: "Delivery on your own truck, when the building is already the customer's before it leaves" },
-  { code: "FR020100", hint: "Shipping by a freight carrier, when the goods become the customer's at delivery" },
-  { code: "FR030000", hint: "Shipping and handling charged together" },
-  { code: "OH010000", hint: "Handling charged separately from shipping" },
+/** How the picker groups the list, in display order. */
+export type SalesTaxCodeGroup = "products" | "on_site" | "site_work" | "delivery" | "other";
+
+export const SALES_TAX_CODE_GROUPS: { key: SalesTaxCodeGroup; label: string }[] = [
+  { key: "products", label: "Buildings and options" },
+  { key: "on_site", label: "Building on site and installation" },
+  { key: "site_work", label: "Foundation and site work" },
+  { key: "delivery", label: "Delivery" },
+  { key: "other", label: "Other services and not taxed" },
 ];
 
-const HINTS = new Map(COMMON_CODES.map((c) => [c.code, c.hint]));
+/**
+ * THE SALES TAX LIST: the only codes a builder can pick. The owner's ask (2026-11-02): do not show
+ * Avalara's whole list (3,106 active North America codes), because builders would be "completely
+ * flooded"; show the ones a US or Canadian builder could really use, with several choices where
+ * there are several. These 31 were picked from the synced catalog and approved by Ahsan on
+ * 2026-11-02; the vault note "StructureStudio Sales Tax Code List Draft 2026-11-02" says what was
+ * left out and why.
+ *
+ * Changing the list means editing this array and redeploying portal-settings: no migration, because
+ * avalara_tax_codes already holds every code Avalara lists (a code the catalog does not hold, or no
+ * longer marks active, simply does not show). Migration 246's twelve seeds are all on it.
+ *
+ * USE TAX IS NOT THIS LIST. The owner wants it later as a separate option for post-frame builders.
+ * Its own list goes beside this one; the labor-and-materials codes (SC150606, SC150607, SC150307,
+ * SC150308, the PB150 building materials) were left off this list for it.
+ *
+ * Each hint is a plain-English SUGGESTION of where the code is commonly used, never advice. Which
+ * code is right depends on how and where the builder files (a delivered building is personal
+ * property in one state and a real-property improvement in another; whether title passes before or
+ * after delivery depends on the sales contract), so the builder or their accountant chooses.
+ */
+export const SALES_TAX_CODES: readonly { code: string; group: SalesTaxCodeGroup; hint: string }[] = [
+  // ── Buildings and options ──
+  { code: "P0000000", group: "products", hint: "General goods. The usual choice for a building sold as a finished product, and its options" },
+  { code: "SF010001", group: "products", hint: "A building made to order from your own materials and not attached to the land" },
+  { code: "PH101300", group: "products", hint: "Impact-rated doors and windows, if you sell them" },
+  { code: "NT", group: "products", hint: "Goods that are not taxed" },
+  // ── Building on site and installation ──
+  { code: "SC150100", group: "on_site", hint: "Putting up a new building on the customer's land" },
+  { code: "SC150600", group: "on_site", hint: "Adding to an existing building on residential property, as a capital improvement" },
+  { code: "SC150601", group: "on_site", hint: "Adding to an existing building on residential property, not a capital improvement" },
+  { code: "SC150200", group: "on_site", hint: "Adding to an existing building on commercial property" },
+  { code: "SI020100", group: "on_site", hint: "Installing something you sold, shown as its own line on the bill" },
+  { code: "SI020200", group: "on_site", hint: "Labor only, for an item you did not sell" },
+  { code: "SI026665", group: "on_site", hint: "Installation where the item becomes part of the property, as a capital improvement" },
+  { code: "SI026666", group: "on_site", hint: "Installation where the item becomes part of the property" },
+  { code: "SI026667", group: "on_site", hint: "Installing something into a new building for the first time" },
+  // ── Foundation and site work ──
+  { code: "SC156211", group: "site_work", hint: "Site prep on residential property, as a capital improvement" },
+  { code: "SC156213", group: "site_work", hint: "Site prep on residential property, not a capital improvement" },
+  { code: "SC156210", group: "site_work", hint: "Site prep on commercial property, as a capital improvement" },
+  { code: "SC156212", group: "site_work", hint: "Site prep on commercial property, not a capital improvement" },
+  // ── Delivery ──
+  { code: "FR010000", group: "delivery", hint: "Delivery on your own truck" },
+  { code: "FR010100", group: "delivery", hint: "Your own truck, when the building becomes the customer's at delivery" },
+  { code: "FR010200", group: "delivery", hint: "Your own truck, when the building is already the customer's before it leaves" },
+  { code: "FR020100", group: "delivery", hint: "A freight carrier, when the building becomes the customer's at delivery" },
+  { code: "FR020200", group: "delivery", hint: "A freight carrier, when the building is the customer's once it leaves your lot" },
+  { code: "FR020400", group: "delivery", hint: "A hired hauler that is not a freight carrier, when the building becomes the customer's at delivery" },
+  { code: "FR020500", group: "delivery", hint: "A hired hauler that is not a freight carrier, when the building is the customer's once it leaves your lot" },
+  { code: "FR030000", group: "delivery", hint: "Shipping and handling charged together" },
+  { code: "OH010000", group: "delivery", hint: "Handling charged on its own" },
+  { code: "FR059314", group: "delivery", hint: "A required charge for loading or unloading" },
+  { code: "FR060000", group: "delivery", hint: "Freight to or from Canada" },
+  // ── Other services and not taxed ──
+  { code: "S0000001", group: "other", hint: "A required charge on the sale, such as a change order fee" },
+  { code: "S0000000", group: "other", hint: "A service that fits nothing above" },
+  { code: "ON030000", group: "other", hint: "Fees and services that are not taxed" },
+];
+
+const HINTS = new Map(SALES_TAX_CODES.map((c) => [c.code, c.hint]));
+const GROUP_OF = new Map(SALES_TAX_CODES.map((c) => [c.code, SALES_TAX_CODE_GROUPS.find((g) => g.key === c.group)?.label ?? null]));
 
 /** Avalara's taxCode is a string of up to 25 characters; the system codes are uppercase letters
  *  and digits. The same pattern is migration 246's CHECK on avalara_tax_codes.code. */
@@ -257,27 +307,15 @@ export function parseAssignmentsPayload(body: unknown): ParsedAssignments {
 /** Longest search a type-ahead sends. Longer text finds nothing a shorter prefix would not. */
 export const SEARCH_MAX = 60;
 
-/**
- * The text of a type-ahead search, ready to sit inside an ILIKE pattern: trimmed, capped at
- * SEARCH_MAX, and with ILIKE's own metacharacters escaped (`\` first, then `%` and `_`) so a
- * builder typing "10%" searches for "10%" rather than "10 followed by anything". `*` is dropped
- * outright: PostgREST turns it into `%` inside like/ilike filters before Postgres sees the
- * pattern, so no escape survives the trip, and no tax code or description needs one.
- * The caller adds the wildcards. Empty for a blank or non-string query.
- */
-export function searchQuery(q: unknown): string {
-  if (typeof q !== "string") return "";
-  const s = q.replace(/\*/g, "").trim().slice(0, SEARCH_MAX).trim();
-  return s.replace(/\\/g, "\\\\").replace(/[%_]/g, (c) => `\\${c}`);
-}
-
 export interface TaxCodeView {
   code: string;
   description: string;
   typeId: string | null;
   isActive: boolean;
-  /** The COMMON_CODES hint, or null for any other code. */
+  /** The SALES_TAX_CODES hint, or null for a code that is not on the list. */
   hint: string | null;
+  /** The name of the list's group the code is under, or null for a code that is not on the list. */
+  group: string | null;
 }
 
 /** An avalara_tax_codes row as the portal reads it. */
@@ -290,13 +328,14 @@ export function taxCodeView(row: unknown): TaxCodeView {
     typeId: typeof r.type_id === "string" && r.type_id ? r.type_id : null,
     isActive: r.is_active === true,
     hint: HINTS.get(code) ?? null,
+    group: GROUP_OF.get(code) ?? null,
   };
 }
 
-/** Common codes first, in COMMON_CODES order, then the rest by code. The order the picker shows
- *  when the box is empty, and the order tax_codes_get lists the codes it sends. */
+/** The list's codes first, in its order, then any others by code. The order the picker shows and
+ *  the order tax_codes_get lists the codes it sends. */
 export function orderCodes<T extends { code: string }>(codes: T[]): T[] {
-  const rank = new Map(COMMON_CODES.map((c, i) => [c.code, i]));
+  const rank = new Map(SALES_TAX_CODES.map((c, i) => [c.code, i]));
   return [...codes].sort((a, b) => {
     const ra = rank.get(a.code) ?? Infinity, rb = rank.get(b.code) ?? Infinity;
     if (ra !== rb) return ra - rb;
@@ -304,25 +343,20 @@ export function orderCodes<T extends { code: string }>(codes: T[]): T[] {
   });
 }
 
-/** Most codes one search returns. A picker list, not a browser for the whole catalog. */
-export const TAX_CODE_SEARCH_LIMIT = 50;
-
 /**
- * One result list from two queries: every code of `first`, then the codes of `second` not
- * already listed, capped at `limit`. For a typed search `first` is the code-prefix matches —
- * someone typing "FR01" is naming a code, so those lead — and `second` the description matches.
- * For an empty box `first` is the common codes.
+ * The picker's type-ahead over the list, keeping its order; an empty box is the whole list. It runs
+ * here rather than as a database filter because the words a builder types are often not Avalara's:
+ * "foundation" has to find the site work codes, whose wording says "Excavation & Grading", and
+ * "truck" the delivery codes, whose wording says "company vehicle". So every word of the search is
+ * looked for in the code, Avalara's wording, the hint and the group's name.
  */
-export function mergeCodeLists<T extends { code: string }>(first: T[], second: T[], limit = TAX_CODE_SEARCH_LIMIT): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const c of [...(first ?? []), ...(second ?? [])]) {
-    if (out.length >= limit) break;
-    if (seen.has(c.code)) continue;
-    seen.add(c.code);
-    out.push(c);
-  }
-  return out;
+export function searchCodes<T extends TaxCodeView>(codes: T[], q: unknown): T[] {
+  const words = typeof q === "string" ? q.trim().slice(0, SEARCH_MAX).toLowerCase().split(/\s+/).filter(Boolean) : [];
+  if (!words.length) return codes;
+  return codes.filter((c) => {
+    const text = `${c.code} ${c.description} ${c.hint ?? ""} ${c.group ?? ""}`.toLowerCase();
+    return words.every((w) => text.includes(w));
+  });
 }
 
 /** A tax_code_assignments row as stored. */
@@ -347,6 +381,19 @@ export function visibleAssignments(
     }
   }
   return out;
+}
+
+/**
+ * The codes in a save that it must refuse because they are not on the list. The list is the
+ * server's rule as well as the picker's: a browser that skips the picker gets the same answer. A
+ * code this builder already has stored is let through, because the save replaces the whole set: a
+ * code saved before the list existed, or taken off it later, must not stop the builder saving an
+ * unrelated change.
+ */
+export function codesOffTheList(codes: string[], stored: StoredAssignment[]): string[] {
+  const onList = new Set(SALES_TAX_CODES.map((c) => c.code));
+  const theirs = new Set((stored ?? []).map((a) => String(a?.tax_code)));
+  return codes.filter((c) => !onList.has(c) && !theirs.has(c));
 }
 
 export interface PlannedAssignment { target_type: TargetType; target_key: string; tax_code: string }

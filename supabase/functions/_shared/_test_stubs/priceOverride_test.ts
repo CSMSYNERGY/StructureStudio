@@ -131,10 +131,18 @@ Deno.test("only rows the server can re-price carry a list unit; included and per
   const one = rowsOf(SEL, ITEMS.filter((i) => i.id !== 2));
   assertEquals(byKey(one, "singleDoor").unit, "included");
   assertEquals(byKey(one, "singleDoor").listUnit, undefined);
-  // A tenant who hides prices: nothing is priceable anywhere.
+  // A tenant who hides prices: the LINES still list (337 — a shopper must read the window they
+  // placed), but nothing carries money and nothing is priceable anywhere.
   const hidden = { ...C, showPricing: false };
   assert(D.computeSelectionRows(SEL, PAINT, hidden, ITEMS).every((r: any) => r.listUnit == null));
-  assertEquals(D.computeLayoutPricingRows(ITEMS, SEL, [], hidden, PAINT).rows, []);
+  const hiddenRows = D.computeLayoutPricingRows(ITEMS, SEL, [], hidden, PAINT).rows;
+  assert(hiddenRows.length > 0, "the placed items still line up with pricing hidden");
+  assert(hiddenRows.every((r: any) => r.total === null), "no row carries a total");
+  assert(hiddenRows.every((r: any) => r.listUnit == null), "no row is priceable");
+  assert(hiddenRows.every((r: any) => !String(r.unit || "").includes("$")), "no unit quotes a rate");
+  // The same keys as the priced run, so a × on one of these rows still removes the right items.
+  assertEquals(hiddenRows.map((r: any) => r.key).sort(),
+    D.computeLayoutPricingRows(ITEMS, SEL, [], C, PAINT).rows.map((r: any) => r.key).sort());
 });
 
 Deno.test("absent, empty or unknown overrides leave every row exactly as it was", () => {

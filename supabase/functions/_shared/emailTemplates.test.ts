@@ -726,7 +726,10 @@ Deno.test("cleanTemplateCopy: keeps what says something, refuses markup by name,
   for (const [field, words] of [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"]]) {
     const bad = cleanTemplateCopy({ quote: { [field]: "Hi <b>there</b>" } });
     assert("error" in bad, `${field} with markup must be refused`);
-    if ("error" in bad) assertEq(bad.error, `Remove the < > characters from the quote ${words} — this is plain text, not HTML.`);
+    if ("error" in bad) assertEq(bad.error, `Remove the < > characters from the estimate ${words} — this is plain text, not HTML.`);
+    // The "estimate" (CRM) key is the tab the editor calls "CRM estimate".
+    const crm = cleanTemplateCopy({ estimate: { [field]: "Hi <b>there</b>" } });
+    if ("error" in crm) assertEq(crm.error, `Remove the < > characters from the CRM estimate ${words} — this is plain text, not HTML.`);
   }
   const none = cleanTemplateCopy(null);
   assert("error" in none && none.error === "Nothing to save.", "null is nothing to save");
@@ -796,4 +799,354 @@ Deno.test("white-label: the new wording blocks and the photo add no platform bra
       assertNotIncludes(all, brand, `platform identifier "${brand}" leaked`);
     }
   }
+});
+
+// ── THE PHOTO-HEADER DESIGN (Carolyn 2026-10-14) ──────────────────────────────────────────
+// Her GHL email: photo, rule, "We're getting closer, {first}", paragraphs, a wide green button, a
+// slogan, "Thanks," and a signature card. Opt-in per kind with layout "photo"; everything else in
+// this file (and the golden test) pins that a builder who never switches it on sees no change.
+
+const HERO = `${STORAGE}/storage/v1/object/public/branding/acme-sheds/email-hero-1.jpg`;
+const BANNER = `${STORAGE}/storage/v1/object/public/branding/acme-sheds/email-footer-1.jpg`;
+const photoCopy = () => ({
+  layout: "photo",
+  subject: "Your shed estimate is here!",
+  hero: HERO,
+  heading: "We're getting closer, {first}",
+  message: "Hi {first},\n\nHere is the estimate for your new shed! Please click the button below.\n\n*If you have any changes, let me know.*\n\n**Click Accept to move this order forward!**",
+  button: "VIEW SHED ESTIMATE",
+  tagline: "EVERYONE NEEDS *a little space* IN THEIR LIFE",
+  closing: "Thanks,",
+  signName: "Pat Miller",
+  signTitle: "Owner/Manager",
+  footer: BANNER,
+  accent: "#F47B2A",
+  buttonColor: "#2cab05",
+});
+const ADDRESS = { addressLine1: "1 Barn Way", city: "Springfield", state: "MO", postalCode: "65801", countryCode: "US" };
+const photoQuote = (copy: Record<string, unknown> = photoCopy(), extra: Record<string, unknown> = {}) =>
+  estimateEmail({ ...acmeQuote(), logoUrl: "https://example.com/logo.png", customerName: "Alex Smith", address: ADDRESS, templateCopy: { quote: copy }, ...extra });
+
+Deno.test("photo design: photo, heading, paragraphs, wide button, slogan, signature and banner, in her order", () => {
+  const q = photoQuote();
+  assertEq(q.subject, "Your shed estimate is here!");
+  const order = [
+    `src="${HERO}"`,
+    ">We&#39;re getting closer, Alex</h2>",
+    ">Hi Alex,</p>",
+    "<em>If you have any changes, let me know.</em>",
+    "<strong>Click Accept to move this order forward!</strong>",
+    ">VIEW SHED ESTIMATE</a>",
+    "Estimate #AS-1041 · Lofted Barn - 12x24",
+    "View your floor plan (PDF)",
+    ">a little space</span>",
+    ">Thanks,</p>",
+    ">Pat Miller</p>",
+    ">Acme Sheds</p>",
+    ">Owner/Manager</p>",
+    `<img src="https://example.com/logo.png"`,
+    ">1 Barn Way, Springfield, MO 65801</p>",
+    ">acmesheds.example.com</a>",
+    ">(555) 555-0100</p>",
+    `src="${BANNER}"`,
+    "All rights reserved.",
+    "Quote good for 30 days.",
+  ];
+  let at = -1;
+  for (const needle of order) {
+    const i = q.html.indexOf(needle, at + 1);
+    assert(i > at, `expected ${JSON.stringify(needle)} after the previous piece (found at ${i}, previous ${at})`);
+    at = i;
+  }
+  // The photo opens the same page the button does, the way hers is linked.
+  assertIncludes(q.html, `<a href="https://app.example.com/my-quotes?client=acme-sheds" target="_blank" style="text-decoration:none;"><img src="${HERO}"`);
+  // Colours: the accent is stored lowercase and drawn on the rules; the button is a filled cell.
+  assertIncludes(q.html, `bgcolor="#f47b2a"`);
+  assertIncludes(q.html, `bgcolor="#2cab05" style="background-color:#2cab05;padding:14px 25px;"`);
+  // No total on a quote email, here either (Carolyn 2026-09-14).
+  for (const s of [q.html, q.text, q.subject]) assertNotIncludes(s, "8,400");
+    assertIncludes(q.html, ">Your estimate from Acme Sheds is ready.</div>");
+});
+
+Deno.test("photo design: every word a reader sees says estimate, never quote (Carolyn Q12)", () => {
+  // Terms are the builder's own words; ours are what this pins.
+  for (const o of [photoQuote({ layout: "photo" }, { quoteTerms: "Good for 30 days." }), photoQuote({ layout: "photo" }, { docWord: undefined, quoteTerms: "Good for 30 days." })]) {
+    // Addresses are identifiers (my-quotes, -quote.pdf); everything a person reads is checked.
+    const read = (o.subject + o.html.replace(/(href|src)="[^"]*"/g, "") + o.text.replace(/https?:\/\/\S+/g, "")).toLowerCase();
+    assert(!/\bquot(e|es|ed|ing)\b/.test(read), `a reader sees "quote": ${read.match(/.{0,40}\bquote.{0,40}/)?.[0]}`);
+  }
+  const d = photoQuote({ layout: "photo" });
+  assertEq(d.subject, "Your estimate AS-1041 from Acme Sheds");
+  assertIncludes(d.html, "View your estimate (PDF)");
+});
+
+Deno.test("photo design: the website reads without https:// and a slash, a bare 10-digit phone gets its dashes", () => {
+  const o = photoQuote({ layout: "photo" }, { website: "https://acmesheds.example.com/", phone: "5555550100" });
+  assertIncludes(o.html, `href="https://acmesheds.example.com/"`);
+  assertIncludes(o.html, ">acmesheds.example.com</a>");
+  assertIncludes(o.html, ">(555) 555-0100</p>");
+  assertIncludes(o.text, "(555) 555-0100 | acmesheds.example.com");
+  const typed = photoQuote({ layout: "photo" }, { phone: "707.725.2276" });
+  assertIncludes(typed.html, ">707.725.2276</p>");
+});
+
+Deno.test("photo design: the text half reads the same email without markers", () => {
+  const q = photoQuote();
+  for (const line of [
+    "We're getting closer, Alex",
+    "Hi Alex,",
+    "If you have any changes, let me know.",
+    "Click Accept to move this order forward!",
+    "VIEW SHED ESTIMATE: https://app.example.com/my-quotes?client=acme-sheds",
+    "Estimate #: AS-1041",
+    "Floor plan (PDF): https://storage.example.com/floor-plans/acme-sheds/SS-ABC123.pdf",
+    "EVERYONE NEEDS a little space IN THEIR LIFE",
+    "Thanks,\nPat Miller\nAcme Sheds\nOwner/Manager\n1 Barn Way, Springfield, MO 65801\n(555) 555-0100 | acmesheds.example.com",
+    "Quote good for 30 days.",
+  ]) assertIncludes(q.text, line);
+  assertNotIncludes(q.text, "**");
+  assertNotIncludes(q.text, "*a little");
+  assertNotIncludes(q.text, "<");
+});
+
+Deno.test("photo design: with no name on the design, no dangling comma and a polite greeting", () => {
+  const q = photoQuote(photoCopy(), { customerName: "" });
+  assertIncludes(q.html, ">We&#39;re getting closer</h2>");
+  assertIncludes(q.html, ">Hi,</p>");
+  const d = photoQuote({ layout: "photo" }, { customerName: undefined });
+  assertIncludes(d.html, ">We&#39;re getting closer</h2>");
+  assertIncludes(d.html, ">Hi there,</p>");
+  assertIncludes(d.html, ">VIEW YOUR ESTIMATE</a>");
+  assertIncludes(d.html, ">Thanks,</p>");
+});
+
+Deno.test("photo design: ours when nothing is typed, and the floor plan sentence only with a floor plan", () => {
+  const d = photoQuote({ layout: "photo" });
+  assertIncludes(d.html, ">We&#39;re getting closer, Alex</h2>");
+  assertIncludes(d.html, "Your floor plan, with everything you chose, is linked below.");
+  assertIncludes(d.html, `bgcolor="#2cab05"`);
+  assertIncludes(d.html, `bgcolor="#f47b2a"`);
+  const noPlan = photoQuote({ layout: "photo" }, { pdfUrl: null });
+  assertNotIncludes(noPlan.html, "Your floor plan");
+  // No top photo and no building photo: the logo and the name open it, like the classic card.
+  assertIncludes(d.html, `<img src="https://example.com/logo.png" alt="Acme Sheds" width="170"`);
+});
+
+Deno.test("photo design: the building photo takes the top when there is no top photo, and only then", () => {
+  const withPic = photoQuote({ layout: "photo" }, { pictureUrl: PHOTO });
+  assertIncludes(withPic.html, `<img src="${PHOTO}" alt="Acme Sheds" width="560"`);
+  const both = photoQuote({ layout: "photo", hero: HERO }, { pictureUrl: PHOTO });
+  assertIncludes(both.html, `src="${HERO}"`);
+  assertNotIncludes(both.html, PHOTO);
+  const off = photoQuote({ layout: "photo", picture: false }, { pictureUrl: PHOTO });
+  assertNotIncludes(off.html, PHOTO);
+});
+
+Deno.test("photo design: every builder value is escaped, and markup is dropped on the way out", () => {
+  const hostile = `<script>alert(1)</script> & "q"`;
+  const q = photoQuote({ ...photoCopy(), heading: `Hi "you" & co`, signName: `Pat "P" & Co`, tagline: `A & B *c & d*` }, { customerName: hostile });
+  assertNotIncludes(q.html, "<script>");
+  assertIncludes(q.html, "Hi &quot;you&quot; &amp; co");
+  assertIncludes(q.html, "Pat &quot;P&quot; &amp; Co");
+  assertIncludes(q.html, "A &amp; B <span");
+  assertIncludes(q.html, ">c &amp; d</span>");
+  // A field with markup in it never reaches the email: tenantCopy drops it and ours shows.
+  const m = photoQuote({ layout: "photo", heading: "<b>x</b>", message: "<img src=x>" });
+  assertIncludes(m.html, ">We&#39;re getting closer, Alex</h2>");
+  assertNotIncludes(m.html, "src=x");
+  // A picture that isn't https:// is never drawn.
+  const bad = photoQuote({ layout: "photo", hero: "http://example.com/a.jpg", footer: "javascript:alert(1)" });
+  assertNotIncludes(bad.html, "http://example.com/a.jpg");
+  assertNotIncludes(bad.html, "javascript:");
+});
+
+Deno.test("photo design: a light button colour gets dark words, a dark one white", () => {
+  const light = photoQuote({ layout: "photo", buttonColor: "#ffe066" });
+  assertIncludes(light.html, "color:#111111;text-decoration:none;\">VIEW YOUR ESTIMATE</a>");
+  const dark = photoQuote({ layout: "photo", buttonColor: "#1e3a8a" });
+  assertIncludes(dark.html, "color:#FFFFFF;text-decoration:none;\">VIEW YOUR ESTIMATE</a>");
+});
+
+Deno.test("photo design fields without the switch change nothing: the classic card is the same bytes", () => {
+  const { layout: _l, ...rest } = photoCopy();
+  const plain = estimateEmail({ ...acmeQuote(), customerName: "Alex Smith", templateCopy: { quote: { subject: rest.subject, button: rest.button, closing: rest.closing } } });
+  const stored = estimateEmail({ ...acmeQuote(), customerName: "Alex Smith", address: ADDRESS, templateCopy: { quote: rest } });
+  assertEq(stored.html, plain.html, "html");
+  assertEq(stored.text, plain.text, "text");
+  assertEq(stored.subject, plain.subject, "subject");
+  // And a layout that isn't "photo" is the classic card too.
+  const odd = estimateEmail({ ...acmeQuote(), customerName: "Alex Smith", templateCopy: { quote: { ...rest, layout: "fancy" } } });
+  assertEq(odd.html, plain.html, "unknown layout");
+});
+
+Deno.test("photo design is estimate and quote only: the invoice ignores it", () => {
+  const inv = invoiceEmail({ ...acmeInvoice(), templateCopy: { invoice: photoCopy() } });
+  const plain = invoiceEmail({ ...acmeInvoice(), templateCopy: { invoice: { subject: "Your shed estimate is here!", button: "VIEW SHED ESTIMATE", closing: "Thanks," } } });
+  assertEq(inv.html, plain.html);
+  const c = cleanTemplateCopy({ invoice: photoCopy() });
+  assert(!("error" in c), "an invoice with photo fields still saves");
+  const kept = "copy" in c ? c.copy.invoice ?? {} : {};
+  for (const f of ["layout", "hero", "heading", "message", "tagline", "signName", "signTitle", "footer", "accent", "buttonColor"]) {
+    assert(!(f in kept), `invoice kept ${f}`);
+  }
+});
+
+Deno.test("cleanTemplateCopy keeps the photo design and refuses what it can't use, out loud", () => {
+  const c = cleanTemplateCopy({ quote: photoCopy() });
+  assert("copy" in c, JSON.stringify(c));
+  const q = "copy" in c ? c.copy.quote! : {};
+  assertEq(q.layout, "photo");
+  assertEq(q.hero, HERO);
+  assertEq(q.footer, BANNER);
+  assertEq(q.accent, "#f47b2a", "colour stored lowercase");
+  assertEq(q.message, photoCopy().message, "the message keeps its blank lines");
+  assertEq(q.tagline, photoCopy().tagline);
+  const httpHero = cleanTemplateCopy({ quote: { layout: "photo", hero: "http://example.com/a.jpg" } });
+  assert("error" in httpHero && /top photo must be an https/.test(httpHero.error), JSON.stringify(httpHero));
+  const badBanner = cleanTemplateCopy({ estimate: { footer: "data:image/png;base64,AAAA" } });
+  assert("error" in badBanner && /bottom banner/.test(badBanner.error), JSON.stringify(badBanner));
+  const badColour = cleanTemplateCopy({ quote: { accent: "red" } });
+  assert("error" in badColour && /accent colour must be a colour like/.test(badColour.error), JSON.stringify(badColour));
+  const url = cleanTemplateCopy({ quote: { buttonColor: "url(x)" } });
+  assert("error" in url && /button colour/.test(url.error), JSON.stringify(url));
+  const tag = cleanTemplateCopy({ quote: { heading: "<b>hi</b>" } });
+  assert("error" in tag && /heading/.test(tag.error), JSON.stringify(tag));
+  // "Classic" is stored as no layout at all, never as a value.
+  const classic = cleanTemplateCopy({ quote: { layout: "", heading: "Kept" } });
+  assert("copy" in classic && classic.copy.quote?.layout === undefined && classic.copy.quote?.heading === "Kept", JSON.stringify(classic));
+  // The limits hold for the new words.
+  const long = cleanTemplateCopy({ quote: { heading: "x".repeat(400), message: "y".repeat(4000) } });
+  assert("copy" in long && long.copy.quote?.heading?.length === TEMPLATE_LIMITS.heading && long.copy.quote?.message?.length === TEMPLATE_LIMITS.message, "limits");
+});
+
+Deno.test("{first} fills in every document email, classic and invoice too", () => {
+  const q = estimateEmail({ ...acmeQuote(), customerName: "Alex Smith", templateCopy: { quote: { intro: "Hi {first}!" } } });
+  assertIncludes(q.html, ">Hi Alex!</p>");
+  const inv = invoiceEmail({ ...acmeInvoice(), customerName: "Alex Smith", templateCopy: { invoice: { intro: "Hi {first}!" } } });
+  assertIncludes(inv.html, "Hi Alex!");
+  assertNotIncludes(inv.html + inv.text, "{first}");
+});
+
+Deno.test("the Preview draws the photo design with the builder's address", () => {
+  const p = templatePreviewEmail({ kind: "quote", copy: photoCopy() as never, businessName: "Acme Sheds", address: ADDRESS, phone: "(555) 555-0100" });
+  assertIncludes(p.html, `src="${HERO}"`);
+  assertIncludes(p.html, `>We&#39;re getting closer, ${PREVIEW_SAMPLE.customerName.split(" ")[0]}</h2>`);
+  assertIncludes(p.html, ">1 Barn Way, Springfield, MO 65801</p>");
+  const hrefs = [...p.html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]).filter((h) => !h.includes("example.com"));
+  assert(hrefs.length >= 2 && hrefs.every((h) => h === "#"), `sample links: ${JSON.stringify(hrefs)}`);
+});
+
+Deno.test("white-label: the photo design adds no platform branding", () => {
+  const outs = [photoQuote(), photoQuote({ layout: "photo" }), templatePreviewEmail({ kind: "quote", copy: photoCopy() as never, businessName: "Acme Sheds" })];
+  for (const o of outs) {
+    const all = (o.subject + o.html + o.text).toLowerCase();
+    for (const brand of ["structurestudio", "structure studio", "postmark", "csm synergy", "resend"]) {
+      assertNotIncludes(all, brand, `platform identifier "${brand}" leaked`);
+    }
+  }
+});
+
+Deno.test("photo design: a * in the customer's or the business's name stays a *, never formatting", () => {
+  const q = estimateEmail({
+    ...acmeQuote(), businessName: "A*Star Barns", customerName: "Jo*Anne Smith",
+    templateCopy: { quote: { layout: "photo", message: "Hi {first}, thanks for choosing {business}! *Any changes, just reply.*", tagline: "{business} builds *a little space*" } },
+  });
+  assertIncludes(q.html, ">Hi Jo*Anne, thanks for choosing A*Star Barns! <em>Any changes, just reply.</em></p>");
+  assertIncludes(q.html, "A*Star Barns builds <span");
+  assertIncludes(q.html, ">a little space</span>");
+  assertIncludes(q.text, "Hi Jo*Anne, thanks for choosing A*Star Barns! Any changes, just reply.");
+  const d = estimateEmail({ ...acmeQuote(), customerName: "Jo*Anne", templateCopy: { quote: { layout: "photo" } } });
+  assertIncludes(d.html, ">Hi Jo*Anne,</p>");
+  assertNotIncludes(d.html + d.text, "\uE000");
+});
+
+Deno.test("photo design: markers count only around words, the way people write them", () => {
+  const m = (message: string, extra: Record<string, unknown> = {}) =>
+    photoQuote({ layout: "photo", message }, extra);
+  const nested = m("**Call *today* to lock in your price**");
+  assertIncludes(nested.html, "<strong>Call <em>today</em> to lock in your price</strong>");
+  assertIncludes(nested.text, "Call today to lock in your price");
+  assertNotIncludes(nested.text, "*");
+  const stray = m("Free delivery* within 50 miles. *Ask about rent-to-own*");
+  assertIncludes(stray.html, "Free delivery* within 50 miles. <em>Ask about rent-to-own</em>");
+  assertIncludes(stray.text, "Free delivery* within 50 miles. Ask about rent-to-own");
+  const sizes = m("Sizes 8*10 and 10*12 in stock");
+  assertIncludes(sizes.html, ">Sizes 8*10 and 10*12 in stock</p>");
+  const slogan = photoQuote({ layout: "photo", tagline: "**BIG** *savings* today" });
+  assertIncludes(slogan.html, "<strong>BIG</strong> <span");
+  assertIncludes(slogan.html, ">savings</span> today");
+  assertIncludes(slogan.text, "BIG savings today");
+});
+
+Deno.test("photo design: with no name, every field closes its gap and nothing else moves", () => {
+  const q = photoQuote({
+    layout: "photo",
+    subject: "Your shed estimate is here, {first}!",
+    heading: "{first}",
+    message: "Hi **{first}**,\n\nSee below.\n\nThanks,",
+    button: "SEE IT, {first}",
+    closing: "Talk soon, {first}!",
+  }, { customerName: "" });
+  assertEq(q.subject, "Your shed estimate is here!");
+  assertIncludes(q.html, ">We&#39;re getting closer</h2>");
+  assertIncludes(q.html, ">Hi,</p>");
+  assertIncludes(q.html, ">Thanks,</p>");
+  assertIncludes(q.html, ">SEE IT</a>");
+  assertIncludes(q.text, "SEE IT: https://app.example.com/my-quotes?client=acme-sheds");
+  assertIncludes(q.html, ">Talk soon!</p>");
+  assertNotIncludes(q.html + q.text + q.subject, "\uE001");
+  // With a name, the same wording reads in full.
+  const named = photoQuote({ layout: "photo", subject: "Here you go, {first}!", button: "SEE IT, {first}" });
+  assertEq(named.subject, "Here you go, Alex!");
+  assertIncludes(named.html, ">SEE IT, Alex</a>");
+});
+
+Deno.test("photo design: Outlook gets a fixed 600px column, everything else may shrink the card", () => {
+  const q = photoQuote();
+  const open = `<!--[if mso]><table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->`;
+  const card = `bgcolor="#FFFFFF" style="width:100%;max-width:600px;`;
+  const close = `<!--[if mso]></td></tr></table><![endif]-->`;
+  assert(q.html.indexOf(open) >= 0 && q.html.indexOf(open) < q.html.indexOf(card), "the Outlook column opens before the card");
+  assert(q.html.lastIndexOf(close) > q.html.indexOf("All rights reserved."), "and closes after it");
+});
+
+// ── Quote to a business entity (2026-10-21) ─────────────────────────────────────────────────
+// Junior Barns: "Bear River Band communications all say "Hi Bear" ... I am working with a guy
+// named Thomas". With a company on the design's contact, {first} is the PERSON and {company} the
+// business. Without one, nothing moves (the golden test pins the bytes).
+
+Deno.test("company: {first} greets the person and {company} names the business, classic and invoice", () => {
+  const who = { customerName: "Thomas Example", customerCompany: "Bear River Band" };
+  const q = estimateEmail({ ...acmeQuote(), ...who, templateCopy: { quote: { intro: "Hi {first} at {company}!", subject: "{company}: your estimate" } } });
+  assertIncludes(q.html, "Hi Thomas at Bear River Band!");
+  assertIncludes(q.text, "Hi Thomas at Bear River Band!");
+  assertEq(q.subject, "Bear River Band: your estimate");
+  const inv = invoiceEmail({ ...acmeInvoice(), ...who, templateCopy: { invoice: { intro: "Hi {first} ({company})" } } });
+  assertIncludes(inv.html + inv.text, "Hi Thomas (Bear River Band)");
+  assertNotIncludes(inv.html + inv.text, "{company}");
+});
+
+Deno.test("company: a name that only repeats the company is no person, so it is never 'Hi Bear'", () => {
+  for (const customerName of ["Bear River Band", "", "  bear river band "]) {
+    const q = photoQuote(photoCopy(), { customerName, customerCompany: "Bear River Band" });
+    assertNotIncludes(q.html + q.text, "Bear,", customerName);
+    assertNotIncludes(q.html + q.text, "Hi Bear", customerName);
+    assertIncludes(q.html, ">We&#39;re getting closer</h2>", `${customerName}: the heading closes up`);
+    // Her default message (no wording saved) greets "there".
+    const d = photoQuote({ layout: "photo" }, { customerName, customerCompany: "Bear River Band" });
+    assertIncludes(d.html + d.text, "Hi there,", customerName);
+  }
+});
+
+Deno.test("company: absent, empty or blank is no company, and {company} fills with nothing", () => {
+  for (const customerCompany of [undefined, null, "", "   "]) {
+    const q = estimateEmail({ ...acmeQuote(), customerName: "Bear River Band", customerCompany, templateCopy: { quote: { intro: "Hi {first}[{company}]" } } });
+    assertIncludes(q.html + q.text, "Hi Bear[]", String(customerCompany));
+  }
+});
+
+Deno.test("company: the wording screen's preview shows a sample company", () => {
+  assertEq(PREVIEW_SAMPLE.customerCompany, "Smith Family Farm");
+  const p = templatePreviewEmail({ kind: "quote", copy: { intro: "Hi {first} at {company}" }, businessName: "Acme Sheds" });
+  assertIncludes(p.html, "Hi Alex at Smith Family Farm");
 });

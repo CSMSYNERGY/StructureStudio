@@ -7,7 +7,7 @@ import { timedFetch, withServerTiming, type ServerTiming } from "../_shared/serv
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
-import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
+import { chargeTaxCalculation, taxChargeMemo, taxLookupIdem } from "../_shared/taxMeter.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
@@ -22,11 +22,16 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
 // The routing Reply-To sendTenantEmail adds, asked here only to refuse a view-as email no reply can reach.
 import { buildReplyAddress } from "../_shared/emailInbound.ts";
-import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
+import { cleanSignature, signatureHtml, signText, signaturePair, signatureImageOrigin } from "../_shared/emailSignature.ts";
+import { cleanSignatureHtml, signatureHtmlToText, SIGNATURE_BUCKET, SIGNATURE_HTML_MAX } from "../_shared/emailSignatureHtml.ts";
+import { cleanContactsView, mergePrefs } from "../_shared/savePrefs.ts";
 // Whose inbox a customer's reply is copied to: the person who sent it, or the customer's rep.
 import { cleanReplyAddress, repReplyTo } from "../_shared/repReplyTo.ts";
 import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
+import { brandColorList } from "../_shared/brandColors.ts";
 import { replyFromNumber, sendTenantSms } from "../_shared/smsSend.ts";
+// An opt-out read the way the send path reads it, and worded by its reason (crm_record, crm_record_consent).
+import { readSmsOptOut, smsOptOutFacts, smsOptOutRefusal } from "../_shared/smsOptOut.ts";
 import { changeOrderEmail, cleanTemplateCopy, estimateEmail, invoiceEmail, templatePreviewEmail, TEMPLATE_KINDS, tenantStylePhotoUrl, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
@@ -46,15 +51,22 @@ import {
   type CarryDecision, type TaxLocation,
 } from "../_shared/taxChain.ts";
 import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts";
+// This UTC month's lookups and what they took from the wallet, for the Sales tax box (319).
+import { monthTaxUsage } from "../_shared/taxUsage.ts";
 import {
-  COMMON_CODES, headingsView, mergeCodeLists, orderCodes, parseAssignmentsPayload, planAssignments, type PlannedAssignment,
-  searchQuery, TAX_CODE_SEARCH_LIMIT, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
+  codesOffTheList, headingsView, orderCodes, parseAssignmentsPayload, planAssignments, type PlannedAssignment,
+  SALES_TAX_CODES, searchCodes, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
 } from "../_shared/taxCodes.ts";
 import {
   isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
   parseSetSalesLocation, quoteInCustomerHands, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan, restampResend,
   restampSendOutcome,
 } from "../_shared/locationTax.ts";
+// The company rate and the "Use tax codes" switch (Settings → Company → Tax, migration 290). `save`
+// parses the rate through the same function, moved out of it word for word.
+import {
+  companyTaxNeedsRow, companyTaxRefusal, companyTaxView, parseCodesSwitch, parseCompanyTax, type CompanyTaxUpdates,
+} from "../_shared/companyTax.ts";
 // The paid lookup (2026-09-17): verify_tax and send_invoice's informational check. The only
 // `allowLookup: true` lives inside paidLookup, so neither caller can skip the cap or the ledger.
 import {
@@ -76,7 +88,8 @@ import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { pdfCustomerFrom } from "../_shared/estimatePdf.ts";
 import { pdfLogoSources } from "../_shared/pdfLogo.ts";
 import { parseQuoteValidDays, QUOTE_VALID_DAYS_MAX, QUOTE_VALID_DAYS_MIN, readQuoteValidDays } from "../_shared/quoteValidity.ts";
-import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
+import { appendAcceptancePage, onBehalfOfFrom } from "../_shared/acceptancePdf.ts";
+import { companyOf, greetingFirst } from "../_shared/customerNaming.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { FLOOR_PLANS, OBJECT_PATH, LEGACY_ROOT_ERA_END, crmInvoiceExists, floorPlanKey, isOwnFloorPlanKey, invoiceExists, removeDesignObjects } from "../_shared/designStorageKeys.ts";
 import {
@@ -87,6 +100,8 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
+// The metal roof profile is the design's own pick since 2026-10-06, its style's value the starting one.
+import { effectiveRoofProfile } from "../_shared/roofProfile.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 // The v2 generator's two additions (2026-09-24), on their own line so the long list above can move
@@ -94,6 +109,9 @@ import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared/styleD3.ts";
 // A raised foundation's save carry-forward (2026-09-25), on its own line for the same reason.
 import { carryForwardFoundation } from "../_shared/styleD3.ts";
+// Where the roof sits on the wall (roof.seat, 2026-10-06): the same carry-forward, over an older designer's redraft.
+import { carryForwardRoofSeat } from "../_shared/styleD3.ts";
+import { carryForwardFraming } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { rtpImportNumber, rtpImportOverhead } from "../_shared/rtpImportValues.ts";
 // The Conversations page's calls go through the record timeline's own visibility rule.
@@ -124,6 +142,8 @@ import { draftReadSample } from "../_shared/styleD3.ts";
 import { measuredPitchLock } from "../_shared/styleD3.ts";
 // ...and so is an overhang the close-ups measured (2026-09-29).
 import { measuredOverhangLock } from "../_shared/styleD3.ts";
+// ...and a recessed porch's depth the reads' points measured (2026-10-07).
+import { measuredPorchLock } from "../_shared/styleD3.ts";
 // A read the API could not serve is sent again, the five reads' first sends are staggered, and an
 // upstream failure is told to the builder in a plain sentence (2026-09-26).
 import { DRAFT_READ_RETRY, draftUpstreamFailure } from "../_shared/styleD3.ts";
@@ -149,6 +169,10 @@ import { bindWallHeightWrites, wallHeightClash, wallHeightListedTwice, type Wall
 // "Offered on": the building styles a catalog fixture is sold on (272). admin-catalog imports the
 // same module (cloneStyleIds), so a change to it deploys both functions.
 import { keepTenantStyleIds, NO_STYLE_TICKED, readStyleIds } from "../_shared/fixtureStyleIds.ts";
+// The pricing-sheet importer, shared with admin-catalog: deploy both when it changes.
+import { importPricingRows } from "../_shared/pricingImport.ts";
+// The sizes table (2026-10-30): its paged read and its save, through migration 350's function.
+import { readSizeTable, savePricingCells, validatePayload as validatePricingCells } from "../_shared/pricingCells.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -158,7 +182,11 @@ import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
 // same, so it is the only thing that can tell "my calls" from "the team's calls". Every Team
 // read below (the Calls report's team scope, the setup screen) asks it for the LITERAL level.
 import { ownPhoneOnly } from "../_shared/access.ts";
-import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRecording, parseRoute, phoneLevelOf, recordingServerOn, recordingView, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, type ReportCall, type ReportText } from "./phone.ts";
+// ownMeetingsOnly is the meetings area's twin, for the APPOINTMENT CHIP on a pipeline card
+// (migration 353). The board's gate is contacts:view and says nothing about the calendar, so the
+// chip asks the meetings area itself — see nextMeetings below.
+import { ownMeetingsOnly } from "../_shared/access.ts";
+import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRecording, parseRoute, phoneLevelOf, recordingServerOn, recordingView, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, transcribeServerOn, type ReportCall, type ReportText } from "./phone.ts";
 // Migration 266: more than one number, each with a name and maybe a person (phone.ts).
 import {
   callerNumberFor, carriesRoute, MAX_NUMBERS, ONE_NUMBER_PER_PERSON, parseAssignee, parseNumberLabel, pickNumber, suggestedMembersFor,
@@ -166,11 +194,20 @@ import {
 // Plan phase 6: a number for calls, bought with portal-sms's own purchase helper (one purchase
 // path, one reconciliation rule) and connected to the phone-api Worker by phoneNumber.ts.
 import {
-  areaCodeOf, applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
-  numberVoicemailConfig, pickedNumber, smsInboundUrl, switchCalling, twilioCreds, voiceEnv, type HoldResult, type SwitchNumber,
+  applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
+  numberVoicemailConfig, pickedNumber, smsInboundUrl, subVoicemailUrlOf, switchCalling, voiceEnv, type HoldResult, type SwitchNumber,
 } from "./phoneNumber.ts";
 import { attachToTexting, TEXTING_JOIN_FAILED } from "./phoneNumber.ts";
 import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNumbers, trustHubConfigured } from "../_shared/twilioTrustHub.ts";
+// The number search: an area code, or the area code and up to three more digits.
+import { numberSearchOf, startsWithPrefix } from "../_shared/numberSearch.ts";
+// Workstream 2: every Twilio call below runs as the TENANT'S account, resolved once per request
+// (tenantTwilio). trustHubHttp binds the shared helpers' transport to it.
+import { trustHubHttp } from "../_shared/twilioTrustHub.ts";
+import { resolveTwilioAccount, TwilioAccountError, type TwilioAccount, type TwilioCreds } from "../_shared/twilioAccount.ts";
+// Workstream 2, phase 3: a builder's first number makes their own Twilio sub-account first (only
+// while TWILIO_SUBACCOUNTS is "on"; off, it answers "the parent" without reading anything).
+import { ensureRefusalSentence, ensureTwilioAccount, SUB_WHILE_OFF_SENTENCE, subAccountWhileOff } from "../_shared/twilioProvision.ts";
 // Migration 266: a later number joins the builder's texting setup with portal-sms's own helpers.
 import { attachNumberToService, clearNumberSmsUrl, numberInService } from "../_shared/twilioTrustHub.ts";
 // Plan phase 6, caller-ID trust (plan §14): SHAKEN/STIR and Voice Integrity for the tenant's
@@ -181,6 +218,18 @@ import {
   callerIdView, chooseTrustProfile, parseTrustProduct, runTrustSetup, runTrustStatus, TRUST_COLS, TRUST_COLUMNS, TRUST_LOCK_MS,
   TRUST_OPERATOR_SENTENCE, trustOperatorAllowed, type TrustRow,
 } from "./phoneTrust.ts";
+// Workstream 2, phase 6: CNAM (the business's name on the called party's screen) beside the two
+// kinds above, and the business profile an operator makes for a builder who only calls
+// (phone_trust_profile), both in the builder's own Twilio account.
+import { createSecondaryCustomerProfile, finishSecondaryCustomerProfile, parseCnamDisplayName } from "../_shared/twilioTrustHub.ts";
+import { CNAM_COLUMNS, cnamNumberRefusal, runTrustProfile, type RegistrationRow } from "./phoneTrust.ts";
+// Workstream 2, phase 8: "Bring your number". The builder's request (phone_port_request) and the
+// operator's landing of a moved number (phone_adopt_number); the rules are numberRequests.ts, the
+// move itself is workers/phone-api/PORTING.md.
+import {
+  adoptNumber, lookupOnlyEnv, parseAdoptNumber, parsePortRequest, portRequestConflict, portRequestRow, portRequestView, type PortRequestRow,
+} from "./numberRequests.ts";
+import { parentCreds } from "../_shared/twilioAccount.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
 // CSM Synergy's own GoHighLevel contacts into its CRM (migration 282): the GoHighLevel read and the
 // walk. This function is the module's only importer.
@@ -191,6 +240,42 @@ import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/qboRealm.ts";
 // Quick sends in the CRM composer: My Synergy Phone's list (migration 258), read and counted here.
 import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuickSends } from "./quickSends.ts";
+// Your own answer on AI transcripts in My Profile (migration 307, 2026-10-14): the Worker's rules
+// mirrored in _shared/aiConsent.ts, the reads and the save in ./aiTranscripts.ts.
+import { AI_NOTICE_VERSION, currentAnswer, parseAiAnswer } from "../_shared/aiConsent.ts";
+import { AI_TRANSCRIPTS_NOT_READY, AI_TRANSCRIPTS_VIEW_AS, readAiTranscripts, saveAiTranscripts } from "./aiTranscripts.ts";
+// Settings → Customer Hub → Forms + Email Templates (migration 325): every action in ./leadForms.ts.
+import { handleLeadFormAction } from "./leadForms.ts";
+import { handleCrmFieldAction, readBuiltinOverrides, readCustomFields } from "./crmFields.ts";
+// The library of claddings, doors and windows (migration 339): its actions, the catalog's share, and
+// the rule for a library entry named on a cladding or door/window save, in ./library.ts.
+import { catalogLibrary, claddingLinkFor, fixtureLinkFor, handleLibraryAction } from "./library.ts";
+// Door looks from a photo (migrations 343/344): the look actions, and the rule that puts a look on a
+// door row (save_fixture, import_fixtures), in ./doorLooks.ts.
+import {
+  doorLookForFixture, doorLookImportRow, doorLookImportState, handleDoorLookAction, isUuid as isDoorLookId, lookSchemaMissing, readDoorLooksFlag,
+} from "./doorLooks.ts";
+// ...and generating one from a photo (P4): the press, its money and its ledger, in ./doorGenerate.ts.
+import { doorAiEnabled, handleDoorLookRecover, handleGenerateDoorLook, wantsStreamedDoorDraft } from "./doorGenerate.ts";
+import { coerceFieldValue } from "../_shared/crmFields.ts";
+// Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
+import {
+  DESIGN_FEED_STAYS, isUuidLike, LOST_REASON_MAX, LOST_REASON_REQUIRED, parseDealPatch, parseIdOrder, parseLead,
+  parseMoneyCents, parsePipelineSave, parseStageOrder,
+  parseStageSave, parseStatusOrder, parseStatusSave, STATUS_IS_SYSTEM_SET, statusArchiveRefusal,
+  stageSetRefusal, type StageKind as PipeStageKind,
+} from "../_shared/crmPipelines.ts";
+// AUTOMATIONS (migrations 355 + 363): the request shapes and the vocabulary. The evaluator itself
+// is in Postgres (crm_rule_event → crm_rules_run) and the sending is crm-rules-tick's; this
+// function only writes what the builder authored.
+import {
+  actionAllowedForScope, actionScopeError, parseRuleConditions, parseRuleSave, RULE_ACTION_LABELS,
+  RULE_ACTIONS_MAX, RULE_SCOPES, RULE_WEBHOOK_SECRET, type RuleActionIn, type RuleActionKind, type RuleCondition,
+  triggerAllowedForScope,
+} from "../_shared/crmRules.ts";
+// Settings → Company → Payments (workstream 1 phase 4): the builder's read-only view of the card
+// account CSM sets up in Admin. paymentSettings.ts only, never the gateway client (cardpointe.ts).
+import { cpEnvOf, cpMerchant, midLast4, readPaymentSettings } from "../_shared/paymentSettings.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -211,6 +296,11 @@ const GATES: GateTable = {
   // that, as its own definition in access.ts says. Someone's default view is not tenant
   // data, so a sales rep sets their own.
   save_prefs: "self",
+  // The headshot or logo in YOUR OWN email signature. "self", deliberately NOT the
+  // settings_crm:edit gate crm_form_upload_url carries: every rep who writes to a customer needs
+  // a signature, and that includes the Crew Leaders, Drivers and Dealers who hold no CRM
+  // settings at all. It mints a path in the same public bucket and nothing else.
+  signature_upload_url: "self",
 
   // ── Your own account ─────────────────────────────────────────────────────
   get_profile: "self",
@@ -223,6 +313,17 @@ const GATES: GateTable = {
   // refused too; the branch refuses every operator in view-as (see QUICK SENDS below).
   quick_sends_list: "self",
   quick_send_used: "self",
+  // Your own answer on AI transcripts (migration 307, My Profile since 2026-10-14): the same answer
+  // the phone app and the extension save through the phone-api Worker, one per account. Per
+  // person, so neither is an area gate: anyone on the team answers for their own calls, and the
+  // handlers key strictly off the session's userId (portal-settings/aiTranscripts.ts).
+  //   get  "open": a READ, so a read-only operator in view-as still sees the card's facts. In
+  //        view-as it never reads the operator's own row (the branch answers viewAs instead), and
+  //        what it does read is the caller's own row and two on/off facts about their business.
+  //   save "self": a write to the caller's own row only. A read-only operator is refused by
+  //        resolveTenant, and the branch refuses every operator in view-as in words.
+  ai_transcripts_get: "open",
+  ai_transcripts_save: "self",
 
   // ── Structures ───────────────────────────────────────────────────────────
   // `catalog` is one payload serving both Settings groups (styles+sizes+prices AND
@@ -231,6 +332,10 @@ const GATES: GateTable = {
   // is the cleaner fix and belongs with the Team screen, not here.
   catalog: { any: [{ area: "settings_structures", level: "view" }, { area: "settings_options", level: "view" }] },
   import_pricing_csv:        { area: "settings_structures", level: "edit" },
+  // The sizes table (Settings → Sheds, 2026-10-30): the same price book as the sheet above, so the
+  // same area. size_table is its whole read; save_pricing_cells writes through migration 350.
+  size_table:                { area: "settings_structures", level: "view" },
+  save_pricing_cells:        { area: "settings_structures", level: "edit" },
 
   // ── Real-Time Pricing (migration 152) ────────────────────────────────────
   // Same area as the price book they feed: whoever may edit structures may edit the
@@ -292,12 +397,39 @@ const GATES: GateTable = {
   save_insulation:                { area: "settings_options", level: "edit" },
   save_electrical:                { area: "settings_options", level: "edit" },
   save_electrical_items:          { area: "settings_options", level: "edit" },
+  // Interior walls (313): the Interior walls tab's two saves.
+  save_interior_walls:            { area: "settings_options", level: "edit" },
+  save_interior_wall_coverings:   { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
   save_fixture:                   { area: "settings_options", level: "edit" },
   delete_fixture:                 { area: "settings_options", level: "edit" },
   reorder_fixtures:               { area: "settings_options", level: "edit" },
   import_fixtures:                { area: "settings_options", level: "edit" },
+  // The library (339), beside the rows it feeds. Each branch ALSO refuses unless
+  // client_settings.library_beta is on for the tenant (./library.ts). library_request spends from the
+  // wallet ($2 a request once its meter is armed), the same gate as the photo background change.
+  library:                        { area: "settings_options", level: "view" },
+  library_seed_mine:              { area: "settings_options", level: "edit" },
+  library_add:                    { area: "settings_options", level: "edit" },
+  library_edit:                   { area: "settings_options", level: "edit" },
+  library_remove:                 { area: "settings_options", level: "edit" },
+  library_request_upload_url:     { area: "settings_options", level: "edit" },
+  library_request:                { area: "settings_options", level: "edit" },
+  library_request_cancel:         { area: "settings_options", level: "edit" },
+  // Door looks from a photo (343/344), beside the door rows they go on. Each branch ALSO refuses
+  // unless client_settings.door_looks_beta is on for the tenant (./doorLooks.ts). None of these calls
+  // the model: generating a look (generate_door_look, P4) adds its own lines with the kill switch.
+  list_door_looks:                { area: "settings_options", level: "view" },
+  save_door_look:                 { area: "settings_options", level: "edit" },
+  archive_door_look:              { area: "settings_options", level: "edit" },
+  door_ref_upload_url:            { area: "settings_options", level: "edit" },
+  door_look_thumb_upload_url:     { area: "settings_options", level: "edit" },
+  // P4 (./doorGenerate.ts): the press that calls the model and can charge, and the pickup of its draft
+  // after a dropped stream. Both refuse without the tenant flag; the press also refuses while the kill
+  // switch DOOR_LOOK_AI_ENABLED is off (unset is off).
+  generate_door_look:             { area: "settings_options", level: "edit" },
+  generate_door_look_recover:     { area: "settings_options", level: "edit" },
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
   set_layout_item_taxable:        { area: "settings_options", level: "edit" },
@@ -331,9 +463,18 @@ const GATES: GateTable = {
   // The serial counter is shared by Inventory and Orders but is configured from a Settings
   // card; branding is where that card lives, and it is an owner/admin-shaped decision.
   save_serial_start: { area: "settings_branding", level: "edit" },
+  // The Serial Numbers card's read (316): starting number, an example, and which styles and
+  // colours still have no code. Same card, same area as save_serial_start.
+  get_serial_setup: { area: "settings_branding", level: "view" },
+  // Settings → Company → Payments (workstream 1 phase 4): a READ-ONLY summary of the card account
+  // CSM sets up in Admin (admin-catalog set_payments). The Company area, as the tab's own
+  // SETTINGS_TAB_AREA entry says, so no new area: _shared/access.ts and its SQL twin
+  // area_level_for() are untouched. There is no write beside it; changes are requested, not made.
+  payments_status: { area: "settings_branding", level: "view" },
 
   // ── CRM ──────────────────────────────────────────────────────────────────
   verify_save_ghl:     { area: "settings_crm", level: "edit" },
+  disconnect_ghl:      { area: "settings_crm", level: "edit" },
   list_ghl_pipelines:  { area: "settings_crm", level: "view" },
 
   // ── Sales tax (migrations 244-245) ───────────────────────────────────────
@@ -343,6 +484,11 @@ const GATES: GateTable = {
   // logo. No new area: a new one needs the SQL mirror (area_level_for) re-issued with it.
   tax_settings:      { area: "settings_crm", level: "view" },
   save_location_tax: { area: "settings_crm", level: "edit" },
+  // The company rate, its label, tax on delivery and the "Use tax codes" switch, from Settings →
+  // Company → Tax (migration 290). settings_crm alone, like the location rates and verify_tax:
+  // `save` asks for Branding as well only because it also writes the business identity. No crm_
+  // prefix, so the paid-CRM guard never refuses a builder their own tax rate.
+  save_company_tax:  { area: "settings_crm", level: "edit" },
   // Which lot a quote was sold from. designs:edit — the rep who issues the quote picks where it
   // was sold, the way set_expected_close works — plus the row scope in the branch. It re-prices
   // with FREE rates only (the location's, else the company's); it can never make a paid lookup.
@@ -384,6 +530,9 @@ const GATES: GateTable = {
   email_status:         { area: "settings_email", level: "view" },
   email_connect_domain: { area: "settings_email", level: "edit" },
   email_save_template: { area: "settings_email", level: "edit" },
+  // The photo design's two pictures (top photo, bottom banner): upload-only, returns a URL the
+  // wording boxes hold until "Save wording". Same edit grant as saving the wording it serves.
+  email_upload_image:  { area: "settings_email", level: "edit" },
   // The wording screen's Preview: draws the wording in the boxes (saved or not) around sample
   // data and the builder's own header and footer. A read: it writes nothing and sends nothing.
   email_preview_template: { area: "settings_email", level: "view" },
@@ -430,6 +579,13 @@ const GATES: GateTable = {
   crm_save_activity:     { area: "contacts", level: "edit" },
   crm_complete_activity: { area: "contacts", level: "edit" },
   crm_save_contact:      { area: "contacts", level: "edit" },
+  // The builder's OWN fields on a customer and on a deal (migration 330). Writing a custom field
+  // on somebody is writing on that customer, so these sit with the contact writes at
+  // contacts:'edit' and are narrowed row by row in CONTACT_ROW_SCOPE — not with the field
+  // DEFINITIONS above, which are settings_crm. A dealer may fill in a custom field on their own
+  // customer and must not be able to fill one in on anybody else's.
+  crm_contact_custom_save: { area: "contacts", level: "edit" },
+  crm_deal_custom_save:    { area: "contacts", level: "edit" },
   // My Synergy Phone's "Save as contact" for an unknown number (plan section 6). Creating a customer
   // is the same altitude as editing one; CONTACT_ROW_SCOPE marks it `creates`, and the branch
   // makes a caller limited to their own customers the new contact's owner.
@@ -440,6 +596,96 @@ const GATES: GateTable = {
   // called. CONTACT_ROW_SCOPE marks it tenantWide, so a caller limited to their own customers is
   // refused; the crm_ prefix brings the CRM subscription check. A dry run unless dryRun: false.
   crm_import_ghl_contacts: { area: "contacts", level: "edit" },
+  // ── Sales pipelines (migration 301) ── hand-moved boards of deals, for every CRM builder.
+  // Carolyn 2026-10-09: her reps cold-calling shed manufacturers work them in a pipeline, and
+  // each prospect lands in contacts. A deal has NO owner of its own ("we do not ever assign
+  // deals", 2026-09-04): it rides on its CONTACT, so every deal action sits on the contacts
+  // area and contacts:'own' is narrowed through CONTACT_ROW_SCOPE like every other write, and
+  // the reads are narrowed in the branch (visibleContactIds). No new area, so access.ts and its
+  // SQL twin are untouched. The stage editor is a Settings card, so it sits on settings_crm.
+  // The crm_ prefix brings the CRM subscription check to every one of them.
+  crm_pipelines_list:    { area: "contacts", level: "view" },
+  crm_deals_list:        { area: "contacts", level: "view" },
+  crm_contact_deals:     { area: "contacts", level: "view" },
+  crm_create_lead:       { area: "contacts", level: "edit" },
+  crm_deal_create:       { area: "contacts", level: "edit" },
+  crm_deal_update:       { area: "contacts", level: "edit" },
+  crm_deal_move:         { area: "contacts", level: "edit" },
+  // Migration 353: Lost is no longer a column to drag into, so marking a card lost (and reopening
+  // it) is its own write. Same gate as a move — whoever may work the board may call it lost.
+  crm_deal_mark_lost:    { area: "contacts", level: "edit" },
+  crm_deal_reopen:       { area: "contacts", level: "edit" },
+  crm_deal_archive:      { area: "contacts", level: "edit" },
+  crm_pipeline_save:     { area: "settings_crm", level: "edit" },
+  // Migration 360: a whole starter pipeline in one call (stages + its own status ladder). Same
+  // gate as making one by hand — it writes nothing crm_pipeline_save could not.
+  crm_pipeline_add_starter: { area: "settings_crm", level: "edit" },
+  crm_stage_save:        { area: "settings_crm", level: "edit" },
+  crm_stages_reorder:    { area: "settings_crm", level: "edit" },
+  // Card STATUSES (migration 302): the status list itself is a Settings → Pipelines card. Since
+  // 303 a card's status is SYSTEM-DRIVEN ONLY (Carolyn 2026-10-12: "it is not even possible for
+  // them to make the changes"), and crm_deal_set_status refuses every caller with a sentence. It
+  // keeps the write gate it had (and its CONTACT_ROW_SCOPE row) so a portal tab from before 303
+  // that still sends it is answered in words rather than with an unknown-action 404.
+  crm_deal_set_status:   { area: "contacts", level: "edit" },
+  crm_status_save:       { area: "settings_crm", level: "edit" },
+  crm_statuses_reorder:  { area: "settings_crm", level: "edit" },
+  // AUTOMATIONS (migrations 355 + 363): "when ‹this happens› → ‹do this›", one flat list per
+  // account on Settings → Customer Hub → Automations. The same write gate as reshaping a
+  // pipeline, and deliberately not a weaker one: a rule can text a builder's customer. The list
+  // and the run log are reads — the log is how "the review text never went out" gets an answer,
+  // and anyone who can see the settings may look. crm_rules_list is settings_crm, NOT the
+  // contacts:view the board's crm_pipelines_list carries: a sales rep has no business reading the
+  // account's automations.
+  crm_rules_list:        { area: "settings_crm", level: "view" },
+  // 365: "this would reach 312 customers now" — the number the builder arms a schedule with.
+  crm_rule_audience:     { area: "settings_crm", level: "view" },
+  // 365: the account's time zone, which schedules run in. A setting, so an edit.
+  crm_rules_time_zone:   { area: "settings_crm", level: "edit" },
+  // 366: the Do Not Disturb panel on a customer — the same altitude as editing the customer.
+  crm_contact_dnd:       { area: "contacts", level: "edit" },
+  crm_rule_save:         { area: "settings_crm", level: "edit" },
+  crm_rules_reorder:     { area: "settings_crm", level: "edit" },
+  crm_rule_log:          { area: "settings_crm", level: "view" },
+
+  // ── Customer Hub → Fields (migration 330, ./crmFields.ts) ───────────────────────────────
+  // What a contact and a design/deal hold, and the builder's own fields beside it. crm_* on
+  // purpose: the CRM entitlement guard below gates them by that prefix. settings_crm, the area
+  // the Customer Hub carries — these write DEFINITIONS, never a customer's row, so none of them
+  // is a contacts gate and CONTACT_ROW_SCOPE has nothing to say about them. The two actions that
+  // write a customer's VALUES are contacts:'edit' and sit further down, with the contact writes.
+  crm_fields_list:         { area: "settings_crm", level: "view" },
+  crm_field_create:        { area: "settings_crm", level: "edit" },
+  crm_field_save:          { area: "settings_crm", level: "edit" },
+  crm_field_delete:        { area: "settings_crm", level: "edit" },
+  crm_fields_reorder:      { area: "settings_crm", level: "edit" },
+  crm_builtin_field_save:  { area: "settings_crm", level: "edit" },
+
+  // ── Customer Hub → Forms + Email Templates (migration 325, ./leadForms.ts) ──────────────
+  // crm_* on purpose: the CRM entitlement guard below gates them by that prefix. settings_crm,
+  // the area the Customer Hub carries; reads at view, everything that writes or sends at edit.
+  // None writes a contact (the public lead-form function does), so none is a contacts gate.
+  crm_forms_list:          { area: "settings_crm", level: "view" },
+  crm_form_get:            { area: "settings_crm", level: "view" },
+  crm_form_submissions:    { area: "settings_crm", level: "view" },
+  crm_form_stats:          { area: "settings_crm", level: "view" },
+  crm_form_create:         { area: "settings_crm", level: "edit" },
+  crm_form_save:           { area: "settings_crm", level: "edit" },
+  crm_form_publish:        { area: "settings_crm", level: "edit" },
+  crm_form_unpublish:      { area: "settings_crm", level: "edit" },
+  crm_form_duplicate:      { area: "settings_crm", level: "edit" },
+  crm_form_archive:        { area: "settings_crm", level: "edit" },
+  crm_form_delete:         { area: "settings_crm", level: "edit" },
+  crm_form_upload_url:     { area: "settings_crm", level: "edit" },
+  crm_form_test_email:     { area: "settings_crm", level: "edit" },
+  crm_email_tpl_list:      { area: "settings_crm", level: "view" },
+  crm_email_tpl_get:       { area: "settings_crm", level: "view" },
+  crm_email_tpl_preview:   { area: "settings_crm", level: "view" },
+  crm_email_tpl_create:    { area: "settings_crm", level: "edit" },
+  crm_email_tpl_save:      { area: "settings_crm", level: "edit" },
+  crm_email_tpl_duplicate: { area: "settings_crm", level: "edit" },
+  crm_email_tpl_delete:    { area: "settings_crm", level: "edit" },
+  crm_email_tpl_test:      { area: "settings_crm", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
   // Recording that a customer gave permission is a claim about them, so it sits at the
   // same level as texting them — the people who talk to customers, not everyone.
@@ -485,6 +731,20 @@ const GATES: GateTable = {
   // Deleting a unit also deletes its design row, that design's versions and its PDFs. That
   // is a Designs deletion happening under an Inventory verb, so it needs both.
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
+  // The Online Shop (migration 310). Listing a building, its photos and the shop's own settings
+  // are all decisions about how the builder's stock is sold, so they sit with inventory:edit;
+  // reading the settings is a view.
+  save_inventory_listing:     { area: "inventory", level: "edit" },
+  inventory_photo_upload_url: { area: "inventory", level: "edit" },
+  save_inventory_photos:      { area: "inventory", level: "edit" },
+  shop_settings:              { area: "inventory", level: "view" },
+  list_shop_requests:         { area: "inventory", level: "view" },
+  // AI background change (migration 312): spends the builder's wallet, so edit, not view.
+  photo_bg_info:              { area: "inventory", level: "view" },
+  photo_bg_start:             { area: "inventory", level: "edit" },
+  photo_bg_status:            { area: "inventory", level: "edit" },
+  mark_shop_request:          { area: "inventory", level: "edit" },
+  save_shop_settings:         { area: "inventory", level: "edit" },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
   send_invoice:     { area: "orders", level: "edit" },
   // Push to Invoice from the designer (Carolyn 2026-09-01): the same irreversible send as
@@ -610,6 +870,17 @@ const GATES: GateTable = {
   // a READ-level line is where resolveTenant waves a read-only operator through.
   phone_trust_setup: { area: "phone", level: "edit" },
   phone_trust_status: { area: "phone", level: "edit" },
+  // Workstream 2, phase 6: the business profile caller ID is built on, made by an OPERATOR from the
+  // business's details for a builder who only calls (phoneTrust.ts runTrustProfile). The same floor
+  // and the same operator gate as the two above; it submits the builder's legal identity to Twilio.
+  // (CNAM is phone_trust_setup / phone_trust_status with product "cnam": no line of its own.)
+  phone_trust_profile: { area: "phone", level: "edit" },
+  // Workstream 2, phase 8: "Bring your number". The REQUEST is the builder's (phone:edit, the people
+  // who set the phone up): it spends nothing and stores no PIN, bill or account number
+  // (numberRequests.ts). ADOPTING a number that has arrived is an operator's (the caller-ID gate,
+  // plus canBill in view-as: the number bills monthly from then on); phone:edit is its floor only.
+  phone_port_request: { area: "phone", level: "edit" },
+  phone_adopt_number: { area: "phone", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -723,6 +994,32 @@ function draftAnswer(
       fn: "portal-settings", req, clientId: at.clientId, code: "ai_draft_stream_deadline",
       message: "The streamed draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
       context: { requestMs: Date.now() - at.requestStartMs, deadlineMs, requestDeadlineMs: DRAFT_STREAM_DEADLINE_MS, workerAgeMs: Date.now() - WORKER_BORN_MS },
+    }),
+  });
+}
+
+// generate_door_look's answer (P4): draftAnswer's twin for the door press. Streamed when the new shell
+// asks (`stream: true`, the lean retry included, since both can outlast the gateway's 150 s of silence),
+// with the same error-wrapper replay and the same watchdog, whose row is coded for doors. Kept apart from
+// draftAnswer so the building press's request rules, which its tests pin line by line, stay untouched.
+function doorDraftAnswer(
+  req: Request,
+  payload: unknown,
+  at: { requestStartMs: number; clientId: string },
+  work: (streamed: boolean) => Promise<Response>,
+): Promise<Response> | Response {
+  if (!wantsStreamedDoorDraft(payload)) return work(false);
+  const ua = req.headers.get("user-agent");
+  const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
+  const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
+  const deadlineMs = streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS });
+  return heartbeatJsonResponse(() => filed(replay), {
+    headers: { ...cors, "Content-Type": "application/json" },
+    deadlineMs,
+    onDeadline: () => logEdgeError({
+      fn: "portal-settings", req, clientId: at.clientId, code: "ai_door_stream_deadline",
+      message: "The streamed door draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
+      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs, workerAgeMs: Date.now() - WORKER_BORN_MS },
     }),
   });
 }
@@ -981,6 +1278,7 @@ async function regenerateQuotePdf(
           acceptedAtIso: String(acc.accepted_at ?? ""),
           ip: acc.ip == null ? null : String(acc.ip),
           consentText: String(acc.consent_text ?? ""),
+          onBehalfOf: onBehalfOfFrom(who?.contact, shortCode),
         });
       } catch (e) {
         console.warn("acceptance page re-append failed:", (e as Error).message);
@@ -1009,14 +1307,25 @@ async function regenerateQuotePdf(
 // feeds a computed expiry on list_inventory today — but it is the ONE place the number lives,
 // so the future listing query and this agree by construction.
 const SOLD_LABEL_DAYS = 30;
+// ⚠️ get_public_shop (migration 310) spells the same 30 days in SQL, because that is the anon
+// read path. Change one, change both.
+
+// The Online Shop's photo bucket (migration 310): public read, images only, 8 MB. Keys are
+// '<client_id>/<unit_id>/<uuid>.<ext>' — the table's check constraint enforces that shape.
+const INVENTORY_PHOTOS = "inventory-photos";
+const INVENTORY_PHOTO_MAX = 12;
 
 // The buyer's first name, for the "SOLD — Dave" label. Contact names are ONE flat field in
 // this product (there is no first/last split anywhere in storage, and contactFields[] cannot
 // gain one without breaking the designer's form and its validation), so this is the same
 // split submit-estimate already uses to title a GHL estimate. Snapshotted at the sale so the
 // label never has to join back to a customer's design row to render.
+// A quote to a BUSINESS (designs.contact.company, 2026-10-21): the person's first name when
+// there is one, else the company ("SOLD — Bear River Band"). Without a company, as always.
 // deno-lint-ignore no-explicit-any
 function firstNameOf(contact: any): string | null {
+  const company = companyOf(contact);
+  if (company) return greetingFirst(contact) || company.slice(0, 80);
   const full = String(contact?.name ?? "").trim();
   if (!full) return null;
   return full.split(/\s+/)[0] || null;
@@ -1030,123 +1339,8 @@ function firstNameOf(contact: any): string | null {
 // The key rules (floorPlanKey, designObjectKind and the removal plan) live in
 // _shared/designStorageKeys.ts since 2026-10-05, where they are unit-tested.
 
-// Shared CSV pricing + inclusion importer (mirror of admin-catalog's). rows:
-// [{ style, width, length, price, active, inclusions: { item_key: qty } }].
-// Inclusion cells are QUANTITIES (2026-07-07): loft = included sq ft (e.g. 50),
-// doors = count (e.g. 1); 0/blank/"no" = not included. Legacy yes-style tokens
-// still import as quantity 1 so previously downloaded sheets keep working.
-// clientId is the JWT-resolved tenant — never trusted from the request body.
-// CREATES the size if a (style, width, length) doesn't exist yet, otherwise UPDATES
-// it — keyed on dimensions, so re-uploading the same sheet updates prices without
-// creating duplicates. A size is offered only when active AND priced (blank price or
-// active=no hides it, per the NULL-base-price contract). Never creates styles.
-async function importPricingRows(sb: any, clientId: string, rows: any[]) {
-  const st = await sb.from("building_styles").select("id, key, label").eq("client_id", clientId);
-  if (st.error) throw st.error;
-  const sz = await sb.from("building_sizes").select("id, style_id, width_ft, length_ft, sort_order").eq("client_id", clientId);
-  if (sz.error) throw sz.error;
-  // A cell resolves against every style's label OR key, hidden styles included — and nothing
-  // makes a label unique (create_style only uniquifies the key). So with a hidden "Barn" and a
-  // fresh "Barn", last-writer-wins sent a whole sheet of prices to whichever came back last,
-  // possibly the hidden one, while the live style kept quoting the old numbers and the banner
-  // reported them imported. A name more than one style answers to now resolves to nobody and
-  // its rows are skipped by name. (The portal's Structures upload refuses the same case before
-  // sending; both operator consoles reach admin-catalog's copy with no such guard.)
-  const styleByName = new Map<string, any>();
-  const claimedBy = new Map<string, Set<string>>();   // lowercased label/key -> style ids
-  for (const s of st.data ?? []) {
-    for (const tok of [s.label, s.key]) {
-      const t = String(tok ?? "").trim().toLowerCase();
-      if (!t) continue;
-      styleByName.set(t, s);
-      const ids = claimedBy.get(t) ?? new Set<string>();
-      ids.add(String(s.id));
-      claimedBy.set(t, ids);
-    }
-  }
-  const sizeByDims = new Map<string, any>();   // `${style_id}|${w}|${l}` -> row
-  const maxSort = new Map<string, number>();   // style_id -> highest sort_order
-  for (const z of sz.data ?? []) {
-    const zw = Number(z.width_ft), zl = Number(z.length_ft);
-    sizeByDims.set(`${z.style_id}|${zw}|${zl}`, { id: z.id });
-    const cur = maxSort.get(z.style_id) ?? -1;
-    if ((z.sort_order ?? 0) > cur) maxSort.set(z.style_id, z.sort_order ?? 0);
-  }
-  // Inclusion cell -> included quantity. 0 = not included (delete the row).
-  // Numbers win ("50" -> 50 sq ft, "2" -> 2); legacy yes-tokens mean quantity 1;
-  // anything else (blank, "no", garbage) is 0 — same delete behavior as before.
-  const parseInclusionQty = (v: unknown): number => {
-    if (v === true) return 1;
-    const s = String(v ?? "").trim().toLowerCase();
-    if (s === "") return 0;
-    if (["yes", "y", "true", "x", "included"].includes(s)) return 1;
-    const n = Number(s.replace(/[$,\s]/g, ""));
-    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
-  };
-  const isLegacyYes = (v: unknown) => v === true || ["yes", "y", "true", "x", "included"].includes(String(v ?? "").trim().toLowerCase());
-  // Existing inclusion quantities: a legacy "yes" cell (old saved sheet) PRESERVES a
-  // configured qty (e.g. loft 50 sq ft) instead of silently downgrading it to 1.
-  const existingQty = new Map<string, number>();   // `${size_id}|${item_key}` -> qty
-  const exq = await sb.from("building_size_inclusions").select("size_id, item_key, qty").eq("client_id", clientId);
-  if (exq.error) throw exq.error;
-  for (const r of exq.data ?? []) existingQty.set(`${r.size_id}|${r.item_key}`, Number(r.qty) || 1);
-  const inactiveWord = (v: unknown) => ["no", "n", "0", "false", "inactive"].includes(String(v ?? "").trim().toLowerCase());
-  const num = (v: unknown) => { const blank = v === "" || v == null; if (blank) return { blank: true, n: NaN }; return { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) }; };
-  const fmt = (n: number) => String(n);
-  let created = 0, updated = 0; const skipped: string[] = [];
-  for (const row of rows) {
-    const styleName = String(row?.style ?? "").trim();
-    const wv = num(row?.width), lv = num(row?.length);
-    if (!styleName && wv.blank && lv.blank) continue;   // wholly blank line
-    if ((claimedBy.get(styleName.toLowerCase())?.size ?? 0) > 1) {
-      skipped.push(`${styleName}: more than one building style answers to this name (a hidden style counts) — rename one of them, then import again`);
-      continue;
-    }
-    const style = styleByName.get(styleName.toLowerCase());
-    if (!style) { skipped.push(`${styleName || "(blank)"}: unknown style`); continue; }
-    if (wv.blank && lv.blank) { skipped.push(`${styleName}: missing width & length`); continue; }
-    if (!Number.isFinite(wv.n) || !Number.isFinite(lv.n) || wv.n <= 0 || lv.n <= 0) {
-      skipped.push(`${styleName} ${row?.width}x${row?.length}: invalid width/length`); continue;
-    }
-    const w = wv.n, l = lv.n;
-    const pr = num(row?.price);
-    // Negative is refused with the unparseable: nothing in the product means a building priced
-    // below zero: submit-estimate would email it as a negative building line, while the
-    // designer's preview clamps the line to $0, so the customer saw one number and got another.
-    if (!pr.blank && (!Number.isFinite(pr.n) || pr.n < 0)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
-    const price = pr.blank ? null : pr.n;
-    const active = !inactiveWord(row?.active) && price != null;   // active intent AND priced
-    const label = `${fmt(w)}x${fmt(l)}`;
-    const dimKey = `${style.id}|${w}|${l}`;
-    let sizeId: string;
-    const existing = sizeByDims.get(dimKey);
-    if (existing) {
-      const up = await sb.from("building_sizes").update({ label, base_price: price, active }).eq("id", existing.id);
-      if (up.error) { skipped.push(`${styleName} ${label}: ${up.error.message}`); continue; }
-      sizeId = existing.id; updated++;
-    } else {
-      const nextSort = (maxSort.get(style.id) ?? -1) + 1; maxSort.set(style.id, nextSort);
-      const insv = await sb.from("building_sizes").insert(
-        { client_id: clientId, style_id: style.id, label, width_ft: w, length_ft: l,
-          base_price: price, active, sort_order: nextSort }).select("id").maybeSingle();
-      if (insv.error) { skipped.push(`${styleName} ${label}: ${insv.error.message}`); continue; }
-      sizeId = insv.data!.id; sizeByDims.set(dimKey, { id: sizeId }); created++;
-    }
-    const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
-    for (const [itemKey, val] of Object.entries(inc)) {
-      // A partition wall is never part of a size's price (278): no inclusion row is written for one,
-      // whatever a sheet exported before that change carries in its column.
-      if (!itemKey || itemKey === "partitionWall") continue;
-      let qty = parseInclusionQty(val);
-      if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
-      const incRes = qty > 0
-        ? await sb.from("building_size_inclusions").upsert({ client_id: clientId, size_id: sizeId, item_key: itemKey, included: true, qty }, { onConflict: "size_id,item_key" })
-        : await sb.from("building_size_inclusions").delete().eq("size_id", sizeId).eq("item_key", itemKey);
-      if (incRes.error) skipped.push(`${styleName} ${label} / ${itemKey}: ${incRes.error.message}`);
-    }
-  }
-  return { imported: created + updated, created, updated, skipped };
-}
+// The CSV pricing + inclusion importer (import_pricing_csv) lives in _shared/pricingImport.ts
+// since 2026-10-28, one copy shared with admin-catalog, and writes a sheet in bulk.
 
 Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request, st: ServerTiming) => {
   // When this request reached the function. The gateway's 150 s idle timeout runs from the
@@ -1189,7 +1383,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
   st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held
-  const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail, canRead, canEdit, access } = r.ctx;
+  // `userId` is WHO ACTED; `selfUserId` is WHOSE DATA this screen is about. They differ only
+  // while an operator is acting as somebody — see the field docs in resolveTenant.
+  const { clientId, role, operator, payload, action, audit, auditStrict, userId, selfUserId, userEmail, canRead, canEdit, access } = r.ctx;
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
@@ -1236,7 +1432,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   // phone:'own', only their own (crmFeed callVisibleToOwn); literal view/edit, all of them.
   const phoneFeedScope = (contactOwner: string | null) => ({
     level: (!canRead("phone") ? "none" : ownPhoneOnly(access) ? "own" : "team") as "none" | "own" | "team",
-    userId: isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null,
+    // selfUserId: "which of these calls are MINE". Acting as a sales rep must narrow to the
+    // REP'S calls, or the screen shows the operator's own slice wearing the rep's name.
+    userId: isUuid(String(selfUserId ?? "")) ? String(selfUserId).toLowerCase() : null,
     contactOwner,
   });
 
@@ -1259,7 +1457,11 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     if (!want.length) return new Set();
     const { data, error } = await admin.rpc("crm_visible_contact_ids", {
       p_client_id: clientId,
-      p_user_id: userId,
+      // ⛔ selfUserId. This is the row scope that makes contacts:'own' mean "the customers
+      // that are MINE" — so while an operator acts as a dealer it has to be the DEALER'S
+      // customers, not the operator's. With the signed-in id here, the narrowing was real but
+      // measured against the wrong person, which is the one thing worse than no narrowing.
+      p_user_id: selfUserId,
       p_ids: want,
     });
     if (error) {
@@ -1385,9 +1587,29 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
      *  the caller), so the row is theirs by construction. The branch must keep doing that;
      *  it is the whole of this rule's safety. */
     creates?: boolean;
+    /** The rowTable has no short_code column (crm_deals), so only its contact_id is read. */
+    noCode?: boolean;
   }> = {
     crm_save_contact:      { contactKeys: ["id"] },
+    // 366: names its customer outright, like crm_save_contact.
+    crm_contact_dnd:       { contactKeys: ["id"] },
+    // Migration 330. The contact one names its contact outright; the deal one names a deal, so it
+    // finds the deal's contact the way the other three deal verbs do.
+    crm_contact_custom_save: { contactKeys: ["id"] },
+    crm_deal_custom_save:    { rowTable: "crm_deals", noCode: true },
     crm_create_contact:    { creates: true },
+    // Sales pipelines (301). crm_create_lead makes the caller the new contact's owner when they
+    // are narrowed (the `creates` promise); a match on an existing contact writes nothing and is
+    // answered only when the caller may see that contact. The deal verbs find their deal's contact.
+    crm_create_lead:       { creates: true },
+    crm_deal_create:       { contactKeys: ["contactId"] },
+    crm_deal_update:       { rowTable: "crm_deals", noCode: true },
+    crm_deal_move:         { rowTable: "crm_deals", noCode: true },
+    // 353: calling a card lost, and reopening it, are the same altitude as moving it.
+    crm_deal_mark_lost:    { rowTable: "crm_deals", noCode: true },
+    crm_deal_reopen:       { rowTable: "crm_deals", noCode: true },
+    crm_deal_archive:      { rowTable: "crm_deals", noCode: true },
+    crm_deal_set_status:   { rowTable: "crm_deals", noCode: true },
     // Reads a whole GoHighLevel location and writes the whole tenant's customer list.
     crm_import_ghl_contacts: { tenantWide: true },
     crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
@@ -1427,8 +1649,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     const rowId = rule.rowTable && payload.id ? String(payload.id).slice(0, 64) : "";
 
     if (rowId) {
-      const { data, error } = await admin.from(rule.rowTable!)
-        .select("contact_id, short_code").eq("client_id", clientId).eq("id", rowId).maybeSingle();
+      const { data: found, error } = await admin.from(rule.rowTable!)
+        .select(rule.noCode ? "contact_id" : "contact_id, short_code").eq("client_id", clientId).eq("id", rowId).maybeSingle();
+      const data = found as { contact_id?: string | null; short_code?: string | null } | null;
       if (error) return dbFail(req, clientId, "check who this customer is assigned to", error);
       // Gone, or another tenant's: the same answer a narrowed caller gets for a row that is
       // simply not theirs, so the refusal never distinguishes the two.
@@ -1520,8 +1743,10 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   // cannot be pointed at another person's row whatever the caller sends. Any role may use
   // it (see SELF_ACTIONS): a "user" account still needs to be able to fill in its own name.
   if (action === "get_profile") {
+    // selfUserId: the profile belongs to the person this screen is about, so acting as them
+    // shows THEIRS. Still never anything from the body.
     const { data, error } = await admin
-      .from("client_users").select("full_name, phone, role, prefs").eq("user_id", userId).maybeSingle();
+      .from("client_users").select("full_name, phone, role, prefs").eq("user_id", selfUserId).maybeSingle();
     if (error) return dbFail(req, clientId, "load your profile", error);
     return json({
       fullName: data?.full_name ?? "",
@@ -1533,11 +1758,23 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
       // The signature crm_send_email puts under this person's emails, exactly as it will go out
       // (cleanSignature is what the send runs too). My Synergy Phone shows it under its Email box;
       // the portal reads it off the prefs `status` already returns. "" when there is none.
-      emailSignature: cleanSignature((data?.prefs as Record<string, unknown> | null)?.emailSignature) ?? "",
+      // Both shapes. `emailSignature` keeps its v1 meaning and value, so My Synergy Phone — which
+      // reads this and is not deployed by this change — is untouched; `emailSignatureHtml` is the
+      // rich one, "" when there is none. signaturePair owns the precedence rule.
+      emailSignature: signaturePair(data?.prefs).text ?? "",
+      emailSignatureHtml: signaturePair(data?.prefs).html ?? "",
     });
   }
 
   if (action === "save_profile") {
+    // ⚠️ Refused while wearing somebody: see the note on selfUserId. Changing a person's own
+    // name and phone from inside their view is not what "see what they see" asked for.
+    if (operator && operator.asUserId) {
+      return json({
+        error: "You're seeing this account as someone else, so their profile is read-only here. Exit to your own view to change yours.",
+        code: "acting_as_read_only",
+      }, 409);
+    }
     const fullName = String(payload?.fullName ?? "").trim().slice(0, 120);
     const phone = String(payload?.phone ?? "").trim().slice(0, 40);
     if (!fullName) return json({ error: "Please enter your name." }, 400);
@@ -1546,6 +1783,54 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
       .eq("user_id", userId);        // own row only
     if (error) return dbFail(req, clientId, "save your name and phone", error);
     return json({ ok: true, fullName, phone });
+  }
+
+  // ── YOUR ANSWER ON AI TRANSCRIPTS (migration 307, My Profile since 2026-10-14) ────────────
+  // The phone app's and the extension's question, asked on the web too: may recordings of calls
+  // you're on go to Cloudflare Workers AI for a transcript, and the transcript to Anthropic's Claude
+  // for a summary? ONE answer per account (phone_user_settings.ai_transcripts), which the phone-api
+  // Worker reads before it sends a call, and only when everyone from the team on the call allowed
+  // it. The rules are _shared/aiConsent.ts (the Worker's, mirrored and pinned by
+  // tests/phone/aiTranscripts_test.ts), the reads and the write ./aiTranscripts.ts.
+  //
+  // Both keyed strictly off the session: the JWT's user and the tenant resolveTenant settled on.
+  // Nothing in the body names a person. In view-as the person signed in is CSM Synergy staff, so:
+  //   * the read answers the business's facts and `viewAs: true`, and never reads their own row;
+  //   * the save is REFUSED in words (their answer would be filed under the viewed builder), a
+  //     refusal marked as one so the browser doesn't file it as a fault. The card hides its buttons.
+  // `canChangeRecording` is phone_recording_save's own rule (the business owner with phone edit),
+  // so the card's pointer to Settings › Phone shows only to the person who can use it.
+  if (action === "ai_transcripts_get" || action === "ai_transcripts_save") {
+    const who = { userId: String(userId ?? ""), clientId };
+    const refusal = (sentence: string, status: number) => {
+      const r = json({ error: sentence }, status);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+      return r;
+    };
+    if (action === "ai_transcripts_save") {
+      if (operator) return refusal(AI_TRANSCRIPTS_VIEW_AS, 403);
+      const parsed = parseAiAnswer((payload ?? {}) as Record<string, unknown>);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const saved = await saveAiTranscripts(admin, who, parsed);
+      if ("notReady" in saved) return refusal(AI_TRANSCRIPTS_NOT_READY, 503);
+      if ("dbError" in saved) return dbFail(req, clientId, "save your answer on AI transcripts", saved.dbError);
+      audit(`ai_transcripts_${saved.consent.choice ?? "unread"}`, 1, `version=${saved.consent.version ?? "none"}`).catch(() => {});
+      const answer = currentAnswer(saved.consent);
+      return json({ ok: true, answer, version: saved.consent.version, at: answer ? saved.consent.at : null });
+    }
+    const rails = { recording: recordingServerOn((k) => Deno.env.get(k)), transcribe: transcribeServerOn((k) => Deno.env.get(k)) };
+    const read = await readAiTranscripts(admin, who, rails, !operator);
+    if ("notReady" in read) return json({ ok: true, available: false, error: AI_TRANSCRIPTS_NOT_READY });
+    if ("dbError" in read) return dbFail(req, clientId, "load your answer on AI transcripts", read.dbError);
+    const answer = currentAnswer(read.consent);
+    return json({
+      ok: true, available: true, viewAs: !!operator, noticeVersion: AI_NOTICE_VERSION,
+      answer, version: read.consent?.version ?? null, at: answer ? read.consent?.at ?? null : null,
+      callRecording: read.callRecording, businessTranscribes: read.businessTranscribes, callAnnounced: read.callAnnounced,
+      canChangeRecording: role === "owner" && canEdit("phone"),
+      phoneAccess: canRead("phone"),
+    });
   }
 
 // ── WHAT A COLOUR SAVE ACTUALLY FAILED ON ────────────────────────────────────────────
@@ -1591,14 +1876,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : Promise.resolve({ data: null, error: null }),
       admin
         .from("client_settings")
-        .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
+        .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, qbo_realm_id, qbo_connected_at, updated_at")
         .eq("client_id", clientId)
         .maybeSingle(),
       // Designer branding lives in client_configs (drives the public ?client= link). See the
       // fallback note below.
       admin
         .from("client_configs")
-        .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
+        .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row, brand_colors")
         .eq("client_id", clientId)
         .maybeSingle(),
       // The builder's default login-code channel (migration 231) — see the note below.
@@ -1661,11 +1946,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Does page 2 of the quote show the building from all four corners (client_settings.
     // quote_corner_views, migration 276)? ITS OWN READ, AND TOLERANT, for the same reason as the
     // three above. A failed read answers null and the Settings card hides the switch; a tenant with
-    // no settings row reads off, which is the column's default.
+    // no settings row reads ON, which is the column's default since migration 322 (and what
+    // get_config says for that tenant), so the box and the quote PDF agree.
     const { data: cornerRow, error: cornerErr } = cornerRes;
     const quoteCornerViews: boolean | null = cornerErr
       ? null
-      : (cornerRow as { quote_corner_views?: boolean } | null)?.quote_corner_views === true;
+      : cornerRow
+      ? (cornerRow as { quote_corner_views?: boolean }).quote_corner_views === true
+      : true;
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The
@@ -1706,6 +1994,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ssQuotePrefix: data?.ss_quote_prefix ?? "",
         ssInvoiceNext: data?.ss_invoice_next ?? null,
         ssInvoicePrefix: data?.ss_invoice_prefix ?? "",
+        // Is a QuickBooks company connected (migration 283's card hint)? The CONNECTION, never the
+        // quickbooks_sync entitlement: a builder who pays for QuickBooks but never connected it has
+        // no QuickBooks numbering to continue. Realm id AND connected_at, getQboConnection's test:
+        // the realm alone survives a disconnect as a tombstone. Only a boolean leaves; never the id.
+        qboConnected: Boolean(data?.qbo_realm_id && data?.qbo_connected_at),
         // Sales tax (migration 148). The rate is surfaced as a PERCENT — it is stored as a
         // fraction, and a settings card that round-trips 0.0725 into a box labelled "%" is how
         // a tenant ends up quoting at 0.07%.
@@ -1752,6 +2045,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // In operator view-as this is still the OPERATOR's own row -- they are the one
       // looking at the screen, and borrowing the viewed tenant's owner's layout would be
       // both wrong and a small information leak.
+      //
+      // ⚠️ DELIBERATELY `userId` AND NOT `selfUserId`, and the one place in this file where
+      // that is the right answer (2026-10-23). Acting as a named person makes every "my ..."
+      // read follow them -- their profile, their calendar, their row scope -- because the
+      // question being answered is "what can THEY reach". This is not that question. Which
+      // tab opens first and whether Designs lists or pipelines is the operator's own habit,
+      // not the other person's access, and inheriting it would reset the operator's remembered
+      // view every time they looked in on somebody. The write below keys on `userId` to match,
+      // so no refusal is needed here.
       prefs: myPrefs,
       ...crm,
       // "on" | "off" | null (no phone access, or not readable yet). See the read above.
@@ -1776,7 +2078,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // Building styles per row on the designer (232). null = never chosen, which the card
         // shows as 8 and the designer treats as 8 — the same default, stated in two places.
         stylesPerRow: (cfg as { styles_per_row?: number | null } | null)?.styles_per_row ?? null,
+        // The brand palette (migration 336). Always an array here, so the Branding card can map
+        // over it without a null check on a tenant who has never saved one.
+        brandColors: brandColorList((cfg as { brand_colors?: unknown } | null)?.brand_colors),
       },
+    });
+  }
+
+  // ── A SIGNATURE IMAGE ────────────────────────────────────────────────────────────────────
+  // A signed upload URL for a picture going into this person's own email signature. Same bucket,
+  // same path shape and the same ext allow-list as crm_form_upload_url (leadForms.ts), because
+  // the sanitiser's <img src> rule is written against exactly that shape — a second bucket would
+  // mean a second origin rule for no gain. form-assets is public-read, 5 MB, images only
+  // (migration 325), which is what an <img> in a sent email needs.
+  if (action === "signature_upload_url") {
+    // An operator in view-as is refused. A signature is per person and view-as never signs (both
+    // send sites gate on `operator`), so an operator uploading into a builder's bucket would be
+    // write access with no purpose behind it. Same reasoning as the quick-sends branch.
+    if (operator) return json({ error: "Signature pictures are personal — upload yours from your own account, not from inside a builder's." }, 403);
+    const ext = typeof payload.ext === "string" ? String(payload.ext).toLowerCase().replace(/^\./, "") : "";
+    if (!["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) return json({ error: "Images only: JPG, PNG, WebP or GIF." }, 400);
+    const sbUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const path = `${clientId}/${crypto.randomUUID()}.${ext}`;
+    const { data, error } = await admin.storage.from(SIGNATURE_BUCKET).createSignedUploadUrl(path);
+    if (error || !data) return dbFail(req, clientId, "start that upload", error);
+    return json({
+      ok: true, path, token: data.token,
+      publicUrl: `${sbUrl.replace(/\/+$/, "")}/storage/v1/object/public/${SIGNATURE_BUCKET}/${path}`,
     });
   }
 
@@ -1797,6 +2125,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ? payload.prefs as Record<string, any> : {};
     const clean: Record<string, unknown> = {};
     if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+    // Which tab the Contacts hub opens on (Carolyn 2026-10-12): the contact list, the Design list,
+    // or one pipeline by id. Shaped, never looked up (_shared/savePrefs.ts says why).
+    {
+      const view = cleanContactsView(raw.contactsView);
+      if (view) clean.contactsView = view;
+    }
     // A person's own reply-to address (Carolyn 2026-09-04 @35:06: "every user should be able to
     // go in and say, when somebody replies to an email, send it here. But that should be in
     // their profile"). It is ADVERTISED TO CUSTOMERS — sendTenantEmail puts it in Reply-To
@@ -1807,11 +2141,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // every sender applies on the way OUT (since 2026-10-05) and the My Profile box applies
     // before it saves, so the three can't disagree about what counts as an address.
     //
-    // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch
-    // and the update below REPLACES the whole jsonb blob, so a key that is not listed here does
-    // not merely fail to save — it is DESTROYED by the next save from any screen, including
-    // someone changing their Pipeline default on the same card. Every future per-user pref has
-    // to be added here or it silently evaporates.
+    // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch,
+    // the keys the save did not name are filled in from the stored blob (mergePrefs, below, which
+    // carries only _shared/savePrefs.ts PREF_KEYS), and the update REPLACES the whole jsonb column
+    // with the result. So a key that is not listed in both places does not merely fail to save —
+    // it is DESTROYED by the next save from any screen. Every future per-user pref has to be added
+    // here and there or it silently evaporates.
     //
     // 320 is the RFC 5321 maximum address length and matches the beta_email cap. An empty
     // string is how the UI clears it, and correctly arrives here as "drop the key".
@@ -1819,12 +2154,36 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const addr = cleanReplyAddress(raw.replyToEmail);
       if (addr) clean.replyToEmail = addr;
     }
+    // Whether this person also gets a copy of customers' replies in their own inbox (My Profile,
+    // 2026-10-07; _shared/repReplyTo.ts reads it on the way out). OFF by default, so only `true`
+    // is kept: false or "true" store nothing, and nothing means OFF. A save that does not name
+    // the key leaves the stored answer alone (the merge below); My Profile names it on every save.
+    if (raw.replyCopy === true) clean.replyCopy = true;
     // The person's email signature (Carolyn 2026-10-01: "be able to set up email signatures in
     // the settings"). Plain text, at most 1,000 characters, trimmed; crm_send_email and
     // email_send_test put it under what this person sends. Same rule as the reply-to above: an
     // empty value is how the UI clears it, and arrives here as "drop the key".
     const emailSignature = cleanSignature(raw.emailSignature);
     if (emailSignature) clean.emailSignature = emailSignature;
+    // THE RICH SIGNATURE (Carolyn 2026-11-01), held to its own sanitiser. Two keys, never one
+    // with a marker or a sniff: _shared/emailSignature.ts' header says why, and the short of it
+    // is that "Jane <jane@acme.com>" is a real plain-text signature no heuristic may mangle.
+    // My Profile names BOTH keys on every save, so clearing one cannot leave the other sending.
+    const sigHtml = cleanSignatureHtml(raw.emailSignatureHtml, signatureImageOrigin());
+    // Over the cap is a REFUSAL, not a silent drop: a signature that vanished on save with no
+    // word about it is indistinguishable from a broken Save button.
+    if (!sigHtml && typeof raw.emailSignatureHtml === "string" && /<[a-z]/i.test(raw.emailSignatureHtml)
+      && raw.emailSignatureHtml.length > SIGNATURE_HTML_MAX) {
+      return json({ error: "That signature is too big to save, even after tidying it up — usually that means a picture was pasted into the text. Use Upload image for the picture and keep the rest to a few lines." }, 400);
+    }
+    if (sigHtml) {
+      clean.emailSignatureHtml = sigHtml;
+      // The plain-text twin is derived HERE, from the HTML the server kept — never from the
+      // browser, which is not the authority on what survived the cleaner, and whose copy would
+      // drift from the HTML the moment the allow-list changed.
+      const twin = cleanSignature(signatureHtmlToText(sigHtml));
+      if (twin) clean.emailSignature = twin; else delete clean.emailSignature;
+    }
     // Card order is a list of section keys. Unknown keys are kept rather than dropped here
     // and filtered at RENDER time instead -- the server would otherwise silently delete a
     // card belonging to a newer frontend than itself, and the user would watch their layout
@@ -1838,6 +2197,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
       }
       if (Object.keys(co).length) clean.cardOrder = co;
+    }
+    // MERGE, NOT REPLACE (2026-10-12): a key this save does not name keeps what is stored, so a
+    // screen that knows only some prefs cannot wipe another card's choice (_shared/savePrefs.ts).
+    // Read the way `status` reads it: the caller's own row, by the verified user id.
+    {
+      const { data: cur, error: curErr } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId).limit(1).maybeSingle();
+      if (curErr) return dbFail(req, clientId, "save your preferences", curErr);
+      // Everything this save decided, plus the stored keys it did not name.
+      Object.assign(clean, mergePrefs(clean, raw, cur?.prefs));
     }
     const { error } = await admin.from("client_users")
       .update({ prefs: Object.keys(clean).length ? clean : null })
@@ -1896,10 +2265,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
     // Tentative — the capability check below can force this to false. See migration 217.
     if ("invoiceInGhl" in payload) updates.invoice_in_ghl = Boolean(payload.invoiceInGhl);
-    // The quote-number START. Blank clears it back to "not set"; anything else must be a
-    // whole positive number, because it is allocated with +1 and printed on a customer's
-    // quote. A float or a stray "1,000" silently becoming NaN — and then 1 — is exactly the
-    // collision with a tenant's existing paperwork that this field exists to avoid.
+    // The quote-number START. Blank means "not chosen" (NULL), which the allocator turns into
+    // 1000, or one past the highest quote already issued under the prefix (migration 283, Carolyn
+    // 2026-10-06); a counter already in use is kept instead (the merged check below). Anything
+    // else must be a whole positive number, because it is allocated with +1 and printed on a
+    // customer's quote. A float or a stray "1,000" silently becoming NaN — and then 1 — is
+    // exactly the collision with a tenant's existing paperwork that this field exists to avoid.
     if ("ssQuoteNext" in payload) {
       const raw = String(payload.ssQuoteNext ?? "").trim();
       if (!raw) updates.ss_quote_next = null;
@@ -1934,28 +2305,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         updates.ss_invoice_next = n;
       }
     }
-    // The sales tax rate, entered as a PERCENT and stored as a FRACTION. Blank clears it back
-    // to "not set", which the guard below then refuses to leave SS mode with. An explicit 0 is
-    // a real answer and must survive — hence the blank/zero distinction rather than falsiness.
-    if ("ssTaxRate" in payload) {
-      const raw = String(payload.ssTaxRate ?? "").trim();
-      if (!raw) updates.ss_tax_rate = null;
-      else {
-        const pct = Number(raw);
-        if (!Number.isFinite(pct) || pct < 0 || pct > 25) {
-          return json({ error: "The sales tax rate must be a percentage between 0 and 25 — for example 7.25." }, 400);
-        }
-        // 5dp, matching numeric(7,5): 7.25% -> 0.0725. Rounded here so the stored value is the
-        // one the card will read back, rather than a float that redisplays as 7.249999.
-        updates.ss_tax_rate = Math.round((pct / 100) * 100000) / 100000;
-      }
-    }
-    if ("ssTaxLabel" in payload) {
-      // Printed on the customer's document, so bounded like the numbering prefixes are.
-      const l = String(payload.ssTaxLabel ?? "").trim().slice(0, 40);
-      updates.ss_tax_label = l || "Sales tax";
-    }
-    if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
+    // The sales tax rate (entered as a PERCENT, stored as a FRACTION; blank clears it, 0 is an
+    // answer), its label and the delivery switch. The parser that lived here, moved word for word
+    // into _shared/companyTax.ts so save_company_tax reads a rate the same way; its parity test
+    // holds a frozen copy of this block. Production's Estimates & Invoices card still posts all
+    // three here, and the guard below still judges the merged rate.
+    const companyTax = parseCompanyTax(payload);
+    if (!companyTax.ok) return json({ error: companyTax.error }, 400);
+    Object.assign(updates, companyTax.updates);
 
     // How the designer's login sheet sends a customer's code FIRST (migration 231; expo plan 3.6,
     // Ahsan 2026-09-15): 'sms' (Text) or 'email'. Blank clears it back to the default, text.
@@ -2062,14 +2419,36 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       updates.ss_invoice_prefix = p;
     }
 
-    // Turning CRM invoicing OFF hands the numbering to us, so BOTH start values (quote AND
-    // invoice — separate sequences, migration 125) have to exist before the switch flips —
-    // otherwise the first SS document would begin at 1 and collide with the tenant's
-    // existing paperwork. Checked against the MERGED state (the controls can arrive in
-    // separate saves), the same way the beta pair below is.
+    // Turning CRM invoicing OFF hands the paperwork to us. The two starting numbers (quote AND
+    // invoice — separate sequences, migration 125) are optional since migration 283 (Carolyn
+    // 2026-10-06: "if a builder hasn't set a starting number, start at 1000 automatically"): a
+    // blank one is allocated as 1000, or one past the highest number already issued under its
+    // prefix, so it can never restart at 1 or repeat an issued number. The TAX RATE is still
+    // required. Checked against the MERGED state (the controls can arrive in separate saves),
+    // the same way the beta pair below is.
     if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload || "ssTaxRate" in payload) {
-      const { data: curInv } = await admin
+      const { data: curInv, error: curInvErr } = await admin
         .from("client_settings").select("invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_invoice_next, ss_tax_rate, ss_quote_prefix, ss_invoice_prefix").eq("client_id", clientId).maybeSingle();
+      // A BLANK START NEVER UNSETS A COUNTER IN USE (283). The card posts both numbers on every
+      // save, so a tab opened while a box was blank would write NULL over a counter that has
+      // moved since. The allocator's floor then reads only the documents still on file: a number
+      // on a deleted design goes out again, and a start another admin typed is dropped. Clearing
+      // gains nothing (a NULL counter carries on past the last number issued anyway), so a blank
+      // against a set counter keeps it. Unreadable, the stored counter is unknown: refuse rather
+      // than risk the NULL.
+      const blankQuote = "ssQuoteNext" in payload && updates.ss_quote_next === null;
+      const blankInvoice = "ssInvoiceNext" in payload && updates.ss_invoice_next === null;
+      if (curInvErr && (blankQuote || blankInvoice)) return dbFail(req, clientId, "check your numbering", curInvErr);
+      // The same for the rate. The beta Estimates & Invoices card stopped posting it (2026-10-09:
+      // it is set on Company → Tax), so the guard below judges the STORED rate, and an unreadable
+      // row would read as "no rate": the sentence telling a builder with a rate on file to set one.
+      // Answer the read failure instead. A save that sends the rate (production's card) is judged
+      // on what it sent, as before. One that does not was always refused here (no row read means
+      // no CRM capability and no stored rate), so this changes which answer it gets, never whether
+      // it saves.
+      if (curInvErr && !("ssTaxRate" in payload)) return dbFail(req, clientId, "check your sales tax settings", curInvErr);
+      if (blankQuote && curInv?.ss_quote_next != null) delete updates.ss_quote_next;
+      if (blankInvoice && curInv?.ss_invoice_next != null) delete updates.ss_invoice_next;
       // ── CRM INVOICING IS A CAPABILITY NOW (migration 217, Carolyn 2026-09-07) ───────────
       // "All other builders will only have the option to invoice through SS." A tenant
       // without the flag can write only FALSE here, whatever the body says — the browser
@@ -2077,32 +2456,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //
       // Forced only when the key is PRESENT. A non-allowed tenant still on the CRM path who
       // saves a neighbouring field (a tax label, a prefix) must not be silently flipped into
-      // paperwork they have set no numbering for; the flip belongs to the save that comes
-      // from the Quotes & Invoices card, which always posts this key.
+      // paperwork they never chose, and may have no tax rate for; the flip belongs to the save
+      // that comes from the Quotes & Invoices card, which always posts this key.
       const mayInvoiceInGhl = curInv?.ghl_invoicing_allowed === true;
       if ("invoiceInGhl" in payload && !mayInvoiceInGhl) updates.invoice_in_ghl = false;
       // A tenant with NO row is not on the CRM path: this save creates its row, and since
       // migration 280 a new row starts false. Reading it as CRM mode let a lone starting quote
-      // number through without the invoice number and tax rate, into a paperwork-mode row with
-      // two of the three missing: a shopper's quote then takes a number and is refused for want
-      // of a rate (submit-estimate's no_tax_rate), and the next one takes another.
+      // number through without a tax rate, into a paperwork-mode row every shopper's quote is
+      // then refused from (submit-estimate's no_tax_rate).
       const nextInGhl = "invoiceInGhl" in payload
         ? (mayInvoiceInGhl && Boolean(payload.invoiceInGhl))
         : (curInv ? curInv.invoice_in_ghl !== false : false);
-      const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
-      const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
       const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
-      if (!nextInGhl && nextQuoteStart == null) {
-        return json({
-          error: "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.",
-        }, 400);
-      }
-      if (!nextInGhl && nextInvoiceStart == null) {
-        return json({
-          error: "StructureStudio needs a starting invoice number too — invoices number separately from quotes, so set where they should begin.",
-        }, 400);
-      }
-      // A rate is as mandatory as a number, and for the same reason: refuse rather than invent.
+      // A rate is mandatory where a number no longer is: refuse rather than invent.
       // Rates come from each quote's delivery address, but this one is what gets charged when
       // that lookup is unavailable — so without it there is no defensible figure to fall back
       // to, and an untaxed invoice goes out that nobody was ever asked about. 0 is accepted;
@@ -2128,6 +2494,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //
       // Gaps stay fine (123/125's own property): the rule is only "not at or below one you
       // have already used", never "exactly one more than the last".
+      //
+      // This guards a TYPED start. A blank one has the same floor inside the allocator (283):
+      // it starts at 1000 or one past the highest issued under the prefix, whichever is higher.
       const numericTail = (value: unknown, prefix: string): number | null => {
         const s = String(value ?? "");
         if (prefix && !s.startsWith(prefix)) return null;
@@ -2276,6 +2645,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (val === false) return json({ error: `${key === "accentColor" ? "Accent color" : "Header background"} must be a color like #D97706 or a gradient — it can't contain punctuation such as ; { } < >.` }, 400);
       updates[col] = val;
     }
+    // BRAND PALETTE (migration 336). Carolyn 2026-10-25: "in the company settings I want to be
+    // able to add additional brand colors and then those colors to show in the forms as easy
+    // selections and also to show in the email as easy selection."
+    //
+    // Hex-only, unlike accentColor/headerBg above: a swatch is painted into a form's inline style
+    // and into an email's HTML, where a gradient is not a color any inbox can use. The list is
+    // REBUILT from scratch, never spread, and an entry whose hex doesn't pass is DROPPED rather
+    // than refusing the whole save — the card stops a bad hex at the control, so a drop here means
+    // something hand-rolled the request.
+    if ("brandColors" in payload) {
+      const raw = (payload as any).brandColors;
+      if (raw !== null && raw !== undefined && !Array.isArray(raw)) return json({ error: "Brand colors must be a list." }, 400);
+      updates.brand_colors = brandColorList(raw);
+    }
+
     // BUILDING STYLES PER ROW (migration 232). Carolyn 2026-09-14 @7:10: a ninth style wrapped to a
     // second row of the designer's style bar; the bar now scrolls, and each builder picks how many
     // photos sit side by side. 5..8 because below 5 a tile is wider than the photo is worth and
@@ -2319,7 +2703,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (Object.keys(updates).length === 0) return json({ error: "Nothing to save." }, 400);
     const { error: upErr } = await admin.from("client_configs").update(updates).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "save your branding", upErr);
-    return json({ ok: true, logoUrl: updates.logo_url ?? null });
+    // brandColors comes back so the Branding card shows what was STORED, not what was typed:
+    // a duplicate or an unusable hex is dropped by brandColorList, and the card would otherwise
+    // keep showing the row it just lost.
+    return json({ ok: true, logoUrl: updates.logo_url ?? null, brandColors: ("brand_colors" in updates ? updates.brand_colors : undefined) });
   }
 
   // Upload-only: store an image in the 'branding' bucket and return its public
@@ -2378,24 +2765,55 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // withholds the balance from exactly those callers. Nothing read it here anyway: the money line
     // needs only the price, the meter and the exemption. If a balance is ever wanted beside the
     // button, gate it the way portal-billing's `mine` does.
-    const walletRead = (async (): Promise<{ priceCents: number | null; meterActive: boolean; exempt: boolean } | null> => {
+    //
+    // TWO METERS SINCE 343. `wallet` is the building meter (video_3d_generation), as before;
+    // `doorWallet` is the door-look meter (door_look_generation), read the same way for the Door
+    // looks section's Generate button. Each is null on its own failure or missing row (the rule
+    // above), and a failed exemption read makes both null.
+    type MoneyLine = { priceCents: number | null; meterActive: boolean; exempt: boolean } | null;
+    const walletRead = (async (): Promise<{ wallet: MoneyLine; doorWallet: MoneyLine }> => {
       try {
-        const [acct, price] = await Promise.all([
+        const [acct, price, doorPrice] = await Promise.all([
           admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle(),
           admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
+          admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "door_look_generation").maybeSingle(),
         ]);
-        if (acct.error || price.error || !price.data) return null;
-        return {
-          // Redacted when visible is false, the same posture portal-billing takes on
-          // billing_plans.price_cents — the projection and the revoke are both load-bearing.
-          priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
-          meterActive: Boolean(price.data?.active),
-          // No wallet row is a tenant never charged for anything, and not exempt: wallet_hold
-          // creates the row at the default (false) on the first hold.
-          exempt: acct.data?.metered_exempt === true,
+        if (acct.error) return { wallet: null, doorWallet: null };
+        const line = (pr: { data: any; error: unknown }): MoneyLine => {
+          if (pr.error || !pr.data) return null;
+          return {
+            // Redacted when visible is false, the same posture portal-billing takes on
+            // billing_plans.price_cents — the projection and the revoke are both load-bearing.
+            priceCents: pr.data.visible !== false ? Number(pr.data.price_cents) : null,
+            meterActive: Boolean(pr.data.active),
+            // No wallet row is a tenant never charged for anything, and not exempt: wallet_hold
+            // creates the row at the default (false) on the first hold.
+            exempt: acct.data?.metered_exempt === true,
+          };
         };
-      } catch (_) { return null; }
+        return { wallet: line(price), doorWallet: line(doorPrice) };
+      } catch (_) { return { wallet: null, doorWallet: null }; }
     })();
+    // The Door looks section shows only for a builder with client_settings.door_looks_beta on (343).
+    // Read on its own, never in the error loop, and false on any failure: a database without 343
+    // (42703) must not fail the whole catalog, and a flag we could not read hides the section.
+    const doorLooksFlagRead = readDoorLooksFlag(admin, clientId).then((f) => f.on).catch(() => false);
+    // The door rows' own 3D look (fixture_items.door_look_id, 343). On a database before 343 PostgREST
+    // answers 42703 for the whole select, so it is read again without the column (the cladding rule
+    // above): every catalog keeps loading, and no row has a look.
+    // lite_rows / lite_cols (335): a window's grid of lites in 3D, null = automatic. Same rule: 335 is
+    // applied first. (324's panes is no longer read: 335 replaced it.)
+    const FIXTURE_COLUMNS = "id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, in_door, door_window_at, lite_rows, lite_cols, in_partition, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable";
+    const fixturesRead = (async () => {
+      const read = (cols: string) => admin.from("fixture_items").select(cols).eq("client_id", clientId).order("sort_order");
+      const res = await read(`${FIXTURE_COLUMNS}, door_look_id`);
+      if (res.error && lookSchemaMissing(res.error)) return await read(FIXTURE_COLUMNS);
+      return res;
+    })();
+    // The library (339): the flag and, when it is on, the builder's entries and which rows use them,
+    // for the Cladding, Doors and Windows pickers. Never rejects and is outside the error loop: a
+    // database without 339, or a failed read, gives libraryBeta false and the pages as they were.
+    const libraryRead = catalogLibrary(admin, clientId);
     // Cladding offered per style (207), with each lap row's course size (style_cladding.exposure_in,
     // migration 275) in the same read. On a database before 275 PostgREST answers 42703 for the whole
     // select, so it is read again without the column and `courses` answers false: the card then
@@ -2410,7 +2828,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       return { ...res, courses: !res.error };
     })();
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, wallet] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, iwSettingsRes, iwCoveringsRes, wallets, doorLooksBeta] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       // updated_at (2026-09-14): the style's version, which the 3D editor sends back with its
@@ -2421,7 +2839,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
       // Height off floor for wall-mounted items, and shows the master default where the tenant
       // has not overridden it.
-      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in, hidden_until_priced"),
+      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in, hidden_until_priced, palette_group"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
@@ -2430,7 +2848,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
       // style_ids (272): the "Offered on" ticks. This select needs 272 applied; before it, the
       // whole catalog read fails on the unknown column.
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, style_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      // in_door (289): a window's "Can be used inside a door" tick. The same applies: 289 is applied
+      // BEFORE this function is deployed, or every portal's catalog read fails.
+      // in_partition (313): "Allowed in interior walls". Same rule: 313 is applied first.
+      // door_window_at (the transom in a door, 2026-10-21): where an in-door window sits. Same rule:
+      // its migration is applied first.
+      // lite_rows / lite_cols (335) and door_look_id (343): read above (fixturesRead), the look with
+      // its fallback.
+      fixturesRead,
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -2448,15 +2873,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Foundation services (237). The card renders a FIXED four rows, so a tenant with no rows
       // is simply one offering no site work yet.
       admin.from("foundation_items").select("id, item_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
-      // NOT one of the sixteen: never in the error loop below, and it cannot reject (see above).
+      // Interior walls (313): the tab's settings row (null until first saved or seeded from the 278
+      // partition price) and the builder's covering list. 313 is applied BEFORE this deploy.
+      admin.from("interior_wall_settings").select("standard_stud, pricing_method, rate_2x4, rate_2x6, standard_height, allow_rafters, allow_rough_openings, taxable, internal_only").eq("client_id", clientId).maybeSingle(),
+      admin.from("interior_wall_coverings").select("id, name, pricing_method, rate, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order").order("name"),
+      // NOT one of the sixteen: never in the error loop below, and neither can reject (see above).
       walletRead,
+      doorLooksFlagRead,
     ]);
+    const { wallet, doorWallet } = wallets;
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, iwSettingsRes, iwCoveringsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
@@ -2481,7 +2912,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           heightOffFloorIn: off != null ? Number(off) : null,
           // Out of the customer's palette until priced (171, 278): the Options card starts its rate
           // blank instead of 0 and does not save a blank one, so a Save for something else cannot offer it free.
-          hiddenUntilPriced: !!t.hidden_until_priced };
+          hiddenUntilPriced: !!t.hidden_until_priced,
+          // Which Options tab prices it (Carolyn 2026-10-12: the door RO belongs on Doors, the
+          // window RO on Windows). Same column that places the designer's palette button, so
+          // the two can never disagree. Older master rows carry no group: Interior.
+          paletteGroup: t.palette_group || "interior" };
       });
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
@@ -2495,9 +2930,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       electrical: electricalRes.data ?? null,
       electricalItems: elecItemsRes.data ?? [],
       foundation: foundationRes.data ?? [],
+      // Interior walls (313). Null settings = a tenant who has never saved the tab; the card falls
+      // back to the table's defaults.
+      interiorWalls: iwSettingsRes.data ?? null,
+      interiorWallCoverings: iwCoveringsRes.data ?? [],
       // Can the Cladding card offer a lap course size (275)? False only on a database before it.
       claddingCourses: claddingRes.courses === true,
-      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
+      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet,
+      // libraryBeta + library (339). Started with the reads above, so it costs no extra round trip.
+      // Door looks from a photo (343): whether this builder sees the Door looks section, and the door
+      // meter's money line (null = say nothing about money, as for `wallet`).
+      // doorLookAiOn: the DOOR_LOOK_AI_ENABLED kill switch, so the Library card's "make it from a photo"
+      // box can say it is off before the builder uploads anything (generate_door_look refuses either way).
+      ...(await libraryRead), doorLooksBeta, doorWallet, doorLookAiOn: doorLooksBeta === true && doorAiEnabled() });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -2506,9 +2951,40 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
     { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     try {
-      const r = await importPricingRows(admin, clientId, payload.rows);
+      const r = await importPricingRows(admin, clientId, payload.rows, (code, message) =>
+        void logEdgeError({ fn: "portal-settings", req, clientId, code, message }).catch(() => {}));
       return json({ ok: true, ...r });
     } catch (e) { return dbFail(req, clientId, "import that pricing sheet", e); }
+  }
+
+  // ── The sizes table (Settings → Sheds → "Open sizes & prices table", 2026-10-30) ──────────────
+  // _shared/pricingCells.ts has the rules; migration 350 has the save, 351 its Delete (an object
+  // remove {id, base}; a size saved designs use is refused). clientId is JWT-resolved
+  // and every answer carries it: the page sends both calls through the side door (a raw fetch that
+  // skips the invoke wrapper's tenant tripwire), so it checks clientId against the tenant it opened
+  // for itself and stops saving on a mismatch.
+  //
+  // The whole read, paged by client_id: styles, sizes (with created_at/updated_at, the version every
+  // edit sends back), inclusions, exact counts of sizes and inclusions (the browser's truncation
+  // guard), whether Real-Time Pricing owns the price column, and `used`, the sizes saved designs use
+  // (pricing_sizes_in_use, 351: the page greys their ✕). The option COLUMNS come from the catalog
+  // action, as for the Excel template.
+  if (action === "size_table") {
+    try {
+      return json({ ok: true, clientId, ...(await readSizeTable(admin, clientId)) });
+    } catch (e) { return dbFail(req, clientId, "load your sizes", e); }
+  }
+
+  // The save: creates, removes and per-size edits, at most 50 together. A malformed body is a 400
+  // with nothing called (the browser checks the same rules first, so it logs one as a parity bug).
+  // Each size's answer (saved / duplicate / conflict / refused / missing) comes back with what the
+  // server now holds for it. One best-effort audit row per call, counts only.
+  if (action === "save_pricing_cells") {
+    const v = validatePricingCells(payload);
+    if (!v.ok) return json({ error: v.error }, 400);
+    try {
+      return json({ ok: true, clientId, ...(await savePricingCells(admin, clientId, v.value, audit)) });
+    } catch (e) { return dbFail(req, clientId, "save your table changes", e); }
   }
 
   // ══ Real-Time Pricing (migration 152) ══════════════════════════════════════════════
@@ -2594,7 +3070,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (crmGated || action === "crm_record") {
     try { crmPaid = await hasPaidFeature(admin, clientId, "crm"); }
     catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
-    if (crmGated && !crmPaid) return json({ error: "The built-in CRM is not part of your subscription - add it under Settings -> Billing." }, 403);
+    if (crmGated && !crmPaid) return json({ error: "The Customer Hub is not part of your subscription - add it under Settings -> Billing." }, 403);
   }
 
   // ENTITLEMENT, server-side, for QuickBooks sync. Third instance of the RTP posture above
@@ -2997,34 +3473,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const method = String(row?.pricing_method ?? "").trim();
       const rate = Number(row?.rate);
       if (!itemKey) continue;
-      // A partition wall (278) is priced only from the card that knows it (partitionAware, sent by the
-      // portal that ships the Interior items card). Production's card from before it sends every row it
-      // lists on Save, and a price set there would put a Partition Wall button on production's designer,
-      // which cannot draw one (it places a sliver no quote charges). The catalog hides an unpriced one
-      // from that card already; this is the backstop, and it never asks for a price. A priced one that
-      // card only sends back unchanged is passed over quietly. Remove once production carries the new
-      // Interior items card.
-      if (itemKey === "partitionWall" && payload.partitionAware !== true) {
+      // An interior wall (278's partitionWall) is priced on its own tab since 313: Settings → Options →
+      // Interior walls (save_interior_walls, interior_wall_settings). Nothing prices a wall from this
+      // row any more, and this action never writes it. A card that only sends the row back unchanged
+      // (production's Interior items card from before 313) is passed over quietly; a change is refused
+      // in words that say where the price lives now.
+      if (itemKey === "partitionWall") {
         const ex = exByKey.get(itemKey);
         const unchanged = !!ex && ex.pricing_method === method && Number(ex.rate) === rate;
-        if (!unchanged) skipped.push(ex ? "Partition Wall: its price can be changed after the next app update" : "Partition Wall: opens with the next app update, nothing to set yet");
+        if (!unchanged) skipped.push("Interior wall: its price is set on Settings → Options → Interior walls");
         continue;
       }
       if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
-      // A partition wall (migration 278) is charged per foot of wall, per square foot of wall or each;
-      // the other four mean nothing for one wall, and submit-estimate would quietly charge them each.
-      if (itemKey === "partitionWall" && !["each", "lineal_ft", "sqft_option"].includes(method)) {
-        skipped.push(`${itemKey}: a partition wall is priced each, per foot (lineal ft) or per square foot of wall (sqft option)`);
-        continue;
-      }
-      // ...and it is only OFFERED once it has a price above $0: a first price of 0 would put it on every
-      // customer's designer, free. The card leaves an untouched (blank) one out of the Save, so this
-      // only says no to a 0 typed for a wall that has no price yet.
-      if (itemKey === "partitionWall" && !idByKey.has(itemKey) && !(rate > 0)) {
-        skipped.push(`${itemKey}: not offered until it has a price above $0`);
-        continue;
-      }
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
       // Optional per-item image (shown on the estimate line for this product). Only written
       // when the row carries an imageUrl field, so a save from an older client never blanks
@@ -3182,6 +3643,32 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // pipeline/stage dropdowns. Uses the STORED creds (the browser never holds the
   // API key), so it only works once the connection is saved. Owner/admin only
   // (settings config) — deliberately NOT in READ_ACTIONS. Never returns the key.
+  // Disconnect the CRM (Carolyn 2026-10-14: "There is also no feature to simply disconnect
+  // GHL"). Until now the only way out was a hand edit: the key is write-only and an empty
+  // save deliberately never blanks it. This clears the credential AND the pipeline/stage
+  // mapping (a mapping with no location behind it would resurface wrong on the next
+  // connect), and moves quotes to Structure Studio paperwork — with no CRM, invoice_in_ghl
+  // = true is a state submit-estimate refuses outright ("isn't set up to send quotes yet").
+  // The browser's confirm dialog says all three of those before the click lands.
+  // Idempotent: a second call on an already-disconnected tenant is an ok, not an error.
+  if (action === "disconnect_ghl") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("ghl_location_id, ghl_api_key, invoice_in_ghl")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your saved CRM credentials", curErr);
+    const wasConnected = Boolean(cur?.ghl_location_id && cur?.ghl_api_key);
+    const movedToSs = cur ? cur.invoice_in_ghl !== false : false;
+    const { error: upErr } = await admin.from("client_settings").upsert({
+      client_id: clientId,
+      ghl_api_key: null, ghl_location_id: null, ghl_pipeline_id: null,
+      ghl_stage_send_quote_id: null, ghl_stage_accepted_id: null, ghl_stage_invoiced_id: null, ghl_stage_delivered_id: null,
+      invoice_in_ghl: false,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "client_id" });
+    if (upErr) return dbFail(req, clientId, "disconnect your CRM", upErr);
+    return json({ ok: true, wasConnected, movedToSs });
+  }
+
   if (action === "list_ghl_pipelines") {
     const { data: cur, error: curErr } = await admin
       .from("client_settings")
@@ -3268,14 +3755,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       imageUrl = pub.publicUrl;
     }
     const base = (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")) || "style";
+    // Serial code (316). Settings → Structures requires it in the form; it stays optional HERE
+    // because the Advanced page's "Save as a new style" copies a style whose code is already
+    // taken (codes are unique per builder). A style created without one is listed on the Serial
+    // Numbers card until the builder adds it.
+    const code = String(payload.code ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || null;
     // INSERT then retry on a unique-violation (23505) for a per-client key collision. The
     // global building_style_catalog key-reservation was removed with that table in 030.
     let key = base, n = 1;
     for (let attempt = 0; attempt < 50; attempt++) {
       const ins = await admin.from("building_styles").insert(
-        { client_id: clientId, key, label, image_url: imageUrl, sort_order: 0, active: true })
+        { client_id: clientId, key, label, code, image_url: imageUrl, sort_order: 0, active: true })
         .select("id, key").maybeSingle();
       if (!ins.error) return json({ ok: true, styleId: ins.data!.id, key: ins.data!.key });
+      // A duplicate CODE is the builder's to fix, not a key to retry around.
+      if (ins.error.code === "23505" && /code_uniq/.test(String(ins.error.message ?? ""))) {
+        return json({ error: `Another style already uses the serial code "${code}". Each style needs its own.` }, 409);
+      }
       if (ins.error.code !== "23505") return dbFail(req, clientId, "create that building style", ins.error);
       key = `${base}-${++n}`;
     }
@@ -3704,6 +4200,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the partial unique index treat un-coded styles as un-set instead of as duplicates.
     if ("code" in payload) {
       updates.code = String(payload.code ?? "").trim().toUpperCase().slice(0, 4) || null;
+      // REQUIRED since 316 (Carolyn 2026-10-18): a style's code can be changed, never removed.
+      if (!updates.code) return json({ error: "A serial code is required for every style (e.g. LBA)." }, 400);
     }
     if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
       const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
@@ -3725,6 +4223,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { error, count } = await admin.from("building_styles")
       .update(updates, { count: "exact" })
       .eq("client_id", clientId).eq("id", styleId);
+    if (error && error.code === "23505" && /code_uniq/.test(String(error.message ?? ""))) {
+      return json({ error: `Another style already uses the serial code "${updates.code}". Each style needs its own.` }, 409);
+    }
     if (error) return dbFail(req, clientId, "save that style", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, imageUrl: updates.image_url ?? null });
@@ -3831,6 +4332,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // compares as the duplicate it is. `slabGround` (2026-10-03): the panel draws a slab's corners, so
     // its null clears them there; an older panel's null keeps them.
     carryForwardFoundation(clean.d3, payload.d3, found.style!.d3, payload.frame, payload.slabGround === true);
+    // WHERE THE ROOF SITS ON THE WALL (roof.seat / roof.rafterDepthIn, 2026-10-06): production's designer, until
+    // the next promotion, drops both on an AI redraft and can never set them, so a save without `seatAware`
+    // keeps the stored pair its roof left out (carryForwardRoofSeat). The current panel sends seatAware, and
+    // its "On the plate" and blank rafter box clear them. Before the guard too, for the same reason.
+    carryForwardRoofSeat(clean.d3, payload.d3, found.style!.d3, payload.seatAware === true);
+    // THE FRAMING VIEW's spacing (d3.framing, 2026-10-27): absent in an older designer's d3 is not a clear; the
+    // panel that sets it sends null for "Not set" (carryForwardFraming). Before the guard too.
+    carryForwardFraming(clean.d3, payload.d3, found.style!.d3);
     // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
     // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
     // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already
@@ -5475,19 +5984,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Live, a draft whose reads measured a 0.41 gable from their own points came out at 0.415, and
     // round 0 of this check then moved it to 0.7 by eye. So a pitch at least two reads MEASURED is
     // treated like a builder-measured eave: the prompt says it is not the check's to change and
-    // applySelfCheck drops a correction to it. Worked out ONCE, off the ROW (draft_tokens.samples
-    // and the first draft, `drafted`), so it holds for every round of this generation. v2 only:
-    // the legacy check is d3ab404's, rules and prompt alike.
-    // ...and only while the spec this round judges is still a gable: a round that follows one which
-    // turned the roof into a shed is not told its pitch was measured.
-    const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
+    // applySelfCheck drops a correction to it. Worked out ONCE, off the ROW: its draft_tokens.samples
+    // and the spec THIS ROUND JUDGES (draftRead: the last round's answer, or the first draft on round
+    // 0), never the request. v2 only: the legacy check is d3ab404's, rules and prompt alike.
+    // The judged spec, not `drafted` (review, 2026-10-07): while the lock holds that spec's pitch IS
+    // the draft's, so it holds for every later round; but a round that follows one which turned the
+    // roof into a shed or a gambrel is not locked, and nor is a later round judging the gable an
+    // earlier one brought back at a pitch set by eye, which no read measured.
+    const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, draftRead.d3);
     // ── AN OVERHANG THE CLOSE-UPS MEASURED IS LOCKED THE SAME WAY (2026-09-29, measuredOverhangLock) ──
     // The draft measured the gable's overhang from enlarged close-ups of its corners, and step 2 of
     // the check would judge it again by eye in a whole frame, the reading the close-ups replaced. So
     // it is the builder-measured eave's posture again: the prompt says it is not the check's to change,
-    // and applySelfCheck drops a correction to it. Off the ROW, v2 only, and only while the spec this
-    // round judges is still a gable. A builder who typed the overhang keeps their own path (dims).
-    const overhangLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredOverhangLock(claimed.draft_tokens, claimed.drafted);
+    // and applySelfCheck drops a correction to it. Off the ROW's draft_tokens and the spec this round
+    // judges, as the pitch's: v2 only, only while that spec is still a gable, and only while its
+    // overhang is still the close-ups' own. A builder who typed the overhang keeps their own path (dims).
+    const overhangLocked = v2Check && measuredOverhangLock(claimed.draft_tokens, draftRead.d3);
+    // ── A RECESSED PORCH'S DEPTH THE READS' POINTS MEASURED IS LOCKED TOO (2026-10-07, measuredPorchLock) ──
+    // The reads measured the depth from points where by eye they gave 8 ft for a 6 ft porch, and step 3
+    // of the check would judge it again by eye. So it is the measured pitch's posture: the prompt says it
+    // is not the check's to change, and applySelfCheck drops a correction to it. Off the ROW's
+    // draft_tokens and the spec this round judges, as the pitch's: v2 only, only while that spec still
+    // has the porch the points measure (porchPointsApply), and only while its depth is within half a
+    // foot of a measured one. A porch an earlier round made projecting and the next put back at a depth
+    // judged by eye is not locked on that depth (review, 2026-10-07).
+    const porchLocked = v2Check && measuredPorchLock(claimed.draft_tokens, draftRead.d3);
 
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
@@ -5512,7 +6033,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
     const plan = selfCheckRequest({
       mode: checkMode, dims, draft: draftRead.d3, pairs,
-      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked, overhangLocked,
+      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked, overhangLocked, porchLocked,
     });
     const checkSignal = AbortSignal.timeout(plan.abortMs);
     let checkRes: Response;
@@ -5570,9 +6091,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
     // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
     // off it. selfCheckPrompt stops asking for it in the same breath. `pitchLocked` does the same
-    // for roof.pitch where the reads measured it (above), and `overhangLocked` for roof.overhang
-    // where the close-ups did.
-    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked);
+    // for roof.pitch where the reads measured it (above), `overhangLocked` for roof.overhang
+    // where the close-ups did, and `porchLocked` for roof.porchDepthFt where the reads' points did.
+    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked, porchLocked);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
@@ -5584,7 +6105,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_field_dropped", severity: "info",
         message: `The self-check proposed ${applied.dropped.length} change(s) that were not applied.`,
-        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}), ...(overhangLocked ? { overhangLocked } : {}) },
+        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}), ...(overhangLocked ? { overhangLocked } : {}), ...(porchLocked ? { porchLocked } : {}) },
       });
     }
 
@@ -5874,6 +6395,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // rate; a cladding row also holds the customer-facing name, the basis and the tax flag, and
   // deleting it would throw away a label a builder typed while they were still deciding what
   // to charge. get_config's `rate is not null` filter is what withholds it from the customer.
+  // The library (339): every action NAMED here, so preflight's GATES <-> branch cross-check sees them.
+  if (action === "library" ||
+      action === "library_seed_mine" ||
+      action === "library_add" ||
+      action === "library_edit" ||
+      action === "library_remove" ||
+      action === "library_request_upload_url" ||
+      action === "library_request" ||
+      action === "library_request_cancel") {
+    return await handleLibraryAction({
+      admin, req, clientId, userId: userId ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, audit,
+    });
+  }
+
   if (action === "save_cladding") {
     const styleId = String((payload as Record<string, unknown>).styleId ?? "").trim();
     if (!styleId) return json({ error: "styleId required" }, 400);
@@ -5888,7 +6424,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
 
-    const CLADDING_IDS = new Set(["panel", "lap", "batten", "agpanel"]);
+    // "vinyl" (4.5" Vinyl Siding) since 2026-10-06, with style_cladding's CHECK (migration 285):
+    // lap's profile at its own course, priced on its own row beside the 7" LP Lap Siding.
+    const CLADDING_IDS = new Set(["panel", "lap", "vinyl", "batten", "agpanel"]);
     // The product's shared pricing vocabulary (221). Kept as an explicit set rather than the
     // pricing_method enum: the values match it deliberately, but a value added to that enum for
     // another table must not silently become offerable here with no implementation behind it.
@@ -5900,7 +6438,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     for (const raw of payload.rows) {
       const row = raw as Record<string, unknown>;
       const cid = String(row?.claddingId ?? "").trim();
-      // Refused, not defaulted. A fifth id would reach D3_CLADDING[id] in the browser as
+      // Refused, not defaulted. A sixth id would reach D3_CLADDING[id] in the browser as
       // undefined and take the 3D wall material down with it, so it must never be stored.
       if (!CLADDING_IDS.has(cid)) { skipped.push(`row ${i}: "${row?.claddingId}" is not a cladding we ship`); i++; continue; }
       if (seen.has(cid)) { skipped.push(`${cid}: listed twice`); i++; continue; }
@@ -5922,11 +6460,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const basisRaw = String(row?.basis ?? "").trim();
       if (basisRaw !== "" && !BASES.has(basisRaw)) { skipped.push(`${cid}: "${basisRaw}" is not a pricing basis`); i++; continue; }
 
-      // How much of each LAP board shows, in inches (exposure_in, 275): what the 3D draws the
-      // courses at, and nothing else — it never prices. Written only when the row NAMES it, so a
+      // The LAP board size in inches (exposure_in, 275; the number in the siding's name since
+      // 2026-10-06, not the reveal): what the 3D scales the courses by, and nothing else — it never prices. Written only when the row NAMES it, so a
       // portal that predates 275 (production's, until it is promoted) never touches a size a
-      // builder set. Blank is a real state, "the 3D's standard 6 in", and reaches the column as
-      // NULL. Refused, never coerced, on any other cladding or outside 3..12: the column's CHECK
+      // builder set. Blank is a real state, "the 3D's standard lap (7 in)", and reaches the column
+      // as NULL; a size is in the inches of the built-in names (2026-10-06), so 7 draws that same
+      // lap and 4.5 draws the vinyl's courses. Refused, never coerced, on any other cladding
+      // (4.5" Vinyl Siding included: it is fixed at its size) or outside 3..12: the column's CHECK
       // says the same, and a sentence here beats a constraint name in the skipped list. A blank on
       // another cladding is simply nothing to write.
       const courses: { exposure_in?: number | null } = {};
@@ -5942,6 +6482,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
       }
 
+      // The builder's library entry this row offers (339). Absent = leave the link alone (the old
+      // portal); null = take it off; an id = this entry, which then names the row and sets its course
+      // (./library.ts claddingLinkFor). Refused only when an entry is NAMED: the library filters the
+      // picker, it is never a rule on a save that does not mention it.
+      const link = await claddingLinkFor(admin, clientId, cid, row && "clientLibraryId" in row ? row.clientLibraryId : undefined);
+      if ("refuse" in link) { skipped.push(`${cid}: ${link.refuse.error}`); i++; continue; }
+      if ("dbError" in link) return dbFail(req, clientId, link.where, link.dbError);
+
       const patch = {
         label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
         rate,
@@ -5951,6 +6499,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         internal_only: row?.internalOnly === true,
         sort_order: i,
         ...courses,
+        ...link.write,
         updated_at: new Date().toISOString(),
       };
       const up = await admin.from("style_cladding")
@@ -6144,6 +6693,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         sort_order: Number(r?.sortOrder) || 0,
         updated_at: new Date().toISOString(),
       };
+      // Allowed on interior walls (313), presence-guarded: a card that never sends it (production's,
+      // or the Interior walls tab's own flag save, which writes the column directly) leaves the tick
+      // alone on an update, and a new row takes the column's default, true.
+      if (r && Object.prototype.hasOwnProperty.call(r, "interiorWallOk") && r.interiorWallOk !== undefined) {
+        row.interior_wall_ok = r.interiorWallOk !== false;
+      }
       // ── RENAME IS AN UPDATE, NOT AN UPSERT ────────────────────────────────────────────
       // The row carries BOTH the primary key and a conflict target of (client_id, name), and
       // those disagree the moment a builder renames an item: Postgres routes the statement by
@@ -6257,6 +6812,171 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
+  // ── Interior walls (313): Settings → Options → Interior walls ──────────────────────────────
+  // One row per tenant, upserted whole, plus the two tick lists the tab shows ("Allowed in interior
+  // walls" on doors and windows, "Allowed on interior walls" on electrical items), which are written
+  // column-only so the tab never has to resend either catalog.
+  //
+  // The wall is priced the builder's choice of exactly two ways (Carolyn, 2026-10-17): per lineal ft
+  // of wall, or per sq ft of wall face. 'each' is refused (the table's CHECK refuses it too).
+  // Nothing is mirrored into the 278 row any more: the designer and submit-estimate read this table
+  // (get_config.interiorWalls / interiorWallRates), and a tenant with no row here has no interior walls.
+  // The 278 layout_item_pricing / client_layout_items rows are left as they are, never written or deleted.
+  if (action === "save_interior_walls") {
+    const p = payload as Record<string, unknown>;
+    const STUDS = new Set(["2x4", "2x6"]);
+    const METHODS = new Set(["lineal_ft", "sqft_option"]);
+    const HEIGHTS = new Set(["plate", "rafters"]);
+    const standardStud = String(p.standardStud ?? "2x4");
+    if (!STUDS.has(standardStud)) return json({ error: "Pick 2x4 or 2x6 as your standard framing." }, 400);
+    const method = String(p.method ?? "");
+    if (!METHODS.has(method)) return json({ error: "Interior walls are priced per lineal foot of wall or per square foot of wall. Pick one." }, 400);
+    // A rate is a number >= 0 or genuinely absent. "" means "this size is not offered" and reaches the
+    // column as NULL, never as 0: 0 is a wall included at no charge.
+    const rateOf = (v: unknown): number | null | undefined => {
+      const t = String(v ?? "").trim();
+      if (t === "") return null;
+      const n = Number(t);
+      return Number.isFinite(n) && n >= 0 ? n : undefined;
+    };
+    const rate2x4 = rateOf(p.rate2x4), rate2x6 = rateOf(p.rate2x6);
+    if (rate2x4 === undefined || rate2x6 === undefined) {
+      return json({ error: "A wall rate has to be a number. Leave a size blank if you don't offer it." }, 400);
+    }
+    const standardRate = standardStud === "2x6" ? rate2x6 : rate2x4;
+    if (standardRate == null) {
+      return json({ error: `Enter a rate for a ${standardStud} wall: it is your standard framing. Leave the other size blank if you don't offer it.` }, 400);
+    }
+    const standardHeight = String(p.standardHeight ?? "plate");
+    if (!HEIGHTS.has(standardHeight)) return json({ error: "Pick stud wall height or to the rafters as your standard wall height." }, 400);
+    const allowRafters = p.allowRafters !== false;
+    if (standardHeight === "rafters" && !allowRafters) {
+      return json({ error: "Your standard height is to the rafters, so \"To the rafters\" has to be offered. Tick it, or make stud wall height the standard." }, 400);
+    }
+    const taxable = p.taxable !== false;
+    const internalOnly = p.internalOnly === true;
+    // The two tick lists: { id: boolean }. Ids that are not uuids are dropped rather than handed to
+    // Postgres (22P02). Every write is scoped to this tenant, so a foreign id matches nothing.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const splitFlags = (v: unknown): { on: string[]; off: string[] } | null => {
+      const on: string[] = [], off: string[] = [];
+      if (v == null) return { on, off };
+      if (typeof v !== "object" || Array.isArray(v)) return null;
+      const entries = Object.entries(v as Record<string, unknown>);
+      if (entries.length > MAX_BULK_ROWS) return null;
+      for (const [id, val] of entries) {
+        if (!UUID_RE.test(id)) continue;
+        (val === false ? off : on).push(id);
+      }
+      return { on, off };
+    };
+    const fixFlags = splitFlags(p.inPartition), elecFlags = splitFlags(p.interiorWallOk);
+    if (!fixFlags || !elecFlags) {
+      return json({ error: "Those interior-wall ticks didn't come through in a form we can save. Reload the page and try again." }, 400);
+    }
+    const up = await admin.from("interior_wall_settings").upsert({
+      client_id: clientId,
+      standard_stud: standardStud,
+      pricing_method: method,
+      rate_2x4: rate2x4,
+      rate_2x6: rate2x6,
+      standard_height: standardHeight,
+      allow_rafters: allowRafters,
+      allow_rough_openings: p.allowRo !== false,
+      taxable,
+      internal_only: internalOnly,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "client_id" });
+    if (up.error) return dbFail(req, clientId, "save your interior wall settings", up.error);
+    for (const [ids, val] of [[fixFlags.on, true], [fixFlags.off, false]] as [string[], boolean][]) {
+      if (!ids.length) continue;
+      const r = await admin.from("fixture_items").update({ in_partition: val })
+        .eq("client_id", clientId).in("category", ["door", "window"]).in("id", ids);
+      if (r.error) return dbFail(req, clientId, "save which doors and windows go in interior walls", r.error);
+    }
+    for (const [ids, val] of [[elecFlags.on, true], [elecFlags.off, false]] as [string[], boolean][]) {
+      if (!ids.length) continue;
+      const r = await admin.from("electrical_items").update({ interior_wall_ok: val })
+        .eq("client_id", clientId).in("id", ids);
+      if (r.error) return dbFail(req, clientId, "save which electrical items go on interior walls", r.error);
+    }
+    return json({ ok: true });
+  }
+
+  // The builder's own list of wall coverings (313): save_electrical_items' shape. Upsert by id (a
+  // rename is an update), a name clash is a 409 in words, and a row the editor did not send back is
+  // deleted: it is the builder's own list, and a removed row is expected to be gone.
+  if (action === "save_interior_wall_coverings") {
+    const rows = Array.isArray((payload as Record<string, unknown>).rows)
+      ? (payload as Record<string, unknown>).rows as Record<string, unknown>[] : [];
+    if (rows.length > MAX_BULK_ROWS) return json({ error: `That's more than ${MAX_BULK_ROWS} coverings in one save.` }, 400);
+    const METHODS = new Set(["sqft_option", "lineal_ft", "each"]);
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    // Validate the whole list before writing any of it: two rows with one name, or one bad rate,
+    // would otherwise stop the save halfway and leave half a list.
+    const seen = new Set<string>();
+    const clean: Record<string, unknown>[] = [];
+    for (const r of rows) {
+      const name = String(r?.name ?? "").trim().slice(0, 60);
+      if (!name) continue;
+      const k = name.toLowerCase();
+      if (seen.has(k)) return json({ error: `You have two wall coverings called "${name}". Give one of them a different name.` }, 409);
+      seen.add(k);
+      const method = String(r?.method ?? "sqft_option");
+      if (!METHODS.has(method)) return json({ error: `"${name}" has to be priced per square foot of wall, per foot of wall, or each.` }, 400);
+      const t = String(r?.rate ?? "").trim();
+      const rate = t === "" ? null : Number(t);
+      if (rate != null && (!Number.isFinite(rate) || rate < 0)) {
+        return json({ error: `"${name}" has a rate that isn't a number. Leave it blank if you don't offer it, or 0 if it's included.` }, 400);
+      }
+      const rawId = String(r?.id ?? "").trim();
+      clean.push({
+        id: UUID_RE.test(rawId) ? rawId : "",
+        row: {
+          client_id: clientId,
+          name,
+          pricing_method: method,
+          rate,
+          taxable: r?.taxable !== false,
+          internal_only: r?.internalOnly === true,
+          active: r?.active !== false,
+          sort_order: Number(r?.sortOrder) || 0,
+          updated_at: new Date().toISOString(),
+        },
+      });
+    }
+    const keep: string[] = [];
+    let saved = 0;
+    for (const c of clean) {
+      const row = c.row as Record<string, unknown>;
+      const id = String(c.id);
+      const nameClash = (err: { code?: string } | null) =>
+        String(err?.code ?? "") === "23505"
+          ? json({ error: `You already have a wall covering called "${row.name}". Give one of them a different name.` }, 409)
+          : null;
+      let savedId: string | null = null;
+      if (id) {
+        // .eq("client_id") is load-bearing: the id arrives in the body.
+        const upd = await admin.from("interior_wall_coverings").update(row)
+          .eq("id", id).eq("client_id", clientId).select("id").maybeSingle();
+        if (upd.error) return nameClash(upd.error) ?? dbFail(req, clientId, "save your wall coverings", upd.error);
+        savedId = upd.data?.id ? String(upd.data.id) : null;
+      }
+      // No id, or an id that no longer matches a row of this tenant's: keyed by name instead.
+      if (!savedId) {
+        const ins = await admin.from("interior_wall_coverings").upsert(row, { onConflict: "client_id,name" }).select("id").single();
+        if (ins.error) return nameClash(ins.error) ?? dbFail(req, clientId, "save your wall coverings", ins.error);
+        savedId = ins.data?.id ? String(ins.data.id) : null;
+      }
+      if (savedId) keep.push(savedId);
+      saved++;
+    }
+    const del = await admin.from("interior_wall_coverings").delete().eq("client_id", clientId)
+      .not("id", "in", `(${keep.length ? keep.map((k) => `"${k}"`).join(",") : '"00000000-0000-0000-0000-000000000000"'})`);
+    if (del.error) return dbFail(req, clientId, "tidy up your wall coverings", del.error);
+    return json({ ok: true, saved });
+  }
+
   if (action === "save_insulation") {
     if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
     { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
@@ -6330,9 +7050,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
     { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
     const ALLOWED_METHODS = new Set(["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"]);
-    const exRes = await admin.from("colors").select("id").eq("client_id", clientId);
+    // SECTION-SCOPED SAVE (Carolyn 2026-10-30: "we need all the save colors to work on their
+    // own page. currently the save on each page is saving all 3 pages"). Settings → Colors is
+    // three pages — Paint, Shingle, Metal — and each one's Save button used to post the whole
+    // palette, so saving Paint also wrote (and could delete from) the other two.
+    //
+    // ⚠️ THE DELETE SWEEP IS WHY THIS IS A SERVER CHANGE and not just "send fewer rows". This
+    // action is a full-list replace: anything absent from the payload is DELETED. Posting only
+    // the paint rows against an unscoped sweep would wipe every shingle and metal colour. So
+    // `section` narrows the sweep to the rows that page owns, and nothing else changes.
+    // Absent `section` keeps the old whole-palette behaviour (an older browser, and the
+    // `section === "all"` view).
+    const SECTIONS = new Set(["paint", "shingle", "metal"]);
+    const section = (payload.section === undefined || payload.section === null || payload.section === "all")
+      ? null : String(payload.section);
+    if (section !== null && !SECTIONS.has(section)) return json({ error: `Unknown colour section "${section}".` }, 400);
+    const exRes = await admin.from("colors").select("id, shingle, metal").eq("client_id", clientId);
     if (exRes.error) return dbFail(req, clientId, "read your current colors", exRes.error);
-    const existingIds = new Set((exRes.data ?? []).map((r: any) => String(r.id)));
+    // A colour's section is NOT a column — it is derived from its flags, paint being the
+    // absence of the other two. Same predicate as migration 161's per-section unique indexes
+    // and as the browser's `catOf`, so all three agree on which page a colour lives on.
+    const sectOfFlags = (shingle: unknown, metal: unknown) => (shingle === true ? "shingle" : metal === true ? "metal" : "paint");
+    const storedSect = new Map<string, string>();
+    for (const r of (exRes.data ?? []) as any[]) storedSect.set(String(r.id), sectOfFlags(r.shingle, r.metal));
+    // Every id, so an id the payload names is still an UPDATE rather than a duplicate insert.
+    const existingIds = new Set(storedSect.keys());
+    // Only the ids this page owns are deletion candidates.
+    const sweepIds = section === null
+      ? new Set(existingIds)
+      : new Set([...storedSect.entries()].filter(([, s]) => s === section).map(([id]) => id));
     const keptIds = new Set<string>();
     let saved = 0; const skipped: string[] = [];
     let i = 0;
@@ -6346,6 +7092,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (isExisting) keptIds.add(rid);
       const unchanged = isExisting ? " — existing colour left unchanged" : "";
       const label = String(row?.label ?? "").trim();
+      // A page may only write its own palette. The flags the payload sends decide the section;
+      // a client that omits them (older browser) is read against what is stored. Refusing here
+      // keeps the narrowed sweep honest: a row the sweep set does not cover must not be able
+      // to slip a write through on another page's save.
+      if (section !== null) {
+        const rowSect = (Object.prototype.hasOwnProperty.call(row ?? {}, "shingle") || Object.prototype.hasOwnProperty.call(row ?? {}, "metal"))
+          ? sectOfFlags(row?.shingle, row?.metal)
+          : (isExisting ? storedSect.get(rid) : "paint");
+        if (rowSect !== section) {
+          skipped.push(`${label || `row ${i}`}: belongs to the ${rowSect} colours, not ${section}${unchanged}`);
+          i++; continue;
+        }
+      }
       if (!label) { skipped.push(`row ${i}: blank label${unchanged}`); i++; continue; }
       const method = String(row?.pricingMethod ?? "each").trim() || "each";
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${label}: invalid method "${method}"${unchanged}`); i++; continue; }
@@ -6388,6 +7147,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (Object.prototype.hasOwnProperty.call(row, "code")) {
         rec.code = String(row.code ?? "").trim().toUpperCase().slice(0, 4) || null;
       }
+      // REQUIRED since 316 (Carolyn 2026-10-18) on every colour that can appear in a serial:
+      // siding, trim and roof. A door-only colour is exempt. Enforced on a NEW colour, and on an
+      // existing one whose code this save would blank; an existing un-coded colour saved by a
+      // client that sends no code key is left as it is (the Serial Numbers card lists it).
+      {
+        const inSerial = rec.siding === true || rec.trim === true || rec.shingle === true || rec.metal === true;
+        const blanking = Object.prototype.hasOwnProperty.call(row, "code") && !rec.code;
+        if (inSerial && (blanking || (!isExisting && !rec.code))) {
+          skipped.push(`${label}: needs a serial code (siding, trim and roof colours are part of every serial number)${unchanged}`);
+          i++; continue;
+        }
+      }
       if (Object.prototype.hasOwnProperty.call(row, "doorRate")) {
         const dr = Number(row.doorRate);
         rec.door_rate = Number.isFinite(dr) && dr >= 0 ? dr : 0;
@@ -6407,7 +7178,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       saved++; i++;
     }
-    const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
+    const toDelete = [...sweepIds].filter((id) => !keptIds.has(id));
     let deleted = 0;
     if (toDelete.length) {
       const del = await admin.from("colors").delete().eq("client_id", clientId).in("id", toDelete);
@@ -6492,7 +7263,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // `category !== "window"` invariants below, so a vent validates down to name, width,
   // height and price — which is exactly what a vent is.
   const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp", "vent"]);
-  const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
+  const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string; doorLook?: { id: string | null } } => {
     // JSON.stringify drops undefined-valued keys client-side, so "absent key" is the wire
     // form of "leave this field alone"; the explicit !== undefined guards a hand-built call.
     const has = (k: string) => Object.prototype.hasOwnProperty.call(row ?? {}, k) && row?.[k] !== undefined;
@@ -6575,6 +7346,57 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (s.err) return { err: `${name}: ${s.err}` };
       if (s.value !== undefined) rec.style_ids = s.value;
     }
+    // Can be used inside a door (289): windows only, presence-guarded like the window colour list, so
+    // a spreadsheet or an older portal that never sends it leaves the builder's tick alone. Every other
+    // category is forced false unconditionally (the colour list's invariant), so no door, ramp or vent
+    // can ever be offered inside a door; 289's fixture_items_in_door_window_chk says the same. Strictly
+    // `=== true`: anything else is no.
+    if (category !== "window") {
+      rec.in_door = false;
+    } else if (has("inDoor")) {
+      rec.in_door = row?.inDoor === true;
+    }
+    // WHERE in the door (the transom, 2026-10-21): 'panel' is the upper panel (289, the default) and
+    // 'top' a transom across the top of each leaf. The column's check allows 'top' only on a window
+    // that can go in a door, and this says the same before the database does:
+    //   * not a window, or "not in a door" sent in this row: forced to 'panel';
+    //   * doorWindowAt "top" sent: 'top', and with no inDoor key beside it the window goes in doors
+    //     too (the catalog asks both in one select, so "as a transom" means "in a door");
+    //   * doorWindowAt sent as anything else: 'panel';
+    //   * neither key: the stored position stays (presence-guarded, like the tick above).
+    // Strictly `=== "top"`, so a typo or a value from a newer portal can only mean the upper panel.
+    if (category !== "window" || (has("inDoor") && rec.in_door !== true)) {
+      rec.door_window_at = "panel";
+    } else if (has("doorWindowAt")) {
+      rec.door_window_at = row?.doorWindowAt === "top" ? "top" : "panel";
+      if (rec.door_window_at === "top" && !has("inDoor")) rec.in_door = true;
+    }
+    // Grid (335; Carolyn, 2026-10-23, spec Ahsan 2026-10-24): a window's default grid of lites, ROWS x
+    // COLUMNS, which the rep can change per placed window in the designer. It replaced 324's Panes.
+    // Windows only, presence-guarded like the tick above (either key present writes both), so a sheet
+    // without the columns or an older portal leaves the builder's choice alone; every other category
+    // is forced to NULL (335's fixture_items_lites_window_chk says the same). Both blank, null or
+    // "auto" is NULL, the automatic look every window drew before 335; otherwise both must be whole
+    // numbers from 1 to 8 (1 x 1 = no grid), refused in words instead of a database error.
+    if (category !== "window") {
+      rec.lite_rows = null; rec.lite_cols = null;
+    } else if (has("liteRows") || has("liteCols")) {
+      const blank = (v: unknown) => v === null || v === undefined || String(v).trim() === "" || String(v).trim() === "auto";
+      if (blank(row?.liteRows) && blank(row?.liteCols)) { rec.lite_rows = null; rec.lite_cols = null; }
+      else {
+        const r = Number(row?.liteRows), c = Number(row?.liteCols);
+        const ok = (n: number) => Number.isInteger(n) && n >= 1 && n <= 8;
+        if (!ok(r) || !ok(c)) return { err: `${name}: the grid must be 1 to 8 rows and 1 to 8 lites across (or automatic)` };
+        rec.lite_rows = r; rec.lite_cols = c;
+      }
+    }
+    // Allowed in interior walls (313): doors and windows, presence-guarded the same way, so a sheet
+    // without the column or an older portal leaves the builder's tick alone. The column defaults TRUE,
+    // so only an explicit false takes an item out of the interior-wall pickers. A ramp or vent is never
+    // written: nothing reads it for them.
+    if ((category === "door" || category === "window") && has("inPartition")) {
+      rec.in_partition = row?.inPartition !== false;
+    }
     // Height off the FLOOR (139): windows AND DOORS, presence-guarded, same shape as above.
     // NULL sill_in means "use the designer's default" and is deliberately NOT the same as 0 —
     // 0 is a real answer, an opening that starts at the floor. sill_mode 'variable' lets the
@@ -6629,7 +7451,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // this deploy can only ever mean "draw it the way you always did" — never a blank door
       // on a customer's building. Keep this list in step with 187's CHECK constraint and with
       // D3_DOOR_STYLES in portal/03-catalog.jsx.
-      rec.door_style = ["plank", "zbrace", "xbrace", "rollup"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
+      // Widened again by migration 289 with the generator's four looks (american, basic, classic,
+      // dutch) -- the CHECK, D3_DOOR_STYLES in the portal and both designer twins carry the same eight.
+      rec.door_style = ["plank", "zbrace", "xbrace", "rollup", "american", "basic", "classic", "dutch"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
+    }
+    // The builder's own 3D look (343): doors only, presence-guarded, and only PARSED here, because the
+    // rule needs the database (this validator has none): the caller hands `doorLook` to
+    // doorLookForFixture / doorLookImportRow (./doorLooks.ts), which check the tenant flag and the look,
+    // force door_style to its base, and clear a look only on an explicit null or a different doorStyle.
+    // An ABSENT key never clears one: today's production portal sends doorStyle on every door save and
+    // no doorLookId at all. A non-door never carries one (343's fixture_items_door_look_door_chk), so
+    // nothing is written for it, and no write here ever names the column on a database without 343.
+    if (isDoor && has("doorLookId")) {
+      const raw = row.doorLookId;
+      if (raw === null || String(raw).trim() === "") return { rec, doorLook: { id: null } };
+      const lookId = String(raw).trim().toLowerCase();
+      if (!isDoorLookId(lookId)) return { err: `${name}: that 3D look isn't in your catalog. Reload the page and pick another.` };
+      return { rec, doorLook: { id: lookId } };
     }
     return { rec };
   };
@@ -6648,10 +7486,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     if (!("color_mode" in rec)) { rec.color_mode = "fixed"; rec.has_trim_color = false; rec.fixed_color_id = null; }
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
+    if (!("in_door" in rec)) rec.in_door = false;
+    if (!("door_window_at" in rec)) rec.door_window_at = "panel";
+    // A NEW window comes with no grid (1 x 1) unless one was sent (335): "every window shows grids
+    // although nobody asked for them". Only a window; the check refuses a grid on anything else.
+    if (!("lite_rows" in rec)) { const win = rec.category === "window"; rec.lite_rows = win ? 1 : null; rec.lite_cols = win ? 1 : null; }
+    if (!("in_partition" in rec)) rec.in_partition = true;
     if (!("style_ids" in rec)) rec.style_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
     if (!("door_style" in rec)) rec.door_style = "auto";
+    // door_look_id (343) is NOT defaulted here: its column default is NULL already, and naming it on
+    // every insert would fail every catalog insert on a database without 343.
     return rec;
   };
 
@@ -6710,6 +7556,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       v.rec!.style_ids = kept;
     }
     const id = String(payload?.id ?? "").trim();
+    // One look per door row (345): a library entry OR the row's own 3D look, never both in one save.
+    const namesEntry = payload?.clientLibraryId != null && String(payload.clientLibraryId).trim() !== "";
+    if (category === "door" && namesEntry && v.doorLook && v.doorLook.id !== null) {
+      return json({ error: `${v.rec!.name}: pick one 3D look for this door, not two.`, code: "door_one_look" }, 400);
+    }
+    // The builder's library entry this door or window draws (339): absent = leave the link alone (the
+    // old portal sends doorStyle on every save and no clientLibraryId), null = take it off, an id = this
+    // entry, whose look then wins over the doorStyle / grid in the same save (./library.ts).
+    {
+      const ln = await fixtureLinkFor(admin, clientId, category, Object.prototype.hasOwnProperty.call(payload ?? {}, "clientLibraryId") ? payload.clientLibraryId : undefined);
+      if ("refuse" in ln) return json({ error: `${v.rec!.name}: ${ln.refuse.error}`, code: ln.refuse.code }, ln.refuse.status);
+      if ("dbError" in ln) return dbFail(req, clientId, ln.where, ln.dbError);
+      Object.assign(v.rec!, ln.write);
+    }
+    // The door's own 3D look (343): set, cleared or left alone by the rule in ./doorLooks.ts. Refused
+    // here, before anything is written.
+    {
+      const dl = await doorLookForFixture(admin, clientId, { category, rec: v.rec!, sent: v.doorLook, rowId: id || null, linking: typeof v.rec!.client_library_id === "string" });
+      if ("refuse" in dl) return json({ error: `${v.rec!.name}: ${dl.refuse.error}`, code: dl.refuse.code }, dl.refuse.status);
+      if ("dbError" in dl) return dbFail(req, clientId, dl.where, dl.dbError);
+    }
     if (id) {
       const { error, count } = await admin.from("fixture_items").update(v.rec!, { count: "exact" })
         .eq("id", id).eq("client_id", clientId).eq("category", category);
@@ -6808,6 +7675,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (t.error) return dbFail(req, clientId, "read your building styles", t.error);
       styleIds = t.ids!;
     }
+    // Door looks (343): what save_fixture's rule needs, read once for the whole sheet. null when no
+    // row carries doorStyle or doorLookId (a window sheet, or one without the column).
+    const lookRead = await doorLookImportState(admin, clientId, category, payload.rows);
+    if ("dbError" in lookRead) return dbFail(req, clientId, lookRead.where, lookRead.dbError);
+    const lookState = lookRead.state;
     let saved = 0, added = 0; const skipped: string[] = [];
     let i = 0;
     for (const row of payload.rows) {
@@ -6838,6 +7710,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
       }
       const rid = String(row?.id ?? "").trim();
+      // The same look rule as save_fixture; a refusal leaves the row's look as it was, with a note.
+      if (lookState) {
+        const dl = doorLookImportRow(lookState, v.rec!, v.doorLook, rid && existingIds.has(rid) ? rid : null);
+        if (dl.note) skipped.push(`${String(row?.name ?? "row " + (i + 1))}: ${dl.note} Its 3D look was left as it was.`);
+      }
       if (rid && existingIds.has(rid)) {
         const res = await admin.from("fixture_items").update(v.rec!)
           .eq("id", rid).eq("client_id", clientId).eq("category", category);
@@ -6852,6 +7729,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       i++;
     }
     return json({ ok: true, saved, added, skipped });
+  }
+
+  // Door looks from a photo (343/344): the builder's own looks, saved, listed and archived, and the
+  // photo and tile uploads. Every action is NAMED here, not looked up in a set, so preflight's GATES ⇄
+  // branch cross-check (which reads this file) sees them. ./doorLooks.ts refuses them all unless the
+  // tenant's door_looks_beta flag is on.
+  if (action === "list_door_looks" ||
+      action === "save_door_look" ||
+      action === "archive_door_look" ||
+      action === "door_ref_upload_url" ||
+      action === "door_look_thumb_upload_url") {
+    return await handleDoorLookAction({
+      admin, req, clientId, userId: userId ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail,
+    });
+  }
+
+  // Generating a door look from a photo (P4), and picking its draft up after a dropped stream. The press
+  // answers behind the heartbeat when it streams (doorDraftAnswer); ./doorGenerate.ts has its order of
+  // checks, its money and its ledger.
+  if (action === "generate_door_look" || action === "generate_door_look_recover") {
+    const doorCtx = {
+      admin, req, clientId, userId: userId ?? null, payload: (payload ?? {}) as Record<string, unknown>, json,
+      filed: (res: Response) => { filedAtReturnSite.add(res); return res; }, requestStartMs, workerBornMs: WORKER_BORN_MS,
+    };
+    if (action === "generate_door_look_recover") return await handleDoorLookRecover(doorCtx);
+    return await doorDraftAnswer(req, payload, { requestStartMs, clientId }, (streamed: boolean) => handleGenerateDoorLook(doorCtx, streamed));
   }
 
   // Archive / un-archive a BUILT-IN layout option (singleDoor/doubleDoor/window/ramp/…). Archived =
@@ -7025,8 +7929,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Every location is listed, inactive ones too, with `active` on each: an inactive lot never
   // prices a quote (taxChain), and the card should be able to say why a rate is not applying.
   // `usage24h` is null when the ledger cannot be counted — unknown, not zero.
+  // `usageMonth` / `spendMonthCents` (2026-10-21, migration 319) are this UTC month's lookups and
+  // what their charges took from the wallet, beside the 24-hour cap; each is null when it cannot be
+  // read (before 319 the spend has no column), never a failed card.
   if (action === "tax_settings") {
-    const [csRes, locRes, usage24h, priceRes, walletRes] = await Promise.all([
+    const [csRes, locRes, usage24h, priceRes, walletRes, month] = await Promise.all([
       admin.from("client_settings").select("invoice_in_ghl, ss_tax_rate, ss_tax_label, tax_lookup_enabled, billing_exempt")
         .eq("client_id", clientId).maybeSingle(),
       admin.from("builder_locations").select(LOCATION_TAX_COLUMNS)
@@ -7036,6 +7943,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
       admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle()
         .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
+      monthTaxUsage(admin, clientId),
     ]);
     if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
     if (locRes.error) return dbFail(req, clientId, "load your locations' tax rates", locRes.error);
@@ -7052,6 +7960,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       companyLabel: cs?.ss_tax_label ?? "Sales tax",
       dailyCap: DAILY_TAX_LOOKUP_CAP,
       usage24h,
+      usageMonth: month.lookups,
+      spendMonthCents: month.spendCents,
+      monthStart: month.monthStart,
       lookupPriceCents: priceRes.error ? null : lookupPriceCents(priceRes.data, exempt),
       locations: (locRes.data ?? []).map(locationTaxView),
     });
@@ -7099,6 +8010,55 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, location: locationTaxView(saved) });
   }
 
+  // ── The company rate and the "Use tax codes" switch (Settings → Company → Tax, 2026-10-09) ──
+  // The Tax tab's own save. It writes ONLY the keys that were sent, out of four:
+  // ss_tax_rate / ss_tax_label / ss_tax_delivery (parsed exactly as `save` parses them) and
+  // tax_codes_enabled (migration 290; named only when the switch is sent, so a database without
+  // 290 refuses nothing else). It NEVER writes invoice_in_ghl, a ghl_* column or a numbering
+  // counter: moving to StructureStudio paperwork stays on CRM Connection, behind `save`'s checks.
+  //   1. parse, then refuse an empty save;
+  //   2. when no usable rate was sent, read the row: a builder with NO row may not save a label or
+  //      the switch alone (the upsert would create a paperwork-mode row with no rate, which `save`'s
+  //      guard exists to prevent), and a BLANK rate is refused in paperwork mode (`save`'s reading
+  //      of the mode, invoice_in_ghl exactly false). 0 is always an answer;
+  //   3. upsert the sent keys (the save_delivery_settings pattern: a builder with no row is never
+  //      told "saved" by a zero-row update), auditStrict, and answer with what is now stored.
+  // Rates already on issued estimates do not move: the next re-stamp of an unsigned one prices at
+  // the chain's rate, and a signed order keeps the tax its customer agreed to (taxChain agreedTax).
+  if (action === "save_company_tax") {
+    const parsed = parseCompanyTax(payload);
+    if (!parsed.ok) return json({ error: parsed.error, reason: "bad_rate" }, 400);
+    const codesSwitch = parseCodesSwitch(payload);
+    if (!codesSwitch.ok) return json({ error: codesSwitch.error, reason: codesSwitch.reason }, codesSwitch.status);
+    const updates: CompanyTaxUpdates = { ...parsed.updates };
+    if (codesSwitch.value !== undefined) updates.tax_codes_enabled = codesSwitch.value;
+
+    let cur: { invoice_in_ghl?: unknown } | null = null;
+    if (Object.keys(updates).length && companyTaxNeedsRow(updates)) {
+      const { data, error } = await admin.from("client_settings").select("invoice_in_ghl").eq("client_id", clientId).maybeSingle();
+      if (error) return dbFail(req, clientId, "check your sales tax settings", error);
+      cur = data;
+    }
+    const refusal = companyTaxRefusal(updates, cur);
+    if (refusal) return json({ error: refusal.error, reason: refusal.reason }, refusal.status);
+
+    const columns = "invoice_in_ghl, ss_tax_rate, ss_tax_label, ss_tax_delivery" + ("tax_codes_enabled" in updates ? ", tax_codes_enabled" : "");
+    const { data: stored, error: saveErr } = await admin.from("client_settings")
+      .upsert({ client_id: clientId, ...updates, updated_at: new Date().toISOString() }, { onConflict: "client_id" })
+      .select(columns).maybeSingle();
+    if (saveErr) return dbFail(req, clientId, "save your sales tax settings", saveErr);
+    await auditStrict("portal_save_company_tax", 1,
+      `keys=${Object.keys(updates).join(",")}${"ss_tax_rate" in updates ? ` rate=${updates.ss_tax_rate ?? "none"}` : ""}${"tax_codes_enabled" in updates ? ` codes=${updates.tax_codes_enabled}` : ""}`);
+    const row = (stored ?? {}) as Record<string, unknown>;
+    return json({
+      ok: true,
+      // Same reading as tax_settings and tax_codes_get: only an explicit false is paperwork mode.
+      ssMode: row.invoice_in_ghl === false,
+      ...companyTaxView(row),
+      ...("tax_codes_enabled" in updates ? { taxCodesEnabled: row.tax_codes_enabled === true } : {}),
+    });
+  }
+
   // ── Tax codes (migration 246, 2026-09-17) ───────────────────────────────────────────────────
   // Settings → Company → Tax: which Avalara tax code each building style and option heading
   // falls under, chosen by the builder (or their accountant) so the codes match how they file.
@@ -7109,17 +8069,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // save plan are _shared/taxCodes.ts.
   //
   // tax_codes_get's answer, and tax_codes_save's: a save hands back what the database now holds,
-  // not an echo of what was sent. `hint` rides on the common codes (the picker's empty-box list)
-  // and `headingGroups` names the heading groups in order — both additive to the brief's shape.
+  // not an echo of what was sent. `hint` and `group` ride on the list's codes (the picker's empty-box
+  // list) and `headingGroups` names the heading groups in order — all additive to the brief's shape.
+  //
+  // THE COMPANY RATE RIDES ALONG (2026-10-09): the Tax tab's "Your sales tax rate" block reads
+  // companyRatePct / companyLabel / ssTaxDelivery (tax_settings' shapes, through companyTaxView),
+  // plus what its copy depends on: who issues the paperwork (ssMode), whether this builder may
+  // invoice through the CRM (ghlInvoicingAllowed, 217) and whether a CRM is connected at all
+  // (crmConfigured, worked out exactly as status's `configured`; a grandfathered builder with a
+  // CRM still issues the CRM's estimate, one without has every estimate refused). tax_settings
+  // already answers some of these; they are here too because "companyRatePct is in the answer" is
+  // how the page tells this function from an older one, and an older one hides the block.
+  //
+  // taxCodesEnabled (migration 290) is ITS OWN READ, AND TOLERANT, status's quote_corner_views
+  // rule: naming the column in the select above would fail this action, and with it every
+  // builder's Tax tab, on a database without 290 (an apply race, or 290 rolled back first). A
+  // failed read answers null, and the page then shows the code editor as it always has, with no
+  // switch; a builder with no settings row reads off, the column's default.
   const taxCodesResponse = async (): Promise<Response> => {
-    const [csRes, stylesRes, storedRes, countRes, syncRes] = await Promise.all([
-      admin.from("client_settings").select("invoice_in_ghl, tax_lookup_enabled").eq("client_id", clientId).maybeSingle(),
+    const [csRes, stylesRes, storedRes, countRes, syncRes, switchRes] = await Promise.all([
+      admin.from("client_settings")
+        .select("invoice_in_ghl, tax_lookup_enabled, ss_tax_rate, ss_tax_label, ss_tax_delivery, ghl_invoicing_allowed, ghl_location_id, ghl_api_key")
+        .eq("client_id", clientId).maybeSingle(),
       admin.from("building_styles").select("id, label, active, sort_order").eq("client_id", clientId)
         .order("active", { ascending: false }).order("sort_order").order("label"),
       admin.from("tax_code_assignments").select("target_type, target_key, tax_code").eq("client_id", clientId),
       admin.from("avalara_tax_codes").select("code", { count: "exact", head: true }),
       admin.from("avalara_tax_codes").select("synced_at").not("synced_at", "is", null)
         .order("synced_at", { ascending: false }).limit(1).maybeSingle(),
+      admin.from("client_settings").select("tax_codes_enabled").eq("client_id", clientId).maybeSingle(),
     ]);
     if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
     if (stylesRes.error) return dbFail(req, clientId, "load your building styles", stylesRes.error);
@@ -7131,16 +8109,24 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const styles = (stylesRes.data ?? []).map((s: any) => ({ id: String(s.id).toLowerCase(), label: s.label ?? "", active: s.active === true }));
     const assignments = visibleAssignments(storedRes.data ?? [], new Set(styles.map((s) => s.id)));
     // Every assigned code's details (an inactive one included, so the card can say it needs
-    // changing) plus the common codes the picker opens on.
-    const wanted = [...new Set([...COMMON_CODES.map((c) => c.code), ...assignments.map((a) => a.code)])];
+    // changing) plus the Sales Tax list the picker opens on.
+    const wanted = [...new Set([...SALES_TAX_CODES.map((c) => c.code), ...assignments.map((a) => a.code)])];
     const codesRes = await admin.from("avalara_tax_codes").select("code, description, type_id, is_active").in("code", wanted);
     if (codesRes.error) return dbFail(req, clientId, "load the tax code list", codesRes.error);
 
+    const cs = csRes.data;
+    const { data: switchRow, error: switchErr } = switchRes;
     return json({
       ok: true,
       // Same readings as tax_settings: a row predating either column is CRM mode / lookups off.
-      ssMode: csRes.data?.invoice_in_ghl === false,
-      lookupEnabled: csRes.data?.tax_lookup_enabled === true,
+      ssMode: cs?.invoice_in_ghl === false,
+      lookupEnabled: cs?.tax_lookup_enabled === true,
+      ...companyTaxView(cs),
+      // status's readings: the capability defaults to not allowed, and only a boolean leaves (never
+      // the location id or the key).
+      ghlInvoicingAllowed: cs?.ghl_invoicing_allowed === true,
+      crmConfigured: Boolean(cs?.ghl_location_id && cs?.ghl_api_key),
+      taxCodesEnabled: switchErr ? null : (switchRow as { tax_codes_enabled?: boolean } | null)?.tax_codes_enabled === true,
       headings: headingsView(),
       headingGroups: TAX_HEADING_GROUPS,
       styles,
@@ -7152,33 +8138,43 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   if (action === "tax_codes_get") return await taxCodesResponse();
 
-  // The picker's type-ahead, over the stored catalog. Active codes only; the codes Avalara marks
-  // not applicable to North America are left out unless `includeAll`. An empty box lists the
-  // common codes first. Two queries rather than one `or=` filter: typed text inside an or-filter
-  // string would need PostgREST's quoting rules for commas, dots and parentheses, while a plain
-  // ilike filter takes the value as it is (searchQuery escapes the pattern characters).
+  // ── Payments (Settings → Company → Payments, workstream 1 phase 4) ──────────────────────────
+  // What a builder may know about the card account CSM set up for them, and nothing they could act
+  // on: on or off, test or live, the merchant id's LAST FOUR (never the whole id, which names their
+  // bank account to anyone who can read Settings), and whether their own processor login is on
+  // file. The account is managed by the Structure Studio team in Admin (admin-catalog set_payments);
+  // this action has no write beside it.
+  //
+  //   enabled            switched on AND a merchant id the charge path would use (cpMerchant): a
+  //                      switch that is on with no id takes no cards, so it does not read as on
+  //   env                "live" or "test" — words for a builder, never the system's own names
+  //   credentialsOnFile  false until per-merchant logins exist (the plan's migration C, waiting on
+  //                      Fiserv); today every merchant runs on the platform's own login
+  //
+  // A database without migration 296 reads as test, which is what every account was before it
+  // (readPaymentSettings). A builder with no settings row reads off, with nothing else.
+  if (action === "payments_status") {
+    const { row, error } = await readPaymentSettings(admin, clientId);
+    if (error) return dbFail(req, clientId, "load your payment settings", error);
+    const merchant = cpMerchant(row);
+    return json({
+      ok: true,
+      enabled: row?.payments_online_enabled === true && merchant !== null,
+      env: cpEnvOf(row?.cardpointe_env) === "prod" ? "live" : "test",
+      midLast4: midLast4(row?.cardpointe_merchid),
+      credentialsOnFile: false,
+      brand: "Structure Studio Payments",
+    });
+  }
+
+  // The picker's type-ahead: the Sales Tax list (_shared/taxCodes.ts), never the whole catalog, and
+  // only the codes the stored catalog holds as active. One read of those few rows, then the search
+  // runs over them in memory, which is what lets a builder's own words match (searchCodes).
   if (action === "tax_codes_search") {
-    const q = searchQuery(payload?.q);
-    const includeAll = payload?.includeAll === true;
-    const columns = "code, description, type_id, is_active";
-    const active = () => {
-      const b = admin.from("avalara_tax_codes").select(columns).eq("is_active", true);
-      return includeAll ? b : b.eq("north_america", true);
-    };
-    const [firstRes, secondRes] = await Promise.all(q
-      ? [
-        active().ilike("code", `${q}%`).order("code").limit(TAX_CODE_SEARCH_LIMIT),
-        active().ilike("description", `%${q}%`).order("code").limit(TAX_CODE_SEARCH_LIMIT),
-      ]
-      : [
-        active().in("code", COMMON_CODES.map((c) => c.code)),
-        active().order("code").limit(TAX_CODE_SEARCH_LIMIT),
-      ]);
-    if (firstRes.error) return dbFail(req, clientId, "search the tax codes", firstRes.error);
-    if (secondRes.error) return dbFail(req, clientId, "search the tax codes", secondRes.error);
-    const first = (firstRes.data ?? []).map(taxCodeView);
-    const second = (secondRes.data ?? []).map(taxCodeView);
-    return json({ ok: true, codes: mergeCodeLists(q ? first : orderCodes(first), second) });
+    const { data, error } = await admin.from("avalara_tax_codes").select("code, description, type_id, is_active")
+      .eq("is_active", true).in("code", SALES_TAX_CODES.map((c) => c.code));
+    if (error) return dbFail(req, clientId, "search the tax codes", error);
+    return json({ ok: true, codes: searchCodes(orderCodes((data ?? []).map(taxCodeView)), payload?.q) });
   }
 
   // Replace the tenant's whole mapping with exactly the payload's. Validated in full BEFORE any
@@ -7238,6 +8234,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: stored, error: storedErr } = await admin.from("tax_code_assignments")
       .select("target_type, target_key, tax_code").eq("client_id", clientId);
     if (storedErr) return dbFail(req, clientId, "load your tax codes", storedErr);
+    const offList = codesOffTheList(codes, stored ?? []);
+    if (offList.length) {
+      return json({ error: `Tax code ${offList[0]} isn't on the Sales Tax list. Pick a code from the list.`, reason: "code_not_on_list" }, 400);
+    }
     const plan = planAssignments(stored ?? [], rows);
 
     const now = new Date().toISOString();
@@ -7269,6 +8269,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     await audit("portal_tax_codes_save", plan.upserts.length + removed,
       `codes=${codes.join(",").slice(0, 400)} changed=${plan.upserts.length} removed=${removed} unchanged=${plan.kept.length}`);
     return await taxCodesResponse();
+  }
+
+  // ── Full serial setup (316): what the Serial Numbers card shows ────────────────
+  // The starting building number, a worked example in the builder's own codes, and every
+  // ACTIVE style and serial-bearing colour that still has no code (those print XXX / XX).
+  if (action === "get_serial_setup") {
+    const [csRes, stRes, coRes] = await Promise.all([
+      admin.from("client_settings").select("next_serial").eq("client_id", clientId).maybeSingle(),
+      admin.from("building_styles").select("label, code, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("label, code, active, siding, trim, shingle, metal").eq("client_id", clientId).order("sort_order"),
+    ]);
+    if (stRes.error) return dbFail(req, clientId, "load your styles", stRes.error);
+    if (coRes.error) return dbFail(req, clientId, "load your colors", coRes.error);
+    const blank = (v: unknown) => !String(v ?? "").trim();
+    // deno-lint-ignore no-explicit-any
+    const styles = (stRes.data ?? []).filter((r: any) => r.active !== false);
+    // deno-lint-ignore no-explicit-any
+    const colors = (coRes.data ?? []).filter((r: any) => r.active !== false && (r.siding || r.trim || r.shingle || r.metal));
+    // deno-lint-ignore no-explicit-any
+    const sample = (rows: any[], pred: (r: any) => boolean, fallback: string) => {
+      const hit = rows.find((r) => !blank(r.code) && pred(r));
+      return hit ? String(hit.code).toUpperCase() : fallback;
+    };
+    const nextSerial = csRes.data?.next_serial ?? null;
+    const now = new Date();
+    const mmyy = String(now.getUTCMonth() + 1).padStart(2, "0") + String(now.getUTCFullYear() % 100).padStart(2, "0");
+    const example = `${mmyy}-${sample(styles, () => true, "LBA")}-1216-`
+      + sample(colors, (r) => !r.shingle && !r.metal, "RE")
+      + sample(colors, (r) => r.trim && !r.shingle && !r.metal, "BU")
+      + sample(colors, (r) => r.shingle || r.metal, "WH") + "M"
+      + `-${nextSerial ?? "25698"}`;
+    return json({
+      ok: true,
+      nextSerial,
+      example,
+      // deno-lint-ignore no-explicit-any
+      missingStyles: styles.filter((r: any) => blank(r.code)).map((r: any) => String(r.label)),
+      // deno-lint-ignore no-explicit-any
+      missingColors: colors.filter((r: any) => blank(r.code)).map((r: any) => String(r.label)),
+    });
   }
 
   // ── Serial sequence starting number ──────────────────────────────────────────
@@ -7505,10 +8545,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: unit } = await admin.from("inventory_units")
       .select("id, design_short_code, serial").eq("id", unitId).eq("client_id", clientId).maybeSingle();
     if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    // The Online Shop photos (migration 310). The rows cascade with the unit; the FILES do not,
+    // so their keys are read first and removed after. Best-effort: a stray file is a public
+    // image nobody links to any more, never a reason to refuse the delete.
+    const { data: photoRows } = await admin.from("inventory_unit_photos")
+      .select("storage_key").eq("client_id", clientId).eq("unit_id", unitId);
     // Customer estimates sent from this unit keep existing — their inventory_unit_id
     // FK nulls out. Only the unit row goes here; the portal then calls delete_design
     // for the master (reusing its storage/version cascade unchanged).
     const { error } = await admin.from("inventory_units").delete().eq("id", unitId).eq("client_id", clientId);
+    if (!error && photoRows?.length) {
+      const keys = photoRows.map((p: { storage_key: string }) => p.storage_key)
+        .filter((k: string) => k.startsWith(`${clientId}/${unitId}/`));
+      if (keys.length) await admin.storage.from(INVENTORY_PHOTOS).remove(keys).catch(() => {});
+    }
     if (error) return dbFail(req, clientId, "delete that building", error);
 
     // The master design goes with it, HERE rather than in a second call from the browser.
@@ -7547,12 +8597,360 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, designShortCode: code, masterDeleted });
   }
 
+  // ── The Online Shop (migration 310, Carolyn 2026-10-17) ──────────────────────
+  // A unit's public listing: on/off, price shown or not, title, description.
+  if (action === "save_inventory_listing") {
+    const unitId = String(payload.unitId ?? "").trim();
+    if (!unitId) return json({ error: "unitId is required." }, 400);
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (Object.prototype.hasOwnProperty.call(payload, "listed")) patch.listed = payload.listed === true;
+    if (Object.prototype.hasOwnProperty.call(payload, "showPriceOnline")) patch.show_price_online = payload.showPriceOnline !== false;
+    if (Object.prototype.hasOwnProperty.call(payload, "publicTitle")) {
+      patch.public_title = String(payload.publicTitle ?? "").trim().slice(0, 120) || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "publicDescription")) {
+      patch.public_description = String(payload.publicDescription ?? "").trim().slice(0, 4000) || null;
+    }
+    const { error, count } = await admin.from("inventory_units").update(patch, { count: "exact" })
+      .eq("id", unitId).eq("client_id", clientId);
+    if (error) return dbFail(req, clientId, "save that listing", error);
+    if (!count) return json({ error: "Inventory unit not found." }, 404);
+    await audit("portal_save_inventory_listing", 1, `unit=${unitId} listed=${patch.listed ?? "-"}`);
+    return json({ ok: true });
+  }
+
+  // Signed upload URLs for a unit's photos. The browser PUTs each file, then calls
+  // add_inventory_photos with the keys it was given. Keys are minted here, never chosen by the
+  // browser, so a photo can only ever land in this builder's folder for this unit.
+  if (action === "inventory_photo_upload_url") {
+    const unitId = String(payload.unitId ?? "").trim();
+    const { data: unit } = await admin.from("inventory_units").select("id")
+      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+    const ext = EXT[String(payload.contentType || "image/jpeg")];
+    if (!ext) return json({ error: "Use a JPG, PNG or WEBP photo." }, 400);
+    const { count: have } = await admin.from("inventory_unit_photos")
+      .select("id", { count: "exact", head: true }).eq("client_id", clientId).eq("unit_id", unitId);
+    const room = INVENTORY_PHOTO_MAX - (have ?? 0);
+    if (room <= 0) return json({ error: `A building can have up to ${INVENTORY_PHOTO_MAX} photos. Remove one first.` }, 400);
+    const want = Math.max(1, Math.min(room, Math.floor(Number(payload.count) || 1)));
+    const uploads: { key: string; token: string | undefined }[] = [];
+    for (let i = 0; i < want; i++) {
+      const key = `${clientId}/${unitId}/${crypto.randomUUID()}.${ext}`;
+      const { data: signed, error } = await admin.storage.from(INVENTORY_PHOTOS).createSignedUploadUrl(key);
+      if (error) {
+        if (!uploads.length) return dbFail(req, clientId, "start that upload", error);
+        break;
+      }
+      uploads.push({ key, token: signed?.token });
+    }
+    return json({ ok: true, uploads });
+  }
+
+  // Record uploaded photos, re-order them, or remove them — one action, the whole list.
+  //   add:    keys just uploaded (appended at the end, in the order given)
+  //   order:  photo ids in their new display order (first = cover)
+  //   remove: photo ids to delete (row and file)
+  if (action === "save_inventory_photos") {
+    const unitId = String(payload.unitId ?? "").trim();
+    const { data: unit } = await admin.from("inventory_units").select("id")
+      .eq("id", unitId).eq("client_id", clientId).maybeSingle();
+    if (!unit) return json({ error: "Inventory unit not found." }, 404);
+    const prefix = `${clientId}/${unitId}/`;
+    const asList = (v: unknown) => (Array.isArray(v) ? v : []).map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 50);
+
+    const remove = asList(payload.remove);
+    if (remove.length) {
+      const { data: gone } = await admin.from("inventory_unit_photos").delete()
+        .eq("client_id", clientId).eq("unit_id", unitId).in("id", remove).select("storage_key");
+      const keys = (gone ?? []).map((g: { storage_key: string }) => g.storage_key).filter((k: string) => k.startsWith(prefix));
+      if (keys.length) await admin.storage.from(INVENTORY_PHOTOS).remove(keys).catch(() => {});
+    }
+
+    const add = asList(payload.add).filter((k) => k.startsWith(prefix) && /^[0-9a-f-]{36}\.(jpg|png|webp)$/.test(k.slice(prefix.length)));
+    if (add.length) {
+      const { data: existing } = await admin.from("inventory_unit_photos")
+        .select("sort_order").eq("client_id", clientId).eq("unit_id", unitId)
+        .order("sort_order", { ascending: false }).limit(1);
+      const { count: have } = await admin.from("inventory_unit_photos")
+        .select("id", { count: "exact", head: true }).eq("client_id", clientId).eq("unit_id", unitId);
+      const room = Math.max(0, INVENTORY_PHOTO_MAX - (have ?? 0));
+      let next = ((existing ?? [])[0]?.sort_order ?? -1) + 1;
+      const rows = add.slice(0, room).map((k) => ({ client_id: clientId, unit_id: unitId, storage_key: k, sort_order: next++ }));
+      if (rows.length) {
+        const { error } = await admin.from("inventory_unit_photos").insert(rows);
+        if (error) return dbFail(req, clientId, "save those photos", error);
+      }
+    }
+
+    const order = asList(payload.order);
+    for (let i = 0; i < order.length; i++) {
+      await admin.from("inventory_unit_photos").update({ sort_order: i })
+        .eq("client_id", clientId).eq("unit_id", unitId).eq("id", order[i]);
+    }
+
+    const { data: photos, error: listErr } = await admin.from("inventory_unit_photos")
+      .select("id, storage_key, ai_edited").eq("client_id", clientId).eq("unit_id", unitId)
+      .order("sort_order", { ascending: true }).order("created_at", { ascending: true });
+    if (listErr) return dbFail(req, clientId, "load those photos", listErr);
+    await audit("portal_save_inventory_photos", 1, `unit=${unitId} add=${add.length} remove=${remove.length}`);
+    return json({
+      ok: true,
+      photos: (photos ?? []).map((p: { id: string; storage_key: string; ai_edited: boolean }) => ({
+        id: p.id, aiEdited: !!p.ai_edited,
+        url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl,
+      })),
+    });
+  }
+
+  // ── AI background change on a lot photo (migration 312, FramedUp's recipe) ─────────────────
+  // photo_bg_info  → is it set up, and what does one cost this builder.
+  // photo_bg_start → wallet hold, then one fal.ai GPT Image 2 edit job. Returns a job id.
+  // photo_bg_status→ polls fal; on success the new image is ADDED beside the original
+  //                  (ai_edited, source_photo_id) and the hold is captured; on failure released.
+  // One at a time per builder: the wallet allows one live hold per meter (wallet_tx_one_hold).
+  if (action === "photo_bg_info" || action === "photo_bg_start" || action === "photo_bg_status") {
+    // The secret was saved as FAL_AI_API_KEY_Structure_Studio on this project (2026-10-17); the
+    // plain FramedUp name is read too, so either spelling works.
+    const FAL_KEY = Deno.env.get("FAL_AI_API_KEY") || Deno.env.get("FAL_AI_API_KEY_Structure_Studio") || "";
+    const BG_MODEL = "openai/gpt-image-2/edit";
+    const BG_METER = "photo_background_change";
+    const [{ data: meter }, { data: csEx }, { data: walletRow }] = await Promise.all([
+      admin.from("usage_prices").select("price_cents, active").eq("kind", BG_METER).maybeSingle(),
+      admin.from("client_settings").select("billing_exempt").eq("client_id", clientId).maybeSingle(),
+      admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle(),
+    ]);
+    // Non-billable builders get metered AI free (migration 228's promise); wallet_hold itself only
+    // honours metered_exempt, so billing_exempt is read here and the hold skipped.
+    const exempt = csEx?.billing_exempt === true || walletRow?.metered_exempt === true;
+    const ready = !!FAL_KEY && !!meter?.active;
+
+    if (action === "photo_bg_info") {
+      return json({ ok: true, ready, priceCents: exempt ? 0 : (meter?.price_cents ?? null), exempt,
+        reason: !FAL_KEY ? "not_configured" : (!meter?.active ? "not_priced" : null) });
+    }
+
+    const releaseHold = async (holdId: number | null, reason: string) => {
+      if (holdId) await admin.rpc("wallet_release", { p_hold_id: holdId, p_reason: reason.slice(0, 200) }).then(() => {}, () => {});
+    };
+
+    if (action === "photo_bg_start") {
+      if (!FAL_KEY) return json({ error: "Background changes aren't set up yet — CSM Synergy is finishing the setup." }, 503);
+      if (!meter?.active) return json({ error: "Background changes aren't switched on yet — CSM Synergy is finishing the setup." }, 503);
+      const photoId = String(payload.photoId ?? "").trim();
+      const scene = String(payload.scene ?? "").replace(/\s+/g, " ").trim().slice(0, 400);
+      if (!scene) return json({ error: "Describe the background you want." }, 400);
+      const idemRaw = String(payload.idempotencyKey ?? "").trim();
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(idemRaw)) return json({ error: "Missing request key — reload the page and try again." }, 400);
+      const { data: photo } = await admin.from("inventory_unit_photos").select("id, unit_id, storage_key")
+        .eq("client_id", clientId).eq("id", photoId).maybeSingle();
+      if (!photo) return json({ error: "Photo not found." }, 404);
+      const { count: have } = await admin.from("inventory_unit_photos")
+        .select("id", { count: "exact", head: true }).eq("client_id", clientId).eq("unit_id", photo.unit_id);
+      if ((have ?? 0) >= INVENTORY_PHOTO_MAX) return json({ error: `This building already has ${INVENTORY_PHOTO_MAX} photos. Remove one first — the new one is added beside the original.` }, 400);
+
+      let holdId: number | null = null;
+      if (!exempt) {
+        const { data: hold, error: hErr } = await admin
+          .rpc("wallet_hold", { p_client_id: clientId, p_kind: BG_METER, p_idem: `photobg:${photoId}:${idemRaw}`.slice(0, 120), p_user: userId ?? null })
+          // deno-lint-ignore no-explicit-any
+          .maybeSingle() as { data: any; error: any };
+        if (hErr) return dbFail(req, clientId, "check your wallet", hErr);
+        const err = hold?.err ?? null;
+        if (err === "insufficient_funds") {
+          return json({ error: `A background change costs $${((hold?.price_cents ?? 0) / 100).toFixed(2)} and your wallet has $${((hold?.balance_after ?? 0) / 100).toFixed(2)}. Add funds in Settings → Billing, then try again.`, code: "insufficient_funds" }, 402);
+        }
+        if (err === "hold_in_flight") return json({ error: "Another background change is still running — wait for it to finish." }, 409);
+        if (err === "hold_replayed") return json({ error: "That change was already made — refresh to see it.", code: "already_charged" }, 409);
+        if (err) return json({ error: "Background changes aren't switched on yet — CSM Synergy is finishing the setup." }, 503);
+        holdId = hold?.hold_id ?? null;
+        await runAutoTopup(admin, clientId, req, { fn: "portal-settings" }).catch(() => {});
+      }
+
+      const sourceUrl = admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(photo.storage_key).data.publicUrl;
+      // FramedUp's prompt, word for word in its "keep the building" mode (generate-image, 2026-10).
+      const photoStyle = "A candid real-estate photograph taken with a DSLR camera: natural ambient daylight, true-to-life muted colors, realistic sky with natural gradation, subtle imperfections of a real place. Sharp focus, no haze or blur. The building rests naturally on the ground with a soft, realistic contact shadow and lighting/perspective consistent with the scene.";
+      const prompt = `Keep the building in the provided photo EXACTLY as it is — same shape, size, materials, siding, doors, windows, roof, trim, proportions, and camera angle. Replace ONLY the background and setting with: ${scene}. ${photoStyle}`;
+      let sub: { request_id?: string; status_url?: string; response_url?: string } = {};
+      try {
+        const r = await fetch(`https://queue.fal.run/${BG_MODEL}`, {
+          method: "POST",
+          headers: { "Authorization": `Key ${FAL_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, image_urls: [sourceUrl], image_size: "landscape_4_3", num_images: 1, output_format: "png", quality: "medium" }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!r.ok) {
+          const detail = (await r.text().catch(() => "")).slice(0, 300);
+          await releaseHold(holdId, `fal submit ${r.status}`);
+          await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_submit", message: `fal submit failed (${r.status})`, context: { body: detail } });
+          return json({ error: "The image service didn't accept that photo. You weren't charged — try again in a minute." }, 502);
+        }
+        sub = await r.json();
+      } catch (e) {
+        await releaseHold(holdId, "fal submit threw");
+        await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_submit", message: `fal submit threw: ${(e as Error).message}` });
+        return json({ error: "The image service didn't answer. You weren't charged — try again in a minute." }, 502);
+      }
+      const { data: job, error: jErr } = await admin.from("inventory_photo_ai_edits").insert({
+        client_id: clientId, unit_id: photo.unit_id, source_photo_id: photo.id, scene, model: BG_MODEL,
+        fal_request_id: sub.request_id ?? null, status_url: sub.status_url ?? null, response_url: sub.response_url ?? null,
+        hold_id: holdId, requested_by: userId ?? null,
+      }).select("id").single();
+      if (jErr) { await releaseHold(holdId, "job insert failed"); return dbFail(req, clientId, "start that change", jErr); }
+      await audit("portal_photo_bg_start", 1, `photo=${photo.id} job=${job.id}`);
+      return json({ ok: true, jobId: job.id });
+    }
+
+    // photo_bg_status
+    const jobId = String(payload.jobId ?? "").trim();
+    const { data: job } = await admin.from("inventory_photo_ai_edits").select("*").eq("client_id", clientId).eq("id", jobId).maybeSingle();
+    if (!job) return json({ error: "Change not found." }, 404);
+    const photoUrl = async (id: string | null) => {
+      if (!id) return null;
+      const { data: p } = await admin.from("inventory_unit_photos").select("id, storage_key").eq("id", id).maybeSingle();
+      return p ? { id: p.id, url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl, aiEdited: true } : null;
+    };
+    if (job.status === "done") return json({ ok: true, status: "done", photo: await photoUrl(job.result_photo_id) });
+    if (job.status === "failed") return json({ ok: true, status: "failed", error: job.error || "That change didn't work. You weren't charged." });
+    const fail = async (why: string, shown: string) => {
+      await releaseHold(job.hold_id, why);
+      await admin.from("inventory_photo_ai_edits").update({ status: "failed", error: shown, updated_at: new Date().toISOString() })
+        .eq("id", job.id).eq("status", "queued");
+      await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_failed", message: why.slice(0, 300), severity: "info" });
+      return json({ ok: true, status: "failed", error: shown });
+    };
+    // The wallet sweeps a hold after 10 minutes; give up before that so the release is ours.
+    if (Date.now() - Date.parse(job.created_at) > 8 * 60_000) return fail("timed out after 8 minutes", "That took too long and was cancelled. You weren't charged — try again.");
+    if (!FAL_KEY || !job.status_url || !job.response_url) return fail("no key or no fal urls", "That change couldn't be checked. You weren't charged.");
+    const st = await fetch(job.status_url, { headers: { "Authorization": `Key ${FAL_KEY}` }, signal: AbortSignal.timeout(15_000) })
+      .then((r) => r.ok ? r.json() : null).catch(() => null);
+    if (!st || st.status !== "COMPLETED") {
+      if (st && (st.status === "FAILED" || st.status === "ERROR")) return fail(`fal status ${st.status}`, "The image service couldn't change that photo. You weren't charged.");
+      return json({ ok: true, status: "working" });
+    }
+    const result = await fetch(job.response_url, { headers: { "Authorization": `Key ${FAL_KEY}` }, signal: AbortSignal.timeout(20_000) })
+      .then((r) => r.ok ? r.json() : null).catch(() => null);
+    const imgUrl = result?.images?.[0]?.url;
+    if (!imgUrl || !/^https:\/\//.test(imgUrl)) return fail("COMPLETED without an image url", "The image service returned nothing. You weren't charged.");
+    const bytes = await fetch(imgUrl, { signal: AbortSignal.timeout(30_000) }).then((r) => r.ok ? r.arrayBuffer() : null).catch(() => null);
+    if (!bytes || bytes.byteLength < 1000) return fail("result download failed", "The new photo couldn't be saved. You weren't charged.");
+    const ct = String(result?.images?.[0]?.content_type || "image/png");
+    const ext = ct.includes("jpeg") ? "jpg" : ct.includes("webp") ? "webp" : "png";
+    const key = `${clientId}/${job.unit_id}/${crypto.randomUUID()}.${ext}`;
+    const { error: upErr } = await admin.storage.from(INVENTORY_PHOTOS).upload(key, new Uint8Array(bytes), { contentType: ext === "jpg" ? "image/jpeg" : `image/${ext}` });
+    if (upErr) return fail(`upload failed: ${upErr.message}`, "The new photo couldn't be saved. You weren't charged.");
+    // Right after its source photo, so the pair sits together; the builder can make it the cover.
+    const { data: src } = await admin.from("inventory_unit_photos").select("sort_order").eq("id", job.source_photo_id ?? "").maybeSingle();
+    const { data: added, error: insErr } = await admin.from("inventory_unit_photos").insert({
+      client_id: clientId, unit_id: job.unit_id, storage_key: key, source_photo_id: job.source_photo_id,
+      ai_edited: true, sort_order: (src?.sort_order ?? 999) + 0,
+    }).select("id").single();
+    if (insErr) { await admin.storage.from(INVENTORY_PHOTOS).remove([key]).catch(() => {}); return fail(`photo row failed: ${insErr.message}`, "The new photo couldn't be saved. You weren't charged."); }
+    // Claim the job first, so two overlapping polls can never add two photos or capture twice.
+    const { data: claimed } = await admin.from("inventory_photo_ai_edits")
+      .update({ status: "done", result_photo_id: added.id, updated_at: new Date().toISOString() })
+      .eq("id", job.id).eq("status", "queued").select("id");
+    if (!claimed?.length) {
+      await admin.from("inventory_unit_photos").delete().eq("id", added.id);
+      await admin.storage.from(INVENTORY_PHOTOS).remove([key]).catch(() => {});
+      const { data: again } = await admin.from("inventory_photo_ai_edits").select("result_photo_id").eq("id", job.id).maybeSingle();
+      return json({ ok: true, status: "done", photo: await photoUrl(again?.result_photo_id ?? null) });
+    }
+    if (job.hold_id) {
+      const { error: capErr } = await admin.rpc("wallet_capture", { p_hold_id: job.hold_id, p_cost_cents: null, p_usage: { model: job.model }, p_ref_id: job.id });
+      if (capErr) await logEdgeError({ fn: "portal-settings", req, clientId, code: "photo_bg_capture", message: `capture failed: ${capErr.message}` });
+    }
+    return json({ ok: true, status: "done", photo: { id: added.id, url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(key).data.publicUrl, aiEdited: true } });
+  }
+
+  // Purchase requests from the shop's cart (migration 311). Newest first; handled ones stay
+  // visible for 30 days so a builder can see what they already dealt with.
+  if (action === "list_shop_requests") {
+    const since = new Date(Date.now() - 30 * 86400000).toISOString();
+    const { data, error } = await admin.from("shop_requests")
+      .select("id, status, kind, paid_cents, design_codes, contact_id, name, phone, email, street, city, state, zip, message, pay_in_full, items, total_cents, due_now_cents, notified_at, handled_at, created_at")
+      .eq("client_id", clientId).or(`status.eq.new,created_at.gte.${since}`)
+      .order("created_at", { ascending: false }).limit(50);
+    if (error) {
+      // Before migration 311 the table does not exist: an empty list, not a broken Inventory tab.
+      if (String(error.code) === "42P01" || String(error.code) === "PGRST205") return json({ ok: true, requests: [] });
+      return dbFail(req, clientId, "load your purchase requests", error);
+    }
+    return json({ ok: true, requests: data ?? [] });
+  }
+
+  if (action === "mark_shop_request") {
+    const id = String(payload.id ?? "").trim();
+    const handled = payload.handled !== false;
+    const { error, count } = await admin.from("shop_requests")
+      .update({ status: handled ? "handled" : "new", handled_at: handled ? new Date().toISOString() : null, handled_by: handled ? (userId ?? null) : null }, { count: "exact" })
+      .eq("client_id", clientId).eq("id", id);
+    if (error) return dbFail(req, clientId, "update that request", error);
+    if (!count) return json({ error: "Request not found." }, 404);
+    await audit("portal_mark_shop_request", 1, `id=${id} handled=${handled}`);
+    return json({ ok: true });
+  }
+
+  // Shop-wide settings.
+  if (action === "shop_settings") {
+    const { data, error } = await admin.from("shop_settings").select("*").eq("client_id", clientId).maybeSingle();
+    if (error) return dbFail(req, clientId, "load your shop settings", error);
+    const { data: pay } = await admin.from("client_settings")
+      .select("payments_online_enabled, cardpointe_merchid").eq("client_id", clientId).maybeSingle();
+    return json({
+      ok: true,
+      settings: {
+        enabled: !!data?.enabled,
+        hideAllPrices: !!data?.hide_all_prices,
+        depositMode: data?.deposit_mode ?? "percent",
+        depositValue: data?.deposit_value != null ? Number(data.deposit_value) : 10,
+        allowPayInFull: data?.allow_pay_in_full !== false,
+        gtmContainerId: data?.gtm_container_id ?? "",
+        heading: data?.heading ?? "",
+        intro: data?.intro ?? "",
+        termsUrl: data?.terms_url ?? "",
+      },
+      paymentsLive: !!(pay?.payments_online_enabled && pay?.cardpointe_merchid),
+    });
+  }
+
+  if (action === "save_shop_settings") {
+    const s = (payload.settings && typeof payload.settings === "object") ? payload.settings : {};
+    const depositMode = ["full", "percent", "flat"].includes(s.depositMode) ? s.depositMode : "percent";
+    const depositValue = Math.round(Math.max(0, Number(s.depositValue) || 0) * 100) / 100;
+    if (depositMode === "percent" && depositValue > 100) return json({ error: "A deposit can't be more than 100%." }, 400);
+    if (depositMode === "flat" && depositValue > 100000) return json({ error: "That deposit is too large." }, 400);
+    const gtm = String(s.gtmContainerId ?? "").trim().toUpperCase();
+    if (gtm && !/^GTM-[A-Z0-9]{4,12}$/.test(gtm)) return json({ error: "A Google Tag Manager ID looks like GTM-ABC1234." }, 400);
+    const termsUrl = String(s.termsUrl ?? "").trim();
+    if (termsUrl && (!/^https:\/\//i.test(termsUrl) || termsUrl.length > 500)) return json({ error: "The terms link must start with https://" }, 400);
+    const row = {
+      client_id: clientId,
+      enabled: s.enabled === true,
+      hide_all_prices: s.hideAllPrices === true,
+      deposit_mode: depositMode,
+      deposit_value: depositValue,
+      allow_pay_in_full: s.allowPayInFull !== false,
+      gtm_container_id: gtm || null,
+      heading: String(s.heading ?? "").trim().slice(0, 120) || null,
+      intro: String(s.intro ?? "").trim().slice(0, 1000) || null,
+      terms_url: termsUrl || null,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await admin.from("shop_settings").upsert(row, { onConflict: "client_id" });
+    if (error) return dbFail(req, clientId, "save your shop settings", error);
+    await audit("portal_save_shop_settings", 1, `enabled=${row.enabled} hidePrices=${row.hide_all_prices}`);
+    return json({ ok: true });
+  }
+
   // ── The Inventory tab's data ─────────────────────────────────────────────────
   if (action === "list_inventory") {
     const [unitsRes, locsRes] = await Promise.all([
       admin.from("inventory_units")
-        .select("id, serial, design_short_code, location_id, asking_price_cents, "
-          + "sale_state, sold_design_short_code, sold_at, sold_first_name, created_at, updated_at")
+        .select("id, serial, full_serial, design_short_code, location_id, asking_price_cents, "
+          + "sale_state, sold_design_short_code, sold_at, sold_first_name, created_at, updated_at, "
+          + "listed, show_price_online, public_title, public_description")
         .eq("client_id", clientId).order("created_at", { ascending: false }),
       admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
     ]);
@@ -7647,6 +9045,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const jobRows = (jobsRes.data ?? []) as JobRow[];
     const stopRows = (stopsRes.data ?? []) as StopRow[];
+    // Online Shop photos (migration 310), in display order, as public URLs.
+    const { data: photoRows } = unitIds.length
+      ? await admin.from("inventory_unit_photos")
+        .select("id, unit_id, storage_key, sort_order, ai_edited, created_at")
+        .eq("client_id", clientId).in("unit_id", unitIds)
+        .order("sort_order", { ascending: true }).order("created_at", { ascending: true })
+      : { data: [] };
+    const photosByUnit = new Map<string, { id: string; url: string; aiEdited: boolean }[]>();
+    for (const p of (photoRows ?? []) as { id: string; unit_id: string; storage_key: string; ai_edited: boolean }[]) {
+      const list = photosByUnit.get(p.unit_id) ?? [];
+      list.push({ id: p.id, url: admin.storage.from(INVENTORY_PHOTOS).getPublicUrl(p.storage_key).data.publicUrl, aiEdited: !!p.ai_edited });
+      photosByUnit.set(p.unit_id, list);
+    }
     const stageIds = [...new Set(jobRows.map((j) => j.stage_id).filter(Boolean))] as string[];
     const { data: stageRows } = stageIds.length
       ? await admin.from("schedule_stages").select("id, name, kind").eq("client_id", clientId).in("id", stageIds)
@@ -7687,7 +9098,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
 
       return {
-        id: u.id, serial: u.serial, shortCode: u.design_short_code,
+        id: u.id, serial: u.serial, fullSerial: u.full_serial ?? null, shortCode: u.design_short_code,
         locationId: u.location_id, locationName: loc?.name ?? null, locationCity: loc?.city ?? null,
         askingPriceCents: u.asking_price_cents,
         // ── Axis 1: where it is on the build ladder ──
@@ -7706,6 +9117,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         bodyColor: paint.body ?? null, trimColor: paint.trim ?? null,
         createdAt: u.created_at, updatedAt: u.updated_at,
         estimates: estsByUnit.get(u.id) ?? [],
+        // ── The Online Shop listing (migration 310) ──
+        listed: !!u.listed, showPriceOnline: u.show_price_online !== false,
+        publicTitle: u.public_title ?? "", publicDescription: u.public_description ?? "",
+        photos: photosByUnit.get(u.id) ?? [],
       };
     });
     return json({ ok: true, units: out, locations: locsRes.data ?? [], soldLabelDays: SOLD_LABEL_DAYS });
@@ -7820,7 +9235,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (kind === "contact" && !mayReadContacts) {
       return json({
         error: canRead("contacts")
-          ? "The built-in CRM is not part of your subscription - add it under Settings -> Billing."
+          ? "The Customer Hub is not part of your subscription - add it under Settings -> Billing."
           : "Your access does not include Contacts. Ask an owner or admin.",
       }, 403);
     }
@@ -7924,7 +9339,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // absent-vs-empty distinction three of them have a comment about: Promise.all rejects on
     // the first THROW, and none of these throws — a failed read comes back on `.error` and is
     // turned into `undefined` by the same line that always did it.
-    const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut] = await Promise.all([
+    const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut, pipeline, fieldDefs] = await Promise.all([
       buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true, phone: phoneFeedScope(contact?.owner_user_id ?? null) }),
       // Focus = open activities, soonest first. This is the crm_activities_focus index.
       admin.from("crm_activities")
@@ -8071,9 +9486,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // available" sends people off editing a contact that is fine. Same lesson the Email
       // tab's hint already carries.
       (async () => {
-        // The config and the consent grant do NOT depend on each other, so they go together
-        // rather than one after the other — the same reason this whole block is a Promise.all.
-        const [cfgRes, grantRes] = await Promise.all([
+        // The config, the consent grant and the opt-out do NOT depend on each other, so they go
+        // together rather than one after the other — the same reason this whole block is a
+        // Promise.all.
+        const [cfgRes, grantRes, optOutRes] = await Promise.all([
           admin.from("client_settings")
             .select("sms_number, sms_status").eq("client_id", clientId).maybeSingle(),
           contact && contact.phone_digits
@@ -8082,7 +9498,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 .eq("phone_digits", contact.phone_digits).eq("action", "granted")
                 .limit(1).maybeSingle()
             : Promise.resolve({ data: null, error: null }),
+          // The opt-out smsSend actually checks before every send: sms_opt_outs, keyed on the
+          // PHONE. crm_contacts.sms_opt_out_at alone missed every opt-out recorded only there — a
+          // STOP from a number saved as a contact afterwards, an import's do-not-disturb, a
+          // contact re-created or merged after its STOP, Twilio's 21610 on a text to an unsaved
+          // number — so the record said nothing and Send failed. Asked 2026-10-12: "Can we see if
+          // a customer has opted out?"
+          readSmsOptOut(admin, clientId, contact && contact.phone_digits),
         ]);
+        // Either record of it, as the send path refuses on either: the number's sms_opt_outs row,
+        // or the contact's own older flag.
+        const optOut = smsOptOutFacts(optOutRes.data, contact ? contact.sms_opt_out_at : null);
         const smsCfg = cfgRes.data;
         // The number a text from this composer goes out from (migration 266): the one this
         // customer last texted with, else the reader's own, else the main number; crm_send_sms
@@ -8095,7 +9521,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           // The tenant's own number, shown in the composer so a rep knows which number the
           // customer will see. Never the platform's, and never another tenant's.
           from: (smsCfg && smsCfg.sms_status === "active") ? (replyFrom ?? smsCfg.sms_number ?? null) : null,
-          optedOut: !!(contact && contact.sms_opt_out_at),
+          optedOut: optOut.optedOut,
+          // Why, so the composer can say it truly (2026-10-13): 'stop' a STOP or Twilio's 21610,
+          // 'team' recorded by the team, 'other' an import, a web form or only the contact's flag;
+          // null when not opted out. Additive: main's frontend reads optedOut alone.
+          optOutReason: optOut.reason,
           // ⚠️ CONSENT IS NOW REQUIRED TO SEND, so the composer has to be able to SHOW its absence
           // rather than let someone type a message and discover it on Send. Asked as "is there a
           // grant?" — the same question smsSend asks, deliberately, so the screen and the send path
@@ -8180,6 +9610,98 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
         return { people, followers, team, ownerName };
       })(),
+
+      // ── EACH DEAL'S PIPELINE, STAGE AND STATUS (Carolyn, 2026-10-12) ─────────────────────
+      // "Instead of this saying sales ... I want this up here to say shed deals with the stage
+      // that it's in", and one Deals section where each deal shows its status and can change
+      // stage or move to another pipeline. So the record needs the pipeline cards (crm_deals) for
+      // this person's deals, and the pipelines and statuses that name them.
+      //
+      // Deals ride their CONTACT (GATES' sales-pipeline note), so this is read only for someone
+      // who may read the contact half: the same rule as crm_pipelines_list, which is contacts:view
+      // plus the CRM. Everyone else gets `undefined` and the record keeps its old stage ladder.
+      // A contact's deals are its own (contact_id) plus the cards of its designs, which can carry
+      // another contact_id after a merge. A design record's deal is its card, by short code.
+      //
+      // ADDED, NOT CHANGED: main's frontend reads crm_record and never looks at this key. Read
+      // only, and it never seeds pipelines (crm_pipelines_list does that the first time the board
+      // opens). NULL on any failed read (2026-10-13), not undefined: the answer then leaves
+      // `pipeline` out and says `pipelineError: true`, so the record can tell "couldn't load this
+      // deal's pipeline" from "no pipeline for this reader" and never draws the old ladder for a
+      // deal whose pipeline it simply failed to read. Older frontends ignore the extra key.
+      (async () => {
+        if (!mayReadContacts) return undefined;
+        // lost_at rides along since 353: it is what says a card is lost (the reason alone cannot —
+        // a reopened card keeps neither, and the record's Mark lost / Reopen keys on this).
+        const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_at, lost_reason, stage_entered_at, created_at, custom";
+        const safeCodes = codes.filter((c) => /^[A-Za-z0-9_-]{1,40}$/.test(String(c)));
+        let dealsQ = admin.from("crm_deals").select(dealCols).eq("client_id", clientId).is("archived_at", null);
+        if (kind === "contact") {
+          dealsQ = dealsQ.or(safeCodes.length
+            ? `contact_id.eq.${contact.id},short_code.in.(${safeCodes.join(",")})`
+            : `contact_id.eq.${contact.id}`);
+        } else {
+          dealsQ = dealsQ.eq("short_code", designs[0].short_code);
+        }
+        const [pRes, sRes, tRes, dRes] = await Promise.all([
+          admin.from("crm_pipelines").select("id, name, position, lost_reasons")
+            .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
+          admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position")
+            .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
+          // pipeline_id rides along since 354 so this SECOND copy of the status read keeps the same
+          // shape as readPipelines' one. The record resolves a pill from an id, so the flat union
+          // is still what it needs; letting the two drift is how the record and the board end up
+          // disagreeing about a card.
+          admin.from("crm_statuses").select("id, pipeline_id, name, color, position")
+            .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
+          dealsQ.order("created_at", { ascending: false }).limit(100),
+        ]);
+        if (pRes.error || sRes.error || tRes.error || dRes.error) return null;
+        const stages = sRes.data ?? [];
+        return {
+          pipelines: (pRes.data ?? []).map((p: any) => ({
+            id: p.id, name: p.name, lostReasons: p.lost_reasons ?? [],
+            stages: stages.filter((s: any) => s.pipeline_id === p.id)
+              .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind })),
+          })),
+          statuses: (tRes.data ?? []).map((t: any) => ({ id: t.id, pipelineId: t.pipeline_id ?? null, name: t.name, color: t.color })),
+          deals: dRes.data ?? [],
+        };
+      })(),
+      // THE BUILDER'S OWN FIELDS (migration 330), and their relabels of ours. Read HERE, in the
+      // one wait, so a contact card can draw them without a second round trip — and so the tab
+      // that defines them and the card that fills them in can never disagree about a label.
+      //
+      // ADDED, NOT CHANGED: an older frontend ignores the key. NULL on a failed read, never
+      // undefined, the same contract `pipeline` above settled on: the card then knows the
+      // difference between "this builder has no custom fields" (empty arrays) and "we could not
+      // read them" (null), and draws nothing in the second case rather than an empty section.
+      (async () => {
+        const [cf, df, co, do_] = await Promise.all([
+          readCustomFields(admin, clientId, "contact"),
+          readCustomFields(admin, clientId, "deal"),
+          readBuiltinOverrides(admin, clientId, "contact"),
+          readBuiltinOverrides(admin, clientId, "deal"),
+        ]);
+        if ("dbError" in cf || "dbError" in df || "dbError" in co || "dbError" in do_) return null;
+        const shown = (rows: Record<string, unknown>[]) => rows
+          .filter((f) => !f.hidden)
+          .map((f) => ({
+            key: String(f.key), label: String(f.label), type: String(f.field_type),
+            choices: Array.isArray(f.choices) ? (f.choices as unknown[]).map(String) : [],
+            // How a number prints (migration 332). `thousands` is true unless it is exactly false,
+            // so a field stored before that column existed reads 100,000 rather than changing.
+            currency: f.currency ? String(f.currency) : null,
+            thousands: f.thousands !== false,
+            help: f.help ? String(f.help) : null, required: !!f.required,
+          }));
+        return {
+          contact: shown(cf.fields as Record<string, unknown>[]),
+          deal: shown(df.fields as Record<string, unknown>[]),
+          contactLabels: co.overrides,
+          dealLabels: do_.overrides,
+        };
+      })(),
     ]);
 
     // Unpacked after the wait, and `contact` is merged HERE rather than inside a branch —
@@ -8194,7 +9716,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team });
+    // A failed pipeline read (null) is said, never sent as a block: see EACH DEAL'S PIPELINE above.
+    const pipelineError = pipeline === null ? true : undefined;
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team, pipeline: pipeline ?? undefined, pipelineError,
+       // Migration 330. `undefined` on a failed read (fields === null), so the card tells "no
+       // custom fields" from "could not read them" — the same contract `pipeline` uses above.
+       fields: fieldDefs ?? undefined, fieldsError: fieldDefs === null ? true : undefined });
   }
 
   if (action === "crm_feed") {
@@ -8263,7 +9790,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "crm_inbox") {
     const req0 = parseInboxRequest(payload);
     if ("error" in req0) return json({ error: req0.error }, 400);
-    const me = isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null;
+    // selfUserId: whose inbox this is. Every 'own' narrowing below keys on it.
+    const me = isUuid(String(selfUserId ?? "")) ? String(selfUserId).toLowerCase() : null;
     const seesCalls = canRead("phone");
     const callScope = phoneFeedScope(null);
     // deno-lint-ignore no-explicit-any
@@ -8708,10 +10236,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ⛔ AN OPT-OUT OUTRANKS THIS, ALWAYS. Someone who replied STOP cannot be put back by a
     // colleague ticking a box — only they can, by replying START. Refusing loudly here is the
     // difference between a control and a loophole.
-    if (c.sms_opt_out_at) {
-      return json({
-        error: "This customer replied STOP. Only they can undo that, by replying START to that number.",
-      }, 409);
+    //
+    // Both records of it, as the send path and crm_record read them (2026-10-13): the contact's
+    // flag alone let a grant be recorded for a number opted out only on sms_opt_outs (a STOP from
+    // before the contact was saved, the team's, an import's), and Send still refused it. A failed
+    // read refuses too: this is the one place a wrong "no" would let someone attest over an opt-out.
+    const { data: optOutRow, error: optOutErr } = await readSmsOptOut(admin, clientId, c.phone_digits);
+    if (optOutErr) return dbFail(req, clientId, "check whether this customer opted out of texts", optOutErr);
+    const optOut = smsOptOutFacts(optOutRow, c.sms_opt_out_at);
+    if (optOut.optedOut) {
+      return json({ error: smsOptOutRefusal(optOut.reason) }, 409);
     }
 
     const attestation = payload.attestation ? String(payload.attestation).trim().slice(0, 1000) : "";
@@ -8774,10 +10308,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Every email this function sends is set off by the person signed in: crm_send_email below,
   // and the quote re-send and re-price, the change order and the invoice sends, re-issues and
   // retries further down. So the reply copy names THEM (their My Profile address, else their
-  // sign-in email), and in view-as the customer's assigned rep instead, never the operator. The
-  // rule and its reasons are _shared/repReplyTo.ts. The senders take a ReplySender rather than
-  // reading the session themselves (sendQuoteEmail and restampQuoteTax take it as a parameter),
-  // so a sender added later has to say whose email it is. `recipient` is the address the email
+  // sign-in email), and in view-as the customer's assigned rep instead, never the operator. It is
+  // advertised only if the person named switched reply copies on in My Profile, or when replies
+  // aren't routed to the record on this account (2026-10-07; sendTenantEmail decides, from the
+  // `copy` flag in the answer). The rule and its reasons are _shared/repReplyTo.ts. The senders
+  // take a ReplySender rather than reading the session themselves (sendQuoteEmail and
+  // restampQuoteTax take it as a parameter), so a sender added later has to say whose email it is. `recipient` is the address the email
   // goes to, and is required: the assigned rep is named only for their customer's own address.
   // A failed lookup is logged and the email goes with the routing address only, as every
   // document email did before.
@@ -8859,9 +10395,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // REPLY-TO: the person who wrote it, resolved SERVER-SIDE from the verified session and
-    // never from the body, so nobody can route a customer's replies at a third party. There is
-    // no `business_email` column to default one from (emailSend.ts says so in as many words),
-    // and the tenant's sending address is a no-reply-shaped local part, so without this a
+    // never from the body, so nobody can route a customer's replies at a third party. Since
+    // 2026-10-07 it names them, and it is advertised only if they switched reply copies on, or
+    // when replies aren't routed to the record (sendTenantEmail decides; see emailSend.ts).
+    // There is no `business_email` column to default one from (emailSend.ts says so in as many
+    // words), and the tenant's sending address is a no-reply-shaped local part, so without this a
     // customer hitting Reply on a tenant with no reply domain had nowhere real to land.
     //
     // The ROUTABLE address (`d.SS-…@reply.<their domain>`) is not computed here: sendTenantEmail
@@ -8873,8 +10411,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // sign-in email. Two things changed for this branch when it moved there. The preference is
     // read on THIS tenant (it used to be limit(1) on the user alone). And in view-as the writer is
     // CSM Synergy staff, whose address must never go on a builder's email: it used to be the
-    // operator's own sign-in address, and is now the customer's assigned rep, or nobody. The
-    // address is validated on the way out as well as at save_prefs, because it goes into a header.
+    // operator's own sign-in address, and is now the customer's assigned rep (on their own
+    // reply-copy switch), or nobody. The address is validated on the way out as well as at
+    // save_prefs, because it goes into a header.
     const replyTo = await replyCopy(signedIn, { shortCode, contactId: contactFound ? contactId : null, recipient: to });
     // VIEW-AS WITH NOWHERE FOR A REPLY TO GO IS REFUSED. Until 2026-10-05 the operator's own
     // address was on this email, so a reply always reached somebody. Without it, an operator
@@ -8882,6 +10421,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // routed to the record (no active reply domain), would send with no Reply-To at all: the
     // customer's answer goes to the From address and reaches no person and no record. Said
     // before anything is sent. Only view-as: a member writing as themselves is not refused here.
+    // A rep who is named but has reply copies off is not "nobody": on an unrouted account
+    // sendTenantEmail keeps their address whatever the switch says, and on a routed one the
+    // reply lands on the record.
     if (operator && !replyTo) {
       const { data: rs, error: rsErr } = await admin.from("client_settings")
         .select("inbound_domain, inbound_status").eq("client_id", clientId).maybeSingle();
@@ -8899,12 +10441,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // membership of their own), so a builder's customer would have got CSM Synergy's name under
     // the builder's email. Keyed on this tenant it finds no row for them now; the operator check
     // stays as the plain statement of the rule. The composer shows no signature in view-as either.
-    let signature: string | null = null;
+    let sig: { text: string | null; html: string | null } = { text: null, html: null };
     try {
       const { data: pu } = await admin.from("client_users")
         .select("prefs").eq("user_id", userId ?? "").eq("client_id", clientId).limit(1).maybeSingle();
-      const prefs = pu?.prefs as Record<string, unknown> | null;
-      signature = operator ? null : cleanSignature(prefs?.emailSignature);
+      sig = operator ? { text: null, html: null } : signaturePair(pu?.prefs);
     } catch (_) { /* no signature */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
@@ -8912,8 +10453,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the branded template already exists for the documents that want one. The signature goes
     // under it: "-- " and the signature in the text, its own block in the HTML (escaped too).
     const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>${signatureHtml(signature)}`;
-    const text = signText(body, signature);
+    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>${signatureHtml(sig.text, sig.html)}`;
+    const text = signText(body, sig.text, sig.html);
 
     const out = await sendTenantEmail(admin, clientId, {
       kind: "conversation",
@@ -9071,10 +10612,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // and followers." Same three-state contract as every field here, which is why it travels
     // as TEXT: "" is a real instruction to UNASSIGN, and a uuid cannot carry it.
     const owner = fld(payload.owner, 64);
+    // COMPANY (308). Carolyn, 2026-10-14 call @11:08: "+ Add lead" asks for the company name,
+    // "but there's no places … for me to edit that company name later, because I got the
+    // company name wrong." 200 characters, crm_create_lead's cap. Same three-state contract.
+    const company = fld(payload.company, 200);
     if (name === null && phone === null && email === null
         && street === null && city === null && state === null && zip === null
         && billingStreet === null && billingCity === null && billingState === null
-        && billingZip === null && owner === null) {
+        && billingZip === null && owner === null && company === null) {
       return json({ error: "Nothing to change." }, 400);
     }
     // Only validate an address that is actually being SET. "" is a deliberate clear and
@@ -9097,6 +10642,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       p_owner: owner,
       p_billing_street: billingStreet, p_billing_city: billingCity,
       p_billing_state: billingState, p_billing_zip: billingZip,
+      // Sent only when it is being edited. PostgREST resolves a named call by its argument
+      // names, so p_company on a database still holding 188's 15-argument function would turn
+      // EVERY contact save into "function not found", not just the ones that touch the company.
+      // Left out, an older database keeps saving everything else.
+      ...(company !== null ? { p_company: company } : {}),
     });
     if (error) {
       // The tenant-wide partial unique index on (client_id, phone_digits) — migration 130.
@@ -9122,6 +10672,1359 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return dbFail(req, clientId, "save that contact", error);
     }
     return json({ ok: true, changed: Number(n ?? 0) });
+  }
+
+  // ══ SALES PIPELINES (migration 301) ════════════════════════════════════════════════════
+  // Hand-moved boards of deals, for every CRM builder. Carolyn 2026-10-09: "I want a pipeline
+  // in Structure Studio for these. This will also add these contacts to our Structure Studio
+  // list of contacts." Her first pipeline is our own account's Manufacturer Outreach.
+  //
+  // WHO SEES A DEAL is who sees its CONTACT (no deal owner — see GATES). The writes are narrowed
+  // by CONTACT_ROW_SCOPE before dispatch; the READS are narrowed here, by visibleContactIds,
+  // because the service role is BYPASSRLS and the tables have no browser path at all.
+  //
+  // Postgres refusals the SQL raises on purpose (check_violation / no_data_found /
+  // foreign_key_violation) are answered with our own sentence; anything else goes to dbFail.
+  const pipeRefusal = (error: { code?: string; message?: string } | null): Response | null => {
+    const msg = String(error?.message ?? "");
+    if (/a lost reason is required/i.test(msg)) return json({ error: "Pick the reason this one was lost." }, 400);
+    if (/cannot start lost/i.test(msg)) return json({ error: "A deal can't start in a lost stage — pick an open one." }, 400);
+    if (/deal not found/i.test(msg)) return json({ error: "That deal no longer exists." }, 404);
+    if (/stage not found/i.test(msg)) return json({ error: "That stage no longer exists — refresh and try again." }, 404);
+    if (/contact not found/i.test(msg)) return json({ error: "That contact no longer exists." }, 404);
+    if (/owner is not on this team/i.test(msg)) return json({ error: "That person isn't on this team any more. Pick someone from the list." }, 400);
+    if (/phone number or an email is required/i.test(msg)) return json({ error: "A lead needs a phone number or an email." }, 400);
+    if (/name or a company is required/i.test(msg)) return json({ error: "Give the lead a name or a company." }, 400);
+    if (String(error?.code) === "23505") return json({ error: "Another contact already has that phone number or email. Search Contacts for it instead." }, 409);
+    return null;
+  };
+
+  /** The tenant's live pipelines with their live stages, seeding the statuses and Shed Deals once. */
+  const readPipelines = async (): Promise<{ pipelines: any[]; statuses: any[] } | { dbError: unknown }> => {
+    const read = () => admin.from("crm_pipelines")
+      .select("id, name, position, lost_reasons, seed_kind, feeds_designs")
+      .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
+    const readStatuses = () => admin.from("crm_statuses")
+      .select("id, pipeline_id, name, color, position, trigger_event")
+      .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true });
+    let [{ data: pipes, error }, { data: statuses, error: stErr }] = await Promise.all([read(), readStatuses()]);
+    if (error) return { dbError: error };
+    if (stErr) return { dbError: stErr };
+    if (!pipes || !pipes.length) {
+      // An account opening the board for the first time (every account that existed on
+      // 2026-10-11 got these from migration 302): the statuses and Shed Deals, which new designs
+      // land in (migration 303 retired Quotes and never seeds it again). A write under a read
+      // gate, deliberately: it is idempotent per tenant and holds no person's data.
+      const seeded = await admin.rpc("crm_ensure_pipelines", { p_client_id: clientId });
+      if (seeded.error) return { dbError: seeded.error };
+      [{ data: pipes, error }, { data: statuses, error: stErr }] = await Promise.all([read(), readStatuses()]);
+      if (error) return { dbError: error };
+      if (stErr) return { dbError: stErr };
+    }
+    const ids = (pipes ?? []).map((p: any) => p.id);
+    const { data: stages, error: sErr } = ids.length
+      ? await admin.from("crm_pipeline_stages").select("id, pipeline_id, name, color, kind, position")
+          .eq("client_id", clientId).in("pipeline_id", ids).is("archived_at", null)
+          .order("position", { ascending: true })
+      : { data: [], error: null };
+    if (sErr) return { dbError: sErr };
+    // ⛔ NO RULES HERE (363). They were nested per pipeline while a rule belonged to one; since
+    // Carolyn's 2026-11-04 decision a rule says who it is for and may belong to none, so grouping
+    // them here would silently drop every every-pipeline rule from the page that edits it. The
+    // flat list is crm_rules_list's, and the board — which never read them — no longer pays for
+    // two extra queries on every open.
+    return {
+      pipelines: (pipes ?? []).map((p: any) => ({
+        // feedsDesigns: new designs land in this one, in its first open stage (Shed Deals since 303).
+        // A stage carries no status (303): moving a card never changes its status.
+        id: p.id, name: p.name, position: p.position, lostReasons: p.lost_reasons ?? [], seedKind: p.seed_kind ?? null,
+        feedsDesigns: p.feeds_designs === true,
+        stages: (stages ?? []).filter((s: any) => s.pipeline_id === p.id)
+          .map((s: any) => ({ id: s.id, name: s.name, color: s.color, kind: s.kind, position: s.position })),
+        // A STATUS BELONGS TO THIS PIPELINE (migration 354). Its ladder, its lost reasons and its
+        // stages now all hang off the pipeline, which is what Settings → Pipelines edits.
+        statuses: (statuses ?? []).filter((t: any) => t.pipeline_id === p.id)
+          .map((t: any) => ({ id: t.id, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
+      })),
+      // The UNION, still flat and still called `statuses`: a status PILL is drawn from an id alone
+      // (SsStatusPill, CrmDealStatusPill, the record's rows), and the card carrying it may belong to
+      // any pipeline. Keeping it costs one array and means every pill lookup keeps working; the
+      // per-pipeline lists above are what the board's filter and the settings editor read.
+      statuses: (statuses ?? []).map((t: any) => ({ id: t.id, pipelineId: t.pipeline_id ?? null, name: t.name, color: t.color, position: t.position, triggerEvent: t.trigger_event ?? null })),
+    };
+  };
+
+  /**
+   * ONE RULE'S ACTIONS, REPLACED WHOLE (migration 355). Returns a Postgres error or null.
+   *
+   * Delete-then-insert rather than a diff, because the list is at most RULE_ACTIONS_MAX rows and
+   * their ORDER is meaning, not decoration: the actions run in `position` order and two of them
+   * see each other's writes. Matching rows up to preserve ids would buy nothing and could leave a
+   * gap in the order; the ids are referenced only by the run log's `detail`, which records what
+   * fired at the time and is deliberately not a live join.
+   */
+  const writeRuleActions = async (ruleId: string, actions: { kind: string; params: Record<string, unknown> }[]) => {
+    const { error: dErr } = await admin.from("crm_rule_actions").delete()
+      .eq("client_id", clientId).eq("rule_id", ruleId);
+    if (dErr) return dErr;
+    if (!actions.length) return null;
+    const rows = actions.slice(0, RULE_ACTIONS_MAX).map((a, i) => ({
+      client_id: clientId, rule_id: ruleId, kind: a.kind, position: (i + 1) * 1024,
+      // 370: a webhook saved without its signing secret gets one, made HERE and never in a browser.
+      // One posted back in its own shape (an edit of a saved rule) is kept, so the receiver's copy
+      // keeps working; parseRuleAction already dropped anything else.
+      params: a.kind === "webhook" && !RULE_WEBHOOK_SECRET.test(String(a.params?.secret ?? ""))
+        ? { ...a.params, secret: [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("") }
+        : a.params,
+    }));
+    const { error: iErr } = await admin.from("crm_rule_actions").insert(rows);
+    return iErr ?? null;
+  };
+
+  const DEAL_COLS = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at, custom";
+
+  /**
+   * Deals → the same deals with their contact attached, narrowed to what this caller may see.
+   * A deal whose contact was MERGED is re-pointed at the surviving contact here (crm_merge_contacts
+   * does not move deals — 301's header), so a tombstone never hides a deal.
+   */
+  const withContacts = async (deals: any[]): Promise<any[] | Response> => {
+    const ids = [...new Set(deals.map((d) => d.contact_id).filter(Boolean))];
+    const contacts = new Map<string, any>();
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await admin.from("crm_contacts")
+        .select("id, name, company, phone, email, owner_user_id, merged_into")
+        .eq("client_id", clientId).in("id", ids.slice(i, i + 200));
+      if (error) return dbFail(req, clientId, "load the deals' contacts", error);
+      (data ?? []).forEach((c: any) => contacts.set(c.id, c));
+    }
+    // Follow merges (bounded) and heal the deal rows that pointed at a tombstone.
+    for (const d of deals) {
+      if (!d.contact_id) continue;
+      let c = contacts.get(d.contact_id);
+      for (let hop = 0; c?.merged_into && hop < 5; hop++) {
+        const { data } = await admin.from("crm_contacts")
+          .select("id, name, company, phone, email, owner_user_id, merged_into")
+          .eq("client_id", clientId).eq("id", c.merged_into).maybeSingle();
+        if (!data) break;
+        contacts.set(data.id, data);
+        c = data;
+      }
+      if (c && c.id !== d.contact_id) {
+        await admin.from("crm_deals").update({ contact_id: c.id }).eq("client_id", clientId).eq("id", d.id);
+        d.contact_id = c.id;
+      }
+    }
+    const seen = await visibleContactIds(deals.map((d) => d.contact_id));
+    if (!seen) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+    // THE NEXT APPOINTMENT, per contact (migration 353). Carolyn: "since we now have meetings set
+    // up we should be able to see on the card when an appt is set. I don't think we want that as a
+    // status as it can happen anytime in the process." So it is read live, never stored on the
+    // card, and it is a third batched lookup in the same shape as the two above.
+    //
+    // THE CALENDAR HAS ITS OWN AREA. This branch's gate is contacts:view and says nothing about
+    // meetings, so the chip asks the meetings area the way phoneFeedScope asks the phone one:
+    // no meetings access, no chip; meetings:'own', only the ones this person is hosting.
+    const meetingIds = canRead("meetings") ? [...new Set(deals.map((d) => d.contact_id).filter(Boolean))] : [];
+    const meetings = new Map<string, any>();
+    for (let i = 0; i < meetingIds.length; i += 200) {
+      let q = admin.from("meetings")
+        .select("contact_id, short_code, starts_at, ends_at, host_user_id, type_id")
+        .eq("client_id", clientId).eq("status", "booked")
+        .gte("starts_at", new Date().toISOString())
+        .in("contact_id", meetingIds.slice(i, i + 200))
+        .order("starts_at", { ascending: true });
+      if (ownMeetingsOnly(access)) {
+        const me = isUuid(String(selfUserId ?? "")) ? String(selfUserId).toLowerCase() : null;
+        if (!me) continue;
+        q = q.eq("host_user_id", me);
+      }
+      const { data, error } = await q;
+      if (error) return dbFail(req, clientId, "load the deals' appointments", error);
+      // Ordered soonest first, so the first row per contact wins. It is the NEXT appointment with
+      // this customer, not "the next one about this card": a meeting carries short_code only when
+      // a rep booked it from a record that had a design picked (326), and a customer with two
+      // cards would otherwise show an appointment on neither.
+      (data ?? []).forEach((m: any) => { if (!meetings.has(m.contact_id)) meetings.set(m.contact_id, m); });
+    }
+    // The meeting's TYPE by its own read, not a PostgREST embed: the board's whole card list hangs
+    // off this one query, and an embed that stops resolving (a renamed relationship, an ambiguous
+    // second FK) would fail it rather than drop a tooltip. A handful of rows per tenant.
+    const typeNames = new Map<string, string>();
+    if (meetings.size) {
+      const { data } = await admin.from("meeting_types").select("id, name").eq("client_id", clientId);
+      (data ?? []).forEach((t: any) => typeNames.set(t.id, t.name));
+    }
+    // A DESIGN CARD (migration 302) carries the design: the card shows its building, estimate
+    // number and status, and its value is the design's LIVE total (never a copy). A design with
+    // neither phone nor email has no contact: like that design everywhere else (193 edge case 2),
+    // only someone who is not narrowed sees it.
+    const codes = [...new Set(deals.map((d) => d.short_code).filter(Boolean))];
+    const designs = new Map<string, any>();
+    for (let i = 0; i < codes.length; i += 200) {
+      const { data, error } = await admin.from("designs")
+        .select("short_code, status, contact, total_cents, ss_quote_number, ghl_estimate_number, expected_close_date, created_at, updated_at, sel_style:selections->>style, sel_size:selections->>size")
+        .eq("client_id", clientId).in("short_code", codes.slice(i, i + 200));
+      if (error) return dbFail(req, clientId, "load the deals' estimates", error);
+      (data ?? []).forEach((r: any) => designs.set(r.short_code, r));
+    }
+    return deals
+      .filter((d) => (d.contact_id ? seen.has(d.contact_id) : !ownContacts && !!d.short_code))
+      .filter((d) => !d.short_code || designs.has(d.short_code))
+      .map((d) => {
+        const c = (d.contact_id && contacts.get(d.contact_id)) || {};
+        const g = d.short_code ? designs.get(d.short_code) : null;
+        const blob = (g && g.contact && typeof g.contact === "object") ? g.contact : {};
+        const mt = d.contact_id ? meetings.get(d.contact_id) : null;
+        return {
+          ...d,
+          // 353: the appointment chip. Absent (not null) when the caller may not see the calendar.
+          next_meeting: mt
+            ? { startsAt: mt.starts_at, endsAt: mt.ends_at, typeName: typeNames.get(mt.type_id) ?? null }
+            : null,
+          value_cents: g ? (g.total_cents ?? null) : d.value_cents,
+          expected_close_date: g ? (g.expected_close_date ?? null) : d.expected_close_date,
+          contact: {
+            id: d.contact_id ?? null, name: c.name ?? blob.name ?? null, company: c.company ?? null,
+            phone: c.phone ?? blob.phone ?? null, email: c.email ?? blob.email ?? null, ownerUserId: c.owner_user_id ?? null,
+          },
+          design: g ? {
+            status: g.status, estimateNumber: g.ss_quote_number || (g.ghl_estimate_number != null ? String(g.ghl_estimate_number) : null),
+            style: g.sel_style || null, size: g.sel_size || null, createdAt: g.created_at, updatedAt: g.updated_at,
+          } : null,
+        };
+      });
+  };
+
+  if (action === "crm_pipelines_list") {
+    const r = await readPipelines();
+    if ("dbError" in r) return dbFail(req, clientId, "load your pipelines", r.dbError);
+    // The roster for the owner picker and the cards' owner initials. client_users is unreadable to
+    // a portal user (client_users_select_own), so names come from here — crm_record's reasoning.
+    const { data: roster } = await admin.from("client_users")
+      .select("user_id, full_name, title").eq("client_id", clientId)
+      .order("full_name", { ascending: true, nullsFirst: false }).limit(200);
+    return json({
+      ok: true,
+      pipelines: r.pipelines,
+      statuses: r.statuses,
+      team: (roster ?? []).map((m: any) => ({ userId: m.user_id, name: m.full_name ?? null, title: m.title ?? null })),
+      canManage: canEdit("settings_crm"),
+      canWrite: canEdit("contacts"),
+      ownOnly: ownContacts,
+      // selfUserId: the browser marks this row as "me" and defaults the owner picker to it.
+      me: selfUserId ?? null,
+    });
+  }
+
+  if (action === "crm_deals_list") {
+    const pipelineId = String(payload.pipelineId ?? "").toLowerCase();
+    if (!isUuidLike(pipelineId)) return json({ error: "Pick a pipeline." }, 400);
+    // Lost deals stay on the board for 90 days after they were called lost (the board hides them
+    // behind "Show lost" meanwhile); older ones are reached from the contact's record. DESIGN cards
+    // are exempt: the old Pipeline board showed every design whatever its age, and still should.
+    //
+    // WON IS NOT A CUT-OFF ANY MORE (353). It used to be, because won_at only ever came from
+    // dragging a card into a Won column — an end of the line. Now it is stamped the moment a job
+    // is INVOICED, which is the middle of the work: that job is still to be paid, scheduled and
+    // delivered. Keeping won_at here would have made every sold job vanish from the board 90 days
+    // after its invoice. A finished job leaves the board by its STATUS instead — the board hides
+    // Payment Received, Scheduling and Delivered by default.
+    const since = new Date(Date.now() - 90 * 86400000).toISOString();
+    const { data, error } = await admin.from("crm_deals").select(DEAL_COLS)
+      .eq("client_id", clientId).eq("pipeline_id", pipelineId).is("archived_at", null)
+      .or(`short_code.not.is.null,lost_at.is.null,lost_at.gte.${since}`)
+      .order("stage_entered_at", { ascending: false }).limit(3000);
+    if (error) return dbFail(req, clientId, "load the deals", error);
+    const out = await withContacts(data ?? []);
+    if (out instanceof Response) return out;
+    return json({ ok: true, deals: out, capped: (data ?? []).length >= 3000 });
+  }
+
+  if (action === "crm_contact_deals") {
+    const contactId = String(payload.contactId ?? "").toLowerCase();
+    if (!isUuidLike(contactId)) return json({ error: "A contact id is required." }, 400);
+    const seen = await visibleContactIds([contactId]);
+    if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+    if (!seen.has(contactId)) return json({ error: "That customer is not one of yours." }, 404);
+    const { data, error } = await admin.from("crm_deals").select(DEAL_COLS)
+      .eq("client_id", clientId).eq("contact_id", contactId).is("archived_at", null)
+      .order("created_at", { ascending: false }).limit(100);
+    if (error) return dbFail(req, clientId, "load this contact's deals", error);
+    const out = await withContacts(data ?? []);
+    if (out instanceof Response) return out;
+    return json({ ok: true, deals: out });
+  }
+
+  // Customer Hub → Forms + Email Templates (migration 325). After the CRM entitlement guard above,
+  // which has already refused an unpaid tenant by the crm_ prefix. Every action is NAMED here, not
+  // looked up in a set, so preflight's GATES ⇄ branch cross-check (which reads this file) sees them.
+  if (action === "crm_forms_list" ||
+      action === "crm_form_create" ||
+      action === "crm_form_get" ||
+      action === "crm_form_save" ||
+      action === "crm_form_publish" ||
+      action === "crm_form_unpublish" ||
+      action === "crm_form_duplicate" ||
+      action === "crm_form_archive" ||
+      action === "crm_form_delete" ||
+      action === "crm_form_submissions" ||
+      action === "crm_form_stats" ||
+      action === "crm_form_upload_url" ||
+      action === "crm_form_test_email" ||
+      action === "crm_email_tpl_list" ||
+      action === "crm_email_tpl_create" ||
+      action === "crm_email_tpl_get" ||
+      action === "crm_email_tpl_save" ||
+      action === "crm_email_tpl_duplicate" ||
+      action === "crm_email_tpl_delete" ||
+      action === "crm_email_tpl_preview" ||
+      action === "crm_email_tpl_test") {
+    return await handleLeadFormAction({
+      admin, req, clientId, userId: userId ?? null, userEmail: userEmail ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, audit,
+    });
+  }
+
+  // Customer Hub → Fields (migration 330). Same shape and the same reasoning as the forms block
+  // above: after the CRM entitlement guard, and every action NAMED here rather than looked up in
+  // a set, so preflight's GATES ⇄ branch cross-check (which reads this file) sees them.
+  if (action === "crm_fields_list" ||
+      action === "crm_field_create" ||
+      action === "crm_field_save" ||
+      action === "crm_field_delete" ||
+      action === "crm_fields_reorder" ||
+      action === "crm_builtin_field_save") {
+    return await handleCrmFieldAction({
+      admin, req, clientId, userId: userId ?? null, action,
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, audit,
+    });
+  }
+
+  // ── A CUSTOMER'S OWN FIELD VALUES (migration 330) ───────────────────────────────────────
+  // One shape for both entities, because the only thing that differs is which table the id names
+  // — and that difference is already expressed twice where it matters: in GATES (both
+  // contacts:'edit') and in CONTACT_ROW_SCOPE, which has already refused a narrowed caller naming
+  // a contact or a deal that is not theirs before this line runs.
+  //
+  // THE VALUES ARRIVE AS TYPED and are coerced against their own field's type here, so a number
+  // field holds a number and a drop-down holds one of its choices. A key the definitions do not
+  // know is DROPPED rather than refused (crm_set_custom drops it too): a browser tab left open
+  // while somebody deleted a field would otherwise fail every subsequent save on that customer.
+  if (action === "crm_contact_custom_save" || action === "crm_deal_custom_save") {
+    const entity = action === "crm_contact_custom_save" ? "contact" : "deal";
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: entity === "contact" ? "A contact id is required." : "That deal wasn't found." }, 400);
+    const values = payload.values;
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      return json({ error: "Nothing to change." }, 400);
+    }
+    const got = await readCustomFields(admin, clientId, entity);
+    if ("dbError" in got) return dbFail(req, clientId, "load your fields", got.dbError);
+    const byKey = new Map(got.fields.map((f) => [String(f.key), f]));
+    const patch: Record<string, unknown> = {};
+    for (const [k, raw] of Object.entries(values as Record<string, unknown>)) {
+      const f = byKey.get(k);
+      if (!f) continue;                       // deleted since this tab loaded — see above
+      const out = coerceFieldValue({ field_type: String(f.field_type), choices: f.choices, label: String(f.label) }, raw);
+      if ("error" in out) return json({ error: out.error }, 400);
+      patch[k] = out.value;
+    }
+    if (!Object.keys(patch).length) return json({ error: "Nothing to change." }, 400);
+    const { data: changed, error } = await admin.rpc("crm_set_custom", {
+      p_client_id: clientId, p_entity: entity, p_id: id, p_patch: patch,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+    });
+    if (error) {
+      if (/must be a single value/i.test(String(error.message ?? ""))) {
+        return json({ error: "A field holds one value, not a list." }, 400);
+      }
+      return dbFail(req, clientId, "save those fields", error);
+    }
+    if (!Number(changed ?? 0)) {
+      return json({ error: entity === "contact" ? "That contact no longer exists." : "That deal no longer exists." }, 404);
+    }
+    return json({ ok: true, values: patch });
+  }
+
+  if (action === "crm_create_lead") {
+    const lead = parseLead((payload ?? {}) as Record<string, unknown>);
+    if (!lead.ok) return json({ error: lead.error }, 400);
+    // selfUserId: an own-scoped caller becomes the owner of what they create, and while
+    // acting as a dealer that owner has to be the DEALER -- an operator is not even on this
+    // tenant's team, so owning it as them would file the lead under nobody who works here.
+    const me = String(selfUserId ?? "").toLowerCase();
+    if (ownContacts && !isUuidLike(me)) return json({ error: "Sign in again to add a lead." }, 401);
+    // Narrowed: the lead is theirs, whatever the picker said (CONTACT_ROW_SCOPE `creates`).
+    const owner = ownContacts ? me : lead.ownerUserId;
+    const { data: made, error } = await admin.rpc("crm_create_lead", {
+      p_client_id: clientId, p_name: lead.name, p_company: lead.company, p_phone: lead.phone,
+      p_email: lead.email, p_owner: owner, p_actor: isUuidLike(me) ? me : null, p_source: "manual",
+      p_stage: lead.stageId, p_title: lead.title, p_value_cents: lead.valueCents, p_on_match: "refuse",
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "add that lead", error);
+    const out = (made ?? {}) as { existing?: string; contactId?: string; dealId?: string | null };
+    if (out.existing) {
+      // Already a contact. Name it only to someone who may open it; a narrowed caller is told it
+      // belongs to someone else, which is the useful sentence and confirms no detail of it.
+      const seen = await visibleContactIds([out.existing]);
+      if (seen && seen.has(out.existing)) {
+        return json({ error: "That phone number or email is already a contact. Open them and add the deal from their record.", existingContactId: out.existing }, 409);
+      }
+      return json({ error: "That phone number or email is already a contact assigned to someone else on your team. Ask your manager to reassign them." }, 409);
+    }
+    if (!out.contactId) return dbFail(req, clientId, "add that lead", { message: "crm_create_lead returned no contact" });
+    audit("crm_create_lead", 1, `contact=${out.contactId} deal=${out.dealId ?? "none"} owner=${owner ? "set" : "none"}`).catch(() => {});
+    return json({ ok: true, contactId: out.contactId, dealId: out.dealId ?? null });
+  }
+
+  if (action === "crm_deal_create") {
+    const contactId = String(payload.contactId ?? "").toLowerCase();
+    const stageId = String(payload.stageId ?? "").toLowerCase();
+    if (!isUuidLike(contactId)) return json({ error: "A contact id is required." }, 400);
+    if (!isUuidLike(stageId)) return json({ error: "Pick a stage." }, 400);
+    const value = parseMoneyCents(payload.value);
+    if (value === "bad") return json({ error: "The deal value should be an amount, like 2500 or $2,500." }, 400);
+    const title = payload.title == null ? null : String(payload.title).trim().slice(0, 200) || null;
+    const { data: dealId, error } = await admin.rpc("crm_add_deal", {
+      p_client_id: clientId, p_contact: contactId, p_stage: stageId,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+      p_title: title, p_value_cents: value ?? null, p_source: "manual",
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "add that deal", error);
+    audit("crm_deal_create", 1, `deal=${dealId}`).catch(() => {});
+    return json({ ok: true, dealId });
+  }
+
+  if (action === "crm_deal_update") {
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: "That deal wasn't found." }, 400);
+    const p = parseDealPatch((payload ?? {}) as Record<string, unknown>);
+    if (!p.ok) return json({ error: p.error }, 400);
+    const { data, error } = await admin.from("crm_deals")
+      .update({ ...p.patch, updated_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("id", id).is("archived_at", null).select("id");
+    if (error) return dbFail(req, clientId, "save that deal", error);
+    if (!data || !data.length) return json({ error: "That deal no longer exists." }, 404);
+    return json({ ok: true });
+  }
+
+  if (action === "crm_deal_mark_lost") {
+    // MIGRATION 353: Lost is not a column. The card stays exactly where it is (Carolyn: "LOST
+    // stays in the column it was when marking lost") and takes lost_at + the reason. The reason
+    // is required, as it was when this was a drag into a Lost stage.
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: "That deal wasn't found." }, 400);
+    const reason = String(payload.lostReason ?? "").trim().slice(0, LOST_REASON_MAX);
+    if (!reason) return json({ error: LOST_REASON_REQUIRED }, 400);
+    const { data, error } = await admin.rpc("crm_set_deal_lost", {
+      p_client_id: clientId, p_deal: id,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null, p_reason: reason,
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "mark that deal lost", error);
+    audit("crm_deal_mark_lost", 1, `deal=${id}`).catch(() => {});
+    return json({ ok: true, ...(data as Record<string, unknown> ?? {}) });
+  }
+
+  if (action === "crm_deal_reopen") {
+    // The other half: it is already in the stage it was working in, so nothing moves.
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: "That deal wasn't found." }, 400);
+    const { data, error } = await admin.rpc("crm_clear_deal_lost", {
+      p_client_id: clientId, p_deal: id,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "reopen that deal", error);
+    audit("crm_deal_reopen", 1, `deal=${id}`).catch(() => {});
+    return json({ ok: true, ...(data as Record<string, unknown> ?? {}) });
+  }
+
+  if (action === "crm_deal_move") {
+    // A stage change only: since migration 303 crm_move_deal never touches the card's status, and
+    // since 353 it never touches the lost flag either — reopening a card is deliberate.
+    const id = String(payload.id ?? "").toLowerCase();
+    const stageId = String(payload.stageId ?? "").toLowerCase();
+    if (!isUuidLike(id) || !isUuidLike(stageId)) return json({ error: "Pick the deal and the stage to move it to." }, 400);
+    const { data, error } = await admin.rpc("crm_move_deal", {
+      p_client_id: clientId, p_deal: id, p_stage: stageId,
+      p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+      p_lost_reason: payload.lostReason == null ? null : String(payload.lostReason).slice(0, 200),
+    });
+    if (error) return pipeRefusal(error) ?? dbFail(req, clientId, "move that deal", error);
+    return json({ ok: true, ...(data as Record<string, unknown> ?? {}) });
+  }
+
+  if (action === "crm_deal_archive") {
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: "That deal wasn't found." }, 400);
+    const restore = payload.restore === true;
+    const { data, error } = await admin.from("crm_deals")
+      .update({ archived_at: restore ? null : new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("id", id).select("id");
+    if (error) return dbFail(req, clientId, restore ? "restore that deal" : "remove that deal", error);
+    if (!data || !data.length) return json({ error: "That deal no longer exists." }, 404);
+    audit("crm_deal_archive", 1, `deal=${id} restore=${restore}`).catch(() => {});
+    return json({ ok: true });
+  }
+
+  // ── Settings → CRM → Pipelines ──────────────────────────────────────────────────────────
+  if (action === "crm_pipeline_save") {
+    const p = parsePipelineSave((payload ?? {}) as Record<string, unknown>);
+    if (!p.ok) return json({ error: p.error }, 400);
+    if (!p.id) {
+      // A new pipeline starts with the three stages every pipeline needs; the editor renames them.
+      const { data: top } = await admin.from("crm_pipelines").select("position")
+        .eq("client_id", clientId).order("position", { ascending: false }).limit(1).maybeSingle();
+      const { data: made, error } = await admin.from("crm_pipelines").insert({
+        client_id: clientId, name: p.name, lost_reasons: p.lostReasons ?? [],
+        position: (Number(top?.position) || 0) + 1024, created_by: isUuidLike(String(userId ?? "")) ? userId : null,
+      }).select("id").single();
+      if (error) return dbFail(req, clientId, "create that pipeline", error);
+      // 353: ONE stage. It used to be New/Won/Lost, but neither outcome is a stage any more
+      // (crm_pipeline_stages_open_only would refuse those two rows), so a new pipeline starts with
+      // the one step every pipeline needs and the editor adds the builder's own.
+      const { error: sErr } = await admin.from("crm_pipeline_stages").insert([
+        { client_id: clientId, pipeline_id: made.id, name: "New", color: "#64748B", kind: "open", position: 1024 },
+      ]);
+      if (sErr) {
+        await admin.from("crm_pipelines").delete().eq("client_id", clientId).eq("id", made.id);
+        return dbFail(req, clientId, "create that pipeline", sErr);
+      }
+      audit("crm_pipeline_save", 1, `created=${made.id}`).catch(() => {});
+      return json({ ok: true, id: made.id });
+    }
+    if (p.archive) {
+      // The pipeline new designs land in stays: without it a new design gets no card (C15).
+      const { data: feed, error: fErr } = await admin.from("crm_pipelines").select("feeds_designs")
+        .eq("client_id", clientId).eq("id", p.id).is("archived_at", null).maybeSingle();
+      if (fErr) return dbFail(req, clientId, "check that pipeline", fErr);
+      if (feed?.feeds_designs === true) return json({ error: DESIGN_FEED_STAYS }, 409);
+      const { count, error: cErr } = await admin.from("crm_deals").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).eq("pipeline_id", p.id).is("archived_at", null);
+      if (cErr) return dbFail(req, clientId, "check that pipeline's deals", cErr);
+      if ((count ?? 0) > 0) return json({ error: `That pipeline still has ${count} deal${count === 1 ? "" : "s"}. Move or remove them first.` }, 409);
+      const { count: live } = await admin.from("crm_pipelines").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).is("archived_at", null);
+      if ((live ?? 0) <= 1) return json({ error: "Keep at least one pipeline." }, 409);
+    }
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (p.name) patch.name = p.name;
+    if (p.lostReasons) patch.lost_reasons = p.lostReasons;
+    if (p.archive) patch.archived_at = new Date().toISOString();
+    const { data, error } = await admin.from("crm_pipelines").update(patch)
+      .eq("client_id", clientId).eq("id", p.id).is("archived_at", null).select("id");
+    if (error) return dbFail(req, clientId, "save that pipeline", error);
+    if (!data || !data.length) return json({ error: "That pipeline wasn't found." }, 404);
+    audit("crm_pipeline_save", 1, `pipeline=${p.id} archive=${p.archive}`).catch(() => {});
+    return json({ ok: true, id: p.id });
+  }
+
+  // A whole starter pipeline in one call (migration 360). The SmartBuild one is six stages plus a
+  // six-rung status ladder; typing that in by hand for every builder who quotes in SmartBuild is
+  // the thing this removes.
+  if (action === "crm_pipeline_add_starter") {
+    // Allow-listed, NOT passed through to the seeder. crm_seed_pipeline also knows 'shed_deals'
+    // (seeded for every new account already, and the one new designs feed) and 'outreach' (CSM's
+    // own manufacturer-recruiting board). Neither is something to hand a builder from this button,
+    // and an un-allow-listed kind reaching the seeder raises inside Postgres instead of answering.
+    const STARTER_KINDS = new Set(["smartbuild"]);
+    const kind = String((payload as Record<string, unknown> | null)?.kind ?? "").trim();
+    if (!STARTER_KINDS.has(kind)) return json({ error: "That isn't a starter pipeline we offer." }, 400);
+
+    const { data: seeded, error } = await admin.rpc("crm_seed_pipeline", { p_client_id: clientId, p_kind: kind });
+    if (error) return dbFail(req, clientId, "add that pipeline", error);
+    const id = typeof seeded === "string" ? seeded : null;
+    if (!id) return dbFail(req, clientId, "add that pipeline", { message: "crm_seed_pipeline returned no pipeline id" });
+
+    // ⚠️ The seeder is idempotent on (client_id, seed_kind) and crm_pipelines_seed_once COUNTS
+    // ARCHIVED ROWS, so a builder who added this starter and later removed it gets the archived
+    // row's id back and no new pipeline. Restoring it is the only answer that matches the button:
+    // without this the editor opens a pipeline the board does not list, which reads as a failed add.
+    const { data: row, error: rErr } = await admin.from("crm_pipelines")
+      .select("archived_at").eq("client_id", clientId).eq("id", id).maybeSingle();
+    if (rErr) return dbFail(req, clientId, "add that pipeline", rErr);
+    let restored = false;
+    if (row?.archived_at) {
+      const { error: uErr } = await admin.from("crm_pipelines")
+        .update({ archived_at: null, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", id);
+      if (uErr) return dbFail(req, clientId, "restore that pipeline", uErr);
+      restored = true;
+    }
+    audit("crm_pipeline_add_starter", 1, `kind=${kind} pipeline=${id} restored=${restored}`).catch(() => {});
+    return json({ ok: true, id, restored });
+  }
+
+  if (action === "crm_stage_save") {
+    const s = parseStageSave((payload ?? {}) as Record<string, unknown>);
+    if (!s.ok) return json({ error: s.error }, 400);
+    // The stage's pipeline, from the row when editing (never from the body), else the body.
+    let pipelineId = s.pipelineId;
+    let current: { kind: PipeStageKind } | null = null;
+    if (s.id) {
+      const { data: row, error } = await admin.from("crm_pipeline_stages").select("pipeline_id, kind")
+        .eq("client_id", clientId).eq("id", s.id).is("archived_at", null).maybeSingle();
+      if (error) return dbFail(req, clientId, "find that stage", error);
+      if (!row) return json({ error: "That stage wasn't found." }, 404);
+      pipelineId = row.pipeline_id; current = { kind: row.kind as PipeStageKind };
+    } else {
+      const { data: pipe } = await admin.from("crm_pipelines").select("id")
+        .eq("client_id", clientId).eq("id", pipelineId!).is("archived_at", null).maybeSingle();
+      if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
+    }
+    // Would the pipeline still have an open stage after this?
+    if (s.id && (s.archive || (s.kind && s.kind !== current!.kind))) {
+      const { data: rest } = await admin.from("crm_pipeline_stages").select("id, kind")
+        .eq("client_id", clientId).eq("pipeline_id", pipelineId!).is("archived_at", null);
+      const kinds = (rest ?? []).filter((x: any) => !(s.archive && x.id === s.id))
+        .map((x: any) => (x.id === s.id && s.kind ? s.kind : x.kind) as PipeStageKind);
+      const bad = stageSetRefusal(kinds);
+      if (bad) return json({ error: bad }, 409);
+    }
+    if (s.id && s.archive) {
+      const { count, error: cErr } = await admin.from("crm_deals").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).eq("stage_id", s.id).is("archived_at", null);
+      if (cErr) return dbFail(req, clientId, "check that stage's deals", cErr);
+      if ((count ?? 0) > 0) return json({ error: `${count} deal${count === 1 ? " is" : "s are"} still in that stage. Move ${count === 1 ? "it" : "them"} first.` }, 409);
+    }
+    if (!s.id) {
+      const { data: top } = await admin.from("crm_pipeline_stages").select("position")
+        .eq("client_id", clientId).eq("pipeline_id", pipelineId!).is("archived_at", null)
+        .order("position", { ascending: false }).limit(1).maybeSingle();
+      // No status_id: a stage never sets a status (migration 303; parseStageSave refuses a link).
+      const { data: made, error } = await admin.from("crm_pipeline_stages").insert({
+        client_id: clientId, pipeline_id: pipelineId, name: s.name, color: s.color ?? "#64748B",
+        kind: s.kind ?? "open", position: (Number(top?.position) || 0) + 1024,
+      }).select("id").single();
+      if (error) return dbFail(req, clientId, "add that stage", error);
+      return json({ ok: true, id: made.id });
+    }
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (s.name) patch.name = s.name;
+    if (s.color) patch.color = s.color;
+    if (s.kind) patch.kind = s.kind;
+    if (s.archive) patch.archived_at = new Date().toISOString();
+    const { error } = await admin.from("crm_pipeline_stages").update(patch).eq("client_id", clientId).eq("id", s.id);
+    if (error) return dbFail(req, clientId, "save that stage", error);
+    audit("crm_stage_save", 1, `stage=${s.id} archive=${s.archive}`).catch(() => {});
+    return json({ ok: true, id: s.id });
+  }
+
+  if (action === "crm_stages_reorder") {
+    const o = parseStageOrder((payload ?? {}) as Record<string, unknown>);
+    if (!o.ok) return json({ error: o.error }, 400);
+    const { data: live, error } = await admin.from("crm_pipeline_stages").select("id")
+      .eq("client_id", clientId).eq("pipeline_id", o.pipelineId).is("archived_at", null);
+    if (error) return dbFail(req, clientId, "reorder those stages", error);
+    const have = new Set((live ?? []).map((x: any) => x.id));
+    if (have.size !== o.ids.length || o.ids.some((id) => !have.has(id))) {
+      return json({ error: "The stages changed while you were editing — refresh and try again." }, 409);
+    }
+    for (let i = 0; i < o.ids.length; i++) {
+      const { error: uErr } = await admin.from("crm_pipeline_stages")
+        .update({ position: (i + 1) * 1024, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", o.ids[i]);
+      if (uErr) return dbFail(req, clientId, "reorder those stages", uErr);
+    }
+    return json({ ok: true });
+  }
+
+  // ── CARD STATUSES (migration 302) ─────────────────────────────────────────────────────
+  // Carolyn 2026-10-11: a status on every card as a coloured pill; "each builder can then rename
+  // them ... add others ... and they will set up when they get that stage such as when an
+  // estimate is accepted then it gets that stage", a drop-down like the GHL settings.
+  // SYSTEM-DRIVEN ONLY since 303. Carolyn 2026-10-12: "those statuses are automatically set, like,
+  // it is not even possible for them to make the changes, it is system-driven, okay, the statuses
+  // are system-driven, 100%." The only writer of a card's status is the database (crm_design_event,
+  // fed by the designs, payments and build_jobs triggers, forward only). What is left here is the
+  // Settings → Pipelines editor: names, colours, order, and the event that sets each status.
+  if (action === "crm_deal_set_status") {
+    // Refused for everyone, before anything is read: an owner can't set one either. Refused LOUDLY
+    // rather than ignored, so a tab from before 303 shows why the pill did not change.
+    return json({ error: STATUS_IS_SYSTEM_SET }, 409);
+  }
+
+  if (action === "crm_status_save") {
+    const st = parseStatusSave((payload ?? {}) as Record<string, unknown>);
+    if (!st.ok) return json({ error: st.error }, 400);
+    const now = new Date().toISOString();
+    // A status is its own row and nothing else: 302's Quotes pipeline, whose stages mirrored the
+    // statuses, was retired by 303, and no stage links to a status any more.
+    // 354: an event is unique PER PIPELINE now, so the sentence says which list it collided in.
+    const dupe = (e: any) => String(e?.code) === "23505"
+      ? json({ error: "Another status on this pipeline is already set by that. Each one can set only one status." }, 409) : null;
+
+    if (!st.id) {
+      // The pipeline the new status belongs to, and its OWN last position — scoping this to the
+      // tenant would drop a new rung after some other pipeline's last one.
+      const { data: pipe, error: pErr } = await admin.from("crm_pipelines").select("id")
+        .eq("client_id", clientId).eq("id", st.pipelineId).is("archived_at", null).maybeSingle();
+      if (pErr) return dbFail(req, clientId, "add that status", pErr);
+      if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
+      const { data: top } = await admin.from("crm_statuses").select("position")
+        .eq("client_id", clientId).eq("pipeline_id", st.pipelineId).is("archived_at", null)
+        .order("position", { ascending: false }).limit(1).maybeSingle();
+      const { data: made, error } = await admin.from("crm_statuses").insert({
+        client_id: clientId, pipeline_id: st.pipelineId, name: st.name, color: st.color ?? "#64748B",
+        trigger_event: st.triggerEvent ?? null, position: (Number(top?.position) || 0) + 1024,
+      }).select("id").single();
+      if (error) return dupe(error) ?? dbFail(req, clientId, "add that status", error);
+      audit("crm_status_save", 1, `created=${made.id} pipeline=${st.pipelineId}`).catch(() => {});
+      return json({ ok: true, id: made.id });
+    }
+
+    if (st.archive) {
+      const { count, error: cErr } = await admin.from("crm_deals").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).eq("status_id", st.id).is("archived_at", null);
+      if (cErr) return dbFail(req, clientId, "check that status's cards", cErr);
+      // Nobody can give those cards another status by hand, so the answer is "rename it".
+      if ((count ?? 0) > 0) return json({ error: statusArchiveRefusal(count ?? 0) }, 409);
+      // The last rung OF THIS PIPELINE, not of the account: every pipeline needs one left, and a
+      // tenant-wide count would happily let a pipeline be emptied while another still had eight.
+      const { data: row } = await admin.from("crm_statuses").select("pipeline_id")
+        .eq("client_id", clientId).eq("id", st.id).maybeSingle();
+      const { count: left } = await admin.from("crm_statuses").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).eq("pipeline_id", row?.pipeline_id ?? "").is("archived_at", null);
+      if ((left ?? 0) <= 1) return json({ error: "Keep at least one status on this pipeline: every card needs one." }, 409);
+    }
+    const patch: Record<string, unknown> = { updated_at: now };
+    if (st.name) patch.name = st.name;
+    if (st.color) patch.color = st.color;
+    if (st.triggerEvent !== undefined) patch.trigger_event = st.triggerEvent;
+    if (st.archive) patch.archived_at = now;
+    const { data, error } = await admin.from("crm_statuses").update(patch)
+      .eq("client_id", clientId).eq("id", st.id).is("archived_at", null).select("id");
+    if (error) return dupe(error) ?? dbFail(req, clientId, "save that status", error);
+    if (!data || !data.length) return json({ error: "That status wasn't found." }, 404);
+    audit("crm_status_save", 1, `status=${st.id} archive=${st.archive}`).catch(() => {});
+    return json({ ok: true, id: st.id });
+  }
+
+  if (action === "crm_statuses_reorder") {
+    // 354: ONE PIPELINE'S ladder, posted whole. Without the pipeline this compared the posted ids
+    // against every status in the account, so reordering one pipeline would always have answered
+    // "the statuses changed while you were editing" — the subset never matches the tenant's set.
+    const o = parseStatusOrder((payload ?? {}) as Record<string, unknown>);
+    if (!o.ok) return json({ error: o.error }, 400);
+    const { data: live, error } = await admin.from("crm_statuses").select("id")
+      .eq("client_id", clientId).eq("pipeline_id", o.pipelineId).is("archived_at", null);
+    if (error) return dbFail(req, clientId, "reorder those statuses", error);
+    const have = new Set((live ?? []).map((x: any) => x.id));
+    if (have.size !== o.ids.length || o.ids.some((id) => !have.has(id))) {
+      return json({ error: "The statuses changed while you were editing — refresh and try again." }, 409);
+    }
+    for (let i = 0; i < o.ids.length; i++) {
+      const { error: uErr } = await admin.from("crm_statuses")
+        .update({ position: (i + 1) * 1024, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", o.ids[i]);
+      if (uErr) return dbFail(req, clientId, "reorder those statuses", uErr);
+    }
+    // The order is what "forward only" means for the automatic changes, so it matters beyond
+    // looks: an event never moves a card to a status earlier in this list.
+    return json({ ok: true });
+  }
+
+  // ── AUTOMATIONS (migrations 355 + 363) ──────────────────────────────────────────────────────
+  // "When ‹this happens› → ‹do this›". Since 363 (Carolyn, 2026-11-04) a rule is not the property
+  // of a pipeline: it says WHO it is for — one pipeline's cards or every pipeline's cards today,
+  // customers or nobody in round 2 — and may carry "only if" conditions. The evaluator is in
+  // Postgres (crm_rule_event → crm_rules_run) and the sending is crm-rules-tick's; all this does is
+  // write what the builder authored, and REFUSE what the evaluator could only record as a failure.
+  //
+  // That refusal is the point of the long block in crm_rule_save. 355 stores an action's params as
+  // unchecked jsonb, and a rule naming another pipeline's status is not a syntax error: it parses,
+  // it saves, and then it throws on every card for ever while the run log fills with 'failed'.
+  // Nobody would find that from the editor, so the ids are resolved HERE at save time — and since
+  // 363 against the pipeline the rule will be on AFTER the save, which a move changes.
+
+  // ⚠️ "IS THE DATABASE READY?" IS ANSWERED BY THE READ ITSELF. A missing table means 355 is not
+  // applied; a missing column means 363 is not. Beta and production share ONE Supabase project, so
+  // this function can be live before either, and the browser tests `rulesVersion >= 2` POSITIVELY —
+  // so it shows "not switched on yet" rather than an editor that cannot save. On 2026-11-03 the
+  // old flag was computed and then not passed through, and the Rules section was silently absent
+  // on beta; `rulesVersionWiring_test` pins this one into the response.
+  const RULES_MISSING_TABLE = new Set(["42P01", "PGRST205"]);
+  const RULES_MISSING_COLUMN = new Set(["42703", "PGRST204"]);
+  const RULE_COLS = "id, name, scope_kind, pipeline_id, trigger_kind, trigger_event, elapsed_anchor, elapsed_days, conditions, once_per_card, enabled, applies_from, position, created_at, schedule, next_run_at, armed_count, max_per_run";
+
+  /** What on a stored rule no longer points anywhere — shown as an amber line on its row, so a
+   *  rule that will fail is visible BEFORE it fails rather than only in the run log after. */
+  const ruleStale = (r: any, actions: { kind: string; params: any }[], pipes: Map<string, any>, templates?: Set<string>): string[] => {
+    const out: string[] = [];
+    const pipe = r.scope_kind === "pipeline" ? pipes.get(r.pipeline_id) : null;
+    if (r.scope_kind === "pipeline" && !pipe) out.push("pipeline_gone");
+    actions.forEach((a, i) => {
+      if (!actionAllowedForScope(a.kind, r.scope_kind)) out.push(`action:${i}`);
+      else if (a.kind === "set_status" && pipe && !pipe.statuses.some((t: any) => t.id === a.params?.statusId)) out.push(`action:${i}`);
+      else if (a.kind === "move_stage" && pipe && !pipe.stages.some((t: any) => t.id === a.params?.stageId)) out.push(`action:${i}`);
+      else if (a.kind === "create_card" && !pipes.has(a.params?.pipelineId)) out.push(`action:${i}`);
+      else if (a.kind === "send_email" && a.params?.templateId && templates && !templates.has(a.params.templateId)) out.push(`action:${i}`);
+    });
+    (Array.isArray(r.conditions) ? r.conditions : []).forEach((c: any, i: number) => {
+      if (c?.field === "deal.status" && pipe && !pipe.statuses.some((t: any) => t.id === c.value)) out.push(`condition:${i}`);
+      if (c?.field === "deal.stage" && pipe && !pipe.stages.some((t: any) => t.id === c.value)) out.push(`condition:${i}`);
+    });
+    return out;
+  };
+
+  if (action === "crm_rules_list") {
+    const { data: rules, error: rErr } = await admin.from("crm_rules").select(RULE_COLS)
+      .eq("client_id", clientId).is("archived_at", null)
+      .order("position", { ascending: true }).order("created_at", { ascending: true });
+    const rCode = String((rErr as any)?.code ?? "");
+    if (rErr && !RULES_MISSING_TABLE.has(rCode) && !RULES_MISSING_COLUMN.has(rCode)) {
+      return dbFail(req, clientId, "load your automations", rErr);
+    }
+    const rulesVersion = !rErr ? 2 : RULES_MISSING_COLUMN.has(rCode) ? 1 : 0;
+    const pr = await readPipelines();
+    if ("dbError" in pr) return dbFail(req, clientId, "load your pipelines", pr.dbError);
+    // The roster names the owner a condition can test. client_users is unreadable to a portal user
+    // (client_users_select_own), so it comes from here — crm_pipelines_list's reasoning.
+    const { data: roster } = await admin.from("client_users")
+      .select("user_id, full_name, title").eq("client_id", clientId)
+      .order("full_name", { ascending: true, nullsFirst: false }).limit(200);
+    // Only what the editor needs from each pipeline: its name, and the statuses, stages and lost
+    // reasons an action or a condition can name.
+    const pipelines = pr.pipelines.map((x: any) => ({
+      id: x.id, name: x.name,
+      stages: x.stages.map((t: any) => ({ id: t.id, name: t.name })),
+      statuses: x.statuses.map((t: any) => ({ id: t.id, name: t.name, color: t.color })),
+      lostReasons: x.lostReasons,
+    }));
+    const base = {
+      ok: true,
+      // ⚠️ MUST BE SENT (see above). The browser offers nothing unless this is 2 or more.
+      rulesVersion,
+      pipelines,
+      team: (roster ?? []).map((m: any) => ({ userId: m.user_id, name: m.full_name ?? null, title: m.title ?? null })),
+      canManage: canEdit("settings_crm"),
+      me: selfUserId ?? null,
+    };
+    if (rulesVersion < 2) return json({ ...base, rules: [], labels: [], timeZone: "America/Chicago", timeZoneSet: false });
+
+    const ids = (rules ?? []).map((r: any) => r.id);
+    const none = Promise.resolve({ data: [] as any[], error: null });
+    const [acts, runs, tags, tz, cf, tpls, ghl] = await Promise.all([
+      ids.length ? admin.from("crm_rule_actions").select("id, rule_id, kind, params, position")
+        .eq("client_id", clientId).in("rule_id", ids).order("position", { ascending: true }) : none,
+      ids.length ? admin.from("crm_rule_runs").select("rule_id, outcome, fired_at")
+        .eq("client_id", clientId).in("rule_id", ids).order("fired_at", { ascending: false }).limit(500) : none,
+      // The tags in use, for the conditions' tag picker. GoHighLevel's import is still their only
+      // writer, so on most accounts this is short or empty; the picker also takes a typed one.
+      admin.from("crm_contacts").select("labels").eq("client_id", clientId).is("merged_into", null)
+        .neq("labels", "{}").limit(2000),
+      // Tolerant: 363 added the column.
+      admin.from("client_settings").select("time_zone").eq("client_id", clientId).maybeSingle(),
+      // The customer's DATE fields, for "on the date in their record" (365).
+      readCustomFields(admin, clientId, "contact"),
+      // 370: the saved emails an email action may send (325's email_templates), by name.
+      admin.from("email_templates").select("id, name, subject, purpose").eq("client_id", clientId)
+        .order("name", { ascending: true }).limit(200),
+      // 370: whether "push to GoHighLevel" has somewhere to go. Only the yes/no leaves this function.
+      admin.from("client_settings").select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle(),
+    ]);
+    if ((acts as any).error) return dbFail(req, clientId, "load your automations", (acts as any).error);
+    const last = new Map<string, any>();
+    for (const n of (((runs as any).data) ?? [])) if (!last.has(n.rule_id)) last.set(n.rule_id, n);
+    const labels = new Map<string, string>();
+    for (const c of (((tags as any).data) ?? [])) {
+      for (const l of (c.labels ?? [])) {
+        const t = String(l ?? "").trim();
+        if (t && !labels.has(t.toLowerCase())) labels.set(t.toLowerCase(), t);
+      }
+    }
+    const pipes = new Map<string, any>(pipelines.map((x: any) => [x.id, x]));
+    // A failed read is NOT "no templates": it would mark every templated email stale. Unknown, so
+    // nothing is marked, and the picker shows what it has.
+    const tplRows: any[] = (tpls as any).error ? [] : (((tpls as any).data) ?? []);
+    const tplIds = (tpls as any).error ? undefined : new Set<string>(tplRows.map((t: any) => t.id));
+    const mayEdit = canEdit("settings_crm");
+    return json({
+      ...base,
+      rules: (rules ?? []).map((r: any) => {
+        const actions = (((acts as any).data) ?? []).filter((a: any) => a.rule_id === r.id)
+          .map((a: any) => {
+            const params = { ...(a.params ?? {}) };
+            // A webhook's signing secret is for whoever sets up the receiver: shown to someone who
+            // may edit the rule, withheld from someone who may only look.
+            if (a.kind === "webhook" && !mayEdit) delete params.secret;
+            return { id: a.id, kind: a.kind, params, position: a.position };
+          });
+        const ran = last.get(r.id);
+        return {
+          id: r.id, name: r.name ?? null, scopeKind: r.scope_kind, pipelineId: r.pipeline_id ?? null,
+          triggerKind: r.trigger_kind, triggerEvent: r.trigger_event ?? null,
+          elapsedAnchor: r.elapsed_anchor ?? null, elapsedDays: r.elapsed_days ?? null,
+          conditions: Array.isArray(r.conditions) ? r.conditions : [],
+          oncePerCard: r.once_per_card === true, enabled: r.enabled === true,
+          appliesFrom: r.applies_from, position: r.position, actions,
+          schedule: r.schedule ?? null, nextRunAt: r.next_run_at ?? null,
+          armedCount: r.armed_count ?? null, maxPerRun: r.max_per_run ?? 200,
+          lastRun: ran ? { outcome: ran.outcome, firedAt: ran.fired_at } : null,
+          stale: ruleStale(r, actions, pipes, tplIds),
+        };
+      }),
+      labels: [...labels.values()].sort((a, b) => a.localeCompare(b)).slice(0, 200),
+      timeZone: ((tz as any).data?.time_zone as string) || "America/Chicago",
+      timeZoneSet: !!(tz as any).data?.time_zone,
+      emailTemplates: tplRows.map((t: any) => ({ id: t.id, name: t.name, subject: t.subject ?? "", purpose: t.purpose })),
+      ghlConnected: !!((ghl as any).data?.ghl_location_id && (ghl as any).data?.ghl_api_key),
+      dateFields: "fields" in (cf as any)
+        ? ((cf as any).fields as any[]).filter((f) => f.field_type === "date" && f.key).map((f) => ({ key: `custom:${f.key}`, label: f.label }))
+        : [],
+    });
+  }
+
+  if (action === "crm_rule_audience") {
+    // WHO A DRAFT WOULD REACH NOW, counted by the SAME predicate the sweep uses (migration 365's
+    // crm_rule_audience_preview) — a count computed here in TypeScript would drift from it, and
+    // this is the number a builder arms a schedule with.
+    const scope = String(payload?.scopeKind ?? "");
+    if (!(RULE_SCOPES as readonly string[]).includes(scope)) return json({ error: "Pick who the rule is for." }, 400);
+    const pipelineId = scope === "pipeline" ? String(payload?.pipelineId ?? "").toLowerCase() : null;
+    if (scope === "pipeline" && !isUuidLike(pipelineId)) return json({ error: "Pick the pipeline the rule runs on." }, 400);
+    const pc = parseRuleConditions(payload?.conditions ?? [], scope);
+    if (!pc.ok) return json({ error: pc.error }, 400);
+    const { data, error } = await admin.rpc("crm_rule_audience_preview", {
+      p_client: clientId, p_scope: scope, p_pipeline: pipelineId, p_conditions: pc.conditions,
+    });
+    if (error) {
+      // Before 365 there is nothing to count with; the editor hides the line rather than lying.
+      if (String((error as any).code) === "42883" || String((error as any).code) === "PGRST202") return json({ ok: true, count: null, sample: [] });
+      return dbFail(req, clientId, "count who that rule reaches", error);
+    }
+    return json({ ok: true, count: Number((data as any)?.count ?? 0), sample: ((data as any)?.sample ?? []).slice(0, 5) });
+  }
+
+  if (action === "crm_contact_dnd") {
+    // ── DO NOT DISTURB (migration 366, Carolyn 2026-11-05) ──────────────────────────────────
+    // "I like the view and simplicity GHL has" — five boxes on the customer: all channels, email,
+    // texts, calls, inbound. And "GHL lets us uncheck the box... how can they let that and we
+    // can't" — so EVERY box can be unticked here, the customer's own STOP and unsubscribe included.
+    //
+    // TEXTS ARE NOT A NEW FLAG. They are the STOP register smsSend already refuses on
+    // (sms_opt_outs, keyed on the PHONE, and the older crm_contacts.sms_opt_out_at), written the
+    // way portal-sms set_opt_out writes it, with the consent log recording that a PERSON did it.
+    // Unticking a customer's own STOP clears ours; their carrier (Twilio) keeps its own block
+    // until they reply START, and the panel says so — that one is not ours to clear.
+    const id = String(payload?.id ?? "").toLowerCase();
+    const channel = String(payload?.channel ?? "");
+    const on = payload?.on === true;
+    if (!isUuidLike(id)) return json({ error: "That customer wasn't found." }, 400);
+    const COL: Record<string, string> = { all: "dnd_all_at", email: "dnd_email_at", calls: "dnd_calls_at", inbound: "dnd_inbound_at" };
+    if (channel !== "text" && !COL[channel]) return json({ error: "Pick which kind of contact to switch." }, 400);
+    const { data: c, error: cErr } = await admin.from("crm_contacts").select("id, phone_digits")
+      .eq("client_id", clientId).eq("id", id).is("merged_into", null).maybeSingle();
+    if (cErr) return dbFail(req, clientId, "find that customer", cErr);
+    if (!c) return json({ error: "That customer wasn't found." }, 404);
+    const now = new Date().toISOString();
+
+    if (channel === "text") {
+      const digits = String(c.phone_digits ?? "").replace(/\D/g, "").slice(-10);
+      if (digits.length !== 10) return json({ error: "This customer has no US mobile number to switch texting for." }, 400);
+      if (on) {
+        const { error } = await admin.from("sms_opt_outs").upsert({
+          client_id: clientId, phone_digits: digits, reason: "operator",
+          requested_at: now, effective_at: now, note: "Do Not Disturb panel",
+        }, { onConflict: "client_id,phone_digits" });
+        if (error) return dbFail(req, clientId, "turn texting off", error);
+        await admin.from("crm_contacts").update({ sms_opt_out_at: now, updated_at: now }).eq("client_id", clientId).eq("id", id);
+        await admin.from("sms_consent_log").insert({
+          client_id: clientId, phone_digits: digits, action: "revoked", source: "operator",
+          detail: { by: userId ?? null, note: "Do Not Disturb panel" },
+        });
+      } else {
+        const { error } = await admin.from("sms_opt_outs").delete().eq("client_id", clientId).eq("phone_digits", digits);
+        if (error) return dbFail(req, clientId, "turn texting back on", error);
+        // The older per-contact flag, on every customer with this number: smsSend still refuses on
+        // it, and the register above is keyed on the phone, so the two must agree.
+        await admin.from("crm_contacts").update({ sms_opt_out_at: null, updated_at: now })
+          .eq("client_id", clientId).eq("phone_digits", c.phone_digits).not("sms_opt_out_at", "is", null);
+        await admin.from("sms_consent_log").insert({
+          client_id: clientId, phone_digits: digits, action: "granted", source: "operator",
+          detail: { by: userId ?? null, note: "Do Not Disturb panel" },
+        });
+      }
+    } else {
+      const patch: Record<string, unknown> = { [COL[channel]]: on ? now : null, updated_at: now };
+      // Who turned email off — the panel says "they unsubscribed" only when they did.
+      if (channel === "email") patch.dnd_email_source = on ? "builder" : null;
+      const { error } = await admin.from("crm_contacts").update(patch).eq("client_id", clientId).eq("id", id);
+      if (error) return dbFail(req, clientId, "save Do Not Disturb", error);
+    }
+    audit("crm_contact_dnd", 1, `contact=${id} channel=${channel} on=${on}`).catch(() => {});
+    return json({ ok: true });
+  }
+
+  if (action === "crm_rules_time_zone") {
+    // The account's time zone (363's client_settings.time_zone). Every schedule moves with it —
+    // 365's crm_rules_tz_changed recomputes their next runs. Validated by the runtime's own zone
+    // list; the database CHECK (ss_valid_time_zone) is the backstop.
+    const tz = String(payload?.timeZone ?? "").trim().slice(0, 64);
+    try {
+      if (!tz) throw new Error("empty");
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    } catch {
+      return json({ error: "Pick a time zone from the list." }, 400);
+    }
+    const { data: hit, error } = await admin.from("client_settings").update({ time_zone: tz })
+      .eq("client_id", clientId).select("client_id");
+    if (error) return dbFail(req, clientId, "save your time zone", error);
+    if (!hit || !hit.length) {
+      const { error: iErr } = await admin.from("client_settings").insert({ client_id: clientId, time_zone: tz });
+      if (iErr) return dbFail(req, clientId, "save your time zone", iErr);
+    }
+    audit("crm_rules_time_zone", 1, `tz=${tz}`).catch(() => {});
+    return json({ ok: true, timeZone: tz });
+  }
+
+  if (action === "crm_rule_save") {
+    const rl = parseRuleSave((payload ?? {}) as Record<string, unknown>);
+    if (!rl.ok) return json({ error: rl.error }, 400);
+    const now = new Date().toISOString();
+
+    // The rule as it stands. An edit may post any subset, and whatever it does not post is checked
+    // AS STORED against the rule as it will be after this save.
+    let stored: any = null;
+    if (rl.id) {
+      const { data: row, error } = await admin.from("crm_rules")
+        .select("id, scope_kind, pipeline_id, trigger_kind, elapsed_anchor, schedule, conditions")
+        .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null).maybeSingle();
+      if (error) return dbFail(req, clientId, "find that rule", error);
+      if (!row) return json({ error: "That rule wasn't found." }, 404);
+      stored = row;
+    }
+
+    // Removing a rule checks nothing: a rule whose pipeline has gone must always be removable.
+    if (rl.id && rl.archive) {
+      const { error } = await admin.from("crm_rules").update({ archived_at: now, updated_at: now })
+        .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null);
+      if (error) return dbFail(req, clientId, "remove that rule", error);
+      audit("crm_rule_save", 1, `rule=${rl.id} archive=true`).catch(() => {});
+      return json({ ok: true, id: rl.id });
+    }
+
+    const scope: string = rl.scopeKind ?? stored?.scope_kind ?? "pipeline";
+    const pipelineId: string | null = scope === "pipeline" ? (rl.pipelineId ?? stored?.pipeline_id ?? null) : null;
+    // A MOVE (decision 2, 2026-11-04): the rule changes who it is for. The database resets the
+    // rule's forward-only line itself (363's crm_rules_guard_reset), so a 30-day rule moved onto a
+    // pipeline with two years of deliveries does not fire on any of them.
+    const moved = !!stored && (scope !== stored.scope_kind || pipelineId !== (stored.pipeline_id ?? null));
+    const triggerKind = rl.triggerKind ?? stored?.trigger_kind ?? null;
+    // Everything is checked on a new rule and on a move; otherwise what was posted. A rename or a
+    // pause checks nothing, so pausing a rule that has gone stale always works.
+    const checkAll = !rl.id || moved;
+
+    let pipeName = "";
+    if (scope === "pipeline") {
+      if (!pipelineId) return json({ error: "Pick the pipeline the rule runs on." }, 400);
+      if (checkAll) {
+        const { data: pipe, error } = await admin.from("crm_pipelines").select("id, name")
+          .eq("client_id", clientId).eq("id", pipelineId).is("archived_at", null).maybeSingle();
+        if (error) return dbFail(req, clientId, "check that pipeline", error);
+        if (!pipe) return json({ error: "That pipeline wasn't found." }, 404);
+        pipeName = pipe.name ?? "";
+      }
+    }
+    const elapsedAnchor = rl.triggerKind ? rl.elapsedAnchor : (stored?.elapsed_anchor ?? null);
+    const scheduleFreq = rl.triggerKind ? (rl.schedule?.freq ?? null) : (stored?.schedule?.freq ?? null);
+    if ((checkAll || rl.triggerKind) && !triggerAllowedForScope({ triggerKind, elapsedAnchor, scheduleFreq }, scope)) {
+      return json({
+        error: scope === "none" ? "A rule for nobody can only run on a schedule."
+          : "That kind of trigger doesn't work for who this rule is for.",
+      }, 400);
+    }
+
+    // ── THE ACTIONS, against the rule as it will be ──────────────────────────────────────────
+    // On a move the STORED ones are checked even though none were posted: they were validated
+    // against the pipeline the rule is leaving.
+    let toCheck: RuleActionIn[] | undefined = rl.actions;
+    if (toCheck === undefined && checkAll && rl.id) {
+      const { data: had, error } = await admin.from("crm_rule_actions").select("kind, params")
+        .eq("client_id", clientId).eq("rule_id", rl.id).order("position", { ascending: true });
+      if (error) return dbFail(req, clientId, "check that rule's actions", error);
+      toCheck = (had ?? []).map((a: any) => ({ kind: a.kind as RuleActionKind, params: a.params ?? {} }));
+    }
+    if (toCheck && toCheck.length) {
+      const offending: { index: number; kind: string; why: string }[] = [];
+      toCheck.forEach((a, i) => { if (!actionAllowedForScope(a.kind, scope)) offending.push({ index: i, kind: a.kind, why: "scope" }); });
+      const flagged = new Set(offending.map((o) => o.index));
+      const named = (kind: string, key: string) => [...new Set(toCheck!.filter((a, i) => a.kind === kind && !flagged.has(i)).map((a) => String(a.params[key])))];
+      if (scope === "pipeline") {
+        const wantStatuses = named("set_status", "statusId");
+        const wantStages = named("move_stage", "stageId");
+        const [{ data: liveSt, error: e1 }, { data: liveSg, error: e2 }] = await Promise.all([
+          wantStatuses.length ? admin.from("crm_statuses").select("id").eq("client_id", clientId)
+            .eq("pipeline_id", pipelineId).in("id", wantStatuses).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+          wantStages.length ? admin.from("crm_pipeline_stages").select("id").eq("client_id", clientId)
+            .eq("pipeline_id", pipelineId).in("id", wantStages).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+        ]);
+        if (e1 || e2) return dbFail(req, clientId, "check that rule's actions", e1 ?? e2);
+        const okSt = new Set((liveSt ?? []).map((x: any) => x.id));
+        const okSg = new Set((liveSg ?? []).map((x: any) => x.id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i)) return;
+          if (a.kind === "set_status" && !okSt.has(String(a.params.statusId))) offending.push({ index: i, kind: a.kind, why: "status" });
+          if (a.kind === "move_stage" && !okSg.has(String(a.params.stageId))) offending.push({ index: i, kind: a.kind, why: "stage" });
+        });
+      }
+      // 365: a person an action names must be on THIS builder's team (assign, a task's owner, a
+      // team email's recipients) — the evaluator refuses one who is not, but only by failing on
+      // every customer it reaches.
+      const people = [...new Set(toCheck.flatMap((a, i) => flagged.has(i) ? [] : [
+        ...(a.kind === "assign_owner" ? [String(a.params.userId)] : []),
+        ...(a.kind === "create_task" && a.params.assigneeUserId ? [String(a.params.assigneeUserId)] : []),
+        ...(a.kind === "notify_team" && Array.isArray(a.params.userIds) ? (a.params.userIds as unknown[]).map(String) : []),
+      ]))];
+      if (people.length) {
+        const { data: team, error } = await admin.from("client_users").select("user_id")
+          .eq("client_id", clientId).in("user_id", people);
+        if (error) return dbFail(req, clientId, "check that rule's people", error);
+        const onTeam = new Set((team ?? []).map((x: any) => x.user_id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i)) return;
+          const whom = a.kind === "assign_owner" ? [String(a.params.userId)]
+            : a.kind === "create_task" && a.params.assigneeUserId ? [String(a.params.assigneeUserId)]
+            : a.kind === "notify_team" && Array.isArray(a.params.userIds) ? (a.params.userIds as unknown[]).map(String) : [];
+          if (whom.some((u) => !onTeam.has(u))) offending.push({ index: i, kind: a.kind, why: "person" });
+        });
+      }
+      // 370: a saved email must be one of THIS builder's templates. The tick refuses a missing one
+      // too, but only by skipping on every customer it reaches.
+      const wantTpls = [...new Set(toCheck.filter((a, i) => a.kind === "send_email" && a.params.templateId && !flagged.has(i))
+        .map((a) => String(a.params.templateId)))];
+      if (wantTpls.length) {
+        const { data: liveTpls, error } = await admin.from("email_templates").select("id")
+          .eq("client_id", clientId).in("id", wantTpls);
+        if (error) return dbFail(req, clientId, "check that rule's saved emails", error);
+        const okT = new Set((liveTpls ?? []).map((x: any) => x.id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i) || a.kind !== "send_email" || !a.params.templateId) return;
+          if (!okT.has(String(a.params.templateId))) offending.push({ index: i, kind: a.kind, why: "template" });
+        });
+      }
+      const wantPipes = named("create_card", "pipelineId");
+      if (wantPipes.length) {
+        const { data: livePipes, error } = await admin.from("crm_pipelines").select("id")
+          .eq("client_id", clientId).in("id", wantPipes).is("archived_at", null);
+        if (error) return dbFail(req, clientId, "check that rule's pipelines", error);
+        const okP = new Set((livePipes ?? []).map((x: any) => x.id));
+        toCheck.forEach((a, i) => {
+          if (flagged.has(i) || a.kind !== "create_card") return;
+          const target = String(a.params.pipelineId);
+          // Creating the card in the pipeline the rule is already on would put a second card
+          // beside the first on every firing. Refused rather than skipped: the builder meant
+          // something and we cannot tell what.
+          if (scope === "pipeline" && target === pipelineId) offending.push({ index: i, kind: a.kind, why: "same_pipeline" });
+          else if (!okP.has(target)) offending.push({ index: i, kind: a.kind, why: "pipeline" });
+        });
+      }
+      if (offending.length) {
+        offending.sort((x, y) => x.index - y.index);
+        const label = (o: { index: number; kind: string }) =>
+          `${(RULE_ACTION_LABELS[o.kind as RuleActionKind] ?? o.kind).replace(/…$/, "").trim()}`;
+        const first = offending[0];
+        let error: string;
+        if (first.why === "scope") {
+          error = actionScopeError(first.index, first.kind);
+        } else if (first.why === "same_pipeline") {
+          error = `Action ${first.index + 1} (${label(first)}) points at the pipeline this rule is on. Pick a different pipeline.`;
+        } else if (first.why === "pipeline") {
+          error = `Action ${first.index + 1} (${label(first)}) points at a pipeline that has been removed. Pick another.`;
+        } else if (first.why === "template") {
+          error = `Action ${first.index + 1} (${label(first)}) names a saved email that has been deleted. Pick another one.`;
+        } else if (first.why === "person") {
+          error = `Action ${first.index + 1} (${label(first)}) names someone who is not on your team. Pick another person.`;
+        } else {
+          // THE MOVE'S OWN SENTENCE: name every action that still points at the old pipeline, so
+          // the builder knows exactly which rows to re-pick (the editor marks the same ones red).
+          const list = offending.filter((o) => o.why === "status" || o.why === "stage")
+            .map((o, k) => `${k === 0 ? "Action" : "action"} ${o.index + 1} (${label(o)})`);
+          const joined = list.length > 1 ? `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}` : list[0];
+          error = `${joined} ${list.length > 1 ? "point" : "points"} at a status or stage from another pipeline. `
+            + `Re-pick ${list.length > 1 ? "them" : "it"}${pipeName ? ` for ${pipeName}` : ""}, then save.`;
+        }
+        return json({ error, code: "actions_stale", offending }, 409);
+      }
+    }
+
+    // ── THE CONDITIONS, the same way ──────────────────────────────────────────────────────────
+    const rawConditions = rl.conditions ?? (checkAll ? (stored?.conditions ?? []) : undefined);
+    let conditions: RuleCondition[] | undefined;
+    if (rawConditions !== undefined) {
+      const pc = parseRuleConditions(rawConditions, scope);
+      // 400 for what was posted; 409 for what was stored and no longer fits the rule's new scope.
+      if (!pc.ok) return json({ error: pc.error, code: "conditions_stale" }, rl.conditions !== undefined ? 400 : 409);
+      const offending: { index: number; field: string; why: string }[] = [];
+      const want = (f: string) => [...new Set(pc.conditions.filter((c) => c.field === f && c.value != null).map((c) => String(c.value)))];
+      const [wSt, wSg, wOwn] = [want("deal.status"), want("deal.stage"), want("contact.owner")];
+      const [{ data: cSt, error: e1 }, { data: cSg, error: e2 }, { data: cOwn, error: e3 }] = await Promise.all([
+        wSt.length ? admin.from("crm_statuses").select("id").eq("client_id", clientId)
+          .eq("pipeline_id", pipelineId).in("id", wSt).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+        wSg.length ? admin.from("crm_pipeline_stages").select("id").eq("client_id", clientId)
+          .eq("pipeline_id", pipelineId).in("id", wSg).is("archived_at", null) : Promise.resolve({ data: [], error: null }),
+        wOwn.length ? admin.from("client_users").select("user_id").eq("client_id", clientId)
+          .in("user_id", wOwn) : Promise.resolve({ data: [], error: null }),
+      ]);
+      if (e1 || e2 || e3) return dbFail(req, clientId, "check that rule's conditions", e1 ?? e2 ?? e3);
+      const okSt = new Set((cSt ?? []).map((x: any) => x.id));
+      const okSg = new Set((cSg ?? []).map((x: any) => x.id));
+      const okOwn = new Set((cOwn ?? []).map((x: any) => x.user_id));
+      pc.conditions.forEach((c, i) => {
+        if (c.field === "deal.status" && !okSt.has(String(c.value))) offending.push({ index: i, field: c.field, why: "status" });
+        if (c.field === "deal.stage" && !okSg.has(String(c.value))) offending.push({ index: i, field: c.field, why: "stage" });
+        if (c.field === "contact.owner" && c.value != null && !okOwn.has(String(c.value))) offending.push({ index: i, field: c.field, why: "owner" });
+      });
+      if (offending.length) {
+        const o = offending[0];
+        return json({
+          error: o.why === "owner"
+            ? `Condition ${o.index + 1} names someone who is no longer on your team. Pick another person.`
+            : `Condition ${o.index + 1} points at a ${o.why} from another pipeline. Re-pick it${pipeName ? ` for ${pipeName}` : ""}, then save.`,
+          code: "conditions_stale", offending,
+        }, 409);
+      }
+      if (rl.conditions !== undefined) conditions = pc.conditions;
+    }
+
+    if (!rl.id) {
+      // Positions are the ACCOUNT's now (363): one list, and the order is the order rules run in.
+      const { data: top } = await admin.from("crm_rules").select("position")
+        .eq("client_id", clientId).is("archived_at", null)
+        .order("position", { ascending: false }).limit(1).maybeSingle();
+      const { data: made, error } = await admin.from("crm_rules").insert({
+        client_id: clientId, scope_kind: scope, pipeline_id: pipelineId, name: rl.name,
+        trigger_kind: rl.triggerKind, trigger_event: rl.triggerEvent,
+        elapsed_anchor: rl.elapsedAnchor, elapsed_days: rl.elapsedDays, schedule: rl.schedule,
+        conditions: conditions ?? [],
+        ...(rl.arm === true ? { armed_count: rl.armedCount } : {}),
+        ...(rl.oncePerCard === undefined ? {} : { once_per_card: rl.oncePerCard }),
+        ...(rl.enabled === undefined ? {} : { enabled: rl.enabled }),
+        position: (Number(top?.position) || 0) + 1024,
+        created_by: userId ?? null,
+      }).select("id").single();
+      if (error) return dbFail(req, clientId, "add that rule", error);
+      const wrote = await writeRuleActions(made.id, rl.actions ?? []);
+      if (wrote) return dbFail(req, clientId, "save that rule's actions", wrote);
+      audit("crm_rule_save", 1, `created=${made.id} scope=${scope} pipeline=${pipelineId ?? "-"}`).catch(() => {});
+      return json({ ok: true, id: made.id });
+    }
+
+    const patch: Record<string, unknown> = { updated_at: now };
+    if (rl.name !== null) patch.name = rl.name;
+    if (moved) {
+      patch.scope_kind = scope;
+      patch.pipeline_id = pipelineId;
+    }
+    if (rl.triggerKind) {
+      // The trigger is replaced WHOLE, both halves, or 355's shape CHECK refuses the row.
+      patch.trigger_kind = rl.triggerKind;
+      patch.trigger_event = rl.triggerEvent;
+      patch.elapsed_anchor = rl.elapsedAnchor;
+      patch.elapsed_days = rl.elapsedDays;
+      patch.schedule = rl.schedule;
+    }
+    // THE ARM (365). Written in the SAME update as any change to who the rule reaches, so the
+    // database's reset (which withdraws an arm on such a change) keeps this one — the builder saw
+    // the new count when they pressed Arm.
+    if (rl.arm === true) patch.armed_count = rl.armedCount;
+    else if (rl.arm === false) patch.armed_count = null;
+    if (rl.oncePerCard !== undefined) patch.once_per_card = rl.oncePerCard;
+    if (rl.enabled !== undefined) patch.enabled = rl.enabled;
+    if (conditions !== undefined) patch.conditions = conditions;
+    const { data, error } = await admin.from("crm_rules").update(patch)
+      .eq("client_id", clientId).eq("id", rl.id).is("archived_at", null).select("id");
+    if (error) return dbFail(req, clientId, "save that rule", error);
+    if (!data || !data.length) return json({ error: "That rule wasn't found." }, 404);
+    if (rl.actions !== undefined) {
+      const wrote = await writeRuleActions(rl.id, rl.actions);
+      if (wrote) return dbFail(req, clientId, "save that rule's actions", wrote);
+    }
+    audit("crm_rule_save", 1, `rule=${rl.id} moved=${moved} scope=${scope} pipeline=${pipelineId ?? "-"}`).catch(() => {});
+    return json({ ok: true, id: rl.id });
+  }
+
+  if (action === "crm_rules_reorder") {
+    // THE ACCOUNT'S rules, posted whole (363: one list, not one per pipeline). A subset can be
+    // checked against nothing, so it is refused — which is also what the 355 bundle, still posting
+    // one pipeline's rules, gets for the few minutes until the new one loads.
+    const o = parseIdOrder((payload ?? {}) as Record<string, unknown>);
+    if (!o.ok) return json({ error: o.error }, 400);
+    const { data: live, error } = await admin.from("crm_rules").select("id")
+      .eq("client_id", clientId).is("archived_at", null);
+    if (error) return dbFail(req, clientId, "reorder those rules", error);
+    const have = new Set((live ?? []).map((x: any) => x.id));
+    if (have.size !== o.ids.length || o.ids.some((id) => !have.has(id))) {
+      return json({ error: "The rules changed while you were editing — refresh and try again." }, 409);
+    }
+    for (let i = 0; i < o.ids.length; i++) {
+      const { error: uErr } = await admin.from("crm_rules")
+        .update({ position: (i + 1) * 1024, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", o.ids[i]);
+      if (uErr) return dbFail(req, clientId, "reorder those rules", uErr);
+    }
+    // The order is the order the rules RUN in, not just how they are listed: two rules on one
+    // event see each other's writes.
+    return json({ ok: true });
+  }
+
+  if (action === "crm_rule_log") {
+    // WHY A RULE DID NOTHING. One rule's history ({ruleId}), or the account's recent runs ({}).
+    // A run belongs to its RULE, not to a pipeline, so a moved rule keeps its history. The 355
+    // bundle's {pipelineId} is still answered for the minutes between deploys.
+    const ruleId = String(payload?.ruleId ?? "").toLowerCase();
+    const legacyPipe = String(payload?.pipelineId ?? "").toLowerCase();
+    if (ruleId && !isUuidLike(ruleId)) return json({ error: "That rule wasn't found." }, 400);
+    let q = admin.from("crm_rules").select("id, name").eq("client_id", clientId);
+    if (ruleId) q = q.eq("id", ruleId);
+    else if (isUuidLike(legacyPipe)) q = q.eq("pipeline_id", legacyPipe);
+    // Archived rules are read too, deliberately: their runs are still the answer to "what sent that?"
+    const { data: rules, error: rErr } = await q;
+    if (rErr) return dbFail(req, clientId, "read the rule log", rErr);
+    const ids = (rules ?? []).map((r: any) => r.id);
+    if (!ids.length) return json({ ok: true, runs: [], outbox: [] });
+    const cap = ruleId ? 100 : 50;
+    const [{ data: runs, error: nErr }, { data: outbox, error: oErr }] = await Promise.all([
+      admin.from("crm_rule_runs").select("id, rule_id, deal_id, contact_id, trigger, outcome, detail, occurrence, fired_at")
+        .eq("client_id", clientId).in("rule_id", ids).order("fired_at", { ascending: false }).limit(cap),
+      // The queue beside the log: a message still queued (or held for the morning) is the
+      // commonest answer to "it did not send", and it is NOT a failure.
+      admin.from("crm_rule_outbox").select("id, rule_id, deal_id, contact_id, kind, state, attempts, last_error, hold_until, queued_at, sent_at")
+        .eq("client_id", clientId).in("rule_id", ids).order("queued_at", { ascending: false }).limit(cap),
+    ]);
+    if (nErr) return dbFail(req, clientId, "read the rule log", nErr);
+    if (oErr) return dbFail(req, clientId, "read the rule log", oErr);
+    // WHO each line was about, so the log reads "Dale Smith — ran" rather than a column of ids.
+    const dealIds = [...new Set([...(runs ?? []), ...(outbox ?? [])].map((x: any) => x.deal_id).filter(Boolean))].slice(0, 200);
+    const contactIds = [...new Set([...(runs ?? []), ...(outbox ?? [])].map((x: any) => x.contact_id).filter(Boolean))].slice(0, 200);
+    const [{ data: deals }, { data: people }] = await Promise.all([
+      dealIds.length ? admin.from("crm_deals").select("id, title, short_code").eq("client_id", clientId).in("id", dealIds) : Promise.resolve({ data: [] }),
+      contactIds.length ? admin.from("crm_contacts").select("id, name").eq("client_id", clientId).in("id", contactIds) : Promise.resolve({ data: [] }),
+    ]);
+    const dealBy = new Map((deals ?? []).map((d: any) => [d.id, d]));
+    const nameBy = new Map((people ?? []).map((c: any) => [c.id, c.name]));
+    const ruleName = new Map((rules ?? []).map((r: any) => [r.id, r.name ?? null]));
+    const who = (x: any) => {
+      const person = x.contact_id ? nameBy.get(x.contact_id) : null;
+      const card = x.deal_id ? dealBy.get(x.deal_id) : null;
+      const cardWord = card ? (card.title || card.short_code || null) : null;
+      return [person, cardWord].filter(Boolean).join(" — ") || null;
+    };
+    return json({
+      ok: true,
+      runs: (runs ?? []).map((r: any) => ({
+        id: r.id, ruleId: r.rule_id, ruleName: ruleName.get(r.rule_id) ?? null,
+        dealId: r.deal_id ?? null, contactId: r.contact_id ?? null, who: who(r),
+        trigger: r.trigger, occurrence: r.occurrence ?? "",
+        outcome: r.outcome, detail: r.detail ?? {}, firedAt: r.fired_at,
+      })),
+      outbox: (outbox ?? []).map((o: any) => ({
+        id: o.id, ruleId: o.rule_id, ruleName: ruleName.get(o.rule_id) ?? null,
+        dealId: o.deal_id ?? null, contactId: o.contact_id ?? null, who: who(o),
+        kind: o.kind, state: o.state, attempts: o.attempts, lastError: o.last_error ?? null,
+        holdUntil: o.hold_until ?? null, queuedAt: o.queued_at, sentAt: o.sent_at,
+      })),
+    });
   }
 
   if (action === "contact_activity") {
@@ -9264,10 +12167,56 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return why ? phoneRefused(why, 403) : null;
   };
 
+  // ── WHICH TWILIO ACCOUNT (Workstream 2) ───────────────────────────────────────────────────
+  // Every Twilio call on this tenant's numbers runs as the tenant's account, resolved AT MOST ONCE
+  // per request and only when a branch asks. While TWILIO_SUBACCOUNTS is not "on" it is the parent
+  // from the environment with no lookup: the same credentials twilioCreds read here before phase 2
+  // (account null = not configured, the old `!creds`). With it on, a tenant with an active
+  // sub-account runs in it; one whose sub is not active yet, or whose lookup fails, gets
+  // tenantTwilioRefused and nothing is sent to Twilio for it.
+  type TenantTwilio = { ok: true; account: TwilioAccount | null } | { ok: false; error: unknown };
+  let tenantTwilioMemo: Promise<TenantTwilio> | null = null;
+  const tenantTwilio = (): Promise<TenantTwilio> =>
+    (tenantTwilioMemo ??= resolveTwilioAccount(admin, clientId, (k) => Deno.env.get(k))
+      .then((account): TenantTwilio => ({ ok: true, account }), (error): TenantTwilio => ({ ok: false, error })));
+  const tenantTwilioRefused = (e: unknown): Response => {
+    if (e instanceof TwilioAccountError && e.kind === "not_ready") {
+      return phoneUnavailable("Your phone account is still being set up. Try again in a few minutes.");
+    }
+    logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_account_lookup_failed", severity: "error",
+      message: `The tenant's Twilio account could not be resolved: ${(e as Error)?.message ?? "unknown"}` }).catch(() => {});
+    return filedHere(json({ error: "Couldn't reach the phone company just now. Try again in a minute." }, 502));
+  };
+  // The builder's own account, made or FINISHED before a number is looked for (2026-10-12, C55).
+  // A builder now gets their sub-account when they are created (admin-catalog twilioAtCreate.ts),
+  // and a run that does not finish there leaves the row 'failed' or 'provisioning'. tenantTwilio
+  // refuses any sub that is not active, and the Phone tab buys only a number its search found, so
+  // without this the search would refuse for good and the builder could never reach
+  // phone_buy_number, the step that finishes the run. ensureTwilioAccount as the purchase runs it
+  // (never the operator path): an active, finished sub or a builder on the parent is one read, and
+  // off is no read at all. The answers are phone_buy_number's (which keeps its own copy inline).
+  // null = go on; otherwise the answer to return.
+  const ensureTenantAccount = async (): Promise<Response | null> => {
+    const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
+    if (prov.ok) return null;
+    if (prov.reason === "not_configured") {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_not_configured", severity: "info",
+        message: `Making this builder's Twilio account needs ${(prov.missing ?? []).join(", ")}${prov.parentKeyOnly ? " (the parent's API key cannot create sub-accounts; set TWILIO_AUTH_TOKEN)" : ""}` }).catch(() => {});
+      return phoneUnavailable(ensureRefusalSentence(prov));
+    }
+    if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
+    if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+    if (prov.reason === "manual") return json({ error: ensureRefusalSentence(prov), code: `twilio_manual_${prov.code}` }, 409);
+    logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
+      message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+      context: { step: prov.step, code: prov.code } }).catch(() => {});
+    return filedHere(json({ error: ensureRefusalSentence(prov) }, 502));
+  };
+
   // The tenant's numbers: EVERY live sms_numbers row, OLDEST first (migration 266, per-person
   // numbers; plan D6's one number per builder is lifted to MAX_NUMBERS). The first is the number
   // every screen before 266 called "your number", and a request that names no number (an older
-  // portal bundle) means it (phone.ts pickNumber). Bought on the Text Messaging tab (calls and
+  // portal bundle) means it (phone.ts pickNumber). Bought on the SMS - A2P tab (calls and
   // texts), or on the Phone tab as calling-only numbers (no messaging_service_sid), which texting
   // adopts or joins once its registration clears.
   //
@@ -9291,18 +12240,24 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Migration 266: the builder's Messaging Service while their texting is ON (sms_registrations
   // 'active'), else null. A failed read is null too: the new number stays calling-only, exactly
   // what happened before 266, and texting can be added to it later from the Phone tab.
+  // ⚠️ NEVER FOR A SOLE PROPRIETOR (no-EIN texting, 2026-10-27): Twilio's Sole Proprietor campaign
+  // takes EXACTLY ONE number, and with more than one in the Messaging Service it registers one of
+  // them at random (sole-prop guide §4/§6). So the business's one texting number stays the only
+  // one: every caller (phone_buy_number, phone_number_texting, phone_adopt_number, and the Phone
+  // tab's textingActive) reads null and the extra number stays calling-only.
   const textingServiceSid = async (): Promise<string | null> => {
     const { data, error } = await admin.from("sms_registrations")
-      .select("status, messaging_service_sid").eq("client_id", clientId).maybeSingle();
-    const r = (data ?? null) as { status?: string | null; messaging_service_sid?: string | null } | null;
+      .select("status, messaging_service_sid, brand_tier").eq("client_id", clientId).maybeSingle();
+    const r = (data ?? null) as { status?: string | null; messaging_service_sid?: string | null; brand_tier?: string | null } | null;
+    if (!error && r?.brand_tier === "sole_proprietor") return null;
     return !error && r?.status === "active" && /^MG[0-9a-f]{32}$/i.test(String(r.messaging_service_sid ?? "")) ? String(r.messaging_service_sid) : null;
   };
   // attachToTexting's Twilio and database steps for one number: portal-sms's own helpers, and the
   // row's messaging_service_sid written last (an update that matched nothing is not a success).
-  const textingDeps = (numberId: string) => ({
-    inService: (svc: string, sid: string) => numberInService(svc, sid),
-    attach: (svc: string, sid: string) => attachNumberToService(svc, sid),
-    clearSmsUrl: (sid: string) => clearNumberSmsUrl(sid),
+  const textingDeps = (numberId: string, creds: TwilioCreds) => ({
+    inService: (svc: string, sid: string) => numberInService(svc, sid, trustHubHttp(creds)),
+    attach: (svc: string, sid: string) => attachNumberToService(svc, sid, trustHubHttp(creds)),
+    clearSmsUrl: (sid: string) => clearNumberSmsUrl(sid, trustHubHttp(creds), creds.accountSid),
     record: async (patch: { messaging_service_sid: string; twilio_sid: string }) => {
       const { data, error } = await admin.from("sms_numbers").update(patch)
         .eq("id", numberId).eq("client_id", clientId).is("released_at", null).select("id");
@@ -9321,14 +12276,48 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     (await callerMayManageCallerId()) ? null : phoneRefused(TRUST_OPERATOR_SENTENCE, 403);
   // The number's caller-ID columns (migration 255), in their OWN select so a server without 255
   // answers `callerId.available: false` rather than failing the number read everything else uses.
-  const trustRowOf = async (numberId: string) =>
-    await admin.from("sms_numbers").select(TRUST_COLUMNS).eq("id", numberId).eq("client_id", clientId).maybeSingle();
+  // Workstream 2, phase 6: CNAM's columns (migration 297) ride along; before 297 the row is read
+  // again without them, and CNAM alone is "not available" (the row then has no cnam_* key).
+  const trustRowOf = async (numberId: string) => {
+    const read = (cols: string) => admin.from("sms_numbers").select(cols).eq("id", numberId).eq("client_id", clientId).maybeSingle();
+    const res = await read(`${TRUST_COLUMNS}, ${CNAM_COLUMNS}`);
+    return res.error && phoneNotReady(res.error) ? await read(TRUST_COLUMNS) : res;
+  };
 
   // Phase 6: may this caller BUY a number? phone:'edit' got them through the gate; spending money
   // every month is settings_billing:'edit' everywhere else (portal-sms buy_number), and an
   // operator needs canBill. Asked by the purchase and reported by phone_settings_get so the
   // screen offers the button only to people it will work for.
   const mayBuyPhoneNumber = () => canEdit("phone") && canEdit("settings_billing") && (!operator || operator.canBill);
+
+  // Workstream 2, phase 6: the texting registration's profile and echo, which phone_trust_profile
+  // reads and writes. No SID leaves: `exists` and the echo the operator's form starts from.
+  // brand_tier (no-EIN texting, 2026-10-27): runTrustProfile refuses a sole proprietor's row, whose
+  // customer_profile_sid is a STARTER profile it must neither finish nor overwrite (phoneTrust.ts 1b).
+  const REG_PROFILE_COLUMNS = "status, customer_profile_sid, twilio_account_sid, legal_business_name, ein_last4, rep_email_domain, website_url, brand_tier";
+  const registrationRow = async (): Promise<{ row: RegistrationRow; error: unknown }> => {
+    const { data, error } = await admin.from("sms_registrations").select(REG_PROFILE_COLUMNS).eq("client_id", clientId).maybeSingle();
+    return { row: (data ?? null) as RegistrationRow, error };
+  };
+  // Workstream 2, phase 8: this business's "Bring your number" requests (migration 298), newest
+  // first, or null when the table is not there yet or the read fails (the card is then not drawn).
+  const portRequestsOf = async () => {
+    const { data, error } = await admin.from("phone_number_requests")
+      .select("id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at")
+      .eq("client_id", clientId).order("created_at", { ascending: false }).limit(10);
+    return error ? null : ((data ?? []) as PortRequestRow[]).map(portRequestView);
+  };
+  const businessProfileView = async () => {
+    const r = await registrationRow();
+    if (r.error) return null;
+    const row = r.row ?? {};
+    return {
+      exists: /^BU[0-9a-f]{32}$/i.test(String(row.customer_profile_sid ?? "")),
+      legalBusinessName: row.legal_business_name ?? "",
+      websiteUrl: row.website_url ?? "",
+      einLast4: row.ein_last4 ?? "",
+    };
+  };
 
   // A 5xx whose app_errors row the branch already wrote, so withErrorLog does not file it twice.
   const filedHere = (res: Response) => { filedAtReturnSite.add(res); return res; };
@@ -9337,7 +12326,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   // The number's PN… sid: the row's own, or found by its E.164 for a number recorded without one
   // (a number bought by hand in the console, like the pilot's).
-  const numberSidOf = async (n: PhoneNum, creds: NonNullable<ReturnType<typeof twilioCreds>>):
+  const numberSidOf = async (n: PhoneNum, creds: TwilioCreds):
     Promise<{ ok: true; sid: string } | { ok: false; res: Response }> => {
     if (n.twilio_sid) return { ok: true, sid: n.twilio_sid };
     const found = await findNumberSid({ creds, e164: n.phone_number });
@@ -9363,13 +12352,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         message: `Connecting a number for calls needs ${ve.missing.join(", ")}`, severity: "info" }).catch(() => {});
       return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
     }
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return { ok: false, res: tenantTwilioRefused(tw.error) };
+    const creds = tw.account;
     if (!creds) return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    // A number in the builder's own sub-account falls back to TWILIO_SUB_VOICEMAIL_URL: the parent's
+    // Bin (PHONE_FALLBACK_URL) answers only the parent (phoneNumber.ts voiceEnv).
+    const vEnv = creds.source === "sub" ? voiceEnv((k) => Deno.env.get(k), true) : ve;
+    if (!vEnv.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_env_missing",
+        message: `Connecting a number for calls needs ${vEnv.missing.join(", ")}`, severity: "info" }).catch(() => {});
+      return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    }
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes;
     const sid = sidRes.sid;
     const smsUrl = !n.messaging_service_sid ? smsInboundUrl((k) => Deno.env.get(k)) : null;
-    const config = { ...numberVoiceConfig(ve.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
+    const config = { ...numberVoiceConfig(vEnv.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
     const applied = await applyNumberVoice({ creds, numberSid: sid, config });
     if (!applied.ok) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_config_failed",
@@ -9402,11 +12401,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // (the pilot's) must still be movable off the Worker.
       const fallbackUrl = fallbackUrlOf((k) => Deno.env.get(k));
       if (!fallbackUrl) return fail("PHONE_FALLBACK_URL is not set");
-      const creds = twilioCreds((k) => Deno.env.get(k));
+      const tw = await tenantTwilio();
+      if (!tw.ok) return fail(`the tenant's Twilio account could not be resolved (${tw.error instanceof TwilioAccountError ? tw.error.kind : "error"})`);
+      const creds = tw.account;
       if (!creds) return fail("Twilio credentials are not set");
+      // In a sub-account: its own voicemail TwiML (the parent's Bin answers only the parent), by GET.
+      const onSub = creds.source === "sub";
+      const target = onSub ? subVoicemailUrlOf((k) => Deno.env.get(k)) : fallbackUrl;
+      if (!target) return fail("TWILIO_SUB_VOICEMAIL_URL is not set");
       const sidRes = await numberSidOf(n, creds);
       if (!sidRes.ok) return fail("its sid could not be found");
-      const applied = await applyNumberVoice({ creds, numberSid: sidRes.sid, config: numberVoicemailConfig({ fallbackUrl }) });
+      const applied = await applyNumberVoice({
+        creds, numberSid: sidRes.sid,
+        config: numberVoicemailConfig({ fallbackUrl: target, ...(onSub ? { fallbackMethod: "GET" as const } : {}) }),
+      });
       if (!applied.ok) return fail(`Twilio answered HTTP ${applied.status}, code ${applied.code}`);
       const { error } = await admin.from("sms_numbers").update({ voice_enabled: false })
         .eq("id", n.id).eq("client_id", clientId);
@@ -9460,15 +12468,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // logged and shows the same. The phone-api Worker's CALL_RECORDING rail can't be seen from
     // the database, so this function holds a copy as its own secret (recordingServerOn, set with
     // the Worker var, SETUP 7c): `serverOn` false makes the card say recording hasn't started,
-    // rather than that calls are recorded while nothing records.
+    // rather than that calls are recorded while nothing records. CALL_TRANSCRIBE is mirrored the
+    // same way (transcribeServerOn), so the card promises transcripts only while they are made.
     const recRes = await admin.from("client_settings")
-      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by")
+      .select("phone_record_calls, phone_recording_notice, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by")
       .eq("client_id", clientId).maybeSingle();
     if (recRes.error && !phoneNotReady(recRes.error)) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_recording_read_failed", severity: "error",
         message: `client_settings recording read failed: ${recRes.error.message ?? "unknown"}` }).catch(() => {});
     }
-    const recording = recRes.error ? null : recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)));
+    const recording = recRes.error ? null : recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)), transcribeServerOn((k) => Deno.env.get(k)));
 
     // AN 'own' CALLER GETS THEIR OWN SLICE. The gate let them in on `view` because RANK scores
     // own == view; the setup — who answers, when, where calls forward — is the team's business
@@ -9477,14 +12486,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // their calls are recorded. "Which number" is the one THEIR calls show (migration 266: their
     // own, else a team line; phone_caller_context's pick), with its name and whether it's theirs.
     if (ownPhoneOnly(access)) {
-      const mine = callerNumberFor(rows, userId, (cs as { sms_number?: string | null } | null)?.sms_number ?? null);
+      // selfUserId: "the number THEIR calls show". The whole answer is about one person.
+      const mine = callerNumberFor(rows, selfUserId, (cs as { sms_number?: string | null } | null)?.sms_number ?? null);
       return json({
         ok: true, available: true, scope: "own", phoneStatus, level: "own", canEdit: false,
         number: mine ? {
           e164: mine.phone_number, label: mine.label ?? null,
-          mine: !!mine.assigned_user_id && String(mine.assigned_user_id).toLowerCase() === String(userId ?? "").toLowerCase(),
+          mine: !!mine.assigned_user_id && String(mine.assigned_user_id).toLowerCase() === String(selfUserId ?? "").toLowerCase(),
         } : null,
-        recording: recording ? { on: recording.on, serverOn: recording.serverOn } : null,
+        // Whether their calls are recorded, and whether callers are told (2026-10-21: the owner's
+        // announcement switch), so their line says so truthfully.
+        recording: recording ? { on: recording.on, serverOn: recording.serverOn, notice: recording.notice } : null,
       });
     }
 
@@ -9543,7 +12555,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const trustBy = new Map<string, any>();
     let trustAvailable = false;
     if (rows.length) {
-      const tr = await admin.from("sms_numbers").select(TRUST_COLUMNS).eq("client_id", clientId).in("id", rows.map((r) => r.id)).limit(50);
+      const readTrust = (cols: string) => admin.from("sms_numbers").select(cols).eq("client_id", clientId).in("id", rows.map((r) => r.id)).limit(50);
+      let tr = await readTrust(`${TRUST_COLUMNS}, ${CNAM_COLUMNS}`);
+      if (tr.error && phoneNotReady(tr.error)) tr = await readTrust(TRUST_COLUMNS);
       trustAvailable = !tr.error;
       // deno-lint-ignore no-explicit-any
       for (const t of (tr.error ? [] : (tr.data ?? [])) as any[]) trustBy.set(String(t.id), t);
@@ -9601,6 +12615,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       voiceSetup: voiceEnv((k) => Deno.env.get(k)).ok,
       callerId,
       canManageCallerId: canEdit("phone") && await callerMayManageCallerId(),
+      // Workstream 2, phase 6: whether this business has the profile caller ID is built on, and
+      // what the operator's form starts from (phone_trust_profile). Read for an operator only, so a
+      // builder's screen asks nothing new.
+      businessProfile: canEdit("phone") && rows.length && await callerMayManageCallerId() ? await businessProfileView() : null,
+      // Workstream 2, phase 8: this business's "Bring your number" requests, newest first (null = not
+      // available on this database yet: the card is not drawn), and whether this caller may land a
+      // moved number (phone_adopt_number's own check).
+      portRequests: canEdit("phone") ? await portRequestsOf() : null,
+      canAdoptNumber: canEdit("phone") && (!operator || operator.canBill) && await callerMayManageCallerId(),
       // Call recording (migration 263): the settings, and whether THIS caller may change them
       // (the business owner with phone edit: phone_recording_save's rule).
       recording,
@@ -9634,7 +12657,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // deno-lint-ignore no-explicit-any
     const n: any = picked.n;
     if (!n) {
-      return json({ error: "Get a number on the Text Messaging tab first, then choose who answers it." }, 409);
+      return json({ error: "Get a number on the SMS - A2P tab first, then choose who answers it." }, 409);
     }
     const p = (payload ?? {}) as Record<string, unknown>;
     const hasLabel = Object.prototype.hasOwnProperty.call(p, "label");
@@ -9720,10 +12743,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // ── Call recording (migration 263) ─────────────────────────────────────────────────────
   // The business OWNER only (role 'owner', on top of the gate's phone:'edit'): recording
   // customers' calls is the business's own legal decision (decided 2026-10-04). An admin and an
-  // operator in view-as are refused in words. parseRecording (phone.ts) decides what is valid,
-  // and refuses turning the announcement off. Who changed it and when are stamped on the row,
-  // for any later question about consent. Nothing records until the phone-api Worker's
-  // CALL_RECORDING rail is on too.
+  // operator in view-as are refused in words. parseRecording (phone.ts) decides what is valid.
+  // The announcement (2026-10-21) is the owner's too: `notice` true/false is written, and a save
+  // without it (the shipped apps' transcripts switch) keeps the stored value. Who changed it and
+  // when are stamped on the row, for any later question about consent. Nothing records until
+  // the phone-api Worker's CALL_RECORDING rail is on too.
   if (action === "phone_recording_save") {
     if (role !== "owner") return json({ error: "Only the business owner can change call recording." }, 403);
     const parsed = parseRecording((payload ?? {}) as Record<string, unknown>);
@@ -9731,7 +12755,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data, error } = await admin.from("client_settings")
       .update({ ...parsed.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: userId })
       .eq("client_id", clientId)
-      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by");
+      .select("phone_record_calls, phone_recording_notice, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by");
     if (error) {
       return phoneNotReady(error) ? phoneUnavailable("Call recording isn't set up on this server yet.") : dbFail(req, clientId, "save call recording", error);
     }
@@ -9739,8 +12763,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: "This account has no settings saved yet. Save your business details under Company first." }, 409);
     }
     audit(parsed.row.phone_record_calls ? "phone_recording_on" : "phone_recording_off", 1,
-      `transcribe=${parsed.row.phone_transcribe_calls} retention_days=${parsed.row.phone_recording_retention_days} wording=${parsed.row.phone_recording_notice_text ? "own" : "standard"}`).catch(() => {});
-    return json({ ok: true, recording: recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k))) });
+      `transcribe=${parsed.row.phone_transcribe_calls} retention_days=${parsed.row.phone_recording_retention_days} wording=${parsed.row.phone_recording_notice_text ? "own" : "standard"} announce=${parsed.row.phone_recording_notice === undefined ? "kept" : parsed.row.phone_recording_notice ? "on" : "off"}`).catch(() => {});
+    return json({ ok: true, recording: recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k)), transcribeServerOn((k) => Deno.env.get(k))) });
   }
 
   // THE SWITCH, and what it does to the number (phoneNumber.ts switchCalling). ON is behind the
@@ -9901,7 +12925,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "crm_create_contact") {
     const parsed = parseCreateContact((payload ?? {}) as Record<string, unknown>);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
-    const me = String(userId ?? "").toLowerCase();
+    // selfUserId: same reason as crm_create_lead -- the new contact belongs to the person
+    // this screen is about, not to the operator looking through their eyes.
+    const me = String(selfUserId ?? "").toLowerCase();
     if (ownContacts && !isUuid(me)) return json({ error: "Sign in again to save a contact." }, 401);
     const { data: made, error } = await admin.rpc("crm_create_contact", {
       p_client_id: clientId,
@@ -10124,15 +13150,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "phone_search_numbers") {
     const refused = await phoneRolloutGate();
     if (refused) return refused;
+    // A sub-account left unfinished (at builder creation, say) is finished here, or the search
+    // would refuse for good (ensureTenantAccount says why).
+    const notReady = await ensureTenantAccount();
+    if (notReady) return notReady;
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
-    const results = await searchAvailableNumbers({ areaCode: areaCodeOf(payload?.areaCode) ?? undefined, limit: 10 })
+    // An area code, or the area code and up to three more digits (_shared/numberSearch.ts; the
+    // 2026-10-12 call). The screen sends both keys, so a server from before this still searches
+    // the area code it understands. An older screen sends only areaCode: three digits search as
+    // before, and a partial one is now refused with a sentence instead of searching anywhere.
+    const q = numberSearchOf(payload?.startsWith ?? payload?.areaCode);
+    if (!q.ok) return json({ error: q.error }, 400);
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const results = await searchAvailableNumbers({ areaCode: q.areaCode ?? undefined, contains: q.contains ?? undefined, limit: 10 }, tw.account)
       .catch((e: unknown) => ({ failed: e }));
     if (!Array.isArray(results)) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_search_failed",
         message: `Twilio number search failed: ${(results.failed as Error)?.message ?? "unknown"}`, severity: "info" }).catch(() => {});
       return filedHere(json({ error: "Couldn't look up numbers just now. Try again in a minute." }, 502));
     }
-    return json({ ok: true, numbers: results.map((n) => ({ e164: n.phoneNumber, locality: n.locality, region: n.region })) });
+    return json({ ok: true, numbers: startsWithPrefix(results, q.prefix).map((n) => ({ e164: n.phoneNumber, locality: n.locality, region: n.region })) });
   }
 
   if (action === "phone_enable_number") {
@@ -10169,12 +13207,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : "Buying a number is for the account owner, or someone they've given Billing access." }, 403);
     }
     if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    // ── WORKSTREAM 2 (review H1): ONE TENANT, ONE ACCOUNT, EVEN WITH THE SWITCH OFF ─────────────
+    // Off, everything runs on the parent, so for a builder an operator already gave a sub-account
+    // (the console's Create works while off) this purchase would land on the parent and split them
+    // across two accounts for good. Read ONLY while the switch is off; with it on or manual the
+    // purchase below resolves to the sub. Builders cannot reach this while off (PHONE_SELF_SERVE
+    // needs TWILIO_SUBACCOUNTS "on"), so the sentence is an operator's.
+    const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+    if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
+    if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
+    // ── WORKSTREAM 2, PHASE 3: THE BUILDER'S OWN TWILIO ACCOUNT, BEFORE ANY MONEY MOVES ──────────
+    // With TWILIO_SUBACCOUNTS "on", a builder who is not pinned to the parent (our internal account,
+    // or one already holding something there) gets their own sub-account made here, BEFORE the
+    // wallet hold and the purchase, so the number is bought inside it with its own credentials
+    // (tenantTwilio below then resolves to it). Off, this returns "the parent" without a read: today.
+    const prov = await ensureTwilioAccount(admin, clientId, { get: (k) => Deno.env.get(k) });
+    if (!prov.ok) {
+      if (prov.reason === "not_configured") {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_not_configured", severity: "info",
+          message: `Making this builder's Twilio account needs ${(prov.missing ?? []).join(", ")}${prov.parentKeyOnly ? " (the parent's API key cannot create sub-accounts; set TWILIO_AUTH_TOKEN)" : ""}` }).catch(() => {});
+        return phoneUnavailable(ensureRefusalSentence(prov));
+      }
+      if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
+      if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+      // TWILIO_SUBACCOUNTS "manual": this builder's sub-account has to be made (or finished) in the
+      // operator console first, so the number does not land on the parent for good.
+      if (prov.reason === "manual") return json({ error: ensureRefusalSentence(prov), code: `twilio_manual_${prov.code}` }, 409);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
+        message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+        context: { step: prov.step, code: prov.code } }).catch(() => {});
+      return filedHere(json({ error: ensureRefusalSentence(prov) }, 502));
+    }
     // Everything the new number needs, BEFORE any money moves: somewhere for its texts to go
     // (review SSB-3), and the voice settings it is given either way (the Worker when calling is
     // on, the voicemail Bin when it is off).
     const smsUrl = smsInboundUrl((k) => Deno.env.get(k));
-    const ve = voiceEnv((k) => Deno.env.get(k));
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    // Inside a sub-account the number's voicemail is TWILIO_SUB_VOICEMAIL_URL, not the parent's Bin.
+    const ve = voiceEnv((k) => Deno.env.get(k), creds?.source === "sub");
     if (!smsUrl || !ve.ok || !creds) {
       const missing = [!smsUrl ? "SMS_INBOUND_SECRET" : null, ...(ve.ok ? [] : ve.missing), !creds ? "Twilio credentials" : null].filter(Boolean);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_env_missing", severity: "info",
@@ -10207,8 +13279,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (csErr) return phoneNotReady(csErr) ? phoneUnavailable() : dbFail(req, clientId, "load your phone settings", csErr);
     const phoneOn = (cs as { phone_status?: string } | null)?.phone_status === "on";
 
+    // The row records which account the number lives in (migration 292): the sub's SID, or nothing
+    // for the parent (exactly the row this wrote before sub-accounts).
+    const subAccountSid = creds.source === "sub" ? creds.accountSid : null;
     const out = await buyCallingNumber({ clientId, wanted, recorded: liveRows.map((r) => String(r.phone_number)) }, {
-      findPurchasedNumbers, purchaseNumber, releaseNumber,
+      // In the tenant's own account (its sub-account once TWILIO_SUBACCOUNTS is on).
+      findPurchasedNumbers: (id) => findPurchasedNumbers(id, creds),
+      purchaseNumber: (o) => purchaseNumber(o, creds),
+      releaseNumber: (sid) => releaseNumber(sid, creds),
       hold: takeNumberHold,
       capture: async (holdId, b) => {
         const { error } = await admin.rpc("wallet_capture", {
@@ -10228,7 +13306,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       },
       record: async (b) => {
         const { data, error } = await admin.from("sms_numbers")
-          .insert(callingOnlyNumberRow(clientId, b))
+          .insert(callingOnlyNumberRow(clientId, b, subAccountSid))
           .select("id, phone_number, twilio_sid").single();
         return error || !data ? { ok: false, error: error ?? { message: "no row returned" } } : { ok: true, row: data };
       },
@@ -10273,7 +13351,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     let joined = false;
     let textingWarning: string | null = null;
     if (serviceSid) {
-      const att = await attachToTexting({ serviceSid, numberSid: bought.sid }, textingDeps(String(row.id)));
+      const att = await attachToTexting({ serviceSid, numberSid: bought.sid }, textingDeps(String(row.id), creds));
       joined = att.ok;
       if (!att.ok) {
         textingWarning = TEXTING_JOIN_FAILED;
@@ -10322,7 +13400,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // safe to repeat. Spends nothing; the number texts once its own carrier registration clears.
   //
   // ⚠️ THE TEXTING-SETUP AUTHORITY TOO, not only phone:edit. This puts a number into the
-  // business's own carrier registration, which every change on the Text Messaging tab keeps to
+  // business's own carrier registration, which every change on the SMS - A2P tab keeps to
   // settings_billing:'edit' (portal-sms), and the purchase's own join is behind the same check
   // (mayBuyPhoneNumber). phone_settings_get says who may (`canJoinTexting`).
   if (action === "phone_number_texting") {
@@ -10344,13 +13422,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (n.messaging_service_sid) return json({ ok: true, number: { id: n.id, callingOnly: false }, already: true });
     const serviceSid = await textingServiceSid();
     if (!serviceSid) {
-      return json({ error: "Texting isn't on for this account yet. Finish the Text Messaging tab first; your main number is used for texting when the carriers approve it." }, 409);
+      return json({ error: "Texting isn't on for this account yet. Finish the SMS - A2P tab first; your main number is used for texting when the carriers approve it." }, 409);
     }
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
     if (!creds) return phoneUnavailable("Texting setup isn't available on this server yet.");
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes.res;
-    const att = await attachToTexting({ serviceSid, numberSid: sidRes.sid }, textingDeps(String(n.id)));
+    const att = await attachToTexting({ serviceSid, numberSid: sidRes.sid }, textingDeps(String(n.id), creds));
     if (!att.ok) {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_texting_failed", severity: "error",
         message: `A number did not join the texting setup (stopped at ${att.step}): ${(att.error as { message?: string } | null)?.message ?? "unknown"}`,
@@ -10388,14 +13468,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const refused = await phoneOperatorGate();
     if (refused) return refused;
     const kind = parseTrustProduct(payload?.product);
-    if (!kind) return json({ error: "Choose SHAKEN/STIR or Voice Integrity." }, 400);
+    if (!kind) return json({ error: "Choose SHAKEN/STIR, Voice Integrity or the caller name (CNAM)." }, 400);
     let info: VoiceIntegrityInfo | null = null;
     if (kind === "voice_integrity" && payload?.voiceIntegrity != null) {
       const parsed = parseVoiceIntegrityInfo(payload.voiceIntegrity);
       if (!parsed.ok) return json({ error: parsed.error }, 400);
       info = parsed.info;
     }
-    const creds = twilioCreds((k) => Deno.env.get(k));
+    // Workstream 2, phase 6: CNAM's display name (at most 15 characters), checked before Twilio.
+    let cnamName: string | null = null;
+    if (kind === "cnam" && payload?.cnam?.displayName != null) {
+      const parsed = parseCnamDisplayName(payload.cnam.displayName);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      cnamName = parsed.name;
+    }
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
     if (!trustHubConfigured() || !creds) return phoneUnavailable("Caller ID registration isn't available on this server yet.");
 
     const numRes = await phoneNumberRows();
@@ -10413,11 +13502,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
     }
     const trustRow = (tr.data ?? {}) as TrustRow;
+    // CNAM is recorded in migration 297's columns: before 297, nothing is sent for it.
+    if (kind === "cnam" && !("cnam_trust_product_sid" in trustRow)) {
+      return phoneUnavailable("Caller name registration isn't available on this server yet.");
+    }
+    // CNAM is for US local numbers only (phoneTrust.ts cnamNumberRefusal): a toll-free or Canadian
+    // number is refused before anything is sent (review 2026-10-09).
+    if (kind === "cnam") {
+      const notLocal = cnamNumberRefusal(n.phone_number);
+      if (notLocal) return json({ error: notLocal, code: "cnam_us_local_only" }, 409);
+    }
     const sidRes = await numberSidOf(n, creds);
     if (!sidRes.ok) return sidRes.res;
 
+    // brand_tier (no-EIN texting): a sole proprietor's profile is a Starter one, which cannot back
+    // caller ID; chooseTrustProfile refuses it with its own code (phoneTrust.ts trustProfileFor).
     const { data: reg, error: regErr } = await admin.from("sms_registrations")
-      .select("customer_profile_sid").eq("client_id", clientId).maybeSingle();
+      .select("customer_profile_sid, brand_tier").eq("client_id", clientId).maybeSingle();
     if (regErr) return dbFail(req, clientId, "load your texting registration", regErr);
     let internal = false;
     try { internal = await isInternalTenant(admin, clientId); } catch (e) {
@@ -10431,10 +13532,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       secondaryProfileSid: (reg as { customer_profile_sid?: string | null } | null)?.customer_profile_sid ?? null,
       internal,
       primaryProfileSid,
+      brandTier: (reg as { brand_tier?: string | null } | null)?.brand_tier ?? null,
       numberSid: sidRes.sid,
-    }, { numberOnProfile: (p, num) => numberOnProfile(p, num) });
+    }, { numberOnProfile: (p, num) => numberOnProfile(p, num, trustHubHttp(creds)) });
     if (!prof.ok) {
-      if (prof.kind === "refused") return json({ error: prof.error }, prof.status);
+      // `code` no_business_profile: the Phone tab offers an operator the business-profile form.
+      if (prof.kind === "refused") return json({ error: prof.error, ...(prof.code ? { code: prof.code } : {}) }, prof.status);
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_setup_failed", severity: "error",
         message: `${kind}: ${prof.detail}`, context: { number_id: n.id, twilio_code: prof.code, profile: "primary_check" } }).catch(() => {});
       return filedHere(json({ error: prof.error, code: prof.code || null }, prof.status));
@@ -10447,7 +13550,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const lockUntil = new Date(Date.now() + TRUST_LOCK_MS).toISOString();
     const out = await runTrustSetup({
       kind, clientId, numberSid: sidRes.sid, profileSid: prof.profileSid,
-      existingSid: (trustRow[TRUST_COLS[kind].sid] as string | null | undefined) ?? null, info,
+      existingSid: (trustRow[TRUST_COLS[kind].sid] as string | null | undefined) ?? null, info, cnamName,
     }, {
       lock: {
         claim: async () => {
@@ -10463,8 +13566,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .eq("id", n.id).eq("client_id", clientId).eq("caller_id_lock_until", lockUntil);
         },
       },
-      fetchProfile: (sid) => fetchCustomerProfile(sid),
-      setup: (s) => setupVoiceTrust(s),
+      fetchProfile: (sid) => fetchCustomerProfile(sid, trustHubHttp(creds)),
+      setup: (s) => setupVoiceTrust(s, trustHubHttp(creds)),
       write: trustWrite(n.id),
     });
     if (!out.ok) {
@@ -10483,14 +13586,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       `product=${kind} status=${r0.status ?? "unknown"} created=${r0.created} submitted=${r0.submitted} answers_updated=${r0.endUserUpdated} profile=${prof.which}`).catch(() => {});
     return json({
       ok: true, product: kind, status: r0.status, submitted: r0.submitted, created: r0.created, answersUpdated: r0.endUserUpdated, profile: prof.which,
-      callerId: callerIdView({ ...trustRow, [TRUST_COLS[kind].sid]: r0.trustProductSid, [TRUST_COLS[kind].status]: r0.status, caller_id_checked_at: new Date().toISOString() }),
+      callerId: callerIdView({
+        ...trustRow, [TRUST_COLS[kind].sid]: r0.trustProductSid, [TRUST_COLS[kind].status]: r0.status, caller_id_checked_at: new Date().toISOString(),
+        ...(kind === "cnam" && cnamName && (r0.endUserCreated || r0.endUserUpdated) ? { cnam_display_name: cnamName } : {}),
+      }),
     });
   }
 
   if (action === "phone_trust_status") {
     const refused = await phoneOperatorGate();
     if (refused) return refused;
-    if (!trustHubConfigured() || !twilioCreds((k) => Deno.env.get(k))) {
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    if (!trustHubConfigured() || !creds) {
       return phoneUnavailable("Caller ID registration isn't available on this server yet.");
     }
     const numRes = await phoneNumberRows();
@@ -10508,7 +13617,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
     }
     const out = await runTrustStatus((tr.data ?? {}) as TrustRow, {
-      fetchTrustProduct: (sid) => fetchTrustProduct(sid),
+      fetchTrustProduct: (sid) => fetchTrustProduct(sid, trustHubHttp(creds)),
       write: trustWrite(n.id),
     });
     if (!out.ok) {
@@ -10518,6 +13627,270 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return filedHere(json({ error: out.error, code: out.code || null }, out.status));
     }
     return json({ ok: true, callerId: out.view, errorCodes: out.errorCodes });
+  }
+
+  // ── Workstream 2, phase 6: the business profile for a builder who only calls ─────────────────
+  // Caller ID (all three kinds) is built on the builder's own Secondary Customer Profile, which only
+  // texting's first submit used to make. An operator makes it here from the business's details
+  // (phoneTrust.ts runTrustProfile: the order, the lock, the write), in the builder's own Twilio
+  // account and linked to the parent's primary profile, and it is written where texting keeps it
+  // (sms_registrations.customer_profile_sid) so texting reuses it later. Twilio reviews it before
+  // caller ID can be registered (usually a few days).
+  // ⚠️ OPERATOR-ONLY (phoneOperatorGate), like the two above. Spends nothing.
+  // ⚠️ ONE TENANT, ONE ACCOUNT: only for a builder whose account is decided by a live number (caller
+  // ID is per number anyway), and never on the parent for a builder with a sub-account while
+  // TWILIO_SUBACCOUNTS is off (it would land there and split them).
+  if (action === "phone_trust_profile") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    const primary = String(Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "").trim();
+    if (!trustHubConfigured() || !/^BU[0-9a-f]{32}$/i.test(primary)) {
+      return phoneUnavailable("Adding a business profile isn't available on this server yet.");
+    }
+    const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+    if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
+    if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    if (!creds) return phoneUnavailable("Adding a business profile isn't available on this server yet.");
+    const numRes = await phoneNumberRows();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    if (!(numRes.data ?? []).length) {
+      return json({ error: "Get a number for this business first: caller ID is registered for a number, and the number decides which Twilio account the profile goes in." }, 409);
+    }
+    let internal = false;
+    try { internal = await isInternalTenant(admin, clientId); } catch (e) {
+      return dbFail(req, clientId, "check this account", { message: (e as Error)?.message ?? "unknown" });
+    }
+    // The registration row the profile is written on (portal-sms's load(): made when missing).
+    let reg = await registrationRow();
+    if (reg.error) return dbFail(req, clientId, "load your texting registration", reg.error);
+    if (!reg.row) {
+      const { error } = await admin.from("sms_registrations").insert({ client_id: clientId, status: "none" });
+      if (error && String((error as { code?: string }).code ?? "") !== "23505") return dbFail(req, clientId, "start your texting registration", error);
+      reg = await registrationRow();
+      if (reg.error || !reg.row) return dbFail(req, clientId, "load your texting registration", reg.error ?? { message: "no row" });
+    }
+    const onSub = creds.source === "sub";
+    const lockUntil = new Date(Date.now() + 5 * 60_000).toISOString();
+    const regWrite = async (patch: Record<string, unknown>) => {
+      const { error } = await admin.from("sms_registrations").update({ ...patch, updated_at: new Date().toISOString() }).eq("client_id", clientId);
+      return error ? { ok: false as const, error } : { ok: true as const };
+    };
+    const out = await runTrustProfile({
+      clientId, intake: (payload?.intake ?? {}) as Parameters<typeof runTrustProfile>[0]["intake"], internal, registration: reg.row,
+      subAccountSid: onSub ? creds.accountSid : null,
+    }, {
+      // portal-sms advance's own lock, so this and a texting submit never both make a profile.
+      lock: {
+        claim: async () => {
+          const { data, error } = await admin.from("sms_registrations").update({ advance_lock_until: lockUntil })
+            .eq("client_id", clientId)
+            .or(`advance_lock_until.is.null,advance_lock_until.lt.${new Date().toISOString()}`)
+            .select("client_id");
+          if (error) return { ok: false as const, busy: false as const, error };
+          return (data ?? []).length ? { ok: true as const } : { ok: false as const, busy: true as const };
+        },
+        release: async () => {
+          await admin.from("sms_registrations").update({ advance_lock_until: null })
+            .eq("client_id", clientId).eq("advance_lock_until", lockUntil);
+        },
+      },
+      create: (intake, friendlyName) => createSecondaryCustomerProfile({ intake, primaryProfileSid: primary, friendlyName }, creds),
+      finish: (profileSid) => finishSecondaryCustomerProfile(profileSid, primary, trustHubHttp(creds), { crossAccount: onSub }),
+      write: regWrite,
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json({ error: out.error, ...(out.problems ? { problems: out.problems } : {}) }, out.status);
+      if (out.kind === "db") return dbFail(req, clientId, "record the business profile", out.error);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_profile_failed", severity: "error",
+        message: out.detail, context: { twilio_code: out.code, recorded: out.recorded, sub: onSub } }).catch(() => {});
+      return filedHere(json({ error: out.error, code: out.code || null }, out.status));
+    }
+    audit("phone_trust_profile", 1, `created=${out.created} finished=${out.finished} sub=${onSub}`).catch(() => {});
+    return json({ ok: true, created: out.created, finished: out.finished, businessProfile: await businessProfileView() });
+  }
+
+  // ── Workstream 2, phase 8: "Bring your number" ───────────────────────────────────────────────
+  // The builder asks to move numbers they already have into Structure Studio. The request is
+  // stored (phone_number_requests, migration 298) and IS the operator's notification: the console
+  // lists every open one. No PIN, bill or account number is accepted (numberRequests.ts refuses
+  // them), and nothing is sent anywhere: an operator books the move (workers/phone-api/PORTING.md).
+  // ⚠️ ONLY THIS BUILDER'S OWN ROWS ARE READ (review 2026-10-09). Refusing on another builder's
+  // number or request told any builder whether a number belonged to someone else, and let one
+  // builder block another's request; the operator console flags those instead.
+  if (action === "phone_port_request") {
+    const parsed = parsePortRequest(payload?.request);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const v = parsed.value;
+    const unavailable = () => phoneUnavailable("Asking to bring a number isn't available on this server yet.");
+    const [mine, asked, live] = await Promise.all([
+      admin.from("phone_number_requests").select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).in("status", ["new", "in_progress"]),
+      // This builder's own open requests naming one of these numbers (the array overlap operator).
+      admin.from("phone_number_requests").select("numbers").eq("client_id", clientId)
+        .in("status", ["new", "in_progress"]).overlaps("numbers", v.numbers).limit(20),
+      admin.from("sms_numbers").select("phone_number").eq("client_id", clientId)
+        .in("phone_number", v.numbers).is("released_at", null).limit(20),
+    ]);
+    for (const r of [mine, asked, live]) {
+      if (r.error) return phoneNotReady(r.error) ? unavailable() : dbFail(req, clientId, "check your number requests", r.error);
+    }
+    const conflict = portRequestConflict(v, {
+      openForTenant: Number(mine.count ?? 0),
+      // deno-lint-ignore no-explicit-any
+      ownOpenNumbers: ((asked.data ?? []) as any[]).flatMap((x) => (Array.isArray(x.numbers) ? x.numbers : [])),
+      // deno-lint-ignore no-explicit-any
+      ownLiveNumbers: ((live.data ?? []) as any[]).map((x) => String(x.phone_number)),
+    });
+    if (conflict) return json({ error: conflict }, 409);
+    const { data: row, error } = await admin.from("phone_number_requests")
+      .insert(portRequestRow(clientId, isUuid(String(userId ?? "")) ? String(userId) : null, v))
+      .select("id, numbers, current_carrier, is_lc_phone, contact_name, contact_email, cutover_window, status, created_at, handled_at").single();
+    if (error || !row) return phoneNotReady(error) ? unavailable() : dbFail(req, clientId, "save your number request", error ?? { message: "no row" });
+    audit("phone_port_request", 1, `numbers=${v.numbers.length} lc_phone=${v.isLcPhone ?? "unsure"}`).catch(() => {});
+    return json({ ok: true, request: portRequestView(row as PortRequestRow) });
+  }
+
+  // An OPERATOR lands a moved number on this builder once it has arrived in THEIR Twilio account
+  // (their sub-account, or the parent for a builder who lives there): numberRequests.ts adoptNumber
+  // finds it there (refusing one in any other account), records it the way a calling-only purchase
+  // is recorded, and then, exactly as phone_buy_number does after a purchase, the number's calls go
+  // to My Synergy Phone (calling on) or voicemail (off), its texts to sms-inbound or into the
+  // business's texting setup, and its FriendlyName becomes the client id (the purchase's
+  // reconciliation key). Open requests naming it are marked done. Nothing is bought, no wallet
+  // hold is taken: the number's monthly fee from its second month is the daily cron's, as for any
+  // number (its first month here is not charged).
+  if (action === "phone_adopt_number") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    if (operator && !operator.canBill) return json({ error: "This operator account cannot change billing." }, 403);
+    const e164 = parseAdoptNumber(payload?.phoneNumber);
+    if (!e164) return json({ error: "Enter the moved number, like (816) 555-0123 (a US local or mobile number)." }, 400);
+    if (!trustHubConfigured()) return phoneUnavailable("Adding a moved number isn't available on this server yet.");
+    // One tenant, one account, even with the switch off (phone_buy_number's own rule).
+    const offSub = await subAccountWhileOff(admin, clientId, (k) => Deno.env.get(k));
+    if (offSub === "lookup_failed") return json({ error: "Couldn't check this account's phone setup just now. Try again in a minute." }, 503);
+    if (offSub === "sub") return json({ error: SUB_WHILE_OFF_SENTENCE, code: "twilio_sub_while_off" }, 409);
+    // ⚠️ ADOPTING NEVER MAKES AN ACCOUNT (review 2026-10-09). A moved number can only have landed in
+    // an account that already exists, so the account is looked up the way TWILIO_SUBACCOUNTS
+    // "manual" does it (lookupOnlyEnv): an existing, finished sub-account, or the parent for a
+    // builder who lives there, and nothing is made or finished. A builder with no finished
+    // sub-account of their own while the switch is on is refused with what to do, instead of one
+    // being made as a side effect.
+    const prov = await ensureTwilioAccount(admin, clientId, { get: lookupOnlyEnv((k) => Deno.env.get(k)) });
+    if (!prov.ok) {
+      if (prov.reason === "not_configured") return phoneUnavailable(ensureRefusalSentence(prov));
+      if (prov.reason === "manual") {
+        return json({
+          error: "This builder has no finished Twilio account of their own yet, so the number cannot have landed in it. Make or finish it on their Twilio account card (Admin, Account), move the number into it (PORTING.md), then adopt it.",
+          code: "no_own_account",
+        }, 409);
+      }
+      if (prov.reason === "busy") return json({ error: ensureRefusalSentence(prov) }, 409);
+      if (prov.reason === "suspended" || prov.reason === "closed") return phoneRefused(ensureRefusalSentence(prov), 403);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "twilio_provision_failed", severity: "error",
+        message: `This builder's Twilio account could not be made (stopped at ${prov.step ?? "start"}, ${prov.code})`,
+        context: { step: prov.step, code: prov.code } }).catch(() => {});
+      return filedHere(json({ error: ensureRefusalSentence(prov) }, 502));
+    }
+    const smsUrl = smsInboundUrl((k) => Deno.env.get(k));
+    const tw = await tenantTwilio();
+    if (!tw.ok) return tenantTwilioRefused(tw.error);
+    const creds = tw.account;
+    const ve = voiceEnv((k) => Deno.env.get(k), creds?.source === "sub");
+    if (!smsUrl || !ve.ok || !creds) return phoneUnavailable("Adding a moved number isn't available on this server yet.");
+    const live = await phoneNumberRows();
+    if (live.error) return dbFail(req, clientId, "check your numbers", live.error);
+    const liveRows = live.data ?? [];
+    if (!liveRows.some((r) => r.phone_number === e164)) {
+      if (!live.perNumber && liveRows.length >= 1) return json({ error: "This account already has a number, and this server keeps one per account." }, 409);
+      if (liveRows.length >= MAX_NUMBERS) return json({ error: `This account has ${MAX_NUMBERS} numbers, the most one account can have.` }, 409);
+    }
+    const subAccountSid = creds.source === "sub" ? creds.accountSid : null;
+    const parent = creds.source === "sub" ? parentCreds((k) => Deno.env.get(k)) : null;
+    const out = await adoptNumber({ e164, subAccountSid }, {
+      tenantId: clientId,
+      liveRow: async (n) => {
+        const { data, error } = await admin.from("sms_numbers").select("id, client_id").eq("phone_number", n).is("released_at", null).maybeSingle();
+        return error ? { ok: false as const, error } : { ok: true as const, row: (data ?? null) as { id: string; client_id: string } | null };
+      },
+      findInTenant: (n) => findNumberSid({ creds, e164: n }),
+      findInParent: parent ? (n) => findNumberSid({ creds: parent, e164: n }) : null,
+      isOtherTenant: async (name) => {
+        const { data, error } = await admin.from("client_configs").select("client_id").eq("client_id", name).maybeSingle();
+        return error ? { ok: false as const, error } : { ok: true as const, other: !!data && name !== clientId };
+      },
+      openRequestNames: async (n) => {
+        const { data, error } = await admin.from("phone_number_requests").select("id")
+          .eq("client_id", clientId).in("status", ["new", "in_progress"]).contains("numbers", [n]).limit(1);
+        // No table yet (298 not applied): no request can name it, so the parent's adoption is refused.
+        if (error) return phoneNotReady(error) ? { ok: true as const, open: false } : { ok: false as const, error };
+        return { ok: true as const, open: (data ?? []).length > 0 };
+      },
+      record: async (sid) => {
+        const { data, error } = await admin.from("sms_numbers")
+          .insert(callingOnlyNumberRow(clientId, { sid, phoneNumber: e164 }, subAccountSid))
+          .select("id, phone_number, twilio_sid").single();
+        return error || !data ? { ok: false as const, error: error ?? { message: "no row returned" } } : { ok: true as const, row: data };
+      },
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json({ error: out.error, ...(out.code ? { code: out.code } : {}) }, out.status);
+      if (out.kind === "db") return dbFail(req, clientId, "record the moved number", out.error);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_adopt_number_failed", severity: "error",
+        message: `Looking the moved number up at Twilio failed (code ${out.code})`, context: { twilio_code: out.code } }).catch(() => {});
+      return filedHere(json({ error: out.error }, out.status));
+    }
+    const doneRequests = async () => {
+      await admin.from("phone_number_requests")
+        .update({ status: "done", handled_at: new Date().toISOString(), handled_by: isUuid(String(userId ?? "")) ? userId : null, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).in("status", ["new", "in_progress"]).contains("numbers", [e164])
+        .then(() => {}, () => {});
+    };
+    if (out.already) {
+      await doneRequests();
+      return json({ ok: true, already: true, number: { id: out.rowId, e164 } });
+    }
+    const { row, sid } = out;
+    audit("phone_adopt_number", 1, `number=${row.id} sub=${!!subAccountSid}`).catch(() => {});
+    await doneRequests();
+    // The purchase's reconciliation key (purchaseNumber's FriendlyName = client_id), so a later
+    // lookup by name finds it. A failure here changes nothing else, so it is only logged.
+    const named = await applyNumberVoice({ creds, numberSid: sid, config: { FriendlyName: clientId } });
+    if (!named.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_adopt_number_name_failed", severity: "info",
+        message: `The moved number's FriendlyName was not set (HTTP ${named.status}, code ${named.code})`, context: { number_id: row.id } }).catch(() => {});
+    }
+    // Texting, then calls and texts' webhooks: phone_buy_number's own tail.
+    const serviceSid = await textingServiceSid();
+    let joined = false;
+    if (serviceSid) {
+      const att = await attachToTexting({ serviceSid, numberSid: sid }, textingDeps(String(row.id), creds));
+      joined = att.ok;
+      if (!att.ok) {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_texting_failed", severity: "error",
+          message: `A moved number did not join the texting setup (stopped at ${att.step})`,
+          context: { number_id: row.id, step: att.step, twilio_code: (att.error as { code?: number } | null)?.code ?? null } }).catch(() => {});
+      }
+    }
+    const { data: cs } = await admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle();
+    const number = { id: String(row.id), e164, callingOnly: !joined };
+    if ((cs as { phone_status?: string } | null)?.phone_status === "on") {
+      const done = await connectNumberForCalls({ ...row, messaging_service_sid: joined ? serviceSid : null });
+      return json({ ok: true, number: { ...number, voiceReady: done.ok }, ...(done.ok ? {} : { warning: "It's on the account, but connecting it for calls didn't finish. Press \"Connect this number for calls\" to try again." }) });
+    }
+    const applied = await applyNumberVoice({
+      creds, numberSid: sid, config: { ...numberVoicemailConfig(ve.env), ...(joined ? {} : numberSmsConfig(smsUrl)) },
+    });
+    if (!applied.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_webhooks_failed", severity: "error",
+        message: `A moved number's voicemail and text settings did not apply (HTTP ${applied.status}, code ${applied.code})`,
+        context: { number_id: row.id } }).catch(() => {});
+      return json({ ok: true, number: { ...number, voiceReady: false }, warning: "It's on the account, but its voicemail and texts aren't set up yet. Turn calling on and press \"Connect this number for calls\" to finish." });
+    }
+    return json({ ok: true, number: { ...number, voiceReady: false } });
   }
 
   // ── The Calls report ────────────────────────────────────────────────────────────────────
@@ -10537,7 +13910,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rawDays = Number(payload?.days ?? 30);
     const days = Number.isFinite(rawDays) ? Math.min(366, Math.max(1, Math.round(rawDays))) : 30;
     const since = new Date(Date.now() - days * 86400000).toISOString();
-    const me = String(userId ?? "").toLowerCase();
+    // selfUserId: MY is the report's default, and while acting as somebody "my" is theirs.
+    const me = String(selfUserId ?? "").toLowerCase();
 
     // PostgREST answers at most 1000 rows a request, so read in pages. A cap keeps one huge
     // tenant from turning a report into a timeout; hitting it is reported, never hidden.
@@ -11159,6 +14533,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, copy: clean });
   }
 
+  // ── The photo design's pictures (Carolyn 2026-10-14, her GHL quote email's top photo) ──
+  // Upload-only, like upload_logo: the picture goes into this builder's own folder in the public
+  // `branding` bucket under an unguessable name, and the URL comes back for the wording box to
+  // hold. Nothing is written to the database until "Save wording", which runs it through
+  // cleanTemplateCopy (https:// only) like any other address. 3 MB, the style photo's limit: a
+  // photo across the top of an email is a photo, not a logo.
+  if (action === "email_upload_image") {
+    const which = payload?.which === "footer" ? "footer" : payload?.which === "hero" ? "hero" : "";
+    if (!which) return json({ error: "Say which picture: the top photo or the bottom banner." }, 400);
+    if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) return json({ error: "No image data." }, 400);
+    const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const ct = String(payload.imageContentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    let bytes: Uint8Array;
+    try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); } catch { return json({ error: "Invalid image data." }, 400); }
+    if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB). Save it smaller, about 1200 pixels wide is plenty for an email." }, 400);
+    const path = `${clientId}/email-${which}-${crypto.randomUUID()}.${ext}`;
+    const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
+    if (up.error) return dbFail(req, clientId, "upload that picture", up.error);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, url: pub.publicUrl });
+  }
+
   // ── The building photo on a quote email (2026-10-04) ──────────────────────────────
   // A style's own photo, behind that style's own "Image on estimate" switch, and only an
   // upload in this builder's own storage folder (tenantStylePhotoUrl): submit-estimate's rule
@@ -11200,7 +14599,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("error" in cleaned) return json({ error: cleaned.error }, 400);
     const copy = cleaned.copy[k] ?? {};
     const { data: cs, error: csErr } = await admin.from("client_settings")
-      .select("business_name, business_logo_url, business_phone, business_website, quote_terms, invoice_in_ghl")
+      .select("business_name, business_logo_url, business_phone, business_website, business_address, quote_terms, invoice_in_ghl")
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return dbFail(req, clientId, "read your business details for the preview", csErr);
     let pictureUrl: string | null = null;
@@ -11228,6 +14627,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       quoteTerms: cs?.quote_terms || null,
       pictureUrl,
       styleLabel,
+      address: cs?.business_address ?? null,
       // StructureStudio invoicing (invoice_in_ghl = false) sends the sign-on-the-quote-page
       // invoice; the CRM path sends the hosted one. Preview the one this builder's customers get.
       invoiceToSign: cs?.invoice_in_ghl === false,
@@ -11539,12 +14939,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // crm_send_email adds, read the same way (keyed on the JWT, limit(1)). A failed read just
     // sends the test without it. None in view-as, as there: the person writing is CSM Synergy
     // staff, not the builder, and the composer shows no signature, so none is added.
-    let signature: string | null = null;
+    let sig: { text: string | null; html: string | null } = { text: null, html: null };
     try {
       const { data: pu } = await admin.from("client_users")
         .select("prefs").eq("user_id", userId ?? "").limit(1).maybeSingle();
-      signature = operator ? null : cleanSignature((pu?.prefs as Record<string, unknown> | null)?.emailSignature);
+      sig = operator ? { text: null, html: null } : signaturePair(pu?.prefs);
     } catch (_) { /* no signature is fine for a test */ }
+    // The HTML block is rendered HERE and handed to testEmail as a finished string. testEmail
+    // lives in emailTemplates.ts, which is bundled into customer-accept, shop-checkout and
+    // submit-estimate as well — letting it import the signature cleaner would turn a one-function
+    // deploy into four, for nothing.
+    const signatureBlockHtml = signatureHtml(sig.text, sig.html);
     // sendTenantEmail owns the ledger row, the beta redirect and the dark guards — it
     // never throws; the verdict below is the whole outcome. It also writes the contact (and
     // who sent the test) on the ledger row at the claim (migration 261), so the test sits in
@@ -11555,7 +14960,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       to,
       ...(contactId ? { contactId } : {}),
       ...(userId ? { sentBy: String(userId) } : {}),
-      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}`, signature }),
+      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}`, signature: sig.text, signatureBlockHtml }),
     });
     if (out.sent) {
       return json({ ok: true, messageId: out.messageId });
@@ -11815,7 +15220,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // first. `refused` carries this action's own refusals, unchanged. `noEmail` is for the
   // re-stamp's own wording only; resend_quote_email answers with `sent` and `reason` as before.
   // `sender` is whoever set the send off, for the reply copy (replyCopy above): a customer who
-  // answers the quote reaches the record and that person's inbox.
+  // answers the estimate reaches the record, and that person's inbox if they switched copies on.
   const sendQuoteEmail = async (
     shortCode: string,
     sender: ReplySender,
@@ -11830,7 +15235,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const { data: cs, error: csErr } = await admin
       .from("client_settings")
-      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms, email_template_copy")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy")
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return { refused: dbFail(req, clientId, "read your settings", csErr) };
     if (!cs || cs.invoice_in_ghl !== false) {
@@ -11852,6 +15257,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // 2026-10-04 a re-send passed neither, so it said different words from the first send.
       templateCopy: cs.email_template_copy,
       customerName: String(d?.contact?.name ?? "").trim(),
+      customerCompany: companyOf(d?.contact),
       pictureUrl: styleEmailPhoto(styleRow),
       businessName: cs.business_name || clientId,
       logoUrl: cs.business_logo_url || null,
@@ -11866,6 +15272,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       formalPdfUrl: d.ss_quote_pdf_url || null,
       quoteTerms: cs.quote_terms || null,
       docWord: "quote",
+      // The photo design's signature carries the address, as the first send's does.
+      address: cs.business_address ?? null,
     });
     const replyTo = await replyCopy(sender, { shortCode, recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
@@ -12339,7 +15747,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       afterWrite: async () => {
         charge = await chargeLookup(admin, lookup, {
           clientId, kind: VERIFY_TAX_METER, refType: "design", refId: shortCode,
-          memo: `Verified sales tax rate${lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
+          // "Tax verification · SST-5021 · Minnesota": the line the builder's Transactions shows.
+          memo: taxChargeMemo({ kind: VERIFY_TAX_METER, quoteNumber: d.ss_quote_number || shortCode, state: address?.state }),
           actorUserId: userId ?? null,
         });
         if (!charge.charged && charge.reason === "error") {
@@ -12432,7 +15841,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       reviewUrl: myQuotesUrl(clientId, req),
       quoteTerms: cs?.quote_terms,
     });
-    // The rep who raised or re-sent it gets the customer's answer too (replyCopy above).
+    // The rep who raised or re-sent it gets the customer's answer too, if they switched reply
+    // copies on (replyCopy above).
     const replyTo = await replyCopy(signedIn, { shortCode: String(co.short_code), recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
       kind: "change_order", shortCode: co.short_code, to,
@@ -13104,7 +16514,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("change_orders")
         .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
         .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
-      admin.from("orders").select("total_cents, pretax_subtotal_cents")
+      admin.from("orders").select("total_cents, pretax_subtotal_cents, building_serial")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
       admin.from("client_settings")
         .select("business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, co_fee_label, email_template_copy")
@@ -13130,6 +16540,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           address: csRes.data?.business_address ?? null,
         },
         estimateNumber: String(inv.invoice_number),
+        // The building's full serial (316), the same tag the order carries.
+        serialNumber: ordRes.data?.building_serial ?? null,
         dateIso: new Date().toISOString(),
         // "Bill to" and the letterhead logo, the same as send_invoice prints (2026-10-05).
         customer: pdfCustomerFrom(d.contact, shortCode),
@@ -13211,6 +16623,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           ip: acc.ip == null ? null : String(acc.ip),
           consentText: String(acc.consent_text ?? ""),
           docLabel: "Invoice",
+          onBehalfOf: onBehalfOfFrom(d.contact, shortCode),
         });
       }
 
@@ -13247,6 +16660,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // invoice sender passed either, so saved invoice wording never reached a customer.
         templateCopy: csRes.data?.email_template_copy,
         customerName: String((d.contact as { name?: unknown } | null)?.name ?? "").trim(),
+        customerCompany: companyOf(d.contact),
         businessName: String(csRes.data?.business_name ?? "").trim() || clientId,
         logoUrl: null, phone: csRes.data?.business_phone, website: csRes.data?.business_website,
         invoiceNumber: String(inv.invoice_number),
@@ -13557,12 +16971,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // that list was missing `batten` — see attributeLines.ts for what that cost.)
     const cladOverrides: Record<string, string> = {};
     let cladOffered: string[] = [];
+    // The style's d3, kept for the Roof line's metal profile (2026-10-06): a design that has not
+    // picked one draws and quotes its style's starting value, so a recolour here has to word the
+    // line the way submit-estimate did, or the roof's own description would change under it.
+    let styleD3: unknown = null;
     {
       const styleKey = String(sel.style ?? "").trim();
       if (styleKey) {
-        const stRow = await admin.from("building_styles").select("id")
+        const stRow = await admin.from("building_styles").select("id, d3")
           .eq("client_id", clientId).eq("key", styleKey).maybeSingle();
         if (stRow.error) return dbFail(req, clientId, "read that design's style", stRow.error);
+        styleD3 = stRow.data?.d3 ?? null;
+        if (!stRow.data) {
+          // The exact key missed (a stored label, or a key differing in case or spacing), yet
+          // submit-estimate found the style by key OR label, normalised, and worded the Roof line
+          // from ITS d3. Match the d3 the same way, or a recolour here rewords a standing seam
+          // line as plain metal (review 2026-10-07). The cladding list above keeps its exact-key
+          // read: what is offered is not this change's question.
+          const all = await admin.from("building_styles").select("key, label, d3").eq("client_id", clientId);
+          if (all.error) return dbFail(req, clientId, "read that design's style", all.error);
+          const hit = ((all.data ?? []) as { key: string; label: string | null; d3: unknown }[])
+            .find((r) => attrNorm(r.key) === attrNorm(styleKey) || attrNorm(r.label) === attrNorm(styleKey));
+          styleD3 = hit?.d3 ?? null;
+        }
         if (stRow.data?.id) {
           const scRows = await admin.from("style_cladding").select("cladding_id, label_override")
             .eq("client_id", clientId).eq("style_id", stRow.data.id).eq("active", true).not("rate", "is", null);
@@ -13612,7 +17043,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: `Couldn't match "${sel.style} ${sel.size}" in your catalog — was the style or size renamed? Fix the catalog (or resubmit from the designer), then try again.` }, 400);
     }
     const paint = computePaintLine(palette, ctx, next.paintStatus, next.paintBody || "TBD", next.paintTrim || "TBD");
-    const roof = computeRoofLine(palette, ctx, next.roofType, next.roofColor);
+    // The design's effective metal profile (its own pick, else the profile its agreed Roof line
+    // names, else the style's), so a metal roof on standing seam keeps "Metal (Standing Seam) — …"
+    // through a recolour or a paint change, and every other roof keeps the words it was quoted with.
+    // The agreed line beats the style (review 2026-10-07): a style set to Standing Seam after this
+    // order was signed as "Metal — Black" must not add "Roof: options updated" to a paint change.
+    // The pick rides along in newSelections (...sel).
+    const roofAgreed = (d.accepted_at || d.accepted_snapshot) ? agreedBaseline(d).lines : null;
+    const roof = computeRoofLine(palette, ctx, next.roofType, next.roofColor, effectiveRoofProfile(sel.roofProfile, styleD3, roofAgreed));
 
     // deno-lint-ignore no-explicit-any
     const newSnap: any = JSON.parse(JSON.stringify(snap));
@@ -14115,9 +17553,38 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // convert/send machinery below stays byte-identical for every invoice_in_ghl tenant.
     {
       const { data: cur0 } = await admin.from("client_settings")
-        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy")
+        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy, ss_invoice_next, qbo_realm_id, qbo_connected_at, qbo_refresh_error")
         .eq("client_id", clientId).maybeSingle();
       if (cur0?.invoice_in_ghl === false) {
+        // ── QUICKBOOKS AND A BLANK INVOICE START (migration 283) ─────────────────────────────
+        // A blank invoice start is allocated as 1000, and the books push hands that number to
+        // QuickBooks as the DocNumber. A builder who already invoices out of their QuickBooks
+        // company may well have an invoice 1000 there. So while the push would run, ask for their
+        // next QuickBooks number instead of starting at 1000. "Would run" is the push's own two
+        // dark guards: a connected, unbroken company AND the paid entitlement. Without either
+        // nothing is pushed, and 1000 is safe.
+        //
+        // FAILS CLOSED. The connection is judged from cur0 with getQboConnection's own test (realm
+        // AND connected_at, no refresh error), so no extra read can fail and pass as "not
+        // connected". The entitlement goes through qboEntitled, NOT qboPushAllowed: that one
+        // answers false on a billing-read error, which here would let 1000 through while the push
+        // further down, reading again, could succeed and send it. Connection first, so a tenant
+        // with nothing connected never pays for the billing read; a start already set pays nothing.
+        //
+        // Only the FIRST number is guarded here (once one is issued the counter is set). A company
+        // connected after invoices 1000-1004 went out is covered where the adoption happens:
+        // pushQboInvoice adopts an existing DocNumber only for the same customer.
+        const QBO_NEEDS_START = "You're connected to QuickBooks, so set your next invoice number first (Settings → CRM Connection → Quotes & Invoices). Starting at 1000 could reuse an invoice number already in QuickBooks.";
+        const qboBlankStart = async (): Promise<"ok" | "needs_start" | { unreadable: unknown }> => {
+          if (cur0?.ss_invoice_next != null) return "ok";
+          if (!cur0?.qbo_realm_id || !cur0?.qbo_connected_at || cur0?.qbo_refresh_error) return "ok";
+          try {
+            return (await qboEntitled()) ? "needs_start" : "ok";
+          } catch (e) {
+            return { unreadable: e };
+          }
+        };
+
         // The design: the SS quote is the prerequisite, and the acceptance evidence is OUR
         // OWN record (designs.status/accepted_at written by customer-accept, migration 124)
         // — there is no live GHL estimate to check.
@@ -14135,7 +17602,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
 
         // The order this invoice belongs to, for the caller to navigate to. The portal's
-        // order deep link is /portal/orders/o-<orders.id>, keyed on the UUID and not on
+        // order deep link is /orders/o-<orders.id>, keyed on the UUID and not on
         // order_no, so the id is what has to travel back. Best-effort by contract: an invoice
         // that went out is not undone by our failing to say where it landed, so every caller
         // treats a null orderId as "no link", never as an error.
@@ -14292,6 +17759,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               ...invoiceEmail({
                 templateCopy: cs2?.email_template_copy,
                 customerName: String((c2?.contact as { name?: unknown } | null)?.name ?? "").trim(),
+                customerCompany: companyOf(c2?.contact),
                 businessName: String(cs2?.business_name ?? "").trim() || clientId,
                 logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
                 invoiceNumber: String(prior.invoice_number),
@@ -14352,6 +17820,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           const phoneDigits = phoneKey(contact.phone);
           if (phoneDigits.length < 10) {
             return json({ error: "This customer has no phone number on file, and they sign the invoice by text. Add their number to the contact first, then push it to an invoice." }, 400);
+          }
+
+          // The QuickBooks start (qboBlankStart above), asked HERE for the phone's reason: refused
+          // at the allocation further down, this push would already have recorded a rep
+          // acceptance, promoted the design and opened its order. A design never accepted has no
+          // issued invoice number to recover, so the answer here is the answer down there.
+          {
+            const qb = await qboBlankStart();
+            if (qb === "needs_start") return json({ error: QBO_NEEDS_START }, 400);
+            if (qb !== "ok") return dbFail(req, clientId, "check your QuickBooks plan", qb.unreadable, 502);
           }
 
           // Who is attesting. Read from client_users by the VERIFIED session's userId, never
@@ -14654,6 +18132,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // Number — allocated ONCE; the recovery path reuses it, never re-numbers.
         let invNumber = recoveredNumber;
         if (!invNumber) {
+          // QuickBooks and a blank start (qboBlankStart, at the top of this branch). Asked before
+          // the number is taken, so a refusal spends nothing.
+          {
+            const qb = await qboBlankStart();
+            if (qb === "needs_start") {
+              await setClaim({ status: "failed", error: "qbo needs invoice start" });
+              return json({ error: QBO_NEEDS_START }, 400);
+            }
+            if (qb !== "ok") {
+              await setClaim({ status: "failed", error: "qbo entitlement unreadable" });
+              return dbFail(req, clientId, "check your QuickBooks plan", qb.unreadable, 502);
+            }
+          }
           const { data: allocated, error: allocErr } = await admin
             .rpc("allocate_ss_invoice_number", { p_client_id: clientId });
           if (allocErr) {
@@ -14661,6 +18152,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             return dbFail(req, clientId, "allocate an invoice number", allocErr, 502);
           }
           invNumber = allocated ? String(allocated) : null;
+          // DEFENSIVE since 283, which starts a blank invoice book at 1000: NULL now means the
+          // settings row vanished, or 125's allocator is still the live one.
           if (!invNumber) {
             await setClaim({ status: "failed", error: "no invoice starting number" });
             return json({ error: "No starting invoice number is set. Add one in Settings → CRM Connection → Quotes & Invoices." }, 400);
@@ -14690,6 +18183,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
             const planUrl = d.image_url && String(d.image_url).startsWith(expectedPdfPrefix) ? String(d.image_url) : null;
             const snapLines = amended.lines;
+            // The building's full serial (316): minted when the order row was created, so it is
+            // there by now. A failed read only costs the line on the document.
+            const { data: serRow } = await admin.from("orders").select("building_serial")
+              .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
             const pdfBytes = await buildQuotePdf({
               docKind: "invoice",
               business: {
@@ -14699,6 +18196,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 address: cur0?.business_address ?? null,
               },
               estimateNumber: invNumber,
+              serialNumber: serRow?.building_serial ?? null,
               dateIso: nowIso(),
               // "Bill to": the customer on the design, and the letterhead logo (2026-10-05).
               customer: pdfCustomerFrom(d.contact, shortCode),
@@ -14793,6 +18291,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             ...invoiceEmail({
               templateCopy: cur0?.email_template_copy,
               customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
+              customerCompany: companyOf(c?.contact),
               businessName: String(cur0?.business_name ?? "").trim() || clientId,
               logoUrl: cur0?.business_logo_url,
               phone: cur0?.business_phone,
@@ -14950,7 +18449,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             }
             const meter = await chargeLookup(admin, lookup, {
               clientId, kind: "tax_invoice", refType: "invoice", refId: String(invNumber),
-              memo: `Sales tax check on invoice ${invNumber}${lookup.ok && lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
+              // "Invoice tax check · Invoice 1042 · Missouri": the line the builder's Transactions shows.
+              memo: taxChargeMemo({ kind: "tax_invoice", invoiceNumber: invNumber, state: addressFrom(c?.contact)?.state }),
               actorUserId: userId ?? null,
             });
             if (!meter.charged && meter.reason === "error") {
@@ -15101,6 +18601,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ...invoiceEmail({
           templateCopy: cur.email_template_copy,
           customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
+          customerCompany: companyOf(c?.contact),
           businessName: String(cur.business_name ?? "").trim() || clientId,
           logoUrl: cur.business_logo_url,
           phone: cur.business_phone,

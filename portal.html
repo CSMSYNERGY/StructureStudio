@@ -94,7 +94,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    items slid through — a sliver of the last nav row under the signed-in user's name. Same 12px, same
    look, but now it belongs to the opaque box. */
 .ss-foot{position:sticky;bottom:0;background:#FFF;z-index:60;border-top:1px solid #F1F5F9;padding:12px 0}
-.ss-newlink{display:flex;align-items:center;gap:6px;font-size:12px;color:#64748B;text-decoration:underline;text-underline-offset:2px;cursor:pointer;margin-bottom:12px;padding:0 4px;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
+.ss-newlink{display:flex;align-items:center;gap:6px;font-size:13.5px;color:#64748B;text-decoration:underline;text-underline-offset:2px;cursor:pointer;margin-bottom:12px;padding:0 4px;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
 .ss-newlink:hover{color:#1B7895}
 .ss-newlink svg{width:14px;height:14px;flex-shrink:0}
 .ss-user-wrap{position:relative;margin-bottom:2px}
@@ -106,24 +106,55 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-user-wrap .ss-user.active{background:#DBEAFF}
 .ss-user-wrap .ss-user.active .uname{color:#3D3672}
 .ss-user .uchev{width:13px;height:13px;margin-left:auto;color:#94A3B8;flex-shrink:0}
-.ss-user-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:5px;display:none;z-index:80}
+/* Opens to the RIGHT of the identity row, not upward (Carolyn 2026-10-23).
+   ⚠️ position:FIXED, not absolute, and that is load-bearing: .ss-side is
+   overflow-y:auto, which makes it a scroll container on BOTH axes, so an
+   absolutely-positioned fly-out past its right edge is clipped (and adds a
+   horizontal scrollbar) — the very thing the collapsed-rail comment above warns
+   about for the account switcher. Fixed escapes the clip, and the geometry is
+   predictable without JS: the rail is sticky at top:0 with height:100vh, so its
+   footer always sits at the viewport bottom — 12px of .ss-foot padding plus the
+   wrap's 2px margin, hence bottom:14px, which lines the menu's last row up with
+   the name it belongs to. `left` is the rail width + a 6px gap, so it moves with
+   the collapsed rail in the <=900px block below. Nothing between here and the
+   viewport may gain transform/filter/contain, or fixed re-anchors to that element. */
+.ss-user-menu{position:fixed;bottom:14px;left:246px;min-width:212px;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:5px;display:none;z-index:80}
 .ss-user-wrap:hover .ss-user-menu,.ss-user-wrap:focus-within .ss-user-menu{display:block}
-/* The 6px above is a VISUAL gap and used to be a dead zone: an absolutely-positioned child
-   rendered outside its parent's box does not extend that parent's hover region, so moving the
+/* The gap beside the row (now horizontal — it was above until the menu moved to the
+   right) used to be a dead zone: a child rendered outside its parent's box does not extend
+   that parent's hover region, so moving the
    mouse off the name toward the menu left :hover before reaching it and the menu vanished
    mid-travel. Sign Out was reachable only by CLICKING the name first — which merely focuses
    it, pinning the menu open through :focus-within. Carolyn, 2026-09-11: "that is not
    intuitive ... we should be able to mouse over your name and click on the nav popup."
    This bridges the gap with a transparent strip that belongs to the MENU, so crossing it
-   keeps the wrap hovered. Taller than the gap on purpose — a 6px bridge against a 6px gap
-   loses to sub-pixel rounding at fractional zoom levels. */
-.ss-user-menu::before{content:"";position:absolute;left:0;right:0;top:100%;height:10px}
+   keeps the wrap hovered (hover still propagates up the DOM, so the menu being position:fixed
+   changes nothing here).
+
+   ⚠️ THE FIRST ATTEMPT (12px wide, top:0 bottom:0) DID NOT FIX IT, and Carolyn reported the
+   same bug again on 2026-11-01: "you should be able to click on this when it hovers.
+   Currently, you have to actually click your name". Two measurements say why, and both are
+   arithmetic off this very file — re-measure, do not re-guess:
+     1. HORIZONTAL. .ss-side is width:240px with padding:16px 14px 0, so the wrap's right
+        edge is at x≈226px while the menu starts at left:246px. The gap is ~20px, not 6px.
+        A 12px bridge left ~8px of dead zone. Now 28px — wider than the gap on purpose, since
+        a bridge equal to the gap loses to sub-pixel rounding at fractional zoom levels, and
+        the overlap under the row is harmless (the wrap is hovered there anyway).
+     2. VERTICAL. The menu is position:fixed at bottom:14px and sized by its content, so it
+        is SHORTER than, and offset from, the identity row it belongs to — the row is ~44px
+        tall and its avatar/email lines can sit outside the menu's vertical band entirely.
+        top:0/bottom:0 is the MENU's box, so a pointer travelling diagonally from the name
+        crossed neither the wrap nor the bridge. ±64px covers the row plus the collapsed-rail
+        offset below. Keep both numbers in step with the <=900px override.
+   position:fixed stays load-bearing (see above) — .ss-side's overflow-y:auto clips an
+   absolutely-positioned fly-out, so the bridge is the mechanism, not a workaround. */
+.ss-user-menu::before{content:"";position:absolute;top:-64px;bottom:-64px;right:100%;width:28px}
 .ss-user-menu button,.ss-user-menu a{display:flex;text-decoration:none;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
 /* Sign Out owns the red hover; My Profile is an <a> (it navigates rather than acting) and
    opts out via .neutral, same as Contact support. */
 .ss-user-menu button:hover,.ss-user-menu a:hover{background:#FEF2F2;color:#DC2626}
 /* Operator account switcher — click-toggled (NOT hover: the hover menu popping over
-   content is what Carolyn flagged), opens UPWARD like .ss-user-menu. Its initials tile
+   content is what Carolyn flagged), opens UPWARD — .ss-user-menu did too until 2026-10-23. Its initials tile
    restyles .ss-clogo for the white rail (the original is white-on-dark for the topbar). */
 .ss-switch-wrap{position:relative;margin-bottom:10px}
 .ss-switch{display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:9px;border:1px solid #E2E8F0;background:#F8FAFC;cursor:pointer;font-family:inherit;text-align:left}
@@ -143,6 +174,31 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-switch-list .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ss-switch-list .vw{margin-left:auto;font-size:10.5px;font-weight:800;color:#92400E;background:#FEF3C7;border-radius:6px;padding:2px 7px;flex-shrink:0}
 .ss-switch-note{font-size:12px;color:#94A3B8;font-weight:600;padding:8px}
+/* ACTING AS a person (2026-10-23). Each account row carries a flyout of the people on it;
+   picking one opens the account wearing THEIR access. */
+.ss-switch-row{position:relative}
+.ss-switch-row .rchev{width:13px;height:13px;margin-left:4px;color:#CBD5E1;flex-shrink:0}
+.ss-switch-row:hover .rchev{color:#64748B}
+/* Opens to the LEFT. The menu it hangs off is right-aligned under a pill in the top-right
+   corner, so a submenu on the right would start off the edge of the window. */
+/* ⛔ position:FIXED, not absolute, and this is the whole reason the flyout exists at all.
+   `.ss-switch-list` above is `overflow-y:auto`, so an absolutely-positioned child of a ROW
+   is clipped to that scroll box — and this opens to the LEFT of it, entirely outside. It
+   rendered, it had a size, and not one pixel of it was ever painted: measured at
+   left/right -24/240 against a list spanning 244/544. Carolyn: "it has the appearance of
+   being there, but isn't actually there."
+   Fixed positioning escapes the clip; the coordinates come from the hovered row, so there
+   is no top/right here to fight with them. */
+.ss-switch-sub{position:fixed;width:250px;background:#FFF;
+  border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:6px;z-index:95;
+  max-height:320px;overflow-y:auto}
+.ss-switch-sub button{display:block;width:100%;background:none;border:none;color:#334155;font-size:12.5px;
+  font-weight:700;padding:7px 8px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch-sub button:hover{background:#F1F5F9}
+.ss-switch-sub button.cur{background:#FEF3C7}
+.ss-switch-sub button.whole{border-bottom:1px solid #E2E8F0;border-radius:7px 7px 0 0;margin-bottom:4px;padding-bottom:9px}
+.ss-switch-sub .sub{display:block;font-size:10.5px;font-weight:600;color:#94A3B8;margin-top:1px}
+.ss-switch-sub .vw{float:right;font-size:10.5px;font-weight:800;color:#92400E;background:#FEF3C7;border-radius:6px;padding:2px 7px}
 .ss-switch-exit{display:block;width:100%;margin-top:5px;background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;font-size:12.5px;font-weight:800;padding:8px 10px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
 .ss-switch-exit:hover{background:#FFEDD5}
 /* Sign Out owns the red hover; a neutral item must not look destructive. */
@@ -156,10 +212,102 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-topbar .ttl{font-size:18px;font-weight:800;color:#FFF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
 .ss-topbar .ttl span{color:#C9DCEA;font-weight:600;font-size:13px;margin-left:10px}
 .ss-topbar .tenant{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+/* The operator account switcher, moved out of the rail's foot and into this corner
+   (2026-10-23). The base .ss-switch rules above are written for the WHITE rail; these
+   repaint it for the dark gradient and flip the menu to open downward. */
+.ss-topbar .ss-switch-wrap{margin:0 0 0 auto;min-width:0}
+.ss-topbar .ss-switch{width:auto;min-width:0;background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.28);padding:5px 10px 5px 7px;gap:10px}
+.ss-topbar .ss-switch:hover{background:rgba(255,255,255,0.22)}
+.ss-topbar .ss-switch .ss-clogo{width:34px;height:34px;background:rgba(255,255,255,0.16);border-color:rgba(255,255,255,0.32);color:#FFF;font-size:12px}
+.ss-topbar .ss-switch .sname{color:#FFF;font-size:15.5px;max-width:220px}
+.ss-topbar .ss-switch .srole{color:rgba(255,255,255,0.74)}
+.ss-topbar .ss-switch .uchev{color:rgba(255,255,255,0.85)}
+/* Opens DOWNWARD now, and right-aligned under the pill rather than stretched to its
+   width: left:0;right:0 made sense against a fixed-width rail and would make this as
+   narrow as the business name here. */
+.ss-topbar .ss-switch-menu{top:calc(100% + 8px);bottom:auto;left:auto;right:0;width:300px;color:#0F172A}
+/* THE SUPPORT BUTTON (2026-10-27, SupportMenu in portal/04-orders.jsx), replacing the floating
+   Feedback pill. It sits just before the switcher / tenant badge and takes the auto margin they
+   used to take, so the pair stays at the right. The chat panel and the ticket dialog render into
+   <body> (createPortal): a fixed child of this sticky bar would stack under page content above 40. */
+.ss-topbar .ss-support{position:relative;margin-left:auto;flex-shrink:0}
+.ss-topbar .ss-support ~ .ss-switch-wrap,.ss-topbar .ss-support ~ .tenant{margin-left:0}
+.ss-sup-btn{display:flex;align-items:center;gap:7px;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.28);color:#FFF;border-radius:9px;padding:8px 12px;font-size:13.5px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap}
+.ss-sup-btn:hover{background:rgba(255,255,255,0.22)}
+.ss-sup-btn svg{width:17px;height:17px;flex-shrink:0}
+.ss-sup-menu{position:absolute;top:calc(100% + 8px);right:0;width:280px;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:6px;z-index:90;color:#0F172A}
+.ss-sup-menu button{display:flex;align-items:center;gap:10px;width:100%;background:none;border:none;padding:8px 9px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-sup-menu button:hover,.ss-sup-menu button:focus-visible{background:#F1F5F9}
+.ss-sup-menu .ic{font-size:17px;width:22px;text-align:center;flex-shrink:0}
+.ss-sup-menu .tx{display:flex;flex-direction:column;min-width:0}
+.ss-sup-menu .lb{font-size:13px;font-weight:700;color:#1E293B}
+.ss-sup-menu .sb{font-size:11.5px;color:#64748B}
+/* My Synergy Phone's download pop-up (11-sms SsPhoneAppPromo): the full-size card grows out of the corner card. */
+.ss-app-promo-pop{animation:ssAppPromoIn .18s ease-out;transform-origin:bottom right}
+@keyframes ssAppPromoIn{from{opacity:0;transform:translateY(14px) scale(.94)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.ss-app-promo-pop{animation:none}}
+/* On a narrow screen the account menu opens under the small card's corner (the card draws above the
+   sticky rail), so the card steps aside while that menu is open. */
+.ss-shell:has(.ss-user-wrap:hover,.ss-user-wrap:focus-within) [data-ss-app-promo="small"]{visibility:hidden}
+.ss-sup-chat{position:fixed;top:70px;right:16px;width:400px;height:min(620px,calc(100vh - 86px));background:#FFF;border:1px solid #E2E8F0;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,0.3);display:flex;flex-direction:column;z-index:950;color:#0F172A;overflow:hidden;font-family:inherit}
+.ss-sup-head{display:flex;align-items:center;gap:8px;padding:12px 14px;background:linear-gradient(100deg,#3D3672 0%,#1B7895 100%);color:#FFF}
+.ss-sup-title{flex:1;min-width:0;display:flex;flex-direction:column}
+.ss-sup-title>span:first-child{font-size:14.5px;font-weight:800}
+.ss-sup-sub{font-size:11px;opacity:.85}
+.ss-sup-ghost{background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.3);color:#FFF;border-radius:7px;padding:4px 9px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit}
+.ss-sup-x{background:none;border:none;color:#FFF;font-size:22px;line-height:1;cursor:pointer;padding:0 2px}
+.ss-sup-note{font-size:11.5px;color:#64748B;background:#F8FAFC;border-bottom:1px solid #E2E8F0;padding:7px 14px;line-height:1.4}
+.ss-sup-list{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.ss-sup-me,.ss-sup-bot{max-width:88%;padding:8px 11px;border-radius:10px;font-size:13.5px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.ss-sup-me{align-self:flex-end;background:#3D3672;color:#FFF;border-bottom-right-radius:3px}
+.ss-sup-bot{align-self:flex-start;background:#F1F5F9;color:#1E293B;border-bottom-left-radius:3px}
+.ss-sup-muted{align-self:flex-start;font-size:12.5px;color:#94A3B8;font-style:italic;padding:2px 4px}
+.ss-sup-link{color:#1B7895;font-weight:700;text-decoration:underline}
+.ss-sup-card{align-self:stretch;border:1px solid #C7D2FE;background:#EEF2FF;border-radius:10px;padding:10px 12px}
+.ss-sup-card-t{font-size:11.5px;font-weight:800;color:#3D3672;text-transform:uppercase;letter-spacing:.3px}
+.ss-sup-card-b{font-size:13px;color:#1E293B;margin-top:3px}
+.ss-sup-rate{align-self:flex-start;display:flex;align-items:center;gap:2px;margin:-5px 0 0 2px;font-size:11.5px;color:#64748B}
+.ss-sup-rate button{background:none;border:1px solid transparent;border-radius:6px;padding:1px 5px;font-size:13px;line-height:1.3;cursor:pointer;opacity:.75;filter:grayscale(.6);font-family:inherit}
+.ss-sup-rate button:hover,.ss-sup-rate button:focus-visible{opacity:1;filter:none;border-color:#E2E8F0}
+.ss-sup-rate button[aria-pressed="true"]{opacity:1;filter:none;background:#EEF2FF;border-color:#C7D2FE}
+.ss-sup-rate span{margin-left:4px}
+.ss-sup-why{align-self:stretch;display:flex;gap:6px;margin-top:-2px}
+.ss-sup-why input{flex:1;min-width:0;border:1px solid #CBD5E1;border-radius:7px;padding:6px 9px;font-size:12.5px;font-family:inherit}
+.ss-sup-why button{background:#3D3672;color:#FFF;border:none;border-radius:7px;padding:6px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit}
+.ss-sup-form{display:flex;gap:8px;align-items:flex-end;padding:10px 12px;border-top:1px solid #E2E8F0}
+.ss-sup-form textarea{flex:1;min-width:0;resize:none;border:1px solid #CBD5E1;border-radius:8px;padding:8px 10px;font-size:13.5px;font-family:inherit;line-height:1.4}
 .ss-clogo{width:34px;height:34px;border-radius:8px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.32);display:flex;align-items:center;justify-content:center;color:#FFF;flex-shrink:0;font-size:12px;font-weight:800}
 .ss-tname{font-size:15.5px;font-weight:800;color:#FFF;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
 .ss-body{flex:1;padding:20px 24px}
 .ss-inner{max-width:1240px}
+/* Pipeline board (2026-10-12, Carolyn: "I am going to make this like the designer where it can be
+   as wide as it needs to be"): while the board shows, the page drops its 1240px cap, and the stage
+   columns share the full width or wrap onto another row, never a scroll bar (SalesPipelines,
+   ssBoardColumns). Keyed on the board itself, so whichever page hosts it gets the width. */
+.ss-inner:has([data-ss-board-wide]){max-width:none}
+/* The Contacts hub's tab row (SsHubTabs, 02-sales.jsx). Ahsan, 2026-10-13: "design and contacts
+   should be different from the pipelines visually so its easier to see and they should be on the
+   right side of the screen may be with a bubble". The pipelines are underline tabs from the left;
+   Contacts and Design list are a rounded two-part bubble at the far right. Carolyn's order from
+   10-12 put those two first, on the left: to go back to it, set .ss-hub-lists's order to -1 (the
+   pipelines' line grows to fill whatever the bubble leaves, on either side).
+   The pipelines' line is flex-basis 0, so the bubble never wraps for want of room; the hub folds
+   pipelines into the ▾ drop-down instead (ssHubLayout takes the bubble's width off the row, using
+   the column-gap below as read from here). In a narrow row SsHubTabs sets data-ss-hub-stacked and
+   the bubble takes its own line above the pipelines, still at the right. Only one thing in the row
+   looks picked: the open pipeline's underline, or the bubble's white part (aria-selected). */
+.ss-hub-row{position:relative;display:flex;flex-wrap:wrap;align-items:flex-end;column-gap:16px;border-bottom:2px solid #E2E8F0;margin-bottom:14px;min-width:0}
+.ss-hub-pipes{display:flex;flex-wrap:wrap;align-items:flex-end;gap:2px;flex:1 1 0;min-width:0}
+.ss-hub-lists{order:1;flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:3px;margin-bottom:4px;background:#F1F5F9;border:1px solid #E2E8F0;border-radius:999px}
+.ss-hub-row[data-ss-hub-stacked] .ss-hub-lists{order:-1;margin:0 0 8px auto}
+.ss-hub-row[data-ss-hub-stacked] .ss-hub-pipes{flex-basis:100%}
+.ss-hub-seg{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:700;letter-spacing:.2px;line-height:18px;color:#475569;text-decoration:none;white-space:nowrap;cursor:pointer;transition:background-color .12s,color .12s,box-shadow .12s}
+.ss-hub-seg .ico{display:inline-flex}
+.ss-hub-seg svg{width:15px;height:15px;flex-shrink:0}
+.ss-hub-seg.locked{color:#94A3B8}
+.ss-hub-seg:hover{background:rgba(255,255,255,.6);color:#1E293B}
+.ss-hub-seg[aria-selected="true"]{background:#FFF;color:#3D3672;box-shadow:0 1px 3px rgba(15,23,42,.14),0 0 0 1px rgba(61,54,114,.18)}
+.ss-hub-seg:focus-visible{outline:2px solid #1B7895;outline-offset:2px}
 /* Designer tab: fixed-height shell, the embedded designer scrolls inside its host
    (body scroll would double-scroll under the sticky topbar). */
 .ss-main.ss-designer-active{height:100vh;height:100dvh}
@@ -192,22 +340,54 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   .ss-brand{display:none}
   /* The switcher needs readable tenant names; a 48px-wide list serves nobody, and the
      sidebar's own overflow-y would clip a fly-out. The Accounts page covers this mode. */
-  .ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav .lock,.ss-newlink span,.ss-back span,.ss-user .utext,.ss-user .uchev,.ss-user-menu .mtext,.ss-switch-wrap{display:none}
+  .ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav .lock,.ss-newlink span,.ss-back span,.ss-user .utext,.ss-user .uchev,.ss-side .ss-switch-wrap{display:none}
+  /* ⚠️ `.ss-switch-wrap` was UNSCOPED here until 2026-10-23, when the switcher moved
+     into the topbar. Left as it was, this rule would have hidden it on every screen under
+     900px — nothing to click, no error, and only findable by opening a tablet. Scoped to
+     the rail, which is all it ever meant. */
   .ss-nav{width:100%}
   .ss-nav a,.ss-nav button{justify-content:center;gap:0;padding:10px 0}
   /* The settings rail collapses like the workspace one — every sub-page has a glyph
      (SETTINGS_ICONS) precisely so it can, and each item keeps its full label in `title`. */
   .ss-back{justify-content:center;gap:0;padding:8px 0}
   .ss-newlink{justify-content:center;padding:0}
+  /* The fly-out is position:fixed, so it does not follow the narrow rail on its own.
+     `bottom` is 14px + the 18px BOTTOM PADDING this block puts back on .ss-side — the
+     wide rail is `16px 14px 0` precisely so .ss-foot can own its bottom edge, and this
+     override restores padding on all four sides, lifting the footer 18px off the
+     viewport floor. Measured, not guessed; re-measure if either padding changes.
+     `left` is NOT overridden for the hover bridge and does not need to be: the rail is 68px
+     with padding:18px 10px, so the wrap's right edge is x≈58px against the menu's left:74px
+     — a ~16px gap, which the shared 28px ::before already covers. Re-check that arithmetic
+     if either number here moves. */
+  .ss-user-menu{left:74px;bottom:32px}
   .ss-user{justify-content:center}
   .ss-foot{width:100%}
-  .ss-user-menu button,.ss-user-menu a{justify-content:center;padding:10px 0}
+  /* The menu KEEPS its labels in the collapsed rail (2026-10-23). They were hidden, and
+     the rows centred, back when it opened upward inside a 68px rail — there was no room
+     for words. It now flies out to the right at its full width, so hiding them left three
+     lone icons floating in a 212px panel. Nothing else in this block changes: the NAV is
+     still icon-only, because those rows really are 68px wide. */
 }
 @media (max-width:560px){
   .ss-topbar{padding:12px 14px}
   .ss-topbar .ttl span{display:none}
   .ss-tname{display:none}
+  /* Same rule for the switcher: the avatar and chevron stay tappable, the words go. */
+  .ss-topbar .ss-switch .stext{display:none}
+  .ss-topbar .ss-switch-menu{width:min(300px,calc(100vw - 28px))}
+  /* No room beside the menu at this width, so the people sit under their account rather
+     than beside it — a flyout here would open off-screen. */
+  .ss-switch-sub{position:static;width:auto;box-shadow:none;border:none;border-left:2px solid #E2E8F0;
+    border-radius:0;margin:4px 0 4px 10px;padding:2px 0 2px 6px;max-height:none}
   .ss-body{padding:14px 12px}
+}
+/* Support on a phone: the button is its icon, and the chat is a full-screen sheet. */
+@media (max-width:640px){
+  .ss-sup-btn{padding:7px 9px}
+  .ss-sup-btn-t{display:none}
+  .ss-sup-menu{width:min(280px,calc(100vw - 28px))}
+  .ss-sup-chat{top:0;right:0;bottom:0;left:0;width:auto;height:auto;border-radius:0;border:none}
 }
 /* Options-tab catalog tables: tighter gutters so the wide fixture tables (Doors/Windows/Ramps,
    now carrying the Internal-only column) fit without a horizontal scroll bar. Scoped to the
@@ -215,6 +395,239 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .tight th,.tight td{padding-left:6px;padding-right:6px}
 .tight td{padding-top:8px;padding-bottom:8px}
 .tight input{box-sizing:border-box}
+/* ── THE SIZES & PRICES TABLE (/settings/sheds-table; 03-catalog.jsx PricingTablePage, 2026-10-30) ──
+   A window-high column whose grid box is the only thing that scrolls, both ways. 100dvh where the
+   browser has it: iOS Safari's 100vh runs under its own bar. Every class is .ss-pg-*; nothing else
+   in this file uses that prefix. */
+.ss-pg{height:100vh;height:100dvh;display:flex;flex-direction:column;background:#F6F9FE;color:#1E293B;overflow:hidden}
+.ss-pg-bar{display:flex;align-items:center;gap:10px;min-height:44px;padding:6px 14px;background:#FFF;border-bottom:1px solid #E2E8F0;flex-shrink:0;min-width:0}
+.ss-pg-back{font-size:12.5px;font-weight:700;color:#475569;text-decoration:none;border:1px solid #E2E8F0;background:#F8FAFC;border-radius:8px;padding:6px 10px;white-space:nowrap}
+.ss-pg-back:hover{background:#F1F5F9}
+.ss-pg-title{font-size:15px;font-weight:800;white-space:nowrap}
+.ss-pg-co{font-size:12.5px;font-weight:700;color:#991B1B;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-pg-jump{font:inherit;font-size:12.5px;font-weight:600;color:#334155;border:1px solid #CBD5E1;border-radius:7px;padding:5px 8px;background:#FFF;max-width:180px;min-width:60px}
+.ss-pg-tog{display:flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;color:#475569;white-space:nowrap;cursor:pointer}
+.ss-pg-readout{flex:1;min-width:0;font-size:12.5px;font-weight:700;color:#334155;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+/* A long badge shrinks rather than push anything off screen. It and the readout both start from nothing,
+   so its grow gives it the room first, up to its words. A page that can't edit has no buttons to make
+   room for, and its badge is all that says why. */
+.ss-pg-badge{font-size:12px;font-weight:700;border-radius:999px;padding:4px 10px;white-space:nowrap;border:1px solid;flex:99999 1 0;min-width:0;max-width:max-content;overflow:hidden;text-overflow:ellipsis}
+.ss-pg[data-ss-pg-editable="0"] .ss-pg-badge{flex:0 1 auto}
+.ss-pg-badge-green{background:#F0FDF4;border-color:#BBF7D0;color:#15803D}
+.ss-pg-badge-grey{background:#F1F5F9;border-color:#E2E8F0;color:#475569}
+.ss-pg-badge-red{background:#FEF2F2;border-color:#FECACA;color:#B91C1C}
+.ss-pg-badge-blue{background:#EFF6FF;border-color:#BFDBFE;color:#1D4ED8}
+.ss-pg-badge-amber{background:#FFFBEB;border-color:#FDE68A;color:#92400E}
+.ss-pg-badge-btn{font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer;text-decoration:underline}
+.ss-pg-bact{font:inherit;font-size:12px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:3px 8px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.ss-pg-q{width:28px;height:28px;border-radius:50%;border:1px solid #CBD5E1;background:#FFF;font:inherit;font-weight:800;color:#475569;cursor:pointer;flex-shrink:0}
+.ss-pg-op{background:#FEE2E2;border-bottom:1px solid #DC2626;color:#991B1B;font-size:12.5px;font-weight:700;padding:6px 14px;flex-shrink:0}
+/* The band under the toolbar: one height whatever is in it, so nothing that comes or goes in it moves
+   the grid. Its contents sit on top of it. Past one line they hang over the frozen header, and
+   --ss-pg-hd (the header's height, set in the JSX) stops them at its bottom edge. */
+.ss-pg{--ss-pg-slot:31px}
+.ss-pg-slot{position:relative;height:var(--ss-pg-slot);flex-shrink:0;background:#FFF;border-bottom:1px solid #E2E8F0;box-sizing:border-box}
+.ss-pg-slot-in{position:absolute;top:0;left:0;right:0;z-index:8;max-height:calc(var(--ss-pg-slot) + var(--ss-pg-hd));overflow-y:auto}
+.ss-pg-status{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:3px 14px;min-height:var(--ss-pg-slot);box-sizing:border-box;border-bottom:1px solid #E2E8F0;flex-shrink:0;line-height:1.4}
+.ss-pg-slot .ss-pg-status>span{flex:1;min-width:0;max-height:calc(var(--ss-pg-slot) + var(--ss-pg-hd) - 7px);overflow-y:auto;overflow-wrap:anywhere}
+.ss-pg-slot .ss-pg-status,.ss-pg-slot .ss-pg-earlier{animation:ss-pg-moved .6s ease-out}
+@media (prefers-reduced-motion:reduce){.ss-pg-slot .ss-pg-status,.ss-pg-slot .ss-pg-earlier{animation:none}}
+.ss-pg-status-grey{background:#F8FAFC;color:#475569}
+.ss-pg-slot .ss-pg-status-grey{background:#E2E8F0;color:#1E293B}
+.ss-pg-status-amber{background:#FEF3C7;color:#92400E}
+.ss-pg-status-red{background:#FEF2F2;color:#991B1B}
+.ss-pg-status button,.ss-pg-fail button,.ss-pg-narrow button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:4px 10px;cursor:pointer;flex-shrink:0}
+.ss-pg-status button,.ss-pg-narrow button{padding:2px 10px}
+/* The offer pushes a long line past the band's cap: Dismiss keeps to the line's top, in view. */
+.ss-pg-earlier~.ss-pg-status button{align-self:flex-start}
+.ss-pg-legend{font-size:12.5px;color:#475569;background:#FFF;padding:6px 14px;line-height:1.4}
+.ss-pg-live:not(:empty)~.ss-pg-legend{display:none}
+.ss-pg-bar:has(.ss-pg-q:is(:hover,:focus-visible))~.ss-pg-slot .ss-pg-live:not(:empty)~.ss-pg-legend{display:block;border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0}
+.ss-pg-narrow{display:flex;align-items:center;gap:10px;justify-content:space-between;font-size:12.5px;color:#1B7895;background:#DBEAFF;border-bottom:1px solid #75E6DA;padding:3px 14px;min-height:var(--ss-pg-slot);box-sizing:border-box}
+.ss-pg-live:not(:empty)~.ss-pg-narrow,.ss-pg-legend~.ss-pg-narrow{display:none}
+.ss-pg-optbox{background:#FEF3C7;border-bottom:1px solid #FDE68A;color:#92400E;font-size:13px;line-height:1.5;padding:9px 14px;flex-shrink:0}
+.ss-pg-optbox a{color:#92400E;font-weight:800}
+.ss-pg-msg{margin:40px auto;max-width:460px;padding:0 16px;text-align:center;font-size:14px;color:#475569;line-height:1.5}
+.ss-pg-msg-inline{margin:16px auto}
+.ss-pg-msg a{color:#3D3672;font-weight:700}
+.ss-pg-box{flex:1;min-height:0;overflow:auto;position:relative;background:#FFF;overscroll-behavior:contain}
+.ss-pg-fail{padding:40px 16px;text-align:center;font-size:14px;color:#475569;display:flex;flex-direction:column;gap:10px;align-items:center}
+.ss-pg-fail-why{font-size:12px;color:#94A3B8}
+.ss-pg-skel{padding:12px}
+/* The grid. border-collapse:separate so a sticky cell keeps its borders; one scroller for both axes. */
+.ss-pg-grid{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px;font-variant-numeric:tabular-nums;outline:none}
+.ss-pg-grid th,.ss-pg-grid td{border-right:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;background:#FFF;overflow:hidden}
+.ss-pg-grid td{height:28px;padding:0 4px;white-space:nowrap;text-overflow:ellipsis;text-align:center;cursor:default}
+.ss-pg-grid td.ss-pg-size{text-align:left;font-weight:700}
+.ss-pg-grid td.ss-pg-price{text-align:right}
+.ss-pg-grid td.ss-pg-off{color:#15803D;font-weight:800}
+/* Layers (plan 3.6): corner 7, header 6, the selection over a frozen column 5, frozen body 4, the
+   selection over an option column 2. Section band at top 0, names at 22px. */
+.ss-pg-sec th{position:sticky;top:0;z-index:6;height:22px;padding:0 6px;font-size:10.5px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;text-overflow:ellipsis;text-align:left}
+/* A section narrower than its name (ssPgSecNarrow; one 44 px column fits none of them in capitals):
+   the name in its own case at 9.5 px, centred on up to two 9.5 px lines inside the same 22 px band,
+   a long word breaking only at its soft hyphen (ssPgSecText). Never cut, and the band never grows.
+   Measured (10-31): two 10 px lines put the second line's text box half a pixel past the band. */
+.ss-pg-sec th.ss-pg-secn{padding:0 1px;font-size:9.5px;line-height:9.5px;letter-spacing:0;text-transform:none;white-space:normal;text-align:center;-webkit-hyphens:manual;hyphens:manual}
+/* height = the measured --ss-pg-hh exactly: 8 px of padding top and bottom, no bottom border (the
+   divider is a shadow), so a name's box is the height less 16 px, which is what .ss-pg-vh allows. */
+.ss-pg-names th{position:sticky;top:22px;z-index:6;height:var(--ss-pg-hh,64px);padding:8px 4px;vertical-align:top;text-align:center;border-bottom:0;box-shadow:inset 0 -2px 0 #CBD5E1}
+.ss-pg-names th.ss-pg-fh{vertical-align:bottom;text-align:left;font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase;letter-spacing:.4px}
+.ss-pg-names th.ss-pg-s0{border-left:2px solid #CBD5E1}
+.ss-pg-grid .ss-pg-f0{position:sticky;left:0;z-index:4}
+.ss-pg-grid .ss-pg-f1{position:sticky;left:82px;z-index:4}
+.ss-pg-grid .ss-pg-f2{position:sticky;left:158px;z-index:4;border-right:2px solid #CBD5E1}
+.ss-pg-grid .ss-pg-corner{position:sticky;left:0;top:0;z-index:7;border-right:2px solid #CBD5E1}
+.ss-pg-grid thead .ss-pg-f0,.ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{z-index:7}
+/* A name stands on end, top to bottom, and wraps onto a second line inside its column rather
+   than being cut. The header's height (--ss-pg-hh) is MEASURED to the longest name (PricingTablePage).
+   vertical-RL, not -lr: both turn the letters the same way, but -lr puts a name's second line to the
+   RIGHT of its first, so a reader who tilts their head to the right reads the two lines bottom one
+   first ("and Kickplate (6'x7')" above "Double Door with Transom"). -rl is the whole name turned a
+   quarter clockwise, second line to the left. Bottom-to-top instead is transform:rotate(180deg). */
+.ss-pg-vh{display:inline-block;vertical-align:top;writing-mode:vertical-rl;white-space:normal;line-height:15px;max-inline-size:calc(var(--ss-pg-hh,64px) - 16px);font-size:12px;font-weight:700;color:#1E293B;text-align:start}
+.ss-pg-grid .ss-pg-rtp{background:#F1F5F9;color:#64748B}
+/* A price Real-Time Pricing sets is grey AND locked (plan 3.13: a shape as well as a colour). The
+   lock sits in the cell's top-left corner, out of the right-aligned number's way; the sticky cell is
+   its box, and below 700 px, where the price is no longer frozen, position:relative keeps it so. */
+.ss-pg-grid tbody td.ss-pg-rtp::before{content:"\1F512";position:absolute;left:2px;top:2px;font-size:9px;line-height:1;opacity:.75}
+.ss-pg-grid td.ss-pg-dis{background:#F8FAFC}
+/* Hidden from the designer: 55% text, not opacity, because a frozen cell must stay opaque over
+   whatever scrolls under it. */
+.ss-pg-grid tr.ss-pg-hid td{color:rgba(30,41,59,.55)}
+/* THE SELECTION, THE EDITOR AND THE MARKS (Phase 3, 2026-10-31). The ring and the range are one
+   overlay placed by the page (PgSelectionOverlay), never a class on a cell: .ss-pg-sheet is their
+   frame (the grid's own width), and .ss-pg-lane is a zero-size sticky strip at its left edge that
+   rides along with the frozen columns, so a ring over Price stays on Price while the options scroll. */
+.ss-pg-sheet{position:relative}
+.ss-pg-lane{position:sticky;left:0;width:0;height:0;z-index:5}
+.ss-pg-ring,.ss-pg-range{position:absolute;display:none;box-sizing:border-box;pointer-events:none;z-index:2}
+.ss-pg-ring{box-shadow:inset 0 0 0 2px #3D3672}
+.ss-pg-range{background:rgba(61,54,114,.08);border:1px solid rgba(61,54,114,.45)}
+.ss-pg-ed{position:absolute;z-index:3;box-sizing:border-box;margin:0;border:2px solid #3D3672;border-radius:0;padding:0 4px;font:inherit;font-size:13px;font-variant-numeric:tabular-nums;color:#1E293B;background:#FFF;outline:none;text-align:center;min-width:0}
+.ss-pg-ed-price{text-align:right}
+/* Marks: a shape as well as a colour (plan 3.13). Waiting to save: a blue corner. Refused or not
+   valid: a red outline and "!". Changed elsewhere: an amber outline and "↺". Backgrounds, not
+   ::after, so a frozen cell stays sticky. A saved box flashes green for 600 ms (.ss-pg-ok). */
+.ss-pg-grid td.ss-pg-m-p{background-image:linear-gradient(225deg,#2563EB 0 5px,transparent 5px)}
+.ss-pg-grid td.ss-pg-m-r{box-shadow:inset 0 0 0 2px #DC2626;background-color:#FEF2F2;background-repeat:no-repeat;background-position:right 2px top 2px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='10'%3E%3Crect x='2' y='0' width='2' height='6' fill='%23DC2626'/%3E%3Crect x='2' y='8' width='2' height='2' fill='%23DC2626'/%3E%3C/svg%3E")}
+.ss-pg-grid td.ss-pg-m-c{box-shadow:inset 0 0 0 2px #D97706;background-color:#FFFBEB;background-repeat:no-repeat;background-position:right 2px top 2px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M8.2 5.6A3.4 3.4 0 1 1 6.9 2.4' fill='none' stroke='%23D97706' stroke-width='1.5'/%3E%3Cpath d='M7.4 0.6v2.6H4.8' fill='none' stroke='%23D97706' stroke-width='1.5'/%3E%3C/svg%3E")}
+.ss-pg-grid td.ss-pg-ok{animation:ss-pg-ok .6s ease-out}
+@keyframes ss-pg-ok{from{background-color:#BBF7D0}}
+/* The full-width rows (a style's band, a placeholder, "Hidden styles") keep their words at the left
+   edge while the grid scrolls sideways: .ss-pg-bandin is sticky, and that needs a cell that is NOT a
+   scroll container. overflow:hidden (every other cell's) makes the cell one, and the words then
+   stick inside it and scroll away with it. */
+.ss-pg-grid .ss-pg-band td{background:#F1F5F9;height:30px;padding:0;text-align:left;border-bottom:1px solid #CBD5E1;overflow:visible}
+.ss-pg-grid .ss-pg-note-row td{height:30px;padding:0;text-align:left;color:#64748B;font-style:italic;overflow:visible}
+.ss-pg-grid .ss-pg-hs td{background:#F8FAFC;height:32px;padding:0;text-align:left;overflow:visible}
+.ss-pg-bandin{position:sticky;left:0;display:inline-flex;align-items:center;gap:10px;padding:0 10px;max-width:calc(100vw - 40px);white-space:nowrap;font-size:13px}
+/* A long style name gives way: the band is sticky, so scrolling can't bring ＋ Add sizes back. */
+.ss-pg-bandin b{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.ss-pg-bandin span{font-size:12px;color:#64748B;font-weight:600}
+.ss-pg-hs button{font:inherit;font-size:12.5px;font-weight:700;color:#475569;background:none;border:none;cursor:pointer;padding:6px 0}
+/* ADDING AND REMOVING SIZES, REFRESH, THE BACKUP (Phase 4a, 2026-10-31). "＋ Add sizes" sits in a
+   style's band; its strip is a full-width row whose contents stick to the left edge like the band's
+   (so its cell is not a scroll container either). The tick-box grid is a CSS grid of labels, not a
+   nested table, so no .ss-pg-grid td rule reaches it. */
+.ss-pg-addbtn{font:inherit;font-size:12px;font-weight:700;color:#3D3672;background:#FFF;border:1px solid #CBD5E1;border-radius:7px;padding:2px 8px;cursor:pointer;white-space:nowrap}
+.ss-pg-addbtn:hover,.ss-pg-addbtn[aria-expanded="true"]{background:#EEF2FF;border-color:#3D3672}
+.ss-pg-grid .ss-pg-add-row td{height:auto;padding:0;text-align:left;white-space:normal;overflow:visible;background:#FBFCFE;border-bottom:1px solid #CBD5E1;cursor:auto}
+.ss-pg-add{position:sticky;left:0;box-sizing:border-box;display:flex;flex-direction:column;gap:7px;padding:8px 10px 10px;width:max-content;max-width:calc(100vw - 40px);font-size:12.5px;color:#334155}
+.ss-pg-addtop,.ss-pg-addline{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.ss-pg-addhint{color:#64748B;font-style:italic}
+.ss-pg-addmode{font:inherit;font-size:12px;font-weight:700;color:#475569;background:#FFF;border:1px solid #CBD5E1;border-radius:999px;padding:2px 10px;cursor:pointer}
+.ss-pg-addmode.ss-pg-on{background:#3D3672;border-color:#3D3672;color:#FFF}
+.ss-pg-addx{font:inherit;font-size:12px;color:#64748B;background:none;border:none;cursor:pointer;padding:2px 6px;margin-left:auto}
+.ss-pg-addin{font:inherit;font-size:13px;width:min(420px,calc(100vw - 140px));min-height:30px;max-height:96px;resize:vertical;box-sizing:border-box;border:1px solid #CBD5E1;border-radius:7px;padding:5px 8px;line-height:1.4}
+.ss-pg-addnum{font:inherit;font-size:13px;width:130px;box-sizing:border-box;border:1px solid #CBD5E1;border-radius:7px;padding:4px 8px;margin-left:4px}
+.ss-pg-addgo{font:inherit;font-size:12.5px;font-weight:800;color:#FFF;background:#3D3672;border:1px solid #3D3672;border-radius:7px;padding:5px 12px;cursor:pointer}
+.ss-pg-addgo:disabled{background:#CBD5E1;border-color:#CBD5E1;cursor:default}
+.ss-pg-adderr{color:#B91C1C;font-weight:600}
+.ss-pg-tick{display:grid;align-self:flex-start;gap:4px 14px;align-items:center;justify-items:start;font-variant-numeric:tabular-nums}
+.ss-pg-tickh{font-weight:800;color:#64748B;font-size:12px}
+.ss-pg-tickc{display:inline-flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
+.ss-pg-there{color:#94A3B8;font-style:italic;white-space:nowrap}
+/* Delete: a small ✕ at the right of every size on a page that can edit (the delete plan, 10-31).
+   Inside the frozen Size box, whose sticky position makes it the ✕'s frame. A size saved designs use
+   keeps a greyed ✕ (aria-disabled, its reason in its title) that never turns red under the pointer. */
+.ss-pg-grid td.ss-pg-rmable{padding-right:21px}
+.ss-pg-rm{position:absolute;right:2px;top:5px;width:17px;height:17px;padding:0;box-sizing:border-box;border:1px solid #E2E8F0;border-radius:4px;background:#FFF;color:#94A3B8;font:inherit;font-size:10px;line-height:15px;cursor:pointer}
+.ss-pg-rm:not([aria-disabled="true"]):hover{color:#B91C1C;border-color:#FECACA;background:#FEF2F2}
+.ss-pg-rm[aria-disabled="true"]{opacity:.35;cursor:not-allowed}
+.ss-pg-wait{color:#64748B;font-style:italic;font-weight:600;font-size:12px}
+.ss-pg-grid tr.ss-pg-busy td.ss-pg-size{color:#64748B}
+/* A box a refresh moved (someone else's save, an Excel upload) flashes grey. */
+.ss-pg-grid td.ss-pg-moved{animation:ss-pg-moved .6s ease-out}
+@keyframes ss-pg-moved{from{background-color:#CBD5E1}}
+/* "You have N changes from earlier that weren't saved." */
+.ss-pg-earlier{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:12.5px;font-weight:600;padding:3px 14px;min-height:var(--ss-pg-slot);box-sizing:border-box;background:#FFFBEB;color:#92400E;border-bottom:1px solid #FDE68A}
+.ss-pg-earlier button{font:inherit;font-size:12.5px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:7px;padding:2px 10px;cursor:pointer}
+/* COPY, PASTE, FILL DOWN AND CLEAR (Phase 4b, 2026-10-31): the toolbar's Fill down and Clear, and the
+   confirm before a change to more than one size, a modal over the whole page. */
+.ss-pg-tbtn{font:inherit;font-size:12.5px;font-weight:700;color:#334155;border:1px solid #CBD5E1;background:#FFF;border-radius:7px;padding:5px 9px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.ss-pg-tbtn:hover{background:#F1F5F9}
+.ss-pg-confirm{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(15,23,42,.35)}
+.ss-pg-confirm-box{box-sizing:border-box;width:100%;max-width:460px;background:#FFF;border-radius:12px;box-shadow:0 12px 40px rgba(15,23,42,.25);padding:18px 20px}
+.ss-pg-confirm-box p{margin:0 0 14px;font-size:14px;line-height:1.5;color:#1E293B}
+.ss-pg-confirm-acts{display:flex;justify-content:flex-end;gap:8px}
+.ss-pg-confirm-acts button{font:inherit;font-size:13px;font-weight:700;border:1px solid #CBD5E1;background:#FFF;color:#334155;border-radius:8px;padding:7px 14px;cursor:pointer}
+.ss-pg-confirm-acts .ss-pg-confirm-yes{background:#3D3672;border-color:#3D3672;color:#FFF}
+/* The delete confirm's Delete: the ✕'s hover red, not the brand purple (its focus starts on Cancel). */
+.ss-pg-confirm-acts .ss-pg-confirm-del{background:#B91C1C;border-color:#B91C1C;color:#FFF}
+/* Below 700 px (plan 3.15): only Size stays frozen, the toolbar wraps, and the header is capped at
+   90 px with an ellipsis (the band's readout carries the full name). */
+@media (max-width:699.98px){
+  .ss-pg{--ss-pg-slot:42px}
+  .ss-pg-status button,.ss-pg-narrow button,.ss-pg-earlier button{padding:4px 10px}
+  .ss-pg-legend{padding:3px 14px;border-bottom:1px solid #E2E8F0}
+  /* One shape whatever the badge says: the badge, its actions and ? get the last row, and a long badge
+     shrinks rather than wrap. The readout lives in the band here, and what is said hangs under it. */
+  .ss-pg-bar{flex-wrap:wrap;gap:4px 8px}
+  .ss-pg-bar::after{content:"";order:7;flex-basis:100%}
+  .ss-pg-badge,.ss-pg-bact,.ss-pg-q{order:8}
+  .ss-pg-q{margin-left:auto}
+  .ss-pg-slot{display:flex;align-items:center;padding:0 14px}
+  .ss-pg-slot>.ss-pg-readout{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;text-align:left;line-height:1.4}
+  .ss-pg-slot>.ss-pg-readout:not(:empty)~.ss-pg-slot-in>.ss-pg-narrow{display:none}
+  .ss-pg-slot>.ss-pg-readout:not(:empty)~.ss-pg-slot-in{top:var(--ss-pg-slot);max-height:var(--ss-pg-hd)}
+  .ss-pg-slot>.ss-pg-readout:not(:empty)~.ss-pg-slot-in .ss-pg-status>span{max-height:calc(var(--ss-pg-hd) - 7px)}
+  .ss-pg-live:not(:empty)~.ss-pg-legend{display:block;border-top:1px solid #E2E8F0}
+  .ss-pg-co{max-width:120px}
+  .ss-pg-grid td.ss-pg-f1,.ss-pg-grid td.ss-pg-f2{position:static}
+  .ss-pg-grid td.ss-pg-f1.ss-pg-rtp{position:relative;left:auto;z-index:auto}
+  .ss-pg-grid thead .ss-pg-f1,.ss-pg-grid thead .ss-pg-f2{left:auto;z-index:6}
+  .ss-pg-grid .ss-pg-corner{left:auto}
+  .ss-pg-names th{height:90px}
+  .ss-pg-vh{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-inline-size:74px}
+}
+/* Too narrow for one row: two, always, so a badge never moves the grid. The way around, then the work.
+   The break's empty line takes a gap too, so 2 px here is 4 between the rows. A wrapping row breaks on
+   what an item starts from, not on how far it can shrink, so the name and the jump start small and
+   grow into what row 1 has left. */
+@media (min-width:560px) and (max-width:1099.98px){
+  .ss-pg-bar{flex-wrap:wrap;gap:2px 8px}
+  .ss-pg-bar::after{content:"";order:7;flex-basis:100%}
+  .ss-pg-tbtn,.ss-pg-readout,.ss-pg-badge,.ss-pg-bact,.ss-pg-q{order:8}
+  .ss-pg-co{flex:1 1 0;min-width:0;max-width:max-content}
+  .ss-pg-jump{flex:1 1 60px}
+}
+/* One row: the badge keeps "Saving stopped…" while the jump and the name give way, and goes below it
+   only once they have nothing left to give. In view-as the name still gives way when a failure's buttons
+   come, so Fill down, Clear and Delete sizes slide there, and a long name can cut the green badge. */
+@media (min-width:1100px){
+  .ss-pg-badge{flex:99999 .01 122px}
+}
+/* Until a whole jump fits beside a stopped badge's buttons, it stays small at rest too. If it only gave
+   way when saving stops, Fill down, Clear and Delete sizes would slide under a still pointer. */
+@media (min-width:1100px) and (max-width:1259.98px){
+  .ss-pg-jump{flex:0 1 70px}
+}
+/* Wide enough for the band to be one line. */
+@media (min-width:560px) and (max-width:699.98px){
+  .ss-pg{--ss-pg-slot:31px}
+  .ss-pg-slot>.ss-pg-readout{display:block;white-space:nowrap}
+}
 </style>
 </head><body><div id="root"></div>
 <!-- SELF-HOSTED, deliberately not a CDN. These four are this page's only dependencies and there
@@ -266,8 +679,8 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
-<script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=8a81c3ba"></script>
-<script defer src="/portal.app.compiled.js?v=195468a0" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=c0bbd55d"></script>
+<script defer src="/portal.app.compiled.js?v=1e7c5620" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

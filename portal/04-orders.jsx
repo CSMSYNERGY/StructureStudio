@@ -318,14 +318,28 @@ const FB_KINDS = {
     sevLabel: "How important is this to you?",
     severities: ["Nice to have", "Would really help", "Critical for me"], sevDefault: "Would really help",
   },
+  // A question, a request, anything a person should pick up (migration 340, 2026-10-27). Lands on
+  // the Projects board and never goes to Monday; portal-feedback refuses nothing else about it.
+  ticket: {
+    icon: "🎫", label: "Submit a Ticket", blurb: "A question, or anything you need a person for",
+    titleHint: "What do you need help with?", detailHint: "Tell us what you were doing and what you need.",
+    sevLabel: null, severities: null, sevDefault: null,
+  },
 };
+
+// Ahsan 10-27, from Carolyn's 10-26 call ("like 24 hour turnaround time"). The support assistant
+// says the same words (support-agent's REPLY_PROMISE); change both together.
+const SS_REPLY_PROMISE = "A person on our team replies within 24 hours.";
 
 const MAX_ATTACH_BYTES = 25 * 1024 * 1024;   // matches the bucket's file_size_limit
 
-function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
+// `prefill` and `supportConversationId` come from the support assistant's "Send this to our team"
+// card: the ticket opens already written, and the server attaches the chat to it (portal-feedback
+// checks the chat is this person's own).
+function FeedbackForm({ kind, clientId, onSubmitted, onBack, prefill = null, supportConversationId = null }) {
   const cfg = FB_KINDS[kind];
-  const [title, setTitle] = useState("");
-  const [detail, setDetail] = useState("");
+  const [title, setTitle] = useState((prefill && prefill.title) || "");
+  const [detail, setDetail] = useState((prefill && prefill.summary) || "");
   const [severity, setSeverity] = useState(cfg.sevDefault);
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -358,7 +372,11 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
         attachmentPath = path;
       }
       const { data, error } = await sb.functions.invoke("portal-feedback", {
-        body: { action: "submit", kind, title: title.trim(), detail: detail.trim(), severity, attachmentPath },
+        body: {
+          action: "submit", kind, title: title.trim(), detail: detail.trim(), attachmentPath,
+          ...(cfg.severities ? { severity } : {}),
+          ...(supportConversationId ? { supportConversationId } : {}),
+        },
       });
       if (error) throw error;
       if (data && data.error) throw new Error(data.error);
@@ -381,12 +399,19 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
         <textarea style={{ ...S.input, minHeight: 110, fontWeight: 500, resize: "vertical" }}
           value={detail} onChange={(e) => setDetail(e.target.value)} placeholder={cfg.detailHint} />
       </div>
-      <div>
-        <label style={S.lbl}>{cfg.sevLabel}</label>
-        <select style={S.input} value={severity} onChange={(e) => setSeverity(e.target.value)}>
-          {cfg.severities.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-      </div>
+      {cfg.severities && (
+        <div>
+          <label style={S.lbl}>{cfg.sevLabel}</label>
+          <select style={S.input} value={severity} onChange={(e) => setSeverity(e.target.value)}>
+            {cfg.severities.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      )}
+      {kind === "ticket" && (
+        <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.5 }}>
+          {SS_REPLY_PROMISE}{supportConversationId ? " Your chat with the assistant is attached, so you don't need to repeat it." : ""}
+        </div>
+      )}
       <div>
         <label style={S.lbl}>Screenshot or video (optional)</label>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -418,6 +443,38 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
   );
 }
 
+// ── Support button, or the old Feedback pill? (migration 346, 2026-10-27) ─────────────────────
+// The Support button SHIPS DARK: client_settings.support_ai_beta, per builder, off by default, turned
+// on by an operator in SQL. support-agent's `enabled` answers it (and fails closed), so until it
+// says yes the shell draws FeedbackWidget below, the pill every builder had before, unchanged.
+// The answer is remembered per builder, so a switched-on builder sees the Support button from the
+// first paint instead of the pill and then a swap. Asked once per page load, behind the boot waves
+// (1.5 s / 3 s), and not at all while an operator views another account (both are hidden then).
+const SS_SUPPORT_ON_KEY = "ss:supportOn:";
+
+function useSupportOn(clientId, active) {
+  const [answer, setAnswer] = useState(null);   // { clientId, on } once support-agent answers
+  useEffect(() => {
+    if (!active || !clientId) return undefined;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const { data } = await sb.functions.invoke("support-agent", { body: { action: "enabled" } });
+        // An error, a 403 or an old server that knows no `enabled` leaves what we had.
+        if (cancelled || !data || typeof data.on !== "boolean") return;
+        setAnswer({ clientId, on: data.on });
+        try { localStorage.setItem(SS_SUPPORT_ON_KEY + clientId, data.on ? "1" : "0"); } catch (_e) {}
+      } catch (_e) { /* the pill stays: it is the safe default */ }
+    }, 3500);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [clientId, active]);
+  if (!clientId) return false;
+  if (answer && answer.clientId === clientId) return answer.on;
+  try { return localStorage.getItem(SS_SUPPORT_ON_KEY + clientId) === "1"; } catch (_e) { return false; }
+}
+
+// KEPT (346): the pill for every builder whose Support switch is off (useSupportOn above). Below
+// this note it is beta's FeedbackWidget as it was, so their bug and feature reports are unchanged.
 // Floating launcher + modal. Mounted once by PortalApp; hidden while an operator is
 // viewing someone else's account (the submission would be attributed to the operator's
 // own tenant, not the one on screen, which would be misleading in both places).
@@ -502,10 +559,428 @@ function FeedbackWidget({ clientId, onSubmitted }) {
   );
 }
 
+// The report / request / ticket form in a modal, for a builder with the Support button (346). Their
+// floating "💬 Feedback" pill is gone (Carolyn, 10-26: "I would take this feedback button down at
+// the below. We'll have a support button up here"), and the top bar's SupportMenu opens this on a
+// chosen kind. Rendered only while an operator is NOT viewing someone else's account: the
+// submission would be attributed to the operator's own tenant, not the one on screen.
+function FeedbackDialog({ kind, clientId, onClose, onSubmitted, prefill = null, supportConversationId = null }) {
+  const [done, setDone] = useState(false);
+  const [pushed, setPushed] = useState(true);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const cfg = FB_KINDS[kind] || FB_KINDS.ticket;
+  const heading = done ? "✅ Thanks — we've got it" : cfg.icon + " " + cfg.label;
+
+  return (
+    <div onClick={onClose} role="dialog" aria-modal="true" aria-label={cfg.label}
+      style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, overflow: "hidden", width: "min(560px, 100%)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.35)" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, flex: 1 }}>{heading}</div>
+          <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", color: "#FFF", cursor: "pointer", fontSize: 18, padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+
+        {!done && (
+          <FeedbackForm kind={kind} clientId={clientId} onBack={onClose} prefill={prefill} supportConversationId={supportConversationId}
+            onSubmitted={(row, wasPushed) => { setPushed(wasPushed !== false); setDone(true); if (onSubmitted) onSubmitted(row); }} />
+        )}
+
+        {done && (
+          <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
+            Your {kind === "ticket" ? "ticket" : "request"} is logged and on our board. {SS_REPLY_PROMISE} You can follow it under{" "}
+            <b>Support → My Requests</b> — the status updates there as we work on it,
+            and any reply we post shows up alongside it.
+            {!pushed && (
+              <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
+                Saved — but syncing it to our tracker didn't go through. It's recorded and we'll pick it up; nothing is lost.
+              </div>
+            )}
+            <button onClick={onClose} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 16, width: "100%" }}>Done</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Portal addresses the assistant may hand out, e.g. "/settings/branding" or "/support/mine". Only a
+// first segment the portal itself routes is turned into a link, and it navigates IN the portal:
+// the assistant can never send anyone off-site (support-agent's rules forbid other links, and this
+// is the half that holds even if it wrote one anyway).
+const SS_SUPPORT_LINK_PAGES = ["settings", "support", "designer", "contacts", "conversations", "orders", "inventory",
+  "build-schedule", "delivery-schedule", "repairs", "calls", "view-3d", "on-demand-pricing"];
+const SS_SUPPORT_LINK_RE = /(^|[\s(])(\/([a-z][a-z0-9-]*)(?:\/([a-z0-9-]+))?)(?=$|[\s.,;:!?)])/g;
+
+function ssSupportText(text, onLink) {
+  const out = [];
+  let last = 0;
+  let m;
+  SS_SUPPORT_LINK_RE.lastIndex = 0;
+  while ((m = SS_SUPPORT_LINK_RE.exec(text))) {
+    const page = m[3];
+    if (SS_SUPPORT_LINK_PAGES.indexOf(page) === -1) continue;
+    const start = m.index + m[1].length;
+    if (start > last) out.push(text.slice(last, start));
+    const sub = m[4] || null;
+    out.push(
+      <a key={start} href={ssPagePath(page, sub)} className="ss-sup-link"
+        onClick={(e) => { e.preventDefault(); onLink(page, sub); }}>{m[2]}</a>,
+    );
+    last = start + m[2].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+// 👍 / 👎 under one answer (migration 348; Carolyn 10-27: "see how it's responding, how the users
+// are responding"). It is for the team's tracking: an operator reads the ratings in Admin → Support
+// chats. One tap saves; a 👎 is saved at once and then asks "What was wrong?" with one optional
+// line. The same thumb again clears it. Only an answer the server stored can be rated (its id is a
+// uuid): a cap's sentence and the "pending" copy of a question are not stored.
+function SupportRate({ m, onRated }) {
+  const [asking, setAsking] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState("");     // "Thanks!" or why it didn't save
+  const save = async (rating, why) => {
+    setBusy(true); setSaid("");
+    const prev = m.rating === 1 || m.rating === -1 ? m.rating : null;
+    onRated(m.id, rating === 0 ? null : rating);   // shown at once, put back if it fails
+    let saved = false;
+    try {
+      const { data, error } = await sb.functions.invoke("support-agent", { body: { action: "rate", messageId: m.id, rating, ...(why ? { note: why } : {}) } });
+      if (error || !data || data.error) throw new Error("rate failed");
+      saved = true;
+      setSaid(rating === 0 ? "" : "Thanks!");
+    } catch (_e) {
+      onRated(m.id, prev);
+      setSaid("That didn't save. Please try again.");
+    }
+    setBusy(false);
+    return saved;
+  };
+  const up = () => { if (busy) return; setAsking(false); save(m.rating === 1 ? 0 : 1); };
+  const down = async () => {
+    if (busy) return;
+    if (m.rating === -1) { setAsking(false); save(0); return; }
+    if (await save(-1)) { setAsking(true); setSaid(""); }
+  };
+  const sendWhy = async (e) => {
+    e.preventDefault();
+    const why = note.trim();
+    if (!why) { setAsking(false); setSaid("Thanks!"); return; }
+    if (await save(-1, why)) { setAsking(false); setNote(""); }
+  };
+  return (
+    <>
+      <div className="ss-sup-rate" data-ss-sup-rate={m.rating === 1 ? "up" : m.rating === -1 ? "down" : "none"}>
+        <button type="button" onClick={up} disabled={busy} aria-pressed={m.rating === 1} aria-label="Helpful" title="Helpful">👍</button>
+        <button type="button" onClick={down} disabled={busy} aria-pressed={m.rating === -1} aria-label="Not helpful" title="Not helpful">👎</button>
+        {said && <span role="status">{said}</span>}
+      </div>
+      {asking && (
+        <form className="ss-sup-why" onSubmit={sendWhy}>
+          <input value={note} maxLength={300} autoFocus placeholder="What was wrong? (optional)" aria-label="What was wrong?"
+            onChange={(e) => setNote(e.target.value)} />
+          <button type="submit" disabled={busy}>Send</button>
+        </form>
+      )}
+    </>
+  );
+}
+
+// The assistant's chat panel, under the Support button (about 400 × 620 at desktop, a full-screen
+// sheet on a phone). Plain text in and out; a "Thinking…" line while support-agent answers; the
+// hand-off card opens the ticket form already written. Chats are saved (migration 340) and the
+// panel says so, every time.
+function SupportChat({ onClose, onTicket, onNavigate }) {
+  const [status, setStatus] = useState(null);     // null = loading; support-agent's status answer
+  const [loadErr, setLoadErr] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [convId, setConvId] = useState(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [handoff, setHandoff] = useState(null);   // { title, summary } from offer_handoff
+  const listRef = useRef(null);
+  const inputRef = useRef(null);
+  const panelRef = useRef(null);
+
+  // On a phone the sheet is pinned to the VISIBLE viewport, not the layout one. A page wider than
+  // the phone (the design list's table) grows the layout viewport past the screen, and focusing the
+  // text box then scrolls the visible part down inside it: found 10-27 with the header cut off by
+  // 29 px at 375 px. The on-screen keyboard shrinks the visible part the same way. Above 640 px the
+  // CSS position stands and these inline values are cleared.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return undefined;
+    const fit = () => {
+      const el = panelRef.current;
+      if (!el) return;
+      const phone = window.matchMedia && window.matchMedia("(max-width:640px)").matches;
+      el.style.top = phone ? vv.offsetTop + "px" : "";
+      el.style.left = phone ? vv.offsetLeft + "px" : "";
+      el.style.width = phone ? vv.width + "px" : "";
+      el.style.height = phone ? vv.height + "px" : "";
+      el.style.right = phone ? "auto" : "";
+      el.style.bottom = phone ? "auto" : "";
+    };
+    fit();
+    vv.addEventListener("resize", fit);
+    vv.addEventListener("scroll", fit);
+    return () => { vv.removeEventListener("resize", fit); vv.removeEventListener("scroll", fit); };
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoadErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("support-agent", { body: { action: "status" } });
+      if (error) throw new Error(error.message);
+      if (!data || data.error) throw new Error((data && data.error) || "no answer");
+      setStatus(data);
+      setMessages((data.conversation && data.conversation.messages) || []);
+      setConvId((data.conversation && data.conversation.id) || null);
+    } catch (_e) {
+      setLoadErr("The assistant couldn't be reached. You can still send us a ticket.");
+      setStatus({ available: false });
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    // Escape belongs to the ticket dialog while it is open over the chat (it is aria-modal; the
+    // chat is not): closing both at once threw away the chat the builder was handing off.
+    const onKey = (e) => { if (e.key === "Escape" && !document.querySelector('[aria-modal="true"]')) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Newest message in view, including the "Thinking…" line.
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  }, [messages, busy, handoff]);
+
+  const send = async (e) => {
+    if (e) e.preventDefault();
+    const text = draft.trim();
+    if (!text || busy) return;
+    setBusy(true); setErr(""); setHandoff(null);
+    setDraft("");
+    // Shown at once; replaced by the stored row when the answer arrives.
+    const temp = { id: "pending-" + Date.now(), role: "user", body: text, created_at: new Date().toISOString() };
+    setMessages((m) => [...m, temp]);
+    try {
+      const { data, error } = await sb.functions.invoke("support-agent", { body: { action: "send", text, conversationId: convId } });
+      if (error) throw new Error(error.message || "send failed");
+      if (data && data.error) throw new Error(data.error);
+      if (data && data.capped) {
+        // A cap: the builder's words were not sent to the assistant. Say so, and offer the ticket.
+        setMessages((m) => [...m, { id: "cap-" + Date.now(), role: "assistant", body: data.reply.body, created_at: new Date().toISOString(), cap: true }]);
+        setHandoff({ title: text.slice(0, 100), summary: text });
+      } else {
+        setConvId(data.conversationId);
+        setMessages((m) => [...m.filter((x) => x.id !== temp.id), ...(data.messages || [])]);
+        if (data.handoff) setHandoff(data.handoff);
+      }
+    } catch (e2) {
+      setMessages((m) => m.filter((x) => x.id !== temp.id));
+      setDraft(text);
+      setErr(e2.message && !/non-2xx|Failed to fetch/i.test(e2.message) ? e2.message : "That didn't go through. Please try again.");
+    }
+    setBusy(false);
+    if (inputRef.current) inputRef.current.focus();
+  };
+
+  const startOver = async () => {
+    if (busy) return;
+    try { await sb.functions.invoke("support-agent", { body: { action: "new" } }); } catch (_e) { /* the next send starts fresh anyway */ }
+    setMessages([]); setConvId(null); setHandoff(null); setErr("");
+  };
+
+  const rated = useCallback((id, rating) => setMessages((ms) => ms.map((x) => (x.id === id ? { ...x, rating } : x))), []);
+  const name = (status && status.name) || "Studio Assistant";
+  const available = !!(status && status.available);
+  const goTo = (page, sub) => { onNavigate(page, sub); if (window.innerWidth < 640) onClose(); };
+
+  return (
+    <div className="ss-sup-chat" role="dialog" aria-label={name} ref={panelRef}>
+      <div className="ss-sup-head">
+        <div className="ss-sup-title">
+          <span>{name}</span>
+          <span className="ss-sup-sub">AI assistant · tickets answered within 24 hours</span>
+        </div>
+        {messages.length > 0 && <button type="button" className="ss-sup-ghost" onClick={startOver} disabled={busy}>New chat</button>}
+        <button type="button" className="ss-sup-x" onClick={onClose} aria-label="Close">×</button>
+      </div>
+      <div className="ss-sup-note">You are chatting with an AI assistant. Chats are saved so our team can follow up.</div>
+
+      <div className="ss-sup-list" ref={listRef} aria-live="polite">
+        {status === null && <div className="ss-sup-muted">Loading…</div>}
+        {status !== null && messages.length === 0 && available && (
+          <div className="ss-sup-bot">
+            Hi! Ask me anything about Structure Studio — how to set something up, where a setting lives, or what's on
+            your account. If I can't sort it out, I'll pass it to a person on our team.
+          </div>
+        )}
+        {status !== null && !available && (
+          <div className="ss-sup-bot">{loadErr || status.unavailable || "The assistant isn't available right now."} {SS_REPLY_PROMISE}</div>
+        )}
+        {messages.map((m) => (
+          <React.Fragment key={m.id}>
+            <div className={m.role === "user" ? "ss-sup-me" : "ss-sup-bot"}>
+              {m.role === "user" ? m.body : ssSupportText(m.body, goTo)}
+            </div>
+            {m.role === "assistant" && !m.cap && SS_UUID_RE.test(String(m.id)) && <SupportRate m={m} onRated={rated} />}
+          </React.Fragment>
+        ))}
+        {busy && <div className="ss-sup-muted">Thinking…</div>}
+        {handoff && !busy && (
+          <div className="ss-sup-card">
+            <div className="ss-sup-card-t">Send this to our team?</div>
+            <div className="ss-sup-card-b">{handoff.title}</div>
+            <button type="button" onClick={() => onTicket(handoff, convId)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", marginTop: 8 }}>
+              Send this to our team
+            </button>
+          </div>
+        )}
+      </div>
+
+      {err && <div style={{ ...S.err, margin: "0 12px 8px" }}>{err}</div>}
+      {available ? (
+        <form className="ss-sup-form" onSubmit={send}>
+          <textarea ref={inputRef} rows={2} value={draft} maxLength={2000} autoFocus
+            placeholder="Ask a question…" aria-label="Your question"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+          <button type="submit" disabled={busy || !draft.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !draft.trim() ? 0.6 : 1 }}>Send</button>
+        </form>
+      ) : status !== null && (
+        <div className="ss-sup-form">
+          {/* The assistant is off (no key, or over the month's cap), but the builder may have been
+              chatting until it went off: status still returns the open chat. The ticket carries it,
+              so the team gets the last messages and the "Full chat" link in exactly this case
+              (Carolyn, 10-29). An empty chat is not sent: there is nothing to link to. */}
+          <button type="button" onClick={() => onTicket(null, messages.length ? convId : null)} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%" }}>Submit a ticket</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// THE SUPPORT BUTTON, in the top bar (Carolyn, 10-26 call, modelled on the Support menu in her GHL
+// dashboard). Chat icon + "Support" (icon only on a phone). The menu: Ask the assistant, Report a
+// problem, Request a feature, Submit a ticket, My requests, What's new — Ahsan 10-27. A "Live
+// support" entry exists for stage 2 and renders only when support-agent says liveSupport is
+// available, which it never does yet. Mounted by the shell only while NOT viewing another account.
+function SupportMenu({ clientId, onSubmitted, onNavigate }) {
+  const [open, setOpen] = useState(false);
+  const [chat, setChat] = useState(false);
+  const [form, setForm] = useState(null);          // { kind, prefill, conversationId }
+  const [live, setLive] = useState(false);
+  const wrapRef = useRef(null);
+  const menuRef = useRef(null);
+  const asked = useRef(false);
+
+  // The menu hangs from the button's right edge. On a phone with a wide business badge the button
+  // sits far enough left that the 280 px menu ran 8 px off the screen (beta, 375 px, 10-28), so it
+  // is nudged back inside an 8 px margin before it paints. The margin is measured from the VISIBLE
+  // edge: on a page wider than the phone (Orders is 14 px wider at 375) the visible area can be
+  // zoomed and panned, and the page's own left edge is then off screen.
+  React.useLayoutEffect(() => {
+    const m = menuRef.current;
+    if (!open || !m) return;
+    m.style.right = "";
+    const vv = window.visualViewport;
+    const over = (vv ? vv.offsetLeft : 0) + 8 - m.getBoundingClientRect().left;
+    if (over > 0) m.style.right = `${-over}px`;
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); window.removeEventListener("keydown", onKey); };
+  }, [open]);
+
+  // The stage-2 flag rides on the assistant's status read, asked once, the first time the menu opens.
+  // It also boots the function, so the first question does not pay the cold start.
+  useEffect(() => {
+    if (!open || asked.current) return;
+    asked.current = true;
+    sb.functions.invoke("support-agent", { body: { action: "status" } })
+      .then(({ data }) => { if (data && data.liveSupport && data.liveSupport.available) setLive(true); })
+      .catch(() => {});
+  }, [open]);
+
+  const pick = (fn) => () => { setOpen(false); fn(); };
+  const items = [
+    ["chat", "💬", "Ask the assistant", "Get an answer right away", pick(() => setChat(true))],
+    ["bug", "🐛", "Report a problem", "Something broken or not working", pick(() => setForm({ kind: "bug" }))],
+    ["feature", "✨", "Request a feature", "An idea or improvement", pick(() => setForm({ kind: "feature" }))],
+    ["ticket", "🎫", "Submit a ticket", "Anything you need a person for", pick(() => setForm({ kind: "ticket" }))],
+    ["mine", "📋", "My requests", "Track what you've sent us", pick(() => onNavigate("support", "mine"))],
+    ["news", "🆕", "What's new", "New features and fixes", pick(() => onNavigate("support", "features"))],
+  ];
+
+  return (
+    <div className="ss-support" ref={wrapRef}>
+      <button type="button" className="ss-sup-btn" aria-haspopup="menu" aria-expanded={open}
+        onClick={() => setOpen((o) => !o)} title="Support">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <span className="ss-sup-btn-t">Support</span>
+      </button>
+      {open && (
+        <div className="ss-sup-menu" role="menu" aria-label="Support" ref={menuRef}>
+          {items.map(([k, icon, label, sub, act]) => (
+            <button key={k} type="button" role="menuitem" onClick={act}>
+              <span className="ic" aria-hidden="true">{icon}</span>
+              <span className="tx"><span className="lb">{label}</span><span className="sb">{sub}</span></span>
+            </button>
+          ))}
+          {live && (
+            <button type="button" role="menuitem" onClick={pick(() => setForm({ kind: "ticket" }))}>
+              <span className="ic" aria-hidden="true">🎧</span>
+              <span className="tx"><span className="lb">Live support</span><span className="sb">Talk to a person now</span></span>
+            </button>
+          )}
+        </div>
+      )}
+      {/* Both render into <body>: the top bar is sticky with its own z-index, so anything drawn
+          inside it sits UNDER every page element above 40 (sticky table headers are 70). */}
+      {chat && ReactDOM.createPortal(
+        <SupportChat onClose={() => setChat(false)} onNavigate={onNavigate}
+          onTicket={(prefill, conversationId) => { setForm({ kind: "ticket", prefill, conversationId }); }} />,
+        document.body,
+      )}
+      {form && ReactDOM.createPortal(
+        <FeedbackDialog kind={form.kind} clientId={clientId} prefill={form.prefill || null}
+          supportConversationId={form.conversationId || null}
+          onClose={() => setForm(null)}
+          onSubmitted={(row) => { if (form.conversationId) setChat(false); if (onSubmitted) onSubmitted(row); }} />,
+        document.body,
+      )}
+    </div>
+  );
+}
+
 // ─── "My Requests": this tenant's bugs + feature requests, with our replies ───
 // The component and the `mine` route slug keep the older "submissions" naming — the rows
 // are still feedback_submissions, and renaming the slug would break existing links.
-function MySubmissions({ refreshKey }) {
+// `supportOn` is the shell's switch (346): off, the empty-state sentence points at the 💬 Feedback
+// pill those builders still have, word for word as before, and the Tickets chip shows only when a
+// ticket row exists (release review, 10-30).
+function MySubmissions({ refreshKey, supportOn = false }) {
   const [rows, setRows] = useState(null);       // null = loading
   const [comments, setComments] = useState({}); // submission_id -> [comment]
   const [error, setError] = useState(null);
@@ -614,7 +1089,8 @@ function MySubmissions({ refreshKey }) {
         <span style={{ ...S.h2, marginBottom: 0 }}>My Requests</span>
         <span style={{ fontSize: 12, color: "#94A3B8" }}>({rows.length})</span>
         <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
-          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"]].map(([k, lbl]) => (
+          {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"],
+            ...(supportOn || rows.some((r) => r.kind === "ticket") ? [["ticket", "🎫 Tickets"]] : [])].map(([k, lbl]) => (
             <button key={k} type="button" onClick={() => setFilter(k)}
               style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999, cursor: "pointer",
                 border: filter === k ? "1px solid " + ACCENT : "1px solid #E2E8F0",
@@ -629,8 +1105,13 @@ function MySubmissions({ refreshKey }) {
 
       {rows.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0", lineHeight: 1.6 }}>
-          You haven't sent us anything yet. Use the <b>💬 Feedback</b> button in the bottom-right corner
-          to report an issue or request a feature — it'll show up here so you can follow what happens to it.
+          {supportOn ? (<>
+            You haven't sent us anything yet. Use the <b>Support</b> button at the top of the page to report
+            a problem, request a feature or send us a ticket — it'll show up here so you can follow what happens to it.
+          </>) : (<>
+            You haven't sent us anything yet. Use the <b>💬 Feedback</b> button in the bottom-right corner
+            to report an issue or request a feature — it'll show up here so you can follow what happens to it.
+          </>)}
         </div>
       ) : shown.length === 0 ? (
         <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>Nothing here under this filter.</div>
@@ -655,7 +1136,7 @@ function MySubmissions({ refreshKey }) {
                     style={{ cursor: "pointer", background: isOpen ? "#F8FAFC" : undefined }}>
                     <td style={{ ...S.td, fontWeight: 700 }}>
                       <span style={{ color: ACCENT, fontSize: 11, marginRight: 6 }}>{isOpen ? "▾" : "▸"}</span>
-                      <span style={{ marginRight: 6 }}>{r.kind === "bug" ? "🐛" : "✨"}</span>
+                      <span style={{ marginRight: 6 }}>{(FB_KINDS[r.kind] || FB_KINDS.ticket).icon}</span>
                       {r.title}
                       {/* Tooltip names the sender rather than saying "from us": the reader
                           IS the client, so "us" scans as their own team — especially next
@@ -914,10 +1395,10 @@ function SetupChecklist({ items, counts, canEdit, onPatch, onReload, onNavigate,
 // changelog is now one view inside it, not the whole page. ───
 // `canAdmin` reaches SetupChecklist for one reason: only an owner/admin can open
 // Settings → Billing, so only they get the "add this add-on" button on a padlocked step.
-function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
+function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin, supportOn = false }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
-  // The sub-tab lives in the URL (/portal/support/setup — /portal/releases/setup still
+  // The sub-tab lives in the URL (/support/setup — /releases/setup still
   // resolves via SS_TAB_ALIASES), so a "Take me there" link or a
   // bookmark lands on the right one. `null` = the visitor has not chosen; see the default
   // below, which only then decides for them.
@@ -1069,8 +1550,8 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
   // "mine" is the odd one out: it renders <MySubmissions /> rather than release_notes
   // entries, so it carries its own count instead of a `list`. It LEADS the strip
   // (Carolyn 2026-08-28) — a builder's own open requests matter more to them than our
-  // changelog does. Its id stays "mine" so /portal/support/mine — and the older
-  // /portal/releases/mine, via the alias — both keep working.
+  // changelog does. Its id stays "mine" so /support/mine — and the older
+  // /releases/mine, via the alias — both keep working.
   const TABS = [
     { id: "mine",     label: "My Requests",  dot: "#7E22CE", count: mineCount },
     { id: "features", label: "New Features", dot: "#10B981", list: features, empty: "No new features yet — check back soon." },
@@ -1085,11 +1566,15 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
     TABS.splice(lead === "setup" ? 0 : 1, 0,
       { id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
   }
-  // An explicit choice — a click, or a /portal/support/<sub> link — always wins; with
+  // An explicit choice — a click, or a /support/<sub> link — always wins; with
   // none, the page lands on whichever tab leads.
   const effTab = subtab || lead || "mine";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
+  // How many of this tab's entries are on beta, for the line under its heading (Carolyn
+  // 2026-10-12: testers need to see which changes are on beta). The badge alone says "On beta
+  // for testing" on each one; the line says what that means, once, and only when it applies.
+  const betaHere = active.list ? active.list.filter((r) => r.status === "beta").length : 0;
 
   return (
     <div>
@@ -1121,7 +1606,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
       {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
         canEdit={!setupData || setupData.canEdit !== false}
         onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
-        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
+        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} supportOn={supportOn} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
         : rows.length === 0
@@ -1133,6 +1618,15 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
               <span style={{ ...S.h2, marginBottom: 0 }}>{active.label}</span>
               <span style={{ fontSize: 12, color: "#94A3B8" }}>({active.list.length})</span>
             </div>
+            {betaHere > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5, color: "#9A3412", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 8, padding: "7px 10px", margin: "8px 0 4px", lineHeight: 1.45 }}>
+                {statusBadge("beta")}
+                <span>
+                  {betaHere === 1 ? "1 entry here is" : `${betaHere} entries here are`} live on beta now and
+                  {betaHere === 1 ? " comes" : " come"} to everyone with the next release.
+                </span>
+              </div>
+            )}
             {active.list.length === 0
               ? <div style={{ fontSize: 13, color: "#64748B", padding: "8px 0" }}>{active.empty}</div>
               : active.list.map(entry)}
@@ -1152,11 +1646,11 @@ function QuickBooksLocked({ canAdmin, onSeeBilling }) {
     <ComingSoon
       title="QuickBooks Sync"
       icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 8.5A2.5 2.5 0 0 0 9.5 15H12M14.5 15.5a2.5 2.5 0 0 0 0-6H12"/></svg>}
-      blurb="Send your accepted quotes to QuickBooks Online as invoices, without typing them twice. Map each building style and add-on to the right QuickBooks item once, and every invoice lands in your books the way your accountant expects."
+      blurb="Send your accepted estimates to QuickBooks Online as invoices, without typing them twice. Map each building style and add-on to the right QuickBooks item once, and every invoice lands in your books the way your accountant expects."
       bullets={[
         "Push an invoice to QuickBooks straight from a design",
         "Map styles, sizes and add-ons to your own QuickBooks items",
-        "Keep your books matching your quotes, with no re-keying",
+        "Keep your books matching your estimates, with no re-keying",
       ]}
       cta={canAdmin ? { label: "Turn on QuickBooks Sync — see Billing", onClick: onSeeBilling } : null}
       available
@@ -1214,96 +1708,30 @@ function ComingSoon({ icon, title, blurb, bullets, cta, available = false }) {
   );
 }
 
-// ─── Orders (preview) ───
-// Coming-soon preview of the paused Orders & payments feature (the full, wired build lives
-// on the wip/orders branch). Renders the finished LIST view with EXAMPLE data behind a
-// pointer-events/user-select lock, under a clear "coming soon / work in progress" banner —
-// so tenants can see what's coming but cannot interact with it. Intentionally self-contained
-// and inert: no data reads, no sb calls, no live wiring. When the real feature ships, this
-// whole component is replaced by the live OrdersView.
-function OrdersPreview() {
-  const pill = (bg, fg, label) => (
-    <span style={{ background: bg, color: fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{label}</span>
-  );
-  const tile = (label, value, note, accent) => (
-    <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "13px 15px", borderLeft: `3px solid ${accent}` }}>
-      <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
-      <div style={{ fontSize: 23, fontWeight: 800, marginTop: 5, letterSpacing: -0.5, fontVariantNumeric: "tabular-nums" }}>{value}</div>
-      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3 }}>{note}</div>
-    </div>
-  );
-  const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
-  const td = { fontSize: 13, padding: "12px 10px", borderBottom: "1px solid #F1F5F9" };
-  const numTd = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
-  const chip = (label, on) => (
-    <span style={{ fontSize: 12, fontWeight: 700, borderRadius: 20, padding: "6px 13px", border: `1px solid ${on ? "#3D3672" : "#E2E8F0"}`, background: on ? "#3D3672" : "#F1F5F9", color: on ? "#FFF" : "#475569" }}>{label}</span>
-  );
-  const muted = <span style={{ color: "#94A3B8" }}>—</span>;
-  const SAMPLE = [
-    { no: "1024", name: "Dale Hostetler", phone: "(330) 555-0148", bldg: "Lofted Barn 12×24", date: "Jul 20, 2026", total: "$9,575.00", paid: "$2,000.00", bal: "$7,575.00", balColor: "#1E293B", st: pill("#DBEAFE", "#1E40AF", "Partially paid") },
-    { no: "1023", name: "Marcus Webb", phone: "(614) 555-0192", bldg: "Garage 24×32", date: "Jul 18, 2026", total: "$18,400.00", paid: muted, bal: "$18,400.00", balColor: "#1E293B", st: pill("#FFE4E6", "#9F1239", "Awaiting payment") },
-    { no: "1022", name: "Owen Brant", phone: "(937) 555-0164", bldg: "Cabin 14×40", date: "Jul 15, 2026", total: <span style={{ color: "#3D3672", fontWeight: 700 }}>Set total</span>, paid: muted, bal: "—", balColor: "#94A3B8", st: pill("#FEF3C7", "#92400E", "Needs invoice") },
-    { no: "1021", name: "Rita Colson", phone: "(419) 555-0173", bldg: "Utility Shed 10×16", date: "Jul 12, 2026", total: "$4,300.00", paid: "$4,300.00", bal: "$0.00", balColor: "#94A3B8", st: pill("#DCFCE7", "#166534", "Paid in full") },
-    { no: "1020", name: "Gary Aldenmeyer", phone: "(740) 555-0100", bldg: "Lean-To 8×12", date: "Jul 8, 2026", total: "$2,100.00", paid: "$2,600.00", bal: "$500.00 credit", balColor: "#9A3412", st: pill("#FFEDD5", "#9A3412", "Overpaid") },
-  ];
-
+// ─── Orders, when it can't be shown ───
+// The "Coming soon / Work in progress" teaser that stood here (example orders behind a lock) went
+// on 2026-10-21. Orders shipped to builders on 2026-09-01, so the teaser only ever reached two
+// people, and told both of them something false: an operator viewing a builder (orders and payments
+// RLS is scoped to the signed-in tenant, so view-as can't read them) and a team member whose title
+// doesn't hold Orders. Carolyn asked on 2026-10-19: "Why does it say work in progress?" (a 10-20
+// error row's address carried ?view=structure-studio). Each now gets the true sentence and the way out.
+function OrdersNotShown({ viewingName = null, onExitView = null }) {
   return (
-    <div style={{ maxWidth: 1040 }}>
-      {/* Coming-soon / work-in-progress banner — the one thing that IS meant to read clearly. */}
-      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 12, padding: "20px 24px", color: "#FFF", marginBottom: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 9, flexWrap: "wrap" }}>
-          <span style={{ background: "#75E6DA", color: "#22345B", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px" }}>Coming soon</span>
-          <span style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.32)", color: "#FFF", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", borderRadius: 999, padding: "3px 10px" }}>Work in progress</span>
-        </div>
-        <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.15 }}>Orders &amp; payments</div>
-        <p style={{ fontSize: 13.5, color: "#D6E4F0", lineHeight: 1.55, margin: "9px 0 0", maxWidth: 660 }}>
-          A preview of what's coming: every accepted quote becomes a tracked order — from the sale, through the build, to delivery — with payments and balances in one place. The screen below shows <b style={{ color: "#FFF" }}>example data</b> and isn't switched on yet, so it can't be clicked or edited while we finish building it.
-        </p>
-      </div>
-
-      {/* Everything below is a locked, non-interactive preview. pointerEvents:none disables
-          every click/hover/field; userSelect:none stops text selection; aria-hidden keeps the
-          sample figures out of the accessibility tree (the banner above is the real message). */}
-      <div aria-hidden="true" style={{ pointerEvents: "none", userSelect: "none", cursor: "default", opacity: 0.96 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))", gap: 11, marginBottom: 16 }}>
-          {tile("Open balance", "$25,975.00", "across 2 open orders", "#F59E0B")}
-          {tile("Collected", "$12,300.00", "6 payments recorded", "#16A34A")}
-          {tile("Needs invoice", "1", "accepted, not billed yet", "#92400E")}
-          {tile("Awaiting payment", "1", "invoiced, nothing collected", "#9F1239")}
-        </div>
-
-        <div style={{ ...S.card }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 12 }}>
-            <div style={{ ...S.h2, marginBottom: 0, marginRight: 4 }}>Orders (5)</div>
-            {chip("All", true)}{chip("Needs invoice")}{chip("Awaiting payment")}{chip("Partially paid")}{chip("Paid in full")}
-            <div style={{ marginLeft: "auto", minWidth: 220, flex: "0 1 280px", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#94A3B8", background: "#FFF" }}>Search orders — name, building, order #…</div>
-            <span style={{ border: "1px solid #E2E8F0", background: "#F1F5F9", color: "#334155", fontWeight: 700, fontSize: 12.5, borderRadius: 8, padding: "8px 12px" }}>↻ Refresh</span>
-          </div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>
-                <th style={th}>Order</th><th style={th}>Customer</th><th style={th}>Building</th><th style={th}>Ordered</th>
-                <th style={{ ...th, textAlign: "right" }}>Total</th><th style={{ ...th, textAlign: "right" }}>Paid</th>
-                <th style={{ ...th, textAlign: "right" }}>Balance</th><th style={th}>Status</th><th style={th}></th>
-              </tr></thead>
-              <tbody>
-                {SAMPLE.map((r) => (
-                  <tr key={r.no}>
-                    <td style={{ ...td, fontWeight: 700, whiteSpace: "nowrap" }}>#{r.no}</td>
-                    <td style={{ ...td, fontWeight: 700 }}>{r.name}<div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 500 }}>{r.phone}</div></td>
-                    <td style={td}>{r.bldg}</td>
-                    <td style={{ ...td, whiteSpace: "nowrap" }}>{r.date}</td>
-                    <td style={numTd}>{r.total}</td>
-                    <td style={numTd}>{r.paid}</td>
-                    <td style={{ ...numTd, fontWeight: 800, color: r.balColor }}>{r.bal}</td>
-                    <td style={td}>{r.st}</td>
-                    <td style={{ ...td, whiteSpace: "nowrap" }}><span style={{ color: "#3D3672", fontWeight: 700, fontSize: 12 }}>Open →</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+    <div style={{ maxWidth: 560 }}>
+      <div style={{ ...S.card }} data-ss-orders-not-shown={viewingName ? "view-as" : "access"}>
+        <div style={{ ...S.h2, fontSize: 16 }}>Orders</div>
+        {viewingName ? (
+          <>
+            <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, margin: "0 0 14px" }}>
+              Orders isn't shown while viewing as <b>{viewingName}</b>. Their orders and payments can only be read from their own sign-in.
+            </p>
+            {onExitView && <button type="button" onClick={onExitView} style={S.btn(ACCENT, "#FFF")}>Exit view-as</button>}
+          </>
+        ) : (
+          <p style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, margin: 0 }}>
+            Orders isn't part of your access. Ask an owner to turn it on for you under Settings → Team.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -1435,7 +1863,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // ── THE ORDER DETAIL HAS A URL NOW ───────────────────────────────────────────────
   // It was pure component state, so the browser Back button walked out of Orders entirely
   // instead of closing the order, and an order could not be linked to at all. The CRM code
-  // names this gap in its own comment -- "there is no /portal/orders/<id> route to
+  // names this gap in its own comment -- "there is no /orders/<id> route to
   // deep-link to" -- which is why its Orders card could not link out.
   //
   // Carolyn, 2026-08-28 @41:03, on why this matters more than it looks: "One of my biggest
@@ -1744,7 +2172,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
       );
     }
     if (!schedOn) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Not scheduled</span>;
-    return schedLinkBtn("Add to build schedule", "Put this building on the Build Schedule — it takes the next shop serial number",
+    return schedLinkBtn("Add to build schedule", "Put this building on the Build Schedule — it takes the next shop serial number the first time, and keeps it",
       () => addToBuildSchedule(r), schedBusy === r.o.id);
   };
   const balOf = (r) => (r.o.total_cents == null ? null : r.o.total_cents - r.paid);
@@ -1963,7 +2391,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
         {all.length === 0 && (
           <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
             No orders yet. An order appears here automatically as soon as a customer signs a
-            StructureStudio quote. (Quotes and invoices issued through your CRM live in your
+            StructureStudio estimate. (Estimates and invoices issued through your CRM live in your
             CRM — this page only tracks the paperwork StructureStudio issues.)
           </p>
         )}
@@ -2150,7 +2578,7 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
       const { data: sent } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: created.id } });
       setMsg(sent && sent.sent
         ? { ok: `CO-${created.co_no} created and emailed to the customer for signature.` }
-        : { ok: `CO-${created.co_no} created. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — the customer can sign it from their quote page link.` });
+        : { ok: `CO-${created.co_no} created. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — the customer can sign it from their estimate page link.` });
     }
     load(); onChanged();
   };
@@ -2197,7 +2625,7 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
     if (error || (data && data.error)) { setMsg({ err: (data && data.error) || error.message }); return; }
     setMsg(data && data.sent
       ? { ok: `CO-${co.co_no} emailed to the customer for signature.` }
-      : { err: `Email not sent${data && data.reason ? ` (${data.reason})` : ""} — the customer can still sign from their quote page.` });
+      : { err: `Email not sent${data && data.reason ? ` (${data.reason})` : ""} — the customer can still sign from their estimate page.` });
   };
 
   // ⚠️ THROUGH void_change_order, NOT a direct update. Voiding is not one column: when the CO
@@ -2493,12 +2921,13 @@ function ssSignedTaxText(a) {
 // ⚠️ `batten` was MISSING from this list, and it was not cosmetic. stage_order_attribute_change
 // validated against the matching server list and `next.cladding` defaults to the design's
 // CURRENT value — so a design saved as Board & Batten made every attribute change on its order
-// fail with "That cladding isn't offered", including a pure roof-colour edit. All four now.
-const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "AG Panel" };
-const SS_CLADDING_ORDER = ["panel", "lap", "batten", "agpanel"];
+// fail with "That cladding isn't offered", including a pure roof-colour edit. All five now: vinyl
+// joined on 2026-10-06 (migration 285), the day lap's built-in name became 7" LP Lap Siding.
+const SS_CLADDING_NAMES = { lap: "7\" LP Lap Siding", vinyl: "4.5\" Vinyl Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "AG Panel" };
+const SS_CLADDING_ORDER = ["panel", "lap", "vinyl", "batten", "agpanel"];
 // `offered` is order_paperwork's list: [{ id, label }] with label = the tenant's override or
 // null. An empty/absent list means "this tenant has not configured cladding", which reads as
-// all four under our own names — the behaviour before 207.
+// all five under our own names — the behaviour before 207.
 const ssCladdingOpts = (offered, current) => {
   const rows = (Array.isArray(offered) && offered.length)
     ? offered.map((o) => [String(o.id), (o.label && String(o.label).trim()) || SS_CLADDING_NAMES[String(o.id)] || String(o.id)])
@@ -2819,7 +3248,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const biz = (paperwork && paperwork.business) || {};
   const colors = (paperwork && paperwork.colors) || [];
   // What this design's STYLE offers, from order_paperwork (207). Empty means the tenant has
-  // configured none, which reads as all four under our built-in names — the behaviour this
+  // configured none, which reads as all five under our built-in names — the behaviour this
   // screen had before cladding was configurable.
   const cladOffered = (paperwork && paperwork.cladding) || [];
   const invoice = (paperwork && paperwork.invoice) || null;
@@ -2988,9 +3417,9 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       const { data: sent } = await sb.functions.invoke("portal-settings", { body: { action: "send_change_order", changeOrderId: data.changeOrderId } });
       note = sent && sent.sent
         ? { ok: `Change order CO-${data.coNo} staged and emailed to the customer for signature.` }
-        : { ok: `Change order CO-${data.coNo} staged. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — they can sign from their quote page link.` };
+        : { ok: `Change order CO-${data.coNo} staged. Email not sent${sent && sent.reason ? ` (${sent.reason})` : ""} — they can sign from their estimate page link.` };
     } else {
-      note = { ok: "Quote updated — the customer hasn't signed yet, so no change order was needed." };
+      note = { ok: "Estimate updated — the customer hasn't signed yet, so no change order was needed." };
     }
     setBusy(false); discardDraft(); onMsg(note); onChanged();
   };
@@ -3142,16 +3571,16 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
               only finding out by opening the page is exactly why this got looked at.
 
               Monospace and select-all because the whole job of this string is to be copied
-              onto a physical tag without a transcription error. Before the building is built
-              there is deliberately no preview: the first block IS the build date, so a
-              preview would print a number that later changes, and a serial that changes after
-              someone has written it on a building is worse than one that arrives late. */}
+              onto a physical tag without a transcription error. Since 316 (2026-10-18) it is
+              issued WHEN THE ORDER IS CREATED and frozen (MMYY-STYLE-SIZE-COLORS-NUMBER), so it
+              can ride the first invoice. Absent means the builder has not set a starting
+              building number yet (316 will not number a sale against an unset counter). */}
           <div style={{ fontSize: 11.5, marginTop: 6 }}>
             {o.building_serial ? (
               <span title="This building's serial number — write this on the tag"
                 style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
             ) : (
-              <span style={{ color: "#94A3B8" }}>Serial assigned when the building is marked built</span>
+              <span style={{ color: "#94A3B8" }}>No serial yet — set your starting building number in Settings → Business Details</span>
             )}
           </div>
         </div>
@@ -3257,7 +3686,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 ? <div style={{ fontSize: 12, fontWeight: 700, color: "#B91C1C", marginTop: 6 }}>{baselineDriftMsg}</div>
                 : (
                   <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>
-                    {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the quote."}
+                    {design.accepted_at ? "The customer must sign off before this order can be invoiced." : "The customer hasn't signed yet — this just updates the estimate."}
                   </div>
                 )}
             </>
@@ -3265,7 +3694,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button type="button" onClick={stage} disabled={anyBusy || !preview || !!baselineDriftMsg}
               style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5, opacity: anyBusy || !preview || !!baselineDriftMsg ? 0.6 : 1 }}>
-              {busy ? "Staging…" : (design.accepted_at ? "Stage & send for signature" : "Update the quote")}
+              {busy ? "Staging…" : (design.accepted_at ? "Stage & send for signature" : "Update the estimate")}
             </button>
             <button type="button" onClick={discardDraft} disabled={anyBusy}
               style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", fontSize: 12.5 }}>Discard</button>
@@ -3323,7 +3752,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       {!locked && (
         !design.accepted_at
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-              <b>Quote sent — awaiting the customer's acceptance.</b> Invoicing unlocks when they accept it from their quote page (Copy customer link below, or hand them your phone).
+              <b>Estimate sent — awaiting the customer's acceptance.</b> Invoicing unlocks when they accept it from their estimate page (Copy customer link below, or hand them your phone).
             </div>
           : ssInvoicePdf
           /* The invoice is OUT but the design is not locked, which since migration 136 can
@@ -3332,7 +3761,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           ? <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#713F12" }}>
               <b>Invoice {invoice.invoice_number || ""} sent{design.ss_invoice_sent_at ? ` ${fmtDate(design.ss_invoice_sent_at)}` : ""} — awaiting the customer's signature.</b>
               <div style={{ marginTop: 4, color: "#854D0E" }}>
-                Send the link to their phone, or they sign it from their quote page. The build schedule unlocks once they do.
+                Send the link to their phone, or they sign it from their estimate page. The build schedule unlocks once they do.
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
                 {/* One offer, never both: a plain resend rebuilds nothing, but it still bumps
@@ -3391,7 +3820,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             </div>
           : anyPendingCo
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their estimate page, or record their verbal OK below.
             </div>
           : invoiceRequestedAt
           /* INVOICE TO APPROVE (migration 229; Ahsan 2026-09-15). The customer accepted from
@@ -3443,8 +3872,8 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             <>
               {ssInvoicePdf
                 ? docBtn("Print invoice", ssInvoicePdf, `Invoice ${invoice.invoice_number || ""}`)
-                : (design.ss_quote_pdf_url && docBtn("Print quote", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`))}
-              {ssInvoicePdf && design.ss_quote_pdf_url && docBtn("Quote (PDF)", design.ss_quote_pdf_url, `Quote ${design.ss_quote_number}`)}
+                : (design.ss_quote_pdf_url && docBtn("Print estimate", design.ss_quote_pdf_url, `Estimate ${design.ss_quote_number}`))}
+              {ssInvoicePdf && design.ss_quote_pdf_url && docBtn("Estimate (PDF)", design.ss_quote_pdf_url, `Estimate ${design.ss_quote_number}`)}
               {design.image_url && docBtn("Floor plan", design.image_url, "Floor plan")}
             </>
           );
@@ -3454,11 +3883,12 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         {/* "View design" once the order is signed and this person cannot raise a change —
             the button still opens the real designer, but calling it "Open design" beside a
             locked order invites an edit that the save will refuse. */}
+        {/* A real link (ssDesignHref): the wheel, a new tab and a reload open THIS design. */}
         {o.short_code && onOpenDesign && (
-          <button type="button" onClick={() => onOpenDesign(o.short_code)}
-            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>
+          <a href={ssDesignHref(o.short_code)} onClick={ssNavClick(() => onOpenDesign(o.short_code))} data-ss-open-design="1"
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", display: "inline-block", textDecoration: "none" }}>
             {amendGate && amendGate.signed === true && attrsLocked ? "View design" : "Open design"}
-          </button>
+          </a>
         )}
         <button type="button"
           onClick={(e) => {
@@ -3480,10 +3910,10 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             setBusy(false);
             if (err || (res && res.error)) { onMsg({ err: (res && res.error) || err.message }); return; }
             onMsg(res && res.sent
-              ? { ok: `Quote ${design.ss_quote_number} emailed to the customer.` }
-              : { err: `Quote email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
+              ? { ok: `Estimate ${design.ss_quote_number} emailed to the customer.` }
+              : { err: `Estimate email not sent${res && res.reason ? ` — ${res.reason}` : ""}. Print the PDF or copy the customer link instead.` });
           }}
-          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend quote email</button>
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend estimate email</button>
       </div>
       {attrsLocked && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>
@@ -3611,6 +4041,201 @@ function QrSvg({ matrix, size = 200 }) {
   );
 }
 
+// ── Refund: all of a payment, or part of it (board card "Partial refunds", migration 349) ───────
+// One box for every payment a builder can refund. A card or bank payment taken HERE goes back
+// through the card network (portal-payments refund_payment, or void_payment to cancel the whole
+// sale before it settles). One RECORDED by hand (cash, a check, a card run elsewhere) is paid back
+// by the builder, and this records how. Either way the amount starts at what is left and cannot go
+// above it, and several partial refunds are fine until nothing is left.
+//
+// ONE KEY PER REFUND. `requestKey` is minted when the box opens and sent with every try of the same
+// refund, so a double click, or a retry after the answer was lost, gets the first refund's outcome
+// back instead of a second refund (payment_refund_open). After an answer that says nothing went back
+// (a refusal, the card network busy) the next try is a NEW refund and gets a new key.
+//
+// ⚠️ A PARTIAL AMOUNT IS ALWAYS A REFUND. A void cancels the whole sale, so before a card payment
+// settles (overnight) the only reversal is the whole of it; the server says so in plain words
+// (reason "not_settled") and this box offers the whole cancel instead.
+const refundKey = () => {
+  try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (_e) {}
+  return "rk-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+};
+
+function RefundModal({ p, refundOwedCents = null, onClose, onDone }) {
+  const left = Number(p.amount_cents) || 0;
+  const taken = left + (Number(p.refunded_cents) || 0);
+  const viaNetwork = p.gateway === "cardpointe";
+  // The same reading voidGatewayPayment always used: a card payment counted settled and over 12 hours
+  // old has been batched; anything younger may still be cancelled whole. The server decides for real.
+  const settledAlready = viaNetwork && p.funding_state === "settled" && Date.parse(p.received_at) < Date.now() - 12 * 3600 * 1000;
+  const bankClearing = viaNetwork && p.method === "ach" && p.funding_state === "pending";
+  const [amount, setAmount] = useState((left / 100).toFixed(2));
+  const [payBack, setPayBack] = useState(PAY_METHODS.some((m) => m[0] === p.method) ? p.method : "cash");
+  const [reference, setReference] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);          // { text, reason }
+  const keyRef = useRef(refundKey());
+  const cents = centsFrom(amount);
+  const amountOk = Number.isFinite(cents) && cents > 0 && cents <= left;
+  const whole = amountOk && cents === left;
+  const methodName = (PAY_METHODS.find((m) => m[0] === p.method) || [, p.method])[1];
+  const card = p.instrument_last4 ? ` ending ${p.instrument_last4}` : "";
+
+  // Reads the edge function's answer the way the rest of this tab does: a non-2xx arrives as
+  // `error`, its body on error.context. No body at all means we never heard back.
+  const ask = async (body) => {
+    const { data, error } = await sb.functions.invoke("portal-payments", { body });
+    if (!error) return data && data.error ? { fail: data } : { ok: data || {} };
+    let ctx = null;
+    try { ctx = await error.context.json(); } catch (_e) {}
+    return ctx ? { fail: ctx } : { lost: true };
+  };
+  const done = (text) => { onDone(text); };
+  const failed = (f) => {
+    const reason = (f && f.reason) || null;
+    // Nothing went back (or it was never sent): the next try is a new refund. A refund we could not
+    // confirm keeps its key, so trying again asks about the same one.
+    if (reason !== "refund_unconfirmed") keyRef.current = refundKey();
+    setErr({ text: (f && f.error) || "That refund didn't go through.", reason });
+  };
+
+  const refund = async (amountCents) => {
+    const out = await ask({ action: "refund_payment", paymentId: p.id, amountCents, requestKey: keyRef.current,
+      ...(viaNetwork ? {} : { refundMethod: payBack, reference: reference.trim() || undefined }) });
+    if (out.ok) {
+      const r = out.ok;
+      const rest = r.leftCents != null && r.leftCents > 0 ? ` ${money(r.leftCents)} of this payment is left.` : "";
+      done(viaNetwork
+        ? `Refunded ${money(r.refunded)} to the customer${card ? ` (card${card})` : ""}.${rest}`
+        : `Recorded a ${money(r.refunded)} refund by ${(PAY_METHODS.find((m) => m[0] === payBack) || [, payBack])[1].toLowerCase()}.${rest}`);
+      return;
+    }
+    if (out.lost) { setErr({ text: "We didn't hear back, so we can't tell yet whether that went through. Press it again: it won't refund twice.", reason: "lost" }); return; }
+    failed(out.fail);
+  };
+
+  // The whole sale, before it settles: a void. "Already settled" chains to a refund of all that is
+  // left, as the old Refund button did; a bank payment still clearing says why it can't.
+  const cancelWhole = async () => {
+    const out = await ask({ action: "void_payment", paymentId: p.id });
+    if (out.ok) { done(out.ok.voided || out.ok.already ? "Payment cancelled at the card network. The customer won't be charged." : "Done."); return; }
+    if (out.lost) { setErr({ text: "We didn't hear back from the card network. Check the payment again in a minute before trying again.", reason: "lost" }); return; }
+    const f = out.fail || {};
+    if (f.settled && bankClearing) { setErr({ text: "This bank payment is still clearing. It can be refunded once it clears.", reason: "ach_pending" }); return; }
+    if (f.settled) { await refund(left); return; }
+    failed(f);
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    if (!amountOk) { setErr({ text: `Enter an amount from $0.01 up to ${money(left)}.`, reason: "amount" }); return; }
+    setBusy(true); setErr(null);
+    try {
+      if (viaNetwork && whole && !settledAlready) await cancelWhole();
+      else await refund(cents);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancelInstead = async () => {
+    if (busy) return;
+    setBusy(true); setErr(null);
+    try { await cancelWhole(); } finally { setBusy(false); }
+  };
+
+  const chip = (label, c) => (
+    <button type="button" key={label} onClick={() => { setAmount((c / 100).toFixed(2)); setErr(null); }} data-ss-refund-chip={label}
+      style={{ background: cents === c ? "#EEF2FF" : "#F8FAFC", color: cents === c ? "#3730A3" : "#475569", border: `1px solid ${cents === c ? "#C7D2FE" : "#E2E8F0"}`, borderRadius: 999, padding: "4px 10px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+  );
+  const primary = !viaNetwork
+    ? (amountOk ? `Record refund of ${money(cents)}` : "Record refund")
+    : whole && !settledAlready ? "Cancel the whole payment"
+      : amountOk ? `Refund ${money(cents)}` : "Refund";
+
+  return (
+    <div data-ss-refund-modal="1" onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
+      <div role="dialog" aria-modal="true" aria-label="Refund payment"
+        style={{ background: "#FFF", borderRadius: 14, maxWidth: 420, width: "100%", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.3)" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10, borderRadius: "14px 14px 0 0" }}>
+          <div style={{ fontSize: 15.5, fontWeight: 800 }}>Refund {viaNetwork ? "this payment" : "a recorded payment"}</div>
+          <button type="button" onClick={() => { if (!busy) onClose(); }} aria-label="Dismiss"
+            style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ padding: "16px 18px" }}>
+          <div style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.5, marginBottom: 12 }}>
+            {methodName}{card} · taken {fmtDate(p.received_at)} · {money(taken)}
+            {taken !== left && <> · <b>{money(taken - left)}</b> refunded already</>}
+            <br />
+            <b style={{ color: "#1E293B" }}>{money(left)}</b> can still be refunded.
+          </div>
+
+          <label style={S.lbl} htmlFor="ss-refund-amount">Amount to refund</label>
+          <input id="ss-refund-amount" data-ss-refund-amount="1" inputMode="decimal" value={amount} disabled={busy}
+            onChange={(e) => { setAmount(e.target.value); setErr(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            style={{ ...S.input, fontSize: 16, fontVariantNumeric: "tabular-nums" }} />
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 7 }}>
+            {chip(`All ${money(left)}`, left)}
+            {refundOwedCents != null && refundOwedCents > 0 && refundOwedCents < left && chip(`Refund owed ${money(refundOwedCents)}`, refundOwedCents)}
+          </div>
+          {Number.isFinite(cents) && cents > left && (
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 6 }}>That's more than the {money(left)} left on this payment.</div>
+          )}
+
+          {!viaNetwork && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+              <div>
+                <label style={S.lbl} htmlFor="ss-refund-method">Paid back by</label>
+                <select id="ss-refund-method" data-ss-refund-method="1" value={payBack} disabled={busy} onChange={(e) => setPayBack(e.target.value)} style={S.input}>
+                  {PAY_METHODS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={S.lbl} htmlFor="ss-refund-ref">Check # / note</label>
+                <input id="ss-refund-ref" data-ss-refund-ref="1" value={reference} maxLength={200} disabled={busy} onChange={(e) => setReference(e.target.value)} style={S.input} placeholder="Optional" />
+              </div>
+            </div>
+          )}
+
+          <div style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.5, marginTop: 12 }}>
+            {!viaNetwork
+              ? "You give the money back yourself (cash, a check…). This records it, and the order's balance updates."
+              : bankClearing
+                ? "This bank payment is still clearing. Today it can only be cancelled whole; once it clears it can be refunded in part."
+                : whole && !settledAlready
+                  ? "This payment hasn't settled yet, so the whole of it is cancelled and the customer is never charged. A part of it can be refunded after it settles (overnight)."
+                  : !settledAlready
+                    ? "Card payments settle overnight. Until then only the whole payment can be cancelled, so a partial refund may be refused until tomorrow."
+                    : "The customer gets this back on their card. It can't be undone from here."}
+          </div>
+
+          {err && (
+            <div data-ss-refund-error={err.reason || "1"} style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
+              {err.text}
+              {err.reason === "not_settled" && !whole && viaNetwork && !bankClearing && (
+                <div style={{ marginTop: 8 }}>
+                  <button type="button" onClick={cancelInstead} disabled={busy} data-ss-refund-cancel-whole="1"
+                    style={{ ...S.btn("#FFF", "#9F1239"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12 }}>Cancel the whole {money(left)} instead</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+            <button type="button" onClick={() => { if (!busy) onClose(); }} disabled={busy}
+              style={{ ...S.btn("#F1F5F9", "#334155"), flex: 1, border: "1px solid #E2E8F0" }}>Close</button>
+            <button type="button" onClick={submit} disabled={busy || !amountOk || (err && err.reason === "refund_unconfirmed")} data-ss-refund-submit="1"
+              style={{ ...S.btn("#BE123C", "#FFF"), flex: 2, opacity: busy || !amountOk || (err && err.reason === "refund_unconfirmed") ? 0.55 : 1 }}>
+              {busy ? "Working…" : primary}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // `ordersOn` = may this person WRITE money on this order (orders:edit). It defaults to true
 // for the reason spelled out on OrdersView: the shell does not pass it yet, and a false
 // default would take Record-a-payment away from owners. `moneyReady` = has the payments read
@@ -3629,6 +4254,38 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [editTotal, setEditTotal] = useState(o.total_cents == null);
   const bal = balOf(row); const st = stateOf(row);
 
+  // ── Refunds (migration 349) ───────────────────────────────────────────────────────────
+  // `refundFor` is the payment the Refund box is open on. `refunds` are this order's refunds, for
+  // the lines under each payment. A database without the ledger, or a read that fails, shows none:
+  // each payment's own figures (what is left, what was refunded) still say it.
+  const [refundFor, setRefundFor] = useState(null);
+  const [refunds, setRefunds] = useState([]);
+  const [refundsKey, setRefundsKey] = useState(0);
+  const refundAskedRef = useRef(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const { data, error } = await sb.from("payment_refunds")
+        .select("id, payment_id, amount_cents, kind, state, method, reference, created_at, completed_at")
+        .eq("client_id", clientId).eq("order_id", o.id).order("created_at", { ascending: true });
+      if (!alive) return;
+      const list = error || !Array.isArray(data) ? [] : data;
+      setRefunds(list);
+      // A card-network refund we never heard back about, older than a refund can take: reconcile
+      // asks the card network about it by its own order id (once per visit to this order), then
+      // the money is read again if it settled.
+      const stuck = list.some((r) => r.kind === "gateway" && (r.state === "pending" || r.state === "unknown")
+        && Date.now() - Date.parse(r.created_at) > 3 * 60 * 1000);
+      if (stuck && refundAskedRef.current !== o.id) {
+        refundAskedRef.current = o.id;
+        sb.functions.invoke("portal-payments", { body: { action: "reconcile", orderId: o.id } }).then(({ data: rd }) => {
+          if (alive && rd && Array.isArray(rd.refunds) && rd.refunds.some((x) => x && x.state !== "open")) { onChanged(); setRefundsKey((k) => k + 1); }
+        }, () => {});
+      }
+    })();
+    return () => { alive = false; };
+  }, [clientId, o.id, refundsKey, row.pays]);
+
   // ── Taking the payment, rather than recording one already taken (migration 174) ──────
   // This lives INSIDE the Record-a-payment modal on purpose. The method chips already say
   // cash / check / card / ach; picking a card or a bank account and then choosing "charge
@@ -3639,10 +4296,91 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [entry, setEntry] = useState("keyed");          // "keyed" | "swipe"
   const [payOpts, setPayOpts] = useState(null);
   const [payToken, setPayToken] = useState(null);
+  const payTokenRef = useRef(null);   // the token right now, for the read timer (see the message listener)
+  payTokenRef.current = payToken;
+  // When the CARD frame posted its token (Date.now()), for the age check in chargeCard. A bank
+  // token is never stamped: it carries no CVV. See CARD_TOKEN_MAX_MS.
+  const payTokenAtRef = useRef(0);
+  // Part of the keyed card frame's key: bumped for a NEW, empty frame once its card is spent (too
+  // old, or seen by the gateway). The reader's frame has armCount for the same job.
+  const [cardGen, setCardGen] = useState(0);
   const [payExpiry, setPayExpiry] = useState(null);
   const [tokenErr, setTokenErr] = useState("");
   const [surcharge, setSurcharge] = useState(null);
   const [armed, setArmed] = useState(false);
+  // Every arming REMOUNTS the reader's frame (armCount is its key), because the frame's own
+  // autofocus is the only thing that puts focus in its card box, and it runs once per load. The
+  // reader is said to be waiting only once that load is done (frameReady): a swipe that arrives
+  // while the new frame is still loading is lost without a word.
+  //
+  // NO "READY" BUTTON (Carolyn 2026-10-20: "why do I have to press Ready?"). Choosing Card > Charge
+  // it now > Swipe arms the reader by itself, and a refusal re-arms it 1.5 s later, at most
+  // READER_AUTO_REARMS times in a row; then "Reset reader". A click on the reader box arms it too.
+  const [armCount, setArmCount] = useState(0);
+  const [frameReady, setFrameReady] = useState(false);
+  const READER_AUTO_REARMS = 3;
+  // A read in flight: the reader's frame said "typing" and has not answered yet. The modal can't be
+  // closed meanwhile, or the rest of the read types into whatever is under it.
+  const [reading, setReading] = useState(false);
+  // Whether the reader's frame holds the page's focus (document.activeElement is the frame, in a
+  // focused window). Polled while the reader is up: the frame's own box can't be seen across
+  // origins, so this is the closest sign there is that the reader's keys will reach it.
+  const [readerFocus, setReaderFocus] = useState(false);
+  const [readerStuck, setReaderStuck] = useState(false);
+  const rearmTimerRef = useRef(null);
+  const rearmLeftRef = useRef(READER_AUTO_REARMS);
+  // Set once the current frame has been seen holding the focus: proof that this browser lets the
+  // frame take it without a click. Only then does the page re-arm by itself when focus wanders.
+  const focusOkRef = useRef(false);
+  // A reader burst that landed on the page while the reader is not what the modal shows (see the
+  // burst guard): the sentence for it, under the amount box.
+  const [readerHint, setReaderHint] = useState("");
+  // The amount box was filled by the PAGE (on open, from pay_options, on picking Charge it now),
+  // not by a person: the page may still replace it until someone types or picks a chip. What
+  // someone typed is never replaced (Carolyn 2026-10-20: "it flips over").
+  const amountAutoRef = useRef(true);
+  const readTimerRef = useRef(null);   // the reader typed, no token yet: see the message listener
+  const landTimerRef = useRef(null);   // the trap's "the burst is over" debounce
+  // How many reader keys this attempt reached the PAGE instead of the card box (a count, never
+  // the keys). 2026-10-20: two real swipes came back 1001 "manual" although the reader's output
+  // ends like ID TECH's 02...03 swipe, which the frame accepts whole; a lost START would do that.
+  const outsideKeysRef = useRef(0);
+  // When this attempt was armed (`ready`: the name the filed rows have always used), its reader
+  // frame loaded, and the reader's first key arrived (page or frame), in ms: a swipe started before
+  // the frame has focus loses its start.
+  const swipeTimesRef = useRef({ ready: 0, load: 0, firstKey: 0 });
+  const swipeTiming = () => {
+    const s = swipeTimesRef.current;
+    return {
+      readyToLoadMs: s.ready && s.load ? s.load - s.ready : null,
+      loadToFirstKeyMs: s.load && s.firstKey ? s.firstKey - s.load : null,
+    };
+  };
+  const noteFirstKey = () => { if (!swipeTimesRef.current.firstKey) swipeTimesRef.current.firstKey = Date.now(); };
+  // A new attempt starts counting from nothing: an arming, the Swipe chip, closing the modal, and
+  // each filed refusal (a second swipe into the same frame must not repeat the first one's numbers).
+  const resetSwipeCounts = (ready = 0) => { outsideKeysRef.current = 0; swipeTimesRef.current = { ready, load: 0, firstKey: 0 }; };
+  const endSwipeAttempt = () => { outsideKeysRef.current = 0; swipeTimesRef.current.firstKey = 0; };
+  const stopReadTimer = () => { if (readTimerRef.current) { clearTimeout(readTimerRef.current); readTimerRef.current = null; } };
+  // How long a read may take, from the reader's FIRST key, before the page says Fiserv refused it.
+  // The frame says "typing" once per read and nothing at the end of one, so this window has to
+  // hold the whole read: a key pressed before the swipe, the reader's own typing speed, the
+  // frame's 2 s of quiet and CardSecure's answer. At 8 s a slow read was told "refused" while the
+  // reader was still typing (2026-10-13). 20 s was still too short: the VP3350 measured 2026-10-30
+  // types a tap for 15-16 s (about 1,060 keys, 40-110 a second), so the frame only sends at
+  // 17-18 s and the answer lands near 19 s, and a slower tap was thrown away mid-answer. 40 s
+  // leaves a whole second tap's worth of room.
+  const READ_WAIT_MS = 40000;
+  // ⚠️ A CARD TOKEN HOLDS THE CVV FOR 2 MINUTES, AND FOR ONE AUTH. Fiserv (CardPointe integrations),
+  // 2026-10-14: the CVV stays linked to the CardSecure token for 2 minutes. Counted from the moment
+  // the frame posts the token, on the wall clock, and treated as used up by the first auth, approved
+  // or not. A builder keying a phone order often reads the card, then confirms the address with the
+  // customer, and that can pass 2 minutes. So Charge checks the age first (100 s leaves the upload,
+  // a cold start and the database writes inside the 2 minutes), and a charge the gateway saw
+  // (newCardNeeded) asks for the card again. A swipe is held to the same limit: whether its track
+  // data lasts longer is not known, and one more read costs little. Bank tokens are not
+  // timed. scripts/preflight.mjs (checkCardTokenMaxAge) holds this equal to my-quotes.html's.
+  const CARD_TOKEN_MAX_MS = 100000;
   // The bank rail's two boxes (see achTokenize). These two strings are the ONLY place the
   // numbers live: every way out of the modal empties them, and nothing copies them anywhere.
   const [achRouting, setAchRouting] = useState("");
@@ -3651,9 +4389,24 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [achChecking, setAchChecking] = useState(false);
   const [achRetry, setAchRetry] = useState(0);       // bumped to re-check unchanged numbers after a failed charge
   const clearAch = () => { setAchRouting(""); setAchAccount(""); setAchLeft({}); setAchChecking(false); };
+  // Name on card, billing street and ZIP for a KEYED card (2026-10): the card's bank checks the
+  // street and ZIP (AVS), and nothing sent them before. Prefilled from pay_options' billingPrefill
+  // (the delivery address on the estimate) and editable, because the card may be billed somewhere
+  // else. Hidden for a swipe (the card is present) and for a bank payment (the server names the
+  // account holder from the estimate, as it always did).
+  const [billName, setBillName] = useState("");
+  const [billStreet, setBillStreet] = useState("");
+  const [billZip, setBillZip] = useState("");
+  const [billErr, setBillErr] = useState("");
   const frameRef = useRef(null);
   const modalRef = useRef(null);
   const chargeable = method === "card" || method === "ach";
+  const keyedCard = method === "card" && entry === "keyed";
+  // The server's ZIP rule (cpBillingFields): 5 digits, or ZIP+4.
+  const billZipOk = /^\d{5}(-?\d{4})?$/.test(billZip.trim());
+  const billProblem = !billName.trim() ? "Enter the name on the card."
+    : !billStreet.trim() ? "Enter the card's billing street address."
+    : !billZipOk ? "Enter the card's billing ZIP code (5 digits)." : "";
 
   // What CAN be charged is decided by the server, never here: the deposit-vs-balance rule,
   // the pending-ACH block and the signature gate all live in portal-payments. The browser
@@ -3672,6 +4425,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     })();
     return () => { alive = false; };
   }, [payOpen, o.id]);
+  // Closed, the answer goes too: OrderDetail stays mounted, and the next open would otherwise fill
+  // the box from THIS answer (the deposit, or a balance since paid) before its own arrives, and
+  // keep it when the new one says nothing can be charged (2026-10-23 promotion review).
+  useEffect(() => { if (!payOpen) setPayOpts(null); }, [payOpen]);
 
   // Choosing Card or Bank lands on "Take it now", but only an account that CAN charge draws
   // the Already collected / Take it now toggle. Without it, landing on "charge" was a dead end:
@@ -3683,6 +4440,22 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       setCollect("recorded"); setPayToken(null); setTokenErr(""); setArmed(false); clearAch();
     }
   }, [payOpts, collect]);
+
+  // Each fresh pay_options answer prefills the billing fields. An older portal-payments sends no
+  // billingPrefill, and an operator or a viewer is sent null: the fields then start empty.
+  useEffect(() => {
+    const p = (payOpts && payOpts.billingPrefill) || {};
+    setBillName(p.name || ""); setBillStreet(p.street || ""); setBillZip(p.zip || ""); setBillErr("");
+  }, [payOpts]);
+
+  // ONE amount for both modes (2026-10-21). It opens on the order's balance; once pay_options says
+  // what is due now (the deposit, or the balance), the box takes that figure, but only while the
+  // page filled it: a figure someone typed, or a chip they picked, is never replaced. Charge it now
+  // charges what is in the box, inside the balance; the server checks the same range.
+  useEffect(() => {
+    if (!payOpen || !payOpts || !payOpts.canCharge || !payOpts.askCents || !amountAutoRef.current) return;
+    setAmount((payOpts.askCents / 100).toFixed(2));
+  }, [payOpen, payOpts]);
 
   // The tokenizer hands the card back through postMessage. ⚠️ The origin test is the whole
   // security of this listener — without it any page that opens this one could post a forged
@@ -3697,21 +4470,106 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
       let m = null;
       try { m = JSON.parse(e.data); } catch (_e) { return; }
-      if (m && m.validationError) { setPayToken(null); setTokenErr(m.validationError); return; }
+      // The reader's frame (sendcardtypingevent) posts {cardTyping:true} on the reader's first
+      // character and {cardTyping:false} after a token; neither carries a token or an error, so
+      // both fall through to the `!tok` return below. When Fiserv's card system refuses the read
+      // (a reader keyed for the other system, a damaged stripe), the frame posts NOTHING else:
+      // it only answers a 200. So "typing, then READ_WAIT_MS of silence" is the only sign there is.
+      //   * Not while a token is held: after a token the frame says "typing" again on ANY key in
+      //     its box (an Enter, a Shift), and the timer then threw a good card away.
+      //   * Only for the frame that said it: a switch to Bank / ACH, or an arming that reloads the
+      //     frame, leaves this timer behind, and it must not touch what is on screen by then.
+      //   * Until it fires the page stays armed, and `reading` holds the modal open and keeps every
+      //     re-arm away: one mid-read reloads the frame and throws the read away.
+      if (m && m.cardTyping === true && entry === "swipe" && !payTokenRef.current) {
+        noteFirstKey();
+        stopReadTimer();
+        setReading(true);
+        const f = frameRef.current;
+        readTimerRef.current = setTimeout(() => {
+          readTimerRef.current = null;
+          if (frameRef.current !== f || payTokenRef.current) return;
+          setArmed(false); setReading(false);
+          setTokenErr("That card didn't go through. Try it again, or key the card in.");
+          // Filed too (warn), beside swipe_refused below: silence is what a reader keyed for the
+          // other system looks like, so support needs the two told apart. No card data.
+          if (window.ssLogError) window.ssLogError("portal", "A swipe got no answer from the card reader frame", "swipe_no_answer",
+            { waitedMs: READ_WAIT_MS, keysOutsideFrame: outsideKeysRef.current, ...swipeTiming(), orderId: o.id }, "warn");
+          endSwipeAttempt();
+          rearmSoon();
+        }, READ_WAIT_MS);
+      }
+      // Every answer below ends the swipe attempt: it disarms, and a refusal re-arms by itself
+      // 1.5 s later (rearmSoon) so the next try needs no click.
+      // A swipe's frame text is about typed numbers ("Invalid Account Number" for a half read),
+      // so the reader gets its own sentence; the keyed form keeps the frame's own words.
+      const swipeMiss = "The reader didn't get a clean read. Swipe, insert or tap the card again.";
+      // ...but that sentence alone hid WHY the frame refused (2026-10-19, the first real VP3350
+      // swipe of a Fiserv test card: a complete read, refused, and nothing to tell a half read
+      // from a reader keyed for the live system). So a swipe refusal also shows CardPointe's own
+      // code and words, and files them (warn) for support. Only the frame's answer travels: never
+      // the swipe, the token or the card. The words are free text (CardSecure's after "NNNN::"),
+      // so anything shaped like track data blanks them, and every run of 4+ digits (spaced or
+      // dashed too) and of 12+ hex is cut, in case a frame ever echoes part of what it was given.
+      // How to read the code: 1001 "Invalid Account Number" is the FRAME's own verdict (it did not
+      // recognise the reader's output as a swipe; nothing reached CardSecure, so it says nothing
+      // about the reader's keys); a 4-digit code with other words is CardSecure's answer.
+      //
+      // 1001 GETS A HINT (2026-10-21). This reader (MSR-to-chip fallback on, per its manual's DFEF62)
+      // answers a swipe of any card whose stripe says "chip" with an "insert the card" code in front
+      // of the read, and the frame then sees no swipe at all: 1001. Inserting is the fix.
+      const swipeRefused = (kind, rawCode, rawWords) => {
+        const str = (v) => (typeof v === "string" || typeof v === "number" ? String(v) : "");
+        let said = str(rawWords);
+        if (/[%^;=?*|]/.test(said)) said = "";
+        said = said.replace(/[0-9A-Fa-f]{12,}/g, "…").replace(/\d(?:[\s-]?\d){3,}/g, "…").trim().slice(0, 120);
+        const code = str(rawCode).replace(/[^0-9A-Za-z-]/g, "").slice(0, 12);
+        const shown = [code ? "code " + code : "", said].filter(Boolean).join(", ");
+        let frame = "";
+        try { frame = new URL((payOpts && payOpts.tokenizer && payOpts.tokenizer.origin) || "").host; } catch (_e) { /* no origin */ }
+        if (window.ssLogError) window.ssLogError("portal", "A swipe was refused by the card reader frame", "swipe_refused",
+          { kind, errorCode: code || null, reason: said || null, entry: typeof m.entry === "string" ? m.entry.slice(0, 10) : null, frame, keysOutsideFrame: outsideKeysRef.current, ...swipeTiming(), orderId: o.id }, "warn");
+        endSwipeAttempt();
+        const hint = code === "1001" ? " If the card has a chip, insert it chip-first." : "";
+        return (shown ? swipeMiss + " (CardPointe: " + shown + ")" : swipeMiss) + hint;
+      };
+      if (m && m.validationError) {
+        stopReadTimer(); setPayToken(null); setArmed(false);
+        if (entry === "swipe") { setReading(false); setTokenErr(swipeRefused("validation", m.errorCode, m.validationError)); rearmSoon(); }
+        else setTokenErr(m.validationError);
+        return;
+      }
       // enhancedresponse: errorCode "0" means the token is real. Without this a failure is
       // indistinguishable from a strange token and the button would arm on nothing.
       if (m && m.errorCode && String(m.errorCode) !== "0") {
-        setPayToken(null);
-        setTokenErr(m.errorMessage || "That card wasn't accepted — check the number.");
+        stopReadTimer();
+        setPayToken(null); setArmed(false);
+        if (entry === "swipe") { setReading(false); setTokenErr(swipeRefused("error", m.errorCode, m.errorMessage)); rearmSoon(); }
+        else setTokenErr(m.errorMessage || "That card wasn't accepted — check the number.");
         return;
       }
       const tok = m && (m.token || m.message);
       if (!tok) return;
+      stopReadTimer();
+      setReading(false);
+      // swipeonly does nothing next to tokenizewheninactive, so a card number TYPED into the
+      // reader's frame is tokenized too, as entry "manual". Charged as a swipe it would go out
+      // with no ecomind and no billing address. enhancedresponse reports the entry on every token.
+      // A chip read (ID TECH's DFEE25/DFEE26 output) is classed "swipe" by the frame, so it passes.
+      if (entry === "swipe" && m.entry !== "swipe") {
+        setPayToken(null); setArmed(false);
+        setTokenErr("That was typed, not read by the card reader. Swipe, insert or tap the card.");
+        rearmSoon();
+        return;
+      }
+      payTokenAtRef.current = Date.now();
+      // A card in hand ends the run of refusals: the next one gets its three re-arms again.
+      rearmLeftRef.current = READER_AUTO_REARMS; setReaderStuck(false);
       setTokenErr(""); setPayExpiry(m.expiry || null); setPayToken(String(tok)); setArmed(false);
     };
     window.addEventListener("message", onMsg, false);
-    return () => window.removeEventListener("message", onMsg, false);
-  }, [payOpen, collect, payOpts]);
+    return () => { window.removeEventListener("message", onMsg, false); stopReadTimer(); setReading(false); };
+  }, [payOpen, collect, payOpts, entry, method]);
 
   // The bank rail has no iframe to post a token back: once BOTH boxes are valid, the numbers
   // are tokenized from here, two seconds after the last keystroke — the quiet the tokenizer's
@@ -3763,56 +4621,292 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
   // Whether a surcharge applies cannot be known until the CARD is known — the card brands
   // forbid it on debit, so the same order is one price on one card and another on the next.
-  // Probe once a token exists, and never let a failed probe block a payment.
+  // Probe once a token exists, and never let a failed probe block a payment. A keyed card's
+  // billing ZIP goes with it (a fee can turn on where the card is billed), and a new ZIP asks again.
+  //
+  // ⚠️ CHARGE WAITS FOR THE ANSWER THAT MATCHES WHAT IT SENDS. Each answer is stored with the card
+  // and ZIP it was for (`key`), and Charge stays on "Checking card fee…" until the answer on screen
+  // is the one for the card and ZIP the charge will carry: the gateway adds the fee for THOSE, so
+  // charging on an older answer could take a fee nobody saw. A failed probe, or one with no answer
+  // in FEE_WAIT_MS, counts as "could not look it up" and releases Charge.
+  const FEE_WAIT_MS = 8000;
+  const probeZip = keyedCard && billZipOk ? billZip.trim().replace("-", "") : "";
+  const feeKey = payToken && method === "card" ? `${payToken}|${probeZip}` : "";
+  const probedTokenRef = useRef(null);
   useEffect(() => {
-    if (!payToken || method !== "card") { setSurcharge(null); return; }
+    if (!payToken || method !== "card") { setSurcharge(null); probedTokenRef.current = null; return; }
     let alive = true;
-    (async () => {
-      const { data } = await sb.functions.invoke("portal-payments", {
-        body: { action: "surcharge_probe", payToken },
-      });
-      if (alive && data) setSurcharge(data);
-    })();
-    return () => { alive = false; };
-  }, [payToken, method]);
+    const key = `${payToken}|${probeZip}`;
+    // A new card asks at once; a changed ZIP waits for a 400 ms pause, so one typed toward a ZIP+4
+    // is asked about once it settles rather than at every valid length on the way.
+    const wait = probedTokenRef.current === payToken ? 400 : 0;
+    probedTokenRef.current = payToken;
+    const unknown = { applies: null, percent: null, key };
+    const ask = setTimeout(async () => {
+      let data = null;
+      try {
+        ({ data } = await sb.functions.invoke("portal-payments", {
+          body: { action: "surcharge_probe", payToken, ...(probeZip ? { postal: probeZip } : {}) },
+        }));
+      } catch (_e) { /* answered as unknown below */ }
+      if (alive) setSurcharge(data && !data.error ? { ...data, key } : unknown);
+    }, wait);
+    const giveUp = setTimeout(() => { if (alive) setSurcharge((s) => (s && s.key === key ? s : unknown)); }, wait + FEE_WAIT_MS);
+    return () => { alive = false; clearTimeout(ask); clearTimeout(giveUp); };
+  }, [payToken, method, probeZip]);
+  const feeReady = !feeKey || !!(surcharge && surcharge.key === feeKey);
 
-  // ⚠️ THE FOCUS TRAP. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
-  // whatever element has focus, fast, ending in Enter. This modal's amount box carries
-  // autoFocus, so an un-trapped swipe would type track data into it. While armed, every
-  // keystroke that reaches this document is one that did NOT reach the iframe — swallow it
-  // and say so. Never echo, never buffer, never log those characters: they are card data.
+  // Card > Charge it now > Swipe, on an account that can take the card: the reader is what the
+  // modal shows. The listeners and timers below read these through refs, so a key or a timer that
+  // fires between renders sees the page as it is now.
+  const swipeLive = payOpen && collect === "charge" && method === "card" && entry === "swipe"
+    && !!(payOpts && payOpts.canCharge && payOpts.tokenizer);
+  const swipeLiveRef = useRef(false);
+  swipeLiveRef.current = swipeLive;
+  const armedRef = useRef(false);
+  armedRef.current = armed;
+  const frameReadyRef = useRef(false);
+  frameReadyRef.current = frameReady;
+  // Set while the burst guard puts a box's old value back, so the amount box does not count that as
+  // someone typing (amountAutoRef).
+  const restoringRef = useRef(false);
+  const isTextBox = (el) => !!el && (el.tagName === "TEXTAREA"
+    || (el.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|date|range|color|file)$/i.test(el.type || "")));
+
+  // ⚠️ THE READER-BURST GUARD (2026-10-21). It replaces the focus trap that swallowed EVERY key on
+  // the page while armed, which, with the reader now armed whenever it shows, would have made the
+  // amount box untypeable. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
+  // whatever has focus, a character every ~1.2 ms, ending in two Enters. While the reader's frame
+  // holds the focus, none of that reaches this document. A burst that DOES reach it missed the
+  // frame: it would type into the amount box (autoFocus), or press a button with its Enter.
+  // A person can't press READER_BURST_KEYS keys inside READER_BURST_WINDOW_MS (that is 80 keys a
+  // second; a held key repeats at 30 at most), so that is the test; anything slower passes
+  // untouched. On a burst the rest of it is swallowed, the box it began in gets its value from
+  // before the burst back, the count (never the keys) is filed, and the reader is armed again.
+  // Never echo, never buffer, never log those characters: they are card data.
+  //   * Timed by the event's own timeStamp, when it arrived, not when it was handled: the first
+  //     characters of a burst re-render the modal, and the keys queued behind that render are
+  //     handled in a clump that says nothing about how fast they came.
+  //   * A WINDOW, not "every gap under N ms": Windows stamps input on a coarse clock, and a key
+  //     pressed on a 15.6 ms tick boundary would break a per-gap rule in the middle of a swipe.
+  //   * Once recognised, the burst is followed BACK through keys under READER_KEY_GAP_MS apart to
+  //     its first key, so the box gets back the value it had before ANY of it landed. Generous on
+  //     purpose: the first characters of a burst each re-render the modal, and a slow machine spaces
+  //     them out (a visible Chrome window did, 2026-10-21). Nobody types an amount and swipes a card
+  //     inside 0.15 s, so a person's own typing is never part of it.
+  //
+  // ⚠️ NOTHING HERE FOCUSES THE FRAME (2026-10-13). iframe.focus() puts the frame's activeElement on
+  // its BODY, not the card box, so a swipe vanished with no token, no error and no key on the page.
+  // The frame focuses its own box (autofocus, on the reload every arming makes).
+  const READER_BURST_KEYS = 4;
+  const READER_BURST_WINDOW_MS = 50;
+  const READER_KEY_GAP_MS = 150;
   useEffect(() => {
-    if (!armed) return;
-    const el = frameRef.current;
-    if (el) { try { el.focus(); } catch (_e) {} }
-    const swallow = (ev) => {
+    if (!payOpen) return;
+    // A real reader is a USB keyboard: each capital hex letter comes with its own Shift keydown.
+    // Those are neither timed nor counted (only swallowed inside a burst), so the count is
+    // characters. The names are compared, never kept.
+    const MODIFIERS = ["Shift", "Control", "Alt", "Meta", "CapsLock"];
+    // `recent`: the last few keys, each with its time, the box it went to and that box's value
+    // BEFORE it (a value, compared and put back, never read for its content or kept past a burst).
+    let recent = [], inBurst = false, burst = 0, burstFirstAt = 0, armedAtBurst = false;
+    const restore = (s) => {
+      // The native setter plus an input event, so React's onChange sees the old value come back.
+      try {
+        const proto = s.el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(s.el, s.value);
+        restoringRef.current = true;
+        s.el.dispatchEvent(new Event("input", { bubbles: true }));
+      } catch (_e) { /* the box is gone */ } finally { restoringRef.current = false; }
+    };
+    // One row per burst (warn): how many keys missed the reader's box, and whether it was armed.
+    const endBurst = () => {
+      landTimerRef.current = null;
+      const keys = burst, firstAt = burstFirstAt;
+      inBurst = false; burst = 0; burstFirstAt = 0; recent = [];
+      const { ready, load } = swipeTimesRef.current;
+      if (window.ssLogError) window.ssLogError("portal", "Reader keys reached the page, not the card box", "swipe_missed_frame",
+        { keys, armed: armedAtBurst, readyToLoadMs: ready && load ? load - ready : null,
+          loadToFirstKeyMs: load && firstAt ? firstAt - load : null,
+          frameLoadedFirst: !!load && load <= firstAt, orderId: o.id }, "warn");
+      if (swipeLiveRef.current && payTokenRef.current) {
+        // A card is already read: it stays the one Charge takes. Dropping it for a read that missed
+        // the reader would leave nothing to charge and no way to tell why.
+        setTokenErr("Another card went to the page, not the card reader. To read a different card, choose Use another card.");
+      } else if (swipeLiveRef.current) {
+        setTokenErr("The card went to the page, not the card reader. Swipe, insert or tap it again.");
+        armReader({ keepErr: true });
+      } else {
+        setReaderHint("That looked like the card reader. To take the card, choose Card, then Charge it now, then Swipe.");
+      }
+    };
+    const onKey = (ev) => {
+      if (MODIFIERS.includes(ev.key)) {
+        if (inBurst) { ev.preventDefault(); ev.stopPropagation(); }
+        return;
+      }
+      if (!inBurst) {
+        const t = ev.timeStamp > 0 ? ev.timeStamp : performance.now();
+        recent.push({ t, el: isTextBox(ev.target) ? ev.target : null, value: isTextBox(ev.target) ? ev.target.value : null });
+        if (recent.length > 24) recent.shift();
+        const last = recent.length - 1;
+        if (recent.length < READER_BURST_KEYS || t - recent[last - READER_BURST_KEYS + 1].t > READER_BURST_WINDOW_MS) return;
+        // A burst. Back to its first key; every key before this one is already on the page, so the
+        // box that first key went to gets its value from before it back.
+        let first = last - READER_BURST_KEYS + 1;
+        while (first > 0 && recent[first].t - recent[first - 1].t <= READER_KEY_GAP_MS) first -= 1;
+        inBurst = true; burstFirstAt = Date.now(); armedAtBurst = armedRef.current;
+        burst = last - first; outsideKeysRef.current += last - first;
+        noteFirstKey();
+        if (recent[first].el) restore({ el: recent[first].el, value: recent[first].value });
+        recent = [];
+      }
       ev.preventDefault(); ev.stopPropagation();
-      setTokenErr("That swipe didn't land in the card box. Press Ready, then swipe again.");
+      burst += 1; outsideKeysRef.current += 1;
+      // The burst is over once the keys stop; the reader types its whole blob without a pause.
+      if (landTimerRef.current) clearTimeout(landTimerRef.current);
+      landTimerRef.current = setTimeout(endBurst, 400);
     };
-    const refocus = () => { try { if (frameRef.current) frameRef.current.focus(); } catch (_e) {} };
-    document.addEventListener("keydown", swallow, true);
-    document.addEventListener("focusin", refocus, true);
-    // An indefinitely armed page is one where the next thing anyone types disappears.
-    const t = setTimeout(() => setArmed(false), 60000);
+    document.addEventListener("keydown", onKey, true);
     return () => {
-      document.removeEventListener("keydown", swallow, true);
-      document.removeEventListener("focusin", refocus, true);
-      clearTimeout(t);
+      document.removeEventListener("keydown", onKey, true);
+      if (landTimerRef.current) { clearTimeout(landTimerRef.current); landTimerRef.current = null; }
     };
-  }, [armed]);
+  }, [payOpen]);
 
-  const askCents = payOpts && payOpts.canCharge ? payOpts.askCents : 0;
+  // An arming: a NEW reader frame (armCount is its key), whose autofocus puts the focus in its box,
+  // and nothing left of the last read. `keepErr` keeps the sentence about the last try on screen.
+  // `remount: false` arms the frame that is loading right now (just mounted, never loaded, so its
+  // autofocus is still to come) instead of throwing it away for another.
+  const armReader = ({ keepErr = false, remount = true } = {}) => {
+    if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; }
+    stopReadTimer();
+    resetSwipeCounts(Date.now());
+    focusOkRef.current = false;
+    if (remount) { setArmCount((n) => n + 1); setFrameReady(false); }
+    setReading(false);
+    setPayToken(null); setPayExpiry(null);
+    if (!keepErr) setTokenErr("");
+    setArmed(true);
+  };
+  // After a refusal: the reader again in 1.5 s, with no click, at most READER_AUTO_REARMS times in
+  // a row. Then "Reset reader": three refusals in a row is the card or the reader, and re-arming for
+  // ever would only hide that.
+  const rearmSoon = () => {
+    if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; }
+    if (rearmLeftRef.current <= 0) { setReaderStuck(true); return; }
+    rearmLeftRef.current -= 1;
+    rearmTimerRef.current = setTimeout(() => {
+      rearmTimerRef.current = null;
+      if (swipeLiveRef.current && !payTokenRef.current) armReader({ keepErr: true });
+    }, 1500);
+  };
+  // A person asked for the reader (Reset reader, a click on its box): a fresh run of re-arms.
+  const armReaderByHand = () => {
+    rearmLeftRef.current = READER_AUTO_REARMS; setReaderStuck(false);
+    armReader();
+  };
+
+  // Choosing Swipe arms the reader: no Ready press (Carolyn 2026-10-20). So does coming back to it
+  // (Already collected, then Charge it now again), since a hidden frame has lost the focus and gets
+  // a new one. A frame that has not loaded yet (the Swipe chip just mounted it) is armed as it is.
+  useEffect(() => {
+    if (!swipeLive) return;
+    rearmLeftRef.current = READER_AUTO_REARMS; setReaderStuck(false);
+    if (!payTokenRef.current) armReader({ remount: frameReadyRef.current });
+    return () => { if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; } };
+  }, [swipeLive]);
+
+  // Where the focus is, while the reader shows. The frame's box can't be seen across origins, but the
+  // frame ELEMENT is document.activeElement whenever the focus is anywhere inside it.
+  //   * Focus that leaves the reader for a button or the bare page (a chip, the backdrop) is brought
+  //     back with a fresh frame after 0.6 s. Never while someone is in a text box (they are typing),
+  //     during a read, with a card in hand, or with a re-arm already on its way.
+  //   * Only where this browser has let the CURRENT frame take the focus by itself (focusOkRef).
+  //     Chrome may refuse a cross-origin frame the focus without a click; then the reader box says
+  //     "Click here", and that click is the one the browser wants. Without this check a frame that
+  //     never gets the focus would be reloaded every second, for ever.
+  useEffect(() => {
+    if (!swipeLive) { setReaderFocus(false); return; }
+    let lostAt = 0;
+    const tick = () => {
+      const f = frameRef.current;
+      const on = !!f && document.hasFocus() && document.activeElement === f;
+      setReaderFocus(on);
+      if (on) { focusOkRef.current = true; lostAt = 0; return; }
+      const idle = armedRef.current && frameReadyRef.current && !payTokenRef.current && !readTimerRef.current && !rearmTimerRef.current;
+      if (!idle || !focusOkRef.current || !document.hasFocus() || isTextBox(document.activeElement)) { lostAt = 0; return; }
+      if (!lostAt) lostAt = Date.now();
+      else if (Date.now() - lostAt >= 600) { lostAt = 0; armReader({ keepErr: true }); }
+    };
+    tick();
+    const t = setInterval(tick, 250);
+    return () => clearInterval(t);
+  }, [swipeLive]);
+
+  // What Charge takes: the amount box, held to the server's range (pay_options' minCents, the
+  // balance, maxCents). portal-payments checks the same range again and charges this figure.
+  const typedCents = centsFrom(amount);
+  const canChargeHere = !!(payOpts && payOpts.canCharge);
+  const owedNow = canChargeHere ? Number(payOpts.balanceCents) || 0 : 0;
+  const chargeMost = canChargeHere ? Math.min(owedNow, Number(payOpts.maxCents) || owedNow) : 0;
+  const chargeLeast = canChargeHere ? Number(payOpts.minCents) || 100 : 0;
+  const amountProblem = !canChargeHere ? ""
+    : !Number.isFinite(typedCents) ? "Enter the amount to charge."
+    : typedCents < chargeLeast ? `The smallest payment is ${money(chargeLeast)}.`
+    : typedCents > chargeMost
+      ? (chargeMost === owedNow ? `That's more than the ${money(owedNow)} still owed.` : `A single payment can be at most ${money(chargeMost)}.`)
+    : "";
+  const chargeCents = canChargeHere && !amountProblem ? typedCents : 0;
   const feeCents = surcharge && surcharge.applies && surcharge.percent
-    ? Math.round(askCents * (surcharge.percent / 100)) : 0;
+    ? Math.round(chargeCents * (surcharge.percent / 100)) : 0;
+  // CardSecure tokens keep the card number's last 4 digits, so the card can be named before it is
+  // charged (Carolyn 2026-10-20: "**** **** **** 1234"). A card only; a bank token is not one.
+  const cardLast4 = method === "card" && payToken ? ((/(\d{4})$/.exec(String(payToken)) || [])[1] || "") : "";
+  // The box was typed in (or a chip picked): never refilled by the page after this.
+  const typeAmount = (v) => { if (!restoringRef.current) amountAutoRef.current = false; setAmount(v); setReaderHint(""); };
+  const pickAmount = (cents) => { amountAutoRef.current = false; setAmount((cents / 100).toFixed(2)); setReaderHint(""); };
+  // Charge it now with an empty box: the figure due now (the deposit, or the balance). Never over
+  // what is already there.
+  const fillAmountForCharge = () => {
+    if (String(amount).trim() || !canChargeHere || !payOpts.askCents) return;
+    amountAutoRef.current = true; setAmount((payOpts.askCents / 100).toFixed(2));
+  };
 
   const closePay = () => {
     setPayOpen(false); setCollect("recorded"); setPayToken(null); setPayExpiry(null);
-    setTokenErr(""); setSurcharge(null); setArmed(false); setEntry("keyed"); clearAch();
+    setTokenErr(""); setSurcharge(null); setArmed(false); setFrameReady(false); stopReadTimer(); setEntry("keyed"); clearAch();
+    if (rearmTimerRef.current) { clearTimeout(rearmTimerRef.current); rearmTimerRef.current = null; }
+    setReading(false); setReaderStuck(false); setReaderHint(""); amountAutoRef.current = true;
+    resetSwipeCounts();
+    setBillName(""); setBillStreet(""); setBillZip(""); setBillErr("");
+  };
+
+  // The card is spent, so the next Charge must carry a NEW one: a new, empty keyed frame (cardGen),
+  // or for a swipe a new reader frame, armed. `why` is the sentence.
+  const askForCardAgain = (why) => {
+    setPayToken(null); setPayExpiry(null);
+    if (entry !== "swipe") setCardGen((n) => n + 1);
+    setTokenErr(why);
+    if (entry === "swipe") armReader({ keepErr: true });
   };
 
   const chargeCard = async () => {
     if (!payToken) { setMsg({ err: "Enter the card details first." }); return; }
-    if (!askCents) { setMsg({ err: "There's nothing to charge on this order." }); return; }
+    // The button is off while the amount is out of range; this says why if it is pressed anyway.
+    if (!chargeCents) { setMsg({ err: amountProblem || "There's nothing to charge on this order." }); return; }
+    // Too old to still hold its CVV (CARD_TOKEN_MAX_MS): nothing is sent. Before the billing
+    // check, which is not worth answering for a card that has to be entered again anyway.
+    if (method === "card" && Date.now() - payTokenAtRef.current > CARD_TOKEN_MAX_MS) {
+      askForCardAgain(entry === "swipe"
+        ? "That card read has expired. Swipe, insert or tap the card again."
+        : "The card details expired: the security code is only kept for 2 minutes. Key the card in again, then press Charge.");
+      return;
+    }
+    // Required here, optional on the server: production's portal sends none of these yet.
+    if (keyedCard && billProblem) { setBillErr(billProblem); return; }
+    // The button is off until then (feeReady); this is the belt to that brace.
+    if (!feeReady) return;
     setBusy(true); setMsg(null);
     const { data, error } = await sb.functions.invoke("portal-payments", {
       body: {
@@ -3821,25 +4915,47 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         rail: method === "ach" ? "ach" : "card",
         payToken,
         expiry: payExpiry || undefined,
-        entry,
-        // The echo that keeps three numbers provably identical: what is on screen, what the
-        // token was minted against, and what is charged.
-        confirmChargeCents: askCents,
+        // A card only. The method chip resets `entry` to keyed on leaving Card, and this is the
+        // second guard; the server ignores it off the card rail too. Before 2026-10-14 Card, then
+        // Swipe, then Bank / ACH sent a bank payment marked "swipe" with no ecomind.
+        ...(method === "card" ? { entry } : {}),
+        // A keyed card only: a swipe carries its own name, and a bank payment's holder is named
+        // by the server from the estimate.
+        ...(keyedCard ? { name: billName.trim(), address: billStreet.trim(), postal: billZip.trim() } : {}),
+        // The amount in the box (2026-10-21), and the echo that keeps two numbers provably
+        // identical: what is on screen and what is charged. A server older than amountCents would
+        // charge its own ask and refuse any other confirm, so it can't charge a figure nobody saw.
+        amountCents: chargeCents,
+        confirmChargeCents: chargeCents,
       },
     });
     setBusy(false);
+    // The gateway SAW this card (a decline, or a partial approval that was voided), so its CVV is
+    // spent and the same token, or a fresh one from the same filled-in frame, must not go again.
+    // portal-payments says so with newCardNeeded; a 402 is the same thing from a server older than
+    // that flag. A refusal before the gateway (409, 429, a business rule) does not carry it.
+    const failed = (m, seen) => {
+      // Said INSIDE the modal too (tokenErr): `msg` renders on the order behind the overlay,
+      // so on its own the operator was left looking at a Charge button gone grey, no reason.
+      setMsg({ err: m });
+      if (method === "card" && seen) {
+        askForCardAgain(`${m} ${entry === "swipe" ? "Swipe, insert or tap the card again." : "Key the card in again, then press Charge."}`);
+        return;
+      }
+      setPayToken(null); setTokenErr(m);
+      // The token is dropped, so the reader has to read the card again: get it ready for that.
+      if (method === "card" && entry === "swipe") armReader({ keepErr: true });
+    };
     if (error) {
       // A non-2xx from an edge function surfaces as a generic message; the real sentence —
       // the decline reason, or "do NOT try again" — is in the body.
       let m = "That payment didn't go through.";
-      try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
-      // Said INSIDE the modal too (tokenErr): `msg` renders on the order behind the overlay,
-      // so on its own the operator was left looking at a Charge button gone grey, no reason.
-      setMsg({ err: m });
-      setPayToken(null); setTokenErr(m);
+      let seen = !!(error.context && error.context.status === 402);
+      try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; if (ctx && ctx.newCardNeeded === true) seen = true; } catch (_e) {}
+      failed(m, seen);
       return;
     }
-    if (data && data.error) { setMsg({ err: data.error }); setPayToken(null); setTokenErr(data.error); return; }
+    if (data && data.error) { failed(data.error, data.newCardNeeded === true); return; }
     closePay();
     setMsg({
       ok: data && data.pending
@@ -3963,7 +5079,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     });
     setBusy(false);
     if (error) { setMsg({ err: error.message }); return; }
-    setPayOpen(false); setAmount(""); setReference(""); setMethod("cash");
+    // Everything closePay resets too (the Swipe choice, the reader's hint and stuck flag, the card),
+    // so the next open starts clean (2026-10-23 promotion review), then this path's own.
+    closePay(); setAmount(""); setReference(""); setMethod("cash");
     setMsg({ ok: "Payment recorded." });
     onChanged();
   };
@@ -3978,35 +5096,14 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
   // A CardPointe payment cannot be voided from the browser — RLS refuses any update to a
   // row with a gateway, and rightly: the money is at the card network, and a local void
-  // would leave the books saying one thing and the merchant account another. So this asks
-  // the server to reverse it, and the row only changes if the gateway agrees.
-  const voidGatewayPayment = async (p) => {
-    const settledAlready = p.funding_state === "settled" && Date.parse(p.received_at) < Date.now() - 12 * 3600 * 1000;
-    if (!window.confirm(
-      `${settledAlready ? "Refund" : "Cancel"} this ${money(p.amount_cents)} payment at the card network?\n\n` +
-      "The customer gets the money back. This can't be undone from here.",
-    )) return;
-    setMsg(null);
-    const { data, error } = await sb.functions.invoke("portal-payments", {
-      body: { action: settledAlready ? "refund_payment" : "void_payment", paymentId: p.id },
-    });
-    if (error) {
-      let m = "That couldn't be reversed.";
-      let settled = false;
-      try { const ctx = await error.context.json(); if (ctx) { if (ctx.error) m = ctx.error; settled = !!ctx.settled; } } catch (_e) {}
-      // "Already settled" is not a failure, it is the next step — a refund rather than a void.
-      if (settled) {
-        const { data: rd, error: re } = await sb.functions.invoke("portal-payments", {
-          body: { action: "refund_payment", paymentId: p.id },
-        });
-        if (!re && rd && !rd.error) { setMsg({ ok: `Refunded ${money(rd.refunded)}.` }); onChanged(); return; }
-      }
-      setMsg({ err: m });
-      return;
-    }
-    if (data && data.error) { setMsg({ err: data.error }); return; }
-    setMsg({ ok: data && data.refunded ? `Refunded ${money(data.refunded)}.` : "Payment cancelled at the card network." });
+  // would leave the books saying one thing and the merchant account another. Its Refund opens
+  // RefundModal, which asks the server to cancel or refund all or part of it; the row only
+  // changes if the gateway agrees. (voidGatewayPayment's window.confirm lived here until 349.)
+  const refundDone = (text) => {
+    setRefundFor(null);
+    setMsg({ ok: text });
     onChanged();
+    setRefundsKey((k) => k + 1);
   };
 
   const unvoidPayment = async (p) => {
@@ -4056,16 +5153,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       Monospace and selectable because the whole job of this string is to be
                       copied onto a physical tag without a transcription error.
 
-                      Before the building is built there is deliberately NO fake serial here.
-                      The date block IS the build date, so a preview would print a number that
-                      later changes -- and a serial that changes after someone has written it
-                      on a building is worse than one that arrives late. The absent state says
-                      when it will appear instead. */}
+                      Since 316 it is issued when the order is created and frozen; absent means
+                      no starting building number is set yet. */}
                   <div style={{ fontSize: 12, marginTop: 5 }}>
                     {o.building_serial ? (
                       <span title="This building's serial number — write this on the tag" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
                     ) : (
-                      <span style={{ color: "#94A3B8" }}>Serial number is assigned when the building is marked built.</span>
+                      <span style={{ color: "#94A3B8" }}>No serial yet — set your starting building number in Settings → Business Details.</span>
                     )}
                   </div>
                 </div>
@@ -4078,8 +5172,8 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 )}
                 {/* IN-PORTAL designer, never the public ?id= page (capture-lead/draft saves). */}
                 {o.short_code && onOpenDesign && (
-                  <button type="button" onClick={() => onOpenDesign(o.short_code)}
-                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+                  <a href={ssDesignHref(o.short_code)} onClick={ssNavClick(() => onOpenDesign(o.short_code))} data-ss-open-design="1"
+                    style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", display: "inline-block", textDecoration: "none" }}>Open design</a>
                 )}
               </div>
             </div>
@@ -4124,8 +5218,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             ) : null}
             {row.pays.map((p) => {
               const dead = !!p.voided_at;
+              // Refunds (migration 349): amount_cents is what is LEFT of the payment and refunded_cents
+              // what went back, so the payment as taken is the two together. A payment refunded in
+              // full reads amount 0 and voided; it shows the refunded figure, struck through, so the
+              // row still says what was taken.
+              const refundedC = Number(p.refunded_cents) || 0;
+              const fullyRefunded = dead && refundedC > 0 && !(Number(p.amount_cents) > 0);
+              const itsRefunds = refunds.filter((r) => r.payment_id === p.id && r.state !== "failed");
+              const linkBtn = { background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", padding: 0 };
               return (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #F1F5F9", fontSize: 12.5, opacity: dead ? 0.65 : 1 }}>
+                <div key={p.id} data-ss-payment-row={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #F1F5F9", fontSize: 12.5, opacity: dead ? 0.65 : 1 }}>
                   <div style={{ width: 26, height: 26, borderRadius: "50%", background: dead ? "#F1F5F9" : "#DCFCE7", color: dead ? "#64748B" : "#166534", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     {dead
                       ? <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -4137,15 +5239,25 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     {p.gateway === "cardpointe" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#DCFCE7", color: "#166534", borderRadius: 5, padding: "2px 6px" }}>Taken here</span>}
                     {p.funding_state === "pending" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FEF3C7", color: "#92400E", borderRadius: 5, padding: "2px 6px" }}>Clearing</span>}
                     {p.funding_state === "returned" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FFE4E6", color: "#9F1239", borderRadius: 5, padding: "2px 6px" }}>Returned</span>}
-                    {dead && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#F1F5F9", color: "#64748B", borderRadius: 5, padding: "2px 6px" }}>Voided</span>}
+                    {dead && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#F1F5F9", color: "#64748B", borderRadius: 5, padding: "2px 6px" }}>{fullyRefunded ? "Refunded" : "Voided"}</span>}
+                    {!dead && refundedC > 0 && <span data-ss-part-refunded="1" style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FFEDD5", color: "#9A3412", borderRadius: 5, padding: "2px 6px" }}>Part refunded</span>}
                     <div style={{ fontSize: 11, color: "#94A3B8" }}>
                       {fmtDate(p.received_at)}
                       {p.instrument_last4 ? ` · ••${p.instrument_last4}` : (p.reference ? ` · ${p.reference}` : "")}
                       {p.funding_state === "pending" ? " · clears in 2-3 business days" : ""}
-                      {dead ? ` · voided ${fmtDate(p.voided_at)}` : ""}
+                      {dead ? ` · ${fullyRefunded ? "refunded" : "voided"} ${fmtDate(p.voided_at)}` : ""}
+                      {!dead && refundedC > 0 ? ` · ${money(refundedC)} of ${money(Number(p.amount_cents) + refundedC)} refunded` : ""}
                     </div>
+                    {itsRefunds.map((r) => (
+                      <div key={r.id} data-ss-refund-line={r.state} style={{ fontSize: 11, color: r.state === "done" ? "#9A3412" : "#B45309" }}>
+                        ↩ {money(r.amount_cents)}
+                        {r.state === "done"
+                          ? ` refunded${r.kind === "manual" && r.method ? ` by ${((PAY_METHODS.find((m) => m[0] === r.method) || [, r.method])[1] || "").toLowerCase()}` : ""} · ${fmtDate(r.completed_at || r.created_at)}${r.reference ? ` · ${r.reference}` : ""}`
+                          : " · checking with the card network…"}
+                      </div>
+                    ))}
                   </div>
-                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead || p.funding_state === "pending" ? "#94A3B8" : "#1E293B" }}>{money(p.amount_cents)}</div>
+                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead || p.funding_state === "pending" ? "#94A3B8" : "#1E293B" }}>{money(fullyRefunded ? refundedC : p.amount_cents)}</div>
                   {/* GHL-imported payments stay read-only — GHL owns them, and a local void
                       would silently come back (or diverge) on the next sync. A CardPointe
                       payment is different: the money is at the card network, so voiding it
@@ -4155,21 +5267,36 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
                       Void/Restore is a direct payments UPDATE, so it needs orders:edit —
                       without it the click returns the RLS refusal migration 188 installs,
-                      rendered as a red banner. A viewer sees the payment and no control. */}
+                      rendered as a red banner. A viewer sees the payment and no control.
+                      Refund goes through portal-payments, gated orders:edit the same way.
+
+                      Refund (349) opens RefundModal on any live payment taken here or recorded
+                      by hand. A payment refunded in full has nothing to restore (the database
+                      refuses a zero payment back to life), so it shows no control. */}
                   {!ordersOn
                     ? <span title="You have view-only access to Orders" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
                     : p.gateway === "cardpointe"
                     ? (dead
                       ? <span title="Already reversed at the card network" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
-                      : <button type="button" onClick={() => voidGatewayPayment(p)} title="Cancel or refund this at the card network"
-                          style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>Refund</button>)
+                      : <button type="button" onClick={() => setRefundFor(p)} title="Cancel or refund all or part of this at the card network" data-ss-refund-open={p.id}
+                          style={linkBtn}>Refund</button>)
                     : p.gateway
                     ? <span title="Recorded in Synergy/GHL — manage it there" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
-                    : <button type="button" onClick={() => (dead ? unvoidPayment(p) : voidPayment(p))} title={dead ? "Restore this payment" : "Void this payment"}
-                        style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>{dead ? "Restore" : "Void"}</button>}
+                    : dead
+                    ? (fullyRefunded
+                      ? <span title="Refunded in full" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
+                      : <button type="button" onClick={() => unvoidPayment(p)} title="Restore this payment" style={linkBtn}>Restore</button>)
+                    : <span style={{ display: "inline-flex", gap: 10, flexShrink: 0 }}>
+                        <button type="button" onClick={() => setRefundFor(p)} title="Record a refund of all or part of this payment" data-ss-refund-open={p.id} style={linkBtn}>Refund</button>
+                        <button type="button" onClick={() => voidPayment(p)} title="Void this payment (it was never really taken)" style={linkBtn}>Void</button>
+                      </span>}
                 </div>
               );
             })}
+            {refundFor && (
+              <RefundModal p={refundFor} refundOwedCents={moneyReady && bal != null && bal < 0 ? -bal : null}
+                onClose={() => setRefundFor(null)} onDone={refundDone} />
+            )}
           </div>
         </div>
 
@@ -4188,7 +5315,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             </div>
             <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
               {o.total_cents == null
-                ? (ssMode ? "The total arrives when the customer signs the quote" : "Set this order's total to track a balance")
+                ? (ssMode ? "The total arrives when the customer signs the estimate" : "Set this order's total to track a balance")
                 : !moneyReady
                   ? <SkelBar w={168} h={10} style={{ background: "rgba(255,255,255,0.22)", margin: "2px 0" }} />
                   : `${money(row.paid)} of ${money(o.total_cents)} collected`}
@@ -4205,7 +5332,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   </div>
                 ))}
                 <div style={{ fontSize: 10.5, color: "#B9CFE0", marginTop: 4, lineHeight: 1.45 }}>
-                  Set by the accepted quote and acknowledged change orders — no hand editing.
+                  Set by the accepted estimate and acknowledged change orders — no hand editing.
                 </div>
               </div>
             )}
@@ -4219,7 +5346,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             {o.total_cents != null && ordersOn && (
               <button type="button" disabled={!moneyReady}
                 title={moneyReady ? undefined : "Reading this order's payments…"}
-                onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
+                onClick={() => { amountAutoRef.current = true; setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
                 style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13, opacity: moneyReady ? 1 : 0.55, cursor: moneyReady ? "pointer" : "not-allowed" }}>Record a payment</button>
             )}
           </div>
@@ -4298,7 +5425,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     ? <ThumbFrame src={ssDesign.plan_image_url} alt="Floor plan" title="Open the full plan"
                         onOpen={() => setPdfView({ url: ssDesign.image_url || ssDesign.plan_image_url, title: "Floor plan" })} />
                     : <div style={{ display: "flex", alignItems: "center", background: "#F8FAFC", border: "1px dashed #E2E8F0", borderRadius: 8, padding: 8, height: 280 }}>
-                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next quote submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
+                        <p style={{ fontSize: 11, color: "#94A3B8", lineHeight: 1.45 }}>Appears after the next estimate submit{ssDesign.image_url ? " — the PDF has it today" : ""}.</p>
                       </div>}
                 </div>
                 <div>
@@ -4347,7 +5474,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           {ssMode && ssDesign && (
             <div style={S.card}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Paper trail</div>
-              {kv("Quote", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
+              {kv("Estimate", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
               {ssAcceptance && ssAcceptance.method === "rep"
                 ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
                 : kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
@@ -4393,34 +5520,51 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       {pdfView && <PdfModal url={pdfView.url} title={pdfView.title} onClose={() => setPdfView(null)} />}
 
       {payOpen && ordersOn && (
-        <div onClick={(e) => { if (armed) return; if (e.target === e.currentTarget) closePay(); }}
+        <div onClick={(e) => { if (reading) return; if (e.target === e.currentTarget) closePay(); }}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
-          <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+{/* Scrolls inside itself (2026-10-12): with the card form plus the billing name, street and
+              ZIP (2026-10-09) the box is taller than a laptop screen, and the centred, fixed backdrop
+              clipped its foot, so the Charge button could not be reached. */}
+          <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflowX: "hidden", overflowY: "auto", maxHeight: "calc(100vh - 40px)" }}>
             <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ fontSize: 15.5, fontWeight: 800 }}>{collect === "charge" ? "Take a payment" : "Record a payment"}</div>
-              <button type="button" onClick={closePay} disabled={armed}
-                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: armed ? "not-allowed" : "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1, opacity: armed ? 0.4 : 1 }}>×</button>
+              <button type="button" onClick={closePay} disabled={reading}
+                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: reading ? "not-allowed" : "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1, opacity: reading ? 0.4 : 1 }}>×</button>
             </div>
             <div style={{ padding: "17px 18px" }}>
               <span style={S.lbl}>Amount</span>
-              {collect === "charge" ? (
-                // The amount is the SERVER's, not the operator's: the deposit-vs-balance
-                // rule lives in portal-payments and the figure here is echoed back to it.
-                <div style={{ ...S.input, fontSize: 20, fontWeight: 800, background: "#F8FAFC", color: "#0F172A" }}>
-                  {money(askCents)}
-                  {payOpts && payOpts.askKind === "deposit" && (
-                    <span style={{ fontSize: 12, fontWeight: 700, color: "#0E7490", marginLeft: 8 }}>deposit</span>
-                  )}
-                </div>
-              ) : (
-                <input style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" autoFocus />
+              {/* ONE box for both modes, typeable at any time (Carolyn 2026-10-20). Charge it now
+                  takes what is in it, from $1 up to the balance; the server holds the same range
+                  and charges exactly this figure. The page fills it (the balance, then the deposit
+                  pay_options names) only until someone types or picks a chip. */}
+              <input data-ss-amount="1" style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount}
+                onChange={(e) => typeAmount(e.target.value)} placeholder="0.00" inputMode="decimal" autoComplete="off" autoFocus
+                // Leaving the box with the reader showing and no card read: the reader gets the
+                // focus back (a fresh frame), so the next swipe reaches it. Not when the whole window
+                // lost the focus (another app): the browser hands it back to this box on return.
+                onBlur={(e) => { if (swipeLive && !payToken && !reading && document.hasFocus() && !isTextBox(e.relatedTarget)) armReader({ keepErr: true }); }} />
+              {(() => {
+                // The chips use the server's figures where it gave them (the balance it will hold the
+                // charge to), and the order's own balance otherwise.
+                const full = canChargeHere ? owedNow : bal;
+                if (!(full > 0)) return null;
+                const chip = (label, cents, key) => (
+                  <button key={key} type="button" onClick={() => pickAmount(cents)}
+                    style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>{label}</button>
+                );
+                return (
+                  <div style={{ display: "flex", gap: 6, marginTop: 7, flexWrap: "wrap" }}>
+                    {canChargeHere && payOpts.askKind === "deposit" && payOpts.askCents > 0 && payOpts.askCents < full
+                      && chip(`Deposit ${money(payOpts.askCents)}`, payOpts.askCents, "dep")}
+                    {chip("Full balance", full, "full")}
+                    {chip("Half", Math.round(full / 2), "half")}
+                  </div>
+                );
+              })()}
+              {collect === "charge" && amountProblem && (
+                <div data-ss-amount-problem="1" style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{amountProblem}</div>
               )}
-              {collect === "recorded" && bal > 0 && (
-                <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
-                  <button type="button" onClick={() => setAmount((bal / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Full balance</button>
-                  <button type="button" onClick={() => setAmount((Math.round(bal / 2) / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Half</button>
-                </div>
-              )}
+              {readerHint && <div style={{ fontSize: 11.5, color: "#92400E", marginTop: 7 }}>{readerHint}</div>}
               <div style={{ marginTop: 13 }}><span style={S.lbl}>Method</span>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {PAY_METHODS.map(([id, label]) => (
@@ -4433,8 +5577,15 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       // entered and Charge is pressed, and Already collected is one click away.
                       // Not where the server has already said this account can't charge: there
                       // is no toggle back from "charge" (see the effect beside pay_options).
-                      setCollect((id === "card" || id === "ach") && !(payOpts && !payOpts.canCharge) ? "charge" : "recorded");
-                      setPayToken(null); setTokenErr(""); setArmed(false); clearAch();
+                      const toCharge = (id === "card" || id === "ach") && !(payOpts && !payOpts.canCharge);
+                      setCollect(toCharge ? "charge" : "recorded");
+                      // Charge it now keeps the amount in the box; only an EMPTY box gets the figure
+                      // due now. It used to swap any typed amount for the server's ask.
+                      if (toCharge) fillAmountForCharge();
+                      setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch(); setReaderHint("");
+                      // Swipe is a card's choice: leaving Card drops it, so Card again starts on
+                      // Key it in, and nothing else can carry a stale "swipe" (see chargeCard).
+                      if (id !== "card") setEntry("keyed");
                     }}
                       style={{ flex: "1 1 auto", background: method === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${method === id ? ACCENT : "#E2E8F0"}`, color: method === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                   ))}
@@ -4450,7 +5601,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   <span style={S.lbl}>{method === "ach" ? "Bank payment" : "Card"}</span>
                   <div style={{ display: "flex", gap: 6 }}>
                     {[["recorded", "Already collected"], ["charge", method === "ach" ? "Take it now" : "Charge it now"]].map(([id, label]) => (
-                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); clearAch(); }}
+                      <button key={id} type="button" onClick={() => { setCollect(id); if (id === "charge") fillAmountForCharge(); setPayToken(null); setTokenErr(""); setArmed(false); stopReadTimer(); clearAch(); }}
                         style={{ flex: 1, background: collect === id ? "#ECFDF5" : "#F8FAFC", border: `1.5px solid ${collect === id ? "#059669" : "#E2E8F0"}`, color: collect === id ? "#047857" : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                     ))}
                   </div>
@@ -4471,7 +5622,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {method === "card" && (
                     <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                       {[["keyed", "Key it in"], ["swipe", "Swipe"]].map(([id, label]) => (
-                        <button key={id} type="button" onClick={() => { setEntry(id); setPayToken(null); setArmed(false); }}
+                        // The one already chosen does nothing: it reloads no frame, so dropping the
+                        // arm (or the card) there left the reader typing into this button, unheard.
+                        // Swipe arms itself once chosen (the effect beside armReader).
+                        <button key={id} type="button" onClick={() => { if (entry === id) return; setEntry(id); setPayToken(null); setPayExpiry(null); setTokenErr(""); setArmed(false); setReading(false); setFrameReady(false); stopReadTimer(); resetSwipeCounts(); }}
                           style={{ flex: 1, background: entry === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${entry === id ? ACCENT : "#E2E8F0"}`, color: entry === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "8px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                       ))}
                     </div>
@@ -4483,16 +5637,67 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       bank rail is the two boxes below, and with no iframe mounted the
                       message listener's frameRef test refuses anything posted meanwhile. */}
                   {method !== "ach" && payOpts && payOpts.tokenizer && (
+                    <div style={{ position: "relative" }}>
                     <iframe
+                      // A new key per arming is a NEW frame: an empty box (a failed read left
+                      // its characters in the old one, and the next swipe was appended), and the
+                      // frame's autofocus runs again. See armCount. The keyed frame's
+                      // cardGen does the same once its card is spent (see CARD_TOKEN_MAX_MS): the
+                      // new frame is empty, so the next token has to carry a freshly typed CVV.
+                      key={entry === "swipe" ? "swipe-" + armCount : "card-" + cardGen}
                       ref={frameRef}
                       title="Payment details"
                       src={entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}
+                      onLoad={() => { if (entry === "swipe" && !swipeTimesRef.current.load) swipeTimesRef.current.load = Date.now(); setFrameReady(true); }}
                       // Height is SERVED (cpTokenizerHeight) so this modal and my-quotes.html
                       // cannot drift. Too short is a dead form, not a cosmetic issue: at the
-                      // original 128px the CVV sat below the fold of a non-scrolling frame.
-                      style={{ width: "100%", display: "block", height: (payOpts.tokenizer.cardHeight || 265), border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
+                      // original 128px the CVV sat below the fold of a non-scrolling frame. The
+                      // reader's frame is one box (swipeHeight; an older server sends none).
+                      style={{ width: "100%", display: "block", height: ((entry === "swipe" && payOpts.tokenizer.swipeHeight) || payOpts.tokenizer.cardHeight || 265), border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
                       frameBorder="0" scrolling="no"
                     />
+                    {/* ⚠️ The reader's frame takes no click of its own. A click anywhere in it but
+                        ON its box leaves the frame's focus on its BODY, where a swipe vanishes:
+                        no token, no message, and no key reaches the page (2026-10-13). So a click
+                        there arms the reader instead: a new frame, whose autofocus puts the focus
+                        in the box. Ignored while that frame is still loading, during a read, and
+                        with a card in hand (the panel's "Use another card" drops one on purpose).
+                        Transparent: the frame stays in view, and its text is white (cpTokenizerUrl's
+                        swipe css), so what the reader types never shows. */}
+                    {entry === "swipe" && (
+                      <div aria-hidden="true" data-ss-reader-cover="1"
+                        onClick={() => { if (busy || reading || payToken || (armed && !frameReady)) return; armReaderByHand(); }}
+                        style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, cursor: payToken ? "default" : "pointer", background: "transparent" }} />
+                    )}
+                    </div>
+                  )}
+                  {keyedCard && payOpts && payOpts.tokenizer && (
+                    // Name on card, billing street and ZIP: prefilled from the delivery address
+                    // (billingPrefill), editable. autoComplete off: this is the BUILDER's browser,
+                    // and what it would offer is the builder's own name and address.
+                    <div data-ss-billing="1" style={{ marginTop: 10 }}>
+                      <label style={{ display: "block" }}>
+                        <span style={S.lbl}>Name on card</span>
+                        <input style={S.input} value={billName} maxLength={60} autoComplete="off" spellCheck={false}
+                          onChange={(e) => { setBillName(e.target.value); setBillErr(""); }} />
+                      </label>
+                      <label style={{ display: "block", marginTop: 10 }}>
+                        <span style={S.lbl}>Billing street address</span>
+                        <input style={S.input} value={billStreet} maxLength={60} autoComplete="off"
+                          onChange={(e) => { setBillStreet(e.target.value); setBillErr(""); }} />
+                      </label>
+                      <label style={{ display: "block", marginTop: 10 }}>
+                        <span style={S.lbl}>Billing ZIP code</span>
+                        <input style={S.input} value={billZip} maxLength={10} inputMode="numeric" autoComplete="off"
+                          onChange={(e) => { setBillZip(e.target.value); setBillErr(""); }} />
+                      </label>
+                      <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.45 }}>
+                        {payOpts.billingPrefill && (payOpts.billingPrefill.street || payOpts.billingPrefill.zip)
+                          ? "Filled in from the delivery address. Change it if the card is billed somewhere else."
+                          : "Where the card's statement goes. The card's bank checks the street and ZIP."}
+                      </div>
+                      {billErr && <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{billErr}</div>}
+                    </div>
                   )}
                   {method === "ach" && payOpts && payOpts.canCharge && payOpts.tokenizer && (
                     // Routing and Checking as two boxes (Carolyn, 2026-09-02). Digits only, no
@@ -4517,26 +5722,64 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       {achChecking && !payToken && <div style={{ fontSize: 11.5, color: "#475569", marginTop: 7 }}>Checking the bank details…</div>}
                     </div>
                   )}
-                  {method === "card" && entry === "swipe" && (
-                    <div style={{ marginTop: 8 }}>
-                      {/* ⚠️ The reader is a USB KEYBOARD. Arming is what stops a swipe from
-                          typing card data into the amount box, and nothing is armed while
-                          the modal is merely open. */}
-                      <button type="button" onClick={() => { setArmed(true); setTokenErr(""); }} disabled={armed}
-                        style={{ ...S.btn(armed ? "#DCFCE7" : "#F1F5F9", armed ? "#166534" : "#334155"), border: "1px solid #E2E8F0", fontSize: 12, width: "100%" }}>
-                        {armed ? "Ready — swipe the card now" : payToken ? "Card read ✓ — swipe again" : "Ready to swipe"}
+                  {method === "card" && entry === "swipe" && (() => {
+                    // THE READER, IN WORDS, where the "Ready to swipe" button was (Carolyn 2026-10-20:
+                    // no Ready press, never the reader's raw output, "**** **** **** 1234" once read).
+                    // The frame above shows nothing a person can read: its text is white.
+                    const st = payToken ? "card" : reading ? "reading" : readerStuck ? "stuck"
+                      : !armed ? "between" : !frameReady ? "loading" : readerFocus ? "waiting" : "click";
+                    const box = { marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 8, padding: "11px 12px", fontSize: 12.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 9, lineHeight: 1.4 };
+                    const spinner = (
+                      // SMIL, not a CSS keyframe: the portal has no stylesheet (see SkelBar).
+                      <svg viewBox="0 0 24 24" width="16" height="16" style={{ flexShrink: 0 }} aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" fill="none" stroke="#CBD5E1" strokeWidth="3" />
+                        <path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke={ACCENT} strokeWidth="3" strokeLinecap="round">
+                          <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite" />
+                        </path>
+                      </svg>
+                    );
+                    const link = { background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" };
+                    if (st === "card") return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#ECFDF5", borderColor: "#A7F3D0", color: "#065F46", justifyContent: "space-between" }}>
+                        <span>
+                          <span style={{ fontSize: 16, letterSpacing: 1.5, fontFamily: "ui-monospace,Consolas,monospace" }}>{cardLast4 ? "**** **** **** " + cardLast4 : "Card read"}</span>
+                          <span style={{ marginLeft: 8 }}>✓</span>
+                        </span>
+                        <button type="button" style={link} disabled={busy} onClick={armReaderByHand}>Use another card</button>
+                      </div>
+                    );
+                    if (st === "reading") return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#F5F3FF", borderColor: "#DDD6FE", color: ACCENT }}>{spinner}Reading card…</div>
+                    );
+                    if (st === "stuck") return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#FFFBEB", borderColor: "#FDE68A", color: "#92400E", flexWrap: "wrap" }}>
+                        <span style={{ flex: "1 1 200px" }}>The reader didn't take the card {READER_AUTO_REARMS + 1} times in a row. Check the card, or choose Key it in.</span>
+                        <button type="button" onClick={armReaderByHand} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", fontSize: 12, padding: "6px 12px" }}>Reset reader</button>
+                      </div>
+                    );
+                    if (st === "between" || st === "loading") return (
+                      <div data-ss-reader-state={st} style={{ ...box, color: "#475569" }}>{spinner}Getting the card reader ready…</div>
+                    );
+                    if (st === "click") return (
+                      // The frame doesn't have the focus (a click elsewhere, or a browser that won't
+                      // hand a frame the focus by itself): this click arms it, and counts as the
+                      // click the browser wants.
+                      <button type="button" data-ss-reader-state={st} onClick={armReaderByHand}
+                        style={{ ...box, width: "100%", background: "#FFF7ED", borderColor: "#FED7AA", color: "#9A3412", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+                        Click here, then swipe, insert or tap the card
                       </button>
-                      {armed && (
-                        <div style={{ fontSize: 11, color: "#166534", marginTop: 6 }}>
-                          Don't type anything until it reads. This clears itself after a minute.
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {tokenErr && <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{tokenErr}</div>}
-                  {payToken && !tokenErr && (
+                    );
+                    return (
+                      <div data-ss-reader-state={st} style={{ ...box, background: "#F0FDF4", borderColor: "#BBF7D0", color: "#166534" }}>
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#16A34A" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M3 10h18" /></svg>
+                        Waiting for card — swipe, insert or tap
+                      </div>
+                    );
+                  })()}
+                  {tokenErr && <div data-ss-token-err="1" style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{tokenErr}</div>}
+                  {payToken && !tokenErr && !(method === "card" && entry === "swipe") && (
                     <div style={{ fontSize: 11.5, color: "#047857", marginTop: 7, fontWeight: 700 }}>
-                      {method === "ach" ? "Bank details captured ✓" : "Card captured ✓"}
+                      {method === "ach" ? "Bank details captured ✓" : `Card captured ✓${cardLast4 ? ` (**** ${cardLast4})` : ""}`}
                     </div>
                   )}
                   {/* Fiserv adds the surcharge itself and reports it back, so this is a
@@ -4545,7 +5788,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {surcharge && surcharge.applies === true && feeCents > 0 && (
                     <div style={{ marginTop: 10, fontSize: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px", color: "#92400E" }}>
                       A {surcharge.percent}% card fee applies to this card — the customer will be charged{" "}
-                      <strong>{money(askCents + feeCents)}</strong>. {money(askCents)} goes to the balance.
+                      <strong>{money(chargeCents + feeCents)}</strong>. {money(chargeCents)} goes to the balance.
                     </div>
                   )}
                   {surcharge && surcharge.applies === false && (
@@ -4569,13 +5812,13 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
                 {collect === "charge" ? (
-                  <button onClick={chargeCard} disabled={busy || !payToken} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken ? 0.55 : 1 }}>
-                    {busy ? "Charging…" : `Charge ${money(askCents + feeCents)}`}
+                  <button data-ss-charge="1" onClick={chargeCard} disabled={busy || !payToken || !feeReady || !chargeCents} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken || !feeReady || !chargeCents ? 0.55 : 1 }}>
+                    {busy ? "Charging…" : !feeReady ? "Checking card fee…" : `Charge ${money(chargeCents + feeCents)}${cardLast4 ? ` to **** ${cardLast4}` : ""}`}
                   </button>
                 ) : (
                   <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
                 )}
-                <button onClick={closePay} disabled={armed} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: armed ? 0.5 : 1 }}>Cancel</button>
+                <button onClick={closePay} disabled={reading} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: reading ? 0.5 : 1 }}>Cancel</button>
               </div>
             </div>
           </div>
@@ -4597,10 +5840,414 @@ const invMoney = (cents) => cents == null ? "—" :
 // building's estimates is the buyer, and to warn on the others — but NOT to decide sold-ness
 // any more: that is stored now (see invSold above the fold).
 const INV_SOLD_EST = new Set(["accepted", "invoiced", "delivered"]);
+// ── The Online Shop (migration 310, Carolyn 2026-10-17) ────────────────────────────────────
+// Builders list lot buildings on a public, branded page (shop.html) their own website can embed.
+// Brittney Weis (Midwest Mini Barns' marketer) asked for this on the 2026-10-12 call in place of
+// a Shopify store, including the option NOT to show prices — so price is per building AND
+// shop-wide. Every write goes through portal-settings; nothing here touches a schedule or a sale.
+// The page and embed are served by whichever host the builder is on: beta previews beta, the app
+// previews the app. A hard-coded production host showed "page not found" from beta until a
+// promotion carried shop.html there (2026-10-17).
+const shopPublicOrigin = () => (/^https:\/\/(app|beta)\.structurestudiosuite\.com$/.test(window.location.origin)
+  ? window.location.origin : "https://app.structurestudiosuite.com");
+
+// A person's public booking page, in THE SHORT FORM (Carolyn 2026-11-01: "Do we have to have
+// these meeting links sooo long?"). `/book/<client>/<host>` says exactly what
+// `?client=&with=` said, 12 characters shorter, and reads like an address rather than a
+// query string. book.html takes either, and everything already sent — confirmations,
+// calendar invites, builders' own sites — carries the query form, so this changes what we
+// HAND OUT and never what resolves. One helper because two screens offer this link and a
+// second copy of the shape is how they drift.
+const ssBookUrl = (clientId, slug) =>
+  `${shopPublicOrigin()}/book/${encodeURIComponent(clientId)}/${encodeURIComponent(slug)}`;
+
+function ShopSettingsPanel({ clientId, canEdit }) {
+  const [s, setS] = useState(null);
+  const [paymentsLive, setPaymentsLive] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [copied, setCopied] = useState(null);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "shop_settings" } });
+      if (!live) return;
+      if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error ? await fnError(error) : "Could not load your shop settings.") }); return; }
+      setS(data.settings); setPaymentsLive(!!data.paymentsLive);
+    })();
+    return () => { live = false; };
+  }, [clientId]);
+  if (!s) return msg && msg.err ? <div style={S.err}>{msg.err}</div> : <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading shop settings…</div>;
+  const set = (k, v) => setS((x) => ({ ...x, [k]: v }));
+  const save = async () => {
+    setSaving(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_shop_settings", settings: s } });
+    setSaving(false);
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error ? await fnError(error) : "That didn't save.") }); return; }
+    setMsg({ ok: s.enabled ? "Saved. Your Online Inventory is live." : "Saved. Your Online Inventory is switched off." });
+  };
+  const shopUrl = `${shopPublicOrigin()}/shop?client=${encodeURIComponent(clientId)}`;
+  const embed = `<div data-ss-shop="${clientId}"></div>\n<script src="${shopPublicOrigin()}/shop-embed.js" async></script>`;
+  const copy = async (what, text) => {
+    try { await navigator.clipboard.writeText(text); setCopied(what); setTimeout(() => setCopied(null), 1600); } catch (_e) { window.prompt("Copy this:", text); }
+  };
+  const lbl = { fontSize: 12, fontWeight: 700, color: "#334155", display: "block", marginBottom: 4 };
+  const row = { display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 };
+  const check = (k, text, hint) => (
+    <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginBottom: 8, cursor: canEdit ? "pointer" : "default" }}>
+      <input type="checkbox" checked={!!s[k]} disabled={!canEdit} onChange={(e) => set(k, e.target.checked)} style={{ marginTop: 2 }} />
+      <span><strong>{text}</strong>{hint ? <span style={{ color: "#64748B" }}> — {hint}</span> : null}</span>
+    </label>
+  );
+  return (
+    <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 12, padding: "14px 16px", marginBottom: 14 }}>
+      {check("enabled", "Online Inventory is live", "show buildings marked “List online” on your public page")}
+      {check("hideAllPrices", "Hide all prices", "every building shows “Call for price” and an inquiry form instead of a price")}
+      <div style={row}>
+        <div style={{ flex: "1 1 240px" }}>
+          <span style={lbl}>Heading</span>
+          <input value={s.heading} disabled={!canEdit} maxLength={120} onChange={(e) => set("heading", e.target.value)}
+            placeholder="Buildings ready to deliver" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ flex: "1 1 160px" }}>
+          <span style={lbl}>Google Tag Manager ID</span>
+          <input value={s.gtmContainerId} disabled={!canEdit} onChange={(e) => set("gtmContainerId", e.target.value)}
+            placeholder="GTM-XXXXXXX" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <span style={lbl}>Intro</span>
+        <textarea value={s.intro} disabled={!canEdit} maxLength={1000} rows={2} onChange={(e) => set("intro", e.target.value)}
+          placeholder="Every building on our lot is built and ready. Ask about delivery to your yard."
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+      </div>
+      <div style={row}>
+        <div style={{ flex: "1 1 220px" }}>
+          <span style={lbl}>Deposit at online checkout</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <select value={s.depositMode} disabled={!canEdit} onChange={(e) => set("depositMode", e.target.value)} style={{ ...S.input }}>
+              <option value="percent">Percent of price</option>
+              <option value="flat">Flat amount ($)</option>
+              <option value="full">Pay in full</option>
+            </select>
+            {s.depositMode !== "full" && (
+              <input type="number" min="0" step="1" value={s.depositValue} disabled={!canEdit}
+                onChange={(e) => set("depositValue", e.target.value)} style={{ ...S.input, width: 90 }} />
+            )}
+          </div>
+        </div>
+        <div style={{ flex: "1 1 240px" }}>
+          <span style={lbl}>Terms link (https://)</span>
+          <input value={s.termsUrl} disabled={!canEdit} onChange={(e) => set("termsUrl", e.target.value)}
+            placeholder="https://yourbusiness.com/terms" style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+        </div>
+      </div>
+      {s.depositMode !== "full" && check("allowPayInFull", "Let buyers choose to pay in full")}
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+        {paymentsLive
+          ? "Online card payments are on for your account, so buyers will be able to check out and pay the deposit once checkout launches."
+          : "Online card payments aren't set up for your account yet, so checkout will send you a purchase request instead of taking payment. Ask CSM Synergy to set up payments."}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {canEdit && <button type="button" disabled={saving} onClick={save} style={S.btn(ACCENT, "#FFF")}>{saving ? "Saving…" : "Save"}</button>}
+        <a href={shopUrl} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none" }}>Preview ↗</a>
+        <button type="button" onClick={() => copy("link", shopUrl)} style={S.btn("#F1F5F9", "#334155")}>{copied === "link" ? "Copied ✓" : "Copy link"}</button>
+        <button type="button" onClick={() => copy("embed", embed)} style={S.btn("#F1F5F9", "#334155")}>{copied === "embed" ? "Copied ✓" : "Copy website embed code"}</button>
+      </div>
+      {msg && msg.ok && <div style={{ color: "#15803D", fontSize: 13, fontWeight: 600, marginTop: 10 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginTop: 10 }}>{msg.err}</div>}
+    </div>
+  );
+}
+
+// Purchase requests from the shop's cart (migration 311). A shopper checked out without paying
+// (online payment is phase 4): the builder calls them, then sends the estimate from the row below.
+function ShopRequestsCard({ clientId, canEdit, refreshKey }) {
+  const [rows, setRows] = useState(null);
+  const [showHandled, setShowHandled] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const load = useCallback(async () => {
+    const { data } = await sb.functions.invoke("portal-settings", { body: { action: "list_shop_requests" } });
+    setRows((data && data.requests) || []);
+  }, [clientId]);
+  useEffect(() => { load(); }, [load, refreshKey]);
+  if (!rows || rows.length === 0) return null;
+  const open = rows.filter((r) => r.status === "new");
+  const list = showHandled ? rows : open;
+  const money = (c) => (c == null ? "—" : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const mark = async (r, handled) => {
+    setBusy(r.id);
+    await sb.functions.invoke("portal-settings", { body: { action: "mark_shop_request", id: r.id, handled } });
+    setBusy(null); load();
+  };
+  return (
+    <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+        <strong style={{ fontSize: 14, color: "#92400E" }}>🛒 Online Inventory purchases &amp; requests{open.length ? ` — ${open.length} new` : ""}</strong>
+        <button type="button" onClick={() => setShowHandled((v) => !v)}
+          style={{ marginLeft: "auto", background: "none", border: "none", color: "#92400E", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+          {showHandled ? "Hide handled" : "Show handled"}
+        </button>
+      </div>
+      {list.length === 0 && <div style={{ fontSize: 13, color: "#92400E" }}>Nothing new. Handled requests stay here for 30 days.</div>}
+      {list.map((r) => (
+        <div key={r.id} style={{ background: "#FFF", border: "1px solid #FDE68A", borderRadius: 10, padding: "10px 12px", marginTop: 8, opacity: r.status === "handled" ? 0.6 : 1 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "baseline" }}>
+            {r.kind === "purchase"
+              ? <span style={{ background: "#DCFCE7", color: "#166534", borderRadius: 10, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>PAID ONLINE</span>
+              : <span style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 10, fontSize: 11, fontWeight: 800, padding: "2px 8px" }}>REQUEST</span>}
+            <strong>{r.name}</strong>
+            <a href={"tel:" + r.phone} style={{ color: ACCENT, fontWeight: 700 }}>{r.phone}</a>
+            {r.email && <a href={"mailto:" + r.email} style={{ color: ACCENT }}>{r.email}</a>}
+            <span style={{ color: "#64748B", fontSize: 12 }}>{fmtDate(r.created_at)}</span>
+            {canEdit && (
+              <button type="button" disabled={busy === r.id} onClick={() => mark(r, r.status !== "handled")}
+                style={{ ...S.btn(r.status === "handled" ? "#F1F5F9" : ACCENT, r.status === "handled" ? "#334155" : "#FFF"), marginLeft: "auto", padding: "5px 11px", fontSize: 12 }}>
+                {r.status === "handled" ? "Reopen" : "Mark handled"}
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize: 12.5, color: "#475569", marginTop: 4 }}>
+            Deliver to {[r.street, r.city, r.state, r.zip].filter(Boolean).join(", ")}
+          </div>
+          {(r.items || []).map((it) => (
+            <div key={it.unitId} style={{ fontSize: 13, marginTop: 4 }}>
+              <strong>{it.label}</strong>{it.lotName ? <span style={{ color: "#94A3B8" }}> · {it.lotName}</span> : null}
+              {" — "}{money(it.priceCents)}
+              {it.deliveryCents != null ? <> + delivery {money(it.deliveryCents)}</> : null}
+              {it.taxCents != null ? <> + tax {money(it.taxCents)}</> : null}
+              {" = "}<strong>{money(it.totalCents)}</strong>
+            </div>
+          ))}
+          {r.kind === "purchase" ? (
+            <div style={{ fontSize: 13, marginTop: 6 }}>
+              Total <strong>{money(r.total_cents)}</strong> · <strong style={{ color: "#166534" }}>paid {money(r.paid_cents)} by card</strong>
+              <span style={{ color: "#64748B" }}> · the invoice is waiting for your approval in Orders — approve it and the customer gets it to sign</span>
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, marginTop: 6 }}>
+              Total <strong>{money(r.total_cents)}</strong> · {r.pay_in_full ? "wants to pay in full" : <>deposit <strong>{money(r.due_now_cents)}</strong></>}
+              <span style={{ color: "#94A3B8" }}> · nothing charged</span>
+            </div>
+          )}
+          {r.message && <div style={{ fontSize: 13, color: "#334155", marginTop: 4, fontStyle: "italic" }}>“{r.message}”</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function InventoryListingEditor({ unit, canEdit, onChanged }) {
+  const [listed, setListed] = useState(!!unit.listed);
+  const [showPrice, setShowPrice] = useState(unit.showPriceOnline !== false);
+  const [title, setTitle] = useState(unit.publicTitle || "");
+  const [desc, setDesc] = useState(unit.publicDescription || "");
+  const [photos, setPhotos] = useState(unit.photos || []);
+  const [busy, setBusy] = useState(null);       // "save" | "upload" | photo id
+  const [msg, setMsg] = useState(null);
+  const [dragId, setDragId] = useState(null);
+  const fileRef = useRef(null);
+
+  const call = async (body) => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body });
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error ? await fnError(error) : "That didn't save.") }); return null; }
+    return data;
+  };
+  const saveListing = async () => {
+    setBusy("save"); setMsg(null);
+    const r = await call({ action: "save_inventory_listing", unitId: unit.id, listed, showPriceOnline: showPrice, publicTitle: title, publicDescription: desc });
+    setBusy(null);
+    if (r) { setMsg({ ok: listed ? "Saved — this building is listed online." : "Saved." }); onChanged && onChanged(); }
+  };
+  const savePhotos = async (patch) => {
+    const r = await call({ action: "save_inventory_photos", unitId: unit.id, ...patch });
+    if (r) { setPhotos(r.photos || []); onChanged && onChanged(); }
+    return r;
+  };
+  const upload = async (fileList) => {
+    const files = Array.from(fileList || []).filter((f) => /^image\/(jpeg|png|webp)$/.test(f.type));
+    if (!files.length) { setMsg({ err: "Pick JPG, PNG or WEBP photos." }); return; }
+    setBusy("upload"); setMsg(null);
+    const fitted = [];
+    for (const f of files) fitted.push(await ssFitImageForUpload(f, 2_800_000, 2000));
+    const added = [];
+    for (const f of fitted) {
+      const r = await call({ action: "inventory_photo_upload_url", unitId: unit.id, contentType: f.type || "image/jpeg", count: 1 });
+      const up = r && r.uploads && r.uploads[0];
+      if (!up) break;
+      const { error } = await sb.storage.from("inventory-photos").uploadToSignedUrl(up.key, up.token, f, { contentType: f.type || "image/jpeg" });
+      if (error) { setMsg({ err: "A photo didn't upload: " + (error.message || "try again") }); break; }
+      added.push(up.key);
+    }
+    if (added.length) {
+      const r = await savePhotos({ add: added });
+      if (r) setMsg({ ok: `${added.length} photo${added.length === 1 ? "" : "s"} added.` });
+    }
+    setBusy(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+  const remove = async (p) => {
+    if (!window.confirm("Remove this photo?")) return;
+    setBusy(p.id); await savePhotos({ remove: [p.id] }); setBusy(null);
+  };
+  const move = async (fromId, toId) => {
+    if (!fromId || fromId === toId) return;
+    const ids = photos.map((p) => p.id);
+    const from = ids.indexOf(fromId), to = ids.indexOf(toId);
+    if (from < 0 || to < 0) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    setPhotos(ids.map((id) => photos.find((p) => p.id === id)));
+    await savePhotos({ order: ids });
+  };
+  const makeCover = (p) => move(p.id, photos[0] && photos[0].id);
+
+  // ── AI background change (migration 312, FramedUp's recipe) ──
+  // One at a time: the wallet allows a single live hold per builder for this meter.
+  const [bg, setBg] = useState(null);           // { photo, scene, preset, running, err, jobId }
+  const [bgInfo, setBgInfo] = useState(null);   // { ready, priceCents, exempt, reason }
+  useEffect(() => {
+    if (!canEdit) return;
+    let live = true;
+    sb.functions.invoke("portal-settings", { body: { action: "photo_bg_info" } })
+      .then(({ data }) => { if (live && data && data.ok) setBgInfo(data); }).catch(() => {});
+    return () => { live = false; };
+  }, [canEdit]);
+  const BG_PRESETS = [
+    ["Green backyard", "a well-kept green suburban backyard lawn with a wooden privacy fence and mature trees"],
+    ["Gravel pad", "a level crushed-gravel pad in a tidy rural yard with a farmhouse and trees in the distance"],
+    ["Farm field", "the edge of an open farm field at golden hour with a clear sky"],
+    ["Wooded lot", "a clearing in a hardwood forest with dappled sunlight and fallen leaves"],
+    ["Snowy yard", "a snowy backyard on a bright winter day with evergreen trees"],
+    ["Plain studio", "a seamless plain light-grey photo studio backdrop with soft even lighting"],
+  ];
+  const bgPrice = bgInfo ? (bgInfo.exempt ? "free on your account" : (bgInfo.priceCents != null ? `$${(bgInfo.priceCents / 100).toFixed(2)} from your wallet` : "")) : "";
+  const runBg = async () => {
+    const scene = (bg.scene || "").trim();
+    if (!scene) { setBg((b) => ({ ...b, err: "Pick a background or describe one." })); return; }
+    const key = "bg" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    setBg((b) => ({ ...b, running: true, err: null }));
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "photo_bg_start", photoId: bg.photo.id, scene, idempotencyKey: key } });
+    if (error || !data || !data.jobId) {
+      const why = (data && data.error) || (error ? await fnError(error) : "That didn't start.");
+      setBg((b) => ({ ...b, running: false, err: why }));
+      return;
+    }
+    const jobId = data.jobId;
+    for (let i = 0; i < 200; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "photo_bg_status", jobId } });
+      if (!st || st.status === "working") continue;
+      if (st.status === "done") {
+        // Refresh the photo list from the server, which knows where the new one sits.
+        const r = await savePhotos({});
+        setBg(null);
+        setMsg({ ok: r ? "New background added beside the original. Make it the cover with ★ if you like it." : "New background added." });
+        return;
+      }
+      setBg((b) => b && ({ ...b, running: false, err: st.error || "That change didn't work. You weren't charged." }));
+      return;
+    }
+    setBg((b) => b && ({ ...b, running: false, err: "Still working — check back in a minute." }));
+  };
+
+  return (
+    <div style={{ background: "#F8FAFC", border: "1px solid #EDF1F6", borderRadius: 10, padding: "12px 14px" }}>
+      <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: "#94A3B8", textTransform: "uppercase", marginBottom: 9 }}>
+        Online listing — building #{unit.serial}
+      </div>
+      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 10 }}>
+        <label style={{ display: "flex", gap: 7, alignItems: "center", fontSize: 13, fontWeight: 700, color: "#334155" }}>
+          <input type="checkbox" checked={listed} disabled={!canEdit} onChange={(e) => setListed(e.target.checked)} /> List online
+        </label>
+        <label style={{ display: "flex", gap: 7, alignItems: "center", fontSize: 13, fontWeight: 700, color: "#334155" }}>
+          <input type="checkbox" checked={showPrice} disabled={!canEdit} onChange={(e) => setShowPrice(e.target.checked)} />
+          Show price online <span style={{ fontWeight: 500, color: "#64748B" }}>(off = “Call for price”)</span>
+        </label>
+      </div>
+      <input value={title} disabled={!canEdit} maxLength={120} onChange={(e) => setTitle(e.target.value)}
+        placeholder={`Title — e.g. ${[titleCase(unit.style || ""), unit.size].filter(Boolean).join(" ") || "12x16 Lofted Barn"}`}
+        style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 8 }} />
+      <textarea value={desc} disabled={!canEdit} maxLength={4000} rows={3} onChange={(e) => setDesc(e.target.value)}
+        placeholder="Description — what makes this building a good buy, options included, ready-to-deliver notes…"
+        style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical", marginBottom: 10 }} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        {photos.map((p, i) => (
+          <div key={p.id} draggable={canEdit} onDragStart={() => setDragId(p.id)} onDragOver={(e) => e.preventDefault()}
+            onDrop={() => { move(dragId, p.id); setDragId(null); }}
+            style={{ position: "relative", width: 112, height: 84, borderRadius: 8, overflow: "hidden", border: i === 0 ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", background: "#FFF", cursor: canEdit ? "grab" : "default", opacity: busy === p.id ? 0.4 : 1 }}>
+            <img src={p.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            {i === 0 && <span style={{ position: "absolute", left: 4, top: 4, background: ACCENT, color: "#FFF", fontSize: 9.5, fontWeight: 800, borderRadius: 6, padding: "1px 6px" }}>COVER</span>}
+            {p.aiEdited && <span style={{ position: "absolute", left: 4, bottom: 4, background: "rgba(15,23,42,.75)", color: "#FFF", fontSize: 9.5, fontWeight: 700, borderRadius: 6, padding: "1px 6px" }}>AI background</span>}
+            {canEdit && (
+              <div style={{ position: "absolute", right: 3, top: 3, display: "flex", gap: 3 }}>
+                {bgInfo && <button type="button" title="Change the background (AI)" onClick={() => setBg({ photo: p, scene: "", preset: null, running: false, err: null })} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>✨</button>}
+                {i > 0 && <button type="button" title="Make cover photo" onClick={() => makeCover(p)} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>★</button>}
+                <button type="button" title="Remove photo" onClick={() => remove(p)} style={{ border: "none", borderRadius: 5, background: "rgba(255,255,255,.92)", fontSize: 11, cursor: "pointer", padding: "1px 5px" }}>✕</button>
+              </div>
+            )}
+          </div>
+        ))}
+        {canEdit && photos.length < 12 && (
+          <button type="button" disabled={busy === "upload"} onClick={() => fileRef.current && fileRef.current.click()}
+            style={{ width: 112, height: 84, borderRadius: 8, border: "1.5px dashed #CBD5E1", background: "#FFF", color: "#64748B", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            {busy === "upload" ? "Uploading…" : "+ Add photos"}
+          </button>
+        )}
+        <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }}
+          onChange={(e) => upload(e.target.files)} />
+      </div>
+      {photos.length > 1 && canEdit && <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 8 }}>Drag photos to reorder. The first one is the cover.{bgInfo ? " ✨ changes a photo's background." : ""}</div>}
+      {bg && (
+        <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, marginBottom: 10 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <img src={bg.photo.url} alt="" style={{ width: 140, height: 105, objectFit: "cover", borderRadius: 8 }} />
+            <div style={{ flex: "1 1 260px" }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#334155", marginBottom: 6 }}>✨ Change the background{bgPrice ? <span style={{ fontWeight: 500, color: "#64748B" }}> — {bgPrice}</span> : null}</div>
+              {!bgInfo.ready ? (
+                <div style={{ fontSize: 13, color: "#B45309" }}>
+                  {bgInfo.reason === "not_configured" ? "Background changes aren't set up yet — CSM Synergy is finishing the setup." : "Background changes aren't switched on yet — CSM Synergy is finishing the setup."}
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                    {BG_PRESETS.map(([label, text]) => (
+                      <button key={label} type="button" disabled={bg.running} onClick={() => setBg((b) => ({ ...b, scene: text, preset: label, err: null }))}
+                        style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 700, borderRadius: 14, padding: "4px 10px", cursor: "pointer",
+                          background: bg.preset === label ? "#1E293B" : "#F1F5F9", color: bg.preset === label ? "#FFF" : "#334155", border: "none" }}>{label}</button>
+                    ))}
+                  </div>
+                  <input value={bg.scene} disabled={bg.running} maxLength={400} onChange={(e) => setBg((b) => ({ ...b, scene: e.target.value, preset: null }))}
+                    placeholder="…or describe it: a gravel driveway beside a red barn on an overcast day"
+                    style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 8 }} />
+                  <div style={{ fontSize: 11.5, color: "#94A3B8", marginBottom: 8 }}>The building is kept exactly as it is; only the background changes. The new photo is added beside the original, which is never replaced. Takes about a minute.</div>
+                </>
+              )}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {bgInfo.ready && <button type="button" disabled={bg.running} onClick={runBg} style={S.btn(ACCENT, "#FFF")}>{bg.running ? "Working… (about a minute)" : "Change background"}</button>}
+                <button type="button" disabled={bg.running} onClick={() => setBg(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+                {bg.err && <span style={{ color: "#B91C1C", fontSize: 13, fontWeight: 600 }}>{bg.err}</span>}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {listed && photos.length === 0 && <div style={{ fontSize: 12, color: "#B45309", marginBottom: 8 }}>Add at least one photo — listings without photos get far fewer inquiries.</div>}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        {canEdit && <button type="button" disabled={busy === "save"} onClick={saveListing} style={S.btn(ACCENT, "#FFF")}>{busy === "save" ? "Saving…" : "Save listing"}</button>}
+        {msg && msg.ok && <span style={{ color: "#15803D", fontSize: 13, fontWeight: 600 }}>{msg.ok}</span>}
+        {msg && msg.err && <span style={{ color: "#B91C1C", fontSize: 13, fontWeight: 600 }}>{msg.err}</span>}
+      </div>
+    </div>
+  );
+}
+
 function InventoryTable({
-  clientId, refreshKey = 0, isAdmin = false,
+  clientId, refreshKey = 0, isAdmin = false, access = null,
   onOpenDesign = null, onSendEstimate = null, onNew = null, onQuoteNewBuild = null,
 }) {
+  // The Online Shop's listing tools are inventory:edit (portal-settings GATES agrees).
+  const canEditShop = isAdmin || !!(access && access.inventory === "edit");
+  const [listingOpen, setListingOpen] = useState({});   // unit id -> listing editor open
   // A STATUS VIEW, deliberately (Carolyn 2026-08-08): "NO SCHEDULING EVER HAPPENS FROM THE
   // INVENTORY PAGE. It should only state the status." The build status follows the Build and
   // Delivery schedules; the sale follows the customer's invoice (or a recorded payment). The
@@ -4727,7 +6374,7 @@ function InventoryTable({
     if (locFilter !== "all" && String(u.locationId || "") !== locFilter) return false;
     const q = query.trim().toLowerCase();
     if (!q) return true;
-    const hay = ["#" + u.serial, String(u.serial), titleCase(u.style || ""), u.size || "", u.locationName || "",
+    const hay = ["#" + u.serial, String(u.serial), u.fullSerial || "", titleCase(u.style || ""), u.size || "", u.locationName || "",
       u.roofType || "", u.roofColor || "", u.bodyColor || "", u.trimColor || "", u.soldFirstName || "",
       ...(u.estimates || []).map((e) => (e.name || "") + " " + (e.estimateNumber ? "EST-" + e.estimateNumber : ""))].join(" ").toLowerCase();
     return hay.includes(q);
@@ -4763,7 +6410,7 @@ function InventoryTable({
     const reason = window.prompt(
       `Put building #${u.serial} back on the market?\n\n`
       + `This does NOT void or change the invoice in your CRM — there is no way to do that from `
-      + `here. It only makes the building available to quote again.\n\nWhy is it being released?`);
+      + `here. It only makes the building available to sell again.\n\nWhy is it being released?`);
     if (reason === null) return;                      // cancelled
     if (!reason.trim()) { setMsg({ err: "Releasing a sold building needs a reason." }); return; }
     setBusyId(u.id); setMsg(null);
@@ -4822,6 +6469,13 @@ function InventoryTable({
               fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>
             {meta.label}
           </span>
+          {u.listed && (
+            <span title={u.showPriceOnline === false ? "Listed in your Online Inventory (price hidden)" : "Listed in your Online Inventory"}
+              style={{ background: "#ECFDF5", color: "#047857", borderRadius: 14, padding: "3px 9px",
+              fontSize: 10.5, fontWeight: 800, letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+              ONLINE{(u.photos || []).length ? ` · ${(u.photos || []).length} 📷` : ""}
+            </span>
+          )}
           {invSold(u) && (
             <span title={u.soldAt ? "Sold " + fmtDate(u.soldAt) : undefined}
               style={{ background: INV_SALE_COLORS.bg, color: INV_SALE_COLORS.fg, borderRadius: 14,
@@ -4850,8 +6504,11 @@ function InventoryTable({
         count={rows ? (anyFilterOn ? `${filtered.length} of ${rows.length}` : rows.length) : null}
         right={<>
           <button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>
+          {/* Settings live under Settings (Carolyn 2026-10-17) — this is only a shortcut there. */}
+          <a href="/settings/online-inventory" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none" }}>🛒 Online Inventory settings</a>
           {onNew && <button type="button" onClick={onNew} style={S.btn(ACCENT, "#FFF")}>+ New building request</button>}
         </>} />
+      <ShopRequestsCard clientId={clientId} canEdit={canEditShop} refreshKey={refreshKey} />
       <input value={query} onChange={(e) => setQuery(e.target.value)}
         placeholder="Search inventory — serial #, building, location, customer…"
         style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 11 }} />
@@ -4912,7 +6569,7 @@ function InventoryTable({
       )}
       {rows && rows.length === 0 && !error && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
-          Nothing on the lot yet. Design a building in the <strong>Designer</strong> tab and click <strong>Request this build</strong> — it takes the next serial number automatically and lands here. Put it on the <strong>Build Schedule</strong> when you're ready to make it.
+          Nothing on the lot yet. Design a building in the <strong>Shed Designer</strong> and click <strong>Request this build</strong> — it takes the next serial number automatically and lands here. Put it on the <strong>Build Schedule</strong> when you're ready to make it.
         </p>
       )}
       {rows && rows.length > 0 && filtered.length === 0 && (
@@ -4940,7 +6597,12 @@ function InventoryTable({
                 return (
                   <React.Fragment key={u.id}>
                     <tr>
-                      <td style={{ ...S.td, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>#{u.serial}</td>
+                      <td style={{ ...S.td, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>
+                        #{u.serial}
+                        {/* The full serial (316) — what goes on the building's tag. */}
+                        {u.fullSerial && <div title="Full serial number — write this on the tag"
+                          style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11, fontWeight: 700, color: "#475569", whiteSpace: "nowrap", userSelect: "all", marginTop: 2 }}>{u.fullSerial}</div>}
+                      </td>
                       <td style={S.td}><strong>{[titleCase(u.style || ""), u.size].filter(Boolean).join(" ") || "—"}</strong></td>
                       <td style={S.td}>{u.roofType ? <>{u.roofType}{u.roofColor ? <span style={{ color: "#94A3B8" }}> · {u.roofColor}</span> : null}</> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
                       <td style={S.td}>{(u.bodyColor || u.trimColor) ? <>{u.bodyColor || "—"}<span style={{ color: "#94A3B8" }}> / {u.trimColor || "—"}</span></> : <span style={{ color: "#94A3B8" }}>—</span>}</td>
@@ -4971,11 +6633,18 @@ function InventoryTable({
                             onClick={() => onSendEstimate && onSendEstimate(u)}
                             style={linkBtn({ color: ACCENT })}>Send estimate</button>
                         )}
+                        <button type="button" onClick={() => setListingOpen((x) => ({ ...x, [u.id]: !x[u.id] }))}
+                          style={linkBtn({ color: ACCENT })}>{listingOpen[u.id] ? "Close listing" : "Online"}</button>
                         {u.imageUrl && ssSafeUrl(u.imageUrl) && <a href={u.imageUrl} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", marginRight: 10 }}>PDF</a>}
                         {isAdmin && <button type="button" disabled={busyId === u.id} onClick={() => del(u)}
                           style={linkBtn({ color: "#CBD5E1", marginRight: 0 })}>Delete</button>}
                       </td>
                     </tr>
+                    {listingOpen[u.id] && (
+                      <tr><td colSpan={10} style={{ padding: "2px 8px 12px" }}>
+                        <InventoryListingEditor unit={u} canEdit={canEditShop} onChanged={load} />
+                      </td></tr>
+                    )}
                     {isOpen && ests.length > 0 && (
                       <tr><td colSpan={10} style={{ padding: "2px 8px 12px" }}>
                         <div style={{ background: "#F8FAFC", border: "1px solid #EDF1F6", borderRadius: 10, padding: "12px 14px" }}>
@@ -5004,7 +6673,7 @@ function InventoryTable({
                                     {onQuoteNewBuild && (
                                       <button type="button" onClick={() => onQuoteNewBuild(e)}
                                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: ACCENT, fontWeight: 700 }}>
-                                        Quote a new build for this customer →
+                                        Start a new estimate for this customer →
                                       </button>
                                     )}
                                   </>

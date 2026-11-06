@@ -4,6 +4,8 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { validateTwilioSignature, hasSignatureKey, smsPhoneKey } from "../_shared/twilioSms.ts";
 import { insertInbound, parseNumMedia } from "./numMedia.ts";
+// Workstream 2, phase 4: which Twilio account sent this (only while TWILIO_SUBACCOUNTS is "on").
+import { edgeWebhookAccount, webhookTenantVerdict, type WebhookAccount } from "../_shared/twilioAccount.ts";
 
 // Inbound SMS → the CRM conversation. The return leg that makes texting two-way, and the
 // twin of email-inbound: same shared-secret gate, same always-200-once-authenticated
@@ -83,8 +85,38 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
   //
   // The URL is REBUILT rather than read off req.url: the Supabase gateway rewrites the
   // incoming URL, while the signature was computed over the URL configured in Twilio.
+  //
+  // ⚠️ PER ACCOUNT, ONLY WHILE TWILIO_SUBACCOUNTS IS "on" (Workstream 2, phase 4). Each builder's
+  // sub-account signs with ITS auth token, so the token is picked by the request's AccountSid
+  // (_shared/twilioAccount.ts edgeWebhookAccount): the parent's SID (or none) gets exactly the three
+  // states above; a known ACTIVE sub-account must be signed with its own token, always (asked once
+  // more if its cached token does not validate: a rotated token); anything else is refused. The
+  // tenant found from `To` below must then live in that same account. Off, `account` stays null,
+  // nothing here is looked up and the three states are the whole check.
   const sig = req.headers.get("X-Twilio-Signature") ?? "";
-  if (hasSignatureKey()) {
+  const envGet = (k: string) => Deno.env.get(k);
+  let account: WebhookAccount | null = null;
+  const perAccount = await edgeWebhookAccount(admin, params.AccountSid, envGet, (token) =>
+    validateTwilioSignature(`${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-inbound?key=${key}`, params, sig, token));
+  if (perAccount.kind === "refused") {
+    await logEdgeError({
+      fn: "sms-inbound",
+      code: perAccount.reason === "lookup_failed" ? "sms_account_lookup_failed"
+        : perAccount.reason === "bad_signature" ? "sms_signature_invalid" : "sms_wrong_account",
+      message: perAccount.reason === "lookup_failed"
+        ? "The Twilio account an inbound text's AccountSid names could not be looked up; message refused."
+        : perAccount.reason === "bad_signature"
+        ? "X-Twilio-Signature did not validate against the sub-account's token; message refused."
+        : "An inbound text's AccountSid is not one of our Twilio accounts; message refused.",
+      severity: perAccount.reason === "wrong_account" ? "info" : "error",
+      context: perAccount.reason === "bad_signature" ? { hasSig: !!sig, account: "sub" } : undefined,
+    }).catch(() => {});
+    return deny();
+  }
+  if (perAccount.kind !== "off") account = perAccount.account;
+  if (perAccount.kind === "sub") {
+    // Signed with the sub's own token: checked by edgeWebhookAccount above.
+  } else if (hasSignatureKey()) {
     const url = `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-inbound?key=${key}`;
     const ok = await validateTwilioSignature(url, params, sig);
     if (!ok) {
@@ -137,6 +169,25 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
     return twiml();
   }
   const clientId = String(tenant.client_id);
+
+  // Workstream 2, phase 4: the number's business must live in the account that sent the text. Never
+  // stored under a business in another account; a failed lookup is not a match either. The request
+  // is authenticated by now, so this is the ALWAYS-200 rule above: logged, answered with empty
+  // TwiML, not stored (a non-2xx would only earn retries and a disabled webhook).
+  if (account) {
+    const verdict = await webhookTenantVerdict(admin, account, clientId, envGet);
+    if (verdict !== "ok") {
+      await logEdgeError({
+        fn: "sms-inbound", clientId,
+        code: verdict === "lookup_failed" ? "sms_account_lookup_failed" : "sms_account_mismatch",
+        message: verdict === "lookup_failed"
+          ? "The business's Twilio account could not be looked up; inbound text not stored."
+          : "An inbound text came from a Twilio account this number's business does not live in; not stored.",
+        context: { source: account.source },
+      }).catch(() => {});
+      return twiml();
+    }
+  }
 
   // ── STAGE B: the contact, within that tenant ─────────────────────────────────────────
   // phone_digits is the 10-digit NANP key (migration 132), so the E.164 sender is reduced

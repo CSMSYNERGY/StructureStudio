@@ -54,7 +54,6 @@
 // the artifacts under test are the compiled bundles the browser really loads. A change that was
 // never `npm run compile`d is invisible here, which is the point.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/calIdempotency.mjs            (SS_BASE=http://127.0.0.1:<port> to move it)
 //
 // Exit 0 = every assertion held.
@@ -248,7 +247,7 @@ async function main() {
   await page.route("**/__stub/img-*.png", (route) => route.fulfill({ status: 200, contentType: "image/png", body: PNG }));
 
   // CLICKED, not deep-linked: python -m http.server serves files, not the Workers routes, so
-  // /portal/settings/designer 404s here even though it is a real URL live.
+  // /settings/designer 404s here even though it is a real URL live.
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), { timeout: 40000 });
   await page.getByText("Settings", { exact: true }).last().click();

@@ -137,6 +137,7 @@ Deno.test("`kinds` agrees with `when`: every card a kind can show is one My Prof
 });
 
 Deno.test("the two lists My Profile shows", () => {
+  // One Deals card since 2026-10-12: the "Sales pipelines" card (migration 301) was merged into it.
   assertEquals(keys(ofKind("contact")), ["summary", "details", "deals", "orders", "tax", "build", "delivery", "repairs", "overview"]);
   assertEquals(keys(ofKind("design")), ["summary", "details", "person", "tax", "build", "delivery", "repairs", "overview"]);
   // The only card that comes and goes says when it shows.

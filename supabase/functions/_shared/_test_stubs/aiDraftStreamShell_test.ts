@@ -408,6 +408,12 @@ Deno.test("01-core: a dropped streamed draft on a page that stays is ONE info ro
   assertEquals(run(false, null, cut("SyntaxError"), { action: "calibrate_style_ai", lean: true }).ssDraftDropped, false, "the lean retry");
   assertEquals(run(false, null, cut("TypeError"), { action: "calibrate_style_ai_recover" }).ssDraftDropped, false, "a pickup ask");
   assertEquals(run(false, null, cut("SyntaxError"), { action: "status", stream: true }).ssDraftDropped, false, "another action");
+  // A door drafted from a photo (generate_door_look) drops the same two ways; its pickup is no drop.
+  const DOOR = { action: "generate_door_look", stream: true };
+  assertEquals(run(false, null, cut("TypeError"), DOOR), { ssAborted: false, ssDraftDropped: true });
+  assertEquals(run(false, 504, deadline, DOOR), { ssAborted: false, ssDraftDropped: true });
+  assertEquals(run(false, null, cut("TypeError"), { action: "generate_door_look_recover" }).ssDraftDropped, false, "a door pickup ask");
+  assertEquals(run(false, null, cut("TypeError"), { action: "generate_door_look", lean: true }).ssDraftDropped, false, "a door press that did not stream");
   assertEquals(run(false, 402, { error: null, data: { error: "x", code: "insufficient_funds", status: 402 } }, PRESS).ssDraftDropped, false, "a streamed refusal");
   assertEquals(run(false, null, cut("FunctionsFetchError"), PRESS).ssDraftDropped, false, "never reached the server");
   assertEquals(run(false, 502, cut("TypeError"), PRESS).ssDraftDropped, false, "a status the server sent");

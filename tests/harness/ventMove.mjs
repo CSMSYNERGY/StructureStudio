@@ -16,7 +16,6 @@
 // The 3D section needs no plan control (the vent starts in the gable, where 1.9 places it), so
 // VM_STEPS=3d runs it alone — which is how it is run against a build from before this change.
 //
-//   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/ventMove.mjs                     (SS_SHOTS=<dir> for the screenshots)
 import { pathToFileURL } from "node:url";
 import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, recordRefusals, waitNoRefusal, refusalsSince, armVent } from "./lib.mjs";

@@ -14,6 +14,12 @@
 //   · d3CladdingFor(siding, exposureIn) is what the renderer's clad line reads: the D3_CLADDING entry
 //     ITSELF in every case but a valid lap size, and then lap with stepFt and tileFtV scaled together.
 //
+// AND THE LAP RENAMED, VINYL ADDED (2026-10-06, Carolyn's Q20 answers): the built-in lap is called
+// 7" LP Lap Siding and draws EXACTLY as it did ("keep its profile, treating the current lap as 7""),
+// and a fifth id, "vinyl" (4.5" Vinyl Siding), draws lap's profile at 4.5/7 of its course. The 275
+// course size moved onto the same nominal scale (D3_LAP_NOMINAL_IN = 7): blank or 7 is lap's own
+// drawing, 4.5 is vinyl's, bit for bit. Vinyl takes no size.
+//
 // Lifted by stable anchors (the raisedFloor_test technique), each region asserted byte-identical in the
 // two hand-mirrored twins. The meshes (the course count on a real wall) are checked in
 // tests/harness/lapCourses.mjs.
@@ -44,7 +50,7 @@ const REGIONS: Array<[string, string]> = [
   ["const D3_GRADE_FALL_TOWARD = [", "// { fallFt, toward }"],
   ["const D3_GRADE_CORNERS = [", "// THE GROUND UNDER THE FOUR CORNERS"],
   ["const FOUNDATION_ITEM_LABEL = {", "function foundationLabelOf("],
-  // The four claddings, the normaliser and d3CladdingFor.
+  // The five claddings, D3_LAP_NOMINAL_IN, the normaliser and d3CladdingFor.
   ["const D3_CLADDING = {", "// ── METAL ROOF PROFILE"],
   // The builder's offered list and the pricing lookup d3CladdingExposureIn reads.
   ["function claddingOptionsFor(", "function resolveWallHeight("],
@@ -65,10 +71,68 @@ Deno.test("every lifted region is byte-identical in the two twins", () => {
 // deno-lint-ignore no-explicit-any
 type Any = any;
 const F = new Function(
-  `${blocks.map((b) => b.cmp).join("\n")}; return { D3_CLADDING, d3CladdingFor, d3CladdingExposureIn, d3ResolveStyleSpec, d3SidingOverride };`,
+  `${blocks.map((b) => b.cmp).join("\n")}; return { D3_CLADDING, D3_LAP_NOMINAL_IN, d3NormalizeCladding, d3CladdingFor, d3CladdingExposureIn, d3ResolveStyleSpec, d3SidingOverride, claddingOptionsFor };`,
 )() as Record<string, Any>;
 const LAP = F.D3_CLADDING.lap;
+const VINYL = F.D3_CLADDING.vinyl;
 const LAP_COPY = JSON.stringify(LAP);
+const GEOMETRY = (c: Any) => ({ tex: c.tex, relief: c.relief, stepFt: c.stepFt, tileFtU: c.tileFtU, tileFtV: c.tileFtV, bump: c.bump });
+const STYLE_PLAIN = { value: "deluxe", label: "Deluxe Gable", d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6 }, wallHeightFt: 7 } };
+
+// ── The rename and the fifth cladding (2026-10-06) ──────────────────────────────────────────────
+Deno.test("\"keep its profile\": lap is renamed 7\" LP Lap Siding and draws exactly what it always drew", () => {
+  assertEquals(LAP.label, '7" LP Lap Siding');
+  assertEquals(LAP.id, "lap");
+  // The numbers every lap wall was drawn with before the rename (ea0a0de0), pinned.
+  assertEquals(GEOMETRY(LAP), { tex: "lap", relief: "lap", stepFt: 0.5, tileFtU: 8, tileFtV: 4, bump: 0.45 });
+  assertEquals(Object.keys(LAP).sort(), ["bump", "id", "label", "relief", "stepFt", "tex", "tileFtU", "tileFtV"]);
+  // ASCII quote, never the inch prime: the quote PDF's standard fonts are WinAnsi only.
+  for (const c of Object.values(F.D3_CLADDING) as Any[]) assert(/^[\x20-\x7e]+$/.test(c.label), `${c.id}: ${c.label}`);
+});
+
+Deno.test("4.5\" Vinyl Siding: lap's profile at 4.5/7 of lap's course, bit for bit what a 4.5 lap size draws", () => {
+  assertEquals([VINYL.id, VINYL.label], ["vinyl", '4.5" Vinyl Siding']);
+  assertStrictEquals(VINYL.stepFt, 0.32142857142857145);
+  assertStrictEquals(VINYL.tileFtV, 2.5714285714285716);
+  assertStrictEquals(VINYL.tileFtV / VINYL.stepFt, 8, "8 boards a tile, as lap: the raster lands on the relief courses");
+  const { id: _i, label: _l, ...vinylRest } = VINYL;
+  const { id: _i2, label: _l2, ...sizedRest } = F.d3CladdingFor("lap", 4.5);
+  assertEquals(vinylRest, sizedRest, "the same object as lap at 4.5, apart from id and label");
+  for (const k of ["stepFt", "tileFtV"]) assertStrictEquals(VINYL[k], F.d3CladdingFor("lap", 4.5)[k], `${k}, bit for bit`);
+  assertEquals([VINYL.tex, VINYL.relief, VINYL.tileFtU, VINYL.bump], [LAP.tex, LAP.relief, LAP.tileFtU, LAP.bump], "the same profile");
+  assertEquals(F.D3_LAP_NOMINAL_IN, 7);
+  assertEquals(Object.keys(F.D3_CLADDING), ["lap", "vinyl", "panel", "agpanel", "batten"], "five ids, vinyl right after lap");
+});
+
+Deno.test("vinyl is its own id end to end: the normaliser, the override, the resolver, the renderer's lookup", () => {
+  for (const v of ["vinyl", " Vinyl ", "VINYL"]) assertEquals(F.d3NormalizeCladding(v), "vinyl", JSON.stringify(v));
+  // Nothing else turns into vinyl.
+  for (const v of ["vinylsiding", "vinyl-lap", "4.5 vinyl"]) assertEquals(F.d3NormalizeCladding(v), "panel", JSON.stringify(v));
+  // A size never reaches it: vinyl is fixed at 4.5, its name says so.
+  for (const ex of [undefined, null, "", 4.5, 3, 7, 12, "abc"]) {
+    assertStrictEquals(F.d3CladdingFor("vinyl", ex), VINYL, `vinyl with ${JSON.stringify(ex)}`);
+  }
+  const cfg = { claddingOptions: { deluxe: [
+    { id: "lap", label: null, rate: 0, charged: false, exposureIn: 4.5 },
+    { id: "vinyl", label: null, rate: 2, charged: true },
+  ] } };
+  const sel = { style: "deluxe", cladding: "vinyl" };
+  assertEquals(F.d3SidingOverride(cfg, sel), "vinyl");
+  assertStrictEquals(F.d3CladdingExposureIn(cfg, sel), null, "the lap row's size is the lap's, never the vinyl's");
+  const spec = F.d3ResolveStyleSpec(STYLE_PLAIN, sel.style, 8, F.d3SidingOverride(cfg, sel), 0, null, F.d3CladdingExposureIn(cfg, sel));
+  assertEquals(spec.siding, "vinyl");
+  assert(!("sidingExposureIn" in spec), "no size is named for vinyl");
+  // Even if a size were handed in, the resolver names it on lap only.
+  assert(!("sidingExposureIn" in F.d3ResolveStyleSpec(STYLE_PLAIN, sel.style, 8, "vinyl", 0, null, 4.5)));
+  assertStrictEquals(F.d3CladdingFor(spec.siding, spec.sidingExposureIn), VINYL);
+});
+
+Deno.test("claddingOptionsFor keeps a vinyl entry and still drops an id we ship nothing for", () => {
+  const C = { claddingOptions: { deluxe: [
+    { id: "panel", label: null }, { id: "vinyl", label: null }, { id: "barn", label: "Barn Siding" }, { id: "lap", label: null },
+  ] } };
+  assertEquals(F.claddingOptionsFor(C, "deluxe", false).map((o: Any) => o.id), ["panel", "vinyl", "lap"]);
+});
 
 // ── d3CladdingFor ──────────────────────────────────────────────────────────────────────────────
 Deno.test("d3CladdingFor: no size means the D3_CLADDING entry itself, by identity", () => {
@@ -80,34 +144,41 @@ Deno.test("d3CladdingFor: no size means the D3_CLADDING entry itself, by identit
   }
   // The renderer's old line read D3_CLADDING[d3NormalizeCladding(siding)] || panel: every siding a
   // style can hold resolves to the entry it always did.
-  for (const s of [null, undefined, "", "groove", "t111", "nonsense", "Lap", "lapsiding", "board-and-batten", "metal", "PANEL"]) {
+  for (const s of [null, undefined, "", "groove", "t111", "nonsense", "Lap", "lapsiding", "board-and-batten", "metal", "PANEL", "vinyl", " Vinyl "]) {
     const old = F.D3_CLADDING[["lap", "lapsiding", "lap-siding"].includes(String(s ?? "").trim().toLowerCase()) ? "lap"
+      : String(s ?? "").trim().toLowerCase() === "vinyl" ? "vinyl"
       : ["batten", "board-and-batten", "bnb"].includes(String(s ?? "").trim().toLowerCase()) ? "batten"
       : ["agpanel", "ag", "metal", "panel-loc", "panelloc"].includes(String(s ?? "").trim().toLowerCase()) ? "agpanel" : "panel"];
     assertStrictEquals(F.d3CladdingFor(s, null), old, String(s));
   }
 });
 
-Deno.test("d3CladdingFor: a 4.5 in lap is 0.375 ft courses on a 3 ft tile (8 boards a tile, as at 6 in)", () => {
+Deno.test("d3CladdingFor: a lap size is on the nominal scale, where 7 is lap's own drawing and 4.5 is vinyl's", () => {
   const c = F.d3CladdingFor("lap", 4.5);
-  assertEquals(c.stepFt, 0.375);
-  assertEquals(c.tileFtV, 3);
+  // 4.5/7 of lap's 0.5 ft course and 4 ft tile (it was 0.375 and 3, true inches, before 2026-10-06).
+  assertStrictEquals(c.stepFt, 0.5 * 4.5 / 7);
+  assertStrictEquals(c.tileFtV, 4.0 * 4.5 / 7);
   assertEquals(c.tileFtV / c.stepFt, LAP.tileFtV / LAP.stepFt, "the raster's boards land on the relief courses");
   const { stepFt: _s, tileFtV: _t, ...rest } = c;
   const { stepFt: _s0, tileFtV: _t0, ...lapRest } = LAP;
-  assertEquals(rest, lapRest, "nothing else about lap changes: texture, relief, tile width, bump");
+  assertEquals(rest, lapRest, "nothing else about lap changes: id, name, texture, relief, tile width, bump");
   assertEquals(JSON.stringify(LAP), LAP_COPY, "D3_CLADDING.lap itself is never written to");
-  // A string from the config, and the ends of the range.
-  assertEquals(F.d3CladdingFor("lap", "4.5").stepFt, 0.375);
-  assertEquals(F.d3CladdingFor("lap", 3).stepFt, 0.25);
-  assertEquals(F.d3CladdingFor("lap", 12).stepFt, 1);
-  assertEquals(F.d3CladdingFor("lap", 12).tileFtV, 8);
-  // 6 in is lap's own numbers (a fresh object, but the same drawing).
-  assertEquals(F.d3CladdingFor("lap", 6), LAP);
+  // A string from the config, and the ends of the range: 0.5 x n / 7.
+  assertStrictEquals(F.d3CladdingFor("lap", "4.5").stepFt, 0.5 * 4.5 / 7);
+  assertStrictEquals(F.d3CladdingFor("lap", 3).stepFt, 0.5 * 3 / 7);
+  assertStrictEquals(F.d3CladdingFor("lap", 12).stepFt, 0.5 * 12 / 7);
+  assertStrictEquals(F.d3CladdingFor("lap", 12).tileFtV, 4.0 * 12 / 7);
+  // 7 in is lap's own numbers, exactly (a fresh object, but the same drawing): a builder who types
+  // the size in its name draws what blank draws.
+  assertEquals(F.d3CladdingFor("lap", 7), LAP);
+  assertStrictEquals(F.d3CladdingFor("lap", 7).stepFt, 0.5);
+  assertStrictEquals(F.d3CladdingFor("lap", 7).tileFtV, 4);
+  // 6, which was lap's own before the scale moved, is now 6/7 of it.
+  assertStrictEquals(F.d3CladdingFor("lap", 6).stepFt, 0.5 * 6 / 7);
 });
 
 Deno.test("d3CladdingFor: a size never touches any other cladding, and a size out of range is ignored", () => {
-  for (const id of ["panel", "batten", "agpanel"]) {
+  for (const id of ["panel", "batten", "agpanel", "vinyl"]) {
     for (const ex of [3, 4.5, 6, 12]) assertStrictEquals(F.d3CladdingFor(id, ex), F.D3_CLADDING[id], `${id} at ${ex}`);
   }
   for (const ex of [0, 2.99, 12.01, 20, -4.5, NaN, Infinity, "abc", true, {}, []]) {
@@ -138,6 +209,7 @@ Deno.test("d3CladdingExposureIn: null for everything else", () => {
     ["no selections", C(DELUXE), null],
     ["no cladding picked (the builder's standard)", C(DELUXE), { style: "deluxe" }],
     ["panel picked", C(DELUXE), { style: "deluxe", cladding: "panel" }],
+    ["vinyl picked (it takes no size)", C([...DELUXE, { id: "vinyl", label: null, rate: 0, charged: false, exposureIn: 4.5 }]), { style: "deluxe", cladding: "vinyl" }],
     ["a lap row with no size", C(DELUXE), { style: "utility", cladding: "lap" }],
     ["a style without the row", C(DELUXE), { style: "other", cladding: "lap" }],
     ["no claddingOptions at all (a config from before 207)", {}, { style: "deluxe", cladding: "lap" }],
@@ -209,7 +281,7 @@ Deno.test("end to end, as the designer calls it: config row → selection → re
   const sel = { style: "deluxe", cladding: "lap" };
   const spec = F.d3ResolveStyleSpec(STYLES.plain, sel.style, 8, F.d3SidingOverride(cfg, sel), 0, null, F.d3CladdingExposureIn(cfg, sel));
   const drawn = F.d3CladdingFor(spec.siding, spec.sidingExposureIn);
-  assertEquals([spec.siding, drawn.stepFt, drawn.tileFtV], ["lap", 0.375, 3]);
+  assertEquals([spec.siding, drawn.stepFt, drawn.tileFtV], ["lap", VINYL.stepFt, VINYL.tileFtV], "a lap row at 4.5 draws vinyl's courses");
   // The customer switches to panel: the size goes with the lap.
   const sel2 = { style: "deluxe", cladding: "panel" };
   const spec2 = F.d3ResolveStyleSpec(STYLES.plain, sel2.style, 8, F.d3SidingOverride(cfg, sel2), 0, null, F.d3CladdingExposureIn(cfg, sel2));
@@ -218,7 +290,8 @@ Deno.test("end to end, as the designer calls it: config row → selection → re
 });
 
 // ── Who passes it, in both twins ───────────────────────────────────────────────────────────────
-const CUSTOMER_CALL = "d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))";
+// The design's metal roof profile follows it as the 8th argument since 2026-10-06 (roofProfilePick_test).
+const CUSTOMER_CALL = "d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel), d3CustomerRoofProfile(sel))";
 
 Deno.test("the five customer-facing calls pass it, and nothing else does", () => {
   for (const [file, src] of [["structure-studio.component.js", CMP], ["StructureStudio.jsx", JSX]]) {

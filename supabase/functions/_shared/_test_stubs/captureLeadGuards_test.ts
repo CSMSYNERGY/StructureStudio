@@ -55,7 +55,7 @@ type Lead = {
   zip?: string | null;
   source?: string | null;
 };
-type Req = Partial<Lead> & { source?: string };
+type Req = Partial<Lead> & { source?: string; shopUnit?: unknown; shopMessage?: string };
 
 const addsSomething = new Function(
   "name",
@@ -66,6 +66,8 @@ const addsSomething = new Function(
   "zip",
   "source",
   "existingLead",
+  "shopUnit",
+  "shopMessage",
   `${EXPR}\nreturn addsSomething;`,
 ) as (
   name: string,
@@ -76,6 +78,8 @@ const addsSomething = new Function(
   zip: string,
   source: string,
   existingLead: Lead,
+  shopUnit: unknown,
+  shopMessage: string,
 ) => boolean;
 
 const run = (req: Req, existing: Lead) =>
@@ -88,6 +92,8 @@ const run = (req: Req, existing: Lead) =>
     req.zip ?? "",
     req.source ?? "gate",
     existing,
+    req.shopUnit ?? null,
+    req.shopMessage ?? "",
   );
 
 // A lead the gate has already captured and the Details capture has already enriched: every
@@ -187,4 +193,11 @@ Deno.test("email_conflict is a handled condition: still filed, as info, message 
       call.includes('"kept on the lead, not used as a CRM match key"'),
     "the email_conflict message text must stay as it was",
   );
+});
+
+// The Online Shop (2026-10-17): an inquiry about a specific building is a question someone is
+// waiting on an answer to, so it is never swallowed as a repeat, even from a fully-known lead.
+Deno.test("a shop inquiry about a building is always novelty", () => {
+  assertEquals(run({ name: "A Visitor", shopUnit: { id: "u1" } }, complete), true);
+  assertEquals(run({ name: "A Visitor", shopMessage: "Is it still available?" }, complete), true);
 });

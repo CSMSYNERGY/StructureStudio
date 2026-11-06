@@ -37,6 +37,7 @@ import {
   FOUNDING_ANNUAL_ONLY, FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS,
 } from "../foundingPricing.ts";
 import { paidThroughOf } from "../billingPeriods.ts";
+import { COF_CONSENT_VERSION } from "../cofConsent.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
 const SOURCE = await read("../../portal-billing/index.ts");
@@ -145,6 +146,13 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]): any {
     case "app_errors":
       trace.errors.push(arg("insert"));
       return { data: null, error: null };
+    // 317: the agreement row written before a checkout's first charge, and the attempt ledger a
+    // cart that gets that far opens (no prior attempt; the insert hands back an id).
+    case "billing_consents":
+      return has("insert") ? one({ id: 9001 }) : { data: null, error: null };
+    case "billing_charge_attempts":
+      if (has("insert")) return one({ id: 501 });
+      return { data: [], error: null };
   }
   throw new Error(`the fake database has no answer for ${table} ${JSON.stringify(ops)}`);
 }
@@ -218,6 +226,10 @@ async function drive(payload: Record<string, unknown>, world: World = {}) {
   }
 }
 
+// Since 317 a builder's checkout carries the ticked agreement box; the founding refusal still
+// answers before it is ever looked at (the cases below without `consent` would be refused for it
+// otherwise, and they get the founding 409 instead).
+const CONSENT = { consent: { version: COF_CONSENT_VERSION, accepted: true } };
 const subscribe = (planIds: string[], extra: Record<string, unknown> = {}) =>
   ({ action: "subscribe", planIds, confirmChargeCents: planIds.reduce((s, id) => s + price(id), 0), ...extra });
 const REFUSED = { error: FOUNDING_ANNUAL_ONLY_MESSAGE, code: FOUNDING_ANNUAL_ONLY_CODE };
@@ -279,16 +291,17 @@ Deno.test("monthly is refused: an operator in view-as, before the strict audit r
 });
 
 Deno.test("annual is allowed: the same builder's annual cart goes on to the gateway", async () => {
-  const r = await drive(subscribe(["simple_layout_annual", "crm_annual"], { paymentToken: "harness-token" }), { vault: null, gateway: "decline" });
-  // The stand-in declines the card at the vault step, so nothing is charged, but the request got
-  // past every refusal to the first gateway call, exactly as before this change.
-  assertEquals(r.trace.gateway.map((g) => g.customer_vault), ["add_customer"]);
+  const r = await drive(subscribe(["simple_layout_annual", "crm_annual"], { paymentToken: "harness-token", ...CONSENT }), { vault: null, gateway: "decline" });
+  // The stand-in declines the card on the first sale, which is also what would have stored it
+  // (317: customer_vault=add_customer rides on that sale), so nothing is charged or kept, but the
+  // request got past every refusal to the first gateway call, exactly as before this change.
+  assertEquals(r.trace.gateway.map((g) => [g.type, g.customer_vault]), [["sale", "add_customer"]]);
   assertEquals(r.status, 402, JSON.stringify(r.body));
-  assertEquals(r.body, { error: "Payment gateway error: Harness decline - nothing was charged" });
+  assert(String(r.body.error).startsWith("Subscription failed: Harness decline - nothing was charged"), JSON.stringify(r.body));
 });
 
 Deno.test("annual is allowed: a card on file reaches the confirm-amount check, which still guards the charge", async () => {
-  const r = await drive(subscribe(["crm_annual"], { confirmChargeCents: 1 }), {
+  const r = await drive(subscribe(["crm_annual"], { confirmChargeCents: 1, ...CONSENT }), {
     vault: "harness-vault",
     subs: [{ id: "sub-base", plan_id: "simple_layout_annual", status: "active", price_cents: price("simple_layout_annual"), created_at: new Date().toISOString() }],
   });
@@ -298,7 +311,7 @@ Deno.test("annual is allowed: a card on file reaches the confirm-amount check, w
 });
 
 Deno.test("annual is allowed: a comped (billing_exempt, not internal) tenant is handled as before", async () => {
-  const r = await drive(subscribe(["simple_layout_annual"], { paymentToken: "harness-token" }), {
+  const r = await drive(subscribe(["simple_layout_annual"], { paymentToken: "harness-token", ...CONSENT }), {
     vault: null, gateway: "decline", settings: { billing_exempt: true, internal_account: false, discount_percent: 0 },
   });
   assertEquals(r.trace.gateway.map((g) => g.customer_vault), ["add_customer"]);
@@ -376,7 +389,7 @@ Deno.test("wiring: the refusal is in subscribe only, after the internal 409 and 
   };
   const refusal = at("monthlyPlansRefused(");
   assert(at("if (internal) {") < refusal, "the internal-account 409 must answer first");
-  for (const later of ["let vault = vaultId;", "customer_vault: \"add_customer\"", "confirmChargeCents", "auditStrict(", "nmiPost(", "billing_charge_attempts"]) {
+  for (const later of ["let vault: string | null = vaultId;", "consentProblem(", "customer_vault: \"add_customer\"", "confirmChargeCents", "auditStrict(", "nmiPost", "billing_charge_attempts"]) {
     assert(refusal < at(later), `the founding refusal must come before ${later}`);
   }
   // Every other action is untouched: top-ups, auto top-up settings, cancel and status.

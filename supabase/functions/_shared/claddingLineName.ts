@@ -32,7 +32,13 @@ export function cladLineName(args: {
   const own = String(args.override ?? "").trim();
   if (own) return own;
   if (args.accepted && args.agreed) {
-    const agreedId = String(args.agreed.selections?.claddingId ?? "").trim();
+    // WHERE THE AGREED ID LIVES (2026-10-06). The snapshot's selections are designs.selections as
+    // the designer saved them (p_selections: sel, copied verbatim into accepted_snapshot), and that
+    // object keeps the id under `cladding`. `claddingId` is the SUBMIT BODY's key; it reaches
+    // designs.selections only after an order-screen attribute change (portal-settings writes both).
+    // Reading `claddingId` alone found nothing on an ordinary signed order, so this guard never
+    // fired there and a relabel still raised the change order it exists to prevent.
+    const agreedId = String(args.agreed.selections?.claddingId || args.agreed.selections?.cladding || "").trim();
     if (agreedId && agreedId === args.claddingId) {
       // agreedBaseline() hands back the snapshot object ({ lines: [...] }); accept a bare array too.
       const snap = args.agreed.lines;

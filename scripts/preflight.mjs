@@ -67,15 +67,18 @@
 //      that a later commit added two more on the very same line. This step is SKIPPED with
 //      a warning when Deno isn't installed (it is not an npm devDependency).
 //   7. `deno test` over the edge-function unit tests — the parts of supabase/functions that
-//      cannot be exercised any other way. Three groups with different invocations: the
+//      cannot be exercised any other way. Four groups: the
 //      self-contained `_shared/*.test.ts` (currently the OAuth discovery document's endpoint
 //      validation, which guards where the client secret gets sent), the pre-existing
-//      `_shared/_test_stubs/*_test.ts`, which needs its own import map, and `tests/phone/`
+//      `_shared/_test_stubs/*_test.ts`, which needs its own import map, a function's own
+//      `<function>/*.test.ts` or `*_test.ts` (run like `_shared`), and `tests/phone/`
 //      (My Synergy Phone's portal and edge pieces, run from the repo root). Same skip-with-a-warning
 //      policy as step 6. Then the migration tests in `tests/sql/*.test.cjs` (PGlite, Node), ONLY
 //      when `tests/sql/node_modules` is already installed: the gate never installs anything, so
 //      without it the step prints a SKIPPED line and blocks nothing — unless CI is set or
-//      SS_REQUIRE_SQL_TESTS=1, where a missing install FAILS the gate instead.
+//      SS_REQUIRE_SQL_TESTS=1, where a missing install FAILS the gate instead. Then every
+//      `scripts/*.test.mjs` under `node --test` (the release-note nudge's, since 2026-10-09:
+//      until then nothing ran a scripts test at all).
 //   8. my-quotes.html's sales-tax breakdown, executed against a DOM shim. That page is a
 //      standalone HTML file, so the eslint pass never reads its inline script and the deno
 //      steps do not know it exists — yet it is the only place a CUSTOMER sees the tax they
@@ -87,6 +90,14 @@
 //      run against the same vectors, no line naming a bank number may also touch storage, a
 //      URL, the console, the error log or an error sentence, and the boxes keep autocomplete
 //      off (checkAchBankInputs).
+//  10. How long a card token may be held before the page asks for the card again (Fiserv: the
+//      CVV is kept for 2 minutes): CARD_TOKEN_MAX_MS in my-quotes.html and portal/04-orders.jsx
+//      must be present, equal, and no more than 110 s (checkCardTokenMaxAge).
+//  11. "Estimate", never "quote", in text a person reads (Carolyn 2026-10-06): string
+//      literals, template parts and JSX text in the portal parts, both designer twins, the
+//      page sources, my-quotes.html, the portal's install manifest and every edge-function
+//      module, read with the vendored Babel. Identifiers, log-only text and the
+//      carrier-registered SMS copy are exempt (checkEstimateWording).
 //
 // Steps are numbered in the order they RUN.
 //
@@ -102,9 +113,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 // this gate has twice ended up reporting clean while running zero rules.
 import { TARGETS, targetName, readTarget, PORTAL_PARTS } from "./compile.mjs";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (f) => readFileSync(join(root, f), "utf8");
@@ -577,8 +589,9 @@ function run(files) {
 
   // portal.html's module tag must stay ROOT-ABSOLUTE, and this rule is the only thing that can
   // protect the ONE failure mode no in-page check can reach. If the module URL resolves to
-  // something under /portal/ that is not a real asset, the `/portal/*` splat in _redirects returns
-  // portal.html itself with HTTP 200 text/html — Babel is handed "<!DOCTYPE html>", throws a
+  // something under a page's address that is not a real asset, that page's `/<slug>/*` rule in
+  // _redirects (the `/portal/*` splat until 2026-10-13) returns portal.html itself with HTTP
+  // 200 text/html — Babel is handed "<!DOCTYPE html>", throws a
   // SyntaxError inside its own runner, and that throw ABORTS THE WHOLE QUEUE: the mount block
   // never executes, so the page is blank AND completely unlogged, because the error reporter lives
   // in the block that never ran. A check inside the mount block cannot help, by construction.
@@ -594,8 +607,8 @@ function run(files) {
   // rather than left to habit.
   //
   // (1) The compiled app tags. Every *.compiled.js tag must be ROOT-ABSOLUTE (portal.html is
-  // served at /portal/<page>/<sub> too, where a relative src resolves against URL depth and
-  // the /portal/* splat answers with portal.html at HTTP 200 — a classic script handed HTML
+  // served at /<page>/<sub> too, where a relative src resolves against URL depth and
+  // the page's /<slug>/* rule answers with portal.html at HTTP 200 — a classic script handed HTML
   // is a SyntaxError, and only the guard's sentinel would notice), must carry `defer` (defer
   // executes after parsing — after the guard has set or not set __ssBootBlocked — and in
   // DOCUMENT ORDER; a tag without defer executes mid-parse, BEFORE the guard exists), must
@@ -607,7 +620,7 @@ function run(files) {
     for (const t of tags) {
       const attrs = t[1] + " ";
       if (!t[2].startsWith("/")) {
-        errors.push(`${f}: compiled tag src "${t[2]}" is not root-absolute — under /portal/* a `
+        errors.push(`${f}: compiled tag src "${t[2]}" is not root-absolute — under /<page>/* a `
           + "relative src resolves to portal.html at HTTP 200 and the script dies on HTML with "
           + "only the sentinel to notice. Use a leading /");
       }
@@ -616,7 +629,7 @@ function run(files) {
       // for window.ssLoadDesigner(), which injects the real script on demand. `defer` and
       // `async` describe when a script RUNS, and this one never runs, so both rules are
       // vacuous here. The shape is still held to root-absolute above (the loader copies the
-      // src verbatim, so /portal/settings/... would break exactly as it did for a real tag)
+      // src verbatim, so /settings/... would break exactly as it did for a real tag)
       // and is separately required to be BACKED BY A LOADER below — removing the eager
       // tag without one would otherwise pass every check and ship a dead Designer tab.
       const isSrcPointer = /\stype="ss\/designer-src"/.test(attrs);
@@ -727,6 +740,8 @@ function run(files) {
 
   // The permission model's two hand-maintained copies must agree. See checkAreaMirror().
   errors.push(...checkAreaMirror(files));
+  // The rule vocabularies' two hand-maintained copies must agree. See checkRuleMirror().
+  errors.push(...checkRuleMirror(files));
 
   // ...and every contacts write must know which ROW it is allowed to touch. See
   // checkContactRowScope() — this is the guard for the write half of contacts:'own'.
@@ -1028,6 +1043,58 @@ function checkAchBankInputs(files) {
   return errors;
 }
 
+// ── How long a card token may be held: one number, in two hand-kept copies ─────────────────────
+//
+// Fiserv (CardPointe integrations), 2026-10-14: the CVV stays linked to the CardSecure token for 2
+// minutes. Both card surfaces, the customer's pay panel in my-quotes.html and the builder's
+// Record-a-payment modal in portal/04-orders.jsx, refuse to charge a card token older than
+// CARD_TOKEN_MAX_MS and ask for the card again. The two copies must be the same number (one page
+// timing out at 100 s and the other at 180 s is a CVV lost on one surface only), and neither may
+// creep up to the 2 minutes themselves: above 110 s there is no room left for the upload, an edge
+// cold start and the database writes before /auth. Taken from the SHIPPED text of both files, so a
+// copy cannot drift while the gate reads something else. Exactly one assignment per file, as a
+// plain integer: anything cleverer is a number this check cannot vouch for.
+//
+// Takes the texts as arguments so --self-test can hand it broken variants.
+const CARD_TOKEN_FILES = ["my-quotes.html", "portal/04-orders.jsx"];
+const CARD_TOKEN_MAX_CEILING_MS = 110000;
+function checkCardTokenMaxAge(files) {
+  const errors = [];
+  const seen = {};
+  for (const f of CARD_TOKEN_FILES) {
+    const text = (files[f] ?? "").replace(/\r\n/g, "\n");
+    const hits = [...text.matchAll(/\bCARD_TOKEN_MAX_MS\s*=(?!=)\s*([^;,\n]*)/g)];
+    if (hits.length === 0) {
+      errors.push(`${f}: CARD_TOKEN_MAX_MS is gone — the card token age limit (Fiserv: the CVV is kept `
+        + "for 2 minutes) lives there. If the limit moved, point checkCardTokenMaxAge at it.");
+      continue;
+    }
+    if (hits.length > 1) {
+      errors.push(`${f}: CARD_TOKEN_MAX_MS is assigned ${hits.length} times — keep one, so the limit `
+        + "this check reads is the one the page uses");
+      continue;
+    }
+    const raw = hits[0][1].trim();
+    const at = text.slice(0, hits[0].index).split("\n").length;
+    if (!/^\d+$/.test(raw)) {
+      errors.push(`${f}:${at}  CARD_TOKEN_MAX_MS = ${raw} — write it as a plain number of milliseconds`);
+      continue;
+    }
+    const ms = Number(raw);
+    if (ms > CARD_TOKEN_MAX_CEILING_MS) {
+      errors.push(`${f}:${at}  CARD_TOKEN_MAX_MS = ${ms} is above ${CARD_TOKEN_MAX_CEILING_MS} — the CVV leaves `
+        + "the token 2 minutes after tokenizing, and the charge needs time to reach /auth");
+    }
+    seen[f] = ms;
+  }
+  const [a, b] = CARD_TOKEN_FILES;
+  if (seen[a] !== undefined && seen[b] !== undefined && seen[a] !== seen[b]) {
+    errors.push(`CARD_TOKEN_MAX_MS differs: ${a} says ${seen[a]}, ${b} says ${seen[b]} — the two card `
+      + "surfaces must ask for the card again at the same age");
+  }
+  return errors;
+}
+
 
 // ── The customer-facing standalone pages must PARSE ────────────────────────────────────
 // 2026-09-08: a multiline regex whose newline escapes did not survive an edit landed in
@@ -1162,18 +1229,58 @@ const FUNCTIONS_DIR = "supabase/functions";
 // DEP0190 deprecation warning to stderr, and this gate's contract is that zero output means
 // go — a permanent warning on every clean push would train everyone to ignore its output.
 //
-// EVERY ARG MUST BE SPACE-FREE: the ENOENT retry below joins them into one command string
-// (an args array there would reintroduce DEP0190). Callers pass relative paths with `cwd`
-// rather than absolute ones, which keeps that true even under a username with a space.
+// The ENOENT retry below joins the args into one command string (an args array there would
+// reintroduce DEP0190), so an arg holding a space is quoted by hand. Unquoted, --allow-read=<root>
+// under a path like "D:\New folder\..." splits in two and deno takes the rest for a test file
+// ("Import ... failed, not found"), failing every group with nothing wrong in any test.
 function runDeno(args, cwd) {
   const opts = { encoding: "utf8", ...(cwd ? { cwd } : {}) };
   const res = spawnSync("deno", args, opts);
   // Windows: a scoop/choco/npm-shim install is deno.cmd, which CreateProcess will not
   // resolve. Only then is a shell worth the trouble.
   if (res.error && res.error.code === "ENOENT") {
-    return spawnSync(["deno", ...args].join(" "), { ...opts, shell: true });
+    const quoted = args.map((a) => (/\s/.test(a) ? `"${a}"` : a));
+    return spawnSync(["deno", ...quoted].join(" "), { ...opts, shell: true });
   }
   return res;
+}
+
+// That retry goes through cmd.exe, which refuses a command line over 8191 characters with "The
+// command line is too long". No test has run at that point, yet it read as "deno test failed in
+// _test_stubs" (2026-11-04, 174 files). Finding the real deno.exe would only move the wall: it
+// stops at 32767 (ENAMETOOLONG), and _test_stubs gained 108 files in October 2026 alone. So every
+// file list runs in batches that fit, on every platform, which means the path CI exercises is the
+// path this machine runs. 7000 leaves room for what the shim adds: its own path, and the quotes above.
+const DENO_COMMAND_LIMIT = 7000;
+
+// In order, every file exactly once, no empty batch. Pure, so --self-test can check it directly.
+function denoBatches(args, files) {
+  const base = ["deno", ...args].join(" ").length;
+  const batches = [];
+  let used = Infinity;
+  for (const f of files) {
+    if (used + 1 + f.length > DENO_COMMAND_LIMIT) {
+      batches.push([]);
+      used = base;
+    }
+    batches[batches.length - 1].push(f);
+    used += 1 + f.length;
+  }
+  return batches;
+}
+
+// Runs `deno <args> <files>` batch by batch and returns one error per failed batch, so a failure
+// in any batch fails the gate and the batches after it still run and report. A run that never
+// finished (ENOBUFS on a flood of output, say) has status null and no verdict, and says so,
+// rather than printing an empty "failed" that reads like a broken test.
+function denoFailures(args, files, cwd, what) {
+  return denoBatches(args, files).flatMap((batch) => {
+    const res = runDeno([...args, ...batch], cwd);
+    if (res.status === 0) return [];
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
+    const why = res.error ? `deno did not finish, so this is not a test verdict: ${res.error.message}\n${out}` : out;
+    return [`edge functions: deno ${what} (${batch.length} of ${files.length} file(s))\n${why}`];
+  });
 }
 
 // One entrypoint per function directory. `_shared/` is skipped because it has no index.ts
@@ -1360,6 +1467,204 @@ const listMigrations = () => {
 // drift can be pushed through the real comparison. A rule nothing ever proves can fire is the
 // failure mode this whole script keeps re-learning, and it is the exact failure that let the
 // two copies drift while 183's header claimed they were checked.
+/**
+ * THE RULE VOCABULARIES, BROWSER vs SERVER (migration 355, Part D).
+ *
+ * Per-pipeline rules carry three hand-maintained lists that exist twice — the action kinds, the
+ * clock anchors, and the eight trigger events — once in `portal/02-sales.jsx` for the editor and
+ * once in `supabase/functions/_shared/crmRules.ts` for the parser that refuses what the editor
+ * sends. This repo has paid for exactly this shape of drift twice already: the Monday status map
+ * (a renamed label silently stalled every feature-request sync) and `area_level_for`'s SQL mirror
+ * (two areas drifted and lasted months because an unknown area returns 'none' rather than
+ * raising). checkAreaMirror below exists because of the second one.
+ *
+ * The failure here is the same quiet kind. An action kind the editor offers and the parser does
+ * not is a rule a builder writes, saves — and the save is REFUSED with "Pick what the rule should
+ * do from the list", about the thing they just picked from the list. In the other direction a kind
+ * the server accepts is simply unreachable, which looks like the feature not being built.
+ *
+ * Compared as SETS, both directions, by key only: the labels are allowed to differ (the server's
+ * are for its own sentences) and are not this rule's business. Refuses to run blind.
+ *
+ * MIGRATION 363 (Carolyn, 2026-11-04: a rule says WHO it is for, and may carry "only if"
+ * conditions) added four more pairs — the scopes, the condition fields, the condition tests and
+ * the card sources — and two pairs compared VALUE by value, because there the keys agreeing is not
+ * enough: what each action NEEDS (a browser that thought "set the status" worked on every pipeline
+ * would offer it there, and a status belongs to one pipeline), and each condition field's type,
+ * scope and allowed tests (an op the browser offers and the server refuses is a condition nobody
+ * can save).
+ */
+function checkRuleMirror(files = {}, inject = null) {
+  const errors = [];
+  const JSX = "portal/02-sales.jsx";
+  const TS = "supabase/functions/_shared/crmRules.ts";
+  // The EVENTS live in crmPipelines.ts, not crmRules.ts: `RULE_EVENTS = STATUS_EVENTS` on purpose,
+  // one list for the status ladder and for rules. So that arm is read from where the list actually
+  // is — and if somebody forks it into crmRules.ts, this reads the original and the fork drifts
+  // unseen, so the RULE_EVENTS alias is checked below too.
+  const PIP = "supabase/functions/_shared/crmPipelines.ts";
+  const jsx = (inject && inject.jsx) ?? files[JSX] ?? readIfExists(JSX);
+  const ts = (inject && inject.ts) ?? files[TS] ?? readIfExists(TS);
+  const pip = (inject && inject.pip) ?? files[PIP] ?? readIfExists(PIP);
+  if (!jsx || !ts || !pip) {
+    errors.push(`${!jsx ? JSX : !ts ? TS : PIP}: missing — the rule vocabularies are now `
+      + "unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+    return errors;
+  }
+  // ONE LIST, SHARED. If this alias is ever replaced by a literal array, the events have been
+  // forked and the arm below would be comparing the browser against a list nothing reads.
+  if (!/export\s+const\s+RULE_EVENTS\s*=\s*STATUS_EVENTS\s*;/.test(ts)) {
+    errors.push(`${TS}: \`RULE_EVENTS\` is no longer \`= STATUS_EVENTS\` — the trigger events have `
+      + "been forked from the status ladder's list, which is the drift the Monday label map cost us. "
+      + "Keep one list, or re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  }
+
+  // Anchored on the `= [` / `] as const`, not the bare name: a name is a prefix of anything
+  // somebody renames it to, which is how checkAreaMirror once reported clean on a renamed export.
+  const pairKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*=\\s*\\[`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n];", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/\[\s*"([a-z_]+)"/g)].map((x) => x[1]);
+  };
+  const constKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*=\\s*\\[`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("] as const", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
+  };
+  const recordKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*:\\s*Record<string, string>\\s*=\\s*\\{`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n};", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/^\s{2}([a-z_]+):/gm)].map((x) => x[1]);
+  };
+
+  // 363's lists: one entry per LINE, read by the line's first string, because the condition
+  // fields carry a nested list of tests and a bare `["` match would read "gt" as a field name.
+  const lineKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*=\\s*\\[`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n];", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_.]+)"/gm)].map((x) => x[1]);
+  };
+  // A Record whose value is an object, and whose keys may be quoted ("deal.value": { … }).
+  const objRecordKeys = (src, name) => {
+    const m = new RegExp(`const\\s+${name}\\s*:\\s*Record<[^>]+>\\s*=\\s*\\{`).exec(src);
+    if (!m) return null;
+    const end = src.indexOf("\n};", m.index);
+    if (end < 0) return null;
+    return [...src.slice(m.index, end).matchAll(/^\s{2}"?([a-z_.]+)"?:/gm)].map((x) => x[1]);
+  };
+
+  const pairs = [
+    ["action kinds", pairKeys(jsx, "SS_RULE_ACTIONS"), "SS_RULE_ACTIONS", constKeys(ts, "RULE_ACTION_KINDS"), "RULE_ACTION_KINDS"],
+    ["scopes", lineKeys(jsx, "SS_RULE_SCOPES"), "SS_RULE_SCOPES", constKeys(ts, "RULE_SCOPES"), "RULE_SCOPES"],
+    ["condition fields", lineKeys(jsx, "SS_RULE_CONDITION_FIELDS"), "SS_RULE_CONDITION_FIELDS", objRecordKeys(ts, "RULE_CONDITION_FIELDS"), "RULE_CONDITION_FIELDS"],
+    ["condition tests", lineKeys(jsx, "SS_RULE_CONDITION_OPS"), "SS_RULE_CONDITION_OPS", constKeys(ts, "RULE_CONDITION_OPS"), "RULE_CONDITION_OPS"],
+    ["card sources", lineKeys(jsx, "SS_RULE_DEAL_SOURCES"), "SS_RULE_DEAL_SOURCES", recordKeys(ts, "RULE_DEAL_SOURCES"), "RULE_DEAL_SOURCES"],
+    // 365: the facts the tables now raise, how often a schedule runs, and where a customer came from.
+    ["customer events", lineKeys(jsx, "SS_RULE_CONTACT_EVENTS"), "SS_RULE_CONTACT_EVENTS", recordKeys(ts, "RULE_CONTACT_EVENTS"), "RULE_CONTACT_EVENTS"],
+    ["schedule frequencies", lineKeys(jsx, "SS_RULE_SCHEDULE_FREQS"), "SS_RULE_SCHEDULE_FREQS", constKeys(ts, "RULE_SCHEDULE_FREQS"), "RULE_SCHEDULE_FREQS"],
+    ["customer sources", lineKeys(jsx, "SS_RULE_CONTACT_SOURCES"), "SS_RULE_CONTACT_SOURCES", recordKeys(ts, "RULE_CONTACT_SOURCES"), "RULE_CONTACT_SOURCES"],
+    ["clock anchors", pairKeys(jsx, "SS_RULE_ANCHORS"), "SS_RULE_ANCHORS", recordKeys(ts, "RULE_ANCHORS"), "RULE_ANCHORS"],
+    // The events are deliberately ONE list on each side (SS_STATUS_EVENTS, and STATUS_EVENTS via
+    // `RULE_EVENTS = STATUS_EVENTS`), shared with the status ladder — so this arm also catches the
+    // day somebody forks one of them for rules.
+    ["trigger events", pairKeys(jsx, "SS_STATUS_EVENTS"), "SS_STATUS_EVENTS", recordKeys(pip, "STATUS_EVENTS"), "STATUS_EVENTS"],
+  ];
+  for (const [what, a, aName, b, bName] of pairs) {
+    if (!a || !a.length) {
+      errors.push(`${JSX}: cannot read \`${aName}\` — it was renamed or reshaped, so the ${what} `
+        + "are now unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+      continue;
+    }
+    if (!b || !b.length) {
+      errors.push(`${TS}: cannot read \`${bName}\` — it was renamed or reshaped, so the ${what} `
+        + "are now unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+      continue;
+    }
+    const inA = new Set(a);
+    const inB = new Set(b);
+    for (const k of a) {
+      if (!inB.has(k)) {
+        errors.push(`rule ${what}: "${k}" is in ${aName} (${JSX}) but NOT in ${bName} (${TS}) — `
+          + "the editor offers it and the server refuses it, so saving says \"pick one from the list\" "
+          + "about the one they picked. Add it to both, in the same commit.");
+      }
+    }
+    for (const k of b) {
+      if (!inA.has(k)) {
+        errors.push(`rule ${what}: "${k}" is in ${bName} (${TS}) but NOT in ${aName} (${JSX}) — `
+          + "the server accepts it and nothing can ask for it, so it reads as unbuilt. Add it to both, "
+          + "in the same commit.");
+      }
+    }
+  }
+
+  // ── VALUE BY VALUE (363) ────────────────────────────────────────────────────────────────────
+  // What each action NEEDS from the rule's subject. `["set_status", "pipeline"],` against
+  // `  set_status: "pipeline",`.
+  const needsJsx = (() => {
+    const m = /const\s+SS_RULE_ACTION_NEEDS\s*=\s*\[/.exec(jsx);
+    if (!m) return null;
+    const end = jsx.indexOf("\n];", m.index);
+    return end < 0 ? null : new Map([...jsx.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_]+)"\s*,\s*"([a-z_]+)"\s*\]/gm)].map((x) => [x[1], x[2]]));
+  })();
+  const needsTs = (() => {
+    const m = /const\s+RULE_ACTION_NEEDS\s*:\s*Record<[^>]+>\s*=\s*\{/.exec(ts);
+    if (!m) return null;
+    const end = ts.indexOf("\n};", m.index);
+    return end < 0 ? null : new Map([...ts.slice(m.index, end).matchAll(/^\s{2}([a-z_]+):\s*"([a-z_]+)"/gm)].map((x) => [x[1], x[2]]));
+  })();
+  if (!needsJsx || !needsJsx.size) {
+    errors.push(`${JSX}: cannot read \`SS_RULE_ACTION_NEEDS\` — what each action needs is now unchecked; `
+      + "re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  } else if (!needsTs || !needsTs.size) {
+    errors.push(`${TS}: cannot read \`RULE_ACTION_NEEDS\` — what each action needs is now unchecked; `
+      + "re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  } else {
+    for (const k of new Set([...needsJsx.keys(), ...needsTs.keys()])) {
+      if (needsJsx.get(k) !== needsTs.get(k)) {
+        errors.push(`rule action needs: "${k}" needs "${needsJsx.get(k) ?? "(missing)"}" in SS_RULE_ACTION_NEEDS (${JSX}) `
+          + `but "${needsTs.get(k) ?? "(missing)"}" in RULE_ACTION_NEEDS (${TS}) — the editor would offer it `
+          + "where the server refuses it, or hide it where it works. Make them match.");
+      }
+    }
+  }
+  // Each condition field's type, what it needs, and the tests it takes.
+  const fieldsJsx = (() => {
+    const m = /const\s+SS_RULE_CONDITION_FIELDS\s*=\s*\[/.exec(jsx);
+    if (!m) return null;
+    const end = jsx.indexOf("\n];", m.index);
+    return end < 0 ? null : new Map([...jsx.slice(m.index, end).matchAll(/^\s*\[\s*"([a-z_.]+)",\s*"[^"]*",\s*"([a-z_]+)",\s*"([a-z_]+)",\s*\[([^\]]*)\]/gm)]
+      .map((x) => [x[1], `${x[2]}|${x[3]}|${[...x[4].matchAll(/"([a-z_]+)"/g)].map((o) => o[1]).sort().join(",")}`]));
+  })();
+  const fieldsTs = (() => {
+    const m = /const\s+RULE_CONDITION_FIELDS\s*:\s*Record<[^>]+>\s*=\s*\{/.exec(ts);
+    if (!m) return null;
+    const end = ts.indexOf("\n};", m.index);
+    return end < 0 ? null : new Map([...ts.slice(m.index, end).matchAll(/^\s{2}"([a-z_.]+)":\s*\{\s*label:\s*"[^"]*",\s*type:\s*"([a-z_]+)",\s*needs:\s*"([a-z_]+)",\s*ops:\s*\[([^\]]*)\]/gm)]
+      .map((x) => [x[1], `${x[2]}|${x[3]}|${[...x[4].matchAll(/"([a-z_]+)"/g)].map((o) => o[1]).sort().join(",")}`]));
+  })();
+  if (!fieldsJsx || !fieldsJsx.size || !fieldsTs || !fieldsTs.size) {
+    errors.push(`${!fieldsJsx || !fieldsJsx.size ? JSX : TS}: cannot read the condition fields' shapes — their types, `
+      + "scopes and tests are now unchecked; re-anchor checkRuleMirror() in scripts/preflight.mjs");
+  } else {
+    for (const [k, v] of fieldsJsx) {
+      if (fieldsTs.has(k) && fieldsTs.get(k) !== v) {
+        errors.push(`rule condition field "${k}": the editor has ${v} (type|needs|tests) but the server has ${fieldsTs.get(k)} — `
+          + "a condition built in the editor would be refused on save. Make them match.");
+      }
+    }
+  }
+  return errors;
+}
+
 function checkAreaMirror(files, inject = null) {
   const errors = [];
   const TS = "supabase/functions/_shared/access.ts";
@@ -1387,15 +1692,18 @@ function checkAreaMirror(files, inject = null) {
   const areasSrc = ts.slice(areasAt, areasEnd);
   // `levels:` is either a named constant (RVE) or an inline array. Resolve named ones from
   // their own declaration so a change to the constant is seen, not assumed.
+  // ⚠️ A LEVEL MAY CARRY AN UNDERSCORE (contacts' "own_view", migration 286). The level pattern was
+  // [a-z]+ until then, which silently SKIPPED such a level on this side only, so the joined
+  // vocabularies could never agree; self-test (c2) pins it.
   const namedLevels = {};
   for (const m of ts.matchAll(/^const\s+([A-Z][A-Z0-9_]*)\s*:\s*Level\[\]\s*=\s*\[([^\]]*)\]/gm)) {
-    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]);
   }
   const tsAreas = new Map();
   for (const m of areasSrc.matchAll(/\{\s*key:\s*"([a-z_]+)"[^}]*?levels:\s*(\[[^\]]*\]|[A-Z][A-Z0-9_]*)/g)) {
     const raw = m[2];
     const levels = raw.startsWith("[")
-      ? [...raw.matchAll(/"([a-z]+)"/g)].map((x) => x[1])
+      ? [...raw.matchAll(/"([a-z_]+)"/g)].map((x) => x[1])
       : namedLevels[raw];
     if (!levels) {
       errors.push(`${TS}: area "${m[1]}" uses levels constant \`${raw}\` which preflight could `
@@ -1716,29 +2024,21 @@ function denoInstalled() {
 // Returns { errors, skipped, why }. Deno is not an npm devDependency, so a teammate may
 // simply not have it: warn and continue, mirroring the hook's freshness check failing open
 // when origin is unreachable. A gate that makes the repo unpushable is worse than the bugs
-// it catches.
-function denoCheck() {
-  const entrypoints = edgeEntrypoints();
+// it catches. The parameters exist so --self-test can drive it on a fixture.
+function denoCheck(entrypoints = edgeEntrypoints(), cwd = join(root, FUNCTIONS_DIR)) {
   if (!entrypoints.length) return { errors: [], skipped: true, why: `no function entrypoints under ${FUNCTIONS_DIR}/` };
   if (!denoInstalled()) return { errors: [], skipped: true, why: "deno is not installed or not on PATH" };
 
-  // ONE invocation for all entrypoints, not one per function: the module graph and download
-  // cache are shared, which is ~3s for all of them versus ~30s serially.
+  // ONE invocation for all entrypoints while they fit on a command line (they take about a sixth
+  // of it today), not one per function: the module graph and download cache are shared, which is
+  // ~3s for all of them versus ~30s serially.
   //
   // --node-modules-dir=none is MANDATORY. This repo's own `npm install` (for the eslint
   // above) leaves a root node_modules that Deno then discovers and dies on — "Could not
   // find a matching package for 'npm:@supabase/realtime-js'". The functions are fine; the
   // resolver isn't. See the pre-push section of CLAUDE.md.
-  const args = ["check", "--quiet", "--node-modules-dir=none", ...entrypoints];
-  const res = runDeno(args, join(root, FUNCTIONS_DIR));
-  if (res.status === 0) return { errors: [], skipped: false, count: entrypoints.length };
-
-  const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
-  return {
-    errors: [`edge functions: deno check failed (${entrypoints.length} entrypoint(s) checked)\n${out}`],
-    skipped: false,
-    count: entrypoints.length,
-  };
+  const args = ["check", "--quiet", "--node-modules-dir=none"];
+  return { errors: denoFailures(args, entrypoints, cwd, "check failed"), skipped: false, count: entrypoints.length };
 }
 
 // ── Edge functions: deno test ────────────────────────────────────────────────────────────
@@ -1748,17 +2048,21 @@ function denoCheck() {
 // could move it is a credential-exfiltration primitive, and the only live way to test the module
 // is to complete a real OAuth round trip. Same skip-with-a-warning policy as denoCheck().
 //
-// TWO GROUPS, because they need different invocations and the difference is not cosmetic:
+// THREE GROUPS under supabase/functions (tests/phone, a fourth, is below), because they need
+// different invocations and the difference is not cosmetic:
 //
 //   _shared/*.test.ts          — self-contained (no jsr:/npm: imports), run with no import map.
 //   _shared/_test_stubs/*_test.ts — the pre-existing resolveTenant suite. It REQUIRES its own
 //                                import map (which rewrites jsr:@supabase/supabase-js@2 to a
 //                                stub); without it 12 of its 14 cases fail on module resolution.
+//   <function>/*.test.ts and <function>/*_test.ts — a function's own tests
+//                                (customer-designs/handler.test.ts), run like _shared:
+//                                self-contained, no import map.
 //
 // The second group existed before this step did and nothing ran it automatically — it guards
 // resolveTenant, which its own header notes sits in front of every tenant's settings, billing and
-// designs. Discovering it by convention rather than listing it means a new file in either shape is
-// covered the day it lands.
+// designs. Discovering them by convention rather than listing them means a new file in any of these
+// shapes is covered the day it lands.
 // My Synergy Phone's Deno suite and the PGlite migration tests, both outside supabase/functions.
 const PHONE_TESTS_DIR = "tests/phone";
 const SQL_TESTS_DIR = "tests/sql";
@@ -1787,6 +2091,22 @@ function testGroups() {
     }
   }
 
+  // A function's OWN tests, beside its handler: <function>/*.test.ts or *_test.ts, either naming as
+  // elsewhere (customer-designs/handler.test.ts was the first, and sat outside the gate from migration
+  // 231 until 2026-10-15 because only the two _shared shapes above were discovered). Same invocation
+  // as _shared: self-contained, no import map, run from supabase/functions. Directories starting with
+  // "_" are not functions (_shared is above).
+  const fnRoot = join(root, FUNCTIONS_DIR);
+  if (existsSync(fnRoot)) {
+    const files = readdirSync(fnRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("_") && e.name !== "node_modules")
+      .flatMap((e) => readdirSync(join(fnRoot, e.name))
+        .filter((f) => f.endsWith(".test.ts") || f.endsWith("_test.ts"))
+        .map((f) => `${e.name}/${f}`))
+      .sort();
+    if (files.length) groups.push({ label: "functions", files, importMap: null });
+  }
+
   // tests/phone — My Synergy Phone's portal-settings, portal-sms and portal pieces (DEVIATIONS item 13
   // in supabase/functions/portal-settings). They sat outside every gate until 2026-09-29. Run from
   // the REPO ROOT (they read the shipped sources by paths relative to themselves, portal/ and
@@ -1806,8 +2126,8 @@ function testGroups() {
 }
 
 
-function denoTest() {
-  const groups = testGroups();
+// `groups` is a parameter so --self-test can drive it on a fixture.
+function denoTest(groups = testGroups()) {
   const total = groups.reduce((n, g) => n + g.files.length, 0);
   if (!total) return { errors: [], skipped: true, why: `no test files under ${FUNCTIONS_DIR}/_shared/ or ${PHONE_TESTS_DIR}/` };
   if (!denoInstalled()) return { errors: [], skipped: true, why: "deno is not installed or not on PATH" };
@@ -1826,14 +2146,50 @@ function denoTest() {
     // own headers document (g.readFlag); the edge groups keep the repo-scoped grant.
     const args = ["test", "--quiet", "--allow-env", g.readFlag ?? `--allow-read=${root}`, "--node-modules-dir=none"];
     if (g.importMap) args.push(`--import-map=${g.importMap}`);
-    args.push(...g.files);
-    const res = runDeno(args, g.cwd ?? join(root, FUNCTIONS_DIR));
-    if (res.status !== 0) {
-      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim();
-      errors.push(`edge functions: deno test failed in ${g.label} (${g.files.length} file(s))\n${out}`);
-    }
+    errors.push(...denoFailures(args, g.files, g.cwd ?? join(root, FUNCTIONS_DIR), `test failed in ${g.label}`));
   }
   return { errors, skipped: false, count: total, groups: groups.length };
+}
+
+// ── The quick tests (2026-11-05) ─────────────────────────────────────────────────────────
+// Carolyn, 2026-11-05: "this was a small change... I need it completed." Her pushes kept failing
+// on tests that read the portal's shipped source. Some cut a block out of it and run that block
+// with only the names they list, so a new name inside the block is a ReferenceError even when the
+// portal works. Others pin an exact line or list. All of it came back only after the slow steps
+// had finished, so each round of fixing cost a whole gate, 5 to 10 rounds in a row.
+//
+// Those tests are about a fifth of the Deno files and take about 30 seconds of a gate that runs
+// 20 minutes or more, so they run right after the lint and a failure stops the gate there (see
+// FAST STOP below). The full `deno test` step still runs every one of them again. That path is
+// untouched on purpose: a push that gets through proves exactly what it proved before.
+const QUICK_TEST_SUBJECT = "portal/";
+// Pure, so --self-test can check it directly. Discovered from each test's own text rather than
+// listed, so a new test that reads the portal is quick from the day it lands.
+function quickTestGroups(groups, read) {
+  return groups
+    .map((g) => ({ ...g, files: g.files.filter((f) => read(g, f).includes(QUICK_TEST_SUBJECT)) }))
+    .filter((g) => g.files.length);
+}
+function readTestFile(g, f) {
+  return readFileSync(join(g.cwd ?? join(root, FUNCTIONS_DIR), f), "utf8");
+}
+// `groups` minus the files `done` already ran, matched within their own group; an emptied group
+// drops out. Pure, so --self-test can check it directly.
+function groupsWithout(groups, done) {
+  const ran = new Set(done.flatMap((g) => g.files.map((f) => `${g.label}\0${f}`)));
+  return groups
+    .map((g) => ({ ...g, files: g.files.filter((f) => !ran.has(`${g.label}\0${f}`)) }))
+    .filter((g) => g.files.length);
+}
+// `npm run ship` reads "preflight:" and "push refused" as a real refusal, so it stops instead of
+// retrying as if it had lost a race. Keep both words in the first line.
+function refuseEarly(errors) {
+  if (!errors.length) return;
+  console.error(`preflight: ${errors.length} error(s) in the fast checks, push refused\n`);
+  for (const e of errors) console.error("  " + e);
+  console.error("\nThe slower checks did not run, so they may still find more. Fix the above and push again,");
+  console.error("or in a genuine emergency: git push --no-verify (and say so in the commit).");
+  process.exit(1);
 }
 
 // ── Migration tests: tests/sql/*.test.cjs (PGlite) ───────────────────────────────────────
@@ -1849,34 +2205,291 @@ function denoTest() {
 // deps can be installed, the migration tests are not optional. Set SS_REQUIRE_SQL_TESTS=1 on any
 // machine that has run `npm install --prefix tests/sql` and wants the gate to hold it to that.
 // `dir` and `required` are parameters so --self-test can drive both directions on a fixture.
-function sqlTestsRequired(env = process.env) {
-  return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1";
+// ⚠️ AND REQUIRED WHEN THIS PUSH TOUCHES WHAT THEY TEST (2026-10-23). The two triggers above
+// are posture: somebody has to set them. That left the real hole — a machine with no install
+// pushes a change to the very thing these tests cover, the step SKIPS, the gate goes green, and
+// the break lands on beta for whoever DOES have them installed to discover. That is not a
+// hypothetical: the Meetings work added the `meetings` area to _shared/access.ts, migration277
+// and migration286 went red for everyone with the install, and beta was un-pushable until it was
+// chased down. The author saw a clean gate and had no way to know.
+//
+// So: if what you are pushing changes a migration or the permission model, these tests stop being
+// optional for you. Not for everyone, not for unrelated work — a fresh clone pushing a CSS fix
+// still needs no PGlite, which is the posture CLAUDE.md asks for ("a gate that makes the repo
+// unpushable is worse than the bugs it catches").
+const SQL_SUBJECT_RE = /^supabase\/(migrations\/|functions\/_shared\/access\.ts$)/;
+// Pure, so --self-test can drive it without a repository.
+function sqlSubjectPaths(files) {
+  return [...new Set(files.map((f) => String(f).trim().replace(/\\/g, "/")).filter((f) => SQL_SUBJECT_RE.test(f)))];
 }
-function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired()) {
+// LOCAL git only — never the network, and never fatal. Anything unexpected (no upstream, a
+// detached HEAD, git missing, a brand-new branch) answers "nothing touched", which leaves the
+// old skip-and-warn posture exactly as it was. `@{u}...HEAD` is what this push would add;
+// `HEAD` catches an uncommitted edit so `npm run preflight` warns before the commit too.
+function sqlSubjectTouched(cwd = root) {
+  const out = [];
+  for (const args of [["diff", "--name-only", "@{u}...HEAD"], ["diff", "--name-only", "HEAD"]]) {
+    try {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (r.status === 0 && r.stdout) out.push(...r.stdout.split("\n"));
+    } catch (_e) { /* git unavailable: answer nothing */ }
+  }
+  return sqlSubjectPaths(out);
+}
+function sqlTestsRequired(env = process.env, touched = []) {
+  return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1" || touched.length > 0;
+}
+
+// ── ONLY WHEN SOMETHING THEY READ CHANGED, AND 8 AT A TIME (2026-11-06) ─────────────────
+// These tests were three quarters of the gate: 68 files at 27 seconds each, one at a time, about
+// 31 of a clean push's 40 minutes on Ahsan's PC. Carolyn's agents push about once an hour, so a
+// gate that long lost the race to her about half the time and then ran again in full. Two
+// changes, neither of which drops a check:
+//
+//   1. A push that changes nothing these tests read skips them, silently. Their verdict depends
+//      on their own folder, the migrations, and the few other repo files they name (today
+//      _shared/access.ts, billingPeriods.ts and billingWebhookRedact.ts), so if none of those
+//      moved, the result is the one they gave when those files last changed, which was also a
+//      push through this gate. 24 of 134 beta commits from 10-30 to 11-06 touched any of them.
+//      What they read is DISCOVERED from the test files, not listed here, and it fails closed:
+//      a file that builds a path this scan cannot read, or a push whose changes git cannot
+//      name (a new branch, no upstream, git missing), runs the whole suite. CI and
+//      SS_REQUIRE_SQL_TESTS=1 always run it. --no-verify breaks the chain, as it breaks
+//      everything else here; the promotion's CI run puts it back together.
+//   2. When they run, they run SQL_JOBS_MAX at a time (measured: 424 s for all 68, against
+//      about 31 minutes). Each one peaks near 1 GB, so the count also respects free memory.
+//      SS_SQL_JOBS=<n> sets it by hand.
+
+// What one test file reads from the repo. `WT` is the repo root in every file here
+// (path.resolve(__dirname, "../..")), and every read is path.join(WT, "<literal>", ...) or a
+// variable built that way. A module the test loads to run it (four of them load a _shared .ts:
+// `await import(pathToFileURL(path.join(WT, "<literal>")).href)`) counts with everything it imports
+// in turn. Anything else that leaves the folder, a path from a variable, another use of
+// __dirname, a relative require, any other dynamic import, a module importing something that is
+// not a relative path, makes the file `always`: it runs whenever the suite does, which is every
+// push. Comments count too, which only ever adds inputs.
+const SQL_WT_DEF = /\bWT\s*=\s*path\.resolve\(\s*__dirname\s*,\s*(["'`])\.\.\/\.\.\1\s*\)/g;
+const SQL_WT_ARG = /path\.(?:join|resolve)\(\s*WT\s*,\s*/g;
+const SQL_TS_IMPORT = /\bimport\(\s*pathToFileURL\(\s*path\.join\(\s*WT\s*,\s*(["'])([^"'`$]+)\1\s*\)\s*\)\.href\s*\)/g;
+const SQL_MODULE_SPEC = /\b(?:import|export)\b[^;'"`]*?\bfrom\s*(["'])([^"']+)\1|\bimport\s*(["'])([^"']+)\3/g;
+// Adds `rel` and every module it imports, relative path by relative path, to `out`. False when it
+// cannot follow them: a file it cannot read, a require or dynamic import, or a specifier that is
+// not relative (npm:, jsr:, a bare name), which is never a file in this repo it could name.
+function sqlModuleInputs(rel, readRepo, out, depth = 0) {
+  if (out.has(rel)) return true;
+  out.add(rel);
+  const text = readRepo(rel);
+  if (text === null || depth > 20 || /\brequire\(|\bimport\(/.test(text)) return false;
+  for (const m of text.matchAll(SQL_MODULE_SPEC)) {
+    const spec = m[2] ?? m[4];
+    if (!spec.startsWith("./") && !spec.startsWith("../")) return false;
+    const next = posix.normalize(posix.join(posix.dirname(rel), spec));
+    if (next.startsWith("..") || !sqlModuleInputs(next, readRepo, out, depth + 1)) return false;
+  }
+  return true;
+}
+function sqlTestInputs(texts, ownDir = SQL_TESTS_DIR, readRepo = readIfExists) {
+  const paths = new Set([ownDir.replace(/\\/g, "/").replace(/\/+$/, "")]);
+  const always = [];
+  for (const [name, text] of Object.entries(texts)) {
+    const modules = [...text.matchAll(SQL_TS_IMPORT)].map((m) => m[2].replace(/\\/g, "/").replace(/^\.\//, ""));
+    let blind = /\brequire\(\s*(["'`])\.{1,2}\//.test(text)
+      || (text.match(/\bimport\(/g) || []).length !== modules.length
+      || /\bprocess\.cwd\(\)/.test(text)
+      || (text.match(/__dirname/g) || []).length !== (text.match(SQL_WT_DEF) || []).length;
+    for (const mod of modules) {
+      const seen = new Set();
+      if (mod.startsWith("..") || !sqlModuleInputs(mod, readRepo, seen)) blind = true;
+      for (const p of seen) paths.add(p);
+    }
+    for (const m of text.matchAll(SQL_WT_ARG)) {
+      const rest = text.slice(m.index + m[0].length);
+      const q = rest[0];
+      let lit = null;
+      if (q === '"' || q === "'") {
+        const end = rest.indexOf(q, 1);
+        if (end > 0) lit = rest.slice(1, end);
+      } else if (q === "`") {
+        const end = rest.indexOf("`", 1);
+        const hole = rest.indexOf("${", 1);
+        if (end > 0 && (hole < 0 || hole > end)) lit = rest.slice(1, end);
+        else if (hole > 0) lit = rest.slice(1, hole).replace(/[^/]*$/, ""); // the folder before the hole
+      }
+      lit = lit === null ? "" : lit.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+      if (!lit || lit.startsWith("..")) blind = true;
+      else paths.add(lit);
+    }
+    if (blind) always.push(name);
+  }
+  return { paths: [...paths].sort(), always: always.sort() };
+}
+function sqlInputHit(changed, paths) {
+  return paths.some((p) => changed === p || changed.startsWith(`${p}/`));
+}
+
+// What this push changes, or null when that cannot be said, in which case the tests run.
+// .githooks/pre-push hands over the exact ranges it was given (SS_PUSH_RANGES, "unknown" for a new
+// branch); a hand run of `npm run preflight` compares with the upstream. Both add what is not
+// committed yet and new files git does not track, so a check before the commit sees them too.
+// Local git only, never the network.
+function pushChangedPaths(env = process.env, cwd = root) {
+  const ask = (args) => {
+    try {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      return r.status === 0 && typeof r.stdout === "string" ? r.stdout.split("\n") : null;
+    } catch (_e) { return null; }
+  };
+  const lists = [];
+  if (env.SS_PUSH_RANGES !== undefined) {
+    const ranges = env.SS_PUSH_RANGES.trim().split(/\s+/).filter(Boolean);
+    if (!ranges.length || ranges.some((r) => !/^[0-9a-f]{7,64}\.\.[0-9a-f]{7,64}$/i.test(r))) return null;
+    for (const r of ranges) lists.push(ask(["diff", "--name-only", ...r.split("..")]));
+  } else {
+    lists.push(ask(["diff", "--name-only", "@{u}...HEAD"]));
+  }
+  lists.push(ask(["diff", "--name-only", "HEAD"]), ask(["ls-files", "--others", "--exclude-standard"]));
+  if (lists.some((l) => l === null)) return null;
+  return [...new Set(lists.flat().map((f) => f.trim().replace(/\\/g, "/")).filter(Boolean))];
+}
+
+const SQL_JOBS_MAX = 8;
+const SQL_JOB_BYTES = 1280 * 1024 * 1024;
+function machineNow() {
+  const os = createRequire(import.meta.url)("node:os");
+  return { cores: typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length, free: os.freemem() };
+}
+function sqlJobs(env = process.env, { cores, free } = machineNow()) {
+  const asked = Number(env.SS_SQL_JOBS);
+  if (Number.isInteger(asked) && asked >= 1) return asked;
+  return Math.max(1, Math.min(SQL_JOBS_MAX, cores - 1, Math.floor(free / SQL_JOB_BYTES)));
+}
+
+// Runs `node <file>` for each file, `jobs` at a time, in `cwd`. The pool lives in a child Node so
+// this step stays synchronous like every other one here (the self-test calls it that way): this
+// process waits on one spawnSync while the child keeps the files going. Each result keeps its
+// output's last 25 lines, sorted by file name so a report reads the same on every run. `error` is
+// set when the pool itself did not finish, which is no verdict on any test.
+function sqlPool() {
+  const { spawn } = require("child_process");
+  const { files, cwd, jobs } = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  const results = [];
+  let next = 0;
+  const one = (f) => new Promise((resolve) => {
+    let out = "";
+    let done = false;
+    const finish = (status, signal) => {
+      if (done) return;
+      done = true;
+      results.push({ f, status, signal, out: out.trim().split("\n").slice(-25).join("\n") });
+      resolve();
+    };
+    let child;
+    try {
+      child = spawn(process.execPath, [f], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      out = String(e && e.message ? e.message : e);
+      return finish(null, null);
+    }
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { out += d; });
+    child.on("error", (e) => { out += `\n${e.message}`; finish(null, null); });
+    child.on("close", finish);
+  });
+  const worker = async () => { while (next < files.length) await one(files[next++]); };
+  Promise.all(Array.from({ length: Math.max(1, Math.min(jobs, files.length)) }, worker)).then(() => {
+    results.sort((a, b) => (a.f < b.f ? -1 : a.f > b.f ? 1 : 0));
+    process.stdout.write(JSON.stringify(results));
+  });
+}
+function runNodeFilesPooled(files, cwd, jobs) {
+  const res = spawnSync(process.execPath, ["-e", `(${sqlPool.toString()})()`], {
+    cwd, encoding: "utf8", input: JSON.stringify({ files, cwd, jobs }), maxBuffer: 64 * 1024 * 1024,
+  });
+  try {
+    const results = res.status === 0 ? JSON.parse(res.stdout) : null;
+    // Every file answers once, or the pool has no verdict: a test that never ran must not read as passed.
+    if (Array.isArray(results) && results.length === files.length
+      && [...files].sort().every((f, i) => results[i] && results[i].f === f)) return { results };
+  } catch (_e) { /* falls through to the no-verdict answer */ }
+  const why = res.error ? res.error.message : `exit ${res.status ?? res.signal}`;
+  return { results: [], error: `${why}\n${`${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n")}` };
+}
+
+// `changed` is what this push changes (pushChangedPaths()): left out, as the self-test's older
+// calls do, the suite runs exactly as it did before 2026-11-06; null means "cannot tell" and runs it.
+function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired(), touched = [], changed = undefined) {
   if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SQL_TESTS_DIR}/ does not exist`, files: [] };
   const files = readdirSync(dir).filter((f) => f.endsWith(".test.cjs")).sort();
   if (!files.length) return { errors: [], skipped: true, why: `no *.test.cjs files in ${SQL_TESTS_DIR}/`, files };
   if (!existsSync(join(dir, "node_modules"))) {
-    const how = `run \`npm install --prefix ${SQL_TESTS_DIR}\` once to include ${files.join(", ")}`;
+    // The COMMAND and the COUNT, never the 53 file names: a refusal nobody can read is a
+    // refusal people reach for --no-verify to get past.
+    const how = `run \`npm install --prefix ${SQL_TESTS_DIR}\` once (${files.length} test file(s))`;
     if (required) {
+      // Name the files that made it required: "REQUIRED here" with no reason reads as the gate
+      // being arbitrary, and the first instinct is --no-verify.
+      const why = touched.length
+        ? `this push changes ${touched.slice(0, 4).join(", ")}${touched.length > 4 ? ` (+${touched.length - 4} more)` : ""}, which is exactly what ${files.length} migration test(s) check`
+        : "REQUIRED here (CI or SS_REQUIRE_SQL_TESTS=1)";
       return {
-        errors: [`migration tests: REQUIRED here (CI or SS_REQUIRE_SQL_TESTS=1) but ${SQL_TESTS_DIR}/node_modules is not installed — ${how}`],
+        errors: [`migration tests: ${why}, but ${SQL_TESTS_DIR}/node_modules is not installed, so they DID NOT RUN — ${how}.
+`
+          + "    These are what catch _shared/access.ts drifting from its SQL mirror. A green gate without them says nothing about it."],
         skipped: false, files,
       };
     }
-    return { errors: [], skipped: true, files, why: `${SQL_TESTS_DIR}/node_modules is not installed (${how})` };
+    // Two reasons, deliberately. `why` INSTRUCTS (the self-test pins that a skip tells you how to
+    // fix it); `shortWhy` is the one clause the banner shows, so the command appears once, on its
+    // own line, ready to copy. The first version of both pasted all 53 test file names in and
+    // buried the sentence that mattered under the list it was trying to warn about.
+    return {
+      errors: [], skipped: true, files,
+      why: `${SQL_TESTS_DIR}/node_modules is not installed — run \`npm install --prefix ${SQL_TESTS_DIR}\` once`,
+      shortWhy: `${SQL_TESTS_DIR}/node_modules is not installed`,
+    };
+  }
+  // Nothing they read changed: silent, like any other passing step (see the section above).
+  if (!required && Array.isArray(changed)) {
+    const texts = Object.fromEntries(files.map((f) => [f, readFileSync(join(dir, f), "utf8")]));
+    const own = relative(root, dir).replace(/\\/g, "/") || ".";
+    const inputs = sqlTestInputs(texts, own);
+    if (!inputs.always.length && !changed.some((p) => sqlInputHit(p, inputs.paths))) {
+      return { errors: [], skipped: false, unchanged: true, files };
+    }
   }
   const errors = [];
-  for (const f of files) {
-    // process.execPath, no shell: the same Node that is running this gate, and no quoting of a
-    // path that may contain a space.
-    const res = spawnSync(process.execPath, [f], { cwd: dir, encoding: "utf8" });
-    if (res.status !== 0) {
-      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n");
-      errors.push(`migration tests: ${SQL_TESTS_DIR}/${f} failed (exit ${res.status ?? res.signal})\n${out}`);
+  // process.execPath, no shell: the same Node that is running this gate, and no quoting of a
+  // path that may contain a space.
+  const pool = runNodeFilesPooled(files, dir, sqlJobs());
+  if (pool.error) {
+    errors.push(`migration tests: the runner did not finish, so this is not a test verdict: ${pool.error}`);
+  }
+  for (const r of pool.results) {
+    if (r.status !== 0) {
+      errors.push(`migration tests: ${SQL_TESTS_DIR}/${r.f} failed (exit ${r.status ?? r.signal})\n${r.out}`);
     }
   }
   return { errors, skipped: false, files };
+}
+
+// ── Script tests: scripts/*.test.mjs (node --test) ──────────────────────────────────────
+// Tests for the repo's own Node tooling (release-note-nudge.test.mjs first, 2026-10-09). Before
+// this step the gate ran _shared, _test_stubs, tests/phone and tests/sql and NOTHING under scripts/,
+// so a test written there passed review and then never ran — the silent-pass hazard every other
+// step here guards against. Discovered by suffix, like the others, so the next one is covered the
+// day it lands. Same Node as this gate, no shell, run from scripts/ with the file names as given.
+// `dir` is a parameter so --self-test can drive it on a fixture.
+const SCRIPT_TESTS_DIR = "scripts";
+function scriptTests(dir = join(root, SCRIPT_TESTS_DIR)) {
+  if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SCRIPT_TESTS_DIR}/ does not exist`, files: [] };
+  const files = readdirSync(dir).filter((f) => f.endsWith(".test.mjs")).sort();
+  if (!files.length) return { errors: [], skipped: true, why: `no *.test.mjs files in ${SCRIPT_TESTS_DIR}/`, files };
+  const res = spawnSync(process.execPath, ["--test", ...files], { cwd: dir, encoding: "utf8" });
+  if (res.status !== 0) {
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n");
+    return { errors: [`script tests: node --test failed in ${SCRIPT_TESTS_DIR}/ (exit ${res.status ?? res.signal}; ${files.join(", ")})\n${out}`], skipped: false, files };
+  }
+  return { errors: [], skipped: false, files };
 }
 
 /**
@@ -1909,9 +2522,15 @@ function checkSettingsRouteCoverage(files, inject = null) {
     return errors;
   }
 
-  // The five functions that between them define every settings slug. Anchored on the
-  // declaration, so a rename surfaces here rather than quietly shrinking the slug set.
-  const TAB_FNS = ["ssSettingsTabs", "ssCompanyTabs", "ssColorTabs", "ssBillingTabs", "ssOptionTabs"];
+  // The functions that between them define every settings slug. Anchored on the declaration, so
+  // a rename surfaces here rather than quietly shrinking the slug set.
+  //
+  // ⚠️ A NEW HUB MEANS A NEW NAME HERE. ssCustomerHubTabs (2026-10-22) was the first hub added
+  // after this check was written, and until it was listed its tabs were the one part of Settings
+  // with no route coverage — the exact blindness the messages below are worded against. The
+  // count guard beneath only catches the list going EMPTY, not it going stale.
+  const TAB_FNS = ["ssSettingsTabs", "ssCompanyTabs", "ssColorTabs", "ssBillingTabs", "ssOptionTabs",
+    "ssCustomerHubTabs"];
   const slugs = new Set();
   for (const name of TAB_FNS) {
     const at = core.indexOf(`function ${name}(`);
@@ -1933,13 +2552,368 @@ function checkSettingsRouteCoverage(files, inject = null) {
     return errors;
   }
 
-  const covered = new Set([...spec.matchAll(/"\/portal\/settings\/([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
+  // Root addresses since 2026-10-13 (/settings/<slug>, no /portal): the spec lists the canonical
+  // form, and scripts/redirects.test.mjs proves each one's old /portal address still redirects.
+  const covered = new Set([...spec.matchAll(/"\/settings\/([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
   const missing = [...slugs].filter((s) => !covered.has(s)).sort();
   if (missing.length) {
     errors.push(`${SPEC}: ${missing.length} Settings slug(s) have no route in the smoke suite — `
-      + missing.map((s) => `"/portal/settings/${s}"`).join(", ")
+      + missing.map((s) => `"/settings/${s}"`).join(", ")
       + ". An unknown sub CLAMPS to the first tab rather than erroring, so an untested settings "
       + "page fails silently by landing people on Structures. Add them to ROUTES.");
+  }
+  return errors;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// "ESTIMATE", NEVER "QUOTE", WHEREVER A PERSON READS IT (Carolyn Q12, 2026-10-06).
+//
+// The product called StructureStudio's own paperwork a "quote" from migration 121 until
+// 2026-10-06, and the word was in ~450 strings when she asked for it gone: the designer, the
+// customer page, every email, the PDFs, the texts, the portal. The sweep fixed the copy; this
+// keeps it fixed, because the next feature written from a quote-era comment would bring the
+// word straight back.
+//
+// THE WORD STAYS IN IDENTIFIERS, ON PURPOSE. Routes and links already sent (/my-quotes,
+// ?account=quotes), function and action names (customer-quotes, accept_quote), DB columns and
+// values (ss_quote_*, subject 'quote', the email_template_copy kind 'quote'), storage keys
+// (-quote.pdf), CSS classes and element ids. Renaming any of those breaks something live, so
+// the rule reads only TEXT: string literals, template parts and JSX text (via the vendored
+// Babel, the compiler compile.mjs uses), plus my-quotes.html's markup. It skips:
+//   • a single identifier-shaped token: no whitespace, not capitalised ("quotes-list",
+//     "customer-quotes", "-quote.pdf", "&account=quotes&q="). A lowercase token IS flagged
+//     where it is rendered as it stands: a JSX child (`{x ? "quotes" : "invoices"}`) or the
+//     interpolation of a sentence-shaped template literal, and any part of a template literal
+//     that has a space anywhere in it (`quote ${n}` is a sentence, "quote " alone is not).
+//   • object keys, TypeScript literal types, import paths, and the attributes a person never
+//     reads (className, id, htmlFor, key, data-*, href, ...);
+//   • log-only text: the arguments of console.*, logEdgeError and the audit log (audit,
+//     auditStrict: key=value lines for support, not prose), and dbFail in
+//     customer-accept / customer-quotes (there it only logs; in portal-settings its `where`
+//     reaches the screen as "Couldn't …", so it IS checked);
+//   • WORDING_ALLOW below: the copy registered with the carriers for texting (the opt-in
+//     sentence, the A2P campaign text and its disclosure page). Changing those needs an update
+//     filed with Twilio for the active campaign, so they keep "quote" until Ahsan decides
+//     (decision 1 of the 2026-10-06 wording sweep). Remove an entry when its copy moves.
+//
+// THE SERVER HALF CAN SHIP LATER (WORDING_SERVER_HELD). The sweep's edge-function copy must not
+// go live before production's my-quotes prints the server's accept sentence (CLAUDE.md, the
+// estimate-wording HOLD), and beta and production share one Supabase project, so a sibling
+// deploy from beta would ship it early. If the branch goes to beta in two halves, the FRONTEND
+// half is pushed with this set to true: the supabase/functions files that discovery finds (they
+// still say "quote" until the server half lands) are read but what they say is set aside, while
+// any file a caller names (`only`, the self-test's plants, `inject`) is checked as usual. The
+// server half sets it back to false, and it is false in any tree holding both halves. A hold
+// left on after the server copy is clean is refused, so it cannot quietly outlive its half.
+//
+// `inject` maps a repo path to replacement text (or adds a file) — for --self-test only.
+const WORDING_SERVER_HELD = true;
+const WORDING_RE = /\bquot(e|es|ed|ing)\b/i;
+const WORDING_IDENT = /^[a-z0-9_\-.:/?&=[\]#{}$]*$/;
+const WORDING_HIDDEN_ATTR = /^(className|class|id|htmlFor|for|key|name|type|role|rel|target|href|src|action|method|view|mainClass|style|ref|data-[\w-]+|aria-(controls|labelledby|describedby))$/;
+const WORDING_ALLOW = {
+  // Carrier-registered SMS copy (decision 1): every string in these files.
+  files: [
+    "supabase/functions/_shared/smsConsentText.ts",
+    "supabase/functions/_shared/smsCopyTemplate.ts",
+    "supabase/functions/_shared/smsComplianceCheck.ts",
+    "supabase/functions/sms-optin-disclosure/index.ts",
+    "portal/11-sms.jsx",
+  ],
+  // ...and the two places outside them that carry the opt-in's own words: the designer twins'
+  // copy of the opt-in sentence (smsConsentText.ts's twin), and the portal's "they gave us
+  // permission" attestation, which names the same message category.
+  text: [
+    "your quote and your building. Message frequency varies.",
+    "permission to text them about their quote and building",
+  ],
+};
+let _wordingBabel = null;
+function wordingBabel() {
+  if (!_wordingBabel) _wordingBabel = createRequire(import.meta.url)(join(root, "vendor", "babel-standalone-7.23.9.min.js"));
+  return _wordingBabel;
+}
+function wordingFiles() {
+  const out = [...PORTAL_PARTS, "StructureStudio.jsx", "structure-studio.component.js",
+    "index.mount.jsx", "admin.app.jsx", "my-quotes.html", "manifest.json"];
+  const walk = (dir) => {
+    let ents = [];
+    try { ents = readdirSync(join(root, dir), { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) { if (e.name !== "node_modules" && e.name !== "_test_stubs") walk(rel); }
+      else if (/\.ts$/.test(e.name) && !/(\.test|_test)\.ts$/.test(e.name)) out.push(rel);
+    }
+  };
+  walk(FUNCTIONS_DIR);
+  walk("workers/phone-api/src");
+  return out;
+}
+// `only` narrows the SCAN to the named files (the self-test plants one file at a time; the
+// discovery is still run and still has to find the real set), and `listFiles` exists so
+// the self-test can prove a blind discovery is refused rather than reported clean. `held`
+// is WORDING_SERVER_HELD unless the self-test says otherwise.
+// ── TWO MIGRATIONS CANNOT SHARE A NUMBER (2026-11-01) ────────────────────────────────────
+// Four agents write migrations into this repo from four clones. A number is only yours at the
+// moment you apply it, and 353_crm_outcomes_not_stages was renumbered three times for exactly that
+// reason (342 -> 352 -> 353): the folder goes stale when a sibling applies from their own clone,
+// and the live ledger misses what a sibling has committed but not yet applied. A gate cannot see
+// either of those — but it CAN see two files in this folder claiming the same prefix, which is the
+// shape the collision takes once both sides are committed, and the cheapest moment to catch it.
+//
+// ⚠️ FROM 340 ONLY, and that floor is load-bearing rather than timid: FORTY-ONE pairs below it
+// already share a number (040, 052, 075, 086, 090-095, 102-105, 206 has three...). They are
+// applied history and renaming them now would break the ledger's name match for no one's benefit,
+// so flagging them would mean a gate that refuses every push on day one — which is a gate everyone
+// learns to bypass. Raise the floor, never lower it.
+const MIGRATION_NUMBER_FLOOR = 340;
+function checkMigrationNumbers(inject = null) {
+  const dir = join(root, "supabase", "migrations");
+  let names;
+  try { names = inject || readdirSync(dir).filter((f) => /^\d+_.*\.sql$/.test(f)); }
+  catch { return []; }                                   // no folder here: nothing to say
+  const byNumber = new Map();
+  for (const f of names) {
+    const n = f.slice(0, f.indexOf("_"));
+    if (!byNumber.has(n)) byNumber.set(n, []);
+    byNumber.get(n).push(f);
+  }
+  const errors = [];
+  for (const [n, files] of [...byNumber].sort((a, b) => Number(a[0]) - Number(b[0]))) {
+    if (files.length > 1 && Number(n) >= MIGRATION_NUMBER_FLOOR) {
+      errors.push(`migrations: ${files.length} files are numbered ${n} — ${files.join(", ")}. `
+        + "Another agent took that number. Renumber yours to max(live ledger, this folder) + 1, "
+        + "re-reading BOTH right before you apply.");
+    }
+  }
+  return errors;
+}
+
+function checkEstimateWording(inject = null, { only = null, listFiles = wordingFiles, held = WORDING_SERVER_HELD } = {}) {
+  const errors = [];
+  const files = listFiles();
+  if (inject) for (const f of Object.keys(inject)) if (!files.includes(f)) files.push(f);
+  if (files.filter((f) => f.startsWith(FUNCTIONS_DIR + "/")).length < 20 || !files.includes("portal/02-sales.jsx")) {
+    return [`estimate wording: only ${files.length} file(s) found to scan — the discovery has gone `
+      + "blind and the rule is checking nothing; re-anchor wordingFiles() in scripts/preflight.mjs"];
+  }
+  let babel;
+  try { babel = wordingBabel(); } catch (e) {
+    return [`estimate wording: the vendored Babel did not load (${String(e.message).slice(0, 120)}) — the rule is checking nothing`];
+  }
+  const allowed = (f, text) => WORDING_ALLOW.files.includes(f) || WORDING_ALLOW.text.some((t) => text.includes(t));
+  const flag = (f, line, text) => errors.push(`${f}:${line}  says "quote" where a person reads it: `
+    + `"${text.replace(/\s+/g, " ").trim().slice(0, 140)}" — say "estimate" (Carolyn 2026-10-06). `
+    + "Identifiers (routes, ids, DB values, action names) keep the word; see checkEstimateWording.");
+  const scanCode = (f, code, lineOffset, isTs) => {
+    let ast;
+    try {
+      ast = babel.transform(code, {
+        filename: f + (isTs ? ".ts" : ".jsx"), ast: true, code: false, babelrc: false, configFile: false,
+        parserOpts: { sourceType: "unambiguous", allowReturnOutsideFunction: true, plugins: isTs ? ["typescript"] : ["jsx"] },
+      }).ast;
+    } catch (e) {
+      errors.push(`${f}: estimate wording check could not parse this file (${String(e.message).slice(0, 120)}) — `
+        + "it is checking nothing here; fix the parse or the file list");
+      return;
+    }
+    const logOnly = (anc) => {
+      for (let i = anc.length - 1; i >= 0; i--) {
+        const a = anc[i];
+        if (a.type !== "CallExpression" && a.type !== "NewExpression") continue;
+        const c = a.callee;
+        if (c.type === "MemberExpression" && c.object && c.object.name === "console") return true;
+        if (c.type === "Identifier" && /^(logEdgeError|audit|auditStrict)$/.test(c.name)) return true;
+        if (c.type === "Identifier" && c.name === "dbFail" && /^supabase\/functions\/customer-(accept|quotes)\//.test(f)) return true;
+      }
+      return false;
+    };
+    // A lowercase token rendered exactly as it stands: through ?: and &&/|| straight into a JSX
+    // child, or into a template literal that is itself a sentence.
+    const rendered = (node, anc) => {
+      if (node.type !== "StringLiteral") return false;
+      let child = node;
+      for (let i = anc.length - 1; i >= 0; i--) {
+        const a = anc[i];
+        if (a.type === "ConditionalExpression" && a.test !== child) { child = a; continue; }
+        if (a.type === "LogicalExpression") { child = a; continue; }
+        if (a.type === "JSXExpressionContainer") {
+          const p = anc[i - 1];
+          return !!p && (p.type === "JSXElement" || p.type === "JSXFragment");
+        }
+        if (a.type === "TemplateLiteral") return a.quasis.some((q) => /\s/.test(q.value.cooked ?? q.value.raw));
+        return false;
+      }
+      return false;
+    };
+    const walk = (node, anc) => {
+      if (!node || typeof node.type !== "string") return;
+      let text = null;
+      if (node.type === "StringLiteral") text = node.value;
+      else if (node.type === "TemplateElement") text = node.value.cooked ?? node.value.raw;
+      else if (node.type === "JSXText") text = node.value;
+      if (text && WORDING_RE.test(text) && !allowed(f, text)) {
+        const parent = anc[anc.length - 1];
+        const t = text.trim();
+        // A template part is prose when ANY part of its template has a space in it: `quote ${n}`
+        // is a sentence even though "quote " trims to a lone word (the sweep missed two that way).
+        const proseTemplate = node.type === "TemplateElement" && parent && parent.type === "TemplateLiteral"
+          && parent.quasis.some((q) => /\s/.test(q.value.cooked ?? q.value.raw));
+        const skip =
+          (parent && parent.type === "TSLiteralType")
+          || (parent && /^(ObjectProperty|ObjectMethod|ClassProperty|TSPropertySignature)$/.test(parent.type) && parent.key === node)
+          || (parent && /^(Import|Export)/.test(parent.type))
+          || (parent && parent.type === "JSXAttribute" && WORDING_HIDDEN_ATTR.test(
+            parent.name.type === "JSXNamespacedName" ? parent.name.name.name : parent.name.name))
+          || (WORDING_IDENT.test(t) && !proseTemplate && !rendered(node, anc))
+          || logOnly(anc);
+        if (!skip) flag(f, node.loc.start.line + lineOffset, text);
+      }
+      for (const k of Object.keys(node)) {
+        if (k === "loc" || k === "leadingComments" || k === "trailingComments" || k === "innerComments" || k === "extra") continue;
+        const v = node[k];
+        if (Array.isArray(v)) { for (const c of v) if (c && typeof c === "object") walk(c, anc.concat(node)); }
+        else if (v && typeof v === "object" && typeof v.type === "string") walk(v, anc.concat(node));
+      }
+    };
+    walk(ast.program, []);
+  };
+  const injected = (f) => !!inject && Object.prototype.hasOwnProperty.call(inject, f);
+  // Under the hold a discovered server file is still read, but what it says is set aside and
+  // only counted: nothing set aside means the server half has landed and the hold is stale.
+  const heldBack = (f) => held && !only && f.startsWith(FUNCTIONS_DIR + "/") && !injected(f);
+  let heldFiles = 0, heldHits = 0;
+  for (const f of only || files) {
+    const mark = errors.length;
+    scanOne(f);
+    if (heldBack(f)) { heldFiles++; heldHits += errors.length - mark; errors.length = mark; }
+  }
+  if (heldFiles && !heldHits) {
+    errors.push(`estimate wording: WORDING_SERVER_HELD is on, but none of the ${heldFiles} supabase/functions `
+      + "file(s) it holds back says \"quote\" any more — the server half has landed; set it back to false "
+      + "in scripts/preflight.mjs so the edge-function copy is checked again");
+  }
+  return errors;
+
+  function scanOne(f) {
+    const src = injected(f) ? inject[f] : readIfExists(f);
+    if (src == null) { errors.push(`${f}: missing — the estimate wording check expected to scan it`); return; }
+    if (/\.json$/.test(f)) {
+      // The portal's install manifest: the words the browser's "Install app" sheet shows.
+      let j = null;
+      try { j = JSON.parse(src); } catch (e) {
+        errors.push(`${f}: estimate wording check could not parse this file (${String(e.message).slice(0, 120)}) — it is checking nothing here`);
+        return;
+      }
+      for (const k of ["name", "short_name", "description"]) {
+        const v = j && typeof j[k] === "string" ? j[k] : "";
+        if (WORDING_RE.test(v) && !allowed(f, v)) {
+          const at = src.indexOf(`"${k}"`);
+          flag(f, at < 0 ? 1 : src.slice(0, at).split("\n").length, v);
+        }
+      }
+      return;
+    }
+    if (!/\.html$/.test(f)) { scanCode(f, src, 0, /\.ts$/.test(f)); return; }
+    // A page: its inline scripts as code, then the markup a person sees — text between tags and
+    // the attributes that are read (title, aria-label, placeholder, alt, value, content).
+    let markup = src;
+    for (const m of src.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+      if (!/\ssrc=/.test(m[1])) scanCode(f, m[2], src.slice(0, m.index + m[0].indexOf(">") + 1).split("\n").length - 1, false);
+    }
+    const blank = (s) => s.replace(/[^\n]/g, " ");
+    markup = markup.replace(/<script\b[\s\S]*?<\/script>/gi, blank).replace(/<style\b[\s\S]*?<\/style>/gi, blank).replace(/<!--[\s\S]*?-->/g, blank);
+    const lineAt = (i) => markup.slice(0, i).split("\n").length;
+    for (const m of markup.matchAll(/<[^>]*>|[^<]+/g)) {
+      if (m[0][0] !== "<") {
+        if (WORDING_RE.test(m[0]) && !allowed(f, m[0])) flag(f, lineAt(m.index), m[0]);
+        continue;
+      }
+      for (const a of m[0].matchAll(/\s(title|aria-label|placeholder|alt|value|content)\s*=\s*"([^"]*)"/gi)) {
+        if (WORDING_RE.test(a[2]) && !allowed(f, a[2])) flag(f, lineAt(m.index), a[2]);
+      }
+    }
+  }
+}
+
+// ── "CUSTOMER HUB", NEVER "CRM", FOR OUR OWN FEATURE (Carolyn 2026-11-01) ────────────────
+// The product was renamed and the old word is still all over the screen. This is NOT the broad
+// rule its estimate sibling is, and deliberately so: most person-facing "CRM" in this codebase
+// is CORRECT, because it means the builder's GoHighLevel — "your CRM", "CRM Connection",
+// "CRM estimate" (a GHL document kind), "CRM mode", "Synergy CRM" (a separate CSM product).
+// Flagging those would be a gate that is wrong hundreds of times on day one.
+//
+// What is checked instead is the phrase that can only ever mean OUR add-on. "built-in CRM" and
+// "Add the CRM" were how the Contacts/pipelines/meetings/fields feature was sold and refused, and
+// a person reads both. Those always become "Customer Hub".
+//
+// Identifiers keep the word, as with the estimate rule: `crm_*` tables, `crm_deal_move`, the
+// access key `settings_crm`, URLs, storage keys. Nothing here can touch them — the phrases hold a
+// space and a capital, so no identifier matches. COMMENTS are exempt by construction too: this
+// walks string, template and JSX text in the AST, and a comment is none of those. That is wanted
+// — the comments carry the history of why the feature is shaped as it is.
+const HUB_RE = /\bbuilt[- ]in CRM\b|\bAdd the CRM\b/i;
+function checkCustomerHubWording(inject = null, { only = null, listFiles = wordingFiles } = {}) {
+  const errors = [];
+  const files = listFiles();
+  if (inject) for (const f of Object.keys(inject)) if (!files.includes(f)) files.push(f);
+  if (files.filter((f) => f.startsWith(FUNCTIONS_DIR + "/")).length < 20 || !files.includes("portal/02-sales.jsx")) {
+    return ["Customer Hub wording: only " + files.length + " file(s) found to scan — the discovery "
+      + "has gone blind and the rule is checking nothing; re-anchor wordingFiles() in scripts/preflight.mjs"];
+  }
+  let babel;
+  try { babel = wordingBabel(); } catch (e) {
+    return [`Customer Hub wording: the vendored Babel did not load (${String(e.message).slice(0, 120)}) — the rule is checking nothing`];
+  }
+  const flag = (f, line, text) => errors.push(`${f}:${line}  calls our own feature a "CRM" where a person `
+    + `reads it: "${text.replace(/\s+/g, " ").trim().slice(0, 140)}" — say "Customer Hub" (Carolyn 2026-11-01). `
+    + "The builder's GoHighLevel is still a CRM; identifiers keep the word. See checkCustomerHubWording.");
+  for (const f of only || files) {
+    const src = inject && Object.prototype.hasOwnProperty.call(inject, f) ? inject[f] : readIfExists(f);
+    if (src == null) { errors.push(`${f}: missing — the Customer Hub wording check expected to scan it`); continue; }
+    if (/\.json$/.test(f)) {
+      let j = null;
+      try { j = JSON.parse(src); } catch { continue; }
+      for (const k of ["name", "short_name", "description"]) {
+        const v = j && typeof j[k] === "string" ? j[k] : "";
+        if (HUB_RE.test(v)) flag(f, 1, v);
+      }
+      continue;
+    }
+    if (/\.html$/.test(f)) {                          // my-quotes.html: visible text and nothing else
+      if (HUB_RE.test(src)) {
+        const at = src.search(HUB_RE);
+        flag(f, src.slice(0, at).split("\n").length, src.slice(Math.max(0, at - 60), at + 80));
+      }
+      continue;
+    }
+    const isTs = /\.ts$/.test(f);
+    let ast;
+    try {
+      ast = babel.transform(src, {
+        filename: f + (isTs ? ".ts" : ".jsx"), ast: true, code: false, babelrc: false, configFile: false,
+        parserOpts: { sourceType: "unambiguous", allowReturnOutsideFunction: true, plugins: isTs ? ["typescript"] : ["jsx"] },
+      }).ast;
+    } catch (e) {
+      errors.push(`${f}: Customer Hub wording check could not parse this file (${String(e.message).slice(0, 120)}) — `
+        + "it is checking nothing here; fix the parse or the file list");
+      continue;
+    }
+    const walk = (node) => {
+      if (!node || typeof node.type !== "string") return;
+      let text = null;
+      if (node.type === "StringLiteral") text = node.value;
+      else if (node.type === "TemplateElement") text = node.value.cooked ?? node.value.raw;
+      else if (node.type === "JSXText") text = node.value;
+      if (text && HUB_RE.test(text)) flag(f, node.loc.start.line, text);
+      for (const k of Object.keys(node)) {
+        if (k === "loc" || k === "leadingComments" || k === "trailingComments" || k === "innerComments" || k === "extra") continue;
+        const v = node[k];
+        if (Array.isArray(v)) { for (const c of v) if (c && typeof c === "object") walk(c); }
+        else if (v && typeof v === "object" && typeof v.type === "string") walk(v);
+      }
+    };
+    walk(ast.program);
   }
   return errors;
 }
@@ -2484,8 +3458,7 @@ if (process.argv.includes("--self-test")) {
   }
   const tmp = mkdtempSync(join(tmpdir(), "ss-preflight-"));
   try {
-    // Written to a temp dir and checked as a RELATIVE path with cwd — the absolute path can
-    // contain a space (any username with one), which runDeno's shell fallback cannot carry.
+    // Written to a temp dir and checked as a RELATIVE path with cwd, the way the gate passes its own files.
     writeFileSync(join(tmp, "bad.ts"), 'const n: number = "not a number";\nconsole.log(n);\n');
     const res = runDeno(["check", "--quiet", "--node-modules-dir=none", "bad.ts"], tmp);
     if (res.status === 0) {
@@ -2512,12 +3485,19 @@ if (process.argv.includes("--self-test")) {
   // suffix — so it ran zero of those 14 cases while reporting clean.
   // tests/phone joined on 2026-09-29, and it is the one group that runs from the repo root with
   // its own read flag: assert both, or a refactor that dropped either would run it wrongly (or
-  // not at all) and still report clean.
-  for (const want of ["_shared", "_test_stubs", PHONE_TESTS_DIR]) {
+  // not at all) and still report clean. "functions" (a function's own <fn>/*.test.ts) joined on
+  // 2026-10-15; customer-designs/handler.test.ts is named so the group cannot be found empty-handed.
+  for (const want of ["_shared", "_test_stubs", PHONE_TESTS_DIR, "functions"]) {
     if (!groups.some((g) => g.label === want)) {
       console.error(`self-test FAILED: test group "${want}" was not discovered`);
       process.exit(1);
     }
+  }
+  const fnGroup = groups.find((g) => g.label === "functions");
+  if (!fnGroup.files.includes("customer-designs/handler.test.ts") || fnGroup.importMap || fnGroup.cwd) {
+    console.error("self-test FAILED: the functions group does not run customer-designs/handler.test.ts from "
+      + `${FUNCTIONS_DIR} with no import map`);
+    process.exit(1);
   }
   const phoneGroup = groups.find((g) => g.label === PHONE_TESTS_DIR);
   if (phoneGroup.cwd !== root || phoneGroup.readFlag !== "--allow-read" || phoneGroup.importMap
@@ -2538,6 +3518,118 @@ if (process.argv.includes("--self-test")) {
     rmSync(tmpT, { recursive: true, force: true });
   }
   console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered (${phoneGroup.files.length} in ${PHONE_TESTS_DIR})`);
+
+  // ── The quick tests and the fast stop (2026-11-05) ─────────────────────────
+  // The selection on its own: only files naming the subject, and each keeps how its group runs.
+  const quickPick = quickTestGroups(
+    [{ label: "a", files: ["reads.ts", "other.ts"], importMap: "m.json", cwd: "x", readFlag: "--allow-read" },
+      { label: "b", files: ["none.ts"], importMap: null }],
+    (_g, f) => (f === "reads.ts" ? 'new URL("../portal/01-core.jsx")' : "no source here"),
+  );
+  if (quickPick.length !== 1 || quickPick[0].files.join() !== "reads.ts" || quickPick[0].importMap !== "m.json"
+    || quickPick[0].cwd !== "x" || quickPick[0].readFlag !== "--allow-read") {
+    console.error("self-test FAILED: quickTestGroups did not keep only the files that read the portal, run as their group runs");
+    process.exit(1);
+  }
+  // On the real repo: the tests that cut the core block must be picked, or the failure this exists
+  // for goes back to arriving last. And it must stay a subset, or it has stopped being quick.
+  const quickFiles = quickTestGroups(groups, readTestFile).flatMap((g) => g.files);
+  for (const want of ["_shared/_test_stubs/tabClamp_test.ts", `${PHONE_TESTS_DIR}/ringHours_test.ts`]) {
+    if (!quickFiles.includes(want)) {
+      console.error(`self-test FAILED: the quick tests no longer include ${want}`);
+      process.exit(1);
+    }
+  }
+  if (quickFiles.length >= found.length) {
+    console.error(`self-test FAILED: the quick tests picked all ${found.length} test files, so they are not quick any more`);
+    process.exit(1);
+  }
+  // End to end on a fixture: a failing test that reads the portal fails the step, and one that
+  // does not is left for the full step.
+  const tmpQ = mkdtempSync(join(tmpdir(), "ss-preflight-quick-"));
+  try {
+    writeFileSync(join(tmpQ, "reads_test.ts"), '// portal/01-core.jsx\nDeno.test("quick one fails", () => { throw new Error("boom"); });\n');
+    writeFileSync(join(tmpQ, "other_test.ts"), 'Deno.test("slow one fails", () => { throw new Error("boom"); });\n');
+    const quickFixture = [{ label: "fixture", files: ["reads_test.ts", "other_test.ts"], importMap: null, cwd: tmpQ, readFlag: `--allow-read=${tmpQ}` }];
+    const quickRed = denoTest(quickTestGroups(quickFixture, readTestFile)).errors;
+    if (quickRed.length !== 1 || !/quick one fails/.test(quickRed[0]) || /slow one fails/.test(quickRed[0])) {
+      console.error(`self-test FAILED: the quick step did not run exactly the test that reads the portal (${quickRed.length} error(s))`);
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpQ, { recursive: true, force: true });
+  }
+  // Where they sit is the whole point: the first stop right after the lint and before the artifact
+  // check, the second before the first slow step, both behind the CI guard so the promotion's gate
+  // still reports everything.
+  const ownSource = readFileSync(join(root, "scripts", "preflight.mjs"), "utf8");
+  const atLint = ownSource.indexOf("\nconst errors = run(load());");
+  const atFirstStop = ownSource.indexOf("\n// ── FAST STOP");
+  const atFirstGuard = ownSource.indexOf("\nif (!process.env.CI) {", atFirstStop);
+  const atArtifacts = ownSource.indexOf("\nerrors.push(...await artifactCheck());");
+  const atSecondStop = ownSource.indexOf("\n// ── SECOND STOP");
+  const atSecondGuard = ownSource.indexOf("\nif (!process.env.CI) {", atSecondStop);
+  const atSlow = ownSource.indexOf("\nconst deno = denoCheck();");
+  if (atLint < 0 || atFirstStop < atLint || atFirstGuard < atFirstStop || atArtifacts < atFirstGuard
+    || atSecondStop < atArtifacts || atSecondGuard < atSecondStop || atSlow < atSecondGuard) {
+    console.error("self-test FAILED: the two early stops no longer sit where they save the time, behind their CI guards");
+    process.exit(1);
+  }
+  console.log(`self-test passed: ${quickFiles.length} of ${found.length} test files run first, and a failure there stops the gate before the slow steps`);
+
+  // ── Deno's file lists vs the command-line limit (2026-11-04) ───────────────
+  // The batching on its own first, because it holds on every platform: a list far over the limit,
+  // under a long --allow-read, comes back split, in order, complete, and every batch fits. Plus
+  // the constant itself, since Linux CI would never see cmd.exe refuse a limit raised past it.
+  const longArgs = ["test", `--allow-read=${"r".repeat(300)}`];
+  const longFiles = Array.from({ length: 2000 }, (_, i) => `_shared/_test_stubs/${"x".repeat(60)}_${i}_test.ts`);
+  const longSplit = denoBatches(longArgs, longFiles);
+  const batchFits = (b) => ["deno", ...longArgs, ...b].join(" ").length <= DENO_COMMAND_LIMIT;
+  if (DENO_COMMAND_LIMIT >= 8191 || longSplit.length < 2 || !longSplit.every((b) => b.length && batchFits(b))
+    || longSplit.flat().join() !== longFiles.join()) {
+    console.error("self-test FAILED: denoBatches did not split a long file list into complete, ordered batches under cmd.exe's 8191-character limit");
+    process.exit(1);
+  }
+  // Then the real runner, on a real list over 8191 characters, in a directory with a space, through
+  // whatever `deno` is on this machine. On the npm shim that is cmd.exe, so if batching or the
+  // quoting ever goes, the clean run below stops being clean ("The command line is too long", or
+  // "Import ... not found"). The shipped.txt read proves the quoted --allow-read reached deno.
+  const tmpL = mkdtempSync(join(tmpdir(), "ss preflight long-"));
+  try {
+    const passes = 'Deno.test("reads a granted file", () => { Deno.readTextFileSync("shipped.txt"); });\n';
+    const throws = 'Deno.test("deliberately failing", () => { throw new Error("boom"); });\n';
+    const names = Array.from({ length: 100 }, (_, i) => `${"a".repeat(80)}_${i}_test.ts`);
+    writeFileSync(join(tmpL, "shipped.txt"), "x");
+    for (const n of names) writeFileSync(join(tmpL, n), passes);
+    if (names.join(" ").length <= 8191) {
+      console.error("self-test FAILED: the long-list fixture no longer exceeds cmd.exe's limit, so it proves nothing");
+      process.exit(1);
+    }
+    const group = { label: "fixture", files: names, importMap: null, cwd: tmpL, readFlag: `--allow-read=${tmpL}` };
+    const clean = [...denoTest([group]).errors, ...denoCheck(names, tmpL).errors];
+    if (clean.length) {
+      console.error(`self-test FAILED: a passing file list over the command-line limit did not pass:\n${clean.join("\n").slice(0, 2000)}`);
+      process.exit(1);
+    }
+    // A failure in the FIRST batch and one in the LAST: both must be reported, so a failed batch
+    // fails the gate wherever it falls, and does not hide the batches after it.
+    writeFileSync(join(tmpL, names[0]), throws);
+    writeFileSync(join(tmpL, names[names.length - 1]), throws);
+    const red = denoTest([group]).errors;
+    if (red.length !== 2 || !red.every((e) => /deno test failed in fixture/.test(e) && /deliberately failing/.test(e))) {
+      console.error(`self-test FAILED: failures in the first and last batch were not both reported (${red.length} error(s))`);
+      process.exit(1);
+    }
+    writeFileSync(join(tmpL, names[names.length - 1]), 'const n: number = "not a number";\nconsole.log(n);\n');
+    const redCheck = denoCheck(names, tmpL).errors;
+    if (redCheck.length !== 1 || !/deno check failed/.test(redCheck[0])) {
+      console.error(`self-test FAILED: a type error in the last batch did not fail deno check (${redCheck.length} error(s))`);
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpL, { recursive: true, force: true });
+  }
+  console.log("self-test passed: a deno file list over cmd.exe's limit runs in batches, and a failure in any batch fails the gate");
 
   // ── The migration-test step (tests/sql, PGlite) ────────────────────────────
   // Three directions, on fixture directories so nothing needs PGlite installed: with no
@@ -2569,6 +3661,38 @@ if (process.argv.includes("--self-test")) {
       console.error("self-test FAILED: sqlTestsRequired does not read CI / SS_REQUIRE_SQL_TESTS=1");
       process.exit(1);
     }
+    // ── The third trigger: the push TOUCHES what these tests cover (2026-10-23) ──
+    // Both directions, and the matcher on its own, because this is the trigger that had to exist:
+    // the first two are posture somebody has to opt into, and nobody had.
+    const subjHit = sqlSubjectPaths([
+      "supabase/migrations/326_meetings.sql", "supabase/functions/_shared/access.ts",
+      "supabase\\migrations\\327_x.sql", "  supabase/migrations/328_y.sql  ",
+    ]);
+    const subjMiss = sqlSubjectPaths([
+      "portal/01-core.jsx", "supabase/functions/_shared/nmi.ts", "supabase/functions/portal-billing/index.ts",
+      "tests/sql/migration277.test.cjs", "docs/supabase/migrations/x.sql",
+    ]);
+    if (subjHit.length !== 4 || subjMiss.length) {
+      console.error(`self-test FAILED: the migration-test subject matcher is wrong (hit ${JSON.stringify(subjHit)}, miss ${JSON.stringify(subjMiss)})`);
+      process.exit(1);
+    }
+    if (!sqlTestsRequired({}, ["supabase/migrations/326_meetings.sql"]) || sqlTestsRequired({}, [])) {
+      console.error("self-test FAILED: touching a migration does not make the migration tests required");
+      process.exit(1);
+    }
+    // ...and the refusal NAMES what made it required, rather than reading as an arbitrary gate.
+    const touchedReq = sqlTests(tmpS, true, ["supabase/functions/_shared/access.ts"]);
+    if (touchedReq.skipped || touchedReq.errors.length !== 1
+      || !/_shared\/access\.ts/.test(touchedReq.errors[0]) || !/DID NOT RUN/.test(touchedReq.errors[0])
+      || !/npm install --prefix/.test(touchedReq.errors[0])) {
+      console.error("self-test FAILED: a push touching access.ts with no install did not fail the gate naming the file:\n" + touchedReq.errors.join("\n"));
+      process.exit(1);
+    }
+    // The probe itself must never throw and never reach the network; outside a repo it answers nothing.
+    if (sqlSubjectTouched(tmpdir()).length) {
+      console.error("self-test FAILED: sqlSubjectTouched invented touched files outside a repository");
+      process.exit(1);
+    }
     mkdirSync(join(tmpS, "node_modules"));
     const failed = sqlTests(tmpS, false);
     if (failed.skipped || failed.errors.length !== 1 || !/fails\.test\.cjs failed/.test(failed.errors[0])) {
@@ -2585,7 +3709,171 @@ if (process.argv.includes("--self-test")) {
   } finally {
     rmSync(tmpS, { recursive: true, force: true });
   }
-  console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI or SS_REQUIRE_SQL_TESTS=1), and a failing one fails the gate (${realSql.files.length} file(s) found)`);
+  console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI, SS_REQUIRE_SQL_TESTS=1, or because the push touches a migration or _shared/access.ts), the refusal names what made it required, the subject matcher fires both ways, and a failing test fails the gate (${realSql.files.length} file(s) found)`);
+
+  // ── Migration tests: only when what they read changed, and 8 at a time (2026-11-06) ──────
+  {
+    const fail = (why) => { console.error(`self-test FAILED: ${why}`); process.exit(1); };
+
+    // What a test reads: literal paths and the folder before a template hole count, and anything
+    // the scan cannot read makes the file `always`, so it can only ever run more, never less.
+    const inp = sqlTestInputs({
+      "a.test.cjs": 'const WT = path.resolve(__dirname, "../..");\n'
+        + 'const M = path.join(WT, "supabase/migrations/300_x.sql");\n'
+        + "const A = path.join(WT, 'supabase/functions/_shared/access.ts');\n"
+        + 'const D = path.join(WT, "supabase/migrations", f);\n'
+        + "const T = path.join(WT, `supabase/functions/_shared/${n}.ts`);\n",
+      "b.test.cjs": 'const WT = path.resolve(__dirname, "../..");\nconst X = path.join(WT, name);\n',
+      "c.test.cjs": 'const ROOT = path.resolve(__dirname, "..", "..");\nfs.readFileSync(path.join(ROOT, "portal/01-core.jsx"));\n',
+      "d.test.cjs": 'const WT = path.resolve(__dirname, "../..");\nconst Y = path.join(WT, `${dir}/x.sql`);\n',
+      "e.test.cjs": 'const lib = require("../lib.cjs");\n',
+      "f.test.cjs": 'const WT = path.resolve(__dirname, "../..");\nconst Z = path.join(WT, "../outside.sql");\n',
+      // A module loaded to run it counts with what it imports; one importing a package cannot be followed.
+      "g.test.cjs": 'const WT = path.resolve(__dirname, "../..");\n'
+        + 'const m = await import(pathToFileURL(path.join(WT, "supabase/functions/_shared/mod.ts")).href);\n',
+      "h.test.cjs": 'const WT = path.resolve(__dirname, "../..");\n'
+        + 'const m = await import(pathToFileURL(path.join(WT, "supabase/functions/_shared/pkg.ts")).href);\n',
+    }, SQL_TESTS_DIR, (p) => ({
+      "supabase/functions/_shared/mod.ts": 'import { a } from "./dep.ts";\nexport type { T } from "../types/t.ts";\n',
+      "supabase/functions/_shared/dep.ts": "export const a = 1;\n",
+      "supabase/functions/types/t.ts": "export type T = number;\n",
+      "supabase/functions/_shared/pkg.ts": 'import { z } from "npm:zod";\n',
+    })[p] ?? null);
+    const wantPaths = ["supabase/functions/_shared", "supabase/functions/_shared/access.ts", "supabase/functions/_shared/dep.ts",
+      "supabase/functions/_shared/mod.ts", "supabase/functions/_shared/pkg.ts", "supabase/functions/types/t.ts",
+      "supabase/migrations", "supabase/migrations/300_x.sql", SQL_TESTS_DIR].sort();
+    if (JSON.stringify(inp.paths) !== JSON.stringify(wantPaths)
+      || JSON.stringify(inp.always) !== JSON.stringify(["b.test.cjs", "c.test.cjs", "d.test.cjs", "e.test.cjs", "f.test.cjs", "h.test.cjs"])) {
+      fail(`sqlTestInputs read the fixtures wrong: ${JSON.stringify(inp)}`);
+    }
+    if (!sqlInputHit("supabase/migrations/301_y.sql", ["supabase/migrations"])
+      || !sqlInputHit("supabase/functions/_shared/access.ts", ["supabase/functions/_shared/access.ts"])
+      || sqlInputHit("supabase/migrations-old/x.sql", ["supabase/migrations"])
+      || sqlInputHit("portal/01-core.jsx", ["supabase/migrations", SQL_TESTS_DIR])) {
+      fail("sqlInputHit matches a path it should not, or misses one it should");
+    }
+
+    // The real suite: every file must be readable by the scan, or the skip never happens and the
+    // gate quietly goes back to 30 minutes. The three _shared files are the ones read today.
+    const realInputs = sqlTestInputs(Object.fromEntries(realSql.files.map((f) => [f, readFileSync(join(root, SQL_TESTS_DIR, f), "utf8")])));
+    if (realInputs.always.length) {
+      fail(`these migration tests read the repo in a way the scan cannot follow, so the suite now runs on every push: ${realInputs.always.join(", ")}. Read through path.join(WT, "<literal>") as the others do.`);
+    }
+    for (const want of ["supabase/migrations", "supabase/functions/_shared/access.ts", "supabase/functions/_shared/billingPeriods.ts", SQL_TESTS_DIR]) {
+      if (!realInputs.paths.includes(want)) fail(`the real migration tests' inputs no longer include ${want}: ${JSON.stringify(realInputs.paths)}`);
+    }
+    if (sqlInputHit("portal/01-core.jsx", realInputs.paths) || sqlInputHit("scripts/preflight.mjs", realInputs.paths)) {
+      fail("a portal or gate change counts as a migration-test input, so the skip would never happen");
+    }
+
+    // What a push changes: an unknown answer is null, never "nothing".
+    if (pushChangedPaths({ SS_PUSH_RANGES: "unknown" }) !== null || pushChangedPaths({ SS_PUSH_RANGES: "" }) !== null
+      || pushChangedPaths({ SS_PUSH_RANGES: "HEAD..HEAD" }) !== null || pushChangedPaths({}, tmpdir()) !== null) {
+      fail("pushChangedPaths answered a list where it cannot know what the push changes");
+    }
+    const headSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim();
+    if (/^[0-9a-f]{40,64}$/.test(headSha) && !Array.isArray(pushChangedPaths({ SS_PUSH_RANGES: `${headSha}..${headSha}` }))) {
+      fail("pushChangedPaths could not read an exact range the hook would hand it");
+    }
+
+    // How many at a time: SS_SQL_JOBS wins, then cores - 1, free memory and SQL_JOBS_MAX, never 0.
+    const GB = 2 ** 30;
+    const jobsCases = [
+      [{ SS_SQL_JOBS: "3" }, { cores: 22, free: 64 * GB }, 3], [{}, { cores: 22, free: 12 * GB }, 8],
+      [{}, { cores: 4, free: 16 * GB }, 3], [{}, { cores: 22, free: 2 * GB }, 1],
+      [{}, { cores: 1, free: 64 * GB }, 1], [{ SS_SQL_JOBS: "0" }, { cores: 22, free: 12 * GB }, 8],
+    ];
+    for (const [env, box, want] of jobsCases) {
+      if (sqlJobs(env, box) !== want) fail(`sqlJobs(${JSON.stringify(env)}, ${JSON.stringify(box)}) is ${sqlJobs(env, box)}, not ${want}`);
+    }
+
+    const tmpQ = mkdtempSync(join(tmpdir(), "ss-preflight-sqlq-"));
+    try {
+      // The skip, on a fixture whose one test always fails, so "it ran" and "it was skipped" differ.
+      mkdirSync(join(tmpQ, "node_modules"));
+      writeFileSync(join(tmpQ, "fails.test.cjs"),
+        '// reads path.join(WT, "supabase/migrations/999_fixture.sql")\nconsole.log("FAIL deliberately"); process.exit(1);\n');
+      const unrelated = sqlTests(tmpQ, false, [], ["portal/01-core.jsx", "scripts/preflight.mjs"]);
+      if (unrelated.errors.length || !unrelated.unchanged || unrelated.skipped) fail("a push changing nothing the migration tests read still ran them");
+      for (const [why, req, changed] of [
+        ["a push changing the migration they read", false, ["supabase/migrations/999_fixture.sql"]],
+        ["a push whose changes git could not name", false, null],
+        ["a REQUIRED run (CI, SS_REQUIRE_SQL_TESTS=1, or a touched subject)", true, ["portal/01-core.jsx"]],
+        ["a call that passes no changes, as the older callers do", false, undefined],
+      ]) {
+        const r = sqlTests(tmpQ, req, [], changed);
+        if (r.unchanged || r.errors.length !== 1 || !/fails\.test\.cjs failed/.test(r.errors[0])) fail(`${why} did not run the migration tests`);
+      }
+
+      // The pool really runs them side by side: a and b each wait for the other to start, so one
+      // at a time would fail both after 20 seconds. c fails, and only c is reported.
+      const waitFor = (me, other) => `const fs = require("fs"); fs.writeFileSync("${me}.start", ""); const t = Date.now();\n`
+        + `(function wait() { if (fs.existsSync("${other}.start")) process.exit(0);\n`
+        + `  if (Date.now() - t > 20000) { console.log("${other} never started"); process.exit(1); } setTimeout(wait, 50); })();\n`;
+      const tmpP = join(tmpQ, "pool");
+      mkdirSync(tmpP);
+      writeFileSync(join(tmpP, "a.test.cjs"), waitFor("a", "b"));
+      writeFileSync(join(tmpP, "b.test.cjs"), waitFor("b", "a"));
+      writeFileSync(join(tmpP, "c.test.cjs"), 'console.log("FAIL on purpose"); process.exit(2);\n');
+      const pool = runNodeFilesPooled(["c.test.cjs", "b.test.cjs", "a.test.cjs"], tmpP, 2);
+      const got = pool.results.map((r) => `${r.f}:${r.status}`).join(" ");
+      if (pool.error || got !== "a.test.cjs:0 b.test.cjs:0 c.test.cjs:2" || !/FAIL on purpose/.test(pool.results[2].out)) {
+        fail(`the migration-test pool did not run two at a time, or misreported: ${got} ${pool.error ?? ""}`);
+      }
+    } finally {
+      rmSync(tmpQ, { recursive: true, force: true });
+    }
+
+    // The quick tests are not run twice: the full step gets the rest, matched within each group.
+    const gw = groupsWithout(
+      [{ label: "x", files: ["1", "2"], importMap: "m" }, { label: "y", files: ["2"] }, { label: "z", files: ["3"] }],
+      [{ label: "x", files: ["2"] }, { label: "z", files: ["3"] }]);
+    if (JSON.stringify(gw) !== JSON.stringify([{ label: "x", files: ["1"], importMap: "m" }, { label: "y", files: ["2"] }])) {
+      fail(`groupsWithout is wrong: ${JSON.stringify(gw)}`);
+    }
+    const allGroups = testGroups();
+    const quickGroups = quickTestGroups(allGroups, readTestFile);
+    const count = (gs) => gs.reduce((n, g) => n + g.files.length, 0);
+    if (count(groupsWithout(allGroups, quickGroups)) + count(quickGroups) !== count(allGroups)) {
+      fail("the quick tests and the rest do not add up to the whole Deno suite");
+    }
+    // ...and the main flow uses both halves, with the final wording checks kept for CI.
+    const selfText = readFileSync(join(root, "scripts", "preflight.mjs"), "utf8").replace(/\r\n/g, "\n");
+    if (!selfText.includes("\nconst restGroups = groupsWithout(testGroups(), quickPassed);\n")
+      || !selfText.includes("\nif (process.env.CI) {\n  errors.push(...checkEstimateWording());\n")
+      || !selfText.includes("pushChangedPaths());\n")) {
+      fail("the main flow no longer leaves out the quick tests, keeps the final wording checks for CI, or hands the migration tests the push's changes");
+    }
+    console.log(`self-test passed: the migration tests skip a push that changes nothing they read (${realInputs.paths.length} input path(s) found in ${realSql.files.length} file(s)) and run when it does, when git cannot tell, and when required; they run ${sqlJobs()} at a time here, side by side; the quick tests are not run twice (${count(quickGroups)} of ${count(allGroups)})`);
+  }
+
+  // ── The script-test step (scripts/*.test.mjs, node --test) ───────────────────
+  // Discovered for real (the nudge's test must be among them), and on a fixture directory a failing
+  // test fails the gate while a passing one does not.
+  const realScripts = readdirSync(join(root, SCRIPT_TESTS_DIR)).filter((f) => f.endsWith(".test.mjs"));
+  if (!realScripts.includes("release-note-nudge.test.mjs")) {
+    console.error(`self-test FAILED: ${SCRIPT_TESTS_DIR}/release-note-nudge.test.mjs was not discovered by the script-test step`);
+    process.exit(1);
+  }
+  const tmpN = mkdtempSync(join(tmpdir(), "ss-preflight-node-"));
+  try {
+    writeFileSync(join(tmpN, "fails.test.mjs"), 'import { test } from "node:test";\ntest("deliberately failing", () => { throw new Error("boom"); });\n');
+    const failedN = scriptTests(tmpN);
+    if (failedN.skipped || failedN.errors.length !== 1 || !/node --test failed/.test(failedN.errors[0])) {
+      console.error("self-test FAILED: a failing scripts/*.test.mjs did not fail the gate");
+      process.exit(1);
+    }
+    rmSync(join(tmpN, "fails.test.mjs"));
+    writeFileSync(join(tmpN, "passes.test.mjs"), 'import { test } from "node:test";\ntest("fine", () => {});\n');
+    const passedN = scriptTests(tmpN);
+    if (passedN.skipped || passedN.errors.length) {
+      console.error("self-test FAILED: a passing scripts/*.test.mjs failed the gate:\n" + passedN.errors.join("\n"));
+      process.exit(1);
+    }
+  } finally {
+    rmSync(tmpN, { recursive: true, force: true });
+  }
+  console.log(`self-test passed: scripts/*.test.mjs run under node --test, and a failing one fails the gate (${realScripts.length} file(s) found)`);
 
   // ── The my-quotes tax-breakdown step ───────────────────────────────────────
   // Same silent-pass hazard as the two above, and a sharper one: this check EXTRACTS its
@@ -2678,6 +3966,43 @@ if (process.argv.includes("--self-test")) {
   console.log("self-test passed: the Routing/Checking validators agree in both files, and a drifted check "
     + "digit, a number in storage or an error sentence, a box the browser may remember, a missing "
     + "validator and a hardcoded CardSecure host are each refused");
+
+  // ── How long a card token may be held ──
+  // The real files pass; the limit raised in ONE copy, raised past the ceiling in both, gone from
+  // one, assigned twice, and written as an expression each fail.
+  const tokReal = Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, read(f)]));
+  if (checkCardTokenMaxAge(tokReal).length) {
+    console.error("self-test FAILED: the real my-quotes.html / portal/04-orders.jsx do not pass checkCardTokenMaxAge:");
+    for (const e of checkCardTokenMaxAge(tokReal)) console.error("  " + e);
+    process.exit(1);
+  }
+  const tokMutants = [
+    ["the portal's limit drifted from my-quotes'", { "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 90000;"] }, /differs/],
+    ["both limits raised past the 2 minutes", {
+      "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_MAX_MS = 120000;"],
+      "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 120000;"],
+    }, /is above 110000/],
+    ["the limit gone from my-quotes", { "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_LIMIT = 100000;"] }, /my-quotes\.html: CARD_TOKEN_MAX_MS is gone/],
+    ["a second assignment in the portal", { "portal/04-orders.jsx": ["const CARD_TOKEN_MAX_MS = 100000;", "const CARD_TOKEN_MAX_MS = 100000; window.CARD_TOKEN_MAX_MS = 100000;"] }, /assigned 2 times/],
+    ["the limit as an expression", { "my-quotes.html": ["CARD_TOKEN_MAX_MS = 100000;", "CARD_TOKEN_MAX_MS = 2 * 60000;"] }, /plain number/],
+  ];
+  for (const [what, edits, want] of tokMutants) {
+    const mutated = { ...tokReal };
+    for (const [f, [from, to]] of Object.entries(edits)) {
+      const src = tokReal[f].replace(/\r\n/g, "\n");
+      mutated[f] = src.replace(from, to);
+      if (mutated[f] === src) {
+        console.error(`self-test FAILED: could not plant "${what}" in ${f} — the subject of checkCardTokenMaxAge moved`);
+        process.exit(1);
+      }
+    }
+    if (!checkCardTokenMaxAge(mutated).some((e) => want.test(e))) {
+      console.error(`self-test FAILED: checkCardTokenMaxAge passed ${what}`);
+      process.exit(1);
+    }
+  }
+  console.log("self-test passed: CARD_TOKEN_MAX_MS is read from both card surfaces, and a drifted copy, a "
+    + "limit past 110 s, a missing one, a second assignment and an expression are each refused");
 
   // ── The GATES ⇄ action cross-check ─────────────────────────────────────────
   // This rule had NO self-test at all until now, in either direction — while quietly running
@@ -2795,6 +4120,100 @@ if (process.argv.includes("--self-test")) {
   console.log(`self-test passed: the GATES cross-check reads all ${gateFns.length} discovered function(s), fires on `
     + "both `action === \"x\"` and `switch/case` dispatch, ignores a non-dispatch switch, and refuses to run blind");
 
+  // ── The rule vocabularies' browser <-> server mirror (migration 355) ──
+  // Clean on the real files, fires in BOTH directions, and refuses to run blind — the three
+  // things checkAreaMirror's own history says a mirror rule has to prove about itself.
+  const rmJsx = readIfExists("portal/02-sales.jsx");
+  const rmTs = readIfExists("supabase/functions/_shared/crmRules.ts");
+  const rmPip = readIfExists("supabase/functions/_shared/crmPipelines.ts");
+  if (!rmJsx || !rmTs || !rmPip) {
+    console.error("self-test FAILED: could not load both halves of the rule vocabularies — "
+      + "checkRuleMirror has no subject and is silently inert");
+    process.exit(1);
+  }
+  const rmClean = checkRuleMirror({}, { jsx: rmJsx, ts: rmTs, pip: rmPip });
+  if (rmClean.length) {
+    console.error("self-test FAILED: the rule vocabularies do not agree on the real files:");
+    for (const e of rmClean) console.error("  " + e);
+    process.exit(1);
+  }
+  // Each case below breaks a real file by editing its text. An edit that matches nothing hands the
+  // rule its clean input, and the case then blames the rule for a fixture that went stale, so a
+  // missing edit stops here and names the text. The edits stay inside one line because line endings
+  // differ by file: crmRules.ts is CRLF on Windows, the .jsx is LF everywhere.
+  const rmEdit = (text, find, to) => {
+    const edited = text.replace(find, to);
+    if (edited === text) {
+      console.error(`self-test: could not find ${find} in the rule vocabularies — update the self-test`);
+      process.exit(1);
+    }
+    return edited;
+  };
+  // (a) an action the editor offers and the server does not: the builder picks it from the list
+  //     and is told to pick one from the list.
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, '"create_card",', ""), pip: rmPip })
+        .some((e) => /"create_card" is in SS_RULE_ACTIONS/.test(e))) {
+    console.error("self-test FAILED: an action kind missing from the server's list passed the rule mirror");
+    process.exit(1);
+  }
+  // (b) the other way: the server accepts something nothing can ask for, which reads as unbuilt.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '  ["reopen", "Reopen it if it was lost"],', ""), ts: rmTs, pip: rmPip })
+        .some((e) => /"reopen" is in RULE_ACTION_KINDS/.test(e))) {
+    console.error("self-test FAILED: an action kind missing from the editor's list passed the rule mirror");
+    process.exit(1);
+  }
+  // (c) a clock anchor dropped on the server side.
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, /^  last_contact:.*$/m, ""), pip: rmPip })
+        .some((e) => /clock anchors: "last_contact"/.test(e))) {
+    console.error("self-test FAILED: a dropped clock anchor passed the rule mirror");
+    process.exit(1);
+  }
+  // (d) BLIND DETECTION. A renamed list must read as "this rule has gone blind", never as a pass
+  //     — the exact failure checkAreaMirror was caught by.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, "const SS_RULE_ACTIONS = [", "const SS_RULE_ACTIONS_V2 = ["), ts: rmTs, pip: rmPip })
+        .some((e) => /cannot read `SS_RULE_ACTIONS`/.test(e))) {
+    console.error("self-test FAILED: a renamed SS_RULE_ACTIONS reported clean — the rule mirror is blind");
+    process.exit(1);
+  }
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, "const RULE_ACTION_KINDS = [", "const RULE_ACTION_KINDS_V2 = ["), pip: rmPip })
+        .some((e) => /cannot read `RULE_ACTION_KINDS`/.test(e))) {
+    console.error("self-test FAILED: a renamed RULE_ACTION_KINDS reported clean — the rule mirror is blind");
+    process.exit(1);
+  }
+  // (e) 363: a scope the server dropped, so the editor offers who-it-is-for that cannot save.
+  if (!checkRuleMirror({}, { jsx: rmJsx, ts: rmEdit(rmTs, '"pipeline", "all_pipelines", "contacts", "none"', '"pipeline", "all_pipelines", "contacts"'), pip: rmPip })
+        .some((e) => /scopes: "none" is in SS_RULE_SCOPES/.test(e))) {
+    console.error("self-test FAILED: a scope missing from the server's list passed the rule mirror");
+    process.exit(1);
+  }
+  // (f) 363: an action whose NEED differs — the editor would offer "set the status" on every pipeline.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '  ["set_status", "pipeline"],', '  ["set_status", "deal"],'), ts: rmTs, pip: rmPip })
+        .some((e) => /rule action needs: "set_status"/.test(e))) {
+    console.error("self-test FAILED: an action-needs mismatch passed the rule mirror");
+    process.exit(1);
+  }
+  // (g) 363: a condition field whose tests differ — and the nested list is NOT read as field names.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '"deal.value", "The card\'s value", "money", "deal", ["gt", "lt", "eq", "neq"]', '"deal.value", "The card\'s value", "money", "deal", ["gt", "lt", "eq", "neq", "has"]'), ts: rmTs, pip: rmPip })
+        .some((e) => /condition field "deal\.value"/.test(e))) {
+    console.error("self-test FAILED: a condition field offering a test the server refuses passed the rule mirror");
+    process.exit(1);
+  }
+  // (i) 365: a customer event the server does not know — the editor would offer a fact no rule can save.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, '  ["call_missed", "A call from them is missed"],', '  ["call_missed", "A call from them is missed"],\n  ["call_hangup", "They hang up"],'), ts: rmTs, pip: rmPip })
+        .some((e) => /customer events: "call_hangup"/.test(e))) {
+    console.error("self-test FAILED: an unknown customer event in the editor passed the rule mirror");
+    process.exit(1);
+  }
+  // (h) 363: blind on a rename of the condition fields.
+  if (!checkRuleMirror({}, { jsx: rmEdit(rmJsx, "const SS_RULE_CONDITION_FIELDS = [", "const SS_RULE_CONDITION_FIELDS_V2 = ["), ts: rmTs, pip: rmPip })
+        .some((e) => /cannot read `SS_RULE_CONDITION_FIELDS`/.test(e))) {
+    console.error("self-test FAILED: a renamed SS_RULE_CONDITION_FIELDS reported clean — the rule mirror is blind");
+    process.exit(1);
+  }
+  console.log("self-test passed: the rule vocabularies' mirror is clean on the real files, fires in both "
+    + "directions for actions and anchors, catches a dropped scope, a mismatched action need and a "
+    + "condition field's tests, and refuses to run blind on a rename");
+
   // ── The access.ts <-> area_level_for() mirror ──
   // Proves all four directions, because this rule exists precisely BECAUSE a claim that it
   // existed was believed for days while the two copies drifted.
@@ -2838,6 +4257,19 @@ if (process.argv.includes("--self-test")) {
   }
   if (!checkAreaMirror(amFiles, { sql: bendLevels }).some((e) => /allows \[.*\] in .* but/.test(e))) {
     console.error("self-test FAILED: a level-vocabulary mismatch did not fire");
+    process.exit(1);
+  }
+  // (c2) SEES A LEVEL WITH AN UNDERSCORE, on the TypeScript side. Drop contacts' "own_view" from
+  // access.ts alone: the two sides now disagree, and the rule must say so. With the old [a-z]+
+  // pattern the TS side never saw the level at all, so this mismatch would have been invisible —
+  // and the real files could never have passed (a).
+  const dropOwnView = amTs.replace(/levels:\s*\["none", "own_view", "own", "view", "edit"\]/, 'levels: ["none", "own", "view", "edit"]');
+  if (dropOwnView === amTs) {
+    console.error("self-test FAILED: could not find contacts' own_view in access.ts — the anchor moved and (c2) tests nothing");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { ts: dropOwnView }).some((e) => /area "contacts" allows \[none\|own\|view\|edit\]/.test(e))) {
+    console.error("self-test FAILED: an underscore level missing from access.ts did not fire");
     process.exit(1);
   }
   // (d) REFUSES TO RUN BLIND. A renamed AREAS export must be an error, never a clean pass —
@@ -2932,7 +4364,8 @@ if (process.argv.includes("--self-test")) {
     + "one that is not, and it refuses to run blind if the table is renamed");
 
   console.log("self-test passed: the permission-model mirror agrees today, fires on an area "
-    + "missing from SQL, on a level-vocabulary mismatch, on a job title missing from either "
+    + "missing from SQL, on a level-vocabulary mismatch (an underscore level like own_view "
+    + "included), on a job title missing from either "
     + "SQL copy, is not fooled by a header comment naming the tables, and refuses to run "
     + "blind on a renamed AREAS or TITLES export");
 
@@ -2950,7 +4383,7 @@ if (process.argv.includes("--self-test")) {
       + "reported errors on the real files");
     process.exit(1);
   }
-  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec.replace('"/portal/settings/cladding",', "") })
+  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec.replace('"/settings/cladding",', "") })
         .some((e) => /cladding/.test(e))) {
     console.error("self-test FAILED: a settings slug missing from the smoke suite did not fire");
     process.exit(1);
@@ -2976,12 +4409,166 @@ if (process.argv.includes("--self-test")) {
     + "one that does not, and it refuses to run blind on a renamed tab function, a changed "
     + "tuple shape, or a missing spec");
 
+  // ── "Estimate", never "quote" ──
+  // Both directions, because a wording rule that cries wolf on an identifier gets deleted by the
+  // first person it stops, and one that never fires is indistinguishable from a clean tree.
+  const ewFail = (why, errs = []) => {
+    console.error("self-test FAILED: estimate wording — " + why);
+    for (const e of errs) console.error("  " + e);
+    process.exit(1);
+  };
+  // (a) CLEAN on the real tree. If this fires, a person really is reading "quote" somewhere.
+  const ewClean = checkEstimateWording();
+  if (ewClean.length) ewFail("the real tree is not clean today:", ewClean);
+  // (b) THE PLANT: the designer's customer button reading "Get Quote" again.
+  const ewCmpFile = "structure-studio.component.js";
+  const ewCmp = readIfExists(ewCmpFile) || "";
+  const ewAnchor = 'hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Estimate"}';
+  if (!ewCmp.includes(ewAnchor)) ewFail("the Get Estimate anchor moved — re-anchor this self-test");
+  const ewPlanted = checkEstimateWording({ [ewCmpFile]: ewCmp.replace(ewAnchor, ewAnchor.replace('"Get Estimate"', '"Get Quote"')) }, { only: [ewCmpFile] });
+  if (!ewPlanted.some((e) => /^structure-studio\.component\.js:\d+ .*"Get Quote"/.test(e))) ewFail("a planted \"Get Quote\" button was not caught", ewPlanted);
+  // (c) IDENTIFIERS AND LOG TEXT STAY QUIET; a sentence beside them fires.
+  const ewTs = "supabase/functions/_shared/__wording_selftest__.ts";
+  const ewQuiet = [
+    'const a = "customer-quotes"; const b = `/my-quotes?client=${a}&account=quotes`; const k = { quote: 1 };',
+    'console.warn("SS quote PDF upload failed:", a);',
+    'logEdgeError({ message: `quote countersign failed: ${a}` });',
+    'type D = "quote" | "invoice";',
+    'if (a === "quotes") audit("x", null, `short_code=${a} quote=${b}`);',
+  ].join("\n");
+  const ewQuietErrs = checkEstimateWording({ [ewTs]: ewQuiet }, { only: [ewTs] });
+  if (ewQuietErrs.length) ewFail("identifiers or log-only text tripped the rule:", ewQuietErrs);
+  if (!checkEstimateWording({ [ewTs]: 'export const r = () => ({ error: "That quote was not found." });' }, { only: [ewTs] })
+        .some((e) => e.startsWith(ewTs + ":1 "))) ewFail("a server error sentence saying \"quote\" was not caught");
+  // (d) A LOWERCASE TOKEN RENDERED AS IT STANDS fires; the same token as a key or class does not.
+  const ewJsx = "portal/__wording_selftest__.jsx";
+  if (!checkEstimateWording({ [ewJsx]: 'const X = ({ v }) => <div>Loading your {v === "invoices" ? "invoices" : "quotes"}…</div>;' }, { only: [ewJsx] })
+        .some((e) => e.startsWith(ewJsx + ":1 "))) ewFail("a lowercase \"quotes\" rendered as a JSX child was not caught");
+  const ewJsxQuiet = checkEstimateWording({ [ewJsx]: 'const X = ({ v }) => <div className="ssd-ft-cta is-quote" id="quotes-list">{v === "quotes" && tab("quotes", "Estimates")}</div>;' }, { only: [ewJsx] });
+  if (ewJsxQuiet.length) ewFail("a class, an id or a compared key tripped the rule:", ewJsxQuiet);
+  // (d2) A WORD IN A SENTENCE-SHAPED TEMPLATE fires even when its own part trims to one word —
+  //      the shape the 2026-10-06 sweep itself missed twice in 02-sales' confirms.
+  if (!checkEstimateWording({ [ewJsx]: 'const f = (qn) => window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this estimate"}.`);' }, { only: [ewJsx] })
+        .some((e) => e.startsWith(ewJsx + ":1 "))) ewFail("\"quote ${qn}\" nested in a sentence was not caught");
+  // (e) my-quotes MARKUP: the heading fires, the ids on the same line do not.
+  const ewMq = readIfExists("my-quotes.html") || "";
+  const ewMqAnchor = '<h1 id="quotes-heading">Your estimates</h1>';
+  if (!ewMq.includes(ewMqAnchor)) ewFail("the my-quotes heading anchor moved — re-anchor this self-test");
+  const ewMqErrs = checkEstimateWording({ "my-quotes.html": ewMq.replace(ewMqAnchor, '<h1 id="quotes-heading">Your quotes</h1>') }, { only: ["my-quotes.html"] });
+  if (ewMqErrs.length !== 1 || !/my-quotes\.html:\d+ .*"Your quotes"/.test(ewMqErrs[0])) ewFail("my-quotes' heading saying \"Your quotes\" was not caught exactly once", ewMqErrs);
+  // (f) THE CARRIER ALLOWANCE IS NARROW: the opt-in sentence passes, other prose in the same
+  //     place does not.
+  if (!checkEstimateWording({ [ewJsx]: 'const t = "Your quote is ready.";' }, { only: [ewJsx] }).length) ewFail("prose outside the carrier allowance passed");
+  if (checkEstimateWording({ [ewJsx]: 'const t = "about " + "your quote and your building. Message frequency varies. Message and data rates may apply.";' }, { only: [ewJsx] }).length) {
+    ewFail("the carrier-registered opt-in sentence tripped the rule");
+  }
+  // (g) REFUSES TO RUN BLIND when discovery finds nothing.
+  if (!checkEstimateWording(null, { listFiles: () => [] }).some((e) => /gone blind/.test(e))) ewFail("an empty discovery reported clean instead of blind");
+  // (h) THE INSTALL MANIFEST: the portal's "Install app" sheet saying "quotes" fires.
+  const ewMan = readIfExists("manifest.json") || "";
+  if (!/"description":/.test(ewMan)) ewFail("manifest.json has no description to plant in — re-anchor this self-test");
+  const ewManErrs = checkEstimateWording({ "manifest.json": ewMan.replace(/("description":\s*")/, "$1Build quotes. ") }, { only: ["manifest.json"] });
+  if (ewManErrs.length !== 1 || !/^manifest\.json:\d+ .*Build quotes/.test(ewManErrs[0])) ewFail("the manifest's description saying \"quotes\" was not caught exactly once", ewManErrs);
+  // (i) THE SERVER-HALF HOLD (WORDING_SERVER_HELD) sets aside only what discovery found under
+  //     supabase/functions: a named or injected server file is still checked, and the hold says
+  //     whether it is holding anything back. Proven against this tree whichever half it holds.
+  const ewServer = 'export const r = () => ({ error: "That quote was not found." });';
+  if (!checkEstimateWording({ [ewTs]: ewServer }, { only: [ewTs], held: true }).some((e) => e.startsWith(ewTs + ":1 "))) ewFail("under the hold, a named server file saying \"quote\" was not caught");
+  if (!checkEstimateWording({ [ewTs]: ewServer }, { held: true }).some((e) => e.startsWith(ewTs + ":1 "))) ewFail("under the hold, an injected server file saying \"quote\" was not caught");
+  const ewOpen = checkEstimateWording(null, { held: false });
+  const ewHeld = checkEstimateWording(null, { held: true });
+  const ewServerHits = ewOpen.filter((e) => e.startsWith(FUNCTIONS_DIR + "/"));
+  if (ewServerHits.length) {
+    // The frontend half: the server copy still says "quote", and the hold sets exactly that aside.
+    if (ewHeld.some((e) => e.startsWith(FUNCTIONS_DIR + "/") || /WORDING_SERVER_HELD/.test(e))) ewFail("the hold did not set the server files aside:", ewHeld);
+    if (ewHeld.length !== ewOpen.length - ewServerHits.length) ewFail("the hold changed what is checked outside supabase/functions:", ewHeld);
+  } else if (ewHeld.filter((e) => /WORDING_SERVER_HELD is on/.test(e)).length !== 1) {
+    // Both halves (or the server half): nothing to hold back, so a hold left on is refused.
+    ewFail("a hold with nothing left to hold back was not refused", ewHeld);
+  }
+  console.log("self-test passed: no \"quote\" where a person reads it today; a planted \"Get Quote\", a "
+    + "server sentence, a rendered lowercase token, a my-quotes heading and the install manifest all fire; "
+    + "identifiers, classes, keys, log text and the carrier opt-in sentence stay quiet; a blind discovery "
+    + "is refused; the server-half hold sets aside only what discovery found, and a stale hold is refused");
+
+  // ── "Customer Hub", never "CRM", for our own feature ──────────────────────────────────
+  // Both directions matter more here than for the estimate rule, because the word is CORRECT
+  // most of the time: the builder's GoHighLevel really is a CRM. A rule that flags "your CRM"
+  // would be wrong on every page it touched and would be deleted within a day.
+  const chFail = (why, errs = []) => {
+    console.error("self-test FAILED: Customer Hub wording — " + why);
+    for (const e of errs) console.error("  " + e);
+    process.exit(1);
+  };
+  const chJsx = "portal/02-sales.jsx";
+  const chTs = FUNCTIONS_DIR + "/portal-meetings/index.ts";
+  // (a) THE REAL TREE IS CLEAN.
+  const chClean = checkCustomerHubWording();
+  if (chClean.length) chFail("the real tree is not clean today:", chClean);
+  // (b) IT FIRES on our own feature, in JSX text, a string and a server sentence.
+  if (!checkCustomerHubWording({ [chJsx]: 'const X = () => <p>Notes are part of the built-in CRM.</p>;' }, { only: [chJsx] })
+    .some((e) => /built-in CRM/.test(e))) chFail("JSX text saying \"built-in CRM\" was not caught");
+  if (!checkCustomerHubWording({ [chJsx]: 'const cta = { label: "Add the CRM — see Billing" };' }, { only: [chJsx] })
+    .some((e) => /Add the CRM/.test(e))) chFail("a button reading \"Add the CRM\" was not caught");
+  if (!checkCustomerHubWording({ [chTs]: 'export const e = { error: "The built-in CRM is not part of your subscription." };' }, { only: [chTs] })
+    .some((e) => e.startsWith(chTs + ":1 "))) chFail("a server refusal saying \"built-in CRM\" was not caught");
+  // (c) IT STAYS QUIET on the builder's GoHighLevel — every spelling that must survive.
+  for (const ghl of [
+    'const a = "Estimates and invoices through my CRM";',
+    'const b = "Connect your CRM first (Settings → CRM Connection).";',
+    'const c = { estimate: "CRM estimate" };',
+    'const d = "Refresh from CRM";',
+    'const e = "Synergy CRM";',
+    'const f = "This account quotes through the CRM — re-send it from there.";',
+  ]) {
+    const errs = checkCustomerHubWording({ [chJsx]: ghl }, { only: [chJsx] });
+    if (errs.length) chFail("a GoHighLevel mention tripped the rule: " + ghl, errs);
+  }
+  // (d) COMMENTS ARE EXEMPT: the history of why the feature is shaped as it is stays readable.
+  if (checkCustomerHubWording({ [chJsx]: '// behind the built-in CRM (the teaser shows without it)\nconst x = 1;' }, { only: [chJsx] }).length) {
+    chFail("a code comment tripped the rule");
+  }
+  // (e) IDENTIFIERS keep the word.
+  if (checkCustomerHubWording({ [chJsx]: 'const t = "crm_deal_move"; const u = { settings_crm: 1 };' }, { only: [chJsx] }).length) {
+    chFail("an identifier tripped the rule");
+  }
+  // (f) REFUSES TO RUN BLIND when discovery finds nothing.
+  if (!checkCustomerHubWording(null, { listFiles: () => [] }).some((e) => /gone blind/.test(e))) {
+    chFail("an empty discovery reported clean instead of blind");
+  }
+  console.log("self-test passed: our own feature is never called a \"CRM\" where a person reads it today; "
+    + "a planted \"built-in CRM\" in JSX, a button and a server refusal all fire; the builder's GoHighLevel "
+    + "(your CRM, CRM Connection, CRM estimate, Synergy CRM), comments and identifiers stay quiet; "
+    + "a blind discovery is refused");
+
   process.exit(0);
 }
 
 const errors = run(load());
 
+// ── FAST STOP (2026-11-05) ───────────────────────────────────────────────────────────────
+// See "The quick tests". The lint above took seconds and so do these, so a failure in any of them
+// refuses the push now, before the artifact check (minutes) and the slow steps. Not under CI:
+// nobody is waiting on the promotion's gate, and its report should name everything it finds.
+// quickPassed: the files that stop ran and passed (any failure exits), so the full step below
+// leaves them out instead of running them twice (2026-11-06; about 40 seconds on a clean push).
+let quickPassed = [];
+if (!process.env.CI) {
+  const quick = quickTestGroups(testGroups(), readTestFile);
+  errors.push(...checkMigrationNumbers(), ...denoTest(quick).errors);
+  refuseEarly(errors);
+  quickPassed = quick;
+}
+
 errors.push(...await artifactCheck());
+
+// ── SECOND STOP (2026-11-05) ─────────────────────────────────────────────────────────────
+// Same idea, one step later: the artifact check and the wording rules cost a few minutes, the
+// steps below cost the rest of the gate, so what has failed so far refuses the push here.
+if (!process.env.CI) {
+  errors.push(...checkEstimateWording(), ...checkCustomerHubWording());
+  refuseEarly(errors);
+}
 
 const deno = denoCheck();
 errors.push(...deno.errors);
@@ -2992,16 +4579,23 @@ if (deno.skipped) {
   console.error("           supabase/functions/ is NOT covered by this run. Install Deno: https://docs.deno.com/runtime/getting_started/installation/");
 }
 
-const tests = denoTest();
+const restGroups = groupsWithout(testGroups(), quickPassed);
+const tests = restGroups.length || !quickPassed.length ? denoTest(restGroups) : { errors: [], skipped: false };
 errors.push(...tests.errors);
 if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
 
-const sql = sqlTests();
+// What this push would add, so a change to a migration or to the permission model cannot skip
+// the tests that cover it. Local git, never the network; "nothing touched" is the safe answer.
+const sqlTouched = sqlSubjectTouched();
+const sql = sqlTests(join(root, SQL_TESTS_DIR), sqlTestsRequired(process.env, sqlTouched), sqlTouched, pushChangedPaths());
 errors.push(...sql.errors);
-if (sql.skipped) {
-  console.error(`preflight: migration tests SKIPPED — ${sql.why}.`);
+
+const scriptRes = scriptTests();
+errors.push(...scriptRes.errors);
+if (scriptRes.skipped) {
+  console.error(`preflight: script tests SKIPPED — ${scriptRes.why}.`);
 }
 
 errors.push(...checkStandalonePagesParse({
@@ -3010,6 +4604,30 @@ errors.push(...checkStandalonePagesParse({
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
+errors.push(...checkCardTokenMaxAge(Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
+// Outside CI these three already ran, and passed, at the two early stops (a failure there exits),
+// so only CI, which skips those stops, needs them here (2026-11-06; about 30 seconds a push).
+if (process.env.CI) {
+  errors.push(...checkEstimateWording());
+  errors.push(...checkCustomerHubWording());
+  errors.push(...checkMigrationNumbers());
+}
+
+// The skip is now the LOUDEST thing this gate prints, and on a clean run it is the LAST.
+// It used to be one line in the middle of the output, which is how a skipped migration suite read
+// as "green": the author of the Meetings work saw a clean gate while migration277 and migration286
+// were red for everyone who had the install, and beta could not be pushed to until it was chased
+// down. One line, mid-run, among other skips, is not a warning anybody acts on.
+if (sql.skipped) {
+  const bar = "=".repeat(68);
+  console.error(`\n${bar}`);
+  console.error(`  MIGRATION TESTS DID NOT RUN - ${sql.files.length} file(s) in ${SQL_TESTS_DIR}/ were skipped`);
+  console.error(`  Why:  ${sql.shortWhy || sql.why}`);
+  console.error(`  Fix:  npm install --prefix ${SQL_TESTS_DIR}      (once, then they run on every push)`);
+  console.error("  Until then a green gate here says NOTHING about your migrations, or about");
+  console.error("  _shared/access.ts still agreeing with its SQL mirror.");
+  console.error(`${bar}\n`);
+}
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);

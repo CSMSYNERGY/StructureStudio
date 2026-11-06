@@ -9,7 +9,7 @@
 // `usage`, or a `*` ever reaches one of its wallet_transactions selects. The handler itself, with
 // what it actually puts on the wire, is driven in _test_stubs/walletTransactions_test.ts.
 //
-// The rest pin the rules a builder sees: the four chips partition the ledger (so All is their
+// The rest pin the rules a builder sees: the five chips partition the ledger (so All is their
 // sum), the labels the wallet card already showed did not change, amounts to four places, and
 // the CSV export cannot carry a spreadsheet formula.
 //
@@ -19,7 +19,7 @@
 import {
   applyLedgerFilter, CALL_METERS, centsToDecimal, costPlusNote, csvCell, exactBalance, FORBIDDEN_LEDGER_COLUMNS, FUNDS_KINDS,
   isTimeZone, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_HEADER, LEDGER_FILTERS, LEDGER_PAGE_MAX, ledgerCategory,
-  ledgerCsv, ledgerDate, type LedgerFilter, type LedgerRaw, microsToDecimal, parseLedgerQuery, TEXT_METERS, toLedgerRow,
+  ledgerCsv, ledgerDate, type LedgerFilter, type LedgerRaw, microsToDecimal, parseLedgerQuery, TAX_METERS, TEXT_METERS, toLedgerRow,
   walletLineLabel,
 } from "./walletLedger.ts";
 
@@ -146,7 +146,7 @@ function splitTop(expr: string): string[] {
 }
 
 const KINDS = ["topup", "debit", "refund", "grant", "adjustment", "reversal"];
-const METERS = [null, ...CALL_METERS, ...TEXT_METERS, "video_3d_generation", "tax_lookup", "phone_line_monthly", "sms_number_monthly"];
+const METERS = [null, ...CALL_METERS, ...TEXT_METERS, ...TAX_METERS, "video_3d_generation", "photo_background_change", "phone_line_monthly", "sms_number_monthly"];
 
 Deno.test("every kind × meter lands under exactly one chip, and it is the one ledgerCategory names", () => {
   const filters = LEDGER_FILTERS.filter((f) => f !== "all");
@@ -172,6 +172,10 @@ Deno.test("the chips mean what the Billing tab says they mean", () => {
   eq(ledgerCategory({ kind: "debit", meter_kind: "sms_segment" }), "texts", "a text sent");
   eq(ledgerCategory({ kind: "debit", meter_kind: "sms_in" }), "texts", "a text received");
   for (const k of FUNDS_KINDS) eq(ledgerCategory({ kind: k, meter_kind: null }), "funds", `a ${k}`);
+  eq(ledgerCategory({ kind: "debit", meter_kind: "tax_lookup" }), "tax", "a Verify press");
+  eq(ledgerCategory({ kind: "debit", meter_kind: "tax_invoice" }), "tax", "an invoice tax check");
+  eq(ledgerCategory({ kind: "reversal", meter_kind: "tax_lookup" }), "tax", "a reversed tax charge stays with the tax it corrects");
+  eq(TAX_METERS, ["tax_lookup", "tax_invoice"], "the two meters 179 seeds");
   eq(ledgerCategory({ kind: "debit", meter_kind: "video_3d_generation" }), "other", "a 3D generation");
   eq(ledgerCategory({ kind: "debit", meter_kind: "phone_line_monthly" }), "other", "the line fee");
   eq(ledgerCategory({ kind: "debit", meter_kind: null }), "other", "an unlabelled debit");
@@ -188,6 +192,17 @@ Deno.test("the labels the wallet card already showed are unchanged", () => {
   eq(walletLineLabel({ kind: "debit", meter_kind: "tax_lookup" }), "Tax verification", "tax lookup");
   eq(walletLineLabel({ kind: "debit", meter_kind: "tax_invoice" }), "Invoice tax check", "invoice tax");
   eq(walletLineLabel({ kind: "debit", meter_kind: null }), "Usage", "an unknown debit");
+  eq(walletLineLabel({ kind: "debit", meter_kind: "photo_background_change" }), "Photo background change", "312's meter has a name, not Usage");
+});
+
+Deno.test("a tax line reads the memo taxMeter.ts writes: the meter, the document and the state", () => {
+  const memo = "Tax verification · SST-5021 · Minnesota";
+  eq(walletLineLabel({ kind: "debit", meter_kind: "tax_lookup", memo }), memo, "a Verify press");
+  const inv = "Invoice tax check · Invoice 1042 · Missouri";
+  eq(walletLineLabel({ kind: "debit", meter_kind: "tax_invoice", memo: inv }), inv, "an invoice check");
+  eq(walletLineLabel({ kind: "debit", meter_kind: "tax_invoice", memo: "  " }), "Invoice tax check", "a blank memo falls back");
+  const row = toLedgerRow(raw({ id: 9, meter_kind: "tax_lookup", memo, amount_cents: -10, amount_exact_micros: -100_000, balance_after_cents: 490, balance_after_exact_micros: 4_900_000 }));
+  eq([row.category, row.description, row.precise], ["tax", memo, false], "a tax line: Tax chip, its memo, two places");
 });
 
 Deno.test("a call or text line reads the wording the worker wrote, with a fallback per direction", () => {
@@ -237,6 +252,8 @@ Deno.test("limits, cursors, dates and formats are validated, and the page size i
   bad({ cursor: "0" }); bad({ cursor: "12;drop" }); bad({ cursor: "-4" }); bad({ cursor: "1e3" });
   for (const f of LEDGER_FILTERS) eq(ok({ filter: f }).filter, f, `filter ${f}`);
   bad({ filter: "everything" });
+  const refusal = parseLedgerQuery({ filter: "everything" });
+  eq(refusal.ok ? null : refusal.error, "Choose All, Calls, Texts, Tax, Funds or Other.", "the refusal names every chip");
   const q = ok({ from: "2026-10-01T05:00:00.000Z", to: "2026-11-01T05:00:00.000Z" });
   eq([q.from, q.to], ["2026-10-01T05:00:00.000Z", "2026-11-01T05:00:00.000Z"], "dates pass through as instants");
   bad({ from: "next tuesday" });
@@ -369,7 +386,23 @@ Deno.test("dates fall back to UTC when the zone cannot be used", () => {
 
 // Keep the filter type honest: a chip added to the list without a category would make All more
 // than the sum of the chips.
-Deno.test("the chip list is All plus exactly the four categories", () => {
+Deno.test("the chip list is All plus exactly the five categories", () => {
   const chips: LedgerFilter[] = [...LEDGER_FILTERS];
-  eq(chips, ["all", "calls", "texts", "funds", "other"], "chips");
+  eq(chips, ["all", "calls", "texts", "tax", "funds", "other"], "chips");
+});
+
+// The Billing tab's chips are authored in portal/03-catalog.jsx (WALLET_TX_FILTERS). A chip the
+// server knows and the page does not is a category nobody can filter to; one the page sends and
+// the server does not is a refusal. Same list, same order.
+const CATALOG = new URL("../../../portal/03-catalog.jsx", import.meta.url);
+Deno.test({
+  name: "the portal's chips are the server's chips, in the same order",
+  ignore: !canRead(CATALOG),
+  fn: async () => {
+    const src = await read(CATALOG);
+    const m = /const WALLET_TX_FILTERS = (\[[^\n]*\]);/.exec(src);
+    assert(m, "WALLET_TX_FILTERS not found in portal/03-catalog.jsx");
+    const keys = [...m![1].matchAll(/\["([a-z]+)", "/g)].map((x) => x[1]);
+    eq(keys, [...LEDGER_FILTERS], "portal chips");
+  },
 });

@@ -23,7 +23,9 @@ import { UUID_RE } from "../http";
 import { inRingHours, isOpen } from "../hours";
 import { emergencyDigits, isPremiumRate, parseIdentity, phoneDigits, stripClientPrefix, toE164, toIdentity, type ParsedIdentity } from "../identity";
 import { logFault } from "../log";
-import { armedFor, noticeText, recordedParams, startCallRecording, startForCallId, stopCallRecording } from "../recording";
+import {
+  announcementFor, armedFor, recordedParams, startCallRecording, startForCallId, stopCallRecording, UNANNOUNCED_MARK,
+} from "../recording";
 import type { TwilioParams } from "../twilioSignature";
 import {
   clientNoun, dial, gather, hangup, numberNoun, response, say,
@@ -31,6 +33,10 @@ import {
 import { hook } from "../urls";
 import { voicemailTwiml, type VoicemailFor } from "../voicemail";
 import { requestAutoTopup, WALLET_WORDS, walletFloorCheck } from "../wallet";
+import { tenantMatchesWebhook, tenantVerdictForWebhook } from "../twilioAccount";
+import {
+  cellForwardAllowed, GUARD_WORDS, guardedNumberAllowed, guardFor, logGuardRefusal, minuteCapFor, routeForwardRefusal,
+} from "../dialGuard";
 
 /** Twilio allows at most 10 nouns in one <Dial>. */
 const MAX_NOUNS = 10;
@@ -179,15 +185,16 @@ function screenUrl(env: Env, callId: string, business: string | null, userId?: s
 
 /**
  * One <Client> for the member, and their cell (screened) when they chose forwarding. On an armed
- * call (../recording.ts) the <Client> carries recorded=1 and the cell's screen says so.
+ * call (../recording.ts) the <Client> carries recorded=1 and the cell's screen says so. A guarded
+ * login's stored cell is never rung (../dialGuard.ts): `clientId` is the business ringing them.
  */
-function memberNouns(env: Env, callId: string, m: { user_id: string; identity: string; forward_to_cell: string | null }, business: string | null, armed = false): string[] {
+function memberNouns(env: Env, callId: string, m: { user_id: string; identity: string; forward_to_cell: string | null }, business: string | null, clientId: string, armed = false): string[] {
   const nouns = [clientNoun({
     identity: m.identity,
     statusCallback: hook(env, "/voice/status", { call: callId, leg: "client" }),
     params: { call_id: callId, ...recordedParams(armed) },
   })];
-  const cell = toE164(m.forward_to_cell);
+  const cell = cellForwardAllowed(env, m.user_id, clientId) ? toE164(m.forward_to_cell) : null;
   if (cell) {
     nouns.push(numberNoun({
       e164: cell,
@@ -200,7 +207,8 @@ function memberNouns(env: Env, callId: string, m: { user_id: string; identity: s
 
 /**
  * How a ring answers on a recorded call: `armed` marks the nouns, and `notice` (the first pass
- * only: the caller hears it once) is said before the <Dial>.
+ * only: the caller hears it once; null when the owner turned the announcement off) is said
+ * before the <Dial>.
  */
 interface RecordingTwiml {
   armed: boolean;
@@ -219,6 +227,18 @@ function forwardTwiml(env: Env, callId: string, info: RouteInfo, forwardTo: stri
     url: screenUrl(env, callId, info.business_name, undefined, rec.armed),
     statusCallback: hook(env, "/voice/status", { call: callId, leg: "cell" }),
   })]));
+}
+
+/**
+ * The route's own forward number (after hours, or when nobody answers), or null for voicemail:
+ * none set, or one the dial guard keeps a demo business from ringing (../dialGuard.ts).
+ */
+function guardedRouteForward(env: Env, ec: Ctx, info: RouteInfo): string | null {
+  const fwd = toE164(info.route.forward_to);
+  const refused = fwd ? routeForwardRefusal(env, info.client_id, fwd) : null;
+  if (!refused) return fwd;
+  logGuardRefusal(ec, { ok: false, mode: refused, counts: {} }, "route_forward", info.client_id);
+  return null;
 }
 
 async function contactIdForNumber(admin: Admin, clientId: string, e164: string): Promise<string | null> {
@@ -367,10 +387,34 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   if (ctx.device_generation !== identity.generation) return response(say(SAY.retired), hangup());
   if (ctx.phone_status !== "on") return response(say(SAY.phoneOff), hangup());
   if (!ctx.number) return response(say(SAY.noNumber), hangup());
+  // Workstream 2, phase 4: the caller's business must live in the account the call came from. Only
+  // while TWILIO_SUBACCOUNTS is "on" (TWILIO_WEBHOOK_ACCOUNT is set then and only then).
+  if (env.TWILIO_WEBHOOK_ACCOUNT && !(await tenantMatchesWebhook(env, admin, ctx.client_id))) {
+    ec.waitUntil(logFault({
+      code: "twilio_account_mismatch", severity: "error", clientId: ctx.client_id, throttleMs: 10 * 60_000,
+      message: "An outbound call came from a Twilio account the caller's business does not live in; refused.",
+      context: { source: env.TWILIO_WEBHOOK_ACCOUNT.source },
+    }));
+    return response(say(SAY.noAccess), hangup());
+  }
 
   const to = rawTo.startsWith("client:") ? null : toE164(rawTo);
   if (!to) return response(say(SAY.badNumber), hangup());
   if (isPremiumRate(to)) return response(say(SAY.premium), hangup());
+
+  // ── The dial guard (../dialGuard.ts) ────────────────────────────────────────────────
+  // After 911, the number's format and premium, before the minute cap and the wallet. `to` is the
+  // number the <Number> below would dial, so what is checked is exactly what would be dialed. A
+  // refusal writes NO phone_calls row (the number a reviewer typed must never show in the next
+  // reviewer's Recents) and logs one line with counts only.
+  const guard = guardFor(env, ec, identity.userId, ctx.client_id);
+  if (guard.mode) {
+    const verdict = await guardedNumberAllowed(admin, guard.state, guard.mode, { clientId: ctx.client_id, numbers: ctx.numbers }, to);
+    if (!verdict.ok) {
+      logGuardRefusal(ec, verdict, "call", ctx.client_id);
+      return response(say(verdict.mode === "demo" ? GUARD_WORDS.demoCall : GUARD_WORDS.blockedCall), hangup());
+    }
+  }
 
   const contactParam = String(p.ContactId ?? "").trim();
   const refuse = (code: string, words: string) => {
@@ -382,7 +426,8 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
     return response(say(words), hangup());
   };
 
-  const cap = intVar(env.DAILY_MINUTE_CAP, 600, 0);
+  // A demo business has its own, lower cap (the guard's demo_daily_minutes), as a cost backstop.
+  const cap = minuteCapFor(guard.state, guard.mode, intVar(env.DAILY_MINUTE_CAP, 600, 0));
   // All in one parallel round: the contact's tenant, today's minutes, and the wallet floor
   // (wallet.ts: one RPC while PHONE_USAGE_METERS is on, none while it is off).
   const [contactOk, used, wallet] = await Promise.all([
@@ -439,8 +484,12 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   events.push({ type: "twiml_served", data: { ms: Date.now() - t0 } });
   // Recorded (../recording.ts): the customer hears the announcement as the <Number>'s whisper,
   // after they pick up and before the bridge, so it lands inside the recording that their answer
-  // starts. The column is written only when true: a call the Worker never armed needs nothing.
+  // starts. With the announcement off there is no whisper: the call is armed and recorded all
+  // the same, marked unannounced. The column is written only when true: a call the Worker never
+  // armed needs nothing.
   const armed = armedFor(env, ctx.recording);
+  const announced = armed && ctx.recording.notice;
+  if (armed && !announced) events.push({ type: UNANNOUNCED_MARK, data: { leg: "out" } });
   ec.waitUntil(insertCall(admin, {
     id: callId, client_id: ctx.client_id, number_id: ctx.number.id,
     contact_id: contactParam || null, direction: "out",
@@ -459,7 +508,7 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   }, [
     numberNoun({
       e164: to,
-      url: armed ? hook(env, "/voice/notice", { call: callId, c: ctx.client_id }) : undefined,
+      url: announced ? hook(env, "/voice/notice", { call: callId, c: ctx.client_id }) : undefined,
       statusCallback: hook(env, "/voice/status", { call: callId, leg: "pstn" }),
     }),
   ]));
@@ -485,7 +534,7 @@ function emergencyDial(env: Env, callId: string, info: RouteInfo, target: { user
   return response(dial({
     timeout: info.route.ring_seconds,
     action: hook(env, "/voice/after-dial", { call: callId, stage: "er", n: round }),
-  }, memberNouns(env, callId, target, info.business_name)));
+  }, memberNouns(env, callId, target, info.business_name, info.client_id)));
 }
 
 /**
@@ -506,7 +555,7 @@ export function ringPlan(info: RouteInfo, now = Date.now(), startAfter = -1): { 
 function ringTwiml(env: Env, callId: string, info: RouteInfo, plan: { members: RouteMember[]; position: number }, rec: RecordingTwiml = NOT_RECORDED): string {
   const nouns: string[] = [];
   for (const m of plan.members) {
-    for (const n of memberNouns(env, callId, m, info.business_name, rec.armed)) {
+    for (const n of memberNouns(env, callId, m, info.business_name, info.client_id, rec.armed)) {
       if (nouns.length < MAX_NOUNS) nouns.push(n);
     }
   }
@@ -528,18 +577,39 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     }));
     return response(say(SAY.notInService), hangup());
   }
+  // Workstream 2, phase 4: the number's business must live in the account the call came from. Only
+  // while TWILIO_SUBACCOUNTS is "on" (TWILIO_WEBHOOK_ACCOUNT is set then and only then).
+  // ⚠️ NEVER FOR THE 911 CALLBACK. Inside the 60 minutes after a 911 call from this number the
+  // dispatcher calling back is rung through whatever the account check says (a mismatch, or a
+  // lookup that failed): the request is already signed by one of our accounts, and a dropped
+  // dispatcher is the one failure worse than a misfiled call. It is still logged as an error.
+  if (env.TWILIO_WEBHOOK_ACCOUNT) {
+    const verdict = await tenantVerdictForWebhook(env, admin, info.client_id);
+    if (verdict !== "ok") {
+      const emergency = !!info.recent_emergency_user;
+      ec.waitUntil(logFault({
+        code: "twilio_account_mismatch", severity: "error", clientId: info.client_id, throttleMs: 10 * 60_000,
+        message: emergency
+          ? "A 911 callback came from a Twilio account this number's business does not live in; rung anyway (the 911 path is never refused)."
+          : "An inbound call came from a Twilio account this number's business does not live in; refused.",
+        context: { source: env.TWILIO_WEBHOOK_ACCOUNT.source, verdict, emergency },
+      }));
+      if (!emergency) return response(say(SAY.notInService), hangup());
+    }
+  }
   const emergencyUser = info.recent_emergency_user;
   const callId = crypto.randomUUID();
   let xml: string;
   let rang: string[] = [];
   // Recorded (../recording.ts): the caller hears the announcement before the first ring, or
-  // before an after-hours forward. Never for the 911 callback window, and never for an answer
-  // that is only voicemail (the caller's message is a recording of its own). `announced` says the
-  // TwiML below really carried it: that, and only that, arms the call.
+  // before an after-hours forward, unless the owner turned it off (recorded all the same, marked
+  // unannounced). Never for the 911 callback window, and never for an answer that is only
+  // voicemail (the caller's message is a recording of its own). `armed` says the TwiML below
+  // really rings someone on a recorded call: that, and only that, arms the call.
   const rec: RecordingTwiml = !emergencyUser && info.phone_status === "on" && armedFor(env, info.recording)
-    ? { armed: true, notice: noticeText(env, info.recording) }
+    ? { armed: true, notice: announcementFor(env, info.recording) }
     : NOT_RECORDED;
-  let announced = false;
+  let armed = false;
 
   if (!emergencyUser && info.phone_status !== "on") {
     // The switch is off (paused, or the SQL panic button) but the number still points here:
@@ -554,9 +624,9 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     xml = target ? emergencyDial(env, callId, info, target, 1) : voicemailTwiml(env, callId, info);
     rang = target ? [target.user_id] : [];
   } else if (!isOpen(info.route.business_hours, info.route.time_zone)) {
-    const fwd = info.route.after_hours === "forward" ? toE164(info.route.forward_to) : null;
+    const fwd = info.route.after_hours === "forward" ? guardedRouteForward(env, ec, info) : null;
     xml = fwd ? forwardTwiml(env, callId, info, fwd, rec) : voicemailTwiml(env, callId, info);
-    announced = !!fwd && rec.armed;
+    armed = !!fwd && rec.armed;
   } else {
     // The business is open; each person's own hours (migration 264) narrow it further, in
     // ringSlots, where outside them counts as away.
@@ -568,7 +638,7 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     } else {
       xml = ringTwiml(env, callId, info, plan, rec);
       rang = plan.members.map((m) => m.user_id);
-      announced = rec.armed;
+      armed = rec.armed;
     }
   }
 
@@ -580,10 +650,10 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
       id: callId, client_id: info.client_id, number_id: info.number_id, contact_id: contactId,
       direction: "in", from_e164: from, to_e164: to, twilio_call_sid: p.CallSid ?? null,
       rang_user_ids: rang, status: "ringing",
-      ...(announced ? { recording_armed: true } : {}),
+      ...(armed ? { recording_armed: true } : {}),
     }, [
       { type: "twiml_served", data: { ms: servedMs, rang: rang.length } },
-      ...(announced ? [{ type: "recording_notice", data: { leg: "in" } }] : []),
+      ...(armed ? [{ type: rec.notice ? "recording_notice" : UNANNOUNCED_MARK, data: { leg: "in" } }] : []),
     ]);
   })());
   return xml;
@@ -702,10 +772,10 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
   // 4.
   clearTransfer();
   // Re-rings and forwards on a recorded call mark their nouns (the caller has heard the
-  // announcement already, so it is not said again). Before any voicemail the recording is
-  // stopped and AWAITED: after a transfer nobody took (transfer=1) it is running, and the
-  // greeting and the caller's message must stay out of it. A call nobody ever answered has no
-  // recording, so its voicemail waits on no read.
+  // announcement already, or the owner turned it off, so it is not said here). Before any
+  // voicemail the recording is stopped and AWAITED: after a transfer nobody took (transfer=1) it
+  // is running, and the greeting and the caller's message must stay out of it. A call nobody
+  // ever answered has no recording, so its voicemail waits on no read.
   const rec: RecordingTwiml = { armed: call.recording_armed === true };
   const toVoicemail = async (route: RouteInfo | null) => {
     const [, forUser] = await Promise.all([
@@ -729,7 +799,7 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
   }
 
   if (stage !== "fwd" && info.route.no_answer === "forward") {
-    const fwd = toE164(info.route.forward_to);
+    const fwd = guardedRouteForward(env, ec, info);
     if (fwd) return forwardTwiml(env, callId, info, fwd, rec);
   }
   return toVoicemail(info);
@@ -876,8 +946,9 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
       const opened = await patchCall(admin, id, { status: "in_progress", answered_at: at }, (q) => q.is("answered_at", null).is("ended_at", null));
       if (!opened) await patchCall(admin, id, { answered_at: at }, (q) => q.is("answered_at", null));
       // The customer picked up: an armed call starts recording on their leg now, as its
-      // whisper (/voice/notice) plays them the announcement (../recording.ts). Not on a call
-      // already known to have ended (a late answer): there is nothing left to record.
+      // whisper (/voice/notice) plays them the announcement when it is announced
+      // (../recording.ts). Not on a call already known to have ended (a late answer): there is
+      // nothing left to record.
       if (opened || !row.ended_at) {
         await startCallRecording(env, admin, { ...row, twilio_call_sid: row.twilio_call_sid ?? (sid || null) });
       }

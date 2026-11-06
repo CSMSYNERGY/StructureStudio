@@ -108,6 +108,13 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   const zip = str(body?.zip, 12);
   const phoneDigits = phoneRaw.replace(/\D/g, "");
   const phoneKey10 = ten(phoneDigits);
+  // ── The Online Shop's "ask about this building" form (shop.html, 2026-10-17) ──
+  // Which lot building the inquiry is about, and what they wrote. The id is checked below
+  // against THIS tenant's listed units before anything uses it, so a stray or foreign id just
+  // reads as a plain inquiry.
+  const fromShop = body?.source === "shop";
+  const shopUnitIdRaw = fromShop && typeof body?.inventoryUnitId === "string" ? body.inventoryUnitId.trim() : "";
+  const shopMessage = fromShop ? str(body?.message, 2000) : "";
 
   // ── SMS consent, from the public gate's checkbox ──────────────────────────
   // ⚠️ The DISCLOSURE SENTENCE IS STORED VERBATIM, not a template id. The wording will be
@@ -144,6 +151,39 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   const { data: cfg } = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
   if (!cfg) return json({ ok: false, skipped: "unknown_client" });
 
+  // The shop unit, verified: this tenant's, listed, and on the public list (unsold, or sold
+  // inside the 30-day badge window — get_public_shop's own rule). Anything else is dropped.
+  let shopUnit: { id: string; serial: number; label: string } | null = null;
+  if (/^[0-9a-f-]{36}$/i.test(shopUnitIdRaw)) {
+    const { data: u } = await sb.from("inventory_units")
+      .select("id, serial, listed, sale_state, sold_at, public_title, design_short_code, location_id")
+      .eq("client_id", clientId).eq("id", shopUnitIdRaw).maybeSingle();
+    const onList = u && u.listed && (u.sale_state === "unsold"
+      || (u.sold_at && Date.now() - Date.parse(u.sold_at) < 30 * 86400000));
+    if (onList) {
+      const [{ data: m }, { data: lot }] = await Promise.all([
+        sb.from("designs").select("selections").eq("client_id", clientId).eq("short_code", u.design_short_code).maybeSingle(),
+        u.location_id
+          ? sb.from("builder_locations").select("name").eq("client_id", clientId).eq("id", u.location_id).maybeSingle()
+          : Promise.resolve({ data: null }),
+      ]);
+      const sel = (m?.selections || {}) as { style?: string; size?: string };
+      // selections.style is the catalog KEY ("lofted"); the note should read the way the shop
+      // shows it, so use the style's label when the catalog has one.
+      let styleName = sel.style || "";
+      if (styleName) {
+        const { data: bs } = await sb.from("building_styles").select("label")
+          .eq("client_id", clientId).eq("key", styleName).maybeSingle();
+        if (bs?.label) styleName = bs.label;
+      }
+      const what = [u.public_title || [sel.size, styleName].filter(Boolean).join(" ")].filter(Boolean).join("");
+      shopUnit = {
+        id: u.id, serial: u.serial,
+        label: `#${u.serial}${what ? " — " + what : ""}${lot?.name ? " (" + lot.name + ")" : ""}`,
+      };
+    }
+  }
+
   // The lead as it stands BEFORE this request. Read once and used three times: by Guard 2
   // to judge novelty, by the upsert below to enrich-never-blank, and by the GHL leg to find
   // the contact it already linked.
@@ -178,7 +218,9 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
       (!!state && !existingLead.state) ||
       (!!zip && !existingLead.zip) ||
       (!!name && !existingLead.name) ||
-      (source === "details" && existingLead.source !== "details");
+      (source === "details" && existingLead.source !== "details") ||
+      // A shop inquiry always carries a question about a specific building: never swallow it.
+      !!shopUnit || !!shopMessage;
     if (Number.isFinite(sinceLast) && sinceLast >= 0 && sinceLast < LEAD_DEBOUNCE_MS && !addsSomething) {
       // No log: this is the ordinary double-fire case (a visitor re-submitting the gate, a
       // double-click, a retry) as much as it is abuse. Logging it would be noise.
@@ -273,6 +315,8 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
     source: source === "details" || existingLead?.source === "details" ? "details" : "gate",
     ghl_contact_id: existingLead?.ghl_contact_id || null,
     updated_at: new Date().toISOString(),
+    // Only set by a shop inquiry, so every other capture writes exactly the columns it always did.
+    ...(shopUnit ? { inventory_unit_id: shopUnit.id } : {}),
   };
   const { data: savedLead, error: leadErr } = await sb.from("captured_leads")
     .upsert(leadRow, { onConflict: "client_id,phone_digits" })
@@ -316,6 +360,22 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
         const { error: linkErr } = await sb.from("captured_leads")
           .update({ contact_id: crmId }).eq("id", savedLead.id);
         if (linkErr) throw linkErr;
+        // The shop inquiry lands on the contact as a note, so the rep opening this person sees
+        // which building they asked about and what they wrote — Brittney's "I see you're
+        // interested in this 10×16" starting point.
+        if (fromShop && (shopUnit || shopMessage)) {
+          const noteBody = [
+            `Online Inventory inquiry${shopUnit ? " about " + shopUnit.label : ""}.`,
+            shopMessage ? `They wrote: "${shopMessage}"` : "",
+            zip ? `Delivery zip: ${zip}` : "",
+          ].filter(Boolean).join("\n");
+          const { error: noteErr } = await sb.from("crm_notes")
+            .insert({ client_id: clientId, contact_id: crmId, body: noteBody, pinned: false, created_by: null });
+          if (noteErr) {
+            await logEdgeError({ fn: "capture-lead", req, clientId, code: "shop_note",
+              message: `shop inquiry note failed - lead saved without it: ${noteErr.message}` });
+          }
+        }
       }
     } catch (e) {
       await logEdgeError({ fn: "capture-lead", req, clientId, code: "crm_link",
@@ -422,8 +482,8 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
         ...(state ? { state } : {}),
         ...(zip ? { postalCode: zip } : {}),
         locationId,
-        source: "StructureStudio Designer",
-        tags: ["structurestudio-lead"],
+        source: fromShop ? "StructureStudio Online Inventory" : "StructureStudio Designer",
+        tags: fromShop ? ["structurestudio-lead", "inventory-inquiry"] : ["structurestudio-lead"],
       }),
     });
     if (!r.ok) {

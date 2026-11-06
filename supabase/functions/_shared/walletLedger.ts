@@ -52,18 +52,24 @@ export const LEDGER_CSV_PAGE = 1000;
 // builder starts, `voice_minute_in` / `sms_in` what their customers start.
 export const CALL_METERS = ["voice_minute", "voice_minute_in"] as const;
 export const TEXT_METERS = ["sms_segment", "sms_in"] as const;
+/** The two sales-tax meters (179): a Verify press and the invoice-time check (2026-10-21, their own
+ *  chip, so a builder can see what tax lookups cost without reading every "Other" line). */
+export const TAX_METERS = ["tax_lookup", "tax_invoice"] as const;
 /** Money in or out that is not usage. `debit` is the only kind left over (128's check). */
 export const FUNDS_KINDS = ["topup", "refund", "grant", "adjustment", "reversal"] as const;
 const USAGE_METERS: readonly string[] = [...CALL_METERS, ...TEXT_METERS];
+/** Every meter that has a chip of its own. The meter wins over the kind for all of them. */
+const CHIP_METERS: readonly string[] = [...USAGE_METERS, ...TAX_METERS];
 
-export type LedgerFilter = "all" | "calls" | "texts" | "funds" | "other";
+export type LedgerFilter = "all" | "calls" | "texts" | "tax" | "funds" | "other";
 export type LedgerCategory = Exclude<LedgerFilter, "all">;
-export const LEDGER_FILTERS: readonly LedgerFilter[] = ["all", "calls", "texts", "funds", "other"];
+export const LEDGER_FILTERS: readonly LedgerFilter[] = ["all", "calls", "texts", "tax", "funds", "other"];
 
 /**
- * Which chip a line belongs to. EXACTLY ONE, which is what makes the four chips add up to All:
+ * Which chip a line belongs to. EXACTLY ONE, which is what makes the five chips add up to All:
  * the meter wins over the kind, so a refund of a call (should one ever be posted) sits with the
- * calls it corrects rather than being counted under both Calls and Funds.
+ * calls it corrects rather than being counted under both Calls and Funds, and a reversal of a tax
+ * charge sits under Tax.
  * applyLedgerFilter below is the same rule written for PostgREST, and walletLedger.test.ts
  * proves the two agree on every kind × meter pair.
  */
@@ -71,19 +77,21 @@ export function ledgerCategory(t: { kind?: string | null; meter_kind?: string | 
   const m = t.meter_kind ?? "";
   if ((CALL_METERS as readonly string[]).includes(m)) return "calls";
   if ((TEXT_METERS as readonly string[]).includes(m)) return "texts";
+  if ((TAX_METERS as readonly string[]).includes(m)) return "tax";
   if ((FUNDS_KINDS as readonly string[]).includes(t.kind ?? "")) return "funds";
   return "other";
 }
 
 const pgList = (xs: readonly string[]) => `(${xs.join(",")})`;
-// `not in` drops NULLs in SQL, and a top-up has no meter, so "no usage meter" must say so.
-const NOT_USAGE = `meter_kind.is.null,meter_kind.not.in.${pgList(USAGE_METERS)}`;
+// `not in` drops NULLs in SQL, and a top-up has no meter, so "no chip meter" must say so.
+const NOT_USAGE = `meter_kind.is.null,meter_kind.not.in.${pgList(CHIP_METERS)}`;
 
 /** Narrow a wallet_transactions query to one chip. `all` (or anything unknown) narrows nothing. */
 export function applyLedgerFilter(q: Query, filter: LedgerFilter): Query {
   switch (filter) {
     case "calls": return q.in("meter_kind", [...CALL_METERS]);
     case "texts": return q.in("meter_kind", [...TEXT_METERS]);
+    case "tax": return q.in("meter_kind", [...TAX_METERS]);
     case "funds": return q.in("kind", [...FUNDS_KINDS]).or(NOT_USAGE);
     case "other": return q.not("kind", "in", pgList(FUNDS_KINDS)).or(NOT_USAGE);
     default: return q;
@@ -114,10 +122,14 @@ const METER_LABELS: Record<string, string> = {
   // "Usage", which is exactly the row a builder cannot explain.
   tax_lookup: "Tax verification",
   tax_invoice: "Invoice tax check",
+  // Migration 312's meter. Missing here until 2026-10-21, so its lines read "Usage".
+  photo_background_change: "Photo background change",
 };
 // Meters whose memo is the better description, because the poster wrote one per line (the
-// number dialled, the minutes, the month a line fee covers).
-const MEMO_METERS = new Set([...USAGE_METERS, "phone_line_monthly", "voicemail_transcription"]);
+// number dialled, the minutes, the month a line fee covers). The tax meters since 2026-10-21:
+// taxMeter.ts taxChargeMemo writes "Tax verification · SST-5021 · Minnesota" (the meter's name,
+// the quote or invoice, the state), which is the line a builder can match to a document.
+const MEMO_METERS = new Set([...USAGE_METERS, ...TAX_METERS, "phone_line_monthly", "voicemail_transcription"]);
 
 export function walletLineLabel(t: { kind?: string | null; meter_kind?: string | null; memo?: string | null }): string {
   const memo = typeof t.memo === "string" ? t.memo.trim() : "";
@@ -174,7 +186,7 @@ export function parseLedgerQuery(p: Record<string, unknown> | null | undefined):
   | { ok: false; error: string } {
   const body = p ?? {};
   const filter = (body.filter ?? "all") as LedgerFilter;
-  if (!LEDGER_FILTERS.includes(filter)) return { ok: false, error: "Choose All, Calls, Texts, Funds or Other." };
+  if (!LEDGER_FILTERS.includes(filter)) return { ok: false, error: "Choose All, Calls, Texts, Tax, Funds or Other." };
 
   let limit = LEDGER_PAGE_MAX;
   if (body.limit != null) {

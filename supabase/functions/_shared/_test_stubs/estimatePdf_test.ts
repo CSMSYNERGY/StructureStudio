@@ -437,3 +437,64 @@ Deno.test("an unusable logo leaves the text letterhead exactly as it was, and sa
     ...FIXTURE, business: { ...BUSINESS, logo: header }, onLogoSkipped: () => { throw new Error("boom"); },
   }));
 });
+
+// ── Quote to a business entity (2026-10-21) ─────────────────────────────────────────────────
+// designs.contact.company: the block prints the business in bold, then "Attn: <person>", then the
+// address, phone and email (NAMING.companyFirstOnDocuments, the plan's default until Carolyn says).
+const BIZ_CONTACT = { ...CONTACT, name: "Thomas Example", company: "Bear River Band" };
+/** The font a drawn line was set in: the last "/<font> <size> Tf" before it. */
+async function fontOf(bytes: Uint8Array, text: string): Promise<string | null> {
+  const t = await drawn(bytes);
+  const i = t.indexOf(`${text} Tj`);
+  if (i < 0) return null;
+  const tf = [...t.slice(0, i).matchAll(/\/(Helvetica-Bold|Helvetica) ([\d.]+) Tf/g)].pop();
+  return tf ? `${tf[1]} ${tf[2]}` : null;
+}
+
+Deno.test("company: pdfCustomerFrom carries it, under the same guessable-code guard", () => {
+  assertEquals(pdfCustomerFrom(BIZ_CONTACT, CODE)?.company, "Bear River Band");
+  assertEquals(pdfCustomerFrom(BIZ_CONTACT, LEGACY), null, "a guessable code prints no company either");
+  assertEquals(pdfCustomerFrom({ company: "Bear River Band" }, CODE), { name: null, phone: null, email: null,
+    address: { street: null, city: null, state: null, zip: null }, company: "Bear River Band" }, "a company alone is printable");
+  // No company (absent, blank, not a string) adds no key, so the object is the one it always was.
+  for (const company of [undefined, "", "   ", null, 7]) {
+    assertEquals(Object.keys(pdfCustomerFrom({ ...CONTACT, company }, CODE) ?? {}).includes("company"), false, String(company));
+  }
+});
+
+Deno.test("company: the business in bold, then Attn: the person, then the address", async () => {
+  const bytes = await buildFormalEstimatePdf({ ...FIXTURE, customer: pdfCustomerFrom(BIZ_CONTACT, CODE) });
+  assertIsPdf(bytes);
+  const lines = await placed(bytes);
+  const y = (s: string) => Number(at(lines, s)?.split(",")[1]);
+  for (const s of ["Prepared for", "Bear River Band", "Attn: Thomas Example", "42 Sample Lane", "pat@example.test"]) {
+    assert(at(lines, s), `"${s}" must render; drew ${JSON.stringify(lines.slice(0, 16))}`);
+  }
+  assert(y("Prepared for") > y("Bear River Band") && y("Bear River Band") > y("Attn: Thomas Example")
+    && y("Attn: Thomas Example") > y("42 Sample Lane"), "in that order, top to bottom");
+  assertEquals(await fontOf(bytes, "Bear River Band"), "Helvetica-Bold 10", "the business is the bold line");
+  assertEquals(await fontOf(bytes, "Attn: Thomas Example"), "Helvetica 9", "Attn is a detail row");
+  assert(!lines.some((l) => /^\S+ Thomas Example$/.test(l)), "the person is not also printed bare");
+  assertEquals((await PDFDocument.load(bytes)).getPageCount(), 1);
+});
+
+Deno.test("company: a name that only repeats it, or no name, prints the company with no Attn line", async () => {
+  for (const name of ["Bear River Band", "", "  BEAR RIVER BAND "]) {
+    const t = await drawn(await buildFormalEstimatePdf({ ...FIXTURE, customer: pdfCustomerFrom({ ...BIZ_CONTACT, name }, CODE) }));
+    assert(t.includes("Bear River Band Tj"), `${name}: the company prints`);
+    assert(!t.includes("Attn:"), `${name}: no Attn line`);
+  }
+});
+
+Deno.test("company: an invoice's Bill to has the same block", async () => {
+  const t = await drawn(await buildFormalEstimatePdf({ ...FIXTURE, docKind: "invoice", customer: pdfCustomerFrom(BIZ_CONTACT, CODE) }));
+  assert(t.includes("Bill to") && t.includes("Bear River Band Tj") && t.includes("Attn: Thomas Example Tj"), "Bill to, company, Attn");
+});
+
+Deno.test("company: none on the contact draws exactly the page it drew before", async () => {
+  const base = await drawn(await buildFormalEstimatePdf({ ...FIXTURE, customer: pdfCustomerFrom(CONTACT, CODE) }));
+  for (const company of ["", "   ", null, undefined]) {
+    assertEquals(await drawn(await buildFormalEstimatePdf({ ...FIXTURE, customer: pdfCustomerFrom({ ...CONTACT, company }, CODE) })), base, String(company));
+  }
+  assert(!base.includes("Attn:"), "no Attn line without a company");
+});

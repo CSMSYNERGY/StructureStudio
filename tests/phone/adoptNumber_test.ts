@@ -216,7 +216,7 @@ Deno.test("buy_number reads the live numbers (failing CLOSED) and decides with b
   assert(/const plan = buyPlanFromRead\(\{ data: \(liveRead\.data \?\? null\) as LiveNumber\[\] \| null, error: liveRead\.error \}\);/.test(BUY));
   assert(/if \(plan\.kind === "read_failed"\) \{[\s\S]*?return json\(\{ error: "Couldn't check your numbers just now\. Try again in a minute\." \}, 503\);/.test(BUY), "a failed read refuses instead of buying");
   const planAt = BUY.indexOf("const plan = buyPlanFromRead(");
-  for (const later of ["findPurchasedNumbers(clientId)", "takeHold(admin, clientId, \"sms_number_monthly\"", "purchaseNumber({"]) {
+  for (const later of ["findPurchasedNumbers(clientId, creds)", "takeHold(admin, clientId, \"sms_number_monthly\"", "purchaseNumber({"]) {
     assert(planAt > 0 && planAt < BUY.indexOf(later), `buyPlan must come before ${later}`);
   }
   assert(/if \(plan\.kind === "has_number"\) \{\s*return json\(\{ error: "This account already has a texting number\." \}, 409\);/.test(BUY));
@@ -231,7 +231,8 @@ Deno.test("the adopt branch: NO hold, NO purchase, NO search — the four shared
   assert(/const reply = await adoptBranch\(\s*\{ serviceSid: reg\.messaging_service_sid, number: plan\.number, registrationStatus: reg\.status \}/.test(ADOPT));
   assert(/if \(!reply\.ok\) \{\s*if \(reply\.log\) await logEdgeError\(\{ fn: "portal-sms", clientId, \.\.\.reply\.log \}\)\.catch\(\(\) => \{\}\);\s*return json\(\{ error: reply\.error \}, reply\.status\);/.test(ADOPT));
   assert(!/ADOPT_STATES|adoptCallingNumber\(/.test(ADOPT), "no second copy of the branch's rules in the handler");
-  for (const w of ["findIncomingNumberSid(e164)", "numberInService(serviceSid, numberSid)", "attachNumberToService(serviceSid, numberSid)", "clearNumberSmsUrl(numberSid)"]) {
+  // In the tenant's own Twilio account (Workstream 2): the registration's account, bound once.
+  for (const w of ["findIncomingNumberSid(e164, http, creds?.accountSid)", "numberInService(serviceSid, numberSid, http)", "attachNumberToService(serviceSid, numberSid, http)", "clearNumberSmsUrl(numberSid, http, creds?.accountSid)"]) {
     assert(ADOPT.includes(w), `not wired: ${w}`);
   }
   assert(/\.from\("client_settings"\)\.update\(\{ sms_number: e164 \}\)\.eq\("client_id", clientId\)/.test(ADOPT));
@@ -251,7 +252,8 @@ Deno.test("the hold the Phone tab took is portal-sms's own key, so an adoption h
 
 Deno.test("the texting purchase still attaches through the same shared helper", () => {
   const purchase = slice(SHARED, "export async function purchaseNumber(", "\n}\n", "purchaseNumber");
-  assert(/if \(opts\.messagingServiceSid && sid\) \{\s*await attachNumberToService\(opts\.messagingServiceSid, sid\);/.test(purchase));
+  // In the account the number was bought in (Workstream 2: trustHubHttp(creds), the environment's when none).
+  assert(/if \(opts\.messagingServiceSid && sid\) \{\s*await attachNumberToService\(opts\.messagingServiceSid, sid, trustHubHttp\(creds\)\);/.test(purchase));
 });
 
 Deno.test("review BE-5: the SMS tab offers the adopt press in EXACTLY the server's ADOPT_STATES, so a stopped adoption survives a reload", () => {

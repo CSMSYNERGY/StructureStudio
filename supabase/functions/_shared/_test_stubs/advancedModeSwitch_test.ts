@@ -396,13 +396,18 @@ Deno.test("everyone on the account gets it (it rides on the entitlement, not the
 Deno.test("portal-billing reads advanced_mode on its own, never in the fatal settings read", async () => {
   const r = await status({ me: OWNER });
   const sel = r.trace.db.filter((q) => q[0] === "client_settings").map((q) => String((q.find((o: any) => o[0] === "select") ?? [])[1]));
-  assertEquals(sel.length, 2, JSON.stringify(sel));
+  // Three since migration 364: `sheds_enabled` is a separate, fail-soft read too, for the same
+  // reason advanced_mode is (a database without the column must never 500 the entitlement).
+  assertEquals(sel.length, 3, JSON.stringify(sel));
   assertEquals(sel[0], "billing_exempt, billing_exempt_until, discount_percent, discount_features, internal_account", "the fatal read is its five columns, as before 270");
   assertEquals(sel[1], "advanced_mode");
+  assertEquals(sel[2], "sheds_enabled");
   assert(code(BILLING_SRC).includes("advancedMode: internal || (!advErr && advRow?.advanced_mode === true),"), "the rule moved");
   // Our own account has the page regardless, so it does not ask.
   const ours = await status({ me: OWNER, settings: { billing_exempt: false, internal_account: true, discount_percent: 0 } });
-  assertEquals(ours.trace.db.filter((q) => q[0] === "client_settings").length, 1);
+  // Our own account skips the Advanced read and still makes the sheds one: it sells sheds, and a
+  // read that answers "on" costs nothing to keep uniform.
+  assertEquals(ours.trace.db.filter((q) => q[0] === "client_settings").length, 2);
   assertEquals(ours.body.entitlement.advancedMode, true);
 });
 
@@ -440,7 +445,7 @@ Deno.test("the card saves to the tenant on screen, then asks the shell to re-rea
   assert(/const needs3d = !on && !has3d;/.test(card), "the 3D rule changed");
   assert(/const disabled = busy \|\| !!advanced\.locked \|\| needs3d;/.test(card), "the disabled rule changed");
   assert(/if \(!want && advanced\.confirmOff && !advanced\.confirmOff\(\)\) return;/.test(card), "turning off must ask the shell first");
-  assert(CARD_SRC.includes("Adds an Advanced page under Designer for designing a building from scratch with every shape control."), "the card's words");
+  assert(CARD_SRC.includes("Adds an Advanced page under Shed Designer for designing a building from scratch with every shape control."), "the card's words");
   assert(CARD_SRC.includes(">Needs 3D<"), "the Needs 3D badge");
 });
 

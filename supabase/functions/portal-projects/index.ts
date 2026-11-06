@@ -5,8 +5,11 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
+import { CLIENT_STATUSES, propagateStatus as propagateStatusShared } from "../_shared/pmStatus.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
-import { buildOverlayItems, columnIdMap, overlaySlugs } from "../_shared/pmOverlay.ts";
+import { buildOverlayItems, choiceIdMap, columnIdMap, overlaySlugs, remapValues } from "../_shared/pmOverlay.ts";
+import { pmDecorateItems, pmSystemColumns, pmWithSystemValues } from "../_shared/pmSystemColumns.ts";
+import { boardsForAction, loadBoardPrivacy, projectsAudience } from "../_shared/pmBoardPrivacy.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -59,10 +62,8 @@ function json(body: unknown, status = 200) {
 const COLUMN_TYPES = new Set([
   "status", "text", "long_text", "number", "date", "people", "dropdown", "checkbox", "link",
 ]);
-// The tenant-facing ladder from migration 054 — the ONLY values client_status may hold.
-const CLIENT_STATUSES = new Set([
-  "submitted", "in_review", "planned", "in_progress", "needs_info", "shipped", "declined", "duplicate",
-]);
+// The tenant-facing ladder (CLIENT_STATUSES, migration 054) lives in _shared/pmStatus.ts with
+// propagateStatus, which release-ci shares.
 const LABEL_KINDS = new Set(["done", "working", "stuck"]);
 
 // ── Where an item came from ──────────────────────────────────────────────────
@@ -83,7 +84,9 @@ const APP_LABELS_ORIGIN: Record<string, string> = {
 };
 // deno-lint-ignore no-explicit-any
 function originOf(item: any, sub: any): { createdAt: string | null; label: string } {
-  const createdAt = item?.created_at ?? null;
+  // The same date the static Created column shows, so the drawer and the cell can never
+  // disagree: an imported row's ORIGINAL creation date (migration 352), else the row's own.
+  const createdAt = item?.source_created_at ?? item?.created_at ?? null;
   const by = String(item?.created_by_email || "");
   const who = (e: string) => (e.includes("@") ? e.split("@")[0] : e);
 
@@ -110,6 +113,10 @@ function originOf(item: any, sub: any): { createdAt: string | null; label: strin
 function str(v: unknown, max: number): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
 }
+// Every pm_* primary key is a uuid, so a filter built from a caller's id has to look like one
+// before it reaches `eq()` — Postgres answers a malformed uuid with 22P02, which arrives here
+// as a thrown error and leaves as a 500.
+const PM_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function cssColor(v: unknown): string | undefined {
   const s = str(v, 40);
   return /^[#a-zA-Z0-9(),.% -]+$/.test(s) && s ? s : undefined;
@@ -266,6 +273,10 @@ function defaultValues(columns: any[], already: Record<string, unknown>): Record
       const opt = (c.settings?.options || []).find((o: any) => o.label === HOME_APP_LABEL);
       if (opt) out[c.id] = [opt.id];
     } else if (c.type === "date" && c.name === "Created") {
+      // ⚠️ DEAD on every board since migration 352 retired the editable "Created" columns —
+      // the Created cell is now derived from the row (_shared/pmSystemColumns.ts) and no
+      // default can reach it. Kept so a board that hand-adds a date column called "Created"
+      // for some other purpose still gets today's date, which is what it would expect.
       out[c.id] = new Date().toISOString().slice(0, 10);
     }
   }
@@ -378,7 +389,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   catch { return json({ error: "Invalid JSON" }, 400); }
   const action = String(payload?.action || "");
 
-  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "setup_template", "setup_overview", "setup_client_items"]);
+  // `board_access` reads: a view-only operator must be able to see who is on a board without
+  // being able to change it. The write half (set_board_visibility, add/remove_board_member)
+  // is not here and so falls under the writer check below, then the owner check at the action.
+  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "board_access", "move_plan", "setup_template", "setup_overview", "setup_client_items"]);
 
   // ── THREE CLASSES OF ACTION, AND THE SPLIT IS THE SECURITY DESIGN ───────────────────────
   //
@@ -415,6 +429,28 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     return json({ error: op ? "This operator account is read-only." : "You have view-only access to Projects." }, 403);
   }
 
+  // ── THE THIRD DOOR: A PRIVATE BOARD (migration 334) ─────────────────────────────────────
+  // The two doors above decide whether you may open Projects AT ALL, and whether you may
+  // write. This one decides which boards you may touch, and it has to run here rather than
+  // inside the handful of actions that mention a board: most of them do not. See
+  // _shared/pmBoardPrivacy.ts for why the resolver is fail-closed.
+  //
+  // Carolyn's rule is VISIBLE BUT LOCKED, so the refusal names who to ask. It deliberately
+  // does not say whether the id exists — a board you cannot see and a board that was never
+  // there read the same from outside.
+  const privacy = await loadBoardPrivacy(admin, user.id);
+  const touched = await boardsForAction(admin, action, payload);
+  if (!touched.ok) return json({ error: touched.error }, 400);
+  for (const bid of touched.boardIds) {
+    if (privacy.canSee(bid)) continue;
+    const owners = privacy.locked.get(bid) || [];
+    return json({
+      error: owners.length
+        ? `That board is private. Ask ${owners.join(" or ")} to add you to it.`
+        : "That board is private, and nobody on it can add you — an operator will have to reopen it.",
+    }, 403);
+  }
+
   const actorEmail = (op && op.email) || user.email || user.id;
   // Best-effort activity log — accountability for shared write access; never blocks.
   const act = async (boardId: string | null, itemId: string | null, action: string, detail: Record<string, unknown> = {}) => {
@@ -434,6 +470,59 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     if (error) throw error;
     return data || [];
   };
+  // ── Created / Requestor: served on every board, stored on none ──────────────────────────
+  // The two columns Carolyn asked to make static (2026-11-01) are SYNTHETIC: derived on read in
+  // _shared/pmSystemColumns.ts and merged into each item's `values` under reserved `sys_` ids.
+  //
+  // ⚠️ They are added to RESPONSES ONLY, never to `boardColumns`. sanitizeValues walks the
+  // column list it is given and keeps any key it finds for a column it recognises — so handing
+  // it a synthetic column is all it would take for a crafted payload to store a `sys_created`
+  // cell that then shadows nothing, lies in the jsonb, and confuses the next reader. Writes see
+  // the board's real pm_columns and drop the reserved ids before the database hears about them.
+  const withSystemColumns = (cols: unknown[]) => [...pmSystemColumns(), ...cols];
+
+  // Email → roster name, so a card Ahsan added reads "Ahsan" rather than "ahsan". pm_people is
+  // one global list; an operator with no roster row degrades to their email's local part.
+  let rosterNamesCache: Map<string, string> | null = null;
+  const rosterNames = async (): Promise<Map<string, string>> => {
+    if (rosterNamesCache) return rosterNamesCache;
+    const { data } = await admin.from("pm_people").select("name, email");
+    const m = new Map<string, string>();
+    for (const p of (data || []) as Array<{ name?: string; email?: string }>) {
+      if (p.email && p.name) m.set(String(p.email).toLowerCase(), String(p.name));
+    }
+    rosterNamesCache = m;
+    return m;
+  };
+
+  // The linked submissions for a whole list, in ONE read per 200 ids — a per-item lookup would
+  // be 47 round trips on the Feature Requests board.
+  // deno-lint-ignore no-explicit-any
+  const submissionsFor = async (items: any[]): Promise<Map<string, any>> => {
+    // deno-lint-ignore no-explicit-any
+    const out = new Map<string, any>();
+    const ids = [...new Set((items || [])
+      .map((i) => i?.feedback_submission_id).filter(Boolean).map(String))];
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data, error } = await admin.from("feedback_submissions")
+        .select("id, client_id, source_app, submitter_name, submitter_email")
+        .in("id", ids.slice(i, i + 200));
+      if (error) throw error;
+      for (const r of data || []) out.set(String(r.id), r);
+    }
+    return out;
+  };
+
+  // One item, on its way back from a create/update — the browser replaces the row it is holding
+  // with this object, so without the derived cells an edit would blank its own Created column.
+  // deno-lint-ignore no-explicit-any
+  const decorateItem = async (item: any) => {
+    if (!item) return item;
+    const [subs, names] = await Promise.all([submissionsFor([item]), rosterNames()]);
+    const sub = item.feedback_submission_id ? subs.get(String(item.feedback_submission_id)) || null : null;
+    return pmWithSystemValues(item, sub, names);
+  };
+
   // Assignable people (pm_people, migration 148) — NOT the operator roster. Someone can
   // be assigned work without any access to builders' accounts, which is the whole point
   // of the split; the two are joined only by pm_people.user_id.
@@ -507,6 +596,33 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     if (error) throw error;
     if (!data) throw new Error("Item not found.");
     return data;
+  };
+
+  // THE CARDS A MOVE IS ABOUT, and the one board they must all live on.
+  //
+  // ⚠️ ONE SOURCE BOARD, ALWAYS. On an overlay board the table shows cards belonging to two
+  // or three other boards at once, so a selection made there can legitimately span boards —
+  // and a "move these to Features" built on the first row's columns would re-key the rest
+  // through the wrong map and store values under ids their cells never had. Refused by name
+  // instead, because the fix is obvious once you are told: move them from their own board.
+  const moveSource = async (ids: string[]): Promise<
+    // deno-lint-ignore no-explicit-any
+    { board: { id: string; name: string }; items: any[] } | { error: string; status: number }
+  > => {
+    if (!ids.length) return { error: "No cards given.", status: 400 };
+    const { data: items, error } = await admin.from("pm_items").select("*")
+      .in("id", ids).is("archived_at", null);
+    if (error) throw error;
+    if (!items || !items.length) return { error: "Item not found.", status: 404 };
+    const boards = new Set(items.map((i: { board_id: string }) => String(i.board_id)));
+    if (boards.size > 1) {
+      return { error: "Those cards live on different boards. Move them from the board each one belongs to.", status: 400 };
+    }
+    const boardId = [...boards][0];
+    const { data: board } = await admin.from("pm_boards")
+      .select("id, name").eq("id", boardId).maybeSingle();
+    if (!board) return { error: "Board not found.", status: 404 };
+    return { board, items };
   };
 
   // ── The roadmap, mirrored into Projects ────────────────────────────────────
@@ -592,37 +708,36 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   };
 
   // Propagate a status change to the tenant mirror when the label maps to a client
-  // status and the item is linked to a feedback submission.
+  // status and the item is linked to a feedback submission. The rule lives in
+  // _shared/pmStatus.ts (release-ci moves items through the same one); this only binds
+  // this request's service-role client and activity logger.
   // deno-lint-ignore no-explicit-any
-  const propagateStatus = async (item: any, columns: any[], newValues: Record<string, unknown>, oldValues: Record<string, unknown>) => {
-    if (!item.feedback_submission_id) return;
-    for (const col of columns) {
-      if (col.type !== "status" || !(col.id in newValues)) continue;
-      if (newValues[col.id] === oldValues?.[col.id]) continue;
-      // deno-lint-ignore no-explicit-any
-      const label = (col.settings?.labels || []).find((l: any) => l.id === newValues[col.id]);
-      if (!label) continue;
-      if (label.client_status && CLIENT_STATUSES.has(label.client_status)) {
-        const { error } = await admin.from("feedback_submissions")
-          .update({ status: label.client_status, status_changed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq("id", item.feedback_submission_id);
-        if (error) throw error;
-        await act(item.board_id, item.id, "client_status", { to: label.client_status, label: label.label });
-      } else {
-        await act(item.board_id, item.id, "status", { label: label.label });
-      }
-    }
-  };
+  const propagateStatus = (item: any, columns: any[], newValues: Record<string, unknown>, oldValues: Record<string, unknown>) =>
+    propagateStatusShared(admin, act, item, columns, newValues, oldValues);
 
   try {
     switch (action) {
       // ── Reads ─────────────────────────────────────────────────────────────
       case "list_boards": {
-        const { data: boards, error } = await admin.from("pm_boards").select("*")
+        const { data: allBoards, error } = await admin.from("pm_boards").select("*")
           .is("archived_at", null).order("position");
         if (error) throw error;
+        // A LOCKED BOARD IS A STUB, and the stub is deliberately thin: the tab strip needs
+        // a name to draw a padlock on and the owners' names to say who to ask, and nothing
+        // else about it may leave this function. Rebuilt field by field rather than deleted
+        // from the row — a new column added to pm_boards later (an intake webhook key, a
+        // description) must not start riding along to people who cannot open the board.
+        const boards = (allBoards || []).map((b) => {
+          if (privacy.canSee(b.id)) return b;
+          return {
+            id: b.id, slug: b.slug, name: b.name, position: b.position,
+            visibility: "private", locked: true, owners: privacy.locked.get(b.id) || [],
+            settings: {}, archived_at: null,
+          };
+        });
         const counts: Record<string, number> = {};
-        for (const b of boards || []) {
+        for (const b of boards) {
+          if (b.locked) continue;   // an item count is a fact about the board's contents
           const { count } = await admin.from("pm_items")
             .select("id", { count: "exact", head: true })
             .eq("board_id", b.id).is("archived_at", null);
@@ -633,7 +748,9 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         // you change the board dropdown. Keyed by board id; `people` is one global list
         // (pm_people has no client_id — see _shared/pmRoster.ts).
         const colsByBoard: Record<string, unknown[]> = {};
-        for (const b of boards || []) colsByBoard[b.id] = await boardColumns(b.id);
+        // Created / Requestor ride along too, so the quick-add form and the board strip see
+        // the same column list the board itself serves. Nothing can be typed into them.
+        for (const b of boards) { if (!b.locked) colsByBoard[b.id] = withSystemColumns(await boardColumns(b.id)); }
         const { data: people, error: pErr } = await admin.from("pm_people")
           .select("id, name, email, user_id, active").eq("active", true).order("position");
         if (pErr) throw pErr;
@@ -698,6 +815,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             .select("id, slug, name").in("slug", ovSlugs).is("archived_at", null);
           const sources = [];
           for (const sbd of (srcBoards || [])) {
+            // ⚠️ AN OVERLAY IS A READ ACROSS BOARDS, so it is the one place a private board
+            // can leak without anybody opening it: point a public board's overlay_from at a
+            // private slug and every one of its cards appears on a table the whole team
+            // reads. Skipped PER VIEWER, not per board — someone who IS on the private board
+            // still sees its rows pulled in, which is the behaviour overlays exist for.
+            if (!privacy.canSee(sbd.id)) continue;
             const [sCols, sItems] = await Promise.all([
               boardColumns(sbd.id),
               admin.from("pm_items").select("*").eq("board_id", sbd.id).is("archived_at", null)
@@ -718,8 +841,15 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           outItems = outItems.concat(foreign.map((f) => ({ ...f, group_id: "overlay:" + f.home_board_slug })));
         }
 
+        // Created / Requestor last of all, over the board's own items AND the overlay's foreign
+        // ones: an overlay row keeps its real row (`...it` in buildOverlayItems), so it derives
+        // from the same fields its home board would. The remap above never sees these ids —
+        // they are identical on every board, which is the one place pmOverlay's per-board uuid
+        // translation has nothing to do.
+        const [subsById, names] = await Promise.all([submissionsFor(outItems), rosterNames()]);
         return json({
-          board, columns, groups: outGroups, items: outItems,
+          board, columns: withSystemColumns(columns), groups: outGroups,
+          items: pmDecorateItems(outItems, subsById, names),
           people: opsRes.data, views: viewsRes.data, canWrite,
         });
       }
@@ -758,7 +888,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             submission = { ...sub, attachmentUrl };
           }
         }
-        return json({ item, updates, activity: actRes.data, submission, canWrite, origin: originOf(item, submission) });
+        return json({
+          item: pmWithSystemValues(item, submission, await rosterNames()),
+          updates, activity: actRes.data, submission, canWrite, origin: originOf(item, submission),
+        });
       }
 
       case "sign_attachment": {
@@ -781,13 +914,33 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const { data: clash } = await admin.from("pm_boards").select("id").eq("slug", slug).maybeSingle();
         if (clash || RESERVED_SLUGS.has(slug)) slug = `${slug}-${crypto.randomUUID().slice(0, 4)}`;
         const { data: maxRow } = await admin.from("pm_boards").select("position").order("position", { ascending: false }).limit(1).maybeSingle();
+        // Private from the first row, when that is what was asked for. A board created
+        // public and locked down a moment later is a board whose first few cards were
+        // readable by the whole team, and "a board for myself" is usually created because
+        // of what is about to go on it.
+        const visibility = payload.visibility === "private" ? "private" : "everyone";
         const { data: board, error } = await admin.from("pm_boards")
-          .insert({ slug, name, position: (maxRow?.position || 0) + 1024 }).select().single();
+          .insert({
+            slug, name, position: (maxRow?.position || 0) + 1024,
+            visibility, created_by: user.id,
+          }).select().single();
         if (error) throw error;
+        if (visibility === "private") {
+          const { error: mErr } = await admin.from("pm_board_members").insert({
+            board_id: board.id, user_id: user.id, email: actorEmail,
+            name: (op && op.display_name) || actorEmail, role: "owner", added_by: user.id,
+          });
+          // ⚠️ A private board whose owner row failed to write is a board NOBODY can open,
+          // including the person who just made it. Undo the board rather than leave it.
+          if (mErr) {
+            await admin.from("pm_boards").delete().eq("id", board.id);
+            throw mErr;
+          }
+        }
         const { error: gErr } = await admin.from("pm_groups")
           .insert({ board_id: board.id, name: "Items", color: "#3D3672", position: 1024 });
         if (gErr) throw gErr;
-        await act(board.id, null, "create_board", { name });
+        await act(board.id, null, "create_board", { name, visibility });
         return json({ board });
       }
 
@@ -805,12 +958,231 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         return json({ ok: true });
       }
 
+      // THE ORDER OF THE BOARD TABS, dragged in the strip (Carolyn 2026-11-01). Tenant-wide:
+      // pm_boards.position is one shared column and list_boards has always sorted on it, so
+      // whoever drags sets the order for the whole team — there is no per-operator order and
+      // adding one would mean a prefs column on app_operators.
+      //
+      // The whole ordered list arrives and is renumbered 1024, 2048, … (the reorder_columns
+      // shape, minus its board_id filter). Not reorder_item's midpoint: a tab strip holds a
+      // handful of rows, the browser already knows every one, and a renumber cannot collapse a
+      // gap the way repeated midpoints do.
+      //
+      // ⚠️ A LOCKED board (private, caller not a member) is in the browser's list as a stub and
+      // carries its real `position`, so it rides along in orderedIds and keeps its slot. It is
+      // NOT re-checked here on purpose: a caller who omitted it would renumber around it, which
+      // moves a board they cannot see — the full list is the protection, and list_boards is what
+      // guarantees they have it. Write-gated like every other board action by READ_ACTIONS.
+      case "reorder_boards": {
+        const ids = Array.isArray(payload.orderedIds) ? payload.orderedIds.map((x: unknown) => str(x, 40)) : [];
+        let pos = 1024;
+        for (const id of ids) {
+          // Same lock reorder_columns carries: `id` goes into eq() on a uuid column, so anything
+          // else is a 22P02 from Postgres and a 500 from here.
+          if (!PM_UUID.test(id)) continue;
+          const { error } = await admin.from("pm_boards").update({ position: pos }).eq("id", id);
+          if (error) throw error;
+          pos += 1024;
+        }
+        await act(null, null, "reorder_boards", { count: ids.length });
+        return json({ ok: true });
+      }
+
       case "archive_board": {
         const id = str(payload.id, 40);
         const { error } = await admin.from("pm_boards")
           .update({ archived_at: new Date().toISOString() }).eq("id", id);
         if (error) throw error;
         await act(id, null, "archive_board", {});
+        return json({ ok: true });
+      }
+
+      // ── Who can see this board (migration 334) ────────────────────────────
+      //
+      // Carolyn, 2026-10-23: "Somehow we need to easily see who all has access to see a
+      // board." The answer has two shapes, and conflating them is the mistake to avoid:
+      //
+      //   * an "everyone" board has NO access list of its own. Everyone who can open
+      //     Projects can read it, so the honest answer is the Projects roster — both doors,
+      //     enumerated, with how each person got in. Inventing a member list for a public
+      //     board would make it look as if removing somebody from it did anything.
+      //   * a "private" board's answer IS its member list.
+      //
+      // One action returns both, labelled, so the screen does not have to guess.
+      case "board_access": {
+        const boardId = str(payload.boardId, 40);
+        const { data: board, error: bErr } = await admin.from("pm_boards")
+          .select("id, name, visibility, created_by").eq("id", boardId).maybeSingle();
+        if (bErr) throw bErr;
+        if (!board) return json({ error: "Board not found." }, 404);
+
+        const audience = await projectsAudience(admin);
+        if (board.visibility !== "private") {
+          return json({ visibility: "everyone", board: board.name, people: audience, iOwn: canWrite });
+        }
+        const { data: mem, error: mErr } = await admin.from("pm_board_members")
+          .select("user_id, name, email, role, added_at").eq("board_id", boardId);
+        if (mErr) throw mErr;
+        // The member rows carry the name as it was when they were added; the roster is the
+        // current truth, so it wins where the two disagree (someone renamed on the Team
+        // screen should not read as their old name here).
+        const byUser = new Map(audience.map((a) => [a.user_id, a]));
+        const people = (mem || []).map((m: Record<string, unknown>) => {
+          const live = byUser.get(String(m.user_id));
+          return {
+            user_id: String(m.user_id),
+            name: live?.name || String(m.name || m.email || "Someone"),
+            email: live?.email ?? (m.email ? String(m.email) : null),
+            via: live?.via || null,     // null = they can no longer open Projects at all
+            level: live?.level || null,
+            role: String(m.role),
+            added_at: m.added_at,
+          };
+        });
+        people.sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "owner" ? -1 : 1));
+        // Everyone who could be added — the roster minus the people already on it.
+        const onIt = new Set(people.map((p) => p.user_id));
+        const addable = audience.filter((a) => !onIt.has(a.user_id));
+        const iOwn = people.some((p) => p.user_id === user.id && p.role === "owner");
+        return json({ visibility: "private", board: board.name, people, addable, iOwn });
+      }
+
+      case "set_board_visibility": {
+        const boardId = str(payload.boardId, 40);
+        const want = payload.visibility === "private" ? "private" : "everyone";
+        const { data: board, error: bErr } = await admin.from("pm_boards")
+          .select("id, name, visibility").eq("id", boardId).maybeSingle();
+        if (bErr) throw bErr;
+        if (!board) return json({ error: "Board not found." }, 404);
+        if (board.visibility === want) return json({ ok: true });
+
+        // Who may flip it: on a board everyone can already see, any writer — there is
+        // nothing to protect yet. On a private board, only an owner, or the person who was
+        // shut out of a board yesterday could reopen it today.
+        if (board.visibility === "private") {
+          const { data: me } = await admin.from("pm_board_members")
+            .select("role").eq("board_id", boardId).eq("user_id", user.id).maybeSingle();
+          if (!me || me.role !== "owner") {
+            return json({ error: "Only an owner of this board can make it visible to everyone." }, 403);
+          }
+        }
+
+        const { error } = await admin.from("pm_boards")
+          .update({ visibility: want, updated_at: new Date().toISOString() }).eq("id", boardId);
+        if (error) throw error;
+
+        if (want === "private") {
+          // Whoever made it private owns it. upsert, not insert: they may already be on an
+          // old member list from a previous private spell, and a duplicate key here would
+          // leave the board private with the person who locked it standing outside.
+          const { error: mErr } = await admin.from("pm_board_members").upsert({
+            board_id: boardId, user_id: user.id, email: actorEmail,
+            name: (op && op.display_name) || actorEmail, role: "owner", added_by: user.id,
+          }, { onConflict: "board_id,user_id" });
+          if (mErr) {
+            await admin.from("pm_boards").update({ visibility: board.visibility }).eq("id", boardId);
+            throw mErr;
+          }
+        }
+        // The member list is KEPT when a board goes public again — making it public for an
+        // afternoon and private again should not silently drop everyone who was on it.
+        await act(boardId, null, "set_board_visibility", { visibility: want });
+        return json({ ok: true });
+      }
+
+      case "add_board_member": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const role = payload.role === "owner" ? "owner" : "member";
+        if (!userId) return json({ error: "Pick somebody to add." }, 400);
+
+        const { data: board } = await admin.from("pm_boards")
+          .select("id, visibility").eq("id", boardId).maybeSingle();
+        if (!board) return json({ error: "Board not found." }, 404);
+        if (board.visibility !== "private") {
+          return json({ error: "This board is visible to everyone — there is no list to add to." }, 400);
+        }
+        const { data: me } = await admin.from("pm_board_members")
+          .select("role").eq("board_id", boardId).eq("user_id", user.id).maybeSingle();
+        if (!me || me.role !== "owner") {
+          return json({ error: "Only an owner of this board can add people to it." }, 403);
+        }
+        // ⚠️ THE ADDABLE SET IS THE PROJECTS ROSTER, AND IT IS CHECKED SERVER-SIDE. The
+        // browser only ever offers these people, but a user id posted straight at this
+        // action would otherwise hand a BUILDER'S login sight of a CSM board — the same
+        // escalation the people editor's tenant check closes from the other direction.
+        const audience = await projectsAudience(admin);
+        const person = audience.find((a) => a.user_id === userId);
+        if (!person) {
+          return json({ error: "That person can't open Projects at all, so adding them here would do nothing. Give them Projects access first." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members").upsert({
+          board_id: boardId, user_id: userId, email: person.email, name: person.name,
+          role, added_by: user.id,
+        }, { onConflict: "board_id,user_id" });
+        if (error) throw error;
+        await act(boardId, null, "add_board_member", { name: person.name, role });
+        return json({ ok: true });
+      }
+
+      // HANDING A PRIVATE BOARD OVER. Without this, the only owner a board ever has is
+      // whoever created it: the last-owner rule in remove_board_member means the board can
+      // never be orphaned, but it also means it can never be passed on — somebody going on
+      // leave, changing role, or leaving altogether took their boards with them, and the
+      // only way out was an operator setting the board back to visible to everyone.
+      //
+      // Promoting is deliberately not the same action as adding. An upsert with role:'owner'
+      // would have done it, and would also silently promote somebody whose membership was
+      // removed a moment earlier by someone else — a write that reads as "change this
+      // person's role" must fail when there is no such person to change.
+      case "set_board_member_role": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const role = payload.role === "owner" ? "owner" : "member";
+        const { data: rows, error: lErr } = await admin.from("pm_board_members")
+          .select("user_id, name, role").eq("board_id", boardId);
+        if (lErr) throw lErr;
+        const me = (rows || []).find((r: { user_id: string }) => String(r.user_id) === user.id);
+        const target = (rows || []).find((r: { user_id: string }) => String(r.user_id) === userId);
+        if (!target) return json({ error: "That person is not on this board." }, 404);
+        if (!me || me.role !== "owner") {
+          return json({ error: "Only an owner of this board can change who owns it." }, 403);
+        }
+        if (target.role === role) return json({ ok: true });
+        // The same fence as removal, for the same reason: a private board with no owner is
+        // a board whose access list nobody can ever open again. An owner stepping down
+        // therefore promotes their replacement FIRST — two clicks, in a safe order.
+        if (role === "member" && (rows || []).filter((r: { role: string }) => r.role === "owner").length <= 1) {
+          return json({ error: "This is the board's last owner. Make somebody else an owner first." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members")
+          .update({ role }).eq("board_id", boardId).eq("user_id", userId);
+        if (error) throw error;
+        await act(boardId, null, "set_board_member_role", { name: target.name, role });
+        return json({ ok: true });
+      }
+
+      case "remove_board_member": {
+        const boardId = str(payload.boardId, 40);
+        const userId = str(payload.userId, 40);
+        const { data: rows, error: lErr } = await admin.from("pm_board_members")
+          .select("user_id, name, role").eq("board_id", boardId);
+        if (lErr) throw lErr;
+        const me = (rows || []).find((r: { user_id: string }) => String(r.user_id) === user.id);
+        const target = (rows || []).find((r: { user_id: string }) => String(r.user_id) === userId);
+        if (!target) return json({ ok: true });
+        // Leaving a board yourself is always allowed; removing somebody else is an owner's
+        // call. Both still have to clear the last-owner rule below.
+        if (userId !== user.id && (!me || me.role !== "owner")) {
+          return json({ error: "Only an owner of this board can remove people from it." }, 403);
+        }
+        if (target.role === "owner" && (rows || []).filter((r: { role: string }) => r.role === "owner").length <= 1) {
+          return json({ error: "This is the board's last owner. Make somebody else an owner first, or set the board back to visible to everyone." }, 400);
+        }
+        const { error } = await admin.from("pm_board_members")
+          .delete().eq("board_id", boardId).eq("user_id", userId);
+        if (error) throw error;
+        await act(boardId, null, "remove_board_member", { name: target.name });
         return json({ ok: true });
       }
 
@@ -910,6 +1282,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const ids = Array.isArray(payload.orderedIds) ? payload.orderedIds.map((x: unknown) => str(x, 40)) : [];
         let pos = 1024;
         for (const id of ids) {
+          // `id` goes into `eq("id", …)` on a uuid column, so anything else is a 22P02 from
+          // Postgres and a 500 from here. The synthetic Created / Requestor ids are exactly
+          // that shape of non-uuid, and the browser already leaves them out — this is the
+          // second lock, so a stale tab reordering a board cannot take the save down.
+          if (!PM_UUID.test(id)) continue;
           const { error } = await admin.from("pm_columns").update({ position: pos }).eq("id", id).eq("board_id", boardId);
           if (error) throw error;
           pos += 1024;
@@ -1036,7 +1413,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         }
         await act(boardId, item.id, "create_item", note ? { name, via: "quick_add" } : { name });
         await propagateStatus(item, columns, values, {});
-        return json({ item, update });
+        return json({ item: await decorateItem(item), update });
       }
 
       case "update_item": {
@@ -1063,32 +1440,83 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           let incoming = (payload.values || {}) as Record<string, unknown>;
           const fromBoardId = str(payload.fromBoardId, 40);
           const crossBoard = !!fromBoardId && fromBoardId !== item.board_id;
+          // The home-board column each sent cell asked for. The refusal below checks THESE
+          // against what sanitizeValues kept, not the translated object, so a translation that
+          // comes back short is a 400 rather than a 200 that wrote nothing.
+          const asked: string[] = [];
           if (crossBoard) {
             const srcColumns = await boardColumns(fromBoardId);
             const map = columnIdMap(srcColumns, columns);
-            const remapped: Record<string, unknown> = {};
             const unmapped: string[] = [];
-            for (const [k, v] of Object.entries(incoming)) {
+            for (const k of Object.keys(incoming)) {
               const dest = map.get(k);
               // deno-lint-ignore no-explicit-any
               if (!dest) { unmapped.push(((srcColumns as any[]).find((c) => c.id === k)?.name) || k); continue; }
-              remapped[dest] = v;
+              asked.push(dest);
             }
             if (unmapped.length) {
               return json({ error: `"${unmapped.join('", "')}" does not exist on the board this item lives on. Open the item there to change it.` }, 400);
             }
-            incoming = remapped;
+            // THE CHOICE IDS INSIDE A CELL ARE PER-BOARD TOO. The working board offers Bugs' App
+            // ids and Feature Requests seeds its own (o_ss …), so re-keying the column alone
+            // carried an id the home column had never heard of: a status came back as the 400
+            // below, and a Feature row's App was WRITTEN as [] with a 200 (sanitizeValues keeps a
+            // dropdown key with whatever survives). remapValues translates them by label text,
+            // the same translation get_board applies for display.
+            //
+            // ⚠️ GIVE IT THE BROWSER'S ORIGINAL KEYS. remapValues re-keys the column itself; fed
+            // values already re-keyed to this board, every lookup misses and it returns {},
+            // which is the silent no-op all over again (design review, 2026-10-09).
+            incoming = remapValues(payload.values, map, srcColumns, columns);
           }
           const clean = sanitizeValues(columns, incoming, opIds);
           if (crossBoard) {
             // sanitizeValues drops a value its column does not recognise — a status label or a
-            // dropdown option belonging to the board being VIEWED rather than the board the
-            // item lives on. Column names match across boards; the ids inside them do not.
-            const lost = Object.keys(incoming).filter((k) => !(k in clean));
+            // dropdown option of the board being VIEWED with no label of the same words here. A
+            // status goes missing from `clean`; a dropdown stays in it with the option filtered
+            // out, so its entries are checked one by one. An option the row ALREADY holds is let
+            // through: a since-deleted one rides back in every multi-select edit and is dropped
+            // as it always was, and refusing for it would leave the row uneditable from the
+            // working board for a reason nobody can see there. An entry that is no id at all ({…},
+            // null, an empty string, a number) is refused the same way: sanitizeValues turned each
+            // of those into [] with a 200 too. (A whole cell sent as null, "" or [] is a clear.)
+            const asList = (v: unknown) => (Array.isArray(v) ? v : v == null || v === "" ? [] : [v]);
+            // deno-lint-ignore no-explicit-any
+            const colOf = (k: string) => (columns as any[]).find((c) => c.id === k);
+            // deno-lint-ignore no-explicit-any
+            const offeredBy = (col: any) => new Set((col.settings?.options || []).map((o: any) => o.id));
+            const lost = asked.filter((k) => {
+              if (!(k in clean)) return true;
+              const col = colOf(k);
+              if (col?.type !== "dropdown") return false;
+              const offered = offeredBy(col);
+              const had = asList((item.values || {})[k]);
+              return asList(incoming[k]).some((x) => {
+                const id = typeof x === "string" ? str(x, 40) : x;
+                return !had.includes(id) && (typeof id !== "string" || !offered.has(id));
+              });
+            });
             if (lost.length) {
-              // deno-lint-ignore no-explicit-any
-              const names = lost.map((k) => ((columns as any[]).find((c) => c.id === k)?.name) || k);
+              const names = lost.map((k) => colOf(k)?.name || k);
               return json({ error: `That choice does not exist on the board this item lives on (${names.join(", ")}). Open the item there to change it.` }, 400);
+            }
+            // ⚠️ A SINGLE-CHOICE COLUMN KEEPS THE FIRST CHOICE AND DROPS THE REST. The page decides
+            // single or multi from the column it is SHOWING, so a multi-select App on the working
+            // board can send two choices to a single-choice App here, and sanitizeValues saved the
+            // first with a 200 while the cell showed both. Every real choice sent must be kept.
+            const crowded = asked.filter((k) => {
+              const col = colOf(k);
+              if (col?.type !== "dropdown") return false;
+              const offered = offeredBy(col);
+              const kept = asList(clean[k]);
+              return asList(incoming[k]).some((x) => typeof x === "string" && offered.has(str(x, 40)) && !kept.includes(str(x, 40)));
+            });
+            if (crowded.length) {
+              const limits = crowded.map((k) => {
+                const col = colOf(k);
+                return `${col?.name || k} takes ${col?.settings?.multi === true ? "fewer choices" : "one choice"}`;
+              });
+              return json({ error: `On the board this item lives on, ${limits.join("; ")}. Open the item there to change it.` }, 400);
             }
           }
           newValues = { ...item.values, ...clean };
@@ -1098,7 +1526,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (error) throw error;
         if (newValues) await propagateStatus(item, columns, newValues, item.values || {});
         else await act(item.board_id, item.id, "rename_item", {});
-        return json({ item: updated });
+        return json({ item: await decorateItem(updated) });
       }
 
       case "move_items": {
@@ -1119,6 +1547,179 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         }
         await act(dest.board_id, ids.length === 1 ? ids[0] : null, "move_items", { count: ids.length, to: dest.name });
         return json({ ok: true });
+      }
+
+      // ── MOVING A CARD TO ANOTHER BOARD (Carolyn 2026-10-26) ───────────────
+      //
+      // move_items above deliberately refuses this: it exists for dragging a card between
+      // GROUPS, and its `.eq("board_id", dest.board_id)` is load-bearing for the overlay,
+      // where somebody else's card is on your table and must not be rewritten onto your
+      // board. A real move is a different operation and gets its own two actions, because
+      // it cannot be done blind — see below.
+      //
+      // WHY A PLAN FIRST. Every board seeds its own column UUIDs, so "Priority" on Bugs and
+      // "Priority" on Feature Requests are different ids for the same idea; pmOverlay's
+      // columnIdMap already matches them on name+type for the overlay's read path, and the
+      // same map is what a move needs. What it cannot decide is the LEFTOVERS: a filled cell
+      // whose column has no counterpart on the destination. Dropping it silently is data
+      // loss nobody saw; refusing the move outright blocks a move people actually want.
+      //
+      // Carolyn's answer (2026-10-26) was neither: "Give the option of matching the field to
+      // an existing or the option to create new, or disregard and delete." So move_plan says
+      // exactly what matched, what did not, and what the alternatives are, and the browser
+      // sends one decision per leftover back to move_to_board.
+      case "move_plan": {
+        const ids = (Array.isArray(payload.ids) ? payload.ids : []).map((x: unknown) => str(x, 40)).filter(Boolean);
+        const toBoardId = str(payload.toBoardId, 40);
+        const src = await moveSource(ids);
+        if ("error" in src) return json({ error: src.error }, src.status);
+        if (src.board.id === toBoardId) return json({ error: "Those cards are already on that board." }, 400);
+
+        const { data: toBoard } = await admin.from("pm_boards")
+          .select("id, name").eq("id", toBoardId).is("archived_at", null).maybeSingle();
+        if (!toBoard) return json({ error: "Board not found." }, 404);
+
+        const [srcCols, destCols, groupsRes] = await Promise.all([
+          boardColumns(src.board.id),
+          boardColumns(toBoardId),
+          admin.from("pm_groups").select("id, name, position").eq("board_id", toBoardId).order("position"),
+        ]);
+        if (groupsRes.error) throw groupsRes.error;
+
+        const auto = columnIdMap(srcCols, destCols);
+        const destById = new Map(destCols.map((c) => [c.id, c]));
+        // Only columns that actually HOLD something on the selected cards are worth asking
+        // about. An empty cell has nothing to lose, and listing every blank column would
+        // bury the two decisions that matter under twelve that do not.
+        const filled = new Map<string, number>();
+        for (const it of src.items) {
+          for (const [k, v] of Object.entries((it.values || {}) as Record<string, unknown>)) {
+            if (v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length)) continue;
+            filled.set(k, (filled.get(k) || 0) + 1);
+          }
+        }
+
+        const matched = [];
+        const unmatched = [];
+        for (const c of srcCols) {
+          const n = filled.get(c.id) || 0;
+          if (!n) continue;
+          const destId = auto.get(c.id);
+          if (destId) {
+            const dc = destById.get(destId);
+            // A matched CHOICE column can still lose individual cells: the columns line up
+            // by name and type, but a label this card is actually using may not exist over
+            // there. Said up front, because it is invisible afterwards.
+            const lost: string[] = [];
+            if (dc && (c.type === "status" || c.type === "dropdown")) {
+              const cm = choiceIdMap(c, dc);
+              const destIds = new Set(((dc.settings?.labels || dc.settings?.options || []) as Array<{ id?: string }>).map((o) => String(o?.id)));
+              const srcChoices = (c.settings?.labels || c.settings?.options || []) as Array<{ id?: string; label?: string }>;
+              for (const it of src.items) {
+                const raw = (it.values || {})[c.id];
+                for (const one of (Array.isArray(raw) ? raw : [raw])) {
+                  const id = String(one ?? "");
+                  if (!id) continue;
+                  if (cm.has(id) || destIds.has(id)) continue;
+                  const label = (srcChoices.find((o) => String(o?.id) === id) || {}).label;
+                  if (label && !lost.includes(String(label))) lost.push(String(label));
+                }
+              }
+            }
+            matched.push({ id: c.id, name: c.name, type: c.type, destId, destName: dc ? dc.name : "", filled: n, lostChoices: lost });
+          } else {
+            unmatched.push({
+              id: c.id, name: c.name, type: c.type, filled: n,
+              // Only columns of the SAME TYPE are offered: putting a date into a status
+              // column would store a value the destination can never render.
+              candidates: destCols.filter((d) => d.type === c.type).map((d) => ({ id: d.id, name: d.name })),
+            });
+          }
+        }
+        return json({
+          from: { id: src.board.id, name: src.board.name },
+          to: { id: toBoard.id, name: toBoard.name },
+          groups: groupsRes.data || [],
+          items: src.items.map((i: { id: string; name: string }) => ({ id: i.id, name: i.name })),
+          matched, unmatched,
+        });
+      }
+
+      case "move_to_board": {
+        const ids = (Array.isArray(payload.ids) ? payload.ids : []).map((x: unknown) => str(x, 40)).filter(Boolean);
+        const toBoardId = str(payload.toBoardId, 40);
+        const src = await moveSource(ids);
+        if ("error" in src) return json({ error: src.error }, src.status);
+        if (src.board.id === toBoardId) return json({ error: "Those cards are already on that board." }, 400);
+
+        const { data: group } = await admin.from("pm_groups")
+          .select("id, name, board_id").eq("id", str(payload.groupId, 40)).maybeSingle();
+        if (!group || group.board_id !== toBoardId) {
+          return json({ error: "Pick a group on the board you are moving to." }, 400);
+        }
+
+        const srcCols = await boardColumns(src.board.id);
+        let destCols = await boardColumns(toBoardId);
+        const map = columnIdMap(srcCols, destCols);
+
+        // The leftovers, one decision each. Anything not named here keeps the default the
+        // plan showed: unmatched and undecided means the cell is dropped.
+        const decisions = (payload.decisions || {}) as Record<string, { action?: string; destColId?: string }>;
+        const created: string[] = [];
+        for (const c of srcCols) {
+          if (map.has(c.id)) continue;
+          const d = decisions[c.id];
+          if (!d || d.action === "drop") continue;
+          if (d.action === "map") {
+            const target = destCols.find((x) => x.id === str(d.destColId, 40));
+            if (!target) return json({ error: `Pick a column for "${c.name}" on the board you are moving to, or choose to leave it behind.` }, 400);
+            if (target.type !== c.type) return json({ error: `"${c.name}" is a ${c.type} column and "${target.name}" is a ${target.type} one — they can't hold the same value.` }, 400);
+            map.set(c.id, target.id);
+            continue;
+          }
+          if (d.action === "create") {
+            // Copied WHOLE, settings included, which is the point: the new column keeps the
+            // source's own label/option ids, so every value walks across unchanged and no
+            // choice has to be matched by text. sanitizeSettings still rebuilds it, so
+            // nothing unvetted reaches the column.
+            const { data: maxRow } = await admin.from("pm_columns").select("position")
+              .eq("board_id", toBoardId).order("position", { ascending: false }).limit(1).maybeSingle();
+            const { data: col, error: cErr } = await admin.from("pm_columns").insert({
+              board_id: toBoardId, type: c.type, name: c.name,
+              settings: sanitizeSettings(c.type, c.settings),
+              position: (maxRow?.position || 0) + 1024,
+              width: c.width ?? null,
+            }).select().single();
+            if (cErr) throw cErr;
+            destCols = destCols.concat(col);
+            map.set(c.id, col.id);
+            created.push(c.name);
+            await act(toBoardId, null, "create_column", { name: c.name, type: c.type, via: "move" });
+            continue;
+          }
+          return json({ error: `Don't know what to do with "${c.name}".` }, 400);
+        }
+
+        const { data: maxRow } = await admin.from("pm_items").select("position")
+          .eq("group_id", group.id).order("position", { ascending: false }).limit(1).maybeSingle();
+        let pos = (maxRow?.position || 0) + 1024;
+        for (const it of src.items) {
+          const values = remapValues(it.values as Record<string, unknown>, map, srcCols, destCols);
+          const { error } = await admin.from("pm_items").update({
+            board_id: toBoardId, group_id: group.id, position: pos, values,
+            updated_at: new Date().toISOString(),
+          }).eq("id", it.id).eq("board_id", src.board.id);   // nobody else moved it meanwhile
+          if (error) throw error;
+          pos += 1024;
+          // Logged on BOTH boards. The card leaves one table and appears on another, and
+          // whoever watches the board it left needs the row that says where it went —
+          // pm_activity is keyed by board, so one insert would only tell half the story.
+          await act(src.board.id, it.id, "move_to_board", { name: it.name, to: toBoardId });
+          await act(toBoardId, it.id, "move_to_board", { name: it.name, from: src.board.id });
+        }
+        // Notes, attachments, the client's own submission link and the item's whole history
+        // are keyed by ITEM id, so they travel with the card and nothing here touches them.
+        return json({ ok: true, moved: src.items.length, created });
       }
 
       case "reorder_item": {
@@ -1204,7 +1805,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (!name) return json({ error: "Give this view a name." }, 400);
         const columns = await boardColumns(boardId);
         if (!columns.length) return json({ error: "Board not found." }, 404);
-        const snap = sanitizeSnap(payload.snap, new Set(columns.map((c) => c.id)));
+        // The synthetic Created / Requestor ids are legal in a view (sort by Created, hide
+        // Requestor, filter a date range on Created) even though they are in no pm_columns row
+        // — the length check above stays on the REAL columns, which is what says "board not
+        // found" rather than "this board has only the two built-ins".
+        const snap = sanitizeSnap(payload.snap, new Set(withSystemColumns(columns).map((c) => (c as { id: string }).id)));
         const { data: maxRow } = await admin.from("pm_views").select("position")
           .eq("board_id", boardId).order("position", { ascending: false }).limit(1).maybeSingle();
         // Upsert on (board_id, name): saving over a name replaces that view, which is what
@@ -1524,6 +2129,17 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           row.requires_feature = rf || null;   // "" clears it
         }
         if (payload.builderVisible !== undefined) row.builder_visible = payload.builderVisible === true;
+        // WHICH ACCOUNTS (migration 368): every account, shed builders only, or SmartBuild builders
+        // only (client_settings.sheds_enabled = false). Refused rather than coerced, for the
+        // requires_feature reason above: a wrong value would hide a step with nothing on screen to
+        // say why. Same `!== undefined` rule.
+        if (payload.accountType !== undefined) {
+          const at = str(payload.accountType, 20) || "all";
+          if (!["all", "sheds", "smartbuild"].includes(at)) {
+            return json({ error: `"${at}" is not an account type. Pick Every account, Shed builders or SmartBuild builders.` }, 400);
+          }
+          row.account_type = at;
+        }
         if (id) {
           const { error } = await admin.from("setup_template_items").update(row).eq("id", id);
           if (error) throw error;

@@ -154,29 +154,34 @@ export function mergeDraft(prior, draft, source = "video") {
   // wingWidthFt over 0 = no wings) and the frame (roof.front / roof.highSide), so a stored one
   // cannot turn the scored building a quarter turn away from what the draft measured.
   // A draft that reports a roof TYPE replaces the roof (2026-09-25), keeping only the builder's own
-  // plateBand / overhangStyle — calDraftRoof's rule, so a stale dormer is never scored either.
-  const BUILDER_ONLY = ["plateBand", "overhangStyle"];
+  // plateBand / overhangStyle / seat / rafterDepthIn — calDraftRoof's rule, so a stale dormer is never scored either.
+  const BUILDER_ONLY = ["plateBand", "overhangStyle", "seat", "rafterDepthIn"];
   const base = {};
   if (dr.type) { for (const k of BUILDER_ONLY) if (p.roof && k in p.roof) base[k] = p.roof[k]; }
   const roof = dr.type ? { ...base, ...dr } : { ...(p.roof || {}), ...dr };
   const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
   const was = p.roof || null;
   if ((dr.porchOutFt || 0) > 0.5) {
-    delete roof.porchDepthFt; delete roof.porchTruss;
+    delete roof.porchDepthFt; delete roof.porchTruss; delete roof.porchGable;
     for (const k of own) if (!(k in dr)) delete roof[k];
-    // A flight off an end of the deck, and its count, stay (calDraftRoof, 2026-10-04).
-    if (!("porchSteps" in dr) && was && (was.porchSteps === "leftSide" || was.porchSteps === "rightSide")) {
+    // A flight off an end of the deck, and its count, stay (calDraftRoof, 2026-10-04), from a stored
+    // projecting porch only: never a stored recessed porch's side flight (review, 2026-10-08).
+    if (!("porchSteps" in dr) && was && (Number(was.porchOutFt) || 0) > 0.5
+        && (was.porchSteps === "leftSide" || was.porchSteps === "rightSide")) {
       roof.porchSteps = was.porchSteps;
       if ("porchStepCount" in was) roof.porchStepCount = was.porchStepCount;
     }
   } else if ((dr.porchDepthFt || 0) > 0.5) {
     delete roof.porchOutFt;
     // A recessed porch's steps along its front, and their count, stay (calDraftRoof, 2026-10-03), taken
-    // back by a typed draft from a stored recessed porch only (2026-10-04).
+    // back by a typed draft from a stored recessed porch only (2026-10-04). A flight off one of its open
+    // sides (2026-10-07) stays the same way, never one off a stored projecting deck's end.
     if (!("porchSteps" in dr) && was && !((Number(was.porchOutFt) || 0) > 0.5) && (Number(was.porchDepthFt) || 0) > 0.5) {
       for (const k of ["porchSteps", "porchStepCount"]) if (k in was) roof[k] = was[k];
     }
-    const keepSteps = ["left", "center", "right"].indexOf(roof.porchSteps) >= 0;
+    const offDeck = !("porchSteps" in dr) && !!was && (Number(was.porchOutFt) || 0) > 0.5;
+    const keepSteps = ["left", "center", "right"].indexOf(roof.porchSteps) >= 0
+      || ((roof.porchSteps === "leftSide" || roof.porchSteps === "rightSide") && !offDeck);
     for (const k of own) if (!(keepSteps && (k === "porchSteps" || k === "porchStepCount"))) delete roof[k];
   }
   if (dr.type) {
@@ -334,6 +339,12 @@ const FIELDS = [
   { id: "roof.porchTruss", group: G.PORCH, w: 2, kind: "cat",
     live: (t, ctx) => porchKind(roofOf(t)) === "recessed" && ctx.kindMatches,
     get: (s) => (roofOf(s).porchTruss === true ? "yes" : "no"), stated: (d) => typeof roofOf(d).porchTruss === "boolean" },
+  // The gable over a recessed porch, open framing or sided (roof.porchGable, 2026-10-07): absent is sided,
+  // so only "open" is ever stated. Recessed porches only, like the truss; the sanitiser and both merges
+  // delete it beside a projecting porch.
+  { id: "roof.porchGable", group: G.PORCH, w: 2, kind: "cat",
+    live: (t, ctx) => porchKind(roofOf(t)) === "recessed" && ctx.kindMatches,
+    get: (s) => (roofOf(s).porchGable === "open" ? "open" : "sided"), stated: (d) => roofOf(d).porchGable != null },
 
   // ── C. eave and trim ─────────────────────────────────────────────────────────────────
   // AND THE EAVE, THE SAME WAY, THE DAY THE BUILDER PRESSES AN OVERHANG CHIP. Since the chip

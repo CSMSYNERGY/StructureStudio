@@ -1,7 +1,7 @@
 // ─── Settings (via portal-settings edge function; API key is write-only) ───
 
 // Is a failed `tax_settings` read a "no tax section here" rather than a fault to show?
-// These answers qualify, and each renders NOTHING (the sales-tax UI on CRM Connection and
+// These answers qualify, and each renders NOTHING (the sales-tax UI on GHL Connection and
 // on Company → Locations reads this):
 //   • A portal-settings OLDER than this page. The frontend deploys itself on push and edge
 //     functions deploy separately, so for a while the page can be ahead of the function.
@@ -28,7 +28,7 @@ function ssQuoteDaysOk(v) {
   return n >= 1 && n <= 365;
 }
 
-function SettingsView({ section, view3d = false }) {
+function SettingsView({ section, view3d = false, onOpenTax = null, shedsOn = true }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
   // display + testing). No section = all (legacy). Form state always covers
@@ -64,13 +64,15 @@ function SettingsView({ section, view3d = false }) {
     // How many days a quote stays good for (migration 269). A STRING like every other field; "30"
     // is the column's default and what every quote printed before the setting existed.
     quoteValidDays: "30",
-    // Page 2 of the quote from all four corners (migration 276). Off is the column's default.
-    quoteCornerViews: false,
+    // Page 2 of the quote from all four corners (migration 276). On is the column's default since
+    // migration 322; the box shows only once status has said what is stored.
+    quoteCornerViews: true,
     // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
     invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
-    ssTaxRate: "", ssTaxLabel: "", ssTaxDelivery: false,
+    // (The company sales tax rate, its label and tax on delivery left this form on 2026-10-09: they
+    // are set on Company → Tax, and the Estimates & Invoices card reads them from `status`.)
     // Changing a signed order (migrations 209-216). coUnlockRequired defaults FALSE and
     // that is load-bearing: with it off the whole approval-and-fee regime is dormant and
     // every tenant behaves exactly as they did before the feature existed.
@@ -113,10 +115,16 @@ function SettingsView({ section, view3d = false }) {
   // at 8 if the default ever moves. Same idea as the logo: the key is sent only when the owner
   // actually picked a different number, and save_branding leaves the column alone otherwise.
   const [brandSprStored, setBrandSprStored] = useState(null);
+  // The brand palette (336): its own state, not a key on `form`, because it is a LIST and the
+  // `set()` helper on this page edits strings. Staged like the logo — Save Branding sends it.
+  const [brandColors, setBrandColors] = useState([]);
   const saveBranding = async () => {
     setBrandBusy(true); setBrandMsg(null);
     const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
-      accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
+      accentColor: form.brandAccent, headerBg: form.brandHeaderBg,
+      // Rows with no usable color are dropped here as well as on the server, so what the card
+      // shows after a save is what was actually stored.
+      brandColors: brandColors.filter((c) => ssHexColor(c.hex)).map((c) => ({ name: String(c.name || "").trim(), hex: ssHexColor(c.hex) })) };
     if (form.brandStylesPerRow !== (brandSprStored || "8")) body.stylesPerRow = Number(form.brandStylesPerRow);
     if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
     else if (clearLogo) { body.logoUrl = ""; }
@@ -124,6 +132,7 @@ function SettingsView({ section, view3d = false }) {
     setBrandBusy(false);
     if (err || (data && data.error)) { setBrandMsg({ err: (data && data.error) || err.message }); return; }
     if ("stylesPerRow" in body) setBrandSprStored(String(body.stylesPerRow));
+    setBrandColors(Array.isArray(data.brandColors) ? data.brandColors : body.brandColors);
     setBrandMsg({ ok: clearLogo && !logoDataUrl ? "Branding saved — your logo was removed, so the designer shows your company initials." : "Branding saved — your designer link now reflects it." });
     if (data.logoUrl) setCurrentLogo(data.logoUrl);
     if (clearLogo && !logoDataUrl) setCurrentLogo(null);
@@ -167,6 +176,7 @@ function SettingsView({ section, view3d = false }) {
       const b = data.branding || {};
       setCurrentLogo(b.logoUrl || null);
       setBrandSprStored(b.stylesPerRow ? String(b.stylesPerRow) : null);
+      setBrandColors(Array.isArray(b.brandColors) ? b.brandColors.map((c) => ({ name: String(c.name || ""), hex: String(c.hex || "") })) : []);
       setForm({
         ghlPipelineId: data.ghlPipelineId || "",
         ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
@@ -187,12 +197,6 @@ function SettingsView({ section, view3d = false }) {
         ssQuotePrefix: data.ssQuotePrefix || "",
         ssInvoiceNext: data.ssInvoiceNext == null ? "" : String(data.ssInvoiceNext),
         ssInvoicePrefix: data.ssInvoicePrefix || "",
-        // Sales tax (migration 158). The status call surfaces the stored fraction as a
-        // PERCENT; blank means "never answered", which the server refuses to let SS-issued
-        // mode start with — 0 is a legitimate explicit answer, silence is not.
-        ssTaxRate: data.ssTaxRate == null ? "" : String(data.ssTaxRate),
-        ssTaxLabel: data.ssTaxLabel || "",
-        ssTaxDelivery: Boolean(data.ssTaxDelivery),
         coUnlockRequired: Boolean(data.coUnlockRequired),
         coFreeDays: data.coFreeDays == null ? "0" : String(data.coFreeDays),
         coFee: data.coFee == null ? "0" : String(data.coFee),
@@ -223,7 +227,7 @@ function SettingsView({ section, view3d = false }) {
     // mistake: it means the 30 its placeholder shows, as the server's parseQuoteValidDays reads it.
     const quoteDaysBlank = String(form.quoteValidDays ?? "").trim() === "";
     if (quoteDaysReady && !quoteDaysBlank && !ssQuoteDaysOk(form.quoteValidDays)) {
-      setError("Quotes have to stay good for a whole number of days, from 1 to 365.");
+      setError("Estimates have to stay good for a whole number of days, from 1 to 365.");
       return;
     }
     setBusy(true);
@@ -243,7 +247,7 @@ function SettingsView({ section, view3d = false }) {
       // 269 never sees the key, so this page can ship ahead of either without breaking the save.
       ...(quoteDaysReady ? { quoteValidDays: quoteDaysBlank ? 30 : Number(form.quoteValidDays) } : {}),
       // Only when `status` could read the column (migration 276), and only when the owner changed
-      // it: a save from Branding or CRM Connection, or one from a tab opened before someone else
+      // it: a save from Branding or GHL Connection, or one from a tab opened before someone else
       // flipped the switch, then never writes back a value nobody on this screen chose.
       ...(cornerReady && form.quoteCornerViews !== status.quoteCornerViews ? { quoteCornerViews: form.quoteCornerViews === true } : {}),
     };
@@ -266,7 +270,7 @@ function SettingsView({ section, view3d = false }) {
   // Junior Barns as he is an active user. All other builders will only have the option to
   // invoice through SS. They can still have the customer info pass to GHL if they choose."
   //
-  // So this hides ONE checkbox. The CRM Connection card above is untouched — location id,
+  // So this hides ONE checkbox. The GHL Connection card above is untouched — location id,
   // API key, pipeline and stages stay for everyone, and submit-estimate keeps mirroring
   // contacts and opportunities into a connected CRM while we issue the paperwork.
   //
@@ -285,6 +289,17 @@ function SettingsView({ section, view3d = false }) {
   // cannot choose, SS mode is the only mode — including while their row still says otherwise,
   // which is exactly when they need the numbering fields in front of them.
   const ssMode = !mayGhlInvoice || !form.invoiceInGhl;
+  // What a BLANK starting-number box will actually print (migration 283): the counter already in
+  // use when there is one (the save keeps a set counter over a blank), otherwise 1000. `stored` is
+  // the saved counter as status reports it, so the preview never promises 1000 to a builder whose
+  // numbering has moved on.
+  const blankStart = (stored) => (stored == null || stored === "" ? "1000" : String(stored));
+  // The company rate's home since 2026-10-09: Company → Tax. A same-document switch where the shell
+  // gave us one (SettingsShell's setSub), a plain link otherwise; ssPagePath keeps ?view=.
+  const taxLink = (text, color = ACCENT) => (
+    <a href={ssPagePath("settings", "tax")} onClick={onOpenTax ? ssNavClick(onOpenTax) : undefined}
+      style={{ color, fontWeight: 700, textDecoration: "underline" }}>{text}</a>
+  );
 
   // SALES TAX SUMMARY — read-only, under the company rate (Avalara plan, 2026-09-17). Which rate
   // a quote charges is no longer just the box on this card: a sales location's own rate beats
@@ -293,7 +308,7 @@ function SettingsView({ section, view3d = false }) {
   // it here, never flip it. No price is shown — the meters are off, and a price read follows
   // the catalog redaction precedent when it is needed.
   //
-  // Asked only on the CRM Connection screen, and only when the SAVED row is SS mode —
+  // Asked only on the GHL Connection screen, and only when the SAVED row is SS mode —
   // `status.invoiceInGhl === false`, the same test submit-estimate makes
   // (`invoice_in_ghl !== false` is the CRM path). NOT `ssMode` above: that one is true for a
   // grandfathered tenant without the capability whose row still says CRM, so their
@@ -349,15 +364,17 @@ function SettingsView({ section, view3d = false }) {
       ssQuotePrefix: form.ssQuotePrefix,
       ssInvoiceNext: form.ssInvoiceNext,
       ssInvoicePrefix: form.ssInvoicePrefix,
-      ssTaxRate: form.ssTaxRate,
-      ssTaxLabel: form.ssTaxLabel,
-      ssTaxDelivery: form.ssTaxDelivery,
+      // NO ssTaxRate / ssTaxLabel / ssTaxDelivery (2026-10-09). The company rate is set on Company →
+      // Tax (save_company_tax). Posting this card's copy of it on every save would write back a
+      // value read when the tab opened over a rate changed there since. `save`'s paperwork guard
+      // reads the STORED rate when the key is absent, so moving to paperwork with no rate on file
+      // is still refused with the server's sentence.
     } });
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
     setInvMsg({ ok: (mayGhlInvoice && form.invoiceInGhl)
-      ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
-      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM if one is connected." });
+      ? "Saved — your estimates and invoices are created in your CRM, exactly as before."
+      : "Saved — StructureStudio now issues your estimates and invoices. Contacts and opportunities still go to your CRM if one is connected." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -429,6 +446,21 @@ function SettingsView({ section, view3d = false }) {
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
     loadPipelines();   // now connected → load pipelines/stages for the dropdowns
+  };
+
+  // Disconnect (Carolyn 2026-10-14). The confirm spells out the three things the server
+  // does — drop the credential, drop the pipeline/stage mapping, move quotes to Structure
+  // Studio paperwork — because the last one changes what customers receive.
+  const disconnectGhl = async () => {
+    if (!window.confirm("Disconnect your CRM?\n\n• The saved Location ID and API key are removed — reconnecting means pasting a key again.\n• Your pipeline & stage mapping is cleared.\n• Estimates and invoices go out through Structure Studio paperwork from now on.\n\nContacts already in your CRM are not touched.")) return;
+    setGhlMsg(null); setGhlBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "disconnect_ghl" } });
+    setGhlBusy(false);
+    if (err || (data && data.error)) { setGhlMsg({ err: (data && data.error) || (err && err.message) || "Couldn't disconnect." }); return; }
+    setGhlMsg({ ok: data.movedToSs ? "CRM disconnected. Estimates and invoices now go out through Structure Studio paperwork." : "CRM disconnected." });
+    setGhlApiKey(""); setGhlLocationId(""); setPipelines([]);
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
   };
 
   // Fetch this tenant's CRM (GoHighLevel) pipelines + stages (server-side, using the
@@ -561,88 +593,89 @@ function SettingsView({ section, view3d = false }) {
 
       {show("connection") && (<>
       <div style={S.card}>
-        <div style={S.h2}>CRM Connection</div>
+        <div style={S.h2}>GHL Connection</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
           {status && status.configured
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
-            : <>Not connected. Optional — connect one to mirror contacts and quotes into it. With no CRM, contacts stay in Structure Studio and quotes go out through Structure Studio paperwork (switch it on below).</>}
+            : <>Not connected. Optional — connect GHL to mirror contacts and estimates into it. With no connection, contacts stay in Structure Studio and estimates go out through Structure Studio paperwork (switch it on below).</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
         {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-          <div><span style={S.lbl}>CRM Location ID</span>
+          <div><span style={S.lbl}>GHL Location ID</span>
             <input style={S.input} name="ss-ghl-location-id" autoComplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" spellCheck={false} value={ghlLocationId} onChange={(e) => setGhlLocationId(e.target.value)} placeholder={status && status.ghlLocationIdMasked ? `saved: ${status.ghlLocationIdMasked}` : "e.g. sp58arigVfqozsJSPe1z"} /></div>
-          <div><span style={S.lbl}>CRM API Key</span>
+          <div><span style={S.lbl}>GHL API Key</span>
             <PasswordInput style={S.input} name="ss-ghl-api-key" autoComplete="new-password" data-lpignore="true" data-1p-ignore data-form-type="other" value={ghlApiKey} onChange={(e) => setGhlApiKey(e.target.value)} placeholder={status && status.hasApiKey ? "•••• saved — type to replace" : "pit-…"} /></div>
         </div>
-        <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
-        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against your CRM and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+          <button type="button" onClick={saveGhl} disabled={ghlBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: ghlBusy ? 0.6 : 1 }}>{ghlBusy ? "Verifying…" : "Verify & Save Connection"}</button>
+          {status && status.configured && (
+            <button type="button" onClick={disconnectGhl} disabled={ghlBusy} style={{ ...S.btn("#FFF", "#DC2626"), border: "1px solid #FECACA", opacity: ghlBusy ? 0.6 : 1 }}>Disconnect GHL</button>
+          )}
+        </div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Checks the Location ID + API key against GHL and saves only if they work. Once connected, choose your pipeline &amp; stages below. (On Synergy or another GoHighLevel-based CRM, both values come from your sub-account settings.)</div>
       </div>
 
       {/* Quotes & Invoices (migration 121). ON is what every tenant has done since day one:
           the quote and the invoice are objects in the CRM. OFF moves BOTH documents into
           StructureStudio — and the copy has to be explicit that contacts and opportunities
           still go to the CRM, because "invoice in StructureStudio" reads like "stop using my
-          CRM" otherwise. The starting number is required before the switch can go off (the
-          server refuses the save without one); numbering that silently restarted at 1 would
-          collide with the paperwork a builder already has out. */}
+          CRM" otherwise. The starting numbers are optional since migration 283 (Carolyn
+          2026-10-06): left blank, quotes and invoices each start at 1000, or carry on one past
+          the last number issued under the prefix, so a book never restarts at 1. A box cleared
+          over a counter already in use keeps that counter (the server ignores the blank), and
+          the preview says so. The tax rate is still required (the server refuses the save
+          without one), and it is set on Company → Tax: this card summarises it and links there. */}
       <div style={S.card}>
-        <div style={S.h2}>Quotes &amp; Invoices</div>
+        <div style={S.h2}>Estimates &amp; Invoices</div>
         {mayGhlInvoice && (
           <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
             <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
-            Quote and invoice through my CRM
+            Estimates and invoices through my CRM
           </label>
         )}
         <p style={{ fontSize: 12, color: "#64748B", marginTop: mayGhlInvoice ? 6 : 0, marginBottom: 0, lineHeight: 1.5 }}>
           {!ssMode
             ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
-            : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your quotes and invoices." : "StructureStudio issues your quotes and invoices."}</b> Each quote is one document: the priced
-                estimate, the floor plan, and, if you have 3D, a 3D picture of the building. Your customer accepts it from
-                their quote page, and you invoice from the Orders tab. If a CRM is connected, contacts and
+            : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your estimates and invoices." : "StructureStudio issues your estimates and invoices."}</b> Each estimate is one document: the price
+                breakdown, the floor plan, and, if you have 3D, a 3D picture of the building. Your customer accepts it from
+                their estimate page, and you invoice from the Orders tab. If a CRM is connected, contacts and
                 opportunities still go there so your pipeline keeps working; if not, everything stays in Structure Studio.</>}
         </p>
         {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
-            <div><span style={S.lbl}>Starting quote number</span>
-              <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="e.g. 1041" inputMode="numeric" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off. Counts up by one per quote.</div></div>
-            <div><span style={S.lbl}>Quote prefix (optional)</span>
+            <div><span style={S.lbl}>Starting estimate number</span>
+              <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="1000" inputMode="numeric" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Pick up where your CRM or QuickBooks left off, or leave blank to start at 1000 (or carry on after your last estimate). Counts up by one per estimate.</div></div>
+            <div><span style={S.lbl}>Estimate prefix (optional)</span>
               <input style={S.input} value={form.ssQuotePrefix} onChange={set("ssQuotePrefix")} placeholder="e.g. JB-" maxLength={12} />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || "1041")}.</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Letters, numbers and dashes. Shows on the document as {(form.ssQuotePrefix || "") + (form.ssQuoteNext || blankStart(status && status.ssQuoteNext))}.</div></div>
             <div><span style={S.lbl}>Starting invoice number</span>
-              <input style={S.input} value={form.ssInvoiceNext} onChange={set("ssInvoiceNext")} placeholder="e.g. 2001" inputMode="numeric" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from quotes — set where they begin.</div></div>
+              <input style={S.input} value={form.ssInvoiceNext} onChange={set("ssInvoiceNext")} placeholder="1000" inputMode="numeric" />
+              {/* The QuickBooks line follows the CONNECTION (status.qboConnected), not the
+                  subscription: send_invoice refuses a blank start while a connected company would
+                  receive the invoice, because QuickBooks may already hold an invoice 1000. */}
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Invoices number separately from estimates. Leave blank to start at 1000 (or carry on after your last invoice).{status && status.qboConnected === true && <> Connected to QuickBooks? Enter your next QuickBooks invoice number.</>}</div></div>
             <div><span style={S.lbl}>Invoice prefix (optional)</span>
               <input style={S.input} value={form.ssInvoicePrefix} onChange={set("ssInvoicePrefix")} placeholder="e.g. INV-" maxLength={12} />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || "2001")}.</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || blankStart(status && status.ssInvoiceNext))}.</div></div>
           </div>
         )}
-        {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
-            own documents. The rate here is the COMPANY rate, and it is the last rung a quote
-            can land on: a rate verified for the delivery address wins, then the quote's
-            sales location's own rate (migration 244), then this. Nothing looks an address up
-            on its own — a verified rate only exists where someone asked for one. That is why
-            the server refuses to flip SS mode on while this is blank: with no location rate
-            either, a quote would have nothing to charge. 0 is a real answer, "unanswered" is
-            not.
-
-            The help text used to say tax was "figured from each quote's delivery address" and
-            this rate charged "when that lookup can't resolve". Neither was true once lookups
-            stopped running on every submit, and a builder reading it would believe every
-            quote was being checked. */}
+        {/* Sales tax (migration 158). SS mode only: in CRM mode the CRM computes tax on its
+            own documents. The rate is the COMPANY rate, and it is the last rung an estimate can
+            land on: a rate verified for the delivery address wins, then the estimate's sales
+            location's own rate (migration 244), then this. Since 2026-10-09 it is SET on Company →
+            Tax (save_company_tax) and only SUMMARISED here, from `status` (the stored values, not
+            a form): two editors of one rate would let a stale tab write an old value back. The
+            server still refuses to flip SS mode on while it is blank; 0 is a real answer,
+            "unanswered" is not. */}
         {ssMode && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
-            <div><span style={S.lbl}>Sales tax rate (%)</span>
-              <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Used on every quote unless the quote's sales location has its own rate, or someone verifies the rate for its delivery address. Enter 0 if you don't collect sales tax.</div></div>
-            <div><span style={S.lbl}>Tax label on documents</span>
-              <input style={S.input} value={form.ssTaxLabel} onChange={set("ssTaxLabel")} placeholder="Sales tax" maxLength={40} />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on quotes and invoices.</div>
-              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>
-                <input type="checkbox" checked={form.ssTaxDelivery} onChange={set("ssTaxDelivery")} />
-                Charge tax on delivery
-              </label></div>
+          <div data-company-tax-summary="" style={{ marginTop: 12, maxWidth: 620, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B", marginBottom: 4 }}>Company sales tax rate</div>
+            {status && status.ssTaxRate != null
+              ? <><b>{status.ssTaxRate}%</b>, shown on documents as “{status.ssTaxLabel || "Sales tax"}”, {status.ssTaxDelivery === true ? "also charged on delivery" : "not charged on delivery"}.</>
+              : <>Not set yet.</>}
+            {" "}{taxLink("Change it in Company → Sales Tax")}
           </div>
         )}
         {/* Read-only: where else a quote's rate can come from, and whether verified lookups
@@ -659,32 +692,34 @@ function SettingsView({ section, view3d = false }) {
                 <div>
                   <b>Local rates:</b>{" "}
                   {withRate > 0
-                    ? <>{withRate} of your sales locations {withRate === 1 ? "has its" : "have their"} own rate, used on quotes for {withRate === 1 ? "that location" : "those locations"}. Set them in Company → Locations.</>
+                    ? <>{withRate} of your sales locations {withRate === 1 ? "has its" : "have their"} own rate, used on estimates for {withRate === 1 ? "that location" : "those locations"}. Set them in Company → Locations.</>
                     : <>none yet. A sales location can carry your local rate — set one in Company → Locations.</>}
                 </div>
                 <div style={{ marginTop: 4 }}>
                   <b>Verified lookups:</b>{" "}
                   {!taxInfo.lookupEnabled
-                    ? <>off for your account. CSM Synergy switches these on; until then your quotes use your company and local rates.</>
+                    ? <>off for your account. CSM Synergy switches these on; until then your estimates use your company and local rates.</>
                     : taxInfo.configured === false
-                      ? <>on for your account, but the lookup service isn't connected right now — quotes use your company and local rates until it is.</>
-                      : <>on for your account. A quote's rate can be verified against its delivery address before your customer signs.
+                      ? <>on for your account, but the lookup service isn't connected right now — estimates use your company and local rates until it is.</>
+                      : <>on for your account. An estimate's rate can be verified against its delivery address before your customer signs.
                           {/* usage24h is null when the lookup ledger can't be counted: unknown, not zero. */}
-                          {taxInfo.dailyCap != null && typeof taxInfo.usage24h === "number" && <> {taxInfo.usage24h} of {taxInfo.dailyCap} used in the last 24 hours.</>}</>}
+                          {taxInfo.dailyCap != null && typeof taxInfo.usage24h === "number" && <> {taxInfo.usage24h} of {taxInfo.dailyCap} used in the last 24 hours.</>}
+                          {/* This UTC month (migration 319). Each figure is null when it can't be read: then it isn't shown. */}
+                          {typeof taxInfo.usageMonth === "number" && <> This month: {taxInfo.usageMonth} lookup{taxInfo.usageMonth === 1 ? "" : "s"}
+                            {typeof taxInfo.spendMonthCents === "number" && (taxInfo.spendMonthCents > 0
+                              ? <>, ${(taxInfo.spendMonthCents / 100).toFixed(2)} from your wallet (Billing → Transactions → Tax)</>
+                              : <>, nothing charged</>)}.</>}</>}
                 </div>
               </>);
             })()}
           </div>
         )}
-        {ssMode && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
-          <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Before saving, set{" "}
-            {[
-              !String(form.ssQuoteNext).trim() && "a starting quote number",
-              !String(form.ssInvoiceNext).trim() && "a starting invoice number",
-              !String(form.ssTaxRate).trim() && "your sales tax rate (0 counts)",
-            ].filter(Boolean).join(", ").replace(/, ([^,]*)$/, " and $1")}.
-            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a company tax rate a quote whose sales location has no rate of its own has nothing to charge.
+        {/* Only the tax rate is still required: a blank starting number begins at 1000 (283). It is
+            the STORED rate that counts (this card no longer posts one), so the banner reads status. */}
+        {ssMode && status && status.ssTaxRate == null && (
+          <div data-company-tax-needed="" style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            Before saving, set your sales tax rate in {taxLink("Company → Sales Tax", "#B45309")} (0 counts).
+            Without a company tax rate, an estimate whose sales location has no rate of its own has nothing to charge.
           </div>
         )}
         {ssMode && status && status.emailReady === false && (
@@ -695,7 +730,7 @@ function SettingsView({ section, view3d = false }) {
              happens (a working send under our name) rather than a failure that no longer
              occurs. Do not restore the old wording without closing that opening too. */
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Heads up: your own sending domain isn't verified yet (Settings → Email Settings), so quotes
+            Heads up: your own sending domain isn't verified yet (Settings → Email Settings), so estimates
             and invoices go out from our address on your behalf, with your business name as the
             sender. Verify your domain to send from your own address instead.
           </div>
@@ -704,7 +739,7 @@ function SettingsView({ section, view3d = false }) {
         {invMsg && invMsg.ok && <div style={{ ...S.okMsg, marginTop: 10 }}>{invMsg.ok}</div>}
         <button type="button" onClick={saveInvoicing} disabled={invBusy}
           style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: invBusy ? 0.6 : 1 }}>
-          {invBusy ? "Saving…" : "Save Quote & Invoice Settings"}
+          {invBusy ? "Saving…" : "Save Estimate & Invoice Settings"}
         </button>
       </div>
 
@@ -793,17 +828,26 @@ function SettingsView({ section, view3d = false }) {
         </div>
       )}
 
+      </>)}
+
       {/* CUSTOMER LOGIN CODE (migration 231; plan 3.6, Ahsan 2026-09-15: "Text AND email login
           codes before the expo"). The designer's Log in sheet offers Text | Email; this picks
           which one comes FIRST. customer-auth login_options only ever treats it as a preference
           among the channels the platform can actually deliver, so choosing Email before email
           codes are switched on changes nothing a customer sees — the copy says so rather than
-          promising a route. Every tenant, CRM or not: the login is ours either way. */}
+          promising a route. Every tenant, CRM or not: the login is ours either way.
+
+          ITS OWN SECTION since 2026-10-22 — Settings → Customer Hub → Customer login. It sat on
+          the connection page under the GHL credentials, which read as though it were part of
+          them; the sentence above is the reason it never was. The card is unchanged and so is
+          its save (saveLoginDefault, posting only customerLoginDefault), so moving it writes
+          nothing differently. */}
+      {show("customer-login") && (
       <div style={S.card}>
         <div style={S.h2}>Customer login code</div>
         <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
-          How your customers get the 6-digit code that logs them in to see, accept and sign their quotes
-          and invoices. This is the option they're offered first — they can still pick the other one.
+          How your customers get the 6-digit code that logs them in to see and accept their estimates,
+          and to sign and pay their invoices. This is the option they're offered first — they can still pick the other one.
         </p>
         <div role="group" aria-label="Customer login code" data-ss-login-default={form.customerLoginDefault === "email" ? "email" : "sms"}
           style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
@@ -826,15 +870,17 @@ function SettingsView({ section, view3d = false }) {
           </div>
         )}
       </div>
+      )}
 
+      {show("connection") && (<>
       {status && status.configured && (
         <div style={S.card}>
           <div style={S.h2}>Pipeline &amp; Stages</div>
           <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
             Map each fulfillment stage to a pipeline stage in your CRM. StructureStudio places a new deal at your
-            <b> "Send Quote"</b> stage; then the badge in your Contacts list advances <b>Quote Accepted → Invoiced →
+            <b> "Send Estimate"</b> stage; then the badge in your Contacts list advances <b>Estimate Accepted → Invoiced →
             Delivered</b> as you move that opportunity into the matching stage in your CRM. Each stage can live
-            in a <b>different pipeline</b> (e.g. Send Quote in "Building", Invoiced/Delivered in "Invoiced"). All
+            in a <b>different pipeline</b> (e.g. Send Estimate in "Building", Invoiced/Delivered in "Invoiced"). All
             optional — leave any blank to skip that stage.
           </p>
           {pipesMsg && pipesMsg.err && <div style={S.err}>{pipesMsg.err}</div>}
@@ -851,7 +897,7 @@ function SettingsView({ section, view3d = false }) {
           <div className="ss-stage-grid">
           {/* Send Quote — its own pipeline + stage (where new estimates land; persisted as ghl_pipeline_id + ghl_stage_send_quote_id) */}
           <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: 12 }}>
-            <div style={{ ...S.lbl, marginBottom: 8 }}>Send Quote — where new estimates land</div>
+            <div style={{ ...S.lbl, marginBottom: 8 }}>Send Estimate — where new estimates land</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
               <div><span style={S.lbl}>Pipeline</span>
                 <select style={S.input} value={form.ghlPipelineId} onChange={onPipelineChange}>
@@ -869,7 +915,7 @@ function SettingsView({ section, view3d = false }) {
                 </select></div>
             </div>
           </div>
-          {derivedRow("Quote Accepted — customer accepted the estimate", "ghlPipelineAcceptedId", "ghlStageAcceptedId")}
+          {derivedRow("Estimate Accepted — customer accepted the estimate", "ghlPipelineAcceptedId", "ghlStageAcceptedId")}
           {derivedRow("Invoiced — an invoice was sent", "ghlPipelineInvoicedId", "ghlStageInvoicedId")}
           {derivedRow("Delivered — marks the Delivered badge", "ghlPipelineDeliveredId", "ghlStageDeliveredId")}
           </div>
@@ -890,15 +936,18 @@ function SettingsView({ section, view3d = false }) {
         {brandMsg && brandMsg.ok && <div style={S.okMsg}>{brandMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
           <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} onKeyDown={brandKeyDown} /></div>
-          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} onKeyDown={brandKeyDown} placeholder="Design & Quote" /></div>
+          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} onKeyDown={brandKeyDown} placeholder="Design & Estimate" /></div>
+          {/* Hex box first, well second (Carolyn 2026-10-25: "I want the HEX codes to show the
+              first"). The well can only hold a hex, so it falls back to black for the gradient
+              header_bg legitimately carries — the box is the control, the well is the picker. */}
           <div><span style={S.lbl}>Accent color</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input type="color" value={form.brandAccent} onChange={set("brandAccent")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} onKeyDown={brandKeyDown} /></div></div>
+              <input style={{ ...S.input, flex: 1, fontFamily: "ui-monospace,Menlo,Consolas,monospace" }} value={form.brandAccent} onChange={set("brandAccent")} onKeyDown={brandKeyDown} aria-label="Accent color hex code" spellCheck={false} />
+              <input type="color" value={ssHexColor(form.brandAccent) || "#000000"} onChange={set("brandAccent")} aria-label="Accent color picker" style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer", flexShrink: 0 }} /></div></div>
           <div><span style={S.lbl}>Header background</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} /></div></div>
+              <input style={{ ...S.input, flex: 1, fontFamily: "ui-monospace,Menlo,Consolas,monospace" }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} aria-label="Header background hex code or gradient" spellCheck={false} />
+              <input type="color" value={ssHexColor(form.brandHeaderBg) || "#000000"} onChange={set("brandHeaderBg")} aria-label="Header background picker" style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer", flexShrink: 0 }} /></div></div>
           {/* BUILDING STYLES PER ROW (Carolyn 2026-09-14 @7:10, migration 232). A ninth style
               wrapped to a second row of her style bar; the bar now scrolls instead, and this is
               how many photos sit side by side before it does. Four buttons, not a number box:
@@ -955,6 +1004,60 @@ function SettingsView({ section, view3d = false }) {
               it while both the input and the server refused it. */}
           <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>PNG / JPG / WebP, under 2MB. Preview shows it on your header color.</div>
         </div>
+        {/* BRAND COLORS (migration 336, Carolyn 2026-10-25) —
+            "In the company settings I want to be able to add additional brand colors and then
+            those colors to show in the forms as easy selections and also to show in the email
+            as easy selection."
+
+            Accent and Header background above are the DESIGNER's two colors and keep their own
+            columns. These are the rest of the brand — the barn red, the cream, the one off the
+            truck wrap — and they exist to be PICKED somewhere else: every color control in the
+            form designer and the email editor draws this list as one-click swatches. So this
+            card is the one place a palette is typed, and nowhere else asks for it again.
+
+            Staged like the logo and styles-per-row: editing here changes nothing until
+            Save Branding. The hex box is the control and the well is the picker, in that order,
+            because a hex is what a brand kit gives you and a well has nothing to paste into. */}
+        <div style={{ marginBottom: 12 }}>
+          <span style={S.lbl}>Brand colors</span>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 8, lineHeight: 1.45 }}>
+            Your other brand colors. They appear as one-click swatches on every color in the
+            form designer and the email editor. Up to {SS_BRAND_COLOR_MAX}.
+          </div>
+          {brandColors.length === 0 && (
+            <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 8 }}>No brand colors yet.</div>
+          )}
+          {brandColors.map((c, i) => {
+            const hex = ssHexColor(c.hex);
+            const upd = (patch) => setBrandColors((p) => p.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+            return (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, maxWidth: 520 }}>
+                <input style={{ ...S.input, flex: "0 0 130px", fontFamily: "ui-monospace,Menlo,Consolas,monospace", textTransform: "uppercase" }}
+                  value={c.hex} placeholder="#RRGGBB" spellCheck={false} aria-label={"Brand color " + (i + 1) + " hex code"}
+                  onChange={(e) => upd({ hex: e.target.value })} onKeyDown={brandKeyDown}
+                  onBlur={() => upd({ hex: hex || "" })} />
+                <input type="color" value={hex || "#000000"} aria-label={"Brand color " + (i + 1) + " picker"}
+                  onChange={(e) => upd({ hex: e.target.value.toUpperCase() })}
+                  style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer", flexShrink: 0 }} />
+                <input style={{ ...S.input, flex: 1 }} value={c.name} maxLength={40} placeholder="Name it (optional)"
+                  aria-label={"Brand color " + (i + 1) + " name"} onChange={(e) => upd({ name: e.target.value })} onKeyDown={brandKeyDown} />
+                <button type="button" aria-label={"Remove brand color " + (i + 1)} onClick={() => setBrandColors((p) => p.filter((_, j) => j !== i))}
+                  style={{ ...S.btn("#FEF2F2", "#DC2626"), flexShrink: 0 }}>✕</button>
+              </div>
+            );
+          })}
+          {/* A row with no usable hex is dropped on save (the server rebuilds the list), so the
+              hint says so rather than letting a blank row look saved. */}
+          {brandColors.some((c) => !ssHexColor(c.hex)) && (
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 2, marginBottom: 6 }}>
+              A row without a color like #D97706 is left out when you save.
+            </div>
+          )}
+          {brandColors.length < SS_BRAND_COLOR_MAX && (
+            <button type="button" onClick={() => setBrandColors((p) => [...p, { name: "", hex: "" }])}
+              style={{ ...S.btn("#F1F5F9", "#334155"), marginTop: 2 }}>+ Add a brand color</button>
+          )}
+        </div>
         <button type="button" onClick={saveBranding} disabled={brandBusy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: brandBusy ? 0.6 : 1 }}>{brandBusy ? "Saving…" : "Save Branding"}</button>
       </div>
       )}
@@ -985,7 +1088,11 @@ function SettingsView({ section, view3d = false }) {
           component says so, and it is why this split needs no new save path. */}
       {show("company") && (<>
       <div style={S.card}>
-        <div style={S.h2}>Business Details (shown on estimates)</div>
+        {/* A builder without the shed product issues no Structure Studio estimates (SmartBuild
+            quotes them, migration 364), so the estimate half of this card is not theirs: the
+            heading's promise, the logo's PDF line, the terms and the valid-for days. Hidden, not
+            cleared: the save is global and still carries whatever the form holds. */}
+        <div style={S.h2}>{shedsOn ? "Business Details (shown on estimates)" : "Business Details"}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
           <div><span style={S.lbl}>Business name</span><input style={S.input} value={form.businessName} onChange={set("businessName")} /></div>
           <div><span style={S.lbl}>Phone</span><input style={S.input} value={form.businessPhone} onChange={set("businessPhone")} placeholder="+17075551234" /></div>
@@ -1002,7 +1109,7 @@ function SettingsView({ section, view3d = false }) {
             </div>
             {/* The quote PDF fetches the logo server-side, and only from where Upload puts it
                 (_shared/pdfLogo.ts). A pasted link from another site still shows in emails. */}
-            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your quote PDFs.</div>
+            {shedsOn && <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A PNG or JPG you upload here also prints at the top of your estimate PDFs.</div>}
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
@@ -1011,34 +1118,36 @@ function SettingsView({ section, view3d = false }) {
           <div><span style={S.lbl}>State</span><input style={S.input} value={form.addrState} onChange={set("addrState")} /></div>
           <div><span style={S.lbl}>Zip</span><input style={S.input} value={form.addrZip} onChange={set("addrZip")} /></div>
         </div>
-        <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
-          <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
+        {shedsOn && <div><span style={S.lbl}>Estimate terms</span>
+          <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>}
         {/* Carolyn 2026-08-06: "estimate good for X amount of days". Prints as the "Valid until"
             date on every quote PDF, and is the expiry date on estimates your CRM sends. */}
-        {quoteDaysReady && (
+        {shedsOn && quoteDaysReady && (
           <div style={{ marginTop: 12 }}>
-            <label htmlFor="ss-quote-valid-days" style={S.lbl}>Quotes are good for</label>
+            <label htmlFor="ss-quote-valid-days" style={S.lbl}>Estimates are good for</label>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <input id="ss-quote-valid-days" style={{ ...S.input, width: 90 }} value={form.quoteValidDays}
                 onChange={set("quoteValidDays")} inputMode="numeric" placeholder="30" />
               <span style={{ fontSize: 13, color: "#475569" }}>days</span>
             </div>
             <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
-              Your quotes show a “Valid until” date this many days after the quote date. Anywhere from 1 to 365 days.
+              Your estimates show a “Valid until” date this many days after the estimate date. Anywhere from 1 to 365 days.
             </div>
           </div>
         )}
         {/* Carolyn 2026-08-20: a 3D page on the estimate, "optional for them", that "gets 4 sides. So
             4 quadrants"; 2026-09-08: "we want to see 4 images... one from each corner". Only where
-            3D is unlocked (no 3D, no 3D page), and only once status can read the setting. */}
+            3D is unlocked (no 3D, no 3D page), and only once status can read the setting. On by
+            default since migration 322 (Ahsan 2026-10-21); a builder can still untick it. */}
         {view3d && cornerReady && (
           <div style={{ marginTop: 12 }}>
             <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
               <input type="checkbox" checked={form.quoteCornerViews} onChange={set("quoteCornerViews")} style={{ marginTop: 2 }} data-ss-quote-corners />
-              Show the building from all four corners on page 2 of my quotes
+              Show the building from all four corners on page 2 of my estimates
             </label>
             <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
-              Page 2 of your quotes shows four 3D pictures of the building, one from each corner, in place of the single 3D view.
+              Page 2 of your estimates shows four 3D pictures of the building, one from each corner, in place of the single 3D view.
+              {" "}It's on by default for every builder with 3D. Untick it to turn it off and go back to the single view.
             </div>
           </div>
         )}
@@ -1101,7 +1210,7 @@ function SettingsView({ section, view3d = false }) {
           Gated on branding-or-company rather than hoisted unconditionally: `show()` returns
           true for EVERY key when `section` is null, so an unconditional button is correct for
           the legacy all-sections render but would also add a second, whole-form Save to the
-          CRM Connection tab, which deliberately has its own three narrow saves. */}
+          GHL Connection tab, which deliberately has its own three narrow saves. */}
       {(show("branding") || show("company")) && (
         <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
       )}
@@ -1228,18 +1337,40 @@ async function readXlsxWorkbook(file, ExcelJS) {
   });
 }
 
-// The brand teal, and the ONE card on the Billing tab that wears it: Synergy CRM. Everything
-// else here is ACCENT purple, which on this tab means "buy this, now, from us". Synergy CRM is
-// a different product bought on a different site, so it gets the other half of the header
-// gradient (01-core.jsx: linear-gradient(#3D3672 → #1B7895)) rather than a colour invented for
-// it. Don't reuse this for a purchasable feature — the whole job it does is being the exception.
-const SYNERGY_TEAL = "#1B7895";
-
 // Wallet top-up presets, in cents. Round numbers a builder recognises rather than multiples
 // of the $20 meter price -- "$100" is a decision, "$140 (7 generations)" is arithmetic
 // homework. The floor and cap are NOT here: the server sends them (wallet.minTopupCents /
 // maxTopupCents) so there is exactly one definition and the UI cannot drift from it.
 const TOPUP_PRESETS = [10000, 25000, 50000];
+
+// ── COF CONSENT (mirrors _shared/cofConsent.ts) ─────────────────────────────────────────────
+// What a builder agrees to when we keep their card (migration 317, the Visa/Mastercard stored-
+// credential rules). The SENTENCES are not here: portal-billing sends them in status.cof.templates
+// from the one copy in _shared/cofConsent.ts, and records the same sentence, filled with ITS OWN
+// numbers, when the box is ticked. These fill the {placeholders} the same way, so what is shown
+// beside the box is what is stored. _shared/cofConsent.test.ts lifts this block out of the shipped
+// file and checks it against the server's functions; plain JS on purpose (no JSX) so it can.
+function cofMoney(cents) {
+  const c = Math.round(Number(cents) || 0);
+  return "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
+}
+function cofCardPhrase(isNewCard, last4) {
+  if (isNewCard) return "this card";
+  return /^\d{4}$/.test(String(last4 == null ? "" : last4)) ? "my card ending " + last4 : "my card on file";
+}
+function cofTodayPhrase(cents) {
+  return cents > 0 ? cofMoney(cents) + " today" : "nothing today";
+}
+function cofRecurringPhrase(yearlyCents, monthlyCents) {
+  const parts = [];
+  if (yearlyCents > 0) parts.push(cofMoney(yearlyCents) + " a year");
+  if (monthlyCents > 0) parts.push(cofMoney(monthlyCents) + " a month");
+  return parts.join(" plus ") || "the renewal price shown";
+}
+function renderCofConsent(template, vars) {
+  return String(template || "").replace(/\{(\w+)\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(vars, k) ? vars[k] : m));
+}
+// ── /COF CONSENT ────────────────────────────────────────────────────────────────────────────
 
 // FOUNDING PRICING IS YEARLY ONLY (Carolyn 2026-09-24): "Everybody that comes in has to pay for
 // the full year on whichever selections they make ... leave month so that month is still
@@ -1275,7 +1406,7 @@ const FOUNDING_ANNUAL_ONLY = true;
 // INLINE STYLES ONLY, like every component here (there is no component stylesheet), so the phone
 // layout is chosen by measuring the card rather than by a media query: under WALLET_TX_NARROW_PX
 // each line becomes two rows, description over date on the left, amount over balance on the right.
-const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["funds", "Funds"], ["other", "Other"]];
+const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["tax", "Tax"], ["funds", "Funds"], ["other", "Other"]];
 const WALLET_TX_NARROW_PX = 560;
 // Narrower still (a 320 px phone with the settings rail beside it leaves a ~230 px card), two date
 // fields side by side clip their own dates, so they stack.
@@ -1588,7 +1719,6 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   // back the shell's entitlement re-read until the customer presses Continue: see subscribe().
   const [holdSignal, setHoldSignal] = useState(false);
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
-  const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
   const [demoNote, setDemoNote] = useState(false); // our own account pressed checkout — see demoView
   // Wallet top-up (migration 164). `topupSel` is a preset in cents; `topupCustom` is the raw
   // DOLLARS string from the Other field. Exactly one is ever set -- picking a preset clears
@@ -1599,6 +1729,26 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const [autoOn, setAutoOn] = useState(false);
   const [autoThreshold, setAutoThreshold] = useState("");
   const [autoAmount, setAutoAmount] = useState("");
+  // STORED-CARD AGREEMENTS (migration 317). Each box is the builder's agreement to how their card
+  // is charged, and portal-billing refuses the request without it. For an operator, the
+  // subscription box is "I read this to the owner and they agreed", and a top-up asks instead
+  // whether the owner asked on the phone (topupPhone; null = not said, and nothing is charged until
+  // it is), which the card networks need to know. Every answer is for ONE charge: they are all
+  // cleared after each attempt, however it ended, and whenever the tab or the viewed tenant changes.
+  const [subAgree, setSubAgree] = useState(false);
+  const [topupAgree, setTopupAgree] = useState(false);
+  const [autoAgree, setAutoAgree] = useState(false);
+  const [topupPhone, setTopupPhone] = useState(null);
+  const [replacing, setReplacing] = useState(false);
+  const [replaceAgree, setReplaceAgree] = useState(false);
+  // Add a card (2026-11-05): the box is open, its agreement is ticked, the owner email is on its way.
+  const [adding, setAdding] = useState(false);
+  const [addAgree, setAddAgree] = useState(false);
+  const [emailing, setEmailing] = useState(false);
+  useEffect(() => {
+    setSubAgree(false); setTopupAgree(false); setAutoAgree(false); setTopupPhone(null); setReplaceAgree(false);
+    setAddAgree(false); setAdding(false);
+  }, [section, viewingLabel]);
 
   // The shell's own entitlement is refreshed through ssEntitlementChanged (subscribe and cancel
   // below), which respects the paywall's hold; this only re-reads what this view shows.
@@ -1616,12 +1766,11 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   // Group the plan rows into features (monthly + annual pair per feature).
   const features = []; const byFeature = {};
   plans.forEach((p) => {
-    if (!byFeature[p.feature]) { byFeature[p.feature] = { feature: p.feature, name: p.name, availability: p.availability, required: p.required, setup: p.setup_fee_cents, priceVisible: p.price_visible !== false, plans: {} }; features.push(byFeature[p.feature]); }
+    if (!byFeature[p.feature]) { byFeature[p.feature] = { feature: p.feature, name: p.name, availability: p.availability, setup: p.setup_fee_cents, priceVisible: p.price_visible !== false, plans: {} }; features.push(byFeature[p.feature]); }
     byFeature[p.feature].plans[p.billing_interval] = p;
   });
   const liveSubs = subs.filter((s) => s.status !== "cancelled");
   const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
-  const baseLive = !!liveFeatures["simple_layout"];
   // NON-BILLABLE ACCOUNT. Since 2026-09-21 the operator's Non-billable flag confers every
   // feature (migration 228), but the tiles below are built from liveFeatures — REAL
   // subscription rows — so without this a comped account sees a full price list with working
@@ -1645,20 +1794,20 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const demoView = !!(data && data.entitlement && data.entitlement.reason === "internal");
   const comped = !!(data && data.entitlement && data.entitlement.exempt) && !demoView;
 
-  // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
-  // (in the cart) or already live, its member features are covered — shown "Included" and not
-  // separately purchasable — and it satisfies the required base in place of Simple Layout.
+  // The Structure Studio Suite bundles these six (NOT Self Serve Displays, Project Management or
+  // SmartBuild Sync — those are sold separately). When it's chosen (in the cart) or already live,
+  // its member features are covered — shown "Included" and not separately purchasable. The tile
+  // prints this list, so a builder can read what the Suite is without selecting it and watching
+  // six other tiles grey out.
   const SUITE_MEMBERS = ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing", "crm"];
   const suiteChosen = !!sel["full_suite"] || !!liveFeatures["full_suite"];
   const memberCovered = (feat) => SUITE_MEMBERS.includes(feat) && suiteChosen;
 
-  // Simple Layout is required: preselect it (yearly) until it's subscribed — unless the Suite
-  // (which includes it) is chosen or already live.
-  useEffect(() => {
-    if (data && data.configured && !baseLive && !sel["full_suite"] && !liveFeatures["full_suite"] && byFeature["simple_layout"] && !sel["simple_layout"]) {
-      setSel((p) => ({ ...p, simple_layout: "annual" }));
-    }
-  }, [data]);
+  // NOTHING IS PRESELECTED (2026-11-04). Simple Layout used to be seeded into every cart here,
+  // because it was the required base. It isn't any more: StructureStudio stopped being a
+  // shed-only product, and a post-frame builder may buy Customer Hub and SmartBuild Sync and
+  // never want the designer. The cart starts empty and the builder picks. See portal-billing's
+  // gate — "any paid feature unlocks the account" — which replaced the required-base rule.
 
   const fmt$ = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
   // What this tenant actually pays. charge_cents is computed server-side from their
@@ -1713,6 +1862,64 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const topupCents = topupSel != null ? topupSel : (Number.isFinite(customCents) ? customCents : null);
   const topupValid = Number.isInteger(topupCents) && topupCents >= minTopup && topupCents <= maxTopup;
 
+  // ── The agreement sentences (317) ──────────────────────────────────────────────────
+  // Filled from the same numbers the server will use: dueTodayCents (proven equal by the
+  // confirmChargeCents handshake), the cart's yearly/monthly totals, the amounts typed here.
+  // An older portal-billing sends no `cof`; then there is no box and nothing to send.
+  const cof = (data && data.cof && data.cof.templates && data.cof.version) ? data.cof : null;
+  const consentBody = cof ? { consent: { version: cof.version, accepted: true } } : {};
+  // On EVERY card request from this tab, box or no box: it is how portal-billing tells this tab
+  // from the pre-317 one it still serves during the transition (see fromOlderTab there).
+  const tabMark = cof ? { cofTab: cof.version } : {};
+  const cardLast4 = (data && data.card && data.card.last4) || null;
+  const cardBrand = (data && data.card && data.card.brand) || null;
+  const subConsentText = cof ? renderCofConsent(cof.templates.subscription, {
+    // Our own account shows the prospect view (see demoView): "this card", as a new builder sees it.
+    card: cofCardPhrase(!(data && data.hasCard) || demoView, cardLast4),
+    today: cofTodayPhrase(dueTodayCents),
+    recurring: cofRecurringPhrase(yrTotal, moTotal),
+  }) : null;
+  // A top-up needs the box until the builder's own first top-up has gone through: that one is
+  // the charge the bank links every automatic top-up to.
+  const topupNeedsAgree = !!cof && !viewingLabel && (!(data && data.hasCard) || !!cof.topupNeedsAgreement);
+  const topupConsentText = cof ? renderCofConsent(cof.templates.topup, {
+    card: cofCardPhrase(!(data && data.hasCard), cardLast4),
+    amount: topupValid ? cofMoney(topupCents) : "the amount I choose",
+  }) : null;
+  const autoCents = (s) => Math.round(Number(s) * 100);
+  const autoConsentText = cof ? renderCofConsent(cof.templates.autoTopup, {
+    card: cofCardPhrase(false, cardLast4),
+    amount: cofMoney(autoCents(autoAmount)),
+    threshold: cofMoney(autoCents(autoThreshold)),
+    dailyMax: String(cof.autoTopupDailyMax),
+  }) : null;
+  // A tick agrees to the sentence as it read WHEN it was ticked. Change the cart or an amount and
+  // the sentence changes, so the tick goes and has to be given again: otherwise the stored
+  // wording (and, for an operator, "I read them this") would be terms nobody agreed to.
+  useEffect(() => { setSubAgree(false); }, [subConsentText]);
+  useEffect(() => { setTopupAgree(false); }, [topupConsentText]);
+  useEffect(() => { setAutoAgree(false); }, [autoConsentText]);
+  // The box beside each sentence. One look, so the four of them read as the same kind of thing.
+  const agreeBox = (checked, set, text, testId) => (
+    <label data-cof-consent={testId} style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 12, color: "#334155", lineHeight: 1.5, cursor: "pointer", maxWidth: 640 }}>
+      <input type="checkbox" checked={checked} onChange={(e) => set(e.target.checked)} style={{ marginTop: 2, flexShrink: 0 }} />
+      <span>{text}</span>
+    </label>
+  );
+  // Operators: "did the owner ask for this on the phone?", answered every time.
+  const phoneChoice = (allowNo, noLabel) => (
+    <div data-cof-phone="1" style={{ marginTop: 10, fontSize: 12.5, color: "#334155", display: "flex", flexDirection: "column", gap: 4 }}>
+      <label style={{ display: "inline-flex", gap: 7, alignItems: "center", cursor: "pointer" }}>
+        <input type="radio" name="cof-phone" checked={topupPhone === true} onChange={() => setTopupPhone(true)} />
+        The owner is on the phone and asked for this
+      </label>
+      <label style={{ display: "inline-flex", gap: 7, alignItems: "center", cursor: allowNo ? "pointer" : "not-allowed", opacity: allowNo ? 1 : 0.5 }}>
+        <input type="radio" name="cof-phone" disabled={!allowNo} checked={topupPhone === false} onChange={() => setTopupPhone(false)} />
+        {noLabel}
+      </label>
+    </div>
+  );
+
   // Mirror the saved auto-recharge config into the form whenever the server's answer
   // changes. Depends on `data` (the whole payload) rather than the nested fields so it
   // re-syncs after every load(), including the one that follows a successful save.
@@ -1730,13 +1937,26 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
     try {
       // Same handshake as subscribe: the amount on screen is the amount tokenized and the
       // amount charged, and the server refuses if they disagree.
-      const body = { action: "topup", amountCents: topupCents, confirmChargeCents: topupCents };
+      const body = { action: "topup", amountCents: topupCents, confirmChargeCents: topupCents, ...tabMark };
       if (viewingLabel) {
+        if (topupPhone === null) { setMsg({ err: "Say whether the owner asked for this on the phone." }); setBusy(false); return; }
+        const asked = topupPhone;
+        // The answer is for this one charge: cleared now, whatever the dialog and the server say.
+        setTopupPhone(null);
         if (!window.confirm(`Add ${fmt$(topupCents)} to ${viewingLabel}'s wallet?
 
-This charges the card they have on file.`)) { setBusy(false); return; }
-      } else if (!data.hasCard) {
-        body.paymentToken = await getPaymentToken(topupCents);
+This charges the card they have on file${asked ? "" : ", without them asking: they will be emailed a receipt"}.`)) { setBusy(false); return; }
+        body.cardholderPresent = asked;
+      } else {
+        if (topupNeedsAgree) {
+          if (!topupAgree) { setMsg({ err: "Tick the box to agree to how your card will be charged." }); setBusy(false); return; }
+          Object.assign(body, consentBody);
+        }
+        if (!data.hasCard) {
+          const t = await getPaymentToken(topupCents);
+          body.paymentToken = t.token;
+          body.card = t.card;
+        }
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e) {
@@ -1750,13 +1970,17 @@ This charges the card they have on file.`)) { setBusy(false); return; }
       setMsg({ ok: r && r.alreadyCredited
         ? "That top-up was already applied — your balance is up to date."
         : `Added ${fmt$(topupCents)} to the wallet.` });
-      setTopupSel(null); setTopupCustom("");
+      setTopupSel(null); setTopupCustom(""); setTopupAgree(false);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
 
   const saveAutoTopup = async () => {
+    // Switching on (or changing the amounts) is the builder's agreement to unattended charges, so
+    // an operator may only switch them off (the server refuses the rest with the same sentence).
+    if (viewingLabel && autoOn && cof) { setMsg({ err: "Only the owner can switch on or change automatic top-ups: it records their agreement to be charged. You can switch them off." }); return; }
+    if (autoOn && cof && !autoAgree) { setMsg({ err: "Tick the box to agree to automatic top-ups." }); return; }
     setMsg(null); setBusy(true);
     try {
       const body = {
@@ -1764,6 +1988,8 @@ This charges the card they have on file.`)) { setBusy(false); return; }
         enabled: autoOn,
         thresholdCents: autoOn ? Math.round(Number(autoThreshold) * 100) : null,
         amountCents: autoOn ? Math.round(Number(autoAmount) * 100) : null,
+        ...tabMark,
+        ...(autoOn ? consentBody : {}),
       };
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e) {
@@ -1773,9 +1999,89 @@ This charges the card they have on file.`)) { setBusy(false); return; }
       }
       if (r && r.error) throw new Error(r.error);
       setMsg({ ok: autoOn ? "Automatic top-ups are on." : "Automatic top-ups are off." });
+      setAutoAgree(false);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
+  };
+
+  // REPLACE THE CARD (317). A $0 check on the new card, which then takes the old one's place for
+  // renewals, top-ups and automatic top-ups. The builder's own card only, like every card entry.
+  const replaceCard = async () => {
+    if (!replaceAgree) { setMsg({ err: "Tick the box to agree to how the new card will be used." }); return; }
+    setMsg(null); setBusy(true);
+    try {
+      const t = await getPaymentToken(null);
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", {
+        body: { action: "update_card", paymentToken: t.token, card: t.card, ...tabMark, ...consentBody },
+      });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: "Card replaced. Renewals and top-ups now use the new card. Nothing was charged." });
+      setReplacing(false); setReplaceAgree(false);
+      await load();
+    } catch (e) {
+      setMsg({ err: e.message });
+      // A failed replacement can still change what the server holds (an unverifiable one clears
+      // the card's top-up agreement), so re-read rather than keep showing the state from before.
+      await load();
+    }
+    setBusy(false);
+  };
+
+  // ADD A CARD (2026-11-05). A $0 check that stores the card where there was none: the way a
+  // builder who pays for StructureStudio by bank transfer gets a wallet card without buying
+  // credit first. It is then the card on file, full stop: top-ups, automatic top-ups, and any
+  // subscription bought here later. The builder's own card only, like every card entry.
+  const addCard = async () => {
+    if (!addAgree) { setMsg({ err: "Tick the box to agree to how the card will be used." }); return; }
+    setMsg(null); setBusy(true);
+    try {
+      const t = await getPaymentToken(null);
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", {
+        body: { action: "add_card", paymentToken: t.token, card: t.card, ...tabMark, ...consentBody },
+      });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: "Card saved. Top-ups use it from now on, and you can switch on automatic top-ups. Nothing was charged." });
+      setAdding(false); setAddAgree(false);
+      await load();
+    } catch (e) {
+      setMsg({ err: e.message });
+      // An unverifiable add can still have stored the card at the gateway, and the server may have
+      // recorded it: re-read rather than keep showing "no card on file".
+      await load();
+    }
+    setBusy(false);
+  };
+
+  // EMAIL THE OWNER (operator, 2026-11-05). An operator can never enter a card for a tenant; this
+  // asks the owners to, with a link to this tab. The server holds it to once a day per tenant and
+  // answers with the sentence to show when it is held.
+  const emailOwner = async () => {
+    setMsg(null); setEmailing(true);
+    try {
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "request_card_email" } });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: "Emailed the owner." });
+    } catch (e) {
+      setMsg({ err: e.message });
+    }
+    await load();
+    setEmailing(false);
   };
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
@@ -1817,7 +2123,15 @@ This charges the card they have on file.`)) { setBusy(false); return; }
             // note already lives on the page's due-today line and the pay button.
             instructionText: `You'll be charged ${fmt$(amountCents)} today.`,
           } : {}),
-          callback: (resp) => resp && resp.token ? settle(resolve, resp.token) : settle(reject, new Error("Card entry was cancelled.")),
+          // The token, and the card's last 4 and type off Collect.js's masked number (317): shown
+          // later as "your card ending 1234" and recorded with the agreement. Nothing else of it.
+          callback: (resp) => {
+            if (!(resp && resp.token)) return settle(reject, new Error("Card entry was cancelled."));
+            const masked = String((resp.card && resp.card.number) || "");
+            const last4 = /\d{4}$/.test(masked) ? masked.slice(-4) : null;
+            const brand = resp.card && typeof resp.card.type === "string" ? resp.card.type : null;
+            settle(resolve, { token: resp.token, card: { last4, brand } });
+          },
         });
         window.CollectJS.startPaymentRequest();
       } catch (e) { return settle(reject, e); }
@@ -1843,19 +2157,12 @@ This charges the card they have on file.`)) { setBusy(false); return; }
   const toggleFeature = (f) => {
     if (comped || f.availability !== "available" || liveFeatures[f.feature] || busy) return;
     if (memberCovered(f.feature)) return;                      // covered by the Suite — not separately selectable
-    // Only block REMOVING the required base (it's in `sel` and the click would delete it);
-    // re-adding must always work. Blocking both directions stranded the cart: selecting the
-    // Suite deletes Simple Layout from `sel`, deselecting the Suite then left NEITHER in the
-    // cart, and this guard refused the click that would put the base back — checkout dead
-    // until a reload re-ran the [data] preselect (the server 400s a cart without the base).
-    if (f.required && !baseLive && !sel["full_suite"] && sel[f.feature]) return; // Simple Layout stays unless the Suite covers it
+    // Every tile is freely selectable and deselectable now — no feature is required, so there is
+    // nothing to keep in the cart and nothing to re-seed when the Suite is deselected.
     setSel((p) => {
       const n = { ...p };
       if (n[f.feature]) {
         delete n[f.feature];
-        // Deselecting the Suite re-seeds the required base — the [data] preselect effect
-        // only re-runs on a reload, so without this the cart strands with neither.
-        if (f.feature === "full_suite" && !baseLive && !liveFeatures["full_suite"] && byFeature["simple_layout"]) n.simple_layout = "annual";
       }
       else {
         n[f.feature] = "annual";
@@ -1884,7 +2191,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
       // so the card can only ever be charged the number that was on screen. dueTodayCents
       // is already cents (the old operator path sent setupTotal * 100, cents times a
       // hundred; never bit only because every setup fee is $0).
-      const body = { action: "subscribe", planIds, confirmChargeCents: dueTodayCents };
+      const body = { action: "subscribe", planIds, confirmChargeCents: dueTodayCents, ...tabMark };
       if (viewingLabel) {
         // Real money against THEIR card: confirm with the client named and the amount out loud.
         // A fully-credited upgrade charges nothing, and the dialog has to say THAT rather
@@ -1892,14 +2199,29 @@ This charges the card they have on file.`)) { setBusy(false); return; }
         const what = dueTodayCents === 0 && creditCents > 0
           ? `charge nothing today (${fmt$(creditCents)} credit covers it)`
           : `charge ${fmt$(dueTodayCents)} today`;
+        // A new subscription is a new recurring agreement: the owner has to be on the phone
+        // making it, and the operator reads them the sentence and ticks that they agreed (317).
+        // The server refuses it otherwise; this says so before the dialog. One charge per tick.
+        if (cof && !subAgree) { setMsg({ err: "Read the agreement to the owner and tick the box once they agree." }); setBusy(false); return; }
+        setSubAgree(false);
         if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s) and ${what}?
 
 This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
-      } else if (!data.hasCard) {
-        // The card is still required when nothing is due — it is what the RENEWAL bills.
-        // Passing null rather than 0 keeps Collect.js from putting "$0.00" on its pay
-        // button, which invites "then why do you want my card?".
-        body.paymentToken = await getPaymentToken(dueTodayCents || null);
+        body.cardholderPresent = true;
+        Object.assign(body, consentBody);
+      } else {
+        if (cof) {
+          if (!subAgree) { setMsg({ err: "Tick the box to agree to how your card will be charged." }); setBusy(false); return; }
+          Object.assign(body, consentBody);
+        }
+        if (!data.hasCard) {
+          // The card is still required when nothing is due — it is what the RENEWAL bills.
+          // Passing null rather than 0 keeps Collect.js from putting "$0.00" on its pay
+          // button, which invites "then why do you want my card?".
+          const t = await getPaymentToken(dueTodayCents || null);
+          body.paymentToken = t.token;
+          body.card = t.card;
+        }
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       // Whatever the answer, the server may have started something (a partial success comes back
@@ -1928,7 +2250,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       } else {
         setMsg({ ok: "You're subscribed — thank you!" });
       }
-      setSel({});
+      setSel({}); setSubAgree(false);
       await load();
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
@@ -2172,10 +2494,19 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                       value={topupCustom} onChange={(e) => { setTopupCustom(e.target.value); setTopupSel(null); }}
                       style={{ border: "none", outline: "none", padding: "7px 4px", fontSize: 13, fontWeight: 700, width: 82, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
                   </div>
-                  <button type="button" onClick={addFunds} disabled={busy || !topupValid}
-                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "8px 16px", opacity: busy || !topupValid ? 0.5 : 1, cursor: busy || !topupValid ? "default" : "pointer" }}>
-                    {busy ? "Working…" : (topupCents ? "Add " + fmt$(topupCents) : "Add funds")}
-                  </button>
+                  {(() => {
+                    // Also held until the agreement box is ticked (the first top-up) or, for an
+                    // operator, until they have said whether the owner asked on the phone; and for
+                    // an operator viewing a tenant with no card at all (the note below says why).
+                    const held = busy || !topupValid || (topupNeedsAgree && !topupAgree)
+                      || (!!viewingLabel && (!data.hasCard || topupPhone === null));
+                    return (
+                      <button type="button" onClick={addFunds} disabled={held}
+                        style={{ ...S.btn(ACCENT, "#FFF"), padding: "8px 16px", opacity: held ? 0.5 : 1, cursor: held ? "default" : "pointer" }}>
+                        {busy ? "Working…" : (topupCents ? "Add " + fmt$(topupCents) : "Add funds")}
+                      </button>
+                    );
+                  })()}
                 </div>
                 {/* Only complain once something has actually been typed — an empty field is
                     the starting state, not a mistake. */}
@@ -2187,21 +2518,142 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
                   {data.hasCard
                     ? "Charged to the card on file. Funds are added straight away."
-                    : "You'll enter your card in a secure form served by the payment gateway — it never passes through StructureStudio."}
+                    : "No card on file yet. Add a card below (checked for $0, nothing charged), or enter one as you add funds. Either way the card goes into the payment gateway's secure form and never passes through StructureStudio."}
                 </div>
+                {topupNeedsAgree && agreeBox(topupAgree, setTopupAgree, topupConsentText, "topup")}
+                {/* "Not asked" is a merchant-initiated charge, allowed only when the owner's own
+                    agreement covers top-ups CSM Synergy adds (portal-billing says so in
+                    cof.operatorTopupAllowed, and refuses it otherwise). */}
+                {viewingLabel && data.hasCard && phoneChoice(
+                  !!(cof && cof.operatorTopupAllowed),
+                  cof && cof.operatorTopupAllowed
+                    ? "The owner did not ask (they will be emailed a receipt)"
+                    : "Not asked: not possible until the owner adds funds or replaces their card themselves (that records their agreement)",
+                )}
+                {viewingLabel && !data.hasCard && (
+                  <div style={{ fontSize: 12, color: "#92400E", marginTop: 6 }}>
+                    <div>{viewingLabel} has no card on file. Only the owner can add one, from Settings &gt; Billing &gt; Wallet.</div>
+                    {/* The most an operator can do (2026-11-05): ask. cof.cardRequest comes only to an
+                        operator on a tenant with no card; the server holds a second send for 24 hours
+                        and this holds the button for the same window. */}
+                    {cof && cof.cardRequest && (() => {
+                      const last = cof.cardRequest.lastSentAt ? new Date(cof.cardRequest.lastSentAt) : null;
+                      const hours = cof.cardRequest.cooldownHours || 24;
+                      const held = emailing || busy || !!(last && Date.now() - last.getTime() < hours * 3600 * 1000);
+                      return (
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
+                          <button type="button" onClick={emailOwner} disabled={held}
+                            style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12.5, opacity: held ? 0.5 : 1, cursor: held ? "default" : "pointer" }}>
+                            {emailing ? "Sending…" : "Email the owner"}
+                          </button>
+                          {last && (
+                            <span style={{ fontSize: 12, color: "#64748B" }}>
+                              Emailed the owner on {last.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}. Another reminder can be sent {hours} hours later.
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* NO CARD YET (2026-11-05): the builder's own "Add a card", a $0 check with no purchase.
+                    Gated on the server sending the sentence, so an older portal-billing shows nothing. */}
+                {!data.hasCard && !viewingLabel && !demoView && cof && cof.templates && cof.templates.cardAdd && (
+                  <div style={{ marginTop: 12, fontSize: 12.5, color: "#475569", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>Card on file: <b>none</b></span>
+                    {!adding && (
+                      <button type="button" onClick={() => { setAdding(true); setAddAgree(false); }} disabled={busy}
+                        style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                        Add a card
+                      </button>
+                    )}
+                  </div>
+                )}
+                {adding && !data.hasCard && !viewingLabel && cof && cof.templates && cof.templates.cardAdd && (
+                  <div style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px" }}>
+                    {agreeBox(addAgree, setAddAgree, cof.templates.cardAdd, "card-add")}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button type="button" onClick={addCard} disabled={busy || !addAgree}
+                        style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12.5, opacity: busy || !addAgree ? 0.5 : 1 }}>
+                        {busy ? "Working…" : "Enter the card"}
+                      </button>
+                      <button type="button" onClick={() => setAdding(false)} disabled={busy}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5 }}>
+                        Cancel
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>Your bank checks the card for $0. Nothing is charged.</div>
+                  </div>
+                )}
+
+                {/* THE CARD ON FILE, and replacing it (317). The decline banner below used to say
+                    "Update the card" with no way to do it. A builder only: an operator never
+                    enters a card. */}
+                {data.hasCard && (
+                  <div style={{ marginTop: 12, fontSize: 12.5, color: "#475569", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>Card on file: <b>{cardLast4 ? `${cardBrand ? cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1) + " " : ""}ending ${cardLast4}` : "saved"}</b></span>
+                    {/* cof: only a portal-billing that sends the sentences can take update_card. */}
+                    {cof && !viewingLabel && !demoView && !replacing && (
+                      <button type="button" onClick={() => { setReplacing(true); setReplaceAgree(false); }} disabled={busy}
+                        style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                        Replace card
+                      </button>
+                    )}
+                  </div>
+                )}
+                {replacing && cof && (
+                  <div style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px" }}>
+                    {agreeBox(replaceAgree, setReplaceAgree, cof.templates.cardUpdate, "card-update")}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button type="button" onClick={replaceCard} disabled={busy || !replaceAgree}
+                        style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12.5, opacity: busy || !replaceAgree ? 0.5 : 1 }}>
+                        {busy ? "Working…" : "Enter the new card"}
+                      </button>
+                      <button type="button" onClick={() => setReplacing(false)} disabled={busy}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5 }}>
+                        Cancel
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>The new card is checked with your bank, not charged.</div>
+                  </div>
+                )}
 
                 {/* AUTO-RECHARGE. Requires a vaulted card: enabling it without one arms
                     something that can only fail, and its first failure would report a
                     declined card that never existed. */}
                 <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                  {/* The reason is a whole sentence since 317 (a decline says to replace the card;
+                      one switched on before agreements were recorded says to add funds once). */}
                   {w.autoTopup && w.autoTopup.disabledReason && (
                     <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
-                      Automatic top-ups were switched off — {w.autoTopup.disabledReason} Update the card, then switch them back on.
+                      Automatic top-ups are off. {w.autoTopup.disabledReason}
+                    </div>
+                  )}
+                  {/* The daily cap the agreement names (317): on, but not charging until the oldest
+                      of today's automatic top-ups is more than 24 hours old. */}
+                  {w.autoTopup && w.autoTopup.enabled && w.autoTopup.dailyMax && w.autoTopup.chargesLast24h >= w.autoTopup.dailyMax && (
+                    <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
+                      Daily limit reached: {w.autoTopup.dailyMax} automatic top-ups in the last 24 hours. They start again as the oldest one passes 24 hours. Add funds by hand if you need more now.
                     </div>
                   )}
                   {!data.hasCard ? (
                     <div style={{ fontSize: 12, color: "#94A3B8" }}>
-                      Add funds once and your card is kept on file — then you can turn on automatic top-ups.
+                      {viewingLabel
+                        ? "Automatic top-ups can be switched on by the owner once a card is on file."
+                        : "Add a card, or add funds once, and it is kept on file — then you can turn on automatic top-ups."}
+                    </div>
+                  ) : (cof && w.autoTopup && w.autoTopup.ready === false && !w.autoTopup.enabled) ? (
+                    // 317: automatic top-ups link to the builder's own first top-up. A card saved by
+                    // a subscription has none yet, and the server refuses to switch them on.
+                    <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                      {viewingLabel
+                        ? "Automatic top-ups can be switched on by the owner after they add funds once themselves."
+                        : "Add funds once yourself, then you can turn on automatic top-ups. That first top-up is the charge your bank links them to."}
+                    </div>
+                  ) : (viewingLabel && !(w.autoTopup && w.autoTopup.enabled)) ? (
+                    <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                      Only the owner can switch automatic top-ups on: it records their agreement to be charged.
                     </div>
                   ) : (
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 13, color: "#334155" }}>
@@ -2223,12 +2675,16 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                             style={{ border: "none", outline: "none", padding: "6px 4px", fontSize: 13, fontWeight: 700, width: 66, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
                         </span>
                       </>)}
-                      <button type="button" onClick={saveAutoTopup} disabled={busy}
-                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+                      <button type="button" onClick={saveAutoTopup} disabled={busy || (autoOn && !!cof && !viewingLabel && !autoAgree)}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy || (autoOn && !!cof && !viewingLabel && !autoAgree) ? 0.6 : 1 }}>
                         Save
                       </button>
                     </div>
                   )}
+                  {/* Switching on, or changing the amounts, is a new agreement to unattended
+                      charges: the sentence names the card, the amounts and the daily limit. */}
+                  {data.hasCard && autoOn && cof && !viewingLabel && !(w.autoTopup && w.autoTopup.ready === false && !w.autoTopup.enabled) &&
+                    agreeBox(autoAgree, setAutoAgree, autoConsentText, "auto-topup")}
                 </div>
               </div>
             )}
@@ -2329,7 +2785,6 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
               const iv = sel[f.feature];
               const on = !!iv;
               const shown = f.plans[iv || "annual"];
-              const lockedBase = f.required && !baseLive;
               return (
                 <div key={f.feature} onClick={(covered || comped) ? undefined : () => toggleFeature(f)}
                   style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: veiled ? "default" : "pointer", overflow: "hidden" }}>
@@ -2341,9 +2796,15 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   <div style={{ opacity: veiled ? 0.45 : 1 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                       <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>{f.name}</span>
-                      {f.required && <span style={{ background: "#75E6DA", color: "#134E4A", borderRadius: 20, padding: "2px 8px", fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5 }}>Required</span>}
-                      {!veiled && !lockedBase && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
+                      {!veiled && <span style={{ marginLeft: "auto", fontSize: 18, color: on ? ACCENT : "#CBD5E1", fontWeight: 800 }}>{on ? "✓" : "+"}</span>}
                     </div>
+                    {/* The Suite's contents, read off SUITE_MEMBERS so this line and the
+                        entitlement map cannot drift. Every other tile is its own feature. */}
+                    {f.feature === "full_suite" && (
+                      <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5, marginBottom: 8 }}>
+                        Includes {SUITE_MEMBERS.map((k) => byFeature[k] && byFeature[k].name).filter(Boolean).join(", ")}.
+                      </div>
+                    )}
                     {!veiled && (
                       <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
                         {["monthly", "annual"].map((k) => {
@@ -2441,11 +2902,24 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 </p>
               ) : (
                 <>
-                <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
-                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
+                {/* THE AGREEMENT (317): every new subscription is a new recurring agreement, card on
+                    file or not. The sentence says what is charged today and what renews. An
+                    operator is shown the same sentence to READ to the owner on the phone, and
+                    ticks that they did and the owner agreed; that is what the server records. */}
+                {!viewingLabel && cof && cart.length > 0 && agreeBox(subAgree, setSubAgree, subConsentText, "subscription")}
+                {viewingLabel && cof && cart.length > 0 && agreeBox(subAgree, setSubAgree,
+                  `The owner is on the phone, I read them this and they agreed: "${subConsentText}"`, "subscription-operator")}
+                <div />
+                {(() => {
+                  const held = busy || cart.length === 0 || (!!cof && !subAgree);
+                  return (
+                <button type="button" onClick={subscribe} disabled={held}
+                  style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: held ? 0.6 : 1 }}>
                   {/* Our own account reads as a brand-new builder: no card on file, nobody viewing-as. */}
                   {busy ? "Working…" : demoView ? "Continue to secure card entry" : (viewingLabel ? `Subscribe ${viewingLabel} with card on file` : (data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"))}
                 </button>
+                  );
+                })()}
                 {demoView && demoNote && (
                   <p style={{ fontSize: 12.5, color: "#1E3A8A", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 8, padding: "8px 12px", marginTop: 10, fontWeight: 600 }}>
                     Demo account. Checkout is off on Structure Studio's own account, so nothing was charged.
@@ -2461,73 +2935,2268 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           )}
 
           <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 14 }}>
-            StructureStudio integrates with your CRM — CRM setup is available for an additional fee.
             Card details are entered in a secure form served by the payment gateway; they never pass through StructureStudio.
           </p>
         </div>
       )}
 
-      {/* Synergy CRM — a separate offering with tiered per-user pricing. Sign-up is EXTERNAL (its
-          own enrollment page), not the in-app Deposyt checkout, so this is an informational card
-          with an outbound link rather than a purchasable billing_plans feature.
-          
-          TEAL, NOT PURPLE, and that is the point (Carolyn 2026-08-29). Since Built-in CRM went
-          on sale there are two cards on this tab with "CRM" in the name, and they are not
-          alternatives: one is a feature of Structure Studio bought right here, the other is a
-          separate per-user product bought somewhere else. Purple is the buy-here colour — it is
-          on every plan tile, the Suite, the toggles and the Subscribe button — so wearing it made
-          this card look like a fourth plan in the same list. The brand's teal (already half of
-          the header gradient) says "related, but not the same thing" without a word of
-          explanation, and the left edge carries it so the difference survives a glance. */}
-      <div style={{ ...S.card, borderLeft: `4px solid ${SYNERGY_TEAL}` }}>
-        <div style={{ ...S.h2, color: SYNERGY_TEAL }}>Synergy CRM</div>
-        <p style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          The CRM that runs your sales — leads, pipelines, and follow-up. Priced by number of users; enroll on the sign-up page.
-        </p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 16 }}>
-          {[
-            { tier: "1 User", monthly: 20000, annual: 200000 },
-            { tier: "2-3 Users", monthly: 30000, annual: 300000 },
-            { tier: "Unlimited Users", monthly: 50000, annual: 500000 },
-          ].map((t) => {
-            const iv = crmIv[t.tier] || "annual";
-            const cents = iv === "annual" ? t.annual : t.monthly;
-            return (
-              <div key={t.tier} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 16 }}>
-                <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", marginBottom: 8 }}>{t.tier}</div>
-                <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
-                  {["monthly", "annual"].map((k) => (
-                    <button key={k} type="button" onClick={() => setCrmIv((p) => ({ ...p, [t.tier]: k }))}
-                      style={{ background: iv === k ? SYNERGY_TEAL : "transparent", color: iv === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-                      {k === "annual" ? "Yearly" : "Monthly"}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ fontSize: 19, fontWeight: 800, color: SYNERGY_TEAL }}>{fmt$(cents)}{iv === "annual" ? "/yr" : "/mo"}</div>
-              </div>
-            );
-          })}
-        </div>
-        <a href="https://streamlinedconstructionsystem.com/saas-enrollment" target="_blank" rel="noopener noreferrer"
-          style={{ ...S.btn(SYNERGY_TEAL, "#FFF"), display: "inline-block", textDecoration: "none" }}>
-          Sign up for Synergy CRM →
-        </a>
-      </div>
+      {/* The external "Synergy CRM" card was REMOVED on 2026-11-04 (Carolyn: "it isn't linked to
+          anything... and I am not promoting it at all"). It advertised a separate per-user product
+          with an outbound enrollment link, and it is not being sold. Customer Hub (`crm`) is the
+          CRM this tab sells, and it is a plan tile like any other. The footer sentence about
+          "integrates with your CRM — setup available for an additional fee" went with it. */}
       </>)}
     </div>
   );
 }
 
 // ─── Pricing & inclusions (CSV self-serve; via portal-settings, JWT-scoped) ───
+// Every option THIS client offers = built-in layout items + their catalog fixtures (doors/
+// windows/ramps). Each becomes a pricing column so an owner can set how many the base price
+// includes per size. Catalog columns key on the fixture id, so an "included" catalog item rides
+// the same building_size_inclusions pipeline (item_key = fixture id). Label carries the size so
+// multiple sizes of one style stay distinct and never collide with a built-in's label.
+// Columns are grouped into the same sections the Options tab shows top-to-bottom — built-in
+// options, then the Doors, Ramps and Windows catalog sections — each with a header fill colour
+// for the Excel template. Archived options drop out entirely (they can't be added to new builds,
+// so they must not be an inclusion column — get_config + submit-estimate also stop netting them).
+// Shared by the Excel template (PricingCsv) and the Pricing Table, so both show the same columns
+// in the same order. `cat` is portal-settings' catalog payload ({ items, fixtures, ... }).
+function ssPricingColumns(cat) {
+  // Drop the built-in "ramp" — the ramp is now a self-contained option managed in the Ramp
+  // settings section (simple price or custom catalog ramps), not a per-building inclusion column.
+  // Mirrors LayoutPricing, which also hides the ramp row.
+  // Nor a partition wall (migration 278): it is the customer's own layout inside the building, never
+  // part of a size's price, so it has no column (submit-estimate ignores such a row too).
+  const layout = ((cat && cat.items) || []).filter((it) => !it.archived && it.key !== "ramp" && it.key !== "partitionWall").map((it) => ({ key: it.key, label: it.label }));
+  const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
+  // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"), and
+  // since the column is matched by its exact label on re-import, a garbled header would silently
+  // drop the inclusion. ASCII round-trips safely through any spreadsheet.
+  const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
+  const inCat = (f, c) => (f.category || "door") === c; // a missing category reads as "door" (matches DoorsView)
+  const byCat = (c) => fx.filter((f) => inCat(f, c)).map(col);
+  const KNOWN_CATS = ["door", "ramp", "window", "vent"];
+  const other = fx.filter((f) => !KNOWN_CATS.includes(f.category || "door")).map(col);
+  // Section order follows the Options tab's own Exterior grouping (Doors · Windows ·
+  // Vents · Ramps) so the sheet reads the way the screen does. "Other" still catches any
+  // category added later without a section here — a new fixture kind must never fall out
+  // of the export silently, which is what a bare `byCat` list per known name would do.
+  return [
+    { name: "Built-in options", argb: "FFDBEAFF", cols: layout },
+    { name: "Doors",            argb: "FFFEE9C7", cols: byCat("door") },
+    { name: "Windows",          argb: "FFDCF1FB", cols: byCat("window") },
+    { name: "Vents",            argb: "FFEAF3E6", cols: byCat("vent") },
+    { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
+    { name: "Other",            argb: "FFF1F5F9", cols: other },
+  ].filter((s) => s.cols.length);
+}
+
+// ─── Sizes & prices table: the pure half (2026-10-30) ───
+// Everything below up to PricingCsv is a top-level `function x(…) {` with no free variables beyond
+// the other functions here, so _test_stubs/pricingTableHelpers_test.ts lifts the SHIPPED text and
+// runs it. The components that draw the table are at the end of this file (PricingTableGate).
+//
+// The reads they model are portal-settings' `catalog` (only `items` and `fixtures`, through
+// ssPricingColumns) and `size_table` (styles, sizes, inclusions, counts, rtpOn, clientId; each list
+// read in 1000-row pages by client_id). See the build plan's section 4.1.
+
+// A stored price as the table shows it: "$4,800", "$4,800.50", "$0". More than two decimals shows as
+// stored ("$4,800.555"): the importer keeps whatever it was given, and rounding it on screen would
+// show a number that is not the one on file. null (not priced) is an empty box.
+function ssPgFmtPrice(v) {
+  if (v == null || v === "") return "";
+  const n = Number(v);
+  if (!isFinite(n)) return String(v);
+  const parts = String(Math.abs(n)).split(".");
+  const int = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  let dec = parts[1] || "";
+  if (dec.length === 1) dec += "0";
+  return (n < 0 ? "-$" : "$") + int + (dec ? "." + dec : "");
+}
+
+// The table's model: option columns, shown and hidden styles with their sizes in order, every cell's
+// text, and the truncation guard. `cat` is the catalog answer, `table` the size_table answer.
+//
+// THE GUARD (plan 4.2) says why the page must not trust this read, or null. First match wins:
+//   "count"             a list is shorter or longer than its exact count (counts missing counts too).
+//   "cap"               catalog's items or fixtures reached 1000 rows: those reads are NOT paged, and
+//                       PostgREST stops at 1000 without an error, so columns may be missing.
+//   "orphan_inclusion"  an inclusion names a size that is not in `sizes`.
+//   "orphan_size"       a size names a style that is not in `styles`.
+// All but "cap" can be a save landing between the reads, so the page reads once more before it
+// believes them. A tripped guard opens the table view-only. The Excel template refuses on "count"
+// alone (plan 4.8), which is why it is checked first: a row cut off a list goes out in the sheet as
+// 0, and the importer deletes it. The others are safe for the sheet: the importer writes only the
+// columns and sizes it is given, so a missing column or an orphan row is left as it is.
+//
+// Cells: an option box shows the quantity when the row says included (Number(qty) || 1, the
+// template's own rule) and is empty otherwise (Carolyn Q2: empty, not 0). A size is HIDDEN from the
+// designer when it is not active or has no price (trigger 029 forces the first when the second).
+// Versions (updated_at) are kept verbatim for the save path and never compared here.
+function ssPgModel(cat, table) {
+  const sections = ssPricingColumns(cat);
+  const cols = [];
+  sections.forEach((s, si) => s.cols.forEach((c) => cols.push({ key: c.key, label: c.label, section: si })));
+  const t = table || {};
+  const styles = Array.isArray(t.styles) ? t.styles.filter(Boolean) : [];
+  const sizes = Array.isArray(t.sizes) ? t.sizes.filter(Boolean) : [];
+  const incs = Array.isArray(t.inclusions) ? t.inclusions.filter(Boolean) : [];
+  const counts = t.counts || {};
+  const items = (cat && Array.isArray(cat.items)) ? cat.items : [];
+  const fixtures = (cat && Array.isArray(cat.fixtures)) ? cat.fixtures : [];
+  const styleIds = new Set(styles.map((s) => s.id));
+  const sizeIds = new Set(sizes.map((z) => z.id));
+  let guard = null;
+  if (Number(counts.sizes) !== sizes.length || Number(counts.inclusions) !== incs.length) guard = "count";
+  else if (items.length >= 1000 || fixtures.length >= 1000) guard = "cap";
+  else if (incs.some((x) => !sizeIds.has(x.size_id))) guard = "orphan_inclusion";
+  else if (sizes.some((z) => !styleIds.has(z.style_id))) guard = "orphan_size";
+
+  const inc = {};
+  const onFile = {};   // inclusion rows per size, included or not: the server's Remove needs none (ssPgNeverEdited)
+  // The sizes saved designs use (size_table's `used`, migration 351's pricing_sizes_in_use: a quote, an
+  // order, a draft, a version, a lot building, or what a deleted design left behind). Such a size is
+  // never deleted, so its ✕ is greyed (ssPgCanDelete); the server judges it again in the delete's own
+  // transaction. A read without the list (an older server) marks none.
+  const used = {};
+  (Array.isArray(t.used) ? t.used : []).forEach((id) => { if (id != null) used[String(id)] = true; });
+  incs.forEach((x) => {
+    onFile[x.size_id] = (onFile[x.size_id] || 0) + 1;
+    if (x.included) (inc[x.size_id] = inc[x.size_id] || {})[x.item_key] = Number(x.qty) || 1;
+  });
+  // sort_order, then id: the server's own order (nulls last, as Postgres sorts them ascending).
+  const ord = (a, b) => {
+    const sa = a.sort_order == null ? Infinity : Number(a.sort_order);
+    const sb = b.sort_order == null ? Infinity : Number(b.sort_order);
+    if (sa !== sb) return sa < sb ? -1 : 1;
+    const ia = String(a.id), ib = String(b.id);
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  };
+  const sizesBy = {};
+  [...sizes].sort(ord).forEach((z) => {
+    const price = z.base_price == null || z.base_price === "" ? null : Number(z.base_price);
+    const offered = !!z.active && price != null;
+    const mine = inc[z.id] || {};
+    const w = z.width_ft, l = z.length_ft;
+    (sizesBy[z.style_id] = sizesBy[z.style_id] || []).push({
+      id: z.id, styleId: z.style_id, label: z.label == null ? "" : String(z.label),
+      title: w != null && l != null ? `${w} ft × ${l} ft` : "",
+      width: w, length: l, price, priceText: ssPgFmtPrice(price), active: !!z.active, offered, hidden: !offered,
+      values: cols.map((c) => (mine[c.key] != null ? String(mine[c.key]) : "")),
+      version: z.updated_at == null ? null : z.updated_at, created: z.created_at == null ? null : z.created_at,
+      onFile: onFile[z.id] || 0, used: !!used[String(z.id)],
+    });
+  });
+  const band = (s) => ({ id: s.id, key: s.key, label: String(s.label || s.key || "Style"), code: s.code || null, active: !!s.active, sizes: sizesBy[s.id] || [] });
+  const ordered = [...styles].sort(ord);
+  return {
+    sections, cols, guard, rtpOn: t.rtpOn === true, clientId: t.clientId == null ? null : String(t.clientId),
+    styles: ordered.filter((s) => s.active).map(band),
+    hiddenStyles: ordered.filter((s) => !s.active).map(band),
+    sizeCount: sizes.length, inclusionCount: incs.length,
+  };
+}
+
+// The rows the grid draws, top to bottom: each shown style's band, then its sizes; a placeholder
+// under a style with nothing to show; then the folded "Hidden styles" section, and the hidden styles
+// themselves when it is open. `showHidden: false` folds away sizes the designer does not offer.
+// Only "size" rows are cells; bands and placeholders are never a place the cursor or a paste lands.
+//
+// Phase 4 ("＋ Add sizes", plan 3.7): `adding` ({ [styleId]: true }) opens a style's add strip, an
+// "add" row right under its band; `addEmpty` (the page can edit) turns a style's "No sizes yet." into
+// that strip with its list box open (empty: true); `keep` ({ [sizeId]: true }, the sizes this page
+// added) are never folded away, so a new size, unpriced and so hidden, stays in view to be priced.
+// An "add" row is not a cell either.
+//
+// What is hidden NOW (2026-10-31): `live` ({ [sizeId]: hidden }, ssPgHiddenNow) overrides the read's
+// `z.hidden` with what the rows themselves draw, this page's edits and save answers included, so a
+// band's "N hidden" moves with its rows (a first price saved, Offered unticked, a price cleared) and
+// not only with the next read. `stay` ({ [sizeId]: true }, the sizes drawn last time while "Show
+// hidden sizes" was off) are never folded away either: a size that turns hidden under the builder,
+// by their own save or by a read, stays where it is, greyed, until the toggle is turned off again
+// or the page is opened again, so no row jumps out from under the cursor or an open editor. A
+// folded size that becomes offered unfolds at once: an offered size is never folded away. So a
+// band's `folded` (the sizes not drawn) is at most its `hidden`.
+function ssPgRows(model, opts) {
+  const o = opts || {};
+  const showHidden = o.showHidden !== false;
+  const keep = o.keep || {};
+  const live = o.live || {};
+  const stay = o.stay || {};
+  const out = [];
+  if (!model) return out;
+  const hid = (z) => (live[z.id] != null ? !!live[z.id] : !!z.hidden);
+  const add = (s) => {
+    const hidden = s.sizes.filter(hid).length;
+    const shown = showHidden ? s.sizes : s.sizes.filter((z) => !hid(z) || keep[z.id] || stay[z.id]);
+    const folded = s.sizes.length - shown.length;
+    out.push({ kind: "band", id: "b-" + s.id, style: s, total: s.sizes.length, hidden, folded });
+    if (!s.sizes.length) {
+      out.push(o.addEmpty ? { kind: "add", id: "a-" + s.id, style: s, empty: true } : { kind: "empty", id: "e-" + s.id, style: s, text: "No sizes yet." });
+      return;
+    }
+    if (o.adding && o.adding[s.id]) out.push({ kind: "add", id: "a-" + s.id, style: s, empty: false });
+    if (!shown.length) out.push({ kind: "empty", id: "e-" + s.id, style: s, text: folded === 1 ? "1 hidden size, folded away." : `${folded} hidden sizes, folded away.` });
+    shown.forEach((z) => out.push({ kind: "size", id: z.id, size: z, style: s }));
+  };
+  model.styles.forEach(add);
+  if (model.hiddenStyles.length) {
+    out.push({ kind: "hiddenStyles", id: "hidden-styles", count: model.hiddenStyles.length, open: !!o.hiddenStylesOpen });
+    if (o.hiddenStylesOpen) model.hiddenStyles.forEach(add);
+  }
+  return out;
+}
+
+// Where a key moves the active cell: { sizeId, col }, or null when the key is not a move (so the
+// browser keeps it). `order` is the size ids in the order drawn, `ncols` counts Size, Price and
+// Offered too. Tab runs along the row and wraps to the next one; at either end of the grid it is
+// left to the browser, so the keyboard can always leave the table.
+function ssPgMove(order, ncols, at, key, shift) {
+  if (!order || !order.length || !(ncols > 0)) return null;
+  const found = at ? order.indexOf(at.sizeId) : -1;
+  const i = found < 0 ? 0 : found;
+  const c = found < 0 ? 0 : Math.max(0, Math.min(ncols - 1, Number(at.col) || 0));
+  const last = order.length - 1;
+  switch (key) {
+    case "ArrowUp": return { sizeId: order[Math.max(0, i - 1)], col: c };
+    case "ArrowDown": return { sizeId: order[Math.min(last, i + 1)], col: c };
+    case "ArrowLeft": return { sizeId: order[i], col: Math.max(0, c - 1) };
+    case "ArrowRight": return { sizeId: order[i], col: Math.min(ncols - 1, c + 1) };
+    case "Home": return { sizeId: order[i], col: 0 };
+    case "End": return { sizeId: order[i], col: ncols - 1 };
+    case "Tab":
+      if (found < 0) return { sizeId: order[0], col: 0 };
+      if (shift) return c > 0 ? { sizeId: order[i], col: c - 1 } : (i > 0 ? { sizeId: order[i - 1], col: ncols - 1 } : null);
+      return c < ncols - 1 ? { sizeId: order[i], col: c + 1 } : (i < last ? { sizeId: order[i + 1], col: 0 } : null);
+    default: return null;
+  }
+}
+
+// Where the active cell goes when the rows under it change: "Show hidden sizes" folded its size
+// away, or a Reload came back without it. The same cell while its size is still drawn (the column
+// clamped if columns went away); otherwise the nearest size that is, looking down `prev` (the order
+// before the change) first, then up, in the same column; null when none is. So the next arrow key
+// carries on from where the builder was, not from the top-left of the grid.
+function ssPgReanchor(prev, order, at, ncols) {
+  if (!at || !order || !order.length) return null;
+  const col = Math.max(0, Math.min((ncols > 0 ? ncols : 1) - 1, Number(at.col) || 0));
+  if (order.indexOf(at.sizeId) >= 0) return col === at.col ? at : { sizeId: at.sizeId, col };
+  const drawn = new Set(order);
+  const was = (prev || []).indexOf(at.sizeId);
+  if (was < 0) return null;
+  for (let i = was + 1; i < prev.length; i++) if (drawn.has(prev[i])) return { sizeId: prev[i], col };
+  for (let i = was - 1; i >= 0; i--) if (drawn.has(prev[i])) return { sizeId: prev[i], col };
+  return null;
+}
+
+// How tall the option headers must be so that NO name is cut (plan 3.4). Each name stands on end
+// (writing-mode: vertical-rl) and may wrap onto a second line inside its 44 px column, so a name
+// needs the length of its longer half at the best place to split it between two words; the header
+// is the longest of those plus `pad`. `measure(text)` is the text's length in px in the header font.
+// A browser filling line one as far as it fits never needs a third line at that length: its first
+// line takes at least the words the best split puts there, and what is left is part of the best
+// split's second line. One word longer than the rest is its own floor.
+function ssPgHeaderHeight(labels, measure, pad) {
+  let need = 0;
+  (labels || []).forEach((label) => {
+    const words = String(label == null ? "" : label).split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    let best = measure(words.join(" "));
+    for (let i = 1; i < words.length; i++) {
+      best = Math.min(best, Math.max(measure(words.slice(0, i).join(" ")), measure(words.slice(i).join(" "))));
+    }
+    need = Math.max(need, best);
+  });
+  return Math.ceil(need) + (Number(pad) || 0);
+}
+
+// Which sections' names need the band's narrow style (plan 3.3's section band; portal.html
+// .ss-pg-secn). In the band's own style (capitals at 10.5 px, 6 px padding each side, a 1 px divider)
+// a name wider than its section ends in "…", and in one 44 px column (`colW`) none of the six names
+// ssPricingColumns gives fits: "VENTS" read "VE…" on beta. `measure(text)` is a name's drawn width in
+// that style; with nothing to measure with, a one-column section is the narrow one. → one true or
+// false per section.
+function ssPgSecNarrow(sections, measure, colW) {
+  return (sections || []).map((s) => {
+    const n = s && Array.isArray(s.cols) ? s.cols.length : 0;
+    if (typeof measure !== "function") return n <= 1;
+    return measure(String((s && s.name) || "")) + 13 > n * (Number(colW) || 44);
+  });
+}
+
+// A section's name as the narrow style draws it: in its own case, on up to two lines of the same
+// 22 px band, and a word of seven letters or more may break once, after its third letter, with a
+// hyphen. The hyphen is a soft one, drawn only when the line breaks there: "Windows" is wider than
+// one column even at 9.5 px, and "Win-" over "dows" is not. The header's title keeps the plain name.
+function ssPgSecText(name) {
+  return String(name == null ? "" : name).replace(/[A-Za-z]{7,}/g, (w) => w.slice(0, 3) + "\u00AD" + w.slice(3));
+}
+
+// The Excel template's header and rows, built from a FRESH catalog (columns) and size_table (styles,
+// sizes, inclusions), never from what Sheds loaded when it mounted: a table edit since then would
+// otherwise go back out in the sheet and be put back by the next upload. Same layout as before:
+// style, width, length, price, one column per option, active; a style with no sizes gets one starter
+// row. Option cells carry the included quantity (0 = not included).
+function ssPgTemplate(cat, table) {
+  const sections = ssPricingColumns(cat);
+  const its = sections.flatMap((s) => s.cols);
+  const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
+  const t = table || {};
+  const incBySize = {};
+  (Array.isArray(t.inclusions) ? t.inclusions : []).forEach((x) => { if (x && x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
+  // Numbers stay numbers so Excel treats width/length/price/counts as numeric; blanks/text pass through.
+  const numOr = (v) => (v === "" || v == null || isNaN(Number(v)) ? v : Number(v));
+  const ord = (a, b) => {
+    const sa = a.sort_order == null ? Infinity : Number(a.sort_order);
+    const sb = b.sort_order == null ? Infinity : Number(b.sort_order);
+    if (sa !== sb) return sa < sb ? -1 : 1;
+    const ia = String(a.id), ib = String(b.id);
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  };
+  const sizes = (Array.isArray(t.sizes) ? t.sizes : []).filter(Boolean).sort(ord);
+  const rows = [];
+  (Array.isArray(t.styles) ? t.styles : []).filter((s) => s && s.active).sort(ord).forEach((s) => {
+    const mine = sizes.filter((z) => z.style_id === s.id);
+    if (mine.length === 0) {
+      // No sizes yet → one starter row: fill width/length/price and copy the line down.
+      rows.push([s.label, "", "", "", ...its.map(() => 0), "yes"]);
+    } else {
+      mine.forEach((z) => {
+        const inc = incBySize[z.id] || {};
+        rows.push([s.label, numOr(z.width_ft), numOr(z.length_ft), z.base_price == null ? "" : numOr(z.base_price),
+          ...its.map((it) => Number(inc[it.key] || 0)), z.active ? "yes" : "no"]);
+      });
+    }
+  });
+  return { sections, headers, rows };
+}
+
+// ─── Sizes & prices table: the save path's pure half (Phase 3, 2026-10-31) ───
+// Lifted and run by pricingTableHelpers_test.ts the same way as the helpers above. The page
+// (PricingTablePage) owns the clock, the timers and the network; these decide what a box shows,
+// what goes out in the next call, and what an answer means. The plan's sections 4.6, 4.7 and 4.10.
+//
+// A FIELD is one box of one size: "price", "active" (Offered), or "c:" + an option key ("c:loft",
+// "c:101"). The prefix keeps an option keyed "price" from ever being read as the price. A price is
+// a number or null (not priced), Offered a boolean, an option box its included quantity (0: nothing
+// included, which is no row on file).
+
+// The number rules (plan 4.10), the browser's twins of _shared/pricingCells.ts parsePrice, parseQty
+// and parseDim. pricingTableHelpers_test.ts runs the one shared table (pricingParseCases.ts) through
+// both: a box the browser lets through and the server refuses is a 400 for the whole call, and the
+// other way round it is a box the builder cannot type. `stored` is what is on file: a value equal to
+// it is always accepted, so copying back what the importer stored never bounces.
+function ssPgParsePrice(text, stored) {
+  const s = String(text == null ? "" : text).replace(/[$,\s]/g, "");
+  if (s === "") return { ok: true, value: null };
+  const n = Number(s);
+  if (!isFinite(n)) return { ok: false, error: "A price is a number, 0 or more" };
+  if (n >= 0 || (stored != null && n === Number(stored))) return { ok: true, value: n };
+  return { ok: false, error: "A price is a number, 0 or more" };
+}
+
+// An option box: a whole number from 0 to 999,999, blank meaning 0. Stricter than the importer on
+// purpose (no yes-words, no rounding, no garbage read as 0, which deletes). Digits only once `$`,
+// commas and spaces are gone, so "1e3", "0x1F" and "+5" are refused too.
+function ssPgParseQty(text, stored) {
+  const s = String(text == null ? "" : text).replace(/[$,\s]/g, "");
+  if (s === "") return { ok: true, value: 0 };
+  if (!/^\d+$/.test(s)) return { ok: false, error: "Whole numbers only, 0 or more" };
+  const n = Number(s);
+  if (n <= 999999 || (stored != null && n === Number(stored))) return { ok: true, value: n };
+  return { ok: false, error: "Whole numbers from 0 to 999,999" };
+}
+
+// A new size's width or length in feet: above 0, at most 500, at most 2 decimals, plain decimals.
+function ssPgParseDim(text) {
+  const s = String(text == null ? "" : text).replace(/\s/g, "");
+  const n = /^\d+(\.\d+)?$/.test(s) ? Number(s) : NaN;
+  if (isFinite(n) && n > 0 && n <= 500 && Number(n.toFixed(2)) === n) return { ok: true, value: n };
+  return { ok: false, error: "A width or length is a number above 0, at most 500, with at most 2 decimals" };
+}
+
+// What the server holds for one field of a size. `s` is { version, price, active, cells }; an
+// option with no row on file is 0.
+function ssPgVal(s, f) {
+  if (!s) return undefined;
+  if (f === "price") return s.price == null ? null : Number(s.price);
+  if (f === "active") return !!s.active;
+  const v = s.cells ? s.cells[String(f).slice(2)] : null;
+  return v == null ? 0 : Number(v);
+}
+
+// Two field values alike. A blank price matches only a blank one ($0 is a real price).
+function ssPgSame(a, b) {
+  if (a == null || b == null) return a == null && b == null;
+  if (typeof a === "boolean" || typeof b === "boolean") return a === b;
+  return Number(a) === Number(b);
+}
+
+// What the server held when the table was read, per size, in the queue's shape: the version
+// (updated_at, verbatim) and every value the grid draws. Hidden styles' sizes too. `created`
+// (created_at, verbatim) is for the ✕: a size whose version is still its created_at was never
+// edited since it was added (ssPgNeverEdited). Sizes this page added (ssPgLocalModel) are not here:
+// they are read only once the server has them.
+function ssPgServerSizes(model) {
+  const out = {};
+  if (!model) return out;
+  [...(model.styles || []), ...(model.hiddenStyles || [])].forEach((st) => (st.sizes || []).forEach((z) => {
+    if (z.local) return;
+    const cells = {};
+    (model.cols || []).forEach((c, i) => { const v = z.values ? z.values[i] : ""; if (v !== "" && v != null) cells[c.key] = Number(v); });
+    out[z.id] = { version: z.version == null ? null : z.version, price: z.price == null ? null : Number(z.price), active: !!z.active, cells,
+      created: z.created == null ? null : z.created };
+  }));
+  return out;
+}
+
+// One size row as drawn: the server's values with this page's unsent and in-flight edits on top
+// (the newest wins), and `marks`, one character per column: "-" nothing, "p" waiting to save (the
+// blue corner), "r" refused or not a valid entry (red, "!"), "c" changed elsewhere (amber, "↺"). A
+// red box shows what the SERVER holds; what was typed is in the status line (plan 3.14). `marks` is
+// "" when the size has nothing local, so PgRow compares one short string. No server entry: the
+// model's own values (before the queue exists).
+function ssPgRowView(z, s, fs, cols) {
+  if (!s) return { priceText: z.priceText, offered: z.offered, noPrice: z.price == null, hidden: z.hidden, values: z.values, marks: "" };
+  const shown = (f) => {
+    const x = fs && fs[f];
+    return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f);
+  };
+  const price = shown("price");
+  const offered = !!shown("active") && price != null;
+  const values = (cols || []).map((c) => { const n = Number(shown("c:" + c.key)) || 0; return n > 0 ? String(n) : ""; });
+  let marks = "";
+  if (fs) {
+    const mark = (f) => {
+      const x = fs[f];
+      if (!x) return "-";
+      if (x.error) return x.error.kind === "conflict" ? "c" : "r";
+      return x.pending || x.inflight ? "p" : "-";
+    };
+    marks = "-" + mark("price") + mark("active") + (cols || []).map((c) => mark("c:" + c.key)).join("");
+    if (!/[^-]/.test(marks)) marks = "";
+  }
+  // Offered cannot be ticked before the size HAS a price on file (the server ticks it with the
+  // first price), so the box stays disabled while that first price is still on its way.
+  return { priceText: ssPgFmtPrice(price), offered, noPrice: price == null || s.price == null, hidden: !offered, values, marks };
+}
+
+// The sizes whose rows are drawn hidden from the designer NOW where the read (`z.hidden`, ssPgModel)
+// says otherwise: a save answer here does not read the table again, so a first price that saved
+// (the server ticks Offered with it), Offered unticked or a price cleared is in the queue (`sizes`,
+// `fields`: ssPgQueue's) long before any read has it. Judged exactly as each row is drawn
+// (ssPgRowView), so a style's band ("12 sizes · 3 hidden", ssPgRows' `live`) says what its rows
+// show. → { [sizeId]: hidden }, only the sizes that differ from the read. `prev` (the last answer)
+// comes back as the very same object when nothing differs from it, so a commit that hides or shows
+// nothing leaves the rows' memo alone (plan 3.5: a commit re-renders one row).
+function ssPgHiddenNow(model, sizes, fields, prev) {
+  const out = {};
+  if (model && sizes) {
+    [...(model.styles || []), ...(model.hiddenStyles || [])].forEach((st) => (st.sizes || []).forEach((z) => {
+      const s = sizes[z.id];
+      if (!s) return;
+      const h = ssPgRowView(z, s, fields ? fields[z.id] : null, null).hidden;
+      if (h !== !!z.hidden) out[z.id] = h;
+    }));
+  }
+  const keys = Object.keys(out);
+  if (prev && Object.keys(prev).length === keys.length && keys.every((k) => prev[k] === out[k])) return prev;
+  return out;
+}
+
+// How many boxes are waiting, saving and red, and sizes being added or removed. The badge and the
+// leave prompt read this.
+function ssPgCount(q) {
+  const out = { pending: 0, inflight: 0, red: 0, creating: 0, removing: 0 };
+  if (!q) return out;
+  Object.keys(q.fields || {}).forEach((id) => {
+    const fs = q.fields[id];
+    Object.keys(fs).forEach((f) => {
+      if (fs[f].pending) out.pending++;
+      if (fs[f].inflight) out.inflight++;
+      if (fs[f].error) out.red++;
+    });
+  });
+  Object.keys(q.sizes || {}).forEach((id) => { if (q.sizes[id].creating) out.creating++; });
+  Object.keys(q.removes || {}).forEach(() => { out.removing++; });
+  return out;
+}
+
+// The next call (plan 4.3, 4.6), or null when nothing can go. Creates first, then removes, then
+// each size with unsent edits, the longest-waiting first. A size whose create is unanswered has no
+// version yet, so its edits wait for the answer (they go in the next call, on the create's version).
+// `to` and `from` carry only what changed. At most 50 entries and 2,500 option boxes (caps.entries,
+// caps.cells): the rest waits for the next call. Returns { body: { creates, removes, sizes }, sent:
+// { [sizeId]: { base, fields: { [field]: { to, from, seq } } } }, creates: [ids], removes: [ids],
+// changes, cells }.
+// A remove goes in the shape it was queued in (the delete plan, 10-31): the plain ✕ on a size never
+// priced or edited (the queue's "remove") sends its id, judged by migration 350's rule; every
+// confirmed delete (the queue's "removes", `q.dels`) sends { id, base: its version }, which the
+// server deletes only at that version, with no Real-Time Pricing list, and when no saved design uses
+// it. `removes` in the answer is ids either way, so the refresh rules never see the shape.
+function ssPgBuildBatch(q, caps) {
+  if (!q) return null;
+  const maxEntries = (caps && caps.entries) || 50;
+  const maxCells = (caps && caps.cells) || 2500;
+  const creates = [], removes = [], sizes = [], createIds = [], removeIds = [];
+  const sent = {};
+  let entries = 0, cells = 0, changes = 0;
+  Object.keys(q.sizes || {}).forEach((id) => {
+    const s = q.sizes[id];
+    if (s.creating !== "pending" || !s.create || entries >= maxEntries) return;
+    creates.push({ id, styleId: s.create.styleId, width: s.create.width, length: s.create.length });
+    createIds.push(id);
+    entries++; changes++;
+  });
+  Object.keys(q.removes || {}).forEach((id) => {
+    if (q.removes[id] !== "pending" || entries >= maxEntries) return;
+    const s = q.sizes ? q.sizes[id] : null;
+    removes.push(q.dels && q.dels[id] ? { id, base: s && s.version != null ? s.version : null } : id);
+    removeIds.push(id);
+    entries++; changes++;
+  });
+  const ready = Object.keys(q.fields || {}).map((id) => {
+    const s = q.sizes[id], mine = q.fields[id];
+    if (!s || s.creating || s.version == null || (q.removes && q.removes[id])) return null;
+    const fs = Object.keys(mine).filter((f) => mine[f].pending && !mine[f].inflight);
+    if (!fs.length) return null;
+    return { id, s, fs, first: Math.min(...fs.map((f) => mine[f].pending.seq)) };
+  }).filter(Boolean).sort((a, b) => a.first - b.first);
+  for (const r of ready) {
+    if (entries >= maxEntries) break;
+    const from = {}, to = {}, fl = {};
+    r.fs.forEach((f) => {
+      const p = q.fields[r.id][f].pending;
+      if (f === "price" || f === "active") { from[f] = p.from; to[f] = p.to; }
+      else {
+        if (cells >= maxCells) return;
+        const k = f.slice(2);
+        (from.cells = from.cells || {})[k] = p.from;
+        (to.cells = to.cells || {})[k] = p.to;
+        cells++;
+      }
+      fl[f] = { to: p.to, from: p.from, seq: p.seq };
+    });
+    if (!Object.keys(fl).length) continue;
+    // A first price the builder pasted with Offered "no" (`off`, ssPgPlanCells): the server ticks
+    // Offered with a first price unless `active` is sent, so it goes along, false from false (plan
+    // 4.11: Excel's own rule keeps a "no" row unoffered). Only the price is judged on the answer.
+    const pp = fl.price ? q.fields[r.id].price.pending : null;
+    if (pp && pp.off && pp.from == null && pp.to != null && !("active" in to)) { from.active = false; to.active = false; }
+    sizes.push({ id: r.id, base: r.s.version, from, to });
+    sent[r.id] = { base: r.s.version, fields: fl };
+    entries++;
+    changes += Object.keys(fl).length;
+  }
+  if (!entries) return null;
+  return { body: { creates, removes, sizes }, sent, creates: createIds, removes: removeIds, changes, cells };
+}
+
+// What a `conflict` means for each field a call sent (plan 4.6): the server holds its `to` → it
+// landed (an earlier copy of this very call, or someone typed the same); it still holds its `from`
+// → nobody else touched it, so it goes again on the new version; anything else → a real conflict,
+// red, never sent. Only fields that were SENT are judged, so an Offered tick never conflicts with a
+// colleague's price. `again`: this size was already resent once after a conflict, and a second
+// resend turns red instead, so two tabs can never bounce one size back and forth.
+function ssPgRebase(sent, server, again) {
+  const out = {};
+  Object.keys(sent || {}).forEach((f) => {
+    const now = ssPgVal(server, f);
+    out[f] = ssPgSame(now, sent[f].to) ? "landed" : (!again && ssPgSame(now, sent[f].from)) ? "resend" : "red";
+  });
+  return out;
+}
+
+// THE SAVE QUEUE (plan 4.6): ssPgQueue(state, event) → the next state, never touching its input.
+//
+// STATE. sizes: { [id]: { version, price, active, cells, creating?, create? } }, what the server last
+// confirmed (creating: "pending" | "inflight" while a new size's create is unanswered). fields:
+// { [id]: { [field]: { pending?, inflight?, error? } } } for boxes with something local only, where
+// pending and inflight are { to, from, seq } and error is { kind: "invalid" | "refused" | "conflict",
+// typed, reason, server? }. removes: { [id]: "pending" | "inflight" }; dels: { [id]: true } for the
+// removes that are confirmed deletes (sent as { id, base }: ssPgBuildBatch). flight: the one call
+// out, with what it sent. Plus the clock marks for the send timing, the failure count, why saving
+// stopped or the page went view-only, the count of answers (oks, for the refresh rule), a note for
+// the status line, and `unsure`: { [id]: true } for sizes a discarded call may have changed all the
+// same, until a fresh read says what is on file.
+//
+// EVENTS: init, commit, commits (a paste, fill or clear), invalid, dismiss, create, remove, removes
+// (a confirmed delete), flush, send, ok, fail, resume, discard, refresh, columns, restore, note-off.
+// Times come in on the event (`at`), never from a clock in here.
+//
+// THE COMMIT RULE. A field's baseline is its in-flight `to` when it has one, otherwise what the
+// server confirmed. A value equal to the baseline drops any unsent edit (nothing to send);
+// anything else is pending { to, from: baseline }. So typing 480 and then 400 again while 480 is
+// out queues { to: 400, from: 480 }, which goes after the answer: it is never thrown away. The
+// editor's commit also carries `seen`, what the box showed when typing began: if an answer moved
+// the box under the open editor, the text was typed against a value that is gone, and the box goes
+// red instead (see commitBox).
+function ssPgQueue(q, ev) {
+  const e = ev || {};
+  const at = e.at == null ? 0 : Number(e.at);
+  if (e.type === "init") {
+    let cols = null;
+    if (Array.isArray(e.cols)) { cols = {}; e.cols.forEach((k) => { cols[k] = true; }); }
+    return { sizes: { ...(e.sizes || {}) }, fields: {}, removes: {}, dels: {}, cols, seq: 0, n: 0, flight: null, failures: 0,
+      stopped: null, viewOnly: null, oks: 0, firstAt: null, lastAt: null, flush: false, retried: {}, note: null,
+      flash: null, reread: false, renamed: {}, unsure: null };
+  }
+  if (!q) return q;
+  // One size's field map with one field set (or gone when nothing is left on it), copied.
+  const put = (fields, id, f, x) => {
+    const mine = { ...(fields[id] || {}) };
+    if (x && (x.pending || x.inflight || x.error)) mine[f] = x; else delete mine[f];
+    const out = { ...fields };
+    if (Object.keys(mine).length) out[id] = mine; else delete out[id];
+    return out;
+  };
+  const setSize = (fields, id, mine) => {
+    const out = { ...fields };
+    if (Object.keys(mine).length) out[id] = mine; else delete out[id];
+    return out;
+  };
+  const anyPending = (fields) => Object.keys(fields).some((id) => Object.keys(fields[id]).some((f) => fields[id][f].pending));
+  const waiting = (st) => anyPending(st.fields) || Object.keys(st.sizes).some((id) => st.sizes[id].creating === "pending")
+    || Object.keys(st.removes).some((id) => st.removes[id] === "pending");
+  // What the builder wants a box to be now: the newest unsent edit, else the one in flight.
+  const wish = (x) => (x.pending ? x.pending.to : x.inflight ? x.inflight.to : x.error ? x.error.typed : undefined);
+  // A first price pasted with Offered "no" keeps that `off` (ssPgBuildBatch) wherever it is re-made
+  // from what is there now, as long as it is still a first price.
+  const offOf = (x, from, to) => (from == null && to != null && ((x.pending && x.pending.off) || (x.inflight && x.inflight.off)) ? { off: true } : {});
+  // One size's in-flight edits, back to unsent. A follow-up typed during the flight folds into it:
+  // the newest value, from where the flight started. A box marked not valid keeps only that mark.
+  const unsendSize = (mine) => {
+    const out = {};
+    Object.keys(mine).forEach((f) => {
+      const x = mine[f];
+      if (!x.inflight) { out[f] = x; return; }
+      const y = { ...x };
+      const to = x.pending ? x.pending.to : x.inflight.to;
+      delete y.inflight;
+      delete y.pending;
+      if (!y.error && !ssPgSame(to, x.inflight.from)) y.pending = { to, from: x.inflight.from, seq: x.pending ? x.pending.seq : x.inflight.seq, ...offOf(x, x.inflight.from, to) };
+      if (y.pending || y.error) out[f] = y;
+    });
+    return out;
+  };
+  // Plan 4.6's refresh rule, for one size's unsent boxes against what the server holds now (`t`):
+  // one that already says what the box wants has nothing left to send; one whose starting value is
+  // gone turns red at once (changed elsewhere, both values) and is never sent, so the grid shows
+  // the colleague's number and typing over it is the builder's own choice. In-flight boxes are left
+  // to their answer. A fresh read runs it, and so does every answer that brings a size's row back:
+  // a conflict or duplicate on one box of a size carries a colleague's price and Offered too.
+  const settle = (mine, t) => {
+    const next = { ...mine };
+    Object.keys(mine).forEach((f) => {
+      const x = mine[f];
+      if (!x.pending || x.inflight) return;
+      const now = ssPgVal(t, f);
+      if (ssPgSame(x.pending.to, now)) { const y = { ...x }; delete y.pending; if (y.error) next[f] = y; else delete next[f]; }
+      else if (!ssPgSame(x.pending.from, now)) next[f] = { error: { kind: "conflict", typed: x.pending.to, server: now, reason: null } };
+    });
+    return next;
+  };
+  // The clock marks after a change: kept while anything waits, cleared when nothing does.
+  const timed = (st, touched) => {
+    if (!waiting(st)) return { ...st, firstAt: null, lastAt: null, flush: false };
+    if (!touched) return st;
+    return { ...st, firstAt: st.firstAt == null ? at : st.firstAt, lastAt: at };
+  };
+
+  // THE COMMIT RULE for one box ({ sizeId, f, value, seen? }), into `mine`: that size's own copy of
+  // its field map, written in place. Returns the next seq (moved when the box now waits to be sent).
+  //
+  // `seen` (the editor's, and every box of a paste, fill or clear): what the box showed when the
+  // typing began, or when the paste was checked. An answer that landed meanwhile moved this box: a
+  // colleague's value adopted from a conflict on another box of the size, or the box's own flight
+  // in conflict. Committed as usual, its `from` would be that new value, and the server's from-check
+  // would let it overwrite the colleague's. So it goes red as changed elsewhere, with both values,
+  // and nothing is sent (plan 1: never quietly replaces theirs). A box the server refused keeps its
+  // reason. Typing exactly what is there now is no change at all.
+  //
+  // `off` (a price, from a paste or fill whose Offered said "no"): with a first price, Offered is
+  // sent as unticked (ssPgBuildBatch). A price typed later over that unsent one keeps it; a paste
+  // says it again either way.
+  const commitBox = (mine, d, seq) => {
+    const x = mine[d.f] || {};
+    const base = x.inflight ? x.inflight.to : ssPgVal(q.sizes[d.sizeId], d.f);
+    const y = { ...x };
+    delete y.error;
+    delete y.pending;
+    let next = seq;
+    if ("seen" in d) {
+      const shown = x.pending ? x.pending.to : base;
+      if (!ssPgSame(shown, d.seen) && !ssPgSame(d.value, shown)) {
+        y.error = x.error && x.error.kind === "refused" ? { ...x.error, typed: d.value }
+          : { kind: "conflict", typed: d.value, server: ssPgVal(q.sizes[d.sizeId], d.f), reason: null };
+      }
+    }
+    if (!y.error && !ssPgSame(d.value, base)) {
+      y.pending = { to: d.value, from: base, seq: ++next };
+      const off = "off" in d ? !!d.off : !!(x.pending && x.pending.off);
+      if (d.f === "price" && off && base == null && d.value != null) y.pending.off = true;
+    }
+    if (y.pending || y.inflight || y.error) mine[d.f] = y; else delete mine[d.f];
+    return next;
+  };
+
+  switch (e.type) {
+    case "commit": {
+      // A size being removed takes no edit (the page says so first): its boxes would go with it.
+      if (!q.sizes[e.sizeId] || q.removes[e.sizeId]) return q;
+      const mine = { ...(q.fields[e.sizeId] || {}) };
+      const seq = commitBox(mine, e, q.seq);
+      return timed({ ...q, seq, fields: setSize(q.fields, e.sizeId, mine) }, seq !== q.seq);
+    }
+    case "commits": {
+      // A paste, a fill or a clear (plan 3.11): many boxes at once, each by the commit rule and its
+      // `seen` check, in ONE copy of the state (20,000 boxes must not copy it 20,000 times), then sent
+      // at once (plan 4.6: a paste flushes). The batches respect the call caps (ssPgBuildBatch).
+      const fields = { ...q.fields };
+      const touched = {};
+      let seq = q.seq;
+      (Array.isArray(e.edits) ? e.edits : []).forEach((d) => {
+        if (!d || !q.sizes[d.sizeId] || q.removes[d.sizeId]) return;
+        seq = commitBox(touched[d.sizeId] || (touched[d.sizeId] = { ...(fields[d.sizeId] || {}) }), d, seq);
+      });
+      Object.keys(touched).forEach((id) => { if (Object.keys(touched[id]).length) fields[id] = touched[id]; else delete fields[id]; });
+      const any = seq !== q.seq;
+      return timed({ ...q, seq, fields, flush: any || q.flush }, any);
+    }
+    case "invalid": {
+      // Typed, refused, not sent (plan 3.9): the box goes red with the reason, and any earlier unsent
+      // edit of it goes too, because the newest thing typed there is this.
+      if (!q.sizes[e.sizeId] || q.removes[e.sizeId]) return q;
+      const y = { ...((q.fields[e.sizeId] || {})[e.f] || {}), error: { kind: "invalid", typed: String(e.typed == null ? "" : e.typed), reason: e.reason || "" } };
+      delete y.pending;
+      return timed({ ...q, fields: put(q.fields, e.sizeId, e.f, y) }, false);
+    }
+    case "dismiss": {
+      const x = (q.fields[e.sizeId] || {})[e.f];
+      if (!x || !x.error) return q;
+      const y = { ...x };
+      delete y.error;
+      return { ...q, fields: put(q.fields, e.sizeId, e.f, y) };
+    }
+    case "create": {
+      if (!e.id || q.sizes[e.id]) return q;
+      const s = { version: null, price: null, active: false, cells: {}, creating: "pending", create: { styleId: e.styleId, width: e.width, length: e.length } };
+      return timed({ ...q, sizes: { ...q.sizes, [e.id]: s }, flush: true }, true);
+    }
+    case "remove": {
+      if (!q.sizes[e.id] || q.removes[e.id]) return q;
+      // A size whose create has not gone yet is simply never added: nothing goes for it. Queued, the
+      // next call would name the id in both creates and removes, and the server refuses such a call
+      // whole (validatePayload), turning every other box in it red. A create already out is answered
+      // before the remove can go: one call at a time.
+      if (q.sizes[e.id].creating === "pending") {
+        const sizes = { ...q.sizes };
+        delete sizes[e.id];
+        return timed({ ...q, sizes, fields: setSize(q.fields, e.id, {}) }, false);
+      }
+      return timed({ ...q, removes: { ...q.removes, [e.id]: "pending" }, flush: true }, true);
+    }
+    case "removes": {
+      // A CONFIRMED DELETE (the delete plan, 10-31), of one size or several, ALL OR NOTHING: every id
+      // must be on the account here, created, not already going, with no box of it in flight (that
+      // box's answer would land on a size the next call deletes). Each one's unsent and red boxes go
+      // with it in this same step: the confirm said its price and options go, those boxes are not on
+      // the server, so the version the delete is sent on stays right, and nothing of it is left red.
+      // Sent at once, as { id, base } (ssPgBuildBatch). Whether saved designs use a size is the
+      // page's check (the model's `used`) and the server's; the queue knows no designs.
+      const ids = Array.isArray(e.ids) ? e.ids : [];
+      if (!ids.length) return q;
+      const flying = (id) => Object.keys(q.fields[id] || {}).some((f) => q.fields[id][f].inflight);
+      if (ids.some((id) => !q.sizes[id] || q.sizes[id].creating || q.sizes[id].version == null || q.removes[id] || flying(id))) return q;
+      const removes = { ...q.removes }, dels = { ...(q.dels || {}) };
+      let fields = q.fields;
+      ids.forEach((id) => { removes[id] = "pending"; dels[id] = true; fields = setSize(fields, id, {}); });
+      return timed({ ...q, removes, dels, fields, flush: true }, true);
+    }
+    case "flush":
+      return q.flush ? q : { ...q, flush: true };
+    case "note-off":
+      return q.note ? { ...q, note: null } : q;
+    case "send": {
+      // ONE CALL OUT PER PAGE. Nothing goes while a call is out, while saving is stopped, or once the
+      // page is view-only.
+      if (q.flight || q.stopped || q.viewOnly) return q;
+      const b = ssPgBuildBatch(q, e.caps);
+      if (!b) return q.flush ? { ...q, flush: false } : q;
+      let fields = q.fields;
+      Object.keys(b.sent).forEach((id) => {
+        const mine = { ...fields[id] };
+        Object.keys(b.sent[id].fields).forEach((f) => {
+          const y = { ...mine[f], inflight: mine[f].pending };
+          delete y.pending;
+          mine[f] = y;
+        });
+        fields = setSize(fields, id, mine);
+      });
+      const sizes = { ...q.sizes };
+      b.creates.forEach((id) => { sizes[id] = { ...sizes[id], creating: "inflight" }; });
+      const removes = { ...q.removes };
+      b.removes.forEach((id) => { removes[id] = "inflight"; });
+      const n = q.n + 1;
+      const next = { ...q, fields, sizes, removes, n,
+        flight: { n, body: b.body, sent: b.sent, creates: b.creates, removes: b.removes, changes: b.changes, tries: 0 } };
+      // What is left (past the caps, or waiting on a create) keeps its clock and goes next.
+      return waiting(next) ? next : { ...next, firstAt: null, lastAt: null, flush: false };
+    }
+    case "ok": {
+      if (!q.flight || e.n !== q.flight.n) return q;   // an answer nobody is waiting for any more
+      const fl = q.flight;
+      const a = e.answer || {};
+      const sizes = { ...q.sizes };
+      const removes = { ...q.removes };
+      const dels = { ...(q.dels || {}) };
+      const retried = { ...q.retried };
+      const renamed = { ...q.renamed };
+      const saved = {};
+      const notes = [];
+      let fields = q.fields;
+      let flush = q.flush;
+      const cellsOf = (c) => { const o = {}; Object.keys(c || {}).forEach((k) => { o[k] = Number(c[k]) || 0; }); return o; };
+      // created_at rides along where the answer has it (the ✕ reads it: ssPgNeverEdited).
+      const bornOf = (r, prev) => (r.row && r.row.created_at != null ? { created: r.row.created_at } : prev && prev.created != null ? { created: prev.created } : {});
+      const rowOf = (r, prev) => ({ version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price),
+        active: !!r.row.active, cells: { ...((prev && prev.cells) || {}), ...cellsOf(r.cells) }, ...bornOf(r, prev) });
+      const gone = (f) => f.slice(0, 2) === "c:" && !!q.cols && !q.cols[f.slice(2)];
+      const dot = (s) => { const t = String(s || "").trim(); return !t || /[.!?]$/.test(t) ? t : t + "."; };
+
+      // Creates. A created (or duplicate: a resend that already landed) size gets its version, and
+      // its waiting edits go in the very next call. `exists`: someone else added these dimensions
+      // first; the existing size replaces the minted one, and what was typed on the minted row
+      // turns red on it. Refused: the size was never added.
+      (Array.isArray(a.created) ? a.created : []).forEach((r) => {
+        if (!r || fl.creates.indexOf(r.id) < 0) return;
+        const minted = q.sizes[r.id];
+        if ((r.status === "created" || r.status === "duplicate") && r.row) {
+          sizes[r.id] = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells), ...bornOf(r, null) };
+          if (fields[r.id]) flush = true;
+        } else if (r.status === "exists" && r.existingId && r.row) {
+          const into = String(r.existingId);
+          const theirs = { version: r.version == null ? null : r.version, price: r.row.price == null ? null : Number(r.row.price), active: !!r.row.active, cells: cellsOf(r.cells), ...bornOf(r, null) };
+          const mine = fields[r.id] || {};
+          const moved = { ...(fields[into] || {}) };
+          Object.keys(mine).forEach((f) => {
+            const typed = wish(mine[f]);
+            if (typed === undefined || moved[f]) return;
+            moved[f] = { error: { kind: "conflict", typed, server: ssPgVal(theirs, f), reason: "Someone else just added this size. Check its numbers and type yours again." } };
+          });
+          delete sizes[r.id];
+          fields = setSize(setSize(fields, r.id, {}), into, moved);
+          if (!q.fields[into] || !sizes[into]) sizes[into] = theirs;
+          renamed[r.id] = into;
+        } else {
+          delete sizes[r.id];
+          fields = setSize(fields, r.id, {});
+          const what = minted && minted.create ? `${minted.create.width}x${minted.create.length}` : "a size";
+          notes.push(`Couldn't add ${what}: ${dot(r.reason || "the server refused it")}`);
+        }
+      });
+      // Removes. `removed` (gone: true too: a resend of one that already landed) takes the row away. A
+      // refused one keeps its row and says nothing here: the page turns the whole answer's removes
+      // into one status line (ssPgDeleteResult), so a refusal never hides under a "Deleted" line.
+      // The answer names each by its id; an object's own id is read too.
+      (Array.isArray(a.removed) ? a.removed : []).forEach((r) => {
+        const id = r && r.id && typeof r.id === "object" ? r.id.id : r ? r.id : null;
+        if (id == null || fl.removes.indexOf(id) < 0) return;
+        delete removes[id];
+        delete dels[id];
+        if (r.status === "removed") { delete sizes[id]; fields = setSize(fields, id, {}); }
+      });
+      // Sizes.
+      const answered = {};
+      (Array.isArray(a.results) ? a.results : []).forEach((r) => {
+        const sent = r && fl.sent[r.id];
+        if (!sent) return;
+        answered[r.id] = true;
+        const server = r.row ? rowOf(r, sizes[r.id]) : sizes[r.id];
+        if (r.row) sizes[r.id] = server;
+        const mine = { ...(fields[r.id] || {}) };
+        const ours = (f) => !!mine[f] && !!mine[f].inflight && mine[f].inflight.seq === sent.fields[f].seq;
+        const fs = Object.keys(sent.fields);
+        if (r.status === "saved" || r.status === "duplicate") {
+          // Landed. In-flight boxes clear; one typed again during the flight stays unsent (its
+          // `from` is already this flight's `to`). A box the server would not take (cellErrors:
+          // an option that is no column any more, Real-Time Pricing, Offered with no price) goes
+          // red with the reason and the server's value, and a follow-up on it goes red with it,
+          // because the value it started from never landed.
+          delete retried[r.id];
+          const errs = r.cellErrors || {};
+          fs.forEach((f) => {
+            if (!ours(f)) return;
+            const x = mine[f];
+            const why = errs[f === "price" || f === "active" ? f : f.slice(2)];
+            if (r.status === "saved" && why != null) {
+              if (gone(f)) delete mine[f];
+              else mine[f] = { error: { kind: "refused", typed: wish(x), reason: String(why) } };
+              return;
+            }
+            const y = { ...x };
+            delete y.inflight;
+            if (y.pending || y.error) mine[f] = y; else delete mine[f];
+            (saved[r.id] = saved[r.id] || []).push(f);
+          });
+        } else if (r.status === "conflict" && r.row) {
+          // REBASE (ssPgRebase): landed boxes clear, untouched ones go again once on the new
+          // version from what is there now, and real conflicts turn red with both values.
+          //
+          // A follow-up typed on a box during its flight folds into that box's resend: the newest
+          // value, from what is there now. Plan 4.6 turns such a follow-up red when ITS box is in
+          // conflict, because the value it started from never landed; that is the red verdict here.
+          // On a resend nobody else touched the box, the value the flight started from still holds,
+          // and the server checks `from` again, so going red would only ask the builder to retype
+          // what they just typed, under "changed elsewhere" when nothing was. A box marked not valid
+          // during the flight keeps that mark (as when the flight is saved): the in-flight value
+          // still goes, and the red "wasn't saved" stays until the builder types over it.
+          const verdict = ssPgRebase(sent.fields, server, !!retried[r.id]);
+          let again = false;
+          fs.forEach((f) => {
+            if (!ours(f)) return;
+            const x = mine[f];
+            const now = ssPgVal(server, f);
+            const want = wish(x);
+            if (verdict[f] === "landed") {
+              const y = { ...x };
+              delete y.inflight;
+              if (y.pending || y.error) mine[f] = y; else delete mine[f];
+            } else if (verdict[f] === "resend") {
+              const red = x.error ? { error: x.error } : {};
+              if (ssPgSame(want, now)) { if (x.error) mine[f] = red; else delete mine[f]; }
+              else { mine[f] = { pending: { to: want, from: now, seq: x.pending ? x.pending.seq : x.inflight.seq, ...offOf(x, now, want) }, ...red }; again = true; }
+            } else {
+              mine[f] = { error: { kind: "conflict", typed: want, server: now, reason: null } };
+            }
+          });
+          if (again) { retried[r.id] = true; flush = true; } else delete retried[r.id];
+        } else {
+          // Refused, or missing (the size is not on the account any more): red with the reason, the
+          // server's value shown, nothing retried. A missing size's other unsent boxes go red too.
+          delete retried[r.id];
+          const why = dot(r.reason || (r.status === "missing" ? "That size isn't on this account any more" : "This change couldn't be saved"));
+          fs.forEach((f) => { if (ours(f)) mine[f] = { error: { kind: "refused", typed: wish(mine[f]), reason: why } }; });
+          if (r.status === "missing") {
+            Object.keys(mine).forEach((f) => { if (mine[f].pending && !mine[f].error) mine[f] = { error: { kind: "refused", typed: mine[f].pending.to, reason: why } }; });
+          }
+        }
+        // The row this answer brought back is what the server holds now, for the boxes this call did
+        // not send as well: a price typed after the call went, waiting behind it, was typed against a
+        // value a colleague may have just replaced. Judged like a fresh read (settle), it turns red
+        // here with their number on screen. Left unsent, a re-type before it went would take the
+        // colleague's value as its `from` and overwrite it (plan 1, 4.6). The server sends back only
+        // the option boxes a call named, so only price and Offered can move this way.
+        fields = setSize(fields, r.id, r.row ? settle(mine, server) : mine);
+      });
+      // Anything the answer left out (it never should): red, with what was typed, rather than unsent
+      // again, which would resend it every 800 ms for as long as the server kept leaving it out.
+      Object.keys(fl.sent).forEach((id) => {
+        if (answered[id] || !fields[id]) return;
+        const mine = { ...fields[id] };
+        Object.keys(fl.sent[id].fields).forEach((f) => {
+          if (mine[f] && mine[f].inflight && mine[f].inflight.seq === fl.sent[id].fields[f].seq) {
+            mine[f] = { error: { kind: "refused", typed: wish(mine[f]), reason: "The server didn't answer for this change. Type it again" } };
+          }
+        });
+        fields = setSize(fields, id, mine);
+      });
+      fl.creates.forEach((id) => {
+        if (!sizes[id] || sizes[id].creating !== "inflight") return;
+        const c = sizes[id].create;
+        delete sizes[id];
+        fields = setSize(fields, id, {});
+        notes.push(`Couldn't add ${c ? `${c.width}x${c.length}` : "a size"}: the server didn't answer. Add it again.`);
+      });
+      // A remove the answer left out (it never should): counted, not named (the queue keeps no labels).
+      const unanswered = fl.removes.filter((id) => removes[id] === "inflight");
+      unanswered.forEach((id) => { delete removes[id]; delete dels[id]; });
+      if (unanswered.length) {
+        notes.push(unanswered.length === 1 ? "A size couldn't be deleted: the server didn't answer. Delete it again."
+          : `${unanswered.length} sizes couldn't be deleted: the server didn't answer. Delete them again.`);
+      }
+      const next = { ...q, sizes, fields, removes, dels, retried, renamed, flight: null, failures: 0, oks: q.oks + 1, flush,
+        note: notes.length ? { text: notes.join(" ") } : q.note, flash: { n: q.oks + 1, saved } };
+      return timed(next, false);
+    }
+    case "fail": {
+      if (!q.flight || e.n !== q.flight.n) return q;
+      const reason = e.reason ? String(e.reason) : "";
+      if (e.kind === "transport") {
+        // A timeout, a dropped connection, a 5xx: the SAME call goes again after a backoff (the
+        // page's timer). The function answers a resend that already landed `duplicate`, so it is
+        // safe. The fifth failure in a row stops saving until the builder says Retry.
+        //
+        // The first copy may have landed all the same (its answer lost), and a colleague may have set
+        // a box back since (A→B→A): the rebase's value check can't tell that from "nobody touched
+        // it". So a conflict on the retry is final for each size in it (retried): landed or red,
+        // never resent.
+        const failures = q.failures + 1;
+        const flight = { ...q.flight, tries: q.flight.tries + 1 };
+        const retried = { ...q.retried };
+        Object.keys(q.flight.sent).forEach((id) => { retried[id] = true; });
+        return { ...q, flight, failures, retried, stopped: failures >= (e.max || 5) ? { kind: "transport", reason: reason || "couldn't reach the server" } : null };
+      }
+      if (e.kind === "refused") {
+        // The server refused the whole call (a 400): the browser let through something it should not
+        // have. Every box in it goes red; nothing is resent; new sizes in it were never added, and
+        // the status line says so, as it does for one the server refuses alone (with no red box to
+        // show it, the badge could otherwise read "All changes saved" over a size that vanished, and
+        // over what was typed on it while it was being added).
+        let fields = q.fields;
+        Object.keys(q.flight.sent).forEach((id) => {
+          const mine = { ...(fields[id] || {}) };
+          Object.keys(q.flight.sent[id].fields).forEach((f) => {
+            if (mine[f] && mine[f].inflight) mine[f] = { error: { kind: "refused", typed: wish(mine[f]), reason } };
+          });
+          fields = setSize(fields, id, mine);
+        });
+        const sizes = { ...q.sizes };
+        const lost = [];
+        let typed = 0;
+        q.flight.creates.forEach((id) => {
+          const c = sizes[id] && sizes[id].create;
+          lost.push(c ? `${c.width}x${c.length}` : "a size");
+          typed += Object.keys(fields[id] || {}).length;
+          delete sizes[id];
+          fields = setSize(fields, id, {});
+        });
+        const removes = { ...q.removes }, dels = { ...(q.dels || {}) };
+        q.flight.removes.forEach((id) => { delete removes[id]; delete dels[id]; });
+        const why = String(reason || "the server refused it").trim();
+        const said = [];
+        if (lost.length) {
+          const names = lost.length > 3 ? `${lost.slice(0, 3).join(", ")} and ${lost.length - 3} more` : lost.join(", ");
+          said.push(`Couldn't add ${names}: ${/[.!?]$/.test(why) ? why : why + "."}${typed ? ` What was typed on ${lost.length === 1 ? "it" : "them"} wasn't saved either.` : ""}`);
+        }
+        // The sizes this call was deleting stay, with no box to show it: the status line says so.
+        const kept = q.flight.removes.length;
+        if (kept) said.push(`${kept === 1 ? "A size" : `${kept} sizes`} couldn't be deleted: ${/[.!?]$/.test(why) ? why : why + "."}`);
+        const note = said.length ? { text: said.join(" ") } : q.note;
+        return timed({ ...q, fields, sizes, removes, dels, flight: null, failures: 0, note }, false);
+      }
+      // 403 (forbidden), 401 (auth) or an answer for another account (tenant): nothing more goes
+      // from this page. What was in flight is unsent again, so the badge and the leave prompt still
+      // count it.
+      const fields = {};
+      Object.keys(q.fields).forEach((id) => { const m = unsendSize(q.fields[id]); if (Object.keys(m).length) fields[id] = m; });
+      const sizes = { ...q.sizes };
+      q.flight.creates.forEach((id) => { if (sizes[id]) sizes[id] = { ...sizes[id], creating: "pending" }; });
+      const removes = { ...q.removes };
+      q.flight.removes.forEach((id) => { removes[id] = "pending"; });
+      const back = { ...q, fields, sizes, removes, flight: null, failures: 0 };
+      if (e.kind === "forbidden") return { ...back, viewOnly: { reason: reason || "You can't change Sheds on this account" } };
+      return { ...back, stopped: { kind: e.kind === "auth" ? "auth" : "tenant", reason } };
+    }
+    case "resume": {
+      // Retry after saving stopped. An answer for another account is not retried from this page.
+      if (!q.stopped || q.stopped.kind === "tenant") return q;
+      return { ...q, stopped: null, failures: 0, flush: true };
+    }
+    case "discard": {
+      // "Discard these changes": every unsent and in-flight edit goes, and the boxes show what the
+      // server last confirmed. Red boxes stay: they say what did not save. A late answer for the
+      // call that was out is ignored (no flight is waiting for it). That call may have landed all
+      // the same: a timeout gives up on a request already on its way, and a 5xx can follow a commit.
+      // So its sizes are `unsure` until a fresh read (refresh) says what is on file; the page reads
+      // at once, and the badge does not say "saved" meanwhile.
+      const fields = {};
+      Object.keys(q.fields).forEach((id) => {
+        const mine = {};
+        Object.keys(q.fields[id]).forEach((f) => { if (q.fields[id][f].error) mine[f] = { error: q.fields[id][f].error }; });
+        if (Object.keys(mine).length) fields[id] = mine;
+      });
+      const sizes = {};
+      Object.keys(q.sizes).forEach((id) => { if (!q.sizes[id].creating) sizes[id] = q.sizes[id]; });
+      let unsure = q.unsure;
+      if (q.flight) {
+        unsure = { ...(q.unsure || {}) };
+        [...Object.keys(q.flight.sent), ...q.flight.creates, ...q.flight.removes].forEach((id) => { unsure[id] = true; });
+      }
+      return { ...q, fields, sizes, removes: {}, dels: {}, flight: null, failures: 0, retried: {}, unsure,
+        stopped: q.stopped && q.stopped.kind === "tenant" ? q.stopped : null, flush: false, firstAt: null, lastAt: null };
+    }
+    case "refresh": {
+      // A fresh read (plan 4.6, 4.8). One asked for before the latest answer landed may predate
+      // that save: dropped, and another read is wanted (reread). A size with nothing local takes
+      // the new version and values (`flash.changed` names the boxes that moved). A size with
+      // anything pending, in flight or red KEEPS ITS VERSION, so the server's checks still judge
+      // its edits; its boxes show the new values except those in flight, and an unsent edit that
+      // started from a value that is no longer there turns red at once and is never sent.
+      // A discarded call's sizes (`unsure`) are settled by this read; if one of them moved, part of
+      // what was discarded had landed, and the status line says so.
+      if (e.okAt !== q.oks) return q.reread ? q : { ...q, reread: true };
+      const fresh = e.sizes || {};
+      const sizes = {};
+      const changed = {};
+      let fields = q.fields;
+      const moved = (was, t) => ["price", "active", ...Object.keys({ ...(was.cells || {}), ...(t.cells || {}) }).map((k) => "c:" + k)]
+        .filter((f) => !ssPgSame(ssPgVal(was, f), ssPgVal(t, f)));
+      const landed = !!q.unsure && Object.keys(q.unsure).some((id) => q.sizes[id] && fresh[id] && moved(q.sizes[id], fresh[id]).length > 0);
+      Object.keys(fresh).forEach((id) => {
+        const was = q.sizes[id], t = fresh[id];
+        const mine = q.fields[id];
+        if (!mine && !(was && was.creating) && !q.removes[id]) {
+          sizes[id] = t;
+          if (was) {
+            const diff = moved(was, t);
+            if (diff.length) changed[id] = diff;
+          }
+          return;
+        }
+        if (!was) { sizes[id] = t; return; }
+        const flying = (f) => !!(mine && mine[f] && mine[f].inflight);
+        const cells = { ...(t.cells || {}) };
+        Object.keys(was.cells || {}).forEach((k) => { if (flying("c:" + k)) cells[k] = was.cells[k]; });
+        Object.keys(cells).forEach((k) => { if (flying("c:" + k) && !(k in (was.cells || {}))) delete cells[k]; });
+        sizes[id] = { ...was, price: flying("price") ? was.price : t.price, active: flying("active") ? was.active : t.active, cells };
+        if (!mine) return;
+        const left = settle(mine, t);
+        fields = setSize(fields, id, left);
+        // Every unsent box already said what is on file (an Excel upload or a colleague typed the
+        // same): nothing local is left, so the size takes the read's version too, like any other.
+        if (!Object.keys(left).length && !was.creating && !q.removes[id]) sizes[id] = t;
+      });
+      // A size the read no longer has keeps its place only while something local hangs on it.
+      Object.keys(q.sizes).forEach((id) => { if (!(id in sizes) && (q.fields[id] || q.sizes[id].creating || q.removes[id])) sizes[id] = q.sizes[id]; });
+      const note = landed ? { text: "Part of what you discarded had already saved. The table shows what's on file now." } : q.note;
+      return timed({ ...q, sizes, fields, reread: false, unsure: null, note, flash: { n: q.oks, changed } }, false);
+    }
+    case "columns": {
+      // Columns that went away (archived in Options, in another tab): an unsent or red box in one is
+      // dropped, with a note saying how many. One in flight is left to the server's answer.
+      // `drafts`: the option keys of an open editor's changed text, which the page closes when its
+      // column goes (the text is in no queue, so it is counted here, in the same note).
+      const keep = {};
+      (e.keys || []).forEach((k) => { keep[k] = true; });
+      const names = e.names || {};
+      const dropped = {};
+      (Array.isArray(e.drafts) ? e.drafts : []).forEach((k) => { if (!keep[k]) dropped[k] = (dropped[k] || 0) + 1; });
+      let fields = q.fields;
+      Object.keys(q.fields).forEach((id) => {
+        const mine = { ...q.fields[id] };
+        let touched = false;
+        Object.keys(mine).forEach((f) => {
+          const k = f.slice(2);
+          if (f.slice(0, 2) !== "c:" || keep[k]) return;
+          const x = mine[f];
+          if (!x.pending && !x.error) return;
+          dropped[k] = (dropped[k] || 0) + 1;
+          const y = { ...x };
+          delete y.pending;
+          delete y.error;
+          if (y.inflight) mine[f] = y; else delete mine[f];
+          touched = true;
+        });
+        if (touched) fields = setSize(fields, id, mine);
+      });
+      const text = Object.keys(dropped).map((k) => `${names[k] || "An option"} was archived in Options; ${dropped[k] === 1 ? "1 unsaved box in that column was dropped" : `${dropped[k]} unsaved boxes in that column were dropped`}.`).join(" ");
+      return timed({ ...q, fields, cols: keep, note: text ? { text } : q.note }, false);
+    }
+    case "restore": {
+      // "Save them" on the backup's banner (plan 4.9): each stored edit goes back in unsent, ON THE
+      // VERSION (base) AND FROM THE VALUE (from) IT WAS MADE AGAINST, never on what was read just now.
+      // So the server's two checks judge it against what is on file: anything saved to the size since
+      // comes back conflict. The size takes the stored version (the refresh rule keeps a size with
+      // local edits on the version they were made against), and a conflict on it is final (retried):
+      // a box already on file is done, every other turns red, and nothing is resent. Something written
+      // since may be this very edit landing (the closed tab's call) and then being set back elsewhere
+      // (A→B→A), which the rebase's value check can't tell from "nobody touched it", so a restored box
+      // is never resent. Left out, and counted in the status line: a box with an unsent, in-flight or
+      // red edit here, one on a size being added or deleted here, one in a column that went away, and
+      // one on a size no longer on the account. Red entries never come here: they are listed, never
+      // sent (the page). Never while a call is out (the page greys Save them): then no box here is in
+      // flight, and every restored one goes on its own stored version.
+      if (q.flight) return q;
+      let fields = q.fields, seq = q.seq, n = 0, gone = 0, skipped = 0;
+      const sizes = { ...q.sizes };
+      const retried = { ...q.retried };
+      const colGone = (f) => f.slice(0, 2) === "c:" && !!q.cols && !q.cols[f.slice(2)];
+      Object.keys(e.sizes || {}).forEach((id) => {
+        const b = e.sizes[id], s = sizes[id];
+        const fs = Object.keys((b && b.fields) || {});
+        if (!s) { gone += fs.length; return; }
+        if (!b || b.base == null) return;
+        if (s.creating || q.removes[id]) { skipped += fs.length; return; }
+        const mine = { ...(fields[id] || {}) };
+        let any = false;
+        fs.forEach((f) => {
+          const x = b.fields[f];
+          if (!x) return;
+          if (mine[f] || colGone(f)) { skipped++; return; }
+          const from = x.from;
+          if (ssPgSame(x.to, from)) return;
+          mine[f] = { pending: { to: x.to, from, seq: ++seq, ...(f === "price" && x.off && from == null && x.to != null ? { off: true } : {}) } };
+          any = true;
+          n++;
+        });
+        if (!any) return;
+        sizes[id] = { ...s, version: b.base };
+        retried[id] = true;
+        fields = setSize(fields, id, mine);
+      });
+      // `creates` (ssPgBackup): boxes typed on a size whose create was never answered. One on file now
+      // (its create landed after all) takes them on the version this page read, from the values a
+      // new size starts with: the server's from-check judges them as for any other. One that isn't is
+      // added again first, as it was typed (the page draws it), and its boxes wait for that answer.
+      Object.keys(e.creates || {}).forEach((id) => {
+        const c = e.creates[id];
+        const fs = Object.keys((c && c.fields) || {});
+        if (!fs.length) return;
+        if (q.removes[id] || (sizes[id] && sizes[id].creating)) { skipped += fs.length; return; }
+        const isNew = !sizes[id];
+        const mine = { ...(fields[id] || {}) };
+        let any = false;
+        fs.forEach((f) => {
+          const x = c.fields[f];
+          if (!x || ssPgSame(x.to, x.from)) return;
+          if (mine[f] || colGone(f)) { skipped++; return; }
+          mine[f] = { pending: { to: x.to, from: x.from, seq: ++seq, ...(f === "price" && x.off && x.from == null && x.to != null ? { off: true } : {}) } };
+          any = true;
+          n++;
+        });
+        if (!any) return;
+        if (isNew) sizes[id] = { version: null, price: null, active: false, cells: {}, creating: "pending", create: { styleId: c.styleId, width: c.width, length: c.length } };
+        fields = setSize(fields, id, mine);
+      });
+      const said = [];
+      if (gone) said.push(`${gone === 1 ? "1 change" : `${gone} changes`} from earlier ${gone === 1 ? "was" : "were"} for a size that isn't on this account any more.`);
+      if (skipped) {
+        said.push(`${skipped === 1 ? "1 change" : `${skipped} changes`} from earlier ${skipped === 1 ? "wasn't" : "weren't"} sent: the option was archived, `
+          + "the size is being added or deleted here, or the box has a newer change here.");
+      }
+      const note = said.length ? { text: said.join(" ") } : q.note;
+      if (!n) return said.length ? { ...q, note } : q;
+      return timed({ ...q, sizes, fields, seq, retried, note, flush: true }, true);
+    }
+    default:
+      return q;
+  }
+}
+
+// How long until the next call should go (plan 4.6), or null when nothing can: 800 ms after the
+// last edit, and at most 3 s after the first one still unsent; at once after a flush (paste, fill,
+// add, remove, leaving the tab, Back to Sheds, Retry now) or a rebase.
+function ssPgDueIn(q, now) {
+  if (!q || q.flight || q.stopped || q.viewOnly) return null;
+  if (!ssPgBuildBatch(q)) return null;
+  if (q.flush) return 0;
+  const last = q.lastAt == null ? now : q.lastAt, first = q.firstAt == null ? now : q.firstAt;
+  return Math.max(0, Math.min(last + 800, first + 3000) - now);
+}
+
+// The wait before the same call goes again after its `failures`-th transport failure in a row:
+// 2, 5, 15, then 30 s (plan 4.7). `schedule` replaces those (the harness shortens them).
+function ssPgBackoff(failures, schedule) {
+  const s = Array.isArray(schedule) && schedule.length ? schedule : [2000, 5000, 15000, 30000];
+  return s[Math.min(s.length - 1, Math.max(0, (Number(failures) || 1) - 1))];
+}
+
+// What one save_pricing_cells answer is (plan 4.7), from ssStyleSaveCall's { data, error }. The
+// status is read the way ssRunStyleSave reads it (error.ssStatus, set by 01-core's wrapper on the
+// main host and by the side door itself).
+//   ok         the function answered, for `expect`'s account;
+//   transport  a timeout, a dropped connection, a 5xx, or a session still reconnecting: resend;
+//   refused    any other 4xx (a 400 is a rule the browser let through: a parity bug), or an error
+//              in a 200's body: the boxes go red;
+//   forbidden  403: view-only;   auth  401: signed out;
+//   tenant     the answer is for another account. The side door skips the wrapper's own tripwire,
+//              so this check is the page's, and a mismatch stops every save.
+function ssPgAnswerKind(r, expect) {
+  const err = r && r.error;
+  const data = r && r.data;
+  const status = err && Number(err.ssStatus) > 0 ? Number(err.ssStatus) : null;
+  if (err) {
+    const why = String(err.message || "");
+    if (status === 401) return { kind: "auth", status, reason: why };
+    if (status === 403) return { kind: "forbidden", status, reason: why };
+    if (status != null && status >= 400 && status < 500 && status !== 408 && status !== 425 && status !== 429) return { kind: "refused", status, reason: why };
+    return { kind: "transport", status, reason: why };
+  }
+  if (!data || typeof data !== "object") return { kind: "transport", status: null, reason: "No answer from the server." };
+  if (data.error) return { kind: "refused", status: null, reason: String(data.error) };
+  if (data.ok !== true) return { kind: "transport", status: null, reason: "No answer from the server." };
+  if (expect && String(data.clientId == null ? "" : data.clientId) !== String(expect)) return { kind: "tenant", status: null, reason: String(data.clientId == null ? "" : data.clientId) };
+  return { kind: "ok", status: 200, reason: "" };
+}
+
+// The status line for a red box (plan 3.14). `where` is "Test Barn 12x24", `field` { name, kind:
+// "price" | "active" | "qty" }, `err` the field's error. The grid shows what the server holds; what
+// was typed is said here.
+function ssPgErrorLine(where, field, err) {
+  if (!err) return "";
+  const kind = field && field.kind;
+  const blank = (v) => (kind === "price" ? v == null : kind === "active" ? false : !(Number(v) > 0));
+  const show = (v) => (kind === "price" ? ssPgFmtPrice(v) : kind === "active" ? (v ? "offered" : "not offered") : String(v));
+  const dot = (s) => { const t = String(s || "").trim(); return /[.!?]$/.test(t) ? t : t + "."; };
+  const head = `${where} · ${(field && field.name) || ""}: `;
+  if (err.kind === "conflict" && err.reason) return head + dot(err.reason);
+  if (err.kind === "conflict") {
+    const theirs = blank(err.server) ? "cleared elsewhere" : `changed elsewhere to ${show(err.server)}`;
+    const yours = kind === "active" ? (err.typed ? "ticked it" : "unticked it") : blank(err.typed) ? "cleared it" : `typed ${show(err.typed)}`;
+    return head + `${theirs} while you ${yours}. ${kind === "active" ? "Set it again" : "Type it again"} if yours is right.`;
+  }
+  if (err.kind === "invalid") return head + `“${err.typed}” wasn't saved. ${dot(err.reason)}`;
+  return head + dot(err.reason || "This change couldn't be saved");
+}
+
+// Where a column sits across the grid: { x, w, frozen }, x from the grid's left edge. The widths are
+// the colgroup's (Size 82, Price 76, Offered 30, each option 44). A frozen column (Size, Price and
+// Offered; Size alone below 700 px) is sticky: the selection overlay and the editor draw it in a
+// sticky lane of their own (PgSelectionOverlay), whose left edge rides along with those columns, so
+// its x is the same however far the grid has scrolled sideways.
+function ssPgColBox(col, narrow) {
+  const c = Math.max(0, Number(col) || 0);
+  return { x: c < 3 ? [0, 82, 158][c] : 188 + (c - 3) * 44, w: c < 3 ? [82, 76, 30][c] : 44, frozen: c < (narrow ? 1 : 3) };
+}
+
+// ─── Sizes & prices table: adding sizes, refresh and the backup, the pure half (Phase 4a, 2026-10-31) ───
+// Lifted and run by pricingTableHelpers_test.ts like the helpers above. The plan's sections 3.7, 4.6,
+// 4.8 and 4.9.
+
+// "＋ Add sizes", List (plan 3.7): "10x12, 12x16" → the sizes to add, in the order typed. A size is a
+// width and a length in feet with x, X, × or "by" between them, spaces or not ("10x12", "10 x 12",
+// "10X12", "10 by 12", "10.5x12"); sizes are split by commas, semicolons or new lines. Each number is
+// judged by ssPgParseDim, the server's own rule (pricingCells.ts parseDim, in validatePayload), so a
+// list the browser takes is never a 400. ONE BAD ENTRY REFUSES THE WHOLE ADD, and is named. A size
+// already in the style (`existing`: [{ width, length }]) is skipped and named; a repeat in the list
+// collapses; at most `max` (100) sizes go in one add. Labels are the server's `${w}x${l}` (10.5x12,
+// never 10.50x12). → { ok: true, sizes: [{ width, length, label }], skipped: [label], repeats } or
+// { ok: false, error }.
+function ssPgParseSizeList(text, existing, max) {
+  const cap = Number(max) > 0 ? Number(max) : 100;
+  const tokens = String(text == null ? "" : text).split(/[,;\r\n]+/).map((t) => t.trim()).filter(Boolean);
+  if (!tokens.length) return { ok: false, error: "Type sizes like 10x12, 12x16." };
+  const have = {};
+  (existing || []).forEach((z) => { if (z && z.width != null && z.length != null) have[String(Number(z.width)) + "x" + String(Number(z.length))] = true; });
+  const sizes = [], skipped = [], seen = {}, bad = [];
+  let repeats = 0;
+  tokens.forEach((t) => {
+    const m = /^(.+?)\s*(?:x|×|by)\s*(.+)$/i.exec(t);
+    const w = m ? ssPgParseDim(m[1]) : null, l = m ? ssPgParseDim(m[2]) : null;
+    if (!w || !l || !w.ok || !l.ok) { bad.push({ t, sized: !!m && /^[\d.\s]+$/.test(m[1]) && /^[\d.\s]+$/.test(m[2]) }); return; }
+    const label = String(w.value) + "x" + String(l.value);
+    if (seen[label]) { repeats++; return; }
+    seen[label] = true;
+    if (have[label]) skipped.push(label);
+    else sizes.push({ width: w.value, length: l.value, label });
+  });
+  if (bad.length) {
+    const b = bad[0];
+    const why = b.sized ? `“${b.t}”: a width or length is above 0, at most 500, with at most 2 decimals.` : `“${b.t}” isn't a size like 10x12.`;
+    return { ok: false, error: `Nothing added. ${why}${bad.length > 1 ? ` ${bad.length - 1} more ${bad.length === 2 ? "entry isn't" : "entries aren't"} right either.` : ""}` };
+  }
+  if (sizes.length > cap) return { ok: false, error: `Nothing added. At most ${cap} sizes go in one add; this list has ${sizes.length}.` };
+  return { ok: true, sizes, skipped, repeats };
+}
+
+// "＋ Add sizes", Add several (plan 3.7): widths × lengths as a tick-box grid, widths down and lengths
+// across. Widths and lengths are typed as lists ("8, 10, 12" or "8 10 12"), each number judged by
+// ssPgParseDim, a repeat dropped, in the order typed. Every pair starts ticked; one already in the
+// style (`existing`) is "already there" (greyed, never added); `unticked` ({ label: true }) are the
+// pairs the builder unticked. `sizes` is what [Add N sizes] adds: the ticked new pairs, row by row
+// (each width's lengths in turn), which is the order they go in. More than `max` (100) is refused
+// (`error`), and so is a bad number, which is named. `blank`: a box is still empty (no grid yet, no
+// complaint). → { ok, blank?, error?, widths, lengths, rows: [[{ width, length, label, there,
+// ticked }]], sizes }.
+function ssPgSizeGrid(widthsText, lengthsText, existing, unticked, max) {
+  const cap = Number(max) > 0 ? Number(max) : 100;
+  const off = unticked || {};
+  const list = (text, what) => {
+    const out = [], seen = {};
+    const toks = String(text == null ? "" : text).split(/[\s,;]+/).filter(Boolean);
+    for (const t of toks) {
+      const p = ssPgParseDim(t);
+      if (!p.ok) return { error: `“${t}” isn't a ${what}: a number of feet above 0, at most 500, with at most 2 decimals.` };
+      if (!seen[p.value]) { seen[p.value] = true; out.push(p.value); }
+    }
+    return { values: out };
+  };
+  const ws = list(widthsText, "width"), ls = list(lengthsText, "length");
+  const none = { widths: [], lengths: [], rows: [], sizes: [] };
+  if (ws.error || ls.error) return { ok: false, error: ws.error || ls.error, ...none };
+  if (!ws.values.length || !ls.values.length) return { ok: false, blank: true, error: null, ...none };
+  const have = {};
+  (existing || []).forEach((z) => { if (z && z.width != null && z.length != null) have[String(Number(z.width)) + "x" + String(Number(z.length))] = true; });
+  const rows = ws.values.map((w) => ls.values.map((l) => {
+    const label = String(w) + "x" + String(l);
+    const there = !!have[label];
+    return { width: w, length: l, label, there, ticked: !there && !off[label] };
+  }));
+  const sizes = [];
+  rows.forEach((r) => r.forEach((c) => { if (c.ticked) sizes.push({ width: c.width, length: c.length, label: c.label }); }));
+  const error = sizes.length > cap ? `At most ${cap} sizes go in one add; ${sizes.length} are ticked. Untick some, or add them in two goes.` : null;
+  return { ok: !error, error, widths: ws.values, lengths: ls.values, rows, sizes };
+}
+
+// The model the grid draws (plan 3.7): the last read, with this page's own changes to its rows that
+// no read has shown yet. Sizes this page added (`added`: [{ id, styleId, width, length, label }], in
+// the order typed) go after their style's last size, which is where the server puts them (max
+// sort_order + 1), for as long as the queue knows them (`sizes`, ssPgQueue's): while their create is
+// unanswered ("Adding…"), and once created, until a read has them. A size the queue no longer has is
+// gone from the grid: removed here, or an add the server refused, or answered `exists` for (the
+// existing size takes its place). The same model object comes back when nothing changes, so the
+// grid's memos hold; `sections` and `cols` are always the read's own.
+function ssPgLocalModel(model, added, sizes) {
+  if (!model || !sizes) return model;
+  const known = {};
+  [...model.styles, ...model.hiddenStyles].forEach((st) => st.sizes.forEach((z) => { known[z.id] = true; }));
+  const extra = {};
+  (Array.isArray(added) ? added : []).forEach((a) => { if (a && sizes[a.id] && !known[a.id]) (extra[a.styleId] = extra[a.styleId] || []).push(a); });
+  const blank = (model.cols || []).map(() => "");
+  let changed = false;
+  const fix = (st) => {
+    const keep = st.sizes.filter((z) => !!sizes[z.id]);
+    const more = (extra[st.id] || []).map((a) => ({
+      id: a.id, styleId: st.id, label: String(a.label), title: `${a.width} ft × ${a.length} ft`, width: a.width, length: a.length,
+      price: null, priceText: "", active: false, offered: false, hidden: true, values: blank, version: null, created: null, onFile: 0, used: false, local: true,
+    }));
+    if (keep.length === st.sizes.length && !more.length) return st;
+    changed = true;
+    return { ...st, sizes: [...keep, ...more] };
+  };
+  const styles = model.styles.map(fix), hiddenStyles = model.hiddenStyles.map(fix);
+  return changed ? { ...model, styles, hiddenStyles } : model;
+}
+
+// A size added by mistake (plan 3.7; the function's rule 2 in migration 350): its ✕ deletes it at
+// once, with no confirm, and sends its id (the queue's "remove"). It was never priced or edited since
+// it was added (its version is still its created_at, both verbatim), nothing is included and no
+// inclusion row is on file (`z`, the model's row: onFile), and nothing of it is local here (an unsent,
+// in-flight or red box, an unanswered create, a remove already on its way). The server checks it all
+// again and answers anything else refused. Every other size goes through the confirm (ssPgCanDelete).
+function ssPgNeverEdited(q, id, z) {
+  const s = q && q.sizes ? q.sizes[id] : null;
+  if (!s || s.creating || s.version == null || s.created == null || String(s.version) !== String(s.created)) return false;
+  if (s.price != null || Object.keys(s.cells || {}).some((k) => Number(s.cells[k]) > 0)) return false;
+  if (z && Number(z.onFile) > 0) return false;
+  return !(q.fields && q.fields[id]) && !(q.removes && q.removes[id]);
+}
+
+// Whether size `id` can be deleted now (the delete plan, 10-31), through the confirm. → { ok, why }:
+//   adding    its create is unanswered (there is no version to delete it on yet);
+//   deleting  its remove is already queued or on its way;
+//   saving    a box of it is in flight (its answer would land on a size being deleted);
+//   used      saved designs use it (`z.used`, size_table's list): it is never deleted;
+//   gone      it isn't on the account here any more.
+// Unsent and red boxes don't block: they go with the size (the queue's "removes"). A red box waits
+// for the builder, not for time, so blocking on one would be a dead end.
+function ssPgCanDelete(q, id, z) {
+  const s = q && q.sizes ? q.sizes[id] : null;
+  if (!s) return { ok: false, why: "gone" };
+  if (s.creating || s.version == null) return { ok: false, why: "adding" };
+  if (q.removes && q.removes[id]) return { ok: false, why: "deleting" };
+  const fs = (q.fields && q.fields[id]) || {};
+  if (Object.keys(fs).some((f) => fs[f] && fs[f].inflight)) return { ok: false, why: "saving" };
+  if (z && z.used) return { ok: false, why: "used" };
+  return { ok: true, why: null };
+}
+
+// Why a size can't be deleted (ssPgCanDelete's `why`), in the status line's words and the greyed ✕'s
+// title. A size saved designs use is hidden by unticking Offered; once it is (`offered` false), it
+// says it already is, and how it folds away: "Show hidden sizes" off, or, when that is off already
+// (`showHidden` false: it turned hidden while drawn, so it stays drawn until the page is opened
+// again), the next open. An Offered size of a hidden style (`hiddenStyle`) is out of the designer
+// already, its tick does nothing there and "Show hidden sizes" doesn't fold it, so it says that
+// instead; unticked, it folds with the toggle like any hidden size. "" when it can go.
+function ssPgDeleteWhy(why, opts) {
+  const o = opts || {};
+  if (why === "used") {
+    if (o.offered && o.hiddenStyle) return "Its style is hidden, so it isn't in your designer. Saved designs use it, so it stays here.";
+    if (o.offered) return "Saved designs use this size, so it can't be deleted. Untick Offered to hide it from your designer.";
+    return o.showHidden === false
+      ? "It's already hidden from your designer. Saved designs use it, so it stays here. It folds away the next time you open this page."
+      : "It's already hidden from your designer. Saved designs use it, so it stays here. Turn off Show hidden sizes to fold it away.";
+  }
+  if (why === "saving") return "A change on this size is saving. Try again in a second.";
+  if (why === "adding") return "This size is still being added. Try again in a second.";
+  if (why === "deleting") return "This size is being deleted.";
+  if (why === "gone") return "That size isn't on this account any more.";
+  return "";
+}
+
+// THE DELETE CONFIRM'S QUESTION, and the line when none can go (the delete plan, 10-31). `ids`: the
+// sizes that can go, in drawn order; `nameOf(id)` is "Test Barn 10x12"; `counts` { used, saving,
+// usedHidden }: the others the selection touched (saving counts a box in flight, a size still being
+// added and one already being deleted; usedHidden, how many of the used are in a hidden style: when
+// that is all of them, Offered is no way to hide them); `company`: the account an operator is viewing
+// as, or null. `ids` null: no box is active (the toolbar's Delete sizes before any click). More than
+// one size always asks; a size never priced or edited is counted with the rest.
+function ssPgDeleteText(ids, nameOf, counts, company) {
+  if (!Array.isArray(ids)) return "Click a size first, then press Delete sizes.";
+  const c = counts || {};
+  const used = Number(c.used) || 0, saving = Number(c.saving) || 0;
+  const name = (id) => (typeof nameOf === "function" && nameOf(id)) || "this size";
+  if (!ids.length) {
+    if (used && saving) return `None of these sizes can be deleted now: saved designs use ${used}, and ${saving} ${saving === 1 ? "is" : "are"} still saving.`;
+    if (saving) return "None of these sizes can be deleted yet: a change on them is saving. Try again in a second.";
+    if (used && Number(c.usedHidden) === used) return "None of these sizes can be deleted: saved designs use them. Their style is hidden, so they aren't in your designer.";
+    return "None of these sizes can be deleted: saved designs use them. Untick Offered to hide them.";
+  }
+  const from = company ? ` from ${company}'s account` : "";
+  const more = [];
+  if (used) more.push(used === 1 ? "1 more stays because a saved design uses it." : `${used} more stay because saved designs use them.`);
+  if (saving) more.push(saving === 1 ? "1 more is still saving." : `${saving} more are still saving.`);
+  const head = ids.length === 1
+    ? `Delete ${name(ids[0])}${from}? Its price and included options go too, and you can't undo this. To sell it again later, add it with ＋ Add sizes.`
+    : `Delete ${ids.length} sizes, ${name(ids[0])} to ${name(ids[ids.length - 1])}${from}? Their prices and included options go too, and you can't undo this.`;
+  return [head, ...more].join(" ");
+}
+
+// ONE STATUS LINE FOR ONE ANSWER'S REMOVES (the delete plan, 10-31): `removed` is the answer's
+// entries for the sizes that call was deleting, `nameOf(id)` "Test Barn 10x12" (or ""). What went
+// first, then what stayed, each reason in one counted sentence: grey when everything went, amber
+// when anything was refused. A refusal with no `code` (a plain id from a tab opened before the
+// delete, or one that read the size as never priced) reads as changed elsewhere: the re-read then
+// sends its next ✕ through the confirm. → { tone, text } or null when there is nothing to say.
+function ssPgDeleteResult(removed, nameOf) {
+  const list = (Array.isArray(removed) ? removed : []).filter((r) => r && (r.status === "removed" || r.status === "refused"));
+  if (!list.length) return null;
+  const idOf = (r) => (r.id && typeof r.id === "object" ? r.id.id : r.id);
+  const nm = (r) => (typeof nameOf === "function" && nameOf(idOf(r))) || "";
+  const dot = (s) => { const t = String(s || "").trim(); return !t || /[.!?]$/.test(t) ? t : t + "."; };
+  const went = list.filter((r) => r.status === "removed");
+  const refused = list.filter((r) => r.status === "refused");
+  const parts = [];
+  if (went.length) parts.push(went.length === 1 && nm(went[0]) ? `Deleted ${nm(went[0])}.` : `Deleted ${went.length === 1 ? "1 size" : `${went.length} sizes`}.`);
+  // After "Deleted 4 sizes." a count reads "2 stay"; on its own, "2 sizes stay".
+  const many = (k) => (went.length ? String(k) : `${k} sizes`);
+  const by = { used: [], changed: [], bom: [], error: [] };
+  refused.forEach((r) => {
+    const code = r.code === "used" || r.code === "bom" || r.code === "error" ? r.code : "changed";
+    by[code].push(r);
+  });
+  const one = (g) => g.length === 1 && nm(g[0]) ? nm(g[0]) : null;
+  if (by.used.length) {
+    parts.push(one(by.used) ? `${one(by.used)} stays: a saved design started using it. Untick Offered to hide it.`
+      : by.used.length === 1 ? "A size stays: a saved design started using it. Untick Offered to hide it."
+      : `${many(by.used.length)} stay: saved designs started using them. Untick Offered to hide them.`);
+  }
+  if (by.changed.length) {
+    parts.push(one(by.changed) ? `${one(by.changed)} was changed elsewhere, so it wasn't deleted. Check it, then delete it again.`
+      : by.changed.length === 1 ? "A size was changed elsewhere, so it wasn't deleted. Check it, then delete it again."
+      : `${many(by.changed.length)} were changed elsewhere, so they weren't deleted. Check them, then delete them again.`);
+  }
+  if (by.bom.length) {
+    parts.push(one(by.bom) ? `${one(by.bom)} has a Real-Time Pricing materials list, so it wasn't deleted. Remove that list first.`
+      : by.bom.length === 1 ? "A size has a Real-Time Pricing materials list, so it wasn't deleted. Remove that list first."
+      : `${many(by.bom.length)} have a Real-Time Pricing materials list, so they weren't deleted. Remove those lists first.`);
+  }
+  if (by.error.length) {
+    const why = dot(by.error[0].reason || "the server refused it");
+    parts.push(one(by.error) ? `Couldn't delete ${one(by.error)}: ${why}`
+      : by.error.length === 1 ? `Couldn't delete a size: ${why}` : `Couldn't delete ${by.error.length} sizes: ${why}`);
+  }
+  return { tone: refused.length ? "amber" : "grey", text: parts.join(" ") };
+}
+
+// The active cell, or a range's far corner ({ sizeId, col }), after a read changed the option columns
+// (`before` → `after`, each [{ key }]; plan 4.6's column change: a new option in Options, one
+// archived there): it stays on ITS option, wherever that column sits now, never on whatever option
+// moved into its place. Size, Price and Offered never move. An option that went away hands the cell
+// to the column now standing where it was (the last one when it was last). The same object comes
+// back when nothing moved.
+function ssPgRekeyCell(cell, before, after) {
+  if (!cell || !(Number(cell.col) >= 3)) return cell;
+  const was = (before || [])[cell.col - 3], cols = after || [];
+  const i = was ? cols.findIndex((c) => c && c.key === was.key) : -1;
+  const col = i >= 0 ? 3 + i : Math.min(cell.col, 2 + cols.length);
+  return col === cell.col ? cell : { ...cell, col };
+}
+
+/// THE LOCAL BACKUP (plan 4.9): what to keep in this browser so a closed tab, a crash or a sign-out
+// loses nothing typed. Stored by the page under ss-pg-pending:<userId>:<clientId> (each table under
+// its own key below that), rewritten on every change of the queue and every keystroke in the editor,
+// cleared when nothing is left. Shape:
+//   { savedAt, sizes: { <id>: { base, fields: { <field>: { to, from } } } }, red: [...], draft: null }
+// `base` is the size's version the edits were made against and `from` the value each box was typed
+// over: an unsent edit's own starting value, an in-flight one's, or, for a box typed again while its
+// value was in flight, that in-flight value (plan 4.6: 480 out, then 500 typed, is { to: 500, from:
+// 480 }). Save them goes on the stored base and never resends (ssPgQueue's restore), so the server's
+// checks judge every box: one whose in-flight value never landed comes back red, and nothing is ever
+// written over a colleague's change. `off`: a first price pasted with Offered "no" (ssPgPlanCells),
+// kept only while its `from` is blank. A size still being added has no version yet: what was typed on
+// it goes under `creates` ({ <id>: { styleId, width, length, fields } }), with the size, so Save them
+// can add it again first (or find it on file, if its create landed after all) and the boxes go after
+// it. `red`: every red box, { sizeId, key, kind, typed, reason, server? }; listed on open, never sent.
+// The open editor's changed text (`draft` in: { sizeId, key, text, seen }; plan 3.10: it counts as
+// typed) is stored as the edit committing it would make: put through the queue's own commit, parsed
+// as commitText parses it, or its invalid event when the rules refuse it. So the stored `draft` is
+// always null. null when there is nothing to keep.
+function ssPgBackup(q, draft, at) {
+  let st = q;
+  if (draft && q && q.sizes && q.sizes[draft.sizeId] && draft.key && draft.key !== "active") {
+    const text = String(draft.text == null ? "" : draft.text);
+    const p = (draft.key === "price" ? ssPgParsePrice : ssPgParseQty)(text, ssPgVal(q.sizes[draft.sizeId], draft.key));
+    st = p.ok ? ssPgQueue(q, { type: "commit", sizeId: draft.sizeId, f: draft.key, value: p.value, seen: draft.seen, at })
+      : ssPgQueue(q, { type: "invalid", sizeId: draft.sizeId, f: draft.key, typed: text, reason: p.error, at });
+  }
+  const sizes = {}, creates = {}, red = [];
+  const entryOf = (f, v) => {
+    const e = { to: v.to, from: v.from };
+    if (f === "price" && v.off && v.to != null && v.from == null) e.off = true;
+    return e;
+  };
+  const put = (id, base, f, v) => { (sizes[id] || (sizes[id] = { base, fields: {} })).fields[f] = entryOf(f, v); };
+  const newOne = (id, c) => creates[id] || (creates[id] = { styleId: c.styleId, width: c.width, length: c.length, fields: {} });
+  const fieldsOf = (st && st.fields) || {};
+  Object.keys(fieldsOf).forEach((id) => {
+    const s = st.sizes ? st.sizes[id] : null;
+    Object.keys(fieldsOf[id]).forEach((f) => {
+      const x = fieldsOf[id][f];
+      if (x.error) {
+        const r = { sizeId: id, key: f, kind: x.error.kind, typed: x.error.typed === undefined ? null : x.error.typed, reason: x.error.reason || null };
+        if (x.error.kind === "conflict") r.server = x.error.server === undefined ? null : x.error.server;
+        red.push(r);
+      }
+      if (!(x.pending || x.inflight) || !s) return;
+      if (s.creating) {
+        const p = x.pending || x.inflight;
+        if (s.create && !ssPgSame(p.to, p.from)) newOne(id, s.create).fields[f] = entryOf(f, p);
+        return;
+      }
+      if (s.version == null) return;
+      if (x.pending && x.inflight) put(id, s.version, f, { to: x.pending.to, from: x.inflight.to, off: x.pending.off });
+      else {
+        const p = x.pending || x.inflight;
+        if (!ssPgSame(p.to, p.from)) put(id, s.version, f, p);
+      }
+    });
+  });
+  const anyNew = Object.keys(creates).length > 0;
+  if (!Object.keys(sizes).length && !anyNew && !red.length) return null;
+  return { savedAt: at, sizes, red, draft: null, ...(anyNew ? { creates } : {}) };
+}
+
+// A stored backup, read back for the banner (plan 4.9): null when there is none, it cannot be read,
+// or it was saved more than 7 days before `now` (`maxAge`, ms): each table's key ages by its own
+// savedAt. Anything the server would refuse whole (a malformed id, version, field or value: one bad
+// entry is a 400 for the call) is dropped here, so Save them never sends it. `creates` (sizes still
+// being added, ssPgBackup) need an id, a style id and the server's own width and length rule. A
+// stored `draft` is ignored: ssPgBackup stores the editor's text as the edit it would make. →
+// { savedAt, sizes, red, count, creates? }, `count` the edits Save them would send.
+function ssPgBackupLoad(raw, now, maxAge) {
+  let b = null;
+  try { b = typeof raw === "string" ? JSON.parse(raw) : raw; } catch (_e) { return null; }
+  if (!b || typeof b !== "object") return null;
+  const savedAt = Number(b.savedAt);
+  const age = Number(maxAge) > 0 ? Number(maxAge) : 7 * 24 * 3600 * 1000;
+  if (!isFinite(savedAt) || Number(now) - savedAt > age) return null;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const VERSION = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2})?)$/;
+  const isField = (f) => f === "price" || f === "active" || (typeof f === "string" && f.slice(0, 2) === "c:" && f.length > 2 && f.length <= 66);
+  const isVal = (f, v) => (f === "price" ? v === null || (typeof v === "number" && isFinite(v))
+    : f === "active" ? typeof v === "boolean" : typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 2147483647);
+  const ok = (f, x) => isField(f) && !!x && isVal(f, x.to) && isVal(f, x.from) && !ssPgSame(x.to, x.from);
+  const entry = (f, x) => {
+    const e = { to: x.to, from: x.from };
+    if (f === "price" && x.off === true && x.to !== null && x.from === null) e.off = true;
+    return e;
+  };
+  const sizes = {}, red = [];
+  let count = 0;
+  const src = b.sizes && typeof b.sizes === "object" ? b.sizes : {};
+  Object.keys(src).forEach((id) => {
+    const s = src[id];
+    if (!UUID.test(id) || !s || typeof s.base !== "string" || !VERSION.test(s.base) || !s.fields || typeof s.fields !== "object") return;
+    Object.keys(s.fields).forEach((f) => {
+      const x = s.fields[f];
+      if (!ok(f, x)) return;
+      (sizes[id] = sizes[id] || { base: s.base, fields: {} }).fields[f] = entry(f, x);
+      count++;
+    });
+  });
+  const creates = {};
+  const dim = (v) => typeof v === "number" && ssPgParseDim(String(v)).ok && ssPgParseDim(String(v)).value === v;
+  const csrc = b.creates && typeof b.creates === "object" ? b.creates : {};
+  Object.keys(csrc).forEach((id) => {
+    const c = csrc[id];
+    if (!UUID.test(id) || !c || !UUID.test(String(c.styleId)) || !dim(c.width) || !dim(c.length) || !c.fields || typeof c.fields !== "object") return;
+    const fields = {};
+    Object.keys(c.fields).forEach((f) => {
+      const x = c.fields[f];
+      if (!ok(f, x)) return;
+      fields[f] = entry(f, x);
+      count++;
+    });
+    if (Object.keys(fields).length) creates[id] = { styleId: String(c.styleId), width: c.width, length: c.length, fields };
+  });
+  (Array.isArray(b.red) ? b.red : []).forEach((r) => {
+    if (r && UUID.test(String(r.sizeId)) && isField(r.key) && ["invalid", "refused", "conflict"].indexOf(r.kind) >= 0) red.push(r);
+  });
+  if (!count && !red.length) return null;
+  return { savedAt, sizes, red, count, ...(Object.keys(creates).length ? { creates } : {}) };
+}
+
+// Every other table's backup this page may offer (plan 4.9; one per table, so two tabs of one
+// account never write over each other's), read back by ssPgBackupLoad and merged into one offer: a
+// plain union, oldest first. Box by box, a newer backup's wins, and an older one that says something
+// else is listed red (a conflict with nothing on file to show: "type it again", never sent). A size a
+// newer backup holds on another version (another read) takes that backup's boxes whole, and every
+// older box of it that the newer one doesn't also hold with the same value is listed red: Save them
+// goes on one stored version per size and never resends. Sizes still being added (`creates`) box by
+// box the same way. Red entries once per box, the newest. → { savedAt (the newest), sizes, red,
+// count, creates? } or null, `count` the boxes Save them would send.
+function ssPgBackupMerge(list) {
+  const all = (Array.isArray(list) ? list : []).filter((b) => b && typeof b === "object").sort((a, b) => Number(a.savedAt) - Number(b.savedAt));
+  if (!all.length) return null;
+  const sizes = {}, creates = {}, red = {}, order = [];
+  all.forEach((b) => {
+    const lost = [];
+    const lose = (id, f, x) => { lost.push({ sizeId: id, key: f, kind: "conflict", typed: x.to, server: null, reason: null }); };
+    // One size's boxes, newer over older: the older box goes red when the newer says something else.
+    const union = (id, was, now) => {
+      const fields = { ...was };
+      Object.keys(now).forEach((f) => {
+        if (fields[f] && !ssPgSame(fields[f].to, now[f].to)) lose(id, f, fields[f]);
+        fields[f] = now[f];
+      });
+      return fields;
+    };
+    Object.keys(b.sizes || {}).forEach((id) => {
+      const s = b.sizes[id];
+      if (!s || !s.fields) return;
+      const was = sizes[id];
+      if (was && was.base !== s.base) {
+        Object.keys(was.fields).forEach((f) => { if (!s.fields[f] || !ssPgSame(s.fields[f].to, was.fields[f].to)) lose(id, f, was.fields[f]); });
+        sizes[id] = { base: s.base, fields: { ...s.fields } };
+        return;
+      }
+      sizes[id] = { base: s.base, fields: union(id, (was && was.fields) || {}, s.fields) };
+    });
+    Object.keys(b.creates || {}).forEach((id) => {
+      const c = b.creates[id];
+      if (!c || !c.fields) return;
+      creates[id] = { styleId: c.styleId, width: c.width, length: c.length, fields: union(id, (creates[id] && creates[id].fields) || {}, c.fields) };
+    });
+    [...lost, ...(b.red || [])].forEach((r) => {
+      if (!r) return;
+      const k = r.sizeId + "|" + r.key;
+      if (!(k in red)) order.push(k);
+      red[k] = r;
+    });
+  });
+  let count = 0;
+  Object.keys(sizes).forEach((id) => { count += Object.keys(sizes[id].fields).length; });
+  Object.keys(creates).forEach((id) => { count += Object.keys(creates[id].fields).length; });
+  if (!count && !order.length) return null;
+  const out = { savedAt: all[all.length - 1].savedAt, sizes, red: order.map((k) => red[k]), count };
+  if (Object.keys(creates).length) out.creates = creates;
+  return out;
+}
+
+// The status line for a backup's red entries (plan 4.9: listed for the builder to type again, never
+// sent): "These didn't save before you left: Test Barn 12x24 · Price ($4,800); …. Type them again if
+// they're right." `where` names each size ({ id: "Test Barn 12x24" }) and `fields` each box ({ field:
+// { name, kind } }); an entry for a size or a column that is no longer drawn is left out. "" when none.
+function ssPgEarlierText(red, where, fields) {
+  const items = [];
+  (red || []).forEach((r) => {
+    const w = r && where ? where[r.sizeId] : null;
+    const f = r && fields ? fields[r.key] : null;
+    if (!w || !f) return;
+    const v = r.typed;
+    const shown = r.kind === "invalid" ? `“${v == null ? "" : v}”`
+      : f.kind === "active" ? (v ? "ticked" : "unticked")
+      : v == null || v === "" || (f.kind !== "price" && !(Number(v) > 0)) ? "cleared"
+      : f.kind === "price" ? ssPgFmtPrice(v) : String(v);
+    items.push(`${w} · ${f.name} (${shown})`);
+  });
+  if (!items.length) return "";
+  const one = items.length === 1;
+  const more = items.length > 3 ? `; and ${items.length - 3} more` : "";
+  return `${one ? "This didn't" : "These didn't"} save before you left: ${items.slice(0, 3).join("; ")}${more}. Type ${one ? "it" : "them"} again if ${one ? "it's" : "they're"} right.`;
+}
+
+// ─── Sizes & prices table: copy, paste, fill down and clear, the pure half (Phase 4b, 2026-10-31) ───
+// Lifted and run by pricingTableHelpers_test.ts like the helpers above. The plan's sections 3.10-3.12.
+//
+// A BLOCK is rows of cells, each the text of one box (ssPgParseTsv). The page hands these helpers its
+// VIEW: { rows (ssPgRows, as drawn), order (the drawn size ids, top to bottom), cols (the option
+// columns), rtp (Real-Time Pricing locks the prices), q (the save queue: what the server confirmed,
+// and this page's edits) }. A box's value AS DRAWN is this page's newest edit, else the server's;
+// what is STORED is the server's. A SELECTION is { r0, r1, c0, c1 }: rows as indexes into `order`,
+// columns as the grid's (0 Size, 1 Price, 2 Offered, 3… the options).
+
+// Text copied from Excel or Google Sheets → rows of cells (plan 3.11). A row ends at CRLF, LF or CR;
+// cells are split by tabs; the one line break both apps put at the very end is not a row of its own,
+// so "480\r\n" is one box and "\r\n" (an empty box copied) one empty box. A cell that STARTS with a
+// double quote is quoted, the way both apps write a cell holding a tab, a line break or a quote: up
+// to the closing quote, `""` being one quote, tabs and line breaks inside kept; what follows the
+// closing quote is kept as typed. A quote that never closes is just a character, so one stray quote
+// can't swallow the rest of the block. Rows may be ragged (shorter than the widest). "" → no rows.
+function ssPgParseTsv(text) {
+  const s = String(text == null ? "" : text);
+  const rows = [];
+  if (!s) return rows;
+  let row = [], cell = "", i = 0, start = true;   // start: at a cell's first character
+  while (i < s.length) {
+    const ch = s[i];
+    if (start && ch === '"') {
+      let j = i + 1, out = "", closed = false;
+      while (j < s.length) {
+        if (s[j] === '"') {
+          if (s[j + 1] === '"') { out += '"'; j += 2; continue; }
+          closed = true;
+          j++;
+          break;
+        }
+        out += s[j];
+        j++;
+      }
+      if (closed) { cell += out; i = j; start = false; continue; }
+    }
+    start = false;
+    if (ch === "\t") { row.push(cell); cell = ""; start = true; i++; continue; }
+    if (ch === "\r" || ch === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = []; cell = ""; start = true;
+      i += ch === "\r" && s[i + 1] === "\n" ? 2 : 1;
+      continue;
+    }
+    cell += ch;
+    i++;
+  }
+  if (row.length || !start) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// Rows of cells → the text Ctrl/Cmd+C puts on the clipboard (plan 3.10): Excel's own shape, tabs
+// between cells and CRLF after every row, the last one too, so a copied empty box pastes back as one
+// empty box. A cell holding a tab, a line break or a quote is quoted, `"` doubled.
+function ssPgToTsv(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "";
+  return rows.map((r) => (r || []).map((c) => {
+    const t = String(c == null ? "" : c);
+    return /[\t\r\n"]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  }).join("\t") + "\r\n").join("");
+}
+
+// An Offered box in a paste: yes or no in the words a sheet uses (the Excel template's `active`
+// column says yes/no, and copying from this table writes the same). Blank is no: an empty cell
+// clears its box, and a cleared Offered box is unticked.
+function ssPgParseOffered(text) {
+  const s = String(text == null ? "" : text).trim().toLowerCase();
+  if (["yes", "y", "true", "1", "x", "✓", "✔", "on", "offered"].indexOf(s) >= 0) return { ok: true, value: true };
+  if (["", "no", "n", "false", "0", "off", "not offered"].indexOf(s) >= 0) return { ok: true, value: false };
+  return { ok: false, error: "Yes or no" };
+}
+
+// The selected boxes as text, as drawn (plan 3.10, Ctrl/Cmd+C; and the top row a fill copies down):
+// the size's label, the price as a plain number ("4800.5", never "$4,800.50", so a sheet reads it as
+// a number), Offered as yes/no, an option's included quantity, and "" for a blank price or an option
+// not included. `ids` are size ids in drawn order; c0..c1 the columns, Size included.
+function ssPgSelectionBlock(view, ids, c0, c1) {
+  const v = view || {}, q = v.q || {}, cols = v.cols || [];
+  const label = {};
+  (v.rows || []).forEach((r) => { if (r.kind === "size") label[r.id] = r.size.label; });
+  return (ids || []).map((id) => {
+    const s = q.sizes ? q.sizes[id] : null, fs = q.fields ? q.fields[id] : null;
+    const shown = (f) => { const x = fs && fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
+    const out = [];
+    for (let c = c0; c <= c1; c++) {
+      if (c === 0) out.push(label[id] == null ? "" : String(label[id]));
+      else if (c === 1) { const p = shown("price"); out.push(p == null ? "" : String(p)); }
+      else if (c === 2) out.push(shown("active") && shown("price") != null ? "yes" : "no");
+      else { const col = cols[c - 3]; const n = col ? Number(shown("c:" + col.key)) || 0 : 0; out.push(n > 0 ? String(n) : ""); }
+    }
+    return out;
+  });
+}
+
+// Whether a price edit's Offered (`off`, ssPgPlanCells: a paste or fill giving a size its first
+// price says Offered unticked, or ticked by the server) would be lost if it went into the queue
+// now (`q`). It rides on the call that sends the first price, so it holds while that price is
+// unsent. Once the price is on its way, that call has said Offered (unticked when it carried
+// `off`, ticked by the server when not), and once it is on file the server holds Offered: an edit
+// asking otherwise would be dropped as no change to the price, and the size would end up the other
+// way from what the paste said and the confirm counted (plan 3.11, 4.11). False with no `off`.
+function ssPgOffLost(q, d) {
+  if (!d || d.f !== "price" || !("off" in d) || d.value == null) return false;
+  const s = q && q.sizes ? q.sizes[d.sizeId] : null;
+  const fs = (q && q.fields && q.fields[d.sizeId]) || {};
+  if (!s) return false;
+  const a = fs.active, x = fs.price;
+  if (s.price != null) {
+    const now = a && a.pending ? a.pending.to : a && a.inflight ? a.inflight.to : !!s.active;
+    return !!now !== !d.off;
+  }
+  return !!(x && x.inflight) && !!x.inflight.off !== !!d.off;
+}
+
+// THE VALUE CHECK of a paste, a fill or a clear (plan 3.9, 3.11): every target box is judged before
+// anything changes, ALL OR NOTHING. `targets`: [{ id, n (its row in the block, from 1), cells:
+// [{ col, text }] in column order }]. Each box follows the rules typing does:
+//   Price     the importer's number rule (ssPgParsePrice); under Real-Time Pricing the box is locked.
+//   Offered   yes/no (ssPgParseOffered). It can be ticked only on a size with a price: one left with no
+//             price is "Add a price first." On a size with none on file that gets its first price
+//             (in this very block, or waiting to be sent), Offered rides on that price: the server
+//             ticks Offered with a first price (plan 3.9), so "yes" sends nothing more, and "no" marks
+//             the price `off`, which sends Offered unticked with it (ssPgBuildBatch). Each box takes
+//             what was pasted, as the Excel importer does (plan 4.11: a "no" row stays unoffered).
+//             A first price already on its way has said Offered: a different answer is refused,
+//             "its first price is still saving" (ssPgOffLost).
+//   A size being deleted takes nothing: "this size is being deleted."
+//   An option a whole number from 0 to 999,999; blank is 0 (not included).
+//   A value equal to what is STORED is always accepted, and a box whose value as drawn already says
+//   it is no change at all.
+// One failure refuses everything, naming the first problem in reading order and counting the rest:
+// "Row 3 (Test Barn 10x16), Loft: 'abc' isn't a whole number. 2 more problems." (opts.byRow; a fill
+// or a clear names the size alone: "Test Barn 10x16, Loft: …"). → { ok: true, edits: [{ sizeId, f,
+// value, seen }], sizes } or { ok: false, error, problems }. `seen` is the box as drawn now, for the
+// queue's check that nothing moved it before the edit lands (a confirm can be open meanwhile).
+// `sizes` is one entry per size that changes, in drawn order, for the confirm (ssPgChangeSummary):
+// { id, name, prices, options, offered, wasShown, nowShown, zero }; shown = offered in the designer
+// (never for a size of a hidden style), zero = put at $0 there by this change.
+function ssPgPlanCells(view, targets, opts) {
+  const v = view || {}, o = opts || {}, q = v.q || {}, cols = v.cols || [];
+  const byId = {};
+  (v.rows || []).forEach((r) => { if (r.kind === "size") byId[r.id] = r; });
+  const quote = (t) => { const s = String(t == null ? "" : t); return "'" + (s.length > 30 ? s.slice(0, 29) + "…" : s) + "'"; };
+  const colName = (c) => (c === 1 ? "Price" : c === 2 ? "Offered" : cols[c - 3] ? cols[c - 3].label : "");
+  const edits = [], sizes = [];
+  let first = null, problems = 0;
+  (targets || []).forEach((t) => {
+    const r = byId[t.id], s = q.sizes ? q.sizes[t.id] : null, fs = q.fields ? q.fields[t.id] : null;
+    const where = r ? `${r.style.label} ${r.size.label}` : "A size";
+    const bad = (c, what) => {
+      problems++;
+      if (!first) first = `${o.byRow ? `Row ${t.n} (${where})` : where}${c != null ? `, ${colName(c)}` : ""}: ${what}`;
+    };
+    if (!r || !s) { bad(null, "that size isn't on this account any more."); return; }
+    if (q.removes && q.removes[t.id]) { bad(null, "this size is being deleted."); return; }
+    const shown = (f) => { const x = fs && fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
+    const before = { price: shown("price"), active: !!shown("active") };
+    // A first price waiting to be sent already says whether Offered goes with it unticked, and so
+    // does one on its way (what its call carried).
+    const px = fs && fs.price;
+    const waitOff = !!(px && (px.inflight ? px.inflight.off : px.pending && px.pending.off));
+    let price = before.price, activeTo, offTo;
+    let prices = 0, options = 0, offered = 0;
+    const mine = [];
+    (t.cells || []).forEach((cell) => {
+      const c = cell.col, text = cell.text;
+      if (c === 1) {
+        const stored = ssPgVal(s, "price");
+        const p = ssPgParsePrice(text, stored);
+        if (v.rtp && !(p.ok && ssPgSame(p.value, stored))) { bad(c, "Real-Time Pricing sets prices on this account."); return; }
+        if (!p.ok) { bad(c, `${quote(text)} isn't a number of 0 or more.`); return; }
+        price = p.value;
+        if (!ssPgSame(p.value, before.price)) { mine.push({ sizeId: t.id, f: "price", value: p.value, seen: before.price }); prices++; }
+      } else if (c === 2) {
+        const p = ssPgParseOffered(text);
+        if (!p.ok) { bad(c, `${quote(text)} isn't yes or no.`); return; }
+        // Ticked with no price after this row: the server would refuse it (and untick it anyway).
+        if (p.value && price == null && !ssPgSame(p.value, before.active)) { bad(c, "Add a price first."); return; }
+        // A first price: Offered rides on it. "yes" is the server's own tick; "no" goes with the
+        // price as unticked. A price that is already waiting is put in again to say which. One
+        // already on its way has said it, and nothing more can go with it: a different answer is
+        // refused, as the Offered box itself is disabled until that price is on file (plan 3.9).
+        if (s.price == null && price != null) {
+          offTo = !p.value;
+          let pe = mine.find((d) => d.f === "price");
+          if (!pe && offTo !== waitOff) { pe = { sizeId: t.id, f: "price", value: price, seen: before.price }; mine.push(pe); offered++; }
+          if (pe) pe.off = offTo;
+          if (pe && ssPgOffLost(q, pe)) bad(c, "its first price is still saving. Try again once it's saved.");
+          return;
+        }
+        if (!ssPgSame(p.value, before.active)) { mine.push({ sizeId: t.id, f: "active", value: p.value, seen: before.active }); activeTo = p.value; offered++; }
+      } else if (c >= 3) {
+        const col = cols[c - 3];
+        if (!col) { bad(c, "there's no box there."); return; }
+        const f = "c:" + col.key;
+        const p = ssPgParseQty(text, ssPgVal(s, f));
+        if (!p.ok) {
+          bad(c, /^\d+$/.test(String(text == null ? "" : text).replace(/[$,\s]/g, "")) ? `${quote(text)} is more than 999,999.` : `${quote(text)} isn't a whole number.`);
+          return;
+        }
+        const was = Number(shown(f)) || 0;
+        if (!ssPgSame(p.value, was)) { mine.push({ sizeId: t.id, f, value: p.value, seen: was }); options++; }
+      }
+    });
+    if (!mine.length) return;
+    mine.forEach((d) => edits.push(d));
+    // Offered in the designer before and after: the server ticks Offered when a size with no price on
+    // file gets one, unless Offered itself was sent, or goes with the price unticked (`off`). A size
+    // of a hidden style is in the designer neither before nor after: it doesn't show that style.
+    let active = activeTo !== undefined ? activeTo : before.active;
+    if (activeTo === undefined && s.price == null && price != null) active = !(offTo !== undefined ? offTo : waitOff);
+    const styleShown = !!(r.style && r.style.active);
+    const nowShown = styleShown && active && price != null;
+    // `zero`: this change puts the size at $0 in the designer, by ssPgZeroNew's rule: free once it
+    // saves (at exactly 0 and offered) and not free before it (ssPgFreeAt, the queue as drawn now),
+    // and the server not holding it at 0 and offered already.
+    const zero = nowShown && ssPgSame(price, 0) && !ssPgFreeAt(q, t.id) && !(ssPgSame(ssPgVal(s, "price"), 0) && ssPgVal(s, "active"));
+    sizes.push({ id: t.id, name: where, prices, options, offered, wasShown: styleShown && before.active && before.price != null, nowShown, zero });
+  });
+  if (problems) return { ok: false, error: `${first}${problems > 1 ? ` ${problems - 1} more ${problems === 2 ? "problem" : "problems"}.` : ""}`, problems };
+  return { ok: true, edits, sizes };
+}
+
+// PASTE (plan 3.11): `block` (ssPgParseTsv) laid over the drawn rows and columns, its top-left box at
+// `at` ({ sizeId, col }). Refused BEFORE ANY VALUE IS CHECKED when its rows cross a style's band or a
+// placeholder row ("Paste one style at a time."), skip a size folded away by "Show hidden sizes"
+// (counted), run past the last row or column, start on the Size column, or hold more than `max`
+// (20,000) boxes. Then every box goes through ssPgPlanCells, all or nothing; a box missing from the
+// end of a short row is left as it is, and an empty cell inside a row clears its box. `opts.verb`:
+// "paste", or "fill" (ssPgFillPlan, whose block starts on the row it copies). → ssPgPlanCells' answer
+// plus `area` ({ first, last, c0, c1 }: the sizes and columns it covers), or { ok: false, error }.
+function ssPgPastePlan(view, at, block, opts) {
+  const v = view || {}, o = opts || {};
+  const rows = v.rows || [], b = Array.isArray(block) ? block : [];
+  const fill = o.verb === "fill";
+  const ncols = 3 + (v.cols || []).length;
+  const max = Number(o.max) > 0 ? Number(o.max) : 20000;
+  const fmt = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const no = (error) => ({ ok: false, error });
+  if (!b.length) return no("There's nothing to paste.");
+  const start = at ? rows.findIndex((r) => r.kind === "size" && r.id === at.sizeId) : -1;
+  if (start < 0) return no("Click the box where the paste should start.");
+  const style = rows[start].style;
+  const pos = {};
+  (style.sizes || []).forEach((z, i) => { pos[z.id] = i; });
+  const ids = [];
+  let folded = 0, past = false;
+  for (let i = 0; i < b.length; i++) {
+    const r = rows[start + i];
+    if (!r) { past = true; break; }
+    if (r.kind !== "size" || r.style.id !== style.id) return no(fill ? "Fill down one style at a time." : "Paste one style at a time.");
+    if (ids.length && pos[r.id] != null && pos[ids[ids.length - 1]] != null) folded += Math.max(0, pos[r.id] - pos[ids[ids.length - 1]] - 1);
+    ids.push(r.id);
+  }
+  if (folded) return no(`Show hidden sizes first. ${fill ? "Filling down" : "This block"} would skip ${folded === 1 ? "1 hidden size" : `${folded} hidden sizes`}.`);
+  if (past) return no("This block runs past the last size.");
+  const width = b.reduce((w, r) => Math.max(w, r.length), 0);
+  const col = Number(at.col) || 0;
+  if (col + width > ncols) return no("This block runs past the last column.");
+  if (col === 0) return no("The Size column can't be pasted into. Start on a price or an option box.");
+  const cells = b.reduce((n, r) => n + r.length, 0);
+  if (cells > max) return no(fill ? `That's ${fmt(cells)} boxes. Fill down at most ${fmt(max)} at a time.` : `This block has ${fmt(cells)} boxes. Paste at most ${fmt(max)} at a time.`);
+  const targets = ids.map((id, i) => ({ id, n: i + 1, cells: b[i].map((text, j) => ({ col: col + j, text })) }));
+  const plan = ssPgPlanCells(v, targets, { byRow: !fill });
+  return plan.ok ? { ...plan, area: { first: ids[0], last: ids[ids.length - 1], c0: col, c1: col + width - 1 } } : plan;
+}
+
+// FILL DOWN (plan 3.10-3.11, Ctrl/Cmd+D and the toolbar's Fill down): the selection's top row copied
+// into the rows under it, the way a sheet does it; a selection one row tall takes the size drawn
+// right above it. The Size column is never filled. Same rules as a paste (ssPgPastePlan, verb
+// "fill"): one style at a time, never across a folded hidden size, all or nothing.
+function ssPgFillPlan(view, sel, opts) {
+  const v = view || {}, order = v.order || [], rows = v.rows || [];
+  if (!sel || !order[sel.r0]) return { ok: false, error: "Click a box first." };
+  const c0 = Math.max(1, sel.c0), c1 = sel.c1;
+  if (c1 < c0) return { ok: false, error: "A size's width and length can't be changed here." };
+  const one = sel.r1 <= sel.r0;
+  const src = one ? sel.r0 - 1 : sel.r0;
+  if (one) {
+    const at = rows.findIndex((r) => r.kind === "size" && r.id === order[sel.r0]);
+    const above = at > 0 ? rows[at - 1] : null;
+    if (src < 0 || at < 0 || !above || above.kind !== "size" || above.style.id !== rows[at].style.id) {
+      return { ok: false, error: `There's no size above this one in ${at >= 0 ? rows[at].style.label : "this style"} to fill down from.` };
+    }
+  }
+  const top = ssPgSelectionBlock(v, [order[src]], c0, c1)[0];
+  const block = [];
+  for (let i = src; i <= Math.max(sel.r0, sel.r1); i++) block.push(top);
+  return ssPgPastePlan(v, { sizeId: order[src], col: c0 }, block, { verb: "fill", max: opts && opts.max });
+}
+
+// CLEAR (plan 3.10, Delete or Backspace on a range, and the toolbar's Clear): every selected box
+// emptied: a blank price (the size is then hidden), Offered unticked, an option not included. Across
+// styles too (only the drawn rows are selected, so a folded size is never touched); the Size column
+// is never cleared. All or nothing like a paste: under Real-Time Pricing a price on file is locked.
+function ssPgClearPlan(view, sel, opts) {
+  const v = view || {}, order = v.order || [];
+  if (!sel || !order[sel.r0]) return { ok: false, error: "Click a box first." };
+  const c0 = Math.max(1, sel.c0), c1 = sel.c1;
+  if (c1 < c0) return { ok: false, error: "A size's width and length can't be changed here." };
+  const max = opts && Number(opts.max) > 0 ? Number(opts.max) : 20000;
+  const n = (sel.r1 - sel.r0 + 1) * (c1 - c0 + 1);
+  if (n > max) return { ok: false, error: `That's ${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} boxes. Clear at most ${String(max).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} at a time.` };
+  const targets = [];
+  for (let i = sel.r0; i <= sel.r1; i++) {
+    const cells = [];
+    for (let c = c0; c <= c1; c++) cells.push({ col: c, text: "" });
+    targets.push({ id: order[i], n: i - sel.r0 + 1, cells });
+  }
+  return ssPgPlanCells(v, targets, { byRow: false });
+}
+
+// THE CONFIRM'S QUESTION (plan 3.12), from ssPgPlanCells' `sizes`: any paste, fill or clear that
+// changes boxes on MORE THAN ONE size asks first, naming the first and last size and counting what
+// changes: "Change 6 sizes, Test Barn 10x12 to Test Barn 12x24: 6 prices, 2 sizes hidden from your
+// designer, 14 included options. Continue?" A size that a first price puts in the designer is counted
+// too, and so is one this change puts at $0 there (`zero`, after Carolyn's call on 10-30: "2 sizes at
+// $0 (free in your designer)"). One size never asks (`ask` false, `text` ""), as typing in a box
+// never does.
+function ssPgChangeSummary(sizes) {
+  const list = (Array.isArray(sizes) ? sizes : []).filter(Boolean);
+  const sum = (k) => list.reduce((n, z) => n + (Number(z[k]) || 0), 0);
+  const prices = sum("prices"), options = sum("options");
+  const zero = list.filter((z) => z.zero).length;
+  const hidden = list.filter((z) => z.wasShown && !z.nowShown).length;
+  const shown = list.filter((z) => !z.wasShown && z.nowShown).length;
+  const n = (k, one, many) => (k === 1 ? `1 ${one}` : `${String(k).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} ${many}`);
+  const parts = [];
+  if (prices) parts.push(n(prices, "price", "prices"));
+  if (zero) parts.push(n(zero, "size at $0 (free in your designer)", "sizes at $0 (free in your designer)"));
+  if (hidden) parts.push(n(hidden, "size hidden from your designer", "sizes hidden from your designer"));
+  if (shown) parts.push(n(shown, "size now offered in your designer", "sizes now offered in your designer"));
+  if (options) parts.push(n(options, "included option", "included options"));
+  const ask = list.length > 1;
+  const text = ask ? `Change ${n(list.length, "size", "sizes")}, ${list[0].name} to ${list[list.length - 1].name}${parts.length ? ": " + parts.join(", ") : ""}. Continue?` : "";
+  return { ask, sizes: list.length, prices, zero, hidden, shown, options, text };
+}
+
+// THE $0 NOTE (Ahsan, after Carolyn's call on 10-30: a builder typed 0 on the sizes he didn't sell,
+// meaning "take these away", but 0 is a real price (plan 3.9) and the designer offers such a size
+// FREE; a blank price is what hides one). Whether size `id` is at $0 in the designer as the queue `q`
+// draws it: its price as drawn is exactly 0, and it is offered, or will be once that price saves:
+// its Offered as drawn or waiting to save, or, for a first price (none on file), the tick the server
+// gives it with that price unless a paste said "no" with it (`off`, ssPgBuildBatch). A size being
+// removed is not. The queue knows no styles: the callers leave out a hidden style's sizes
+// (ssPgHiddenStyleSizes).
+function ssPgFreeAt(q, id) {
+  const s = q && q.sizes ? q.sizes[id] : null;
+  if (!s || (q.removes && q.removes[id])) return false;
+  const fs = (q.fields && q.fields[id]) || {};
+  const now = (f) => { const x = fs[f]; return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f); };
+  if (!ssPgSame(now("price"), 0)) return false;
+  const a = fs.active;
+  if (a && (a.pending || a.inflight)) return !!now("active");
+  if (s.price == null) { const x = fs.price; return !((x && x.pending && x.pending.off) || (x && x.inflight && x.inflight.off)); }
+  return !!s.active;
+}
+
+// Which of `ids` (the sizes a commit, a paste, a fill or a clear touched: a price, an Offered tick or
+// anything else) that change just put at $0 in the designer: free after it (ssPgFreeAt on `after`,
+// the queue after it) and not free before it (on `before`, the queue before it), so a 0 typed on a
+// size with Offered unticked says nothing until Offered is ticked, and then it does; and not held at
+// 0 and offered by the server already, so typing 0 again over a 0, a resend, or a 0 already stored
+// (typed earlier, or from the Excel upload) says nothing. This is the confirm's `zero` mark
+// (ssPgPlanCells), so the two count the same sizes. A size of a hidden style (`hidden`, { [id]: true },
+// ssPgHiddenStyleSizes) is not in the designer at all, and a box the commit rule turned red took
+// nothing: neither is counted. → those ids, each once, in order.
+function ssPgZeroNew(before, after, ids, hidden) {
+  const out = [];
+  const seen = {};
+  (ids || []).forEach((id) => {
+    if (seen[id]) return;
+    seen[id] = true;
+    const s = after && after.sizes ? after.sizes[id] : null;
+    if (!s || (hidden && hidden[id])) return;
+    if (ssPgSame(ssPgVal(s, "price"), 0) && ssPgVal(s, "active")) return;
+    if (ssPgFreeAt(after, id) && !ssPgFreeAt(before, id)) out.push(id);
+  });
+  return out;
+}
+
+// The sizes of the hidden styles ({ [sizeId]: true }, from the model the grid draws): the designer
+// doesn't show a hidden style at all, so none of its sizes is free there, whatever its price.
+function ssPgHiddenStyleSizes(model) {
+  const out = {};
+  ((model && model.hiddenStyles) || []).forEach((st) => ((st && st.sizes) || []).forEach((z) => { out[z.id] = true; }));
+  return out;
+}
+
+// The $0 note's words (the status line, plan 3.14), for the sizes still at $0 in the designer
+// (`ids`; `nameOf(id)` is "Test Barn 10x12"). One size is named; more are counted, the way the
+// confirm counts. Each ends with the ✕ (the delete plan, 10-31): deleting the size is what a builder
+// typing 0 on a size he doesn't sell means. "" when there are none.
+function ssPgZeroText(ids, nameOf) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!list.length) return "";
+  const name = list.length === 1 && typeof nameOf === "function" ? nameOf(list[0]) : "";
+  if (name) return `${name}: $0 means this size is free in your designer. To stop offering it, untick Offered, clear the price, or delete it with ✕.`;
+  if (list.length === 1) return "A size is now $0, which means it's free in your designer. To stop offering it, untick Offered, clear the price, or delete it with ✕.";
+  return `${String(list.length).replace(/\B(?=(\d{3})+(?!\d))/g, ",")} sizes are now $0, which means they're free in your designer. To stop offering one, untick Offered, clear its price, or delete it with ✕.`;
+}
+
+// The Excel upload's $0 sizes (Settings > Sheds, "⬆ Upload filled sheet"), counted in the browser
+// from the rows it sends, by the importer's own rules (pricingImport.ts): a price is blank, or a
+// number once `$`, commas and spaces are stripped (so "$0", "0.00" and " 0 " are all 0); a row needs
+// a style the account knows (`styles`: label or key, any case; with none, the importer skips every
+// row as an unknown style, and nothing counts) and a width and length above 0; a later row for the
+// same size wins; `active` no, n, 0, false or inactive hides it. A size of a hidden style (its
+// `active` false) is saved all the same, but the designer doesn't show that style, so it isn't free
+// there and doesn't count. → how many sizes the sheet leaves at $0 in the designer.
+function ssPricingSheetZeros(rows, styles) {
+  const byName = {}, hidden = {};
+  (Array.isArray(styles) ? styles : []).forEach((st) => [st && st.label, st && st.key].forEach((t) => {
+    const k = String(t == null ? "" : t).trim().toLowerCase();
+    if (!k) return;
+    byName[k] = st.id == null ? k : st.id;
+    if (st.active === false) hidden[byName[k]] = true;
+  }));
+  const num = (v) => (v === "" || v == null ? { blank: true, n: NaN } : { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) });
+  const off = (v) => ["no", "n", "0", "false", "inactive"].includes(String(v == null ? "" : v).trim().toLowerCase());
+  const last = {};
+  (Array.isArray(rows) ? rows : []).forEach((r) => {
+    const name = String(r && r.style != null ? r.style : "").trim().toLowerCase();
+    if (!name || byName[name] == null) return;
+    const w = num(r.width), l = num(r.length), p = num(r.price);
+    if (w.blank || l.blank || !Number.isFinite(w.n) || !Number.isFinite(l.n) || w.n <= 0 || l.n <= 0) return;
+    if (!p.blank && (!Number.isFinite(p.n) || p.n < 0)) return;
+    const id = byName[name];
+    last[`${id}|${w.n}|${l.n}`] = !hidden[id] && !p.blank && p.n === 0 && !off(r.active);
+  });
+  return Object.keys(last).filter((k) => last[k]).length;
+}
+
+// The Excel side of the delete (Settings > Sheds: the upload's $0 line and the "Using Excel" steps).
+const SS_PG_SHEET_ROW = "Deleting a row in the sheet doesn't delete the size. To delete one, open the sizes table and press ✕ on it.";
+
+// The sizes an Excel upload would ADD (the delete plan, 10-31): the importer never deletes a size, and
+// a row for one that isn't in the table is a create, offered at its price, so an old sheet brings a
+// deleted size back, and a row priced 0 brings it back free in the designer. Counted by
+// ssPricingSheetZeros' rules (a style the account knows by label or key, a width and length above 0,
+// a price blank or 0 or more, the later row for a size wins) and the importer's match by style and
+// width x length (pricingImport.ts dimKeyOf). `sizes` are the table's ({ style_id, width_ft,
+// length_ft }). → { added, zeros }: the new sizes, and how many of them land at $0 in the designer
+// (not "no" in the active column, not in a hidden style).
+function ssPricingSheetNew(rows, styles, sizes) {
+  const byName = {}, hidden = {};
+  (Array.isArray(styles) ? styles : []).forEach((st) => [st && st.label, st && st.key].forEach((t) => {
+    const k = String(t == null ? "" : t).trim().toLowerCase();
+    if (!k) return;
+    byName[k] = st.id == null ? k : st.id;
+    if (st.active === false) hidden[byName[k]] = true;
+  }));
+  const have = {};
+  (Array.isArray(sizes) ? sizes : []).forEach((z) => { if (z) have[`${z.style_id}|${Number(z.width_ft)}|${Number(z.length_ft)}`] = true; });
+  const num = (v) => (v === "" || v == null ? { blank: true, n: NaN } : { blank: false, n: Number(String(v).replace(/[$,\s]/g, "")) });
+  const off = (v) => ["no", "n", "0", "false", "inactive"].includes(String(v == null ? "" : v).trim().toLowerCase());
+  const last = {};
+  (Array.isArray(rows) ? rows : []).forEach((r) => {
+    const name = String(r && r.style != null ? r.style : "").trim().toLowerCase();
+    if (!name || byName[name] == null) return;
+    const w = num(r.width), l = num(r.length), p = num(r.price);
+    if (w.blank || l.blank || !Number.isFinite(w.n) || !Number.isFinite(l.n) || w.n <= 0 || l.n <= 0) return;
+    if (!p.blank && (!Number.isFinite(p.n) || p.n < 0)) return;
+    const id = byName[name];
+    const key = `${id}|${w.n}|${l.n}`;
+    if (have[key]) return;
+    last[key] = !hidden[id] && !p.blank && p.n === 0 && !off(r.active);
+  });
+  const keys = Object.keys(last);
+  return { added: keys.length, zeros: keys.filter((k) => last[k]).length };
+}
+
 function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [cat, setCat] = useState(null);   // { clientId, styles, sizes, items, inclusions }
   const [busy, setBusy] = useState(false);
   const [dlBusy, setDlBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // The Excel row's own banner (2026-10-30): an upload's result and a download's refusal draw under
+  // the two buttons that caused them, not at the top of the page over the styles card.
+  const [xlMsg, setXlMsg] = useState(null);
   const [result, setResult] = useState(null);
   const [fileKey, setFileKey] = useState(0);
   // building-style manager state
   const [styleName, setStyleName] = useState("");
+  const [styleCode, setStyleCode] = useState("");      // serial code, required (316)
   const [styleImg, setStyleImg] = useState(null);     // { base64, contentType, name }
   const [styleBusy, setStyleBusy] = useState(false);
   const [styleFileKey, setStyleFileKey] = useState(0);
@@ -2554,44 +5223,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const items = () => (cat && cat.items) || [];
   const allStyles = () => (cat && cat.styles) || [];
   const activeStyles = () => allStyles().filter((s) => s.active);
-  // Every option THIS client offers = built-in layout items + their catalog fixtures (doors/
-  // windows/ramps). Each becomes a CSV column so an owner can set how many the base price includes
-  // per size. Catalog columns key on the fixture id, so an "included" catalog item rides the same
-  // building_size_inclusions pipeline (item_key = fixture id). Label carries the size so multiple
-  // sizes of one style stay distinct and never collide with a built-in's label.
-  // Option columns grouped into the same sections the Options tab shows top-to-bottom — built-in
-  // options, then the Doors, Ramps and Windows catalog sections — each with a header fill colour
-  // for the Excel template. Archived options drop out entirely (they can't be added to new builds,
-  // so they must not be an inclusion column — get_config + submit-estimate also stop netting them).
-  const optionSections = () => {
-    // Drop the built-in "ramp" — the ramp is now a self-contained option managed in the Ramp
-    // settings section (simple price or custom catalog ramps), not a per-building inclusion column.
-    // Mirrors LayoutPricing, which also hides the ramp row.
-    // Nor a partition wall (migration 278): it is the customer's own layout inside the building, never
-    // part of a size's price, so it has no column (submit-estimate ignores such a row too).
-    const layout = items().filter((it) => !it.archived && it.key !== "ramp" && it.key !== "partitionWall").map((it) => ({ key: it.key, label: it.label }));
-    const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
-    // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"), and
-    // since the column is matched by its exact label on re-import, a garbled header would silently
-    // drop the inclusion. ASCII round-trips safely through any spreadsheet.
-    const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
-    const inCat = (f, c) => (f.category || "door") === c; // a missing category reads as "door" (matches DoorsView)
-    const byCat = (c) => fx.filter((f) => inCat(f, c)).map(col);
-    const KNOWN_CATS = ["door", "ramp", "window", "vent"];
-    const other = fx.filter((f) => !KNOWN_CATS.includes(f.category || "door")).map(col);
-    // Section order follows the Options tab's own Exterior grouping (Doors · Windows ·
-    // Vents · Ramps) so the sheet reads the way the screen does. "Other" still catches any
-    // category added later without a section here — a new fixture kind must never fall out
-    // of the export silently, which is what a bare `byCat` list per known name would do.
-    return [
-      { name: "Built-in options", argb: "FFDBEAFF", cols: layout },
-      { name: "Doors",            argb: "FFFEE9C7", cols: byCat("door") },
-      { name: "Windows",          argb: "FFDCF1FB", cols: byCat("window") },
-      { name: "Vents",            argb: "FFEAF3E6", cols: byCat("vent") },
-      { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
-      { name: "Other",            argb: "FFF1F5F9", cols: other },
-    ].filter((s) => s.cols.length);
-  };
+  // The option columns live in ssPricingColumns (top level, above) so the Pricing Table builds
+  // exactly the same columns as this sheet.
+  const optionSections = () => ssPricingColumns(cat);
   const optionCols = () => optionSections().flatMap((s) => s.cols);
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -2615,16 +5249,20 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   };
   const addStyle = async () => {
     if (!styleName.trim()) return;
+    // Serial code is REQUIRED (Carolyn 2026-10-18: "make sure we are requiring a code for each
+    // style and color so that we always have a full serial number").
+    if (!styleCode.trim()) { setMsg({ err: "Add a serial code for this style (e.g. LBA) — it is part of every building's serial number." }); return; }
     setStyleBusy(true); setMsg(null);
     try {
-      const body = { action: "create_style", label: styleName.trim() };
+      const body = { action: "create_style", label: styleName.trim(), code: styleCode.trim() };
       if (styleImg) { body.imageBase64 = styleImg.base64; body.imageContentType = styleImg.contentType; }
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       const added = styleName.trim();
-      setStyleName(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
+      setStyleName(""); setStyleCode(""); setStyleImg(null); setStyleFileKey((k) => k + 1);
       await load();
-      setMsg({ ok: `Building style “${added}” added — now set its sizes & prices via the Excel template below.` });
+      // Drawn as a link to the table, jumped to the new style (create_style answers its styleId).
+      setMsg({ added: { name: added, styleId: (data && data.styleId) || null } });
     } catch (e) { setMsg({ err: e.message }); }
     setStyleBusy(false);
   };
@@ -2689,6 +5327,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const saveEdit = async () => {
     const s = editStyle;
     if (!s || !editName.trim()) return;
+    if (!editCode.trim()) { setMsg({ err: "A serial code is required for every style." }); return; }
     setStyleBusy(true); setMsg(null);
     try {
       const body = { action: "update_style", styleId: s.id, label: editName.trim(), code: editCode.trim() };
@@ -2717,36 +5356,38 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   };
   const downloadTemplate = async () => {
     if (!cat || dlBusy) return;
-    const sections = optionSections();
-    const its = sections.flatMap((s) => s.cols);
-    const headers = ["style", "width", "length", "price", ...its.map((it) => it.label), "active"];
-    // Item cells carry the included QUANTITY (loft = sq ft, doors = count); 0 = not included.
-    // Legacy "yes"/"no" sheets still upload fine (yes imports as quantity 1).
-    const incBySize = {}; (cat.inclusions || []).forEach((x) => { if (x.included) (incBySize[x.size_id] = incBySize[x.size_id] || {})[x.item_key] = Number(x.qty) || 1; });
-    // Numbers stay numbers so Excel treats width/length/price/counts as numeric; blanks/text pass through.
-    const numOr = (v) => (v === "" || v == null || isNaN(Number(v)) ? v : Number(v));
-    const rows = [];
-    activeStyles().forEach((s) => {
-      const sizes = (cat.sizes || []).filter((z) => z.style_id === s.id);
-      if (sizes.length === 0) {
-        // No sizes yet → one starter row: fill width/length/price and copy the line down.
-        rows.push([s.label, "", "", "", ...its.map(() => 0), "yes"]);
-      } else {
-        sizes.forEach((z) => {
-          const inc = incBySize[z.id] || {};
-          rows.push([s.label, numOr(z.width_ft), numOr(z.length_ft), z.base_price == null ? "" : numOr(z.base_price),
-            ...its.map((it) => Number(inc[it.key] || 0)), z.active ? "yes" : "no"]);
-        });
-      }
-    });
+    // FRESH READS, not `cat` (2026-10-30). Sheds loaded `cat` when it mounted, and the Sizes & prices
+    // table may have changed numbers since, in another tab. A sheet built from the old copy puts
+    // those numbers back on its next upload, because the importer writes every box it is given.
+    // size_table also reads every list in pages: catalog's own inclusion read stops at 1000 rows, and
+    // a row cut off there went out as 0, which the importer then DELETED. A list that does not add
+    // up to its count (ssPgModel's "count") gets one more try, then the download is refused rather
+    // than built (plan 4.8). Only that: the table's other guards ("cap", an orphan row) cannot put
+    // a false 0 in the sheet, and the table sends a builder who trips them here, to Excel.
+    // The view-as target is read in the click's tick, like every other write path here.
+    const target = ssTargetClientId;
+    setDlBusy(true); setXlMsg(null);
+    let fresh = null;
+    for (let attempt = 0; attempt < 2 && !fresh; attempt++) {
+      const r = await ssPgFetch(target, cat.clientId || null);
+      if (!r.ok) { setXlMsg({ err: `Couldn't read your catalog for the template: ${r.error}` }); setDlBusy(false); return; }
+      if (ssPgModel(r.cat, r.table).guard !== "count") fresh = r;
+    }
+    if (!fresh) { setXlMsg({ err: "Couldn't read your whole catalog just now. Try again in a minute." }); setDlBusy(false); return; }
+    // onUpload maps a sheet's headers through `cat`'s columns, so `cat` becomes the catalog this sheet
+    // is built from. Kept as mounted, a column added or renamed in another tab since (the table's
+    // no-columns box sends builders to Options) would be in the sheet and then dropped, unmatched, by
+    // the upload, under a banner that still says "Imported". Same `catalog` answer load() stores.
+    setCat(fresh.cat);
+    const { sections, headers, rows } = ssPgTemplate(fresh.cat, fresh.table);
+    const fileBase = fresh.table.clientId || cat.clientId || "pricing";
 
-    setDlBusy(true); setMsg(null);
     let ExcelJS;
     try { ExcelJS = await loadExcelJS(); }
     catch (e) {
       // Library unreachable → still hand back a usable CSV so the download never fully fails.
-      downloadFile(`${cat.clientId || "pricing"}-pricing.csv`, toCSV(headers, rows.map((r) => r.map((v) => (v == null ? "" : String(v))))));
-      setMsg({ err: `${e.message} Downloaded a plain CSV instead.` });
+      downloadFile(`${fileBase}-pricing.csv`, toCSV(headers, rows.map((r) => r.map((v) => (v == null ? "" : String(v))))));
+      setXlMsg({ err: `${e.message} Downloaded a plain CSV instead.` });
       setDlBusy(false);
       return;
     }
@@ -2794,16 +5435,18 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: headers.length } };
 
       const buf = await wb.xlsx.writeBuffer();
-      downloadBlob(`${cat.clientId || "pricing"}-pricing.xlsx`,
+      downloadBlob(`${fileBase}-pricing.xlsx`,
         new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
     } catch (e) {
-      setMsg({ err: `Could not build the Excel file: ${e.message}` });
+      setXlMsg({ err: `Could not build the Excel file: ${e.message}` });
     }
     setDlBusy(false);
   };
   const onUpload = async (file) => {
     if (!file) return;
-    setBusy(true); setMsg(null); setResult(null);
+    // The view-as target is read in the click's tick, like every other write path here.
+    const target = ssTargetClientId;
+    setBusy(true); setMsg(null); setXlMsg(null); setResult(null);
     try {
       if (file.size > 5_000_000) throw new Error("File too large (max 5MB).");
       // Accept both the Excel template and a plain CSV (anything already filled out).
@@ -2859,22 +5502,54 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
         const inclusions = {}; colKey.forEach((k, idx) => { if (k) inclusions[k] = cols[idx]; });
         return { style: cols[iStyle], width: cols[iWidth], length: cols[iLength], price: cols[iPrice], active: iActive >= 0 ? cols[iActive] : "", inclusions };
       });
+      // The sizes this sheet leaves at $0 (ssPricingSheetZeros, the importer's own number rules):
+      // $0 is a real price, so the designer offers them free (Carolyn's call, 10-30: a builder put 0 on
+      // the sizes he didn't sell). Said under the result; the upload goes ahead as it is.
+      const zeros = ssPricingSheetZeros(rows, allStyles());
+      // THE SIZES THIS SHEET ADDS (the delete plan, 10-31): the importer never deletes a size, so an old
+      // sheet that still has a deleted size's row brings it back as a new one, offered at the sheet's
+      // price, and a 0 there brings it back free in the designer. Counted (ssPricingSheetNew) against
+      // a fresh read of the table: a size deleted in the table's own tab since Sheds loaded is still in
+      // `cat`, and counting against that would miss the very case this asks about. When that read
+      // fails, `cat` is the best there is. Asked before anything is sent; Cancel sends nothing.
+      const now = await ssPgFetch(target, cat.clientId || null);
+      const adds = now.ok ? ssPricingSheetNew(rows, now.table.styles, now.table.sizes) : ssPricingSheetNew(rows, allStyles(), cat.sizes);
+      if (adds.added && !window.confirm(adds.added === 1
+        ? `This sheet adds 1 size that isn't in your table${adds.zeros ? " (at $0, so free in your designer)" : ""}. Upload it?`
+        : `This sheet adds ${adds.added} sizes that aren't in your table${adds.zeros ? ` (${adds.zeros} of them at $0, so free in your designer)` : ""}. Upload it?`)) {
+        setBusy(false); setFileKey((k) => k + 1);
+        return;
+      }
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "import_pricing_csv", rows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       setResult(data); await load();
       const parts = []; if (data.created) parts.push(`${data.created} added`); if (data.updated) parts.push(`${data.updated} updated`);
-      setMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : "") });
-    } catch (e) { setMsg({ err: e.message }); }
+      setXlMsg({ ok: `Imported ${data.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (data.skipped && data.skipped.length ? `, ${data.skipped.length} skipped` : ""),
+        zero: !zeros ? "" : `${zeros === 1 ? "1 size in the sheet is priced $0, so it's" : `${zeros} sizes in the sheet are priced $0, so they're`} free in your designer. `
+          + "To hide a size, leave its price blank or put no in the active column. " + SS_PG_SHEET_ROW });
+    } catch (e) { setXlMsg({ err: e.message }); }
     setBusy(false); setFileKey((k) => k + 1);
   };
 
   const errStyle = { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const okStyle = { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "9px 13px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 };
+  // The upload's $0 note (ssPricingSheetZeros): amber, a warning that never stopped the upload.
+  const warnStyle = { background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 13px", color: "#92400E", fontSize: 13, fontWeight: 600, marginBottom: 12 };
   const thumb = { width: 48, height: 36, borderRadius: 4, background: "#F1F5F9", objectFit: "cover", flexShrink: 0 };
   return (
     <>
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
+      {/* Add style's answer points straight at the table, jumped to the new style. A real link in
+          a new tab, like the card's own button below; the Excel template stays the other way. */}
+      {msg && msg.added && (
+        <div style={okStyle}>
+          Building style “{msg.added.name}” added.{" "}
+          <a href={ssPricingTableHref({ style: msg.added.styleId })} target="_blank" rel="noopener"
+            style={{ color: "#15803D", fontWeight: 800, textDecoration: "underline" }}>Open the sizes &amp; prices table</a>{" "}
+          to add its sizes, or use the Excel template below.
+        </div>
+      )}
 
       {editStyle && (
         <div onClick={() => !styleBusy && setEditStyle(null)}
@@ -2884,16 +5559,15 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             <span style={S.lbl}>Name</span>
             <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 10 }} />
             {/* Serial code (163). Carolyn @57:20: "all of their buildings have codes. They
-                come up with them. LBA. Okay. Stands for Lofted Barn." Optional -- a style
-                with no code still sells, its serials just read XXX in this position rather
-                than shifting every later segment left. */}
-            <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Serial code</label>
+                come up with them. LBA. Okay. Stands for Lofted Barn." REQUIRED since 316
+                (2026-10-18): Save stays off until it is filled. */}
+            <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Serial code <span style={{ color: "#DC2626" }}>*</span></label>
             <input value={editCode} maxLength={4}
               onChange={(e) => setEditCode(e.target.value.toUpperCase().slice(0, 4))}
               placeholder="e.g. LBA"
               style={{ ...S.input, marginBottom: 4, textTransform: "uppercase" }} />
             <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 0, marginBottom: 14, lineHeight: 1.5 }}>
-              Your short code for this building style. It becomes the second block of every serial number this style produces &mdash; the <b>LBA</b> in <code>0826<b>LBA</b>1016REBLDWS5000</code>.
+              Your short code for this building style. It becomes the second block of every serial number this style produces &mdash; the <b>LBA</b> in <code>1027-<b>LBA</b>-1216-REBUWHM-25698</code>.
             </p>
             <span style={S.lbl}>Photo</span>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
@@ -2907,7 +5581,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             </div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button onClick={() => setEditStyle(null)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
-              <button onClick={saveEdit} disabled={styleBusy || !editName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !editName.trim()) ? 0.55 : 1 }}>
+              <button onClick={saveEdit} disabled={styleBusy || !editName.trim() || !editCode.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !editName.trim() || !editCode.trim()) ? 0.55 : 1 }}>
                 {styleBusy ? "Saving…" : "Save changes"}
               </button>
             </div>
@@ -2938,8 +5612,8 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
       <div style={S.card}>
         <div style={S.h2}>Building styles</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-          Add each building style you sell — give it a name and a photo. Then set the sizes &amp; prices for each
-          style using the Excel template below. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
+          Add each building style you sell — give it a name and a photo. Then press “Open sizes &amp; prices
+          table ↗” below to set each style’s sizes &amp; prices. <b>Drag the ⠿ handle to reorder</b> — the top style shows first on your
           design page, then the rest in this order. <b>Hide</b> stops offering a style to customers but keeps its
           sizes &amp; prices (reversible). <b>Delete</b> permanently removes the style and all its sizes &amp; prices —
           use it only when you’re sure you won’t need that style again.
@@ -2986,7 +5660,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                       {/* Shown on the row, not just inside Edit: the code is the thing a
                           builder cross-checks against their paper list, and opening six
                           dialogs to read six codes is the friction that stops them being set. */}
-                      {s.code && <span title="Serial code for this style" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, letterSpacing: 0.4, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>{s.code}</span>}
+                      {s.code
+                        ? <span title="Serial code for this style" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, letterSpacing: 0.4, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>{s.code}</span>
+                        : <span title="Serial numbers for this style read XXX until you add a code — click Edit" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, color: "#B91C1C", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 5, padding: "2px 6px" }}>Needs serial code</span>}
                     </div>
                     {/* Whether this style has a 3D look of its own yet. Read-only here —
                         setting one needs the live 3D preview, so it lives in
@@ -2999,7 +5675,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
                     </label>
-                    <label title="Sales tax is charged on this style's building line. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
+                    <label title="Sales tax is charged on this style's building line. Untick and it sits under the non-taxable subtotal on estimates and invoices." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.taxable !== false} disabled={styleBusy} onChange={() => toggleStyleTaxable(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Taxable
                     </label>
@@ -3012,72 +5688,97 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
             )}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input value={styleName} onChange={(e) => setStyleName(e.target.value)} placeholder="Building style name (e.g. Lofted Barn)" style={{ ...S.input, minWidth: 220 }} />
+              <input value={styleCode} maxLength={4} onChange={(e) => setStyleCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4))}
+                placeholder="Serial code *" title="Required — your short code for this style, e.g. LBA. It is part of every building's serial number."
+                style={{ ...S.input, width: 120, textTransform: "uppercase" }} />
               <label style={{ ...S.btn("#F1F5F9", "#334155"), cursor: "pointer", display: "inline-block" }}>
                 {styleImg ? "Image selected ✓" : "Choose image"}
                 <input key={styleFileKey} type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }} onChange={(e) => onStyleImg(e.target.files && e.target.files[0])} />
               </label>
-              <button onClick={addStyle} disabled={styleBusy || !styleName.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !styleName.trim()) ? 0.55 : 1 }}>{styleBusy ? "Adding…" : "Add style"}</button>
+              <button onClick={addStyle} disabled={styleBusy || !styleName.trim() || !styleCode.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (styleBusy || !styleName.trim() || !styleCode.trim()) ? 0.55 : 1 }}>{styleBusy ? "Adding…" : "Add style"}</button>
             </div>
           </div>
         )}
       </div>
 
       <div style={S.card}>
-        <div style={S.h2}>Pricing &amp; included options (Excel)</div>
-        {/* Sequencing banner (Carolyn 2026-08-06): the template's option columns ARE the
-            tenant's Options catalog, so pricing a size before the catalog exists means
-            re-downloading the sheet later to say what's included. Say so before they start. */}
+        {/* Retitled 2026-10-30: the table is the way in now, and Excel is the alternative under it. */}
+        <div style={S.h2}>Sizes, prices &amp; included options</div>
+        {/* Sequencing banner (Carolyn 2026-08-06): the option columns ARE the tenant's Options
+            catalog, so pricing a size before the catalog exists means coming back later to say
+            what's included. Say so before they start. */}
         <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "11px 14px", marginBottom: 12, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
           <span aria-hidden="true" style={{ fontSize: 15, lineHeight: 1.4 }}>💡</span>
           <div style={{ flex: 1, minWidth: 220, fontSize: 13, color: "#92400E", lineHeight: 1.55 }}>
             <b>Set up your Options first.</b> Every door, window, ramp, and add-on you offer becomes a
-            column in this sheet — that's how you say what comes <b>included</b> with each style and size.
-            Build that list under <b>Options</b>, then download the template so nothing is missing from it.
+            column in the table and the sheet — that's how you say what comes <b>included</b> with each style and size.
+            Build that list under <b>Options</b> first, so nothing is missing from it.
           </div>
           {onGoToOptions && (
             <button onClick={onGoToOptions} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", padding: "6px 12px", whiteSpace: "nowrap" }}>Go to Options →</button>
           )}
         </div>
-        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
-          Download the template (one row per building style), then add a row for every size you offer: type the
-          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
-          included in the price</b> — for a loft that's the included <b>square footage</b> (e.g. <b>50</b>), for doors
-          and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
-          included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
-          (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
-          The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
-          built-in items — so you can set how many of a specific catalog item come included with each size.
-        </p>
-        {/* This gate gives way to a two-button row (download template / upload sheet), so the
-            skeleton is two button-sized blocks — nothing more. Claiming any more shape here
-            would be inventing controls this card doesn't have. */}
+        {/* This gate gives way to the table link and the two-button Excel row, so the skeleton is
+            those three button-sized blocks — nothing more. Claiming any more shape here would be
+            inventing controls this card doesn't have. */}
         {!cat ? (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <SkelBar w={186} h={30} /><SkelBar w={156} h={30} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <SkelBar w={236} h={36} />
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <SkelBar w={96} h={14} /><SkelBar w={186} h={30} /><SkelBar w={156} h={30} />
+            </div>
           </div>
         ) : activeStyles().length === 0 ? (
           <div style={{ background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8, padding: "11px 14px", color: "#1B7895", fontSize: 13, lineHeight: 1.5 }}>
-            <b>Add a building style above first.</b> The pricing template is built from your styles — add at least one
-            (with a name &amp; photo), then come back here to download it and set sizes &amp; prices.
+            <b>Add a building style above first.</b> Sizes and prices are set per style — add at least one
+            (with a name &amp; photo), then come back here to set its sizes &amp; prices.
           </div>
         ) : (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <button onClick={downloadTemplate} disabled={dlBusy} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: dlBusy ? 0.6 : 1, cursor: dlBusy ? "default" : "pointer" }}>{dlBusy ? "Preparing…" : "⬇ Download Excel template"}</button>
-            <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
-              {busy ? "Importing…" : "⬆ Upload filled sheet"}
-              <input key={fileKey} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} style={{ display: "none" }}
-                onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
-            </label>
-          </div>
+          <>
+            <p style={{ fontSize: 13, color: "#64748B", marginBottom: 10, lineHeight: 1.5 }}>
+              Every size you sell, its price and what comes <b>included</b>, for all your styles in one table. It opens in its own tab.
+            </p>
+            {/* A REAL anchor in a new tab, never ssNavClick (01-core.jsx), which turns a plain left
+                click into same-document navigation. Middle-click and "open in new tab" work too. */}
+            <a href={ssPricingTableHref()} target="_blank" rel="noopener"
+              style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none", marginBottom: 14 }}>
+              Open sizes &amp; prices table ↗
+            </a>
+            {/* Prefer Excel? (Carolyn Q5: kept for good). The upload's answer draws right under it. */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#475569" }}>Prefer Excel?</span>
+              <button onClick={downloadTemplate} disabled={dlBusy} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: dlBusy ? 0.6 : 1, cursor: dlBusy ? "default" : "pointer" }}>{dlBusy ? "Preparing…" : "⬇ Download Excel template"}</button>
+              <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
+                {busy ? "Importing…" : "⬆ Upload filled sheet"}
+                <input key={fileKey} type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} style={{ display: "none" }}
+                  onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
+              </label>
+            </div>
+            {xlMsg && xlMsg.err && <div data-ss-xl-msg="err" style={{ ...errStyle, marginTop: 12, marginBottom: 0 }}>{xlMsg.err}</div>}
+            {xlMsg && xlMsg.ok && <div data-ss-xl-msg="ok" style={{ ...okStyle, marginTop: 12, marginBottom: 0 }}>{xlMsg.ok}</div>}
+            {xlMsg && xlMsg.ok && xlMsg.zero && <div data-ss-xl-msg="zero" style={{ ...warnStyle, marginTop: 8, marginBottom: 0 }}>{xlMsg.zero}</div>}
+          </>
         )}
         {result && result.skipped && result.skipped.length > 0 && (
           <div style={{ marginTop: 12, fontSize: 13 }}>
-            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) skipped:</div>
+            <div style={{ color: "#B91C1C", fontWeight: 700 }}>{result.skipped.length} row(s) not imported in full:</div>
             <ul style={{ margin: "4px 0 0 18px", color: "#B91C1C", maxHeight: 160, overflow: "auto" }}>
               {result.skipped.slice(0, 30).map((s, i) => <li key={i}>{s}</li>)}
             </ul>
           </div>
         )}
+        <p style={{ fontSize: 12.5, color: "#64748B", marginTop: 14, marginBottom: 0, lineHeight: 1.5 }}>
+          <b>Using Excel:</b> download the template (one row per building style), then add a row for every size you offer: type the
+          <b> width</b> and <b>length</b> (in feet) and the <b>price</b>. The option columns hold the <b>quantity
+          included in the price</b> — for a loft that's the included <b>square footage</b> (e.g. <b>50</b>), for doors
+          and windows a <b>count</b> (e.g. <b>1</b>). Put <b>0</b> to charge for it instead. If a customer declines an
+          included item, their estimate credits the quantity × your configured rate. Re-upload anytime to update prices
+          (matched by style + size, so no duplicates). A blank price — or <b>active = no</b> — hides that size from your designer.
+          A price of <b>0</b> doesn't hide a size: it shows in your designer as free. {SS_PG_SHEET_ROW}{" "}
+          The option columns include <b>every door, window, and ramp in your catalog</b> (each shown with its size) alongside the
+          built-in items — so you can set how many of a specific catalog item come included with each size.
+          {" "}<b>Changed numbers in the table? Download a fresh template before you use Excel again.</b>
+        </p>
       </div>
     </>
   );
@@ -3751,14 +6452,6 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
-// A partition wall (migration 278) is priced by the foot of wall, by the square foot of wall (its length
-// times its height) or each: the three methods its pricing understands. portal-settings refuses the
-// others for it, and submit-estimate would charge them each.
-const LP_METHODS_PARTITION = [
-  { value: "each", label: "each" },
-  { value: "lineal_ft", label: "lineal ft — per foot of wall" },
-  { value: "sqft_option", label: "sqft option — per sq ft of wall" },
-];
 // The build-on-site fee's basis, shown inline on the row (Carolyn 2026-09-14). The same seven
 // methods as LP_METHODS, with "each" spelled the way she reads it: "All these but each is
 // flat rate." Values must match the style_wall_heights check constraint (228).
@@ -3860,6 +6553,9 @@ function Electrical({ viewingLabel = null, clientId = null }) {
       priceStandalone: r.price_standalone != null ? String(r.price_standalone) : "",
       taxable: r.taxable !== false, active: r.active !== false,
       internalOnly: r.internal_only === true, sortOrder: r.sort_order || 0,
+      // Allowed on interior walls (313): ticked on the Interior walls tab; carried through this
+      // card's save so it survives. Absent reads as yes, the column's default.
+      interiorWallOk: r.interior_wall_ok !== false,
     })));
   };
   useEffect(() => { load(); }, [clientId]);
@@ -3926,22 +6622,38 @@ function Electrical({ viewingLabel = null, clientId = null }) {
           items in the table below with two prices like everything else; the standards just say
           WHICH item the package lays out. Leave one unset and the package lays none of those. */}
       <div style={{ ...S.lbl, marginBottom: 8 }}>Your standards</div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
-        {[["outletItemId", "Outlets are"], ["switchItemId", "The switch is"], ["lightItemId", "Lights are"]].map(([k, label]) => (
-          <label key={k} style={{ display: "block", minWidth: 180 }}>
-            <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
-            <select value={f[k] || ""} onChange={(e) => set(k, e.target.value || null)} style={{ ...S.input, width: 180 }}>
-              <option value="">&mdash; none &mdash;</option>
-              {/* `it.id` guard: an item added in this session has no id yet, and an option
-                  with value="" reads back as "— none —" the moment it is picked. Save first,
-                  then point a standard at it. */}
-              {items.filter((it) => it.id && (it.name || "").trim()).map((it) => (
-                <option key={it.id} value={it.id}>{it.name}</option>
+      {/* `it.id` guard: an item added in this session has no id yet, and an option with
+          value="" reads back as "— none —" the moment it is picked. Save first, then point a
+          standard at it. */}
+      {(() => {
+        const pickable = items.filter((it) => it.id && (it.name || "").trim());
+        return (
+          <>
+            {pickable.length === 0 && (
+              /* A brand-new tenant saw three dropdowns holding nothing but "— none —" and no
+                 clue why (Carolyn 2026-10-12). The choices ARE the saved items below. */
+              <p style={{ margin: "0 0 8px", fontSize: 12.5, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", maxWidth: 640 }}>
+                Nothing to choose from yet. Add your outlet, switch and light under <b>Your electrical items</b> below,
+                click <b>Save</b>, then come back here and pick them &mdash; that is how the package knows what to lay out.
+              </p>
+            )}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
+              {[["outletItemId", "Outlets are"], ["switchItemId", "The switch is"], ["lightItemId", "Lights are"]].map(([k, label]) => (
+                <label key={k} style={{ display: "block", minWidth: 180 }}>
+                  <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
+                  <select value={f[k] || ""} onChange={(e) => set(k, e.target.value || null)} disabled={pickable.length === 0}
+                    style={{ ...S.input, width: 180, opacity: pickable.length === 0 ? 0.55 : 1 }}>
+                    <option value="">{pickable.length === 0 ? "no saved items yet" : "— none —"}</option>
+                    {pickable.map((it) => (
+                      <option key={it.id} value={it.id}>{it.name}</option>
+                    ))}
+                  </select>
+                </label>
               ))}
-            </select>
-          </label>
-        ))}
-      </div>
+            </div>
+          </>
+        );
+      })()}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
         {num("outletSpacingFt", "Outlet every", "ft", "measured around the walls")}
         {num("outletHeightIn", "Outlet height", "in", "off the floor")}
@@ -4124,7 +6836,7 @@ function Insulation({ viewingLabel = null, clientId = null }) {
         roof use the footprint; walls use the perimeter &times; the wall height, so a taller-wall
         upgrade is included automatically. <b>Leave a rate blank and that combination isn&rsquo;t
         offered</b> &mdash; the customer simply won&rsquo;t see it. They pick the areas they want and
-        each one lands as its own line on the quote. Only insulate under the floor? Fill in just the
+        each one lands as its own line on the estimate. Only insulate under the floor? Fill in just the
         Floor rate for that type and leave Walls and Roof blank.
       </p>
       <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
@@ -4261,7 +6973,7 @@ function Foundation({ viewingLabel = null, clientId = null }) {
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 8px", maxWidth: 680 }}>
         Site work you do before the building arrives. <b>Leave a rate blank and that item isn&rsquo;t
         offered</b>; 0 means it is included; anything else is a charge, worked out by the method you pick.
-        Each one the customer chooses lands as its own line on the quote.
+        Each one the customer chooses lands as its own line on the estimate.
       </p>
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
         <b>each</b> = rate &times; a count the customer enters (piers, starting at 1); <b>lineal ft</b> = rate &times; the
@@ -4278,7 +6990,7 @@ function Foundation({ viewingLabel = null, clientId = null }) {
           <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 900 }}>
             <thead><tr>
               <th style={S.th}>Item</th>
-              <th style={S.th} title="How it reads on the designer and the quote. Blank keeps the built-in name.">Shown as</th>
+              <th style={S.th} title="How it reads on the designer and the estimate. Blank keeps the built-in name.">Shown as</th>
               <th style={S.th} title="Which of the seven methods prices it. Three of them ask the customer for a number.">How it&rsquo;s priced</th>
               <th style={S.th} title="Dollars, or a percent for the two pct methods. Blank = not offered; 0 = included.">Rate</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick to park this item without losing its rate. Customers never see it while unticked.">Offer</th>
@@ -4334,7 +7046,7 @@ const SS_DELIVERY_RULES = [
 const SS_DELIVERY_ORIGINS = [
   ["business", "Our business address", "From the address under Settings → Company."],
   ["nearest", "The nearest of our locations", "Whichever of your business address and Locations is closest to the customer."],
-  ["rep", "The rep's home lot", "The location set for whoever is quoting (Settings → Company → Team). The customer designer, which has no rep, uses the nearest location."],
+  ["rep", "The rep's home lot", "The location set for whoever is making the estimate (Settings → Company → Team). The customer designer, which has no rep, uses the nearest location."],
 ];
 
 function DeliveryView({ viewingLabel = null, clientId = null }) {
@@ -4424,7 +7136,7 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
       <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
         How delivery is charged. Pick where it is measured from and how the fee is worked out, then
         choose whether it is <b>added automatically</b> — the customer sees it in the designer as soon as
-        they enter their address, and it lands on the quote — or left for the rep, who sees the figure
+        they enter their address, and it lands on the estimate — or left for the rep, who sees the figure
         these rules suggest and decides. Miles are <b>driving miles</b>, rounded up to the next whole mile.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
@@ -4456,7 +7168,7 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
           <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 16, maxWidth: 680 }}>
             On file: <b>{addrLine(data.businessAddress) || "no business address yet"}</b>
             {(data.locations || []).length > 0 && <> &middot; locations: {data.locations.map((l) => l.name + (l.city ? " (" + l.city + ")" : "")).join(", ")}</>}
-            {" "}&middot; <a href="/portal/settings/company" style={{ color: "#1B7895" }}>Company</a> &middot; <a href="/portal/settings/locations" style={{ color: "#1B7895" }}>Locations</a>
+            {" "}&middot; <a href={ssPagePath("settings", "company")} style={{ color: "#1B7895" }}>Company</a> &middot; <a href={ssPagePath("settings", "locations")} style={{ color: "#1B7895" }}>Locations</a>
           </div>
 
           <div style={{ ...S.lbl, marginBottom: 6 }}>How the fee is worked out</div>
@@ -4507,9 +7219,10 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
             <input type="checkbox" checked={f.ssTaxDelivery} onChange={set("ssTaxDelivery")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
             Taxable
-            {/* The twin of "Charge tax on delivery" on CRM Connection → Quotes & Invoices (both write
-                ss_tax_delivery). It used to point at Company → Business details, which has no such switch. */}
-            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as CRM Connection &rarr; Quotes &amp; Invoices)</span>
+            {/* The twin of "Charge tax on delivery" on Company → Tax (both write ss_tax_delivery;
+                until 2026-10-09 the other one was on GHL Connection → Estimates & Invoices). It used to
+                point at Company → Business details, which has no such switch. */}
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as Company &rarr; Tax)</span>
           </label>
 
           <div>
@@ -4797,16 +7510,20 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
 // they use... but keep the cladding as dropdown options as we have it worked into the 3D so
 // make sure you don't lose that."
 //
-// FOUR FIXED ROWS PER STYLE, never added or removed: we ship a texture and a relief profile for
-// each of the four, and a builder cannot invent a fifth. What is theirs is which ones they sell,
+// FIVE FIXED ROWS PER STYLE, never added or removed: we ship a texture and a relief profile for
+// each of the five, and a builder cannot invent a sixth. What is theirs is which ones they sell,
 // what each costs, and what the customer sees it called. The id underneath never changes, which
-// is what keeps the 3D renderer and every saved design working.
+// is what keeps the 3D renderer and every saved design working. The fifth, 4.5" Vinyl Siding,
+// joined on 2026-10-06 (migration 285) with lap's profile at its own course, and lap became
+// 7" LP Lap Siding the same day with its drawing unchanged (Carolyn, Q20). ASCII quotes in both
+// names: the quote PDF's standard fonts are WinAnsi only.
 //
 // Per STYLE rather than per tenant because a Greenhouse and a Lofted Barn do not sell the same
 // siding, and because the wall area — and so the price — differs anyway.
 const SS_CLADDING_ROWS = [
   { id: "panel", label: "Panel Siding" },
-  { id: "lap", label: "Lap Siding" },
+  { id: "lap", label: "7\" LP Lap Siding" },
+  { id: "vinyl", label: "4.5\" Vinyl Siding" },
   { id: "batten", label: "Board & Batten" },
   // The profile name, not "Metal" (Carolyn 09-11: "they can type in here metal").
   { id: "agpanel", label: "AG Panel" },
@@ -4831,7 +7548,1310 @@ const SS_CLADDING_BASES = [
   ["pct_estimate_total", "pct estimate total"],
 ];
 
-function CladdingView({ viewingLabel = null, clientId = null }) {
+// ─── The library (migration 339; Carolyn's 10-26 call, Ahsan's answers 2026-10-27) ───
+// Cladding, Doors and Windows each carry a Library card above their own list: a search and a Browse
+// button over the StructureStudio templates (Ahsan 2026-10-27), where the builder imports templates,
+// renames or removes what they imported, and requests what is not there. A builder USES a template under their own name and may edit their
+// copy (a lap course, a door look, a window grid); only their copy changes. Their rows then pick
+// from these entries (the cladding table's dropdown, a door's "How it looks in 3D", a window's
+// grid), and an entry's edit moves every row on it (339 writes it through).
+//
+// Shown only with client_settings.library_beta on: the card reads the catalog first (joining the
+// same in-flight read as the list beside it, so it costs nothing) and asks for `library` only when
+// libraryBeta says yes. Asking with the flag off would answer 403, and every 4xx is an info row.
+//
+// Names here are prefixed ssLib / SsLib: portal/01..12 are ONE lexical scope once concatenated.
+const SS_LIB_NOUN = { cladding: "cladding", door: "door", window: "window" };
+const SS_LIB_DOOR_LOOKS = [
+  ["auto", "Use the door's photo"], ["plank", "Board-and-batten (built in 3D)"], ["zbrace", "Board-and-batten with a Z brace"],
+  ["xbrace", "Board-and-batten with an X brace"], ["rollup", "Roll-up / garage door"], ["american", "American (built in 3D)"],
+  ["basic", "Basic (built in 3D)"], ["classic", "Classic (built in 3D)"], ["dutch", "Dutch (built in 3D)"],
+];
+const SS_LIB_CLADDING_NAMES = { panel: "Panel Siding", lap: "7\" LP Lap Siding", vinyl: "4.5\" Vinyl Siding", batten: "Board & Batten", agpanel: "AG Panel" };
+const SS_LIB_REQ_STATUS = {
+  submitted: ["Sent", "#1D4ED8", "#DBEAFE"], in_progress: ["Being built", "#92400E", "#FEF3C7"], generating: ["Being built", "#92400E", "#FEF3C7"],
+  review: ["Being checked", "#92400E", "#FEF3C7"], ready: ["Ready", "#15803D", "#DCFCE7"], done: ["Ready", "#15803D", "#DCFCE7"],
+  refused: ["Not possible", "#B91C1C", "#FEE2E2"], failed: ["Didn't work", "#B91C1C", "#FEE2E2"], cancelled: ["Cancelled", "#475569", "#F1F5F9"],
+};
+// What a look IS, in words, for the line under an entry's name.
+function ssLibLookWords(category, look) {
+  const l = look || {};
+  if (category === "cladding") {
+    const base = SS_LIB_CLADDING_NAMES[l.profile] || l.profile || "Cladding";
+    return l.profile === "lap" && l.exposureIn != null ? `${base}, ${l.exposureIn} in boards` : base;
+  }
+  if (category === "door" && l.doorLookId) return `Made from your photo, drawn over ${(SS_LIB_DOOR_LOOKS.find(([k]) => k === l.doorStyle) || [null, "a built look"])[1].replace(/ \(built in 3D\)$/, "")}`;
+  if (category === "door") return (SS_LIB_DOOR_LOOKS.find(([k]) => k === l.doorStyle) || [null, "Door"])[1];
+  if (l.liteRows == null) return "Standard grid (sized to the window)";
+  const n = Number(l.liteRows) * Number(l.liteCols);
+  return n < 2 ? "No grid" : `${n}-lite: ${l.liteRows} ${Number(l.liteRows) === 1 ? "row" : "rows"} of ${l.liteCols}`;
+}
+// A small drawing of a look: courses or grooves for cladding, the panel for a door, the grid for a
+// window. Not the 3D (that is the designer's job), just enough to tell entries apart at a glance.
+function SsLibPic({ category, look, size = 44, thumbUrl = null }) {
+  const l = look || {};
+  const w = size, h = Math.round(size * 0.82), stroke = "#334155";
+  // A door made from a photo shows our own render of it (its tile), when it has one.
+  if (category === "door" && thumbUrl) return <img src={thumbUrl} alt="" width={w} height={h} style={{ objectFit: "contain", background: "#F1F5F9", borderRadius: 4, flexShrink: 0 }} />;
+  const lines = [];
+  if (category === "cladding") {
+    const p = l.profile;
+    if (p === "lap" || p === "vinyl") {
+      const step = p === "vinyl" ? 4 : Math.max(4, Math.min(9, Number(l.exposureIn || 7)));
+      for (let y = step; y < h; y += step) lines.push(<line key={y} x1="0" y1={y} x2={w} y2={y} stroke="#64748B" strokeWidth={p === "vinyl" ? 0.8 : 1.2} />);
+    } else if (p === "batten") {
+      for (let x = 7; x < w; x += 9) lines.push(<rect key={x} x={x} y="0" width="2.2" height={h} fill="#64748B" />);
+    } else if (p === "agpanel") {
+      for (let x = 4; x < w; x += 8) lines.push(<path key={x} d={`M${x} 0V${h}`} stroke="#475569" strokeWidth="2.4" />);
+    } else {
+      for (let x = 6; x < w; x += 6) lines.push(<line key={x} x1={x} y1="0" x2={x} y2={h} stroke="#94A3B8" strokeWidth="0.8" />);
+    }
+    return <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" style={{ background: "#E2E8F0", borderRadius: 4, flexShrink: 0 }}>{lines}</svg>;
+  }
+  if (category === "window") {
+    const R = l.liteRows == null ? 2 : Number(l.liteRows), C = l.liteRows == null ? 2 : Number(l.liteCols);
+    for (let i = 1; i < R; i++) lines.push(<line key={"r" + i} x1="3" y1={3 + ((h - 6) * i) / R} x2={w - 3} y2={3 + ((h - 6) * i) / R} stroke={stroke} strokeWidth="1.2" strokeDasharray={l.liteRows == null ? "2 2" : null} />);
+    for (let j = 1; j < C; j++) lines.push(<line key={"c" + j} x1={3 + ((w - 6) * j) / C} y1="3" x2={3 + ((w - 6) * j) / C} y2={h - 3} stroke={stroke} strokeWidth="1.2" strokeDasharray={l.liteRows == null ? "2 2" : null} />);
+    return <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" style={{ flexShrink: 0 }}><rect x="2" y="2" width={w - 4} height={h - 4} fill="#F0F9FF" stroke={stroke} strokeWidth="2" />{lines}</svg>;
+  }
+  // A door: frame, then what the look puts in its panels.
+  const s = l.doorStyle, dw = Math.round(h * 0.62), x0 = (w - dw) / 2, mid = h * 0.42;
+  const mark = [];
+  if (s === "auto") mark.push(<path key="cam" d={`M${x0 + dw * 0.25} ${h * 0.55}h${dw * 0.5}v${h * 0.2}h${-dw * 0.5}z`} fill="#94A3B8" />);
+  if (s === "plank" || s === "zbrace" || s === "xbrace") for (let x = x0 + 4; x < x0 + dw - 2; x += 4) mark.push(<line key={x} x1={x} y1="3" x2={x} y2={h - 3} stroke="#94A3B8" strokeWidth="0.8" />);
+  if (s === "zbrace") mark.push(<path key="z" d={`M${x0 + 2} ${h - 4}L${x0 + dw - 2} 4`} stroke={stroke} strokeWidth="2" />);
+  if (s === "xbrace") mark.push(<path key="x" d={`M${x0 + 2} ${mid}L${x0 + dw - 2} ${h - 3}M${x0 + dw - 2} ${mid}L${x0 + 2} ${h - 3}`} stroke={stroke} strokeWidth="1.6" />);
+  if (s === "rollup") for (let y = 5; y < h - 2; y += 3.5) mark.push(<line key={y} x1={x0 + 1} y1={y} x2={x0 + dw - 1} y2={y} stroke="#64748B" strokeWidth="0.9" />);
+  if (s === "american" || s === "basic" || s === "classic" || s === "dutch") mark.push(<line key="m" x1={x0} y1={mid} x2={x0 + dw} y2={mid} stroke={stroke} strokeWidth="2" />);
+  if (s === "american") for (let k = 1; k <= 3; k++) mark.push(<line key={"p" + k} x1={x0 + (dw * k) / 4} y1={mid} x2={x0 + (dw * k) / 4} y2={h - 3} stroke={stroke} strokeWidth="2" />);
+  if (s === "classic") mark.push(<path key="cl" d={`M${x0 + 3} ${mid + 2}L${x0 + dw - 3} ${h - 4}M${x0 + dw - 3} ${mid + 2}L${x0 + 3} ${h - 4}M${x0 + dw / 2} ${mid * 0.35}l${dw * 0.18} ${mid * 0.25}l${-dw * 0.18} ${mid * 0.25}l${-dw * 0.18} ${-mid * 0.25}z`} stroke={stroke} strokeWidth="1.4" fill="none" />);
+  if (s === "dutch") mark.push(<rect key="v" x={x0 + dw * 0.3} y={h * 0.62} width={dw * 0.4} height={h * 0.18} fill="#334155" />);
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" style={{ flexShrink: 0 }}>
+      <rect x={x0} y="2" width={dw} height={h - 4} fill="#FEF3C7" stroke={stroke} strokeWidth="2" />{mark}
+    </svg>
+  );
+}
+
+// A window's grid of lites (335), set here in Settings and nowhere else. Carolyn, 10-27 call: "The
+// customer can't select the grid" (the designer's grid picker is gone), and "The way it's in the
+// Designer is how I want it here ... no grids or then one grid, vertical, horizontal, whatever, to
+// replace this drop-down". So this is that picker: No grid, rows and lites across with a little drawing
+// of the grid, and Standard (the grid every window drew before 335, sized to the window). `look` is
+// { liteRows, liteCols }, or {} for Standard. With `entries` (the builder's imported window grids, 339),
+// each is a chip that takes its grid from the library; `linkedId` marks the one in use. Used by the
+// window editor, the Library card's grid editor and the operator's library (07-admin).
+function SsGridPicker({ look, onChange, entries = null, linkedId = null, onPickEntry = null, onFindMore = null }) {
+  const l = look || {};
+  const cur = l.liteRows == null ? null : { rows: Number(l.liteRows), cols: Number(l.liteCols) || 1 };
+  const base = cur || { rows: 1, cols: 1 };
+  const set = (rows, cols) => { if (rows >= 1 && cols >= 1 && rows <= 8 && cols <= 8) onChange({ liteRows: rows, liteCols: cols }); };
+  const ink = "#334155", line = "#E2E8F0", accent = "#0284C7";
+  const chip = (key, on, text, onClick, extra) => (
+    <button key={key} type="button" onClick={onClick} data-ss-lites-chip={key} {...(extra || {})}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700, cursor: "pointer",
+        border: `2px solid ${on ? accent : line}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : ink }}>{text}</button>
+  );
+  const step = (key, n, onDown, onUp, unit) => (
+    <span key={key} data-ss-lites-step={key} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: ink, fontWeight: 600 }}>
+      <button type="button" onClick={onDown} disabled={n <= 1} aria-label={`Fewer ${key === "rows" ? "rows" : "across"}`}
+        style={{ width: 26, height: 26, borderRadius: 6, border: `1px solid ${line}`, background: "#FFF", color: ink, cursor: n <= 1 ? "default" : "pointer", padding: 0, fontWeight: 800, opacity: n <= 1 ? 0.45 : 1 }}>−</button>
+      <span style={{ minWidth: 14, textAlign: "center", fontWeight: 800 }}>{cur ? n : "–"}</span>
+      <button type="button" onClick={onUp} disabled={n >= 8} aria-label={`More ${key === "rows" ? "rows" : "across"}`}
+        style={{ width: 26, height: 26, borderRadius: 6, border: `1px solid ${line}`, background: "#FFF", color: ink, cursor: n >= 8 ? "default" : "pointer", padding: 0, fontWeight: 800, opacity: n >= 8 ? 0.45 : 1 }}>+</button>
+      <span>{unit}</span>
+    </span>
+  );
+  return (
+    <div data-ss-grid-picker="1">
+      {entries && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }} data-ss-window-grid-library="1">
+          <span style={{ fontSize: 12, fontWeight: 700, color: "#64748B" }}>From your library:</span>
+          {entries.map((x) => chip("lib-" + x.id, linkedId === x.id, <><SsLibPic category="window" look={x.look} size={22} />{x.name}</>, () => onPickEntry && onPickEntry(x),
+            { "data-ss-window-grid-library-entry": x.name, title: ssLibLookWords("window", x.look) }))}
+          {onFindMore && chip("more", false, "Find more in the library…", onFindMore)}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        {chip("plain", !!cur && cur.rows === 1 && cur.cols === 1, "No grid", () => set(1, 1))}
+        {step("rows", base.rows, () => set(base.rows - 1, base.cols), () => set(base.rows + 1, base.cols), base.rows === 1 ? "row" : "rows")}
+        <span style={{ color: ink, fontSize: 12 }}>×</span>
+        {step("cols", base.cols, () => set(base.rows, base.cols - 1), () => set(base.rows, base.cols + 1), "across")}
+        <span aria-hidden="true" data-ss-window-lite-pic={cur ? `${cur.rows}x${cur.cols}` : "auto"}
+          style={{ width: 36, height: 28, boxSizing: "border-box", border: `2px solid ${ink}`, background: "#F0F9FF", display: "grid",
+            gridTemplateRows: `repeat(${cur ? cur.rows : 2}, 1fr)`, gridTemplateColumns: `repeat(${cur ? cur.cols : 2}, 1fr)`, borderStyle: cur ? "solid" : "dashed" }}>
+          {Array.from({ length: cur ? cur.rows * cur.cols : 4 }, (_, k) => {
+            const rr = cur ? cur.rows : 2, cc = cur ? cur.cols : 2;
+            return <span key={k} style={{ borderRight: (k % cc) < cc - 1 ? `1px ${cur ? "solid" : "dashed"} ${ink}` : "none", borderBottom: Math.floor(k / cc) < rr - 1 ? `1px ${cur ? "solid" : "dashed"} ${ink}` : "none" }} />;
+          })}
+        </span>
+        <span data-ss-lites-name="1" style={{ fontSize: 12, color: "#64748B" }}>
+          {!cur ? "sized to the window, as before" : cur.rows * cur.cols < 2 ? "1 lite, no bars" : `${cur.rows * cur.cols}-lite (${cur.rows} ${cur.rows === 1 ? "row" : "rows"} of ${cur.cols})`}
+        </span>
+        {chip("standard", !cur, "Standard", () => onChange({}), { title: "The grid windows had before: two rows of two or three lites by width (one row in a transom)" })}
+      </div>
+    </div>
+  );
+}
+
+// The look editor for one entry (or a template being copied): the course on lap, the built look on a
+// door, the grid on a window. Cladding other than lap has nothing to edit but its name.
+function SsLibLookEdit({ category, look, onChange }) {
+  const l = look || {};
+  if (category === "cladding") {
+    if (l.profile !== "lap") return null;
+    return (
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#475569" }}>
+        Board size (in)
+        <input type="number" min="3" max="12" step="0.25" value={l.exposureIn == null ? "" : l.exposureIn} placeholder="7"
+          onChange={(e) => onChange(e.target.value === "" ? { profile: "lap" } : { profile: "lap", exposureIn: Number(e.target.value) })}
+          style={{ ...S.input, width: 80 }} />
+      </label>
+    );
+  }
+  if (category === "door") {
+    return (
+      <select value={l.doorStyle || "auto"} onChange={(e) => onChange({ doorStyle: e.target.value })} style={{ ...S.input, width: "auto", minWidth: 0 }}>
+        {SS_LIB_DOOR_LOOKS.map(([k, t]) => <option key={k} value={k}>{t}</option>)}
+      </select>
+    );
+  }
+  return <SsGridPicker look={l} onChange={onChange} />;
+}
+
+// ─── "Don't see your door? Make it from a photo" (door looks from a photo, P6; Ahsan 2026-10-27) ───
+// The right side of the Doors page's Library card. A builder whose door is not in the StructureStudio
+// library uploads ONE straight-on photo of it, closed (plus optional close-ups of a hinge, the handle and
+// the middle of a double: Ahsan 2026-10-27), drags four dots onto the door's corners, and presses
+// Generate. The server drafts the door from the photo (generate_door_look, P4); the builder sees it
+// drawn in 3D beside their photo, names it and saves it, and it goes into THEIR library, so it shows in
+// every door's "How it looks in 3D" like any other library door (345).
+//
+// WHAT THE SERVER NEEDS, AND WHY THE STRAIGHTENER IS HERE. The model is told the photo is straightened:
+// the door's leaves fill the picture from the top of the threshold to the top of the leaves, with
+// DOOR_EDGE_PAD_IN (2 in) of what is past each side edge left showing, because a butt hinge's knuckle
+// sits ON that edge (DOOR_LOOK_V2). So the four dragged corners are warped onto the box doorEdgePadPx
+// leaves inside the picture, sized with doorFitSize (the 1568 px / 1.15 MP limits), exactly as
+// scripts/doorLookLocal.mjs prepares a photo. The server refuses any other shape (door_photo_shape).
+// The copies below (ssDoorFitSize, ssDoorPreparedSize, ssDoorEdgePadPx) are _shared/doorLookPrompt.ts's
+// and doorLookLocal.mjs's, line for line; doorStudio_test pins them to each other.
+//
+// Every photo is re-encoded on a canvas (which drops EXIF and GPS) before it is uploaded, the front photo
+// by the warp itself. Nothing is uploaded or charged until the three checks pass. One press is one key:
+// a retryable failure is retried ONCE with `lean: true` while 150 s of the 8-minute press clock remain,
+// and a dropped stream is picked up by the same key (generate_door_look_recover).
+//
+// Shown only with client_settings.door_looks_beta on (and the library's own flag, since it lives in the
+// library card). Names are prefixed ssDoor / SsDoor: portal/01..12 are ONE lexical scope.
+const SS_DOOR_PAD_IN = 2;
+const SS_DOOR_MAX_LONG = 1568;
+const SS_DOOR_MAX_PIXELS = Math.floor(1.15 * 1024 * 1024);
+const SS_DOOR_PRESS_MS = 8 * 60 * 1000;
+const SS_DOOR_LEAN_MIN_LEFT_MS = 150 * 1000;
+const SS_DOOR_MIN_PX = 600;
+const SS_DOOR_GOOD_PX = 1000;
+const SS_DOOR_SHAPE_TOL = 0.35;
+// The progress line moves on a timer: the stream carries only a space every 10 s, then the answer.
+const SS_DOOR_STAGES = [[0, "Reading your door"], [75, "Looking closely at the hinges and the handle"], [170, "Putting your 3D door together"], [300, "Almost there, still working"]];
+
+// _shared/doorLookPrompt.ts's doorFitSize: the largest size inside both limits with this aspect, never
+// larger than the source.
+function ssDoorFitSize(src, aspect) {
+  const a = aspect && Number.isFinite(aspect) && aspect > 0 ? aspect : src[0] / src[1];
+  let w = a >= 1 ? Math.min(src[0], SS_DOOR_MAX_LONG) : Math.min(src[1], SS_DOOR_MAX_LONG) * a;
+  let h = w / a;
+  if (Math.max(w, h) > SS_DOOR_MAX_LONG) [w, h] = a >= 1 ? [SS_DOOR_MAX_LONG, SS_DOOR_MAX_LONG / a] : [SS_DOOR_MAX_LONG * a, SS_DOOR_MAX_LONG];
+  if (w * h > SS_DOOR_MAX_PIXELS) {
+    const k = Math.sqrt(SS_DOOR_MAX_PIXELS / (w * h));
+    [w, h] = [w * k, h * k];
+  }
+  return [Math.max(1, Math.floor(w)), Math.max(1, Math.floor(h))];
+}
+// doorEdgePadPx: the strip, in output pixels, that DOOR_EDGE_PAD_IN takes at this photo's width.
+function ssDoorEdgePadPx(photoW, widthIn, padIn = SS_DOOR_PAD_IN) {
+  return padIn > 0 ? (photoW * padIn) / (widthIn + 2 * padIn) : 0;
+}
+// doorLookLocal.mjs's preparedSize: the typed shape plus the strips, at the largest size the quad's own
+// pixels can fill (never enlarged).
+function ssDoorPreparedSize(quad, widthIn, heightIn, padIn = SS_DOOR_PAD_IN) {
+  const len = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const w = Math.max(len(quad[0], quad[1]), len(quad[3], quad[2])), h = Math.max(len(quad[0], quad[3]), len(quad[1], quad[2]));
+  const aspect = widthIn / heightIn, span = (widthIn + 2 * padIn) / widthIn;
+  const natural = h * aspect <= w ? [h * aspect, h] : [w, w / aspect];
+  return ssDoorFitSize([Math.round(natural[0] * span), Math.round(natural[1])], aspect * span);
+}
+// The three checks before anything is uploaded or charged (plan §2, screen 2). `quad` is in the
+// original photo's pixels: top-left, top-right, bottom-right, bottom-left.
+function ssDoorQuadCheck(quad, widthIn, heightIn, hasHingeCloseUp) {
+  const len = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const tall = Math.max(len(quad[0], quad[3]), len(quad[1], quad[2]));
+  const wide = (len(quad[0], quad[1]) + len(quad[3], quad[2])) / 2;
+  const high = (len(quad[0], quad[3]) + len(quad[1], quad[2])) / 2;
+  if (tall < SS_DOOR_MIN_PX) return { ok: false, tall, error: "This photo is too small. Use one where the door fills most of the picture." };
+  if (tall < SS_DOOR_GOOD_PX && !hasHingeCloseUp) return { ok: false, tall, error: "This photo is too small to read the hinges. Add a close-up of a hinge, or use a photo where the door fills more of the picture." };
+  const want = widthIn / heightIn, got = high > 0 ? wide / high : 0;
+  if (!(got > 0) || Math.abs(got / want - 1) > SS_DOOR_SHAPE_TOL) return { ok: false, tall, error: "This photo doesn't match the door's size. Check the width and height you typed, or stand straight in front of the door and try again." };
+  return { ok: true, tall };
+}
+// The warp: the output's door box (padPx in from each side, full height) onto the dragged quad, the
+// strips carried on past the corners, and plain grey where they run off the photo (never the edge
+// pixels smeared). doorLookLocal.mjs's render, on this page's canvas. Null when the quad is not a sane
+// convex shape or the photo would not decode.
+function ssDoorWarp(img, quad, out, padPx) {
+  const [W, H] = out;
+  const natW = img.naturalWidth || img.width, natH = img.naturalHeight || img.height;
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const signs = [0, 1, 2, 3].map((i) => Math.sign(cross(quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4])));
+  if (!(signs.every((s) => s > 0) || signs.every((s) => s < 0))) return null;
+  const edge = Math.max(...quad.map((p, i) => Math.hypot(p[0] - quad[(i + 1) % 4][0], p[1] - quad[(i + 1) % 4][1])));
+  if (!(edge > 8)) return null;
+  // Shrink the source first so the warp samples about 2 source pixels per output pixel (and a 48 MP
+  // phone photo never meets Safari's canvas cap).
+  const k = Math.min(1, (2 * Math.max(W, H)) / edge, 4096 / Math.max(natW, natH));
+  const sw = Math.max(1, Math.round(natW * k)), sh = Math.max(1, Math.round(natH * k));
+  const s = document.createElement("canvas");
+  s.width = sw; s.height = sh;
+  const sctx = s.getContext("2d");
+  sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(img, 0, 0, sw, sh);
+  const src = sctx.getImageData(0, 0, sw, sh).data;
+  const q = quad.map(([x, y]) => [x * k, y * k]);
+  const Hm = ssSolveHomography([[padPx, 0], [W - padPx, 0], [W - padPx, H], [padPx, H]], q);
+  if (!Hm) return null;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const ctx = c.getContext("2d");
+  const outImg = ctx.createImageData(W, H);
+  const o = outImg.data;
+  let sampled = 0;
+  for (let Y = 0; Y < H; Y++) {
+    for (let X = 0; X < W; X++) {
+      const x = X + 0.5, y = Y + 0.5, d = Hm[6] * x + Hm[7] * y + Hm[8];
+      const sx = (Hm[0] * x + Hm[1] * y + Hm[2]) / d - 0.5, sy = (Hm[3] * x + Hm[4] * y + Hm[5]) / d - 0.5;
+      const at = (Y * W + X) * 4;
+      if (sx < -0.5 || sy < -0.5 || sx > sw - 0.5 || sy > sh - 0.5) {
+        o[at] = o[at + 1] = o[at + 2] = 128;
+        o[at + 3] = 255;
+        continue;
+      }
+      const x0 = Math.max(0, Math.min(sw - 1, Math.floor(sx))), y0 = Math.max(0, Math.min(sh - 1, Math.floor(sy)));
+      const x1 = Math.min(sw - 1, x0 + 1), y1 = Math.min(sh - 1, y0 + 1);
+      const fx = Math.max(0, Math.min(1, sx - x0)), fy = Math.max(0, Math.min(1, sy - y0));
+      for (let ch = 0; ch < 3; ch++) {
+        const v00 = src[(y0 * sw + x0) * 4 + ch], v10 = src[(y0 * sw + x1) * 4 + ch];
+        const v01 = src[(y1 * sw + x0) * 4 + ch], v11 = src[(y1 * sw + x1) * 4 + ch];
+        o[at + ch] = (v00 * (1 - fx) + v10 * fx) * (1 - fy) + (v01 * (1 - fx) + v11 * fx) * fy;
+      }
+      o[at + 3] = 255;
+      if (src[(y0 * sw + x0) * 4 + 3] > 0) sampled++;
+    }
+  }
+  // A photo the browser could not decode reads as fully transparent: report it, never upload grey.
+  if (sampled < W * H * 0.2) return null;
+  ctx.putImageData(outImg, 0, 0);
+  return c;
+}
+const ssDoorBlob = (canvas, type = "image/jpeg", q = 0.92) => new Promise((res) => canvas.toBlob((b) => res(b), type, q));
+const ssDoorLoadImage = (file) => new Promise((res, rej) => {
+  const url = URL.createObjectURL(file);
+  const im = new Image();
+  im.onload = () => res(im);
+  im.onerror = () => { URL.revokeObjectURL(url); rej(new Error("That photo could not be opened. Try a JPG or PNG straight from the camera.")); };
+  im.src = url;
+});
+// A close-up: re-encoded on a canvas (no EXIF, no GPS), inside the same size limits as the front photo.
+async function ssDoorReencode(file) {
+  const img = await ssDoorLoadImage(file);
+  const [w, h] = ssDoorFitSize([img.naturalWidth, img.naturalHeight]);
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const g = c.getContext("2d");
+  g.fillStyle = "#FFFFFF"; g.fillRect(0, 0, w, h);
+  g.imageSmoothingQuality = "high";
+  g.drawImage(img, 0, 0, w, h);
+  const b = await ssDoorBlob(c);
+  if (!b) throw new Error("That close-up could not be read. Try another photo.");
+  return b;
+}
+// A refusal's own words and code, from either way supabase-js hands an answer back (a 2xx body, or a
+// non-2xx whose body sits unread on error.context).
+async function ssDoorAnswerOf(res) {
+  if (res && res.data && typeof res.data === "object") return { status: res.error ? (res.error.ssStatus || 500) : 200, body: res.data };
+  const e = res && res.error;
+  if (e && e.context && typeof e.context.clone === "function") {
+    try { return { status: e.context.status || 500, body: await e.context.clone().json() }; } catch (_) { /* not JSON */ }
+  }
+  return { status: e && e.ssStatus ? e.ssStatus : null, body: null, error: e || null };
+}
+
+// Drag four dots onto the corners of the door itself (inside the trim; the bottom ones on top of the
+// threshold). The small drawing beside it shows where they go: dots on a 3.5 in casing instead would
+// shift every measurement on a 36 in door by about 10 %.
+function SsDoorCorners({ img, quad, setQuad }) {
+  const [drag, setDrag] = useState(null);
+  const boxRef = useRef(null);
+  useEffect(() => {
+    if (drag == null) return undefined;
+    const end = () => setDrag(null);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("blur", end);
+    return () => { window.removeEventListener("pointerup", end); window.removeEventListener("pointercancel", end); window.removeEventListener("blur", end); };
+  }, [drag]);
+  const view = Math.max(220, Math.min(420, (typeof window !== "undefined" ? window.innerWidth : 420) - 120));
+  const scale = view / Math.max(img.naturalWidth, img.naturalHeight);
+  const dispW = img.naturalWidth * scale, dispH = img.naturalHeight * scale;
+  const moveTo = (e) => {
+    if (drag == null || !boxRef.current) return;
+    if (e.cancelable) e.preventDefault();
+    const r = boxRef.current.getBoundingClientRect();
+    const px = Math.max(0, Math.min(img.naturalWidth, (e.clientX - r.left) / scale));
+    const py = Math.max(0, Math.min(img.naturalHeight, (e.clientY - r.top) / scale));
+    setQuad((q) => q.map((pt, i) => (i === drag ? [px, py] : pt)));
+  };
+  const labels = ["Top left", "Top right", "Bottom right", "Bottom left"];
+  return (
+    <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }} onPointerMove={moveTo}>
+      <div ref={boxRef} data-ss-door-corners="1" style={{ position: "relative", width: dispW, height: dispH, userSelect: "none", touchAction: "none", flexShrink: 0 }}>
+        <img src={img.src} alt="Your door photo" draggable={false} style={{ width: dispW, height: dispH, display: "block", borderRadius: 6 }} />
+        <svg viewBox={`0 0 ${dispW} ${dispH}`} style={{ position: "absolute", inset: 0, width: dispW, height: dispH, pointerEvents: "none" }}>
+          <polygon points={quad.map(([x, y]) => `${x * scale},${y * scale}`).join(" ")} fill="rgba(27,120,149,0.16)" stroke="#1B7895" strokeWidth="2" />
+        </svg>
+        {quad.map(([x, y], i) => (
+          <div key={i} role="slider" aria-label={labels[i] + " corner"} data-ss-door-corner={i}
+            onPointerDown={(e) => { if (e.currentTarget.setPointerCapture && e.pointerId != null) { try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_e) { /* old browser */ } } setDrag(i); }}
+            style={{ position: "absolute", left: x * scale - 10, top: y * scale - 10, width: 20, height: 20, borderRadius: "50%", background: "#1B7895", border: "2px solid #FFF", boxShadow: "0 1px 4px rgba(0,0,0,0.4)", cursor: "grab" }} />
+        ))}
+      </div>
+      <div style={{ flex: "1 1 160px", minWidth: 150, fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+        <svg width="120" height="150" viewBox="0 0 120 150" aria-hidden="true" style={{ display: "block", marginBottom: 6 }}>
+          <rect x="18" y="10" width="84" height="130" fill="#E2E8F0" stroke="#94A3B8" strokeWidth="6" />
+          <rect x="24" y="16" width="72" height="118" fill="#FEF3C7" stroke="#334155" strokeWidth="1.5" />
+          <rect x="12" y="136" width="96" height="6" fill="#94A3B8" />
+          {[[24, 16], [96, 16], [96, 134], [24, 134]].map(([x, y], i) => <circle key={i} cx={x} cy={y} r="5" fill="#1B7895" stroke="#FFF" strokeWidth="1.5" />)}
+        </svg>
+        Put each dot on a corner of the <b>door itself</b>: inside the trim, with the bottom dots on top of the threshold. On a double door, use the outer corners of both doors.
+      </div>
+    </div>
+  );
+}
+
+// ── The press, above every page (Ahsan 2026-10-28) ───────────────────────────────────────────
+// "Once I start the generation, I should see a button for generating in background, or if I click
+// outside the pop-up, it should automatically move the generation in the background. And once it is
+// generated, I should see a pop-up on my screen that it is generated."
+// So one press (the server refuses a second while one runs) lives here, not in the Doors page's
+// dialog: the dialog only watches it, and SsDoorJobDock (mounted by the Dashboard on every page) shows
+// a pill while nobody is watching, then a pop-up when it is done. It is kept in localStorage under
+// its key, without the photos, so a reload or a closed tab picks it up again by
+// generate_door_look_recover: the server keeps drawing after a dropped connection (heartbeatJson
+// hands the work to EdgeRuntime.waitUntil) and answers by the key with the draft, still-working, or
+// a failure. After a reload the one lean retry can still go out: the body (the photos' server paths,
+// never the photos) is kept too.
+const SS_DOOR_JOB_STORE = "ss.doorJob.v1";
+const ssDoorJob = (() => {
+  let job = null;      // { id, clientId, target, key, name, widthIn, heightIn, leaves, startedAt, sent, body, lean, status, note, result, error, seen }
+  let watching = 0;    // the dialog is showing this press: no pill, and it takes the answer itself
+  let review = null;   // a finished press the Doors page should open in its review
+  let booted = null;   // the client whose saved press was looked at
+  // A reload or a closed tab cancels the request under a running press: that is not an answer, and
+  // the next page asks the server by the key, so nothing may be recorded once the page is going.
+  let leaving = false;
+  try { window.addEventListener("pagehide", () => { leaving = true; }); } catch (_e) { /* no window */ }
+  const subs = new Set();
+  const emit = () => subs.forEach((f) => { try { f(); } catch (_e) { /* a gone view */ } });
+  const save = () => {
+    try {
+      if (!job || (job.seen && job.status !== "running")) localStorage.removeItem(SS_DOOR_JOB_STORE);
+      else {
+        const { straightUrl, ...kept } = job;
+        localStorage.setItem(SS_DOOR_JOB_STORE, JSON.stringify(kept));
+      }
+    } catch (_e) { /* storage blocked: the press still runs, it just cannot outlive the tab */ }
+  };
+  const set = (patch) => { if (!job || leaving) return; job = { ...job, ...patch }; save(); emit(); };
+  const notify = (title, body) => {
+    try {
+      if (document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") new Notification(title, { body });
+    } catch (_e) { /* not offered here */ }
+  };
+  const finish = (patch) => {
+    // A dialog watching it takes the answer (and marks it seen); otherwise the dock pops up.
+    set({ ...patch, seen: false });
+    if (!watching) {
+      if (patch.status === "ready") notify("Your 3D door is ready", `${job.name ? `“${job.name}”` : "Your door"} is drawn. Check it, then save it to your library.`);
+      else notify("We couldn't draw your door", patch.error || "Try again.");
+    }
+  };
+  async function run(blobs) {
+    const j0 = job;
+    const invoke = (body) => sb.functions.invoke("portal-settings", { body: j0.target ? { ...body, targetClientId: j0.target } : body });
+    const call = async (body) => {
+      const { data, error } = await invoke(body);
+      if (error || (data && data.error)) throw new Error((data && data.error) || (error && error.message) || "Something went wrong.");
+      return data;
+    };
+    const mine = () => job && job.id === j0.id;
+    const left = () => SS_DOOR_PRESS_MS - (Date.now() - j0.startedAt);
+    try {
+      // 1. The photos, at paths the server picks, into the private bucket (only on the first run:
+      //    after a reload the press is already out, and the photos are gone from this page anyway).
+      if (!job.sent) {
+        const up = await call({ action: "door_ref_upload_url", contentTypes: blobs.map(() => "image/jpeg") });
+        const photos = {};
+        for (let i = 0; i < blobs.length; i++) {
+          const u = up.uploads[i];
+          const { error } = await sb.storage.from("door-refs").uploadToSignedUrl(u.path, u.token, blobs[i].blob, { contentType: "image/jpeg" });
+          if (error) throw new Error("A photo didn't upload: " + error.message);
+          photos[blobs[i].kind] = u.path;
+        }
+        if (!mine()) return;
+        set({ sent: true, fresh: true, body: { action: "generate_door_look", stream: true, idempotencyKey: job.key, name: job.name, widthIn: job.widthIn, heightIn: job.heightIn, leaves: job.leaves, photos } });
+      }
+      // 2. One press: one key, a lean retry at most, and a pickup by the key when the stream drops.
+      for (;;) {
+        let got = null, refusal = null, brokeOff = true;
+        if (job.fresh) {
+          const res = await invoke(job.lean ? { ...job.body, lean: true } : job.body);
+          if (!mine()) return;
+          set({ fresh: false });
+          // No HTTP answer at all (a body that broke off, the network gone, the page reloading) is a
+          // dropped stream: the server keeps drawing, so ask by the key. Only a real status refuses.
+          const e = res.error;
+          brokeOff = Boolean(e && !e.ssStatus && !(e.context && typeof e.context.status === "number"));
+          const a = brokeOff ? { status: null, body: null } : await ssDoorAnswerOf(res);
+          got = a.body && a.body.ok && a.body.spec ? a.body : null;
+          refusal = !got && a.body && a.body.error ? a.body : null;
+          if (!got && !brokeOff && !(a.body && a.body.code === "stream_deadline")) {
+            if (!refusal) refusal = { error: (res.error && res.error.message) || "We couldn't draw this door. Try again." };
+          } else if (!got) brokeOff = true;
+        }
+        if (!got && brokeOff) {
+          // The server may still be working, or done: ask by this press's key until the clock runs out.
+          set({ note: "Your door is still being drawn. Picking it up…" });
+          const firstAsk = Date.now();
+          for (;;) {
+            const r = await ssDoorAnswerOf(await invoke({ action: "generate_door_look_recover", idempotencyKey: job.key }));
+            if (!mine()) return;
+            if (r.body && r.body.ok && r.body.spec) { got = r.body; break; }
+            if (r.body && r.body.ok && r.body.pending === false) {
+              if (r.body.reason === "no_row" && Date.now() - j0.startedAt < 90_000) { /* its row may not be written yet */ }
+              else { refusal = { error: r.body.message, code: r.body.code, retryable: r.body.retryable === true }; break; }
+            }
+            if (left() < 10_000 && Date.now() - firstAsk > 60_000) { refusal = { error: "This took too long. Look for your door under “Not in your library yet” on the Doors page before you press Generate again." }; break; }
+            await new Promise((ok) => setTimeout(ok, 10_000));
+          }
+        }
+        if (got) {
+          finish({ status: "ready", note: null, name: job.name || (got.look && got.look.name) || "", result: { lookId: got.lookId || null, look: got.look || null, spec: got.spec, warnings: got.warnings || [] } });
+          return;
+        }
+        if (refusal && refusal.retryable === true && !job.lean && left() >= SS_DOOR_LEAN_MIN_LEFT_MS) { set({ lean: true, fresh: true, note: "Trying once more, a quicker way" }); continue; }
+        finish({ status: "failed", note: null, error: (refusal && refusal.error) || "We couldn't draw this door. Try again." });
+        return;
+      }
+    } catch (e) {
+      if (mine() && !leaving) finish({ status: "failed", note: null, error: e.message || "Something went wrong. Try again." });
+    }
+  }
+  return {
+    get: () => job,
+    review: () => review,
+    subscribe: (f) => { subs.add(f); return () => subs.delete(f); },
+    // false when a press is already running (one at a time).
+    start(o) {
+      if (job && job.status === "running") return false;
+      job = {
+        id: "j" + Date.now().toString(36), clientId: o.clientId || null, target: o.target || null,
+        key: "dl" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12),
+        name: o.name, widthIn: o.widthIn, heightIn: o.heightIn, leaves: o.leaves, startedAt: Date.now(),
+        sent: false, body: null, lean: false, fresh: false, status: "running", note: null, result: null, error: null, seen: false,
+        straightUrl: o.straightUrl || null,
+      };
+      save(); emit();
+      run(o.blobs);
+      return true;
+    },
+    watch(on) { watching = Math.max(0, watching + (on ? 1 : -1)); emit(); },
+    watched: () => watching > 0,
+    // The answer has been shown (the dialog took it, or the pop-up was closed): forget the press.
+    seen() { if (job && job.status !== "running") { job = { ...job, seen: true }; save(); job = null; emit(); } },
+    // "See my door": the Doors page opens it in its review.
+    openReview() {
+      if (!job || job.status !== "ready") return;
+      review = { ...job.result, name: job.name, widthIn: job.widthIn, heightIn: job.heightIn, straightUrl: job.straightUrl || null };
+      this.seen();
+      emit();
+    },
+    takeReview() { const r = review; review = null; return r; },
+    // The Dashboard, once per client: a press saved by an earlier page of THIS client comes back.
+    boot(clientId) {
+      if (!clientId || booted === clientId || (job && job.status === "running")) return;
+      booted = clientId;
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(SS_DOOR_JOB_STORE) || "null"); } catch (_e) { saved = null; }
+      if (!saved || saved.clientId !== clientId || typeof saved.key !== "string") return;
+      job = saved;
+      if (job.status === "running") {
+        if (!job.sent) {
+          // Closed before the photos went up: nothing is being drawn.
+          finish({ status: "failed", error: "The page closed before your door started drawing. Make it from your photo again." });
+        } else if (Date.now() - job.startedAt > SS_DOOR_PRESS_MS + 5 * 60_000) {
+          finish({ status: "failed", error: "This took too long. Look for your door under “Not in your library yet” on the Doors page before you press Generate again." });
+        } else {
+          job = { ...job, fresh: false };
+          emit();
+          run([]);
+        }
+      } else emit();
+    },
+  };
+})();
+// Re-render on every change to the press, and once a second while it runs (the clock).
+function useSsDoorJob() {
+  const [, bump] = useState(0);
+  useEffect(() => ssDoorJob.subscribe(() => bump((n) => n + 1)), []);
+  const job = ssDoorJob.get();
+  const running = !!(job && job.status === "running");
+  useEffect(() => {
+    if (!running) return undefined;
+    const t = setInterval(() => bump((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  return job;
+}
+const ssDoorJobClock = (job) => {
+  const s = Math.max(0, Math.floor((Date.now() - job.startedAt) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+const ssDoorJobStage = (job) => {
+  if (job.note) return job.note;
+  if (!job.sent) return "Sending your photo";
+  const s = (Date.now() - job.startedAt) / 1000;
+  return (SS_DOOR_STAGES.filter(([t]) => s >= t).pop() || SS_DOOR_STAGES[0])[1];
+};
+
+// The pill while a press runs out of sight, and the pop-up when it is done. On every page: the
+// Dashboard mounts it beside its other app-wide pieces.
+function SsDoorJobDock({ clientId, onOpenDoors }) {
+  const job = useSsDoorJob();
+  useEffect(() => { ssDoorJob.boot(clientId); }, [clientId]);
+  if (!job || job.clientId !== (clientId || null) || ssDoorJob.watched()) return null;
+  const btn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "8px 14px", fontSize: 13 };
+  const go = { ...S.btn(DOOR_MINT, "#0F4C46"), padding: "8px 16px", fontSize: 13 };
+  if (job.status === "running") {
+    return (
+      <button type="button" data-ss-door-job-pill="1" onClick={onOpenDoors} title="Open the Doors page"
+        style={{ position: "fixed", left: "50%", bottom: 20, transform: "translateX(-50%)", zIndex: 1150, display: "flex", alignItems: "center", gap: 10,
+          background: "#0F4C5C", color: "#FFF", border: "none", borderRadius: 999, padding: "9px 16px", boxShadow: "0 6px 20px rgba(15,23,42,0.28)", cursor: "pointer", fontSize: 13, maxWidth: "calc(100vw - 32px)" }}>
+        <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: "50%", background: DOOR_MINT, boxShadow: "0 0 0 3px rgba(117,230,218,0.3)", flexShrink: 0 }} />
+        <span style={{ fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{job.name ? <>Drawing &ldquo;{job.name}&rdquo;…</> : "Drawing your door…"}</span>
+        <span style={{ fontVariantNumeric: "tabular-nums", opacity: 0.85 }}>{ssDoorJobClock(job)}</span>
+      </button>
+    );
+  }
+  const ready = job.status === "ready";
+  return (
+    <div role="dialog" aria-modal="true" aria-label={ready ? "Your 3D door is ready" : "We couldn't draw your door"}
+      data-ss-door-job-ready={ready ? "1" : undefined} data-ss-door-job-failed={ready ? undefined : "1"}
+      onClick={(e) => { if (e.target === e.currentTarget) ssDoorJob.seen(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 1250, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#FFF", borderRadius: 14, padding: 20, maxWidth: 420, width: "100%", boxShadow: "0 12px 40px rgba(15,23,42,0.3)" }}>
+        <div style={{ fontWeight: 800, fontSize: 17, color: "#0F172A", marginBottom: 6 }}>{ready ? "Your 3D door is ready" : "We couldn't draw your door"}</div>
+        <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55 }}>
+          {ready ? <>{job.name ? <>&ldquo;{job.name}&rdquo;</> : "Your door"} is drawn from your photo. Check it, then save it to your library.</> : (job.error || "Try again.")}
+        </div>
+        {!ready && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 6 }}>You can make it from the photo again on the Doors page.</div>}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+          <button type="button" style={btn} onClick={() => ssDoorJob.seen()}>{ready ? "Later" : "Close"}</button>
+          <button type="button" style={go} onClick={() => { if (ready) ssDoorJob.openReview(); else ssDoorJob.seen(); onOpenDoors(); }}>
+            {ready ? "See my door" : "Go to Doors"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The flow itself, in a dialog: the photo, the corners, the press, the review, saved.
+function SsDoorStudio({ call, scoped, money, ai, resume, onClose, onSaved }) {
+  // Hooks first, every one of them, above every early return (React #310 otherwise).
+  const [step, setStep] = useState(resume ? "review" : "photo");   // photo | corners | press | review | saved
+  const [name, setName] = useState(resume ? resume.name : "");
+  const [leaves, setLeaves] = useState(resume && resume.spec && resume.spec.src && resume.spec.src.leaves === 2 ? 2 : 1);
+  const [widthIn, setWidthIn] = useState(resume && resume.widthIn ? String(resume.widthIn) : "");
+  const [heightIn, setHeightIn] = useState(resume && resume.heightIn ? String(resume.heightIn) : "");
+  const [front, setFront] = useState(null);     // the chosen file
+  const [img, setImg] = useState(null);
+  const [quad, setQuad] = useState(null);
+  const [closeUps, setCloseUps] = useState({}); // { hinge, handle, meet }: files
+  // { blob, url, size }; a press picked up from the background brings its photo's url only.
+  const [straight, setStraight] = useState(resume && resume.straightUrl ? { blob: null, url: resume.straightUrl, size: null } : null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState(resume ? { lookId: resume.lookId, look: resume.look || null, spec: resume.spec, warnings: resume.warnings || [] } : null);
+  const [shots, setShots] = useState(null);     // [{ view, url }] or "failed"
+  const [saved, setSaved] = useState(null);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  // The press is ssDoorJob's (above every page); this dialog only watches the one it started.
+  const job = useSsDoorJob();
+  const myJob = useRef(null);
+  useEffect(() => {
+    if (step !== "press") return undefined;
+    ssDoorJob.watch(true);
+    return () => ssDoorJob.watch(false);
+  }, [step]);
+  useEffect(() => {
+    if (step !== "press" || !job || job.id !== myJob.current || job.status === "running") return;
+    if (job.status === "ready") {
+      const r = job.result;
+      setDraft({ lookId: r.lookId, look: r.look, spec: r.spec, warnings: r.warnings || [] });
+      if (!name.trim() && r.look && r.look.name) setName(r.look.name);
+      setStep("review");
+    } else {
+      setErr(job.error);
+      setStep("corners");
+    }
+    ssDoorJob.seen();
+  }, [job, step]);
+  const otherRunning = !!(job && job.status === "running" && job.id !== myJob.current);
+  // "Keep working": the press carries on above the page; the pill and the pop-up take it from here.
+  const toBackground = () => { if (onClose) onClose(); };
+  useEffect(() => {
+    if (!front) { setImg(null); return undefined; }
+    let gone = false;
+    ssDoorLoadImage(front).then((im) => {
+      if (gone) return;
+      setImg(im);
+      const w = im.naturalWidth, h = im.naturalHeight, ix = w * 0.18, iy = h * 0.1;
+      setQuad([[ix, iy], [w - ix, iy], [w - ix, h - iy], [ix, h - iy]]);
+    }).catch((e) => { if (!gone) setErr(e.message); });
+    return () => { gone = true; };
+  }, [front]);
+  // The drawn door, once there is a draft: front, 35° left and right, from the designer's own renderer.
+  useEffect(() => {
+    if (!draft || !draft.spec) return undefined;
+    let gone = false;
+    setShots(null);
+    const w = Number(widthIn) || (resume && resume.widthIn) || 36, h = Number(heightIn) || (resume && resume.heightIn) || 80;
+    window.ssLoadDesigner()
+      .then(() => (typeof window.ssRenderDoorLookShots === "function" ? window.ssRenderDoorLookShots({ spec: draft.spec, widthIn: w, heightIn: h }) : null))
+      .then((s) => { if (!gone) setShots(s && s.length ? s : "failed"); })
+      .catch(() => { if (!gone) setShots("failed"); });
+    return () => { gone = true; };
+  }, [draft]);
+
+  const W = Number(widthIn), H = Number(heightIn);
+  const sizeOk = W >= 12 && W <= 240 && H >= 24 && H <= 192;
+  const priceLine = !money ? null
+    : money.exempt ? "Free on your account."
+    : !money.meterActive ? "Free right now."
+    : money.priceCents != null ? `${(money.priceCents / 100).toFixed(2)} a door, taken from your wallet only when we draw one.`
+    : null;
+
+  const toCorners = () => {
+    setErr(null);
+    if (!sizeOk) { setErr("Type the door's width (12 to 240 in) and height (24 to 192 in)."); return; }
+    if (!front) { setErr("Add a photo of the door first."); return; }
+    setStep("corners");
+  };
+  const straighten = async () => {
+    setErr(null);
+    const chk = ssDoorQuadCheck(quad, W, H, !!closeUps.hinge);
+    if (!chk.ok) { setErr(chk.error); return; }
+    setBusy(true);
+    try {
+      const size = ssDoorPreparedSize(quad, W, H);
+      const c = ssDoorWarp(img, quad, size, ssDoorEdgePadPx(size[0], W));
+      const blob = c ? await ssDoorBlob(c) : null;
+      if (!blob) { setErr("We couldn't straighten this photo. Try another one."); return; }
+      setStraight({ blob, url: URL.createObjectURL(blob), size });
+    } finally { setBusy(false); }
+  };
+
+  // ── The press: handed to ssDoorJob, which outlives this dialog ──────────────────────────────
+  const generate = async () => {
+    setErr(null);
+    if (otherRunning) { setErr("Another door is being drawn. Wait for it to finish, then press Generate again."); return; }
+    setBusy(true);
+    try {
+      const kinds = ["front", ...["hinge", "handle", "meet"].filter((k) => closeUps[k] && (k !== "meet" || leaves === 2))];
+      const blobs = [{ kind: "front", blob: straight.blob }];
+      for (const k of kinds.slice(1)) blobs.push({ kind: k, blob: await ssDoorReencode(closeUps[k]) });
+      const t = scoped({});
+      const started = ssDoorJob.start({ clientId: ssResolvedClientId, target: t.targetClientId || null, name: name.trim(), widthIn: W, heightIn: H, leaves, blobs, straightUrl: straight.url });
+      if (!started) { setErr("Another door is being drawn. Wait for it to finish, then press Generate again."); return; }
+      myJob.current = ssDoorJob.get().id;
+      setStep("press");
+    } catch (e) {
+      setErr(e.message || "Something went wrong. Try again.");
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  // ── Save: the look Ready with our front render as its tile, then into the library ─────────────
+  const save = async () => {
+    setErr(null);
+    const nm = name.trim().replace(/\s+/g, " ");
+    if (!nm || nm.length > 60) { setErr("Give the door a name of 1 to 60 characters."); return; }
+    setBusy(true);
+    try {
+      let thumbPath;
+      const frontShot = Array.isArray(shots) ? shots.find((s) => s.view === "front") : null;
+      if (frontShot) {
+        const blob = await (await fetch(frontShot.url)).blob();
+        const t = await call({ action: "door_look_thumb_upload_url" });
+        const { error } = await sb.storage.from("fixtures").uploadToSignedUrl(t.path, t.token, blob, { contentType: "image/png" });
+        if (!error) thumbPath = t.path;
+      }
+      let look = draft.look;
+      if (draft.lookId && !(look && look.version)) {
+        const l = await call({ action: "list_door_looks" });
+        look = (l.looks || []).find((x) => x.id === draft.lookId) || null;
+      }
+      const saveBody = draft.lookId && look
+        ? { action: "save_door_look", id: draft.lookId, version: look.version, name: nm, ...(thumbPath ? { thumbPath } : {}) }
+        : { action: "save_door_look", name: nm, spec: draft.spec, ...(thumbPath ? { thumbPath } : {}) };
+      const s = await call(saveBody);
+      const add = await call({ action: "library_add", doorLookId: s.look.id, name: nm });
+      if (!alive.current) return;
+      setSaved(add.entry);
+      setStep("saved");
+      if (onSaved) onSaved(add.entry);
+    } catch (e) { if (alive.current) setErr(e.message); }
+    finally { if (alive.current) setBusy(false); }
+  };
+
+  const btn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "8px 14px", fontSize: 13 };
+  const go = { ...S.btn(DOOR_MINT, "#0F4C46"), padding: "8px 16px", fontSize: 13 };
+  const title = { photo: "Make your door from a photo", corners: "Mark the door's corners", press: "Drawing your door", review: "Check your 3D door", saved: "Saved to your library" }[step];
+  return (
+    <div role="dialog" aria-modal="true" aria-label={title} data-ss-door-studio={step}
+      onClick={(e) => { if (step === "press" && e.target === e.currentTarget) toBackground(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.72)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#FFF", borderRadius: 14, padding: 20, maxWidth: step === "review" ? 980 : 640, width: "100%", maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={{ fontWeight: 800, fontSize: 17, color: "#0F172A", flex: 1 }}>{title}</div>
+          {step !== "press" && <button type="button" onClick={onClose} aria-label="Close" style={{ ...btn, padding: "4px 10px" }}>✕</button>}
+        </div>
+        {err && <div style={S.err} data-ss-door-error="1">{err}</div>}
+
+        {step === "photo" && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+              Stand straight in front of the door. Close it. Get the whole door in, and show both doors on a double. Move anything that's in front of it.
+            </p>
+            <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Name
+              <input type="text" value={name} maxLength={60} placeholder="e.g. Ranch barn door" onChange={(e) => setName(e.target.value)} style={{ ...S.input, marginTop: 4 }} />
+            </label>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Door
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  {[[1, "Single"], [2, "Double"]].map(([n, t]) => (
+                    <button key={n} type="button" aria-pressed={leaves === n} onClick={() => setLeaves(n)}
+                      style={{ ...btn, background: leaves === n ? "#DBEAFE" : "#F1F5F9", border: leaves === n ? "1px solid #1D4ED8" : "1px solid transparent" }}>{t}</button>
+                  ))}
+                </div>
+              </div>
+              <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Width (in)
+                <input type="number" min="12" max="240" value={widthIn} onChange={(e) => setWidthIn(e.target.value)} style={{ ...S.input, width: 110, marginTop: 4 }} aria-label="Width in inches" />
+              </label>
+              <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700 }}>Height (in)
+                <input type="number" min="24" max="192" value={heightIn} onChange={(e) => setHeightIn(e.target.value)} style={{ ...S.input, width: 110, marginTop: 4 }} aria-label="Height in inches" />
+              </label>
+            </div>
+            <div style={{ border: "1px dashed #94A3B8", borderRadius: 10, padding: 12, background: "#F8FAFC" }}>
+              <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 6 }}>Photo of the closed door</div>
+              <label style={{ ...btn, display: "inline-block" }}>
+                {front ? "Use a different photo" : "Choose a photo"}
+                <input type="file" accept="image/jpeg,image/png,image/webp,image/avif,.avif" data-ss-door-front="1" style={{ display: "none" }}
+                  onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { setFront(f); setStraight(null); setErr(null); } e.target.value = ""; }} />
+              </label>
+              {front && <span style={{ marginLeft: 10, fontSize: 12.5, color: "#15803D", fontWeight: 700 }}>✓ {front.name}</span>}
+              <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>Close-ups help, but you can skip them:</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                {[["hinge", "A hinge"], ["handle", "The handle"], ...(leaves === 2 ? [["meet", "Where the doors meet"]] : [])].map(([k, t]) => (
+                  <label key={k} style={{ ...btn, padding: "5px 10px", fontSize: 12, display: "inline-block" }}>
+                    {closeUps[k] ? "✓ " : "+ "}{t}
+                    <input type="file" accept="image/jpeg,image/png,image/webp,image/avif,.avif" data-ss-door-closeup={k} style={{ display: "none" }}
+                      onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) setCloseUps((c) => ({ ...c, [k]: f })); e.target.value = ""; }} />
+                  </label>
+                ))}
+              </div>
+            </div>
+            {priceLine && <div style={{ fontSize: 12.5, color: "#475569" }} data-ss-door-price="1">{priceLine}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button type="button" style={btn} onClick={onClose}>Cancel</button>
+              <button type="button" style={go} onClick={toCorners}>Next: mark the corners</button>
+            </div>
+          </div>
+        )}
+
+        {step === "corners" && img && quad && (
+          <div style={{ display: "grid", gap: 12 }}>
+            {!straight ? <SsDoorCorners img={img} quad={quad} setQuad={setQuad} /> : (
+              <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <img src={straight.url} alt="Your door, straightened" data-ss-door-straight="1" style={{ maxHeight: 360, maxWidth: "100%", borderRadius: 6, border: "1px solid #CBD5E1" }} />
+                <div style={{ flex: "1 1 200px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+                  This is the photo we'll read: your door, squared up, with a little of what's beside it showing on each side.
+                  If the door's edges aren't at the sides of the picture, move the dots again.
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button type="button" style={btn} onClick={() => { setStraight(null); setStep("photo"); }}>Back</button>
+              {!straight && <button type="button" style={go} disabled={busy} onClick={straighten}>{busy ? "Straightening…" : "Straighten"}</button>}
+              {straight && <button type="button" style={btn} onClick={() => setStraight(null)}>Move the dots again</button>}
+              {straight && <button type="button" style={go} disabled={busy || !ai || otherRunning} onClick={generate} data-ss-door-generate="1">Generate my 3D door</button>}
+            </div>
+            {straight && !ai && <div style={{ fontSize: 12.5, color: "#92400E" }}>Making doors from photos is turned off right now. Try again later.</div>}
+            {straight && ai && otherRunning && <div style={{ fontSize: 12.5, color: "#92400E" }}>We&rsquo;re still drawing &ldquo;{job.name || "your other door"}&rdquo;. You can press Generate once it&rsquo;s ready.</div>}
+          </div>
+        )}
+
+        {step === "press" && (
+          <div style={{ display: "grid", gap: 12, justifyItems: "center", padding: "18px 0" }} aria-live="polite">
+            <SkelBar />
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }} data-ss-door-stage="1">
+              {job && job.id === myJob.current ? ssDoorJobStage(job) : SS_DOOR_STAGES[0][1]}…
+              {job && job.id === myJob.current && <span style={{ fontWeight: 600, color: "#64748B", marginLeft: 8, fontVariantNumeric: "tabular-nums" }}>{ssDoorJobClock(job)}</span>}
+            </div>
+            <div style={{ fontSize: 12.5, color: "#64748B", textAlign: "center", maxWidth: 420 }}>
+              This usually takes 1 to 6 minutes, and never more than 8. You can keep working: we&rsquo;ll tell you when it&rsquo;s ready.
+            </div>
+            <button type="button" onClick={toBackground} data-ss-door-background="1"
+              style={{ ...S.btn("#F1F5F9", "#1E293B"), padding: "8px 14px", fontSize: 13 }}>Keep working, run it in the background</button>
+          </div>
+        )}
+
+        {step === "review" && draft && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-start" }}>
+              {straight && (
+                <figure style={{ margin: 0, textAlign: "center" }}>
+                  <img src={straight.url} alt="Your photo" style={{ height: 340, maxWidth: "100%", borderRadius: 6, border: "1px solid #CBD5E1" }} />
+                  <figcaption style={{ fontSize: 12, color: "#64748B" }}>Your photo</figcaption>
+                </figure>
+              )}
+              {shots === null && <div style={{ width: 240, height: 340, display: "flex", alignItems: "center", justifyContent: "center", background: "#F1F5F9", borderRadius: 6, fontSize: 12.5, color: "#64748B" }}>Drawing it in 3D…</div>}
+              {shots === "failed" && <div style={{ width: 240, height: 340, display: "flex", alignItems: "center", justifyContent: "center", background: "#FEF2F2", borderRadius: 6, fontSize: 12.5, color: "#B91C1C", padding: 10, textAlign: "center" }}>We couldn't draw the 3D preview on this device. You can still save it and see it in the designer.</div>}
+              {Array.isArray(shots) && shots.map((s) => (
+                <figure key={s.view} style={{ margin: 0, textAlign: "center" }}>
+                  <img src={s.url} alt={`Our 3D door, ${s.view === "front" ? "straight on" : s.view === "left35" ? "from the left" : "from the right"}`} data-ss-door-shot={s.view}
+                    style={{ height: s.view === "front" ? 340 : 250, maxWidth: "100%", borderRadius: 6, border: "1px solid #CBD5E1" }} />
+                  <figcaption style={{ fontSize: 12, color: "#64748B" }}>{s.view === "front" ? "Our 3D door" : s.view === "left35" ? "From the left" : "From the right"}</figcaption>
+                </figure>
+              ))}
+            </div>
+            {(draft.warnings || []).length > 0 && (
+              <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#92400E" }} data-ss-door-warnings="1">
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>Check these before you save</div>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>{draft.warnings.map((w, i) => <li key={i}>{typeof w === "string" ? w : (w && (w.text || w.message)) || ""}</li>)}</ul>
+              </div>
+            )}
+            <label style={{ fontSize: 12.5, color: "#334155", fontWeight: 700, maxWidth: 360 }}>Name it
+              <input type="text" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} style={{ ...S.input, marginTop: 4 }} data-ss-door-name="1" />
+            </label>
+            <div style={{ fontSize: 12.5, color: "#64748B" }}>Saving puts it in your library. Then pick it in any door&rsquo;s <b>How it looks in 3D</b>; it follows that door&rsquo;s colours.</div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button type="button" style={btn} onClick={onClose}>Not now</button>
+              {front && <button type="button" style={btn} onClick={() => { setDraft(null); setShots(null); setStraight(null); setStep("corners"); }}>Try another photo</button>}
+              <button type="button" style={go} disabled={busy || shots === null} onClick={save} data-ss-door-save="1">{busy ? "Saving…" : "Save to my library"}</button>
+            </div>
+          </div>
+        )}
+
+        {step === "saved" && saved && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={S.okMsg} data-ss-door-saved="1">&ldquo;{saved.name}&rdquo; is in your library. Pick it in any door&rsquo;s <b>How it looks in 3D</b> below.</div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}><button type="button" style={go} onClick={onClose}>Done</button></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The box on the Library card's right: the way in, and any door drafted from a photo that is not in the
+// library yet (a press whose page was closed, or a draft not saved), so a paid draft is never lost.
+function SsDoorFromPhoto({ call, scoped, money, ai, entries, openKey = 0, onSaved }) {
+  const [open, setOpen] = useState(null);       // null | { resume? }
+  const [looks, setLooks] = useState(null);
+  const loadLooks = async () => {
+    try { const d = await call({ action: "list_door_looks" }); setLooks(d.looks || []); } catch (_) { setLooks([]); }
+  };
+  useEffect(() => { loadLooks(); }, []);
+  useEffect(() => { if (openKey) setOpen({}); }, [openKey]);
+  // A press running above the page: its line here, a fresh list once it is done, and the review the
+  // pop-up's "See my door" asked for.
+  const job = useSsDoorJob();
+  const jobStatus = job ? job.status : null;
+  useEffect(() => { if (jobStatus && jobStatus !== "running") loadLooks(); }, [jobStatus]);
+  useEffect(() => {
+    const r = ssDoorJob.takeReview();
+    if (r) { loadLooks(); setOpen({ resume: { lookId: r.lookId, look: r.look, spec: r.spec, name: r.name, warnings: r.warnings || [], widthIn: r.widthIn, heightIn: r.heightIn, straightUrl: r.straightUrl } }); }
+  }, [job]);
+  const inLibrary = new Set((entries || []).filter((e) => e.category === "door" && e.look && e.look.doorLookId).map((e) => e.look.doorLookId));
+  const waiting = (looks || []).filter((l) => l.fromPhoto && !inLibrary.has(l.id)).slice(0, 3);
+  return (
+    <div data-ss-door-from-photo="1" style={{ flex: "0 1 320px", minWidth: 240, border: "1px solid #BFE3EA", background: "#F0FAFC", borderRadius: 12, padding: "12px 14px" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, color: "#0F4C5C" }}>Don&rsquo;t see your door?</div>
+      <div style={{ fontSize: 12.5, color: "#335B66", lineHeight: 1.5, margin: "4px 0 10px" }}>
+        Upload a photo of it and we&rsquo;ll draw it in 3D, with its boards, braces, hinges and handle. It goes into your library.
+      </div>
+      <button type="button" onClick={() => setOpen({})} data-ss-door-open="1" style={{ ...S.btn("#1B7895", "#FFF"), padding: "8px 14px", fontSize: 13 }}>Make it from a photo</button>
+      {!ai && <div style={{ fontSize: 12, color: "#92400E", marginTop: 8 }}>Making doors from photos is turned off right now.</div>}
+      {job && job.status === "running" && !open && (
+        <div data-ss-door-job-line="1" style={{ fontSize: 12.5, color: "#0F4C5C", marginTop: 8, lineHeight: 1.45 }}>
+          Drawing &ldquo;{job.name || "your door"}&rdquo;… <span style={{ fontVariantNumeric: "tabular-nums" }}>{ssDoorJobClock(job)}</span>. We&rsquo;ll tell you when it&rsquo;s ready.
+        </div>
+      )}
+      {waiting.length > 0 && (
+        <div style={{ marginTop: 10, borderTop: "1px solid #CFE8EE", paddingTop: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: "#0F4C5C" }}>Not in your library yet</div>
+          {waiting.map((l) => (
+            <div key={l.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, marginTop: 6 }} data-ss-door-waiting={l.name}>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name}</span>
+              <button type="button" style={{ ...S.btn("#FFF", "#0F4C5C"), padding: "3px 10px", fontSize: 12, border: "1px solid #9FD3DE" }}
+                onClick={() => setOpen({ resume: { lookId: l.id, look: l, spec: l.spec, name: l.name, warnings: [] } })}>Review</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {open && (
+        <SsDoorStudio call={call} scoped={scoped} money={money} ai={ai} resume={open.resume || null}
+          onClose={() => { setOpen(null); loadLooks(); }}
+          onSaved={(entry) => { loadLooks(); if (onSaved) onSaved(entry); }} />
+      )}
+    </div>
+  );
+}
+
+function SsLibrarySection({ category, viewingLabel = null, clientId = null, onChanged = null }) {
+  // Hooks first, every one of them, above every early return (React #310 otherwise).
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [on, setOn] = useState(null);           // null = still asking the catalog; false = flag off
+  const [lib, setLib] = useState(null);         // { templates, entries, requests, requestPrice }
+  const [msg, setMsg] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [browse, setBrowse] = useState(false);
+  const [q, setQ] = useState("");
+  const [adding, setAdding] = useState(null);   // { template, name, look }
+  const [editing, setEditing] = useState(null); // { id, name, look }
+  const [reqOpen, setReqOpen] = useState(false);
+  const [reqDraft, setReqDraft] = useState(null);
+  // Doors only: "make it from a photo" (door looks, P6), when client_settings.door_looks_beta is on.
+  // null = off; { ai, money } = on (ai: the kill switch; money: the door meter's line).
+  const [doorGen, setDoorGen] = useState(null);
+  const [photoOpenKey, setPhotoOpenKey] = useState(0);
+  const seeded = useRef(false);
+  const rootRef = useRef(null);
+  const noun = SS_LIB_NOUN[category];
+
+  const call = async (body) => {
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped(body) });
+    if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    return data;
+  };
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const cat = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (!cat || cat.error || !cat.data || cat.data.libraryBeta !== true) { setOn(false); return; }
+    setOn(true);
+    setDoorGen(category === "door" && cat.data.doorLooksBeta === true ? { ai: cat.data.doorLookAiOn === true, money: cat.data.doorWallet || null } : null);
+    try {
+      let d = await call({ action: "library" });
+      // First open: copy in what the builder uses today, so their rows keep working (Ahsan
+      // 2026-10-27). Once only, and only while the library is empty; it creates nothing twice.
+      if (!seeded.current && !(d.entries || []).length) {
+        seeded.current = true;
+        try { await call({ action: "library_seed_mine" }); d = await call({ action: "library" }); if (onChanged) onChanged(); }
+        catch (_s) { /* a view-only login cannot seed; the empty library says so below */ }
+      }
+      setLib(d);
+    } catch (e) { setMsg({ err: e.message }); }
+  };
+  useEffect(() => { load(); }, []);
+  // "Find more in the library..." in a door's or a window's look picker opens this card.
+  useEffect(() => {
+    const open = (ev) => {
+      if (!ev || !ev.detail || ev.detail.category !== category) return;
+      if (ev.detail.photo) setPhotoOpenKey((n) => n + 1);
+      else setBrowse(true);
+      if (rootRef.current) rootRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+    window.addEventListener("ss:library-open", open);
+    return () => window.removeEventListener("ss:library-open", open);
+  }, [category]);
+
+  // Nothing until the catalog has said the flag is on, so a builder without the library never sees a
+  // card appear and then go (it did, with a loading bar, until 2026-10-27).
+  if (on !== true) return null;
+  if (!lib) {
+    return <div style={S.card} ref={rootRef}><div style={S.h2}>Library</div>{msg && msg.err ? <div style={S.err}>{msg.err}</div> : <SkelBar />}</div>;
+  }
+
+  const mine = (lib.entries || []).filter((e) => e.category === category);
+  const needle = q.trim().toLowerCase();
+  const hit = (t) => !needle || [t.name, t.description || "", ...(t.searchTerms || [])].some((s) => String(s).toLowerCase().includes(needle));
+  const templates = (lib.templates || []).filter((t) => t.category === category && hit(t));
+  const requests = (lib.requests || []).filter((r) => r.category === category);
+  const price = lib.requestPrice;
+  const priceLine = !price ? null
+    : price.exempt ? "Requests are free on your account."
+    : !price.active ? "Requests are free right now."
+    : price.priceCents != null ? `A request costs $${(price.priceCents / 100).toFixed(2)}, taken from your wallet when you send it, and credited back if we can't build it or you cancel before we start.`
+    : null;
+
+  const run = async (key, fn, ok) => {
+    setBusy(key); setMsg(null);
+    try { await fn(); await load(); if (onChanged) onChanged(); if (ok) setMsg({ ok }); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const addEntry = () => run("add", async () => {
+    // A promoted door (347) is copied with its own look; the server takes no look for it.
+    await call({ action: "library_add", templateId: adding.template.id, name: adding.name, ...(adding.template.fromPhoto ? {} : { look: adding.look }) });
+    setAdding(null);
+  }, `Imported. Pick it on your ${noun === "cladding" ? "styles" : noun + "s"} below.`);
+  const saveEdit = () => run("edit:" + editing.id, async () => {
+    await call({ action: "library_edit", id: editing.id, name: editing.name, look: editing.look });
+    setEditing(null);
+  }, "Saved. Everything using it now shows the change.");
+  const remove = (e) => run("rm:" + e.id, () => call({ action: "library_remove", id: e.id }), `Removed "${e.name}".`);
+  const cancelReq = (r) => run("cx:" + r.id, () => call({ action: "library_request_cancel", id: r.id }), "Request cancelled." + (r.chargedCents ? " It was credited back to your wallet." : ""));
+
+  const openRequest = () => {
+    setReqDraft({ name: "", widthIn: "", heightIn: "", supplierUrl: "", notes: "", photos: [], key: "lr" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36), uploading: false });
+    setReqOpen(true);
+  };
+  const addPhotos = async (files) => {
+    const list = Array.from(files || []).slice(0, Math.max(0, 4 - reqDraft.photos.length));
+    if (!list.length) return;
+    setReqDraft((d) => ({ ...d, uploading: true })); setMsg(null);
+    try {
+      const added = [];
+      for (const f of list) {
+        // An AVIF (or anything else the browser opens that isn't JPEG, PNG or WebP) goes up as a
+        // JPEG: a small one would otherwise go up untouched, labelled image/jpeg.
+        const plain = ["image/jpeg", "image/png", "image/webp"].includes(f.type);
+        const fit = plain ? await ssFitImageForUpload(f).catch(() => f)
+          : new File([await ssDoorReencode(f).catch(() => { throw new Error((f.name || "That photo") + " could not be opened. Try a JPG or PNG."); })], "photo.jpg", { type: "image/jpeg" });
+        const file = fit && fit.size ? fit : f;
+        const ct = ["image/jpeg", "image/png", "image/webp"].includes(file.type) ? file.type : "image/jpeg";
+        const up = await call({ action: "library_request_upload_url", contentType: ct });
+        const { error } = await sb.storage.from("library-refs").uploadToSignedUrl(up.path, up.token, file, { contentType: ct });
+        if (error) throw new Error("A photo didn't upload: " + error.message);
+        added.push({ path: up.path, role: "front", name: f.name, preview: URL.createObjectURL(file) });
+      }
+      setReqDraft((d) => ({ ...d, photos: [...d.photos, ...added], uploading: false }));
+    } catch (e) { setMsg({ err: e.message }); setReqDraft((d) => ({ ...d, uploading: false })); }
+  };
+  const sendRequest = () => run("req", async () => {
+    const d = reqDraft;
+    await call({
+      action: "library_request", category, name: d.name, widthIn: d.widthIn, heightIn: d.heightIn,
+      supplierUrl: d.supplierUrl.trim(), notes: d.notes, idempotencyKey: d.key, photos: d.photos.map((p) => ({ path: p.path, role: p.role })),
+    });
+    setReqOpen(false); setReqDraft(null);
+  }, "Request sent. You'll see it below as we work on it.");
+
+  // THE CARD IS A SEARCH AND A BROWSE BUTTON (Ahsan 2026-10-27: "the library tab should only show a search
+  // bar and Browse the StructureStudio library button ... import the template from the library into the
+  // subaccount and then user can select the doors in the dropdown of How it looks in 3D"). Importing happens
+  // in the list; what is already imported is managed in the same list (Imported as <name>, Rename, Remove),
+  // and the pickers on the page below are where imported entries are used. A request for something missing
+  // sits at the bottom of the list, with the builder's requests.
+  const total = (lib.templates || []).filter((t) => t.category === category).length;
+  const templateIds = new Set((lib.templates || []).map((t) => t.id));
+  const importedFrom = (t) => mine.filter((e) => e.templateId === t.id);
+  // Entries with no live template behind them (a grid the builder already used that no template matches,
+  // one CSM made from a request, or one whose template was archived) are listed after the templates.
+  const own = mine.filter((e) => !e.templateId || !templateIds.has(e.templateId));
+  const ownHits = needle ? own.filter((e) => e.name.toLowerCase().includes(needle)) : own;
+  const open = browse || !!needle;
+  const usedWords = (e) => (e.usedOn && e.usedOn.length
+    ? `used on ${e.usedOn.length}: ${e.usedOn.slice(0, 4).join(", ")}${e.usedOn.length > 4 ? "…" : ""}`
+    : "not used yet");
+  const rowStyle = { display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: "1px solid #F1F5F9", flexWrap: "wrap" };
+  const smallBtn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "6px 12px", fontSize: 12.5 };
+  const tinyBtn = { ...S.btn("#F1F5F9", "#1E293B"), padding: "3px 10px", fontSize: 12 };
+  // One imported entry: its name, how it differs from the template, where it is used, Rename and Remove.
+  const entryLine = (e, label) => (editing && editing.id === e.id ? (
+    <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+      <input type="text" value={editing.name} maxLength={60} onChange={(ev) => setEditing({ ...editing, name: ev.target.value })} style={{ ...S.input, width: 240 }} aria-label="Name" />
+      {!(editing.look && editing.look.doorLookId) && <SsLibLookEdit category={category} look={editing.look} onChange={(look) => setEditing({ ...editing, look })} />}
+      <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "edit:" + e.id} onClick={saveEdit}>{busy === "edit:" + e.id ? "Saving…" : "Save"}</button>
+      <button style={smallBtn} onClick={() => setEditing(null)}>Cancel</button>
+    </div>
+  ) : (
+    <div key={e.id} data-ss-library-entry={e.name} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 12.5, color: "#334155" }}>
+      {label && <span style={{ fontWeight: 800, color: "#15803D" }}>✓ {label}</span>}
+      <b>{e.name}</b>
+      <span style={{ color: "#64748B" }}>· {e.look && e.look.doorLookId && e.templateId ? "From the StructureStudio library, drawn in 3D" : ssLibLookWords(category, e.look)} · {usedWords(e)}</span>
+      <button style={tinyBtn} onClick={() => { setEditing({ id: e.id, name: e.name, look: e.look || {} }); setMsg(null); }}>Rename</button>
+      <button style={{ ...tinyBtn, color: "#B91C1C" }} disabled={busy === "rm:" + e.id} onClick={() => remove(e)}>{busy === "rm:" + e.id ? "Removing…" : "Remove"}</button>
+    </div>
+  ));
+  return (
+    <div style={S.card} ref={rootRef} data-ss-library={category}>
+      <div style={{ ...S.h2, display: "flex", alignItems: "center", gap: 8 }}>Library <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 999, padding: "2px 8px" }}>Beta</span></div>
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+      <div style={{ flex: "1 1 420px", minWidth: 0 }}>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px", maxWidth: 720, lineHeight: 1.5 }}>
+        Import {noun === "cladding" ? "claddings" : noun + "s"} from the StructureStudio library under your own names. Everything you import shows up
+        {category === "door" && <> in each door&rsquo;s <b>How it looks in 3D</b> below.</>}
+        {category === "window" && <> in each window&rsquo;s <b>Grid</b> below.</>}
+        {category === "cladding" && <> in each style&rsquo;s <b>Cladding</b> column below.</>}
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search the StructureStudio library"
+          placeholder={category === "cladding" ? "Search: lap, metal, T1-11, vinyl…" : category === "door" ? "Search: barn, roll-up, pickets…" : "Search: transom, 6 lite, slider…"}
+          style={{ ...S.input, maxWidth: 380 }} />
+        <button style={smallBtn} onClick={() => { setBrowse((b) => !(b || !!needle)); if (needle) setQ(""); }} aria-expanded={open}>
+          {open ? "Hide the StructureStudio library" : `Browse the StructureStudio library (${total})`}
+        </button>
+      </div>
+      </div>
+      {doorGen && (
+        <SsDoorFromPhoto call={call} scoped={scoped} money={doorGen.money} ai={doorGen.ai} entries={lib.entries || []} openKey={photoOpenKey}
+          onSaved={() => { load(); if (onChanged) onChanged(); }} />
+      )}
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", borderRadius: 10, padding: "4px 12px 12px" }} data-ss-library-browse="1">
+          {!templates.length && !ownHits.length && (
+            <div style={{ fontSize: 13, color: "#64748B", padding: "10px 0" }}>Nothing matches “{q}”.{category !== "door" ? " Request it below and we’ll build it." : ""}</div>
+          )}
+          {templates.map((t) => {
+            const imp = importedFrom(t);
+            const addingThis = adding && adding.template.id === t.id;
+            return (
+              <div key={t.id} style={rowStyle} data-ss-library-template={t.name}>
+                <SsLibPic category={category} look={addingThis ? adding.look : t.look} thumbUrl={t.fromPhoto ? t.thumbUrl : null} />
+                <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, color: "#1E293B" }}>{t.name}</div>
+                  <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.45 }}>{t.description || (t.fromPhoto ? "A door drawn in 3D from a photo" : ssLibLookWords(category, t.look))}</div>
+                  {imp.map((e) => entryLine(e, "Imported as"))}
+                  {addingThis && (
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                      <input type="text" value={adding.name} maxLength={60} placeholder="Your name for it" onChange={(e) => setAdding({ ...adding, name: e.target.value })} style={{ ...S.input, width: 240 }} aria-label="Your name for it" />
+                      {!t.fromPhoto && <SsLibLookEdit category={category} look={adding.look} onChange={(look) => setAdding({ ...adding, look })} />}
+                      <button style={{ ...S.btn(DOOR_MINT, "#0F4C46"), padding: "6px 12px" }} disabled={busy === "add"} onClick={addEntry}>{busy === "add" ? "Importing…" : "Import"}</button>
+                      <button style={smallBtn} onClick={() => setAdding(null)}>Cancel</button>
+                    </div>
+                  )}
+                </div>
+                {!addingThis && (
+                  <button style={smallBtn} onClick={() => { setAdding({ template: t, name: imp.length ? "" : t.name, look: t.look || {} }); setMsg(null); }}>
+                    {imp.length ? "Import again" : "Import"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {ownHits.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B" }}>Yours, not from a template</div>
+              {ownHits.map((e) => (
+                <div key={e.id} style={rowStyle}>
+                  <SsLibPic category={category} look={editing && editing.id === e.id ? editing.look : e.look} thumbUrl={e.doorLook ? e.doorLook.thumbUrl : null} />
+                  <div style={{ flex: "1 1 320px", minWidth: 0 }}>{entryLine(e, null)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {category === "door" ? (
+            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 10 }}>
+              {doorGen
+                ? <>Don&rsquo;t see your door? <button type="button" style={{ ...tinyBtn, color: "#0F4C5C" }} onClick={() => setPhotoOpenKey((n) => n + 1)}>Make it from a photo</button></>
+                : <>Don&rsquo;t see your door? Making a 3D door from your supplier&rsquo;s photo is coming next.</>}
+            </div>
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              {!reqOpen && <button style={smallBtn} onClick={openRequest}>Can&rsquo;t find yours? Request it</button>}
+              {reqOpen && reqDraft && (
+                <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, background: "#F8FAFC" }} data-ss-library-request-form="1">
+                  <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>Request a {noun}</div>
+                  <div style={{ display: "grid", gap: 8, maxWidth: 560 }}>
+                    <input type="text" value={reqDraft.name} maxLength={80} placeholder={category === "window" ? "Product name, e.g. Arched top window" : "Product name, e.g. Stone veneer panel"}
+                      onChange={(e) => setReqDraft({ ...reqDraft, name: e.target.value })} style={S.input} aria-label="Product name" />
+                    {category === "window" && (
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input type="number" min="1" max="600" value={reqDraft.widthIn} placeholder="Width (in)" onChange={(e) => setReqDraft({ ...reqDraft, widthIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Width in inches" />
+                        <input type="number" min="1" max="600" value={reqDraft.heightIn} placeholder="Height (in)" onChange={(e) => setReqDraft({ ...reqDraft, heightIn: e.target.value })} style={{ ...S.input, width: 130 }} aria-label="Height in inches" />
+                      </div>
+                    )}
+                    <input type="url" value={reqDraft.supplierUrl} placeholder="Link to the product on your supplier's site (https://…)" onChange={(e) => setReqDraft({ ...reqDraft, supplierUrl: e.target.value })} style={S.input} aria-label="Supplier link" />
+                    <textarea value={reqDraft.notes} maxLength={2000} rows={3} placeholder="Anything we should know (colours, sizes you sell, how it's installed)" onChange={(e) => setReqDraft({ ...reqDraft, notes: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Notes" />
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      {reqDraft.photos.map((p) => <img key={p.path} src={p.preview} alt="" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid #CBD5E1" }} />)}
+                      {reqDraft.photos.length < 4 && (
+                        <label style={{ ...smallBtn, display: "inline-block" }}>
+                          {reqDraft.uploading ? "Uploading…" : "Add photos"}
+                          <input type="file" accept="image/jpeg,image/png,image/webp,image/avif,.avif" multiple style={{ display: "none" }} disabled={reqDraft.uploading} onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
+                        </label>
+                      )}
+                      <span style={{ fontSize: 12, color: "#64748B" }}>A clear, straight-on photo from the supplier&rsquo;s website works best.</span>
+                    </div>
+                    {priceLine && <div style={{ fontSize: 12.5, color: "#475569" }} data-ss-library-request-price="1">{priceLine}</div>}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button style={S.btn(DOOR_MINT, "#0F4C46")} disabled={busy === "req" || reqDraft.uploading} onClick={sendRequest}>{busy === "req" ? "Sending…" : "Send request"}</button>
+                      <button style={smallBtn} onClick={() => { setReqOpen(false); setReqDraft(null); }}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {requests.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#1E293B", marginBottom: 2 }}>Your requests</div>
+              {requests.map((r) => {
+                const st = SS_LIB_REQ_STATUS[r.status] || [r.status, "#475569", "#F1F5F9"];
+                return (
+                  <div key={r.id} style={{ ...rowStyle, alignItems: "center" }} data-ss-library-request={r.name}>
+                    <span style={{ fontSize: 11.5, fontWeight: 800, color: st[1], background: st[2], borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>{st[0]}</span>
+                    <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{r.name}</div>
+                      <div style={{ fontSize: 12, color: "#64748B" }}>
+                        Sent {new Date(r.createdAt).toLocaleDateString()}
+                        {r.chargedCents ? ` · $${(r.chargedCents / 100).toFixed(2)}${r.refundedCents ? `, $${(r.refundedCents / 100).toFixed(2)} credited back` : ""}` : ""}
+                        {r.resultNote ? ` · ${r.resultNote}` : ""}
+                      </div>
+                    </div>
+                    {r.status === "submitted" && <button style={smallBtn} disabled={busy === "cx:" + r.id} onClick={() => cancelReq(r)}>{busy === "cx:" + r.id ? "Cancelling…" : "Cancel"}</button>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Settings → Options → Cladding: the Library card (339) above the per-style table, which re-reads its
+// choices when an entry changes. With the library off the card renders nothing and this is the table.
+function SsCladdingPage({ viewingLabel = null, clientId = null }) {
+  const [libRev, setLibRev] = useState(0);
+  return (
+    <>
+      <SsLibrarySection category="cladding" viewingLabel={viewingLabel} clientId={clientId} onChanged={() => setLibRev((n) => n + 1)} />
+      <CladdingView viewingLabel={viewingLabel} clientId={clientId} refreshKey={libRev} />
+    </>
+  );
+}
+
+function CladdingView({ viewingLabel = null, clientId = null, refreshKey = 0 }) {
   // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [cat, setCat] = useState(null);
@@ -4841,6 +8861,10 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   // Can this database hold a lap course size (style_cladding.exposure_in, 275)? portal-settings
   // answers false only before 275, and then the box is hidden rather than offered and lost.
   const [courses, setCourses] = useState(false);
+  // The builder's library (339), when client_settings.library_beta is on: each style then lists only
+  // what it offers, and the CLADDING column is a dropdown of the builder's own entries (Carolyn
+  // 10-26: "This becomes a dropdown from the library, from their library"). null = the table as before.
+  const [lib, setLib] = useState(null);
 
   const load = async () => {
     const body = scoped({ action: "catalog" });
@@ -4850,12 +8874,15 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
     setCourses(data.claddingCourses === true);
+    const libOn = data.libraryBeta === true && data.library ? data.library : null;
+    setLib(libOn);
+    const links = (libOn && libOn.claddingLinks) || {};
     const saved = {};
     (data.cladding || []).forEach((r) => { (saved[r.style_id] = saved[r.style_id] || {})[r.cladding_id] = r; });
     const m = {};
     (data.styles || []).forEach((st) => {
       const own = saved[st.id] || {};
-      // The four rows always render, whether or not the tenant has a row for each. A style with
+      // The five rows always render, whether or not the tenant has a row for each. A style with
       // no rows at all is not broken — it is a style offering builder's standard only — and it
       // must still be fillable, which a data-driven row list would not allow.
       m[st.id] = SS_CLADDING_ROWS.map((c) => {
@@ -4869,14 +8896,20 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
           taxable: !r || r.taxable !== false,
           active: !r || r.active !== false,
           internalOnly: !!(r && r.internal_only),
-          // Lap only: how much of each board shows, in inches. Blank = the 3D's standard 6 in.
+          // Lap only: the board size in inches, the number in the siding's name (D3_LAP_NOMINAL_IN),
+          // which the 3D scales the courses by. Blank = the standard lap, 7 in. NOT the reveal: the
+          // standard 7 in board shows about 6 in, so asking "how much shows" got the wrong number.
           exposureIn: c.id === "lap" && r && r.exposure_in != null ? String(r.exposure_in) : "",
+          // The library entry this row offers (339), or null; and whether it was just added here.
+          clientLibraryId: (r && links[r.id]) || null,
+          added: false,
         };
       });
     });
     setByStyle(m);
   };
-  useEffect(() => { load(); }, []);
+  // refreshKey: the Library card above bumps it after an entry changes, so the dropdowns follow.
+  useEffect(() => { load(); }, [refreshKey]);
 
   const setRow = (styleId, idx, field, val) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
@@ -4894,11 +8927,16 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
       if (badRate.length) {
         throw new Error("Nothing was saved — fix these rate(s) first: " + badRate.map((r) => r.builtIn).join(", "));
       }
-      // The course size the same way: a typo must not become a silent 6 in.
+      // The course size the same way: a typo must not become a silent 7 in.
       const lapRow = rows.find((r) => r.claddingId === "lap");
       const course = lapRow ? String(lapRow.exposureIn == null ? "" : lapRow.exposureIn).trim() : "";
       if (courses && course !== "" && !(Number.isFinite(Number(course)) && Number(course) >= 3 && Number(course) <= 12)) {
-        throw new Error("Nothing was saved — the lap course has to be between 3 and 12 inches (leave it blank for 6).");
+        throw new Error("Nothing was saved — the lap course has to be between 3 and 12 inches (leave it blank for 7).");
+      }
+      // A cladding just added from the library needs its price: blank would save it as not offered.
+      const unpriced = lib ? rows.filter((r) => r.added && String(r.rate == null ? "" : r.rate).trim() === "") : [];
+      if (unpriced.length) {
+        throw new Error("Nothing was saved — give these a rate (0 = included) or remove them: " + unpriced.map((r) => r.labelOverride || r.builtIn).join(", "));
       }
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
@@ -4915,6 +8953,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
             // Sent on the lap row only, and only where the database can hold it: a row that does
             // not name it leaves the stored size alone.
             ...(courses && r.claddingId === "lap" ? { exposureIn: String(r.exposureIn == null ? "" : r.exposureIn).trim() } : {}),
+            // The library entry (339), sent only with the library on. Its name and course win on the
+            // server; null takes a row off the library.
+            ...(lib ? { clientLibraryId: r.clientLibraryId || null } : {}),
           })),
         }),
       });
@@ -4926,7 +8967,108 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
     setBusyId(null);
   };
 
+  // ── The library version of a style's table (339) ──────────────────────────────────────────
+  // Only what the style offers (a rate, or a library link, or just added here), each row's cladding a
+  // dropdown of the builder's entries OF THAT LOOK (the 207 key allows one row per look per style),
+  // and an "Add" dropdown of the entries whose look the style does not offer yet. A row still offered
+  // but not on any entry stays visible and is marked, so nothing a customer can buy disappears.
+  const libEntries = lib ? (lib.entries || []).filter((e) => e.category === "cladding" && e.active !== false) : [];
+  const pickEntry = (styleId, idx, entryId) => {
+    const e = libEntries.find((x) => x.id === entryId) || null;
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i !== idx ? r : e
+      ? { ...r, clientLibraryId: e.id, labelOverride: e.name, exposureIn: e.look && e.look.exposureIn != null ? String(e.look.exposureIn) : "" }
+      : { ...r, clientLibraryId: null })) }));
+  };
+  const addFromLibrary = (styleId, entryId) => {
+    const e = libEntries.find((x) => x.id === entryId);
+    if (!e) return;
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r) => (r.claddingId !== (e.look && e.look.profile) ? r
+      : { ...r, added: true, active: true, clientLibraryId: e.id, labelOverride: e.name, exposureIn: e.look && e.look.exposureIn != null ? String(e.look.exposureIn) : "" })) }));
+  };
+  const removeFromStyle = (styleId, idx) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, rate: "", clientLibraryId: null, added: false } : r)) }));
+  const renderLibSection = (st) => {
+    const rows = byStyle[st.id] || [];
+    const visible = rows.map((r, i) => ({ r, i })).filter(({ r }) => r.added || r.clientLibraryId || String(r.rate == null ? "" : r.rate).trim() !== "");
+    const offeredLooks = new Set(visible.map(({ r }) => r.claddingId));
+    const addable = libEntries.filter((e) => e.look && !offeredLooks.has(e.look.profile));
+    return (
+      <div key={st.id} style={{ ...S.card, marginBottom: 12 }} data-ss-cladding-style={st.label}>
+        <div style={S.h2}>{st.label}</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 860 }}>
+            <thead><tr>
+              <th style={S.th} title="Picked from your library above. The name is what your customers see.">Cladding</th>
+              <th style={S.th} title="The same seven methods the rest of Options uses — the definitions are above the table.">How it&rsquo;s priced</th>
+              <th style={S.th} title="0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
+              <th style={S.th} />
+            </tr></thead>
+            <tbody>
+              {!visible.length && (
+                <tr><td colSpan={6} style={{ ...S.td, color: "#64748B" }}>Nothing offered on this style yet. Add a cladding from your library below.</td></tr>
+              )}
+              {visible.map(({ r, i }) => {
+                const choices = libEntries.filter((e) => e.look && e.look.profile === r.claddingId);
+                const entry = r.clientLibraryId ? libEntries.find((e) => e.id === r.clientLibraryId) : null;
+                return (
+                  <tr key={r.claddingId} data-ss-cladding-row={entry ? entry.name : r.builtIn}>
+                    <td style={S.td}>
+                      <select value={r.clientLibraryId || ""} onChange={(e) => pickEntry(st.id, i, e.target.value)}
+                        aria-label={`${st.label} cladding`} style={{ ...S.input, width: 240 }}>
+                        {!r.clientLibraryId && <option value="">{(r.labelOverride || r.builtIn) + " (not in your library)"}</option>}
+                        {choices.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                      <div style={{ fontSize: 11.5, color: entry ? "#64748B" : "#B45309", marginTop: 4 }}>
+                        {entry ? ssLibLookWords("cladding", entry.look) : "Not in your library: pick one, or add it to your library above."}
+                      </div>
+                    </td>
+                    <td style={S.td}>
+                      <select value={r.basis} onChange={(e) => setRow(st.id, i, "basis", e.target.value)} style={{ ...S.input, width: 230 }}>
+                        {SS_CLADDING_BASES.map(([v, lbl]) => <option key={v} value={v}>{lbl}</option>)}
+                      </select>
+                    </td>
+                    <td style={S.td}>
+                      <input type="number" min="0" step="0.01" value={r.rate} placeholder={r.added ? "enter a rate" : "not offered"}
+                        aria-label={`${st.label} ${entry ? entry.name : r.builtIn} rate`}
+                        onChange={(e) => setRow(st.id, i, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <input type="checkbox" checked={r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)}
+                        style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)}
+                        style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                    </td>
+                    <td style={S.td}>
+                      <button type="button" title="Stop offering it on this style" aria-label={`Remove from ${st.label}`} onClick={() => removeFromStyle(st.id, i)}
+                        style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 18, cursor: "pointer", padding: 0 }}>×</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {addable.length > 0 && (
+            <select value="" onChange={(e) => addFromLibrary(st.id, e.target.value)} aria-label={`Add a cladding to ${st.label}`} style={{ ...S.input, width: "auto", minWidth: 0 }}>
+              <option value="">+ Add a cladding from your library…</option>
+              {addable.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+          )}
+          <button onClick={() => save(st.id, st.label)} disabled={busyId === st.id} style={S.btn(DOOR_MINT, "#0F4C46")}>
+            {busyId === st.id ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   const renderSection = (st) => {
+    if (lib) return renderLibSection(st);
     const rows = byStyle[st.id] || [];
     return (
       <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
@@ -4940,7 +9082,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
               <th style={S.th} title="Blank = you do not offer it on this style. 0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
-              {courses && <th style={S.th} title="Lap siding only: how much of each board shows, in inches. When a customer picks Lap Siding, the 3D draws the boards at this size. Blank = 6 in.">Course (in)</th>}
+              {courses && <th style={S.th} title={"7\" LP Lap Siding only: the board size in inches, the number in the siding's name (8 for an 8\" lap). When a customer picks it, the 3D scales the boards to match. Blank is the standard 7. For 4.5\" vinyl, offer the 4.5\" Vinyl Siding row instead."}>Course (in)</th>}
             </tr></thead>
             <tbody>
               {rows.map((r, i) => (
@@ -4978,7 +9120,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
                   {courses && (
                     <td style={S.td}>
                       {r.claddingId === "lap" && (
-                        <input type="number" min="3" max="12" step="0.25" value={r.exposureIn} placeholder="6"
+                        <input type="number" min="3" max="12" step="0.25" value={r.exposureIn} placeholder="7"
                           aria-label={`${st.label} lap siding course, inches`}
                           onChange={(e) => setRow(st.id, i, "exposureIn", e.target.value)}
                           style={{ ...S.input, width: 80 }} />
@@ -5002,21 +9144,31 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   return (
     <div style={S.card}>
       <div style={S.h2}>Cladding</div>
-      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+      {lib && (
+        <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }} data-ss-cladding-library-intro="1">
+          The siding a customer can choose, per building style. Each style lists only what you offer
+          there: pick from <b>your library</b> above, set the price, and the customer sees your name for
+          it. Enter <b>0</b> and it is included at no charge; anything else is an upcharge.
+        </p>
+      )}
+      {!lib && <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
         The siding a customer can choose, per building style — not every style takes every
         cladding, and metal in particular is far from universal. Leave a rate <b>blank</b> and you
         do not offer it on that style; enter <b>0</b> and it is included at no charge; anything
         else is an upcharge. Rename any of them under <b>Shown
         as</b> to whatever your customers know it as &mdash; the drawing and the 3D view are
-        unaffected, because the siding itself is still the same one of our four.
+        unaffected, because the siding itself is still the same one of our five.
         {courses && (
           <>
-            {" "}On <b>Lap Siding</b> you can also set the <b>course</b>: how much of each board
-            shows, in inches (4.5 for a 4&frac12;&Prime; vinyl, say). When a customer picks Lap
-            Siding, the 3D draws the boards at that size; it does not change the price. Blank is 6 in.
+            {" "}On <b>7&quot; LP Lap Siding</b> you can also set the <b>course</b>: the board
+            size in inches, the number in the siding&rsquo;s name, so blank is the standard 7 and 8
+            is an 8&quot; lap. When a customer picks it, the 3D scales the boards to match; it does
+            not change the price.
+            For 4.5&quot; vinyl, offer the <b>4.5&quot; Vinyl Siding</b> row instead: it draws the
+            same boards at 4.5 in, and you price it on its own.
           </>
         )}
-      </p>
+      </p>}
       {/* The SAME wording as the Options header, because it is the same vocabulary. Two
           sentences are appended for cladding specifically: a whole-building option has no area
           or length of its own, so `sqft option` and `lineal ft` need their meaning stated here
@@ -5041,7 +9193,12 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   );
 }
 
-function LayoutPricing({ viewingLabel = null, clientId = null }) {
+// `group` picks which of the catalog's layout items this card prices: "interior" (the
+// Interior items tab, the default) or "doors" / "windows", where the two rough openings
+// live beside their fixture catalogs (Carolyn 2026-10-12: "Move the Window one on to
+// Windows and Door one to Doors"). One component, three mounts — the save action upserts
+// per row, so a card that holds only its own group can never touch another's prices.
+function LayoutPricing({ viewingLabel = null, clientId = null, group = "interior" }) {
   // Operator "view as": scope catalog read + archive to the client on screen (see DoorsView).
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [cat, setCat] = useState(null);     // { clientId, items, layoutPricing }
@@ -5057,10 +9214,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // The ramp is managed entirely in the Ramp section now (mode/price/offer + archive), so it is
     // no longer shown or archived here. The three electrical devices are not layout items at
     // all any more — 206 made them ordinary electrical_items, so they cannot appear here.
-    return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
+    // The interior wall (278's partitionWall) has its own tab since 313 (InteriorWalls), and
+    // save_layout_pricing no longer writes it, so it is not listed here either.
+    return (data.items || []).filter((it) => it.key !== "ramp" && it.key !== "partitionWall" && (it.paletteGroup || "interior") === group).map((it) => {
       const p = byKey[it.key] || {};
-      // An item that stays out of the customer's palette until it is PRICED (171's shelves, 278's partition
-      // wall) starts BLANK rather than 0, and Save leaves a blank one alone: a 0 would be a price, and the
+      // An item that stays out of the customer's palette until it is PRICED (171's shelves) starts BLANK rather than 0, and Save leaves a blank one alone: a 0 would be a price, and the
       // item would appear free on every customer's designer the first time this card was saved for
       // something else. Any other item keeps showing 0, which is what it costs today.
       const unpriced = !!it.hiddenUntilPriced && p.rate == null;
@@ -5108,7 +9266,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "set_layout_item_taxable", itemKey, taxable }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      setMsg({ ok: taxable ? "Sales tax will be charged on this option." : "This option is no longer taxed — it appears under the non-taxable subtotal on quotes and invoices." });
+      setMsg({ ok: taxable ? "Sales tax will be charged on this option." : "This option is no longer taxed — it appears under the non-taxable subtotal on estimates and invoices." });
     } catch (e) { setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, taxable: !taxable } : r)); setMsg({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -5173,9 +9331,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
       if (dimBad.length) throw new Error(`Nothing was saved — fix these measurement(s) first, they aren't usable inch values: ${dimBad.map((r) => r.label).join(", ")}.`);
       const payloadRows = src.filter((r) => !(r.unpriced && String(r.rate ?? "").trim() === "")).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
         ...(r.wallSnap ? { depthIn: String(r.depthIn ?? "").trim(), heightOffFloorIn: String(r.heightOffFloorIn ?? "").trim() } : {}) }));
-      // partitionAware: this card knows the partition wall (278), so portal-settings lets it price one.
-      // The card from before it, which cannot, never sends the flag.
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows, partitionAware: true } });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
       const skipped = data.skipped || [];
@@ -5208,7 +9364,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
         const itemKey = keyByAny[String(cols[iItem] || "").trim().toLowerCase()];
         if (!itemKey || !byKey[itemKey]) return;   // unknown/disabled item — ignore
         const method = methodByAny[String(cols[iMethod] || "").trim().toLowerCase()];
-        if (method && (itemKey !== "partitionWall" || LP_METHODS_PARTITION.some((m) => m.value === method))) byKey[itemKey].pricing_method = method;
+        if (method) byKey[itemKey].pricing_method = method;
         const rate = String(cols[iRate] || "").replace(/[$,\s]/g, "");
         if (rate !== "") byKey[itemKey].rate = rate;
       });
@@ -5230,15 +9386,23 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             a tab called Options, inside the Interior group, said nothing about what it holds.
             HEADING ONLY — the component, the save_layout_pricing action and every item_key are
             untouched, so nothing joins on this string. */}
-        <div style={S.h2}>Interior items</div>
+        <div style={S.h2}>{group === "doors" ? "Rough opening (door)" : group === "windows" ? "Rough opening (window)" : "Interior items"}</div>
+        {group !== "interior" ? (
+          <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+            A framed hole with no {group === "doors" ? "door" : "window"} in it — the customer places it like any other
+            {group === "doors" ? " door" : " window"} and types the size. <b>each</b> = rate × count; the other methods
+            work as on the Interior items tab.
+          </p>
+        ) : (
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Set how each item customers can place on the floor plan is priced —
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
           <b>sqft building</b> = rate × (width × depth); <b>perimeter building</b> = rate × 2 × (width + depth);
           <b>pct building price</b> = (rate ÷ 100) × base building price; <b>pct estimate total</b> = (rate ÷ 100) × subtotal of all other lines, resolved last.
-          These rates are used on estimates when you don’t price through your CRM’s products. Building sizes are priced on the <b>Structures</b> tab.
+          These rates are used on estimates when you don’t price through your CRM’s products. Building sizes are priced on the <b>Sheds</b> tab.
           <br />Add an optional <b>product image</b> per item — it appears on that line of the customer’s estimate.
         </p>
+        )}
         {/* A real table, so the skeleton keeps the real <thead> and puts SkelRows in the body
             at the same six columns — Item / How it's priced / Rate / Image / Internal /
             archive — so the header and the first paint line up and nothing jumps when the
@@ -5253,7 +9417,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             </table>
           </div>
         ) : rows.length === 0 ? (
-          <div style={{ fontSize: 13, color: "#64748B" }}>No placeable items are enabled for your designer yet.</div>
+          <div style={{ fontSize: 13, color: "#64748B" }}>{group === "interior" ? "No placeable items are enabled for your designer yet." : "No rough opening is enabled for your designer."}</div>
         ) : (
           <>
             {/* overflowX wrapper: the method select + rate input enforce ~300px of minimum
@@ -5262,7 +9426,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on estimates and invoices.">Taxable</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -5272,7 +9436,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                     </td>
                     <td style={S.td}>
                       <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
-                        {(r.item_key === "partitionWall" ? LP_METHODS_PARTITION : LP_METHODS).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                        {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                       </select>
                     </td>
                     <td style={S.td}>
@@ -5309,7 +9473,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                       </label>
                     </td>
                     <td style={{ ...S.td, textAlign: "center" }}>
-                      <label title="Taxable: sales tax is charged on this option. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
+                      <label title="Taxable: sales tax is charged on this option. Untick and it sits under the non-taxable subtotal on estimates and invoices." style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
                         <input type="checkbox" checked={r.taxable !== false} disabled={busy} onChange={() => toggleTaxable(r.item_key, r.taxable === false)} style={{ width: 16, height: 16, cursor: busy ? "default" : "pointer", accentColor: DOOR_MINT }} />
                       </label>
                     </td>
@@ -5325,11 +9489,13 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <button onClick={() => save()} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save prices"}</button>
+              {group === "interior" && (<>
               <button onClick={downloadCsv} disabled={busy || !cat} style={S.btn("#F1F5F9", "#334155")}>⬇ Download CSV</button>
               <label style={{ ...S.btn(busy ? "#9CA3AF" : "#1E293B", "#FFF"), cursor: busy ? "default" : "pointer", display: "inline-block" }}>
                 {busy ? "Working…" : "⬆ Upload CSV"}
                 <input key={fileKey} type="file" accept=".csv,text/csv" disabled={busy} style={{ display: "none" }} onChange={(e) => onUpload(e.target.files && e.target.files[0])} />
               </label>
+              </>)}
             </div>
           </>
         )}
@@ -5341,6 +9507,283 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             </ul>
           </div>
         )}
+      </div>
+    </>
+  );
+}
+
+// ─── Interior walls (migration 313): Settings → Options → Interior walls ───
+// Four cards on one Save: framing and price (interior_wall_settings), the builder's own wall
+// coverings (interior_wall_coverings, the Electrical card's list pattern), what may go IN a wall
+// (rough openings, and the door/window "Allowed in interior walls" tick) and what may go ON one (the
+// electrical "Allowed on interior walls" tick). The two tick lists are written column-only by
+// save_interior_walls, so this tab never resends either catalog. The wall used to be one row on
+// Interior items (278); that card no longer lists it, and nothing is copied from it (Carolyn,
+// 2026-10-17): each builder sets interior walls up here, and until this tab is saved no customer or
+// rep is offered one. The wall is priced the builder's choice of exactly two ways.
+const IW_METHODS = [
+  { value: "lineal_ft", label: "Per lineal ft of wall" },
+  { value: "sqft_option", label: "Per sq ft of wall" },
+];
+const IW_COVER_METHODS = [
+  { value: "sqft_option", label: "per sq ft of that side" },
+  { value: "lineal_ft", label: "per foot of wall" },
+  { value: "each", label: "each side" },
+];
+function InteriorWalls({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [f, setF] = useState(null);
+  const [covers, setCovers] = useState([]);
+  const [fixtures, setFixtures] = useState([]);   // doors and windows: { id, name, category, inPartition }
+  const [elec, setElec] = useState([]);           // electrical items: { id, name, icon, interiorWallOk }
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [saved, setSaved] = useState(true);       // false until this tab has been saved once
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    // Null until the tab is first saved (nothing is seeded): the table's own defaults, rates blank,
+    // and interior walls not offered to anyone yet.
+    setSaved(!!data.interiorWalls);
+    const w = data.interiorWalls || {};
+    const str = (v) => (v != null ? String(v) : "");
+    setF({
+      standardStud: w.standard_stud === "2x6" ? "2x6" : "2x4",
+      method: IW_METHODS.some((m) => m.value === w.pricing_method) ? w.pricing_method : "lineal_ft",
+      rate2x4: str(w.rate_2x4),
+      rate2x6: str(w.rate_2x6),
+      standardHeight: w.standard_height === "rafters" ? "rafters" : "plate",
+      allowRafters: w.allow_rafters !== false,
+      allowRo: w.allow_rough_openings !== false,
+      taxable: w.taxable !== false,
+      internalOnly: w.internal_only === true,
+    });
+    setCovers((data.interiorWallCoverings || []).map((c) => ({
+      id: c.id, name: c.name || "", method: c.pricing_method || "sqft_option", rate: str(c.rate),
+      taxable: c.taxable !== false, internalOnly: c.internal_only === true, active: c.active !== false,
+    })));
+    setFixtures((data.fixtures || []).filter((x) => (x.category === "door" || x.category === "window") && !x.archived)
+      .map((x) => ({ id: x.id, name: x.name || "", category: x.category, inPartition: x.in_partition !== false })));
+    setElec((data.electricalItems || []).map((e) => ({ id: e.id, name: e.name || "", icon: e.icon || "⚡", interiorWallOk: e.interior_wall_ok !== false })));
+  };
+  useEffect(() => { load(); }, [clientId]);
+
+  const set = (k, v) => setF((prev) => ({ ...prev, [k]: v }));
+  const updCover = (i, k, v) => setCovers((p) => p.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+  const moveCover = (i, d) => setCovers((p) => {
+    const j = i + d; if (j < 0 || j >= p.length) return p;
+    const n = p.slice(); const t = n[i]; n[i] = n[j]; n[j] = t; return n;
+  });
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const stdRate = f.standardStud === "2x6" ? f.rate2x6 : f.rate2x4;
+      if (String(stdRate).trim() === "") throw new Error(`Enter a rate for a ${f.standardStud} wall: it is your standard framing. Leave the other size blank if you don't offer it.`);
+      const bad = [["2x4", f.rate2x4], ["2x6", f.rate2x6]].filter(([, v]) => { const t = String(v).trim(); return t !== "" && !(Number.isFinite(Number(t)) && Number(t) >= 0); });
+      if (bad.length) throw new Error(`Nothing was saved. The ${bad.map((b) => b[0]).join(" and ")} rate isn't a dollar amount.`);
+      const badCover = covers.filter((c) => c.name.trim() && String(c.rate).trim() !== "" && !(Number.isFinite(Number(c.rate)) && Number(c.rate) >= 0));
+      if (badCover.length) throw new Error(`Nothing was saved. Fix the rate on: ${badCover.map((c) => c.name.trim()).join(", ")}.`);
+      const inPartition = {}; fixtures.forEach((x) => { inPartition[x.id] = x.inPartition; });
+      const interiorWallOk = {}; elec.forEach((e) => { interiorWallOk[e.id] = e.interiorWallOk; });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({
+        action: "save_interior_walls",
+        standardStud: f.standardStud, method: f.method, rate2x4: f.rate2x4, rate2x6: f.rate2x6,
+        standardHeight: f.standardHeight, allowRafters: f.standardHeight === "rafters" ? true : f.allowRafters,
+        allowRo: f.allowRo, taxable: f.taxable, internalOnly: f.internalOnly,
+        inPartition, interiorWallOk,
+      }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      const rows = covers.map((c, i) => ({ ...c, sortOrder: (i + 1) * 10 }));
+      const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_interior_wall_coverings", rows }) });
+      if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
+      await load();
+      setMsg({ ok: "Saved." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const cbx = { width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT };
+  const hint = { display: "block", fontSize: 11, color: "#94A3B8", marginTop: 3 };
+  const note = { fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680, lineHeight: 1.5 };
+  if (!f) {
+    return (
+      <div style={S.card}>
+        <div style={S.h2}>Interior walls</div>
+        {msg && msg.err ? <div style={S.err}>{msg.err}</div> : <SkelRows cols={3} rows={4} widths={["40%", "60%", "30%"]} />}
+      </div>
+    );
+  }
+  const offered = String(f.standardStud === "2x6" ? f.rate2x6 : f.rate2x4).trim() !== "";
+  const tickList = (list, key, label, onTick) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+      {list.map((x) => (
+        <label key={x.id} style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13 }}>
+          <input type="checkbox" checked={!!x[key]} onChange={(e) => onTick(x.id, e.target.checked)} style={cbx} />
+          {x.icon ? <span>{x.icon}</span> : null}{x.name}
+        </label>
+      ))}
+      {!list.length && <span style={{ fontSize: 12.5, color: "#94A3B8" }}>{label}</span>}
+    </div>
+  );
+  const tickFixture = (id, v) => setFixtures((p) => p.map((x) => (x.id === id ? { ...x, inPartition: v } : x)));
+  const tickElec = (id, v) => setElec((p) => p.map((x) => (x.id === id ? { ...x, interiorWallOk: v } : x)));
+
+  return (
+    <>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+
+      {/* 1. Framing & price */}
+      <div style={S.card}>
+        <div style={S.h2}>Framing &amp; price</div>
+        <p style={note}>
+          A wall your customer draws inside the building. Pick the framing you build with as standard and
+          a rate for each size you offer. <b>Leave a size blank and you don&rsquo;t offer it.</b> Owners,
+          admins and reps can switch any wall to the other size in the designer; customers never see the
+          choice. {!saved
+            ? <b style={{ color: "#B45309" }}>Interior walls aren&rsquo;t offered to your customers or reps until you set a price here and save.</b>
+            : !offered && <b style={{ color: "#B45309" }}>Customers can&rsquo;t add interior walls until your standard size has a rate.</b>}
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 16 }}>
+          <div style={{ minWidth: 170 }}>
+            <span style={{ ...S.lbl, marginBottom: 6 }}>Standard framing</span>
+            {["2x4", "2x6"].map((s) => (
+              <label key={s} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 14, cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                <input type="radio" name="iw-stud" checked={f.standardStud === s} onChange={() => set("standardStud", s)} style={cbx} />{s}
+              </label>
+            ))}
+          </div>
+          {["2x4", "2x6"].map((s) => (
+            <label key={s} style={{ display: "block", minWidth: 150 }}>
+              <span style={{ ...S.lbl }}>{s} wall rate{f.standardStud === s ? " (standard)" : ""}</span>
+              <input type="number" min="0" step="0.01" placeholder="not offered" value={s === "2x4" ? f.rate2x4 : f.rate2x6}
+                onChange={(e) => set(s === "2x4" ? "rate2x4" : "rate2x6", e.target.value)} style={{ ...S.input, width: 130 }} />
+              <span style={hint}>Blank = not offered. 0 = included.</span>
+            </label>
+          ))}
+          <label style={{ display: "block", minWidth: 200 }}>
+            <span style={{ ...S.lbl }}>How it&rsquo;s priced</span>
+            <select value={f.method} onChange={(e) => set("method", e.target.value)} style={{ ...S.input, width: 200 }}>
+              {IW_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+            <span style={hint}>Per sq ft uses the wall&rsquo;s length times its height.</span>
+          </label>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
+          <label style={{ display: "block", minWidth: 320 }}>
+            <span style={{ ...S.lbl }}>Standard height</span>
+            <select value={f.standardHeight} onChange={(e) => set("standardHeight", e.target.value)} style={{ ...S.input, width: 320 }}>
+              <option value="plate">Stud wall height (level with the wall plate)</option>
+              <option value="rafters">To the rafters (follows the roof)</option>
+            </select>
+            <span style={hint}>Where a new wall&rsquo;s top stops. Customers can change it on each wall.</span>
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 22, cursor: f.standardHeight === "rafters" ? "default" : "pointer", fontSize: 13 }}
+            title={f.standardHeight === "rafters" ? "Your standard is to the rafters, so it is always offered." : undefined}>
+            <input type="checkbox" checked={f.standardHeight === "rafters" || f.allowRafters} disabled={f.standardHeight === "rafters"}
+              onChange={(e) => set("allowRafters", e.target.checked)} style={cbx} />
+            Offer &ldquo;To the rafters&rdquo;
+          </label>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center" }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}
+            title="Available in the rep designer only. Hidden from the customer-facing page; a wall a rep adds still prices normally.">
+            <input type="checkbox" checked={f.internalOnly} onChange={(e) => set("internalOnly", e.target.checked)} style={cbx} />
+            Internal only
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}>
+            <input type="checkbox" checked={f.taxable} onChange={(e) => set("taxable", e.target.checked)} style={cbx} />
+            Taxable
+          </label>
+        </div>
+      </div>
+
+      {/* 2. Wall coverings */}
+      <div style={S.card}>
+        <div style={S.h2}>Wall coverings</div>
+        <p style={note}>
+          What can go on each side of an interior wall: drywall, OSB, shiplap. The customer picks one for
+          each side, or leaves it bare. <b>Leave a rate blank and you don&rsquo;t offer it; 0 means it&rsquo;s
+          included.</b> Per sq ft is that side&rsquo;s length times its height.
+        </p>
+        <div style={{ overflowX: "auto", marginBottom: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
+            <thead>
+              <tr>
+                <th style={S.th}>Covering</th>
+                <th style={S.th}>How it&rsquo;s priced</th>
+                <th style={S.th}>Rate ($)</th>
+                <th style={{ ...S.th, textAlign: "center" }} title="Rep designer only, hidden from the customer-facing page.">Internal</th>
+                <th style={{ ...S.th, textAlign: "center" }}>Taxable</th>
+                <th style={S.th}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {covers.map((c, i) => (
+                <tr key={c.id || ("new-" + i)}>
+                  <td style={S.td}><input value={c.name} maxLength={60} onChange={(e) => updCover(i, "name", e.target.value)} style={{ ...S.input, width: 170 }} /></td>
+                  <td style={S.td}>
+                    <select value={c.method} onChange={(e) => updCover(i, "method", e.target.value)} style={{ ...S.input, width: 180 }}>
+                      {IW_COVER_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                  </td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" placeholder="not offered" value={c.rate} onChange={(e) => updCover(i, "rate", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={c.internalOnly} onChange={(e) => updCover(i, "internalOnly", e.target.checked)} style={cbx} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={c.taxable} onChange={(e) => updCover(i, "taxable", e.target.checked)} style={cbx} /></td>
+                  <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                    <button onClick={() => moveCover(i, -1)} disabled={i === 0} title="Move up" style={{ background: "transparent", border: "none", cursor: i === 0 ? "default" : "pointer", color: "#64748B", fontSize: 13 }}>&uarr;</button>
+                    <button onClick={() => moveCover(i, 1)} disabled={i === covers.length - 1} title="Move down" style={{ background: "transparent", border: "none", cursor: i === covers.length - 1 ? "default" : "pointer", color: "#64748B", fontSize: 13 }}>&darr;</button>
+                    <button onClick={() => setCovers((p) => p.filter((_, j) => j !== i))}
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "#B91C1C", fontWeight: 700, fontSize: 13 }}>Remove</button>
+                  </td>
+                </tr>
+              ))}
+              {!covers.length && (
+                <tr><td colSpan={6} style={{ ...S.td, color: "#94A3B8", fontSize: 12.5 }}>No coverings yet. Walls are bare studs until you add one.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <button onClick={() => setCovers((p) => p.concat([{ id: "", name: "", method: "sqft_option", rate: "", taxable: true, internalOnly: false, active: true }]))}
+          style={S.btn("#F1F5F9", "#334155")}>+ Add a covering</button>
+      </div>
+
+      {/* 3. Openings */}
+      <div style={S.card}>
+        <div style={S.h2}>Openings</div>
+        <p style={note}>
+          What a customer can put in an interior wall. Rough openings use the rates you set on the
+          Doors and Windows tabs.
+        </p>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+          <input type="checkbox" checked={f.allowRo} onChange={(e) => set("allowRo", e.target.checked)} style={cbx} />
+          Rough openings allowed in interior walls
+        </label>
+        <div style={{ ...S.lbl, marginBottom: 8 }}>Doors allowed in interior walls</div>
+        {tickList(fixtures.filter((x) => x.category === "door"), "inPartition", "No doors in your catalog yet.", tickFixture)}
+        <div style={{ ...S.lbl, marginBottom: 8 }}>Windows allowed in interior walls</div>
+        {tickList(fixtures.filter((x) => x.category === "window"), "inPartition", "No windows in your catalog yet.", tickFixture)}
+      </div>
+
+      {/* 4. Electrical */}
+      <div style={S.card}>
+        <div style={S.h2}>Electrical</div>
+        <p style={note}>
+          Which of your electrical items a customer can put on an interior wall. Each one is charged at
+          its own price, the same as one added on an outside wall beyond your package.
+        </p>
+        <div style={{ ...S.lbl, marginBottom: 8 }}>Allowed on interior walls</div>
+        {tickList(elec, "interiorWallOk", "No electrical items yet. Add them on the Electrical tab.", tickElec)}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : DOOR_MINT, "#0F4C46")}>{busy ? "Saving…" : "Save interior walls"}</button>
+        {msg && <span style={{ fontSize: 12.5, color: msg.err ? "#B91C1C" : "#047857" }}>{msg.err || msg.ok}</span>}
       </div>
     </>
   );
@@ -5390,13 +9833,22 @@ function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number"
 // a value written by a NEWER portal than this one can then only ever mean "draw it the way you
 // always did" — never a blank door. Keep this list in step with the CHECK constraint in 187
 // and with FIXTURE_CATEGORIES' door branch in portal-settings.
-const D3_DOOR_STYLES = ["plank", "zbrace", "xbrace", "rollup"];
+//
+// Migration 289 adds the generator's four looks (american, basic, classic, dutch): the four hinged
+// doors builders sell, drawn in 3D with the frame in the door's trim colour and the panels in its
+// door colour, each able to take a window ticked "Can be used inside a door". A double is the row's
+// own Double operation, so "American double" is an american row with Double ticked.
+const D3_DOOR_STYLES = ["plank", "zbrace", "xbrace", "rollup", "american", "basic", "classic", "dutch"];
 const D3_DOOR_STYLE_HINT = {
-  auto: "The photo above is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to board-and-batten if this door looks skewed.",
-  plank: "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The photo above is still used on the estimate, but not in 3D.",
+  auto: "The door's photo is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to one of the built looks if this door looks skewed.",
+  plank: "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The door's photo is still used on the estimate, but not in 3D.",
   zbrace: "The same board-and-batten door with a single diagonal brace, rising from the hinge side.",
   xbrace: "The same board-and-batten door with a crossed X brace across the lower panel.",
-  rollup: "Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch. The photo above is still used on the estimate, but not in 3D.",
+  rollup: "Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch. The door's photo is still used on the estimate, but not in 3D.",
+  american: "A trim frame with a mid rail and vertical pickets across the lower panel (as many as the door's width spaces like the real door), panels in the door colour (or the building's), with a window in the upper panel if the customer picks one.",
+  basic: "A trim frame with a mid rail and plain panels in the door colour (or the building's), with a window in the upper panel if the customer picks one.",
+  classic: "A trim frame with an octagon and a diamond in the upper panel and an X in the lower one; a window, if the customer picks one, takes the octagon's place.",
+  dutch: "A trim frame with a mid rail and a small dark louvred vent in the lower panel, with a window in the upper panel if the customer picks one.",
 };
 
 // The shared per-line catalog editor. `sizeWord` flips the second dimension's wording
@@ -5437,6 +9889,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // ticks shown: a line restricted to the Greenhouse while the only other style is hidden must not
   // save as "every style" on a price edit, or the restriction is gone when that style comes back.
   const [allStyleIds, setAllStyleIds] = useState([]);
+  // The builder's library (339) when client_settings.library_beta is on: a door's "How it looks in
+  // 3D" and a window's grid then pick from the builder's own entries. null = the editor as before.
+  const [lib, setLib] = useState(null);
+  // Door looks from a photo (P6): the dropdown's "Make one from a photo…" when door_looks_beta is on.
+  const [doorLooksOn, setDoorLooksOn] = useState(false);
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -5447,6 +9904,16 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
     // null = comes in ALL window colors (the living default); an array = exactly those.
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
+    // Can go inside a door (289): windows only; absent reads as no, the column's default.
+    in_door: d.in_door === true,
+    // Where in the door (the transom, 2026-10-21): "top" a transom, anything else the upper panel.
+    door_window_at: d.door_window_at === "top" ? "top" : "panel",
+    // Grid of lites (335): "" = automatic (NULL, today's look); otherwise rows and lites across as
+    // text, for the selects.
+    lite_rows: d.lite_rows != null ? String(d.lite_rows) : "",
+    lite_cols: d.lite_cols != null ? String(d.lite_cols) : "",
+    // Allowed in interior walls (313): doors and windows; absent reads as YES, the column's default.
+    in_partition: d.in_partition !== false,
     // null = offered on EVERY building style (the living default); an array = only those (272).
     style_ids: Array.isArray(d.style_ids) ? d.style_ids.map(String) : null,
     // Blank = "use the standard 3'6"", which is NOT the same as 0 (a window starting at
@@ -5471,7 +9938,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       () => sb.functions.invoke("portal-settings", { body }),
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
-    const list = (data.fixtures || []).filter((f) => (f.category || "door") === category).map(mapRow);
+    const libOn = data.libraryBeta === true && data.library ? data.library : null;
+    setLib(libOn);
+    setDoorLooksOn(isDoorCat && !!libOn && data.doorLooksBeta === true);
+    const links = (libOn && libOn.fixtureLinks) || {};
+    const list = (data.fixtures || []).filter((f) => (f.category || "door") === category)
+      .map((d) => ({ ...mapRow(d), client_library_id: links[d.id] || null }));
     // Display order = the order drag persists: live items first, archived sink to the bottom.
     setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
     if (isDoorCat) setDoorColors((data.colors || []).filter((c) => c.door === true && c.active !== false));
@@ -5506,6 +9978,15 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
+    // Can be used inside a door (289). WINDOW-ONLY on the wire, like the colour list: portal-settings
+    // forces it off for every other category, so sending it for a door would be a value it throws away.
+    // Where in the door rides beside it, "top" only for a window that goes in doors at all.
+    ...(isWindowCat ? { inDoor: r.in_door === true, doorWindowAt: r.in_door === true && r.door_window_at === "top" ? "top" : "panel" } : {}),
+    // Grid of lites (335), windows only: both null is automatic.
+    ...(isWindowCat ? { liteRows: r.lite_rows ? Number(r.lite_rows) : null, liteCols: r.lite_rows && r.lite_cols ? Number(r.lite_cols) : null } : {}),
+    // Allowed in interior walls (313): doors and windows only. Ticked on the Interior walls tab; it
+    // rides every line save so the tick survives a price edit made here.
+    ...((isWindowCat || isDoorCat) ? { inPartition: r.in_partition !== false } : {}),
     // Offered on (272), every category, the same collapse: every style ticked, hidden ones
     // included, goes over as null ("every style"), so a style added later offers this item
     // without a visit here.
@@ -5519,6 +10000,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     ...(isDoorCat ? { sillIn: ftInToInches(r.sill_in) } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
     taxable: r.taxable !== false,
+    // The library entry (339), doors and windows, only with the library on. Its look wins on the
+    // server; null takes the line off the library. Absent (library off) leaves any link alone.
+    ...(lib && (isDoorCat || isWindowCat) ? { clientLibraryId: r.client_library_id || null } : {}),
   });
 
   const saveLine = async () => {
@@ -5645,9 +10129,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // builder can set loft-door heights in bulk (see the edit panel). Adding a column is safe
   // for anyone holding an older sheet: import matches columns BY NAME and an absent one is
   // left untouched, so an old export re-imports exactly as it always did.
+  // "Interior walls" (313): may this door or window go in an interior wall. Doors and windows only;
+  // a sheet from before it has no such column, and import leaves the tick alone.
+  const inWalls = isDoorCat || isWindowCat;
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Height off floor", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Height off floor", ...(inWalls ? ["Interior walls"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), ...(inWalls ? ["Interior walls"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
   // resolves it back against the door-flagged palette.
@@ -5660,8 +10147,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     return names.length ? names.join(", ") : "none";
   };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), r.sill_in || "", yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), r.sill_in || "", ...(inWalls ? [yn(r.in_partition !== false)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), ...(inWalls ? [yn(r.in_partition !== false)] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -5724,7 +10211,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iSwOut = col("swing out"), iSwIn = col("swing in"), iSwDef = col("default swing"),
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
         iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
-        iSill = col("height off floor"), iSillMode = col("placement"),
+        iSill = col("height off floor"), iSillMode = col("placement"), iInWalls = col("interior walls", "interior wall"),
         iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iTaxable = col("taxable", "tax"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
@@ -5790,6 +10277,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         if (isWindowCat && iSillMode >= 0) {
           row.sillMode = /^\s*(variable|slide|adjustable)\b/i.test(String(cols[iSillMode] == null ? "" : cols[iSillMode])) ? "variable" : "fixed";
         }
+        // Interior walls (313): absent column leaves the tick alone; a blank cell is the default, yes.
+        if (inWalls && iInWalls >= 0) row.inPartition = bool(cols, iInWalls, true);
         return row;
       });
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "import_fixtures", category, rows: importRows }) });
@@ -5802,7 +10291,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, in_door: false, door_window_at: "panel", lite_rows: "1", lite_cols: "1", in_partition: true, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -5869,6 +10358,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
       parts.push(names.length === 0 ? "no colors" : `colors: ${names.join(", ")}`);
     }
+    // Can go inside a door (289): said on the row, only when ticked, and how (the transom, 2026-10-21).
+    if (isWindowCat && r.in_door) parts.push(r.door_window_at === "top" ? "transom in doors" : "can go in a door");
+    // Grid of lites (335): said only when set, so an automatic window's line is unchanged.
+    if (isWindowCat && r.lite_rows && r.lite_cols) parts.push(Number(r.lite_rows) * Number(r.lite_cols) < 2 ? "no grid" : `${Number(r.lite_rows) * Number(r.lite_cols)}-lite`);
     // A raised DOOR says so on its row. It is the one field that separates a loft door from a
     // walk door in a list where both read "3' x 4'", and a builder scanning the list for the
     // one they got wrong should not have to open each row to find it. Only when set, so an
@@ -5997,6 +10490,67 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           )}
         </div>
       )}
+      {/* Can be used inside a door (migration 289; asked for on 2026-10-06: the window settings get
+          "a can be used inside a door option"). The customer then sees it in the door picker for the four
+          built door looks, but only where it fits the upper panel of one door leaf, and it is priced
+          as its own window line, once per leaf. Windows only.
+          The tick became a select on 2026-10-21 (Yoder Barns: "transom windows in doors"): No, in the
+          upper panel (in_door, door_window_at 'panel'), or as a transom across the top of each leaf
+          (door_window_at 'top'), which the designer also offers in the board-and-batten doors and a
+          plain door with no photo. One control because "as a transom" only means anything in a door. */}
+      {isWindowCat && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fldLbl}>Use in doors</div>
+          <select data-ss-door-window-at="1" value={!edit.draft.in_door ? "no" : edit.draft.door_window_at === "top" ? "top" : "panel"}
+            onChange={(e) => setDraft(e.target.value === "no" ? { in_door: false, door_window_at: "panel" } : { in_door: true, door_window_at: e.target.value })}
+            style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
+            <option value="no">No</option>
+            <option value="panel">In the door's upper panel</option>
+            <option value="top">As a transom at the top of the door</option>
+          </select>
+          <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+            {!edit.draft.in_door
+              ? "Only on the walls. Choose a door option to offer it inside doors as well."
+              : edit.draft.door_window_at === "top"
+                ? "Offered in the door picker as a transom across the top of the doors it fits: the American, Basic, Classic and Dutch doors, the board-and-batten doors, and plain doors without a photo. Each one is charged as a window, one per door (two on a double door)."
+                : "Offered in the door picker for the American, Basic, Classic and Dutch doors it fits. Each one is charged as a window, one per door (two on a double door)."}
+          </div>
+        </div>
+      )}
+      {/* Grid (migration 335; Carolyn, 2026-10-23: "every window shows grids although nobody asked for
+          them"; spec Ahsan, 2026-10-24). The window's grid of lites, ROWS x lites ACROSS, for this window
+          on a wall, in a door's upper panel and as a transom. Since Carolyn's 10-27 call it is set HERE
+          only: "The customer can't select the grid", so the designer has no picker, and this one is built
+          the way that one was. 1 x 1 is no grid; a transom of five is 1 row of 5; a "6-lite" is 3 rows of 2.
+          Standard is the look every window had before. A window with a photo shows the photo instead.
+          With the library (339) the builder's imported grids sit above it as chips; picking one links the
+          window to that entry, and any other change unlinks it. Windows only. */}
+      {isWindowCat && (() => {
+        const lr = edit.draft.lite_rows || "", lc = edit.draft.lite_cols || "1";
+        const R = Number(lr) || 0, Cn = Number(lc) || 1;
+        const winEntries = lib ? (lib.entries || []).filter((x) => x.category === "window" && x.active !== false) : null;
+        const cur = edit.draft.client_library_id || null;
+        const linked = winEntries && cur && winEntries.some((x) => x.id === cur) ? cur : null;
+        const draftOf = (l) => ({ lite_rows: l.liteRows == null ? "" : String(l.liteRows), lite_cols: l.liteRows == null ? "" : String(l.liteCols) });
+        return (
+          <div style={{ marginBottom: 12 }} data-ss-window-grid="1">
+            <div style={fldLbl}>Grid (lites)</div>
+            <SsGridPicker look={R > 0 ? { liteRows: R, liteCols: Cn } : {}}
+              onChange={(l) => setDraft({ ...draftOf(l), ...(lib ? { client_library_id: null } : {}) })}
+              entries={winEntries} linkedId={linked}
+              onPickEntry={(x) => setDraft({ client_library_id: x.id, ...draftOf(x.look || {}) })}
+              onFindMore={lib ? () => window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "window" } })) : null} />
+            <div data-ss-window-lite-hint="1" style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+              {R === 0
+                ? "Standard is the look windows had before: two rows of two or three lites by width (one row in a transom)."
+                : R * Cn < 2
+                  ? "No grid: one clear lite."
+                  : `${R * Cn}-lite: ${R} ${R === 1 ? "row" : "rows"} of ${Cn}, all the same size.`}
+              {" "}Customers get this grid on this window; they can't change it in the designer.
+            </div>
+          </div>
+        );
+      })()}
       {/* Offered on (272), for every category: the styles a customer can add this item to. A
           builder asked for louvered vents on greenhouses only (2026-10-02); the same ticks keep a
           garage door off a style sold without one. Only with two or more styles, since one style
@@ -6043,17 +10597,56 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       {isDoorCat && (
         <div style={{ marginBottom: 12 }}>
           <div style={fldLbl}>How it looks in 3D</div>
+          {lib ? (() => {
+            // From the builder's library (339; Carolyn 10-26: "everything in the library that is doors
+            // then comes in as an option in here"). The line's current look stays pickable even when it
+            // is in no entry, so opening and saving a line never changes how it draws.
+            const doorEntries = (lib.entries || []).filter((x) => x.category === "door" && x.active !== false);
+            const cur = edit.draft.client_library_id || null;
+            const curStyle = D3_DOOR_STYLES.includes(edit.draft.door_style) ? edit.draft.door_style : "auto";
+            const val = cur && doorEntries.some((x) => x.id === cur) ? "lib:" + cur : "style:" + curStyle;
+            return (
+              <select data-ss-door-look-library="1" value={val} style={{ ...S.input, minWidth: 0, maxWidth: 380 }}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__more") { window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "door" } })); return; }
+                  if (v === "__photo") { window.dispatchEvent(new CustomEvent("ss:library-open", { detail: { category: "door", photo: true } })); return; }
+                  if (v.startsWith("lib:")) {
+                    const x = doorEntries.find((y) => y.id === v.slice(4));
+                    if (x) setDraft({ client_library_id: x.id, door_style: (x.look && x.look.doorStyle) || "auto" });
+                    return;
+                  }
+                  setDraft({ client_library_id: null, door_style: v.slice(6) });
+                }}>
+                {doorEntries.map((x) => <option key={x.id} value={"lib:" + x.id}>{x.name}</option>)}
+                {val.startsWith("style:") && <option value={val}>{ssLibLookWords("door", { doorStyle: curStyle })} (not in your library)</option>}
+                <option value="__more">Find more in the library…</option>
+                {doorLooksOn && <option value="__photo">Make one from a photo…</option>}
+              </select>
+            );
+          })() : (
           <select value={D3_DOOR_STYLES.includes(edit.draft.door_style) ? edit.draft.door_style : "auto"}
             onChange={(e) => setDraft({ door_style: e.target.value })}
             style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
-            <option value="auto">Use the photo above</option>
+            <option value="auto">Use the door's photo</option>
             <option value="plank">Board-and-batten (built in 3D)</option>
             <option value="zbrace">Board-and-batten with a Z brace</option>
             <option value="xbrace">Board-and-batten with an X brace</option>
             <option value="rollup">Roll-up / garage door</option>
+            <option value="american">American (built in 3D)</option>
+            <option value="basic">Basic (built in 3D)</option>
+            <option value="classic">Classic (built in 3D)</option>
+            <option value="dutch">Dutch (built in 3D)</option>
           </select>
+          )}
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto}
+            {(() => {
+              // A door made from a photo (345) draws its own look, not its base's description.
+              const e = lib && edit.draft.client_library_id ? (lib.entries || []).find((x) => x.id === edit.draft.client_library_id) : null;
+              return e && e.look && e.look.doorLookId
+                ? "Your door, drawn in 3D from your photo. It follows this door's colours."
+                : D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto;
+            })()}
           </div>
         </div>
       )}
@@ -6115,7 +10708,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         {dCbx("show_image_on_estimate", "Photo on estimate", "Attach this item's photo to its line on the customer's estimate")}
         {dCbx("active", "Active", "Unchecked = hidden from the designer entirely")}
         {dCbx("internalOnly", "Internal only", "Reps can still place it in the designer; customers can't add it on the client-facing page (already-placed items still show)")}
-        {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the quote and invoice under a separate non-taxable subtotal.")}
+        {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the estimate and invoice under a separate non-taxable subtotal.")}
         <span style={{ flex: 1 }} />
         <button onClick={() => setEdit(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
         <button onClick={saveLine} disabled={busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)} title={offeredNowhere(edit.draft) ? "Tick at least one building style under Offered on" : undefined} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
@@ -6143,7 +10736,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       </div>
       {!r.active && chip("Hidden", "#F1F5F9", "#64748B", "Active is off — not offered in the designer")}
       {r.internalOnly && chip("Internal", "#E2E8F0", "#475569", "Internal Designer only — customers can't add it")}
-      {r.taxable === false && chip("No tax", "#FEF3C7", "#B45309", "Not subject to sales tax — appears under the non-taxable subtotal on quotes and invoices")}
+      {r.taxable === false && chip("No tax", "#FEF3C7", "#B45309", "Not subject to sales tax — appears under the non-taxable subtotal on estimates and invoices")}
       {r.archived && chip("Archived", "#FEF3C7", "#B45309", "Retired from new builds; still shows on existing designs")}
       <button onClick={() => setEdit({ id: r.id, draft: { ...r } })} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
       <button onClick={() => quickSave(i, { archived: !r.archived })} disabled={busy}
@@ -6275,7 +10868,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
 }
 
 function DoorsView({ viewingLabel = null, clientId = null }) {
+  // Bumped by the Library card after an entry changes, so the door lines re-read their choices.
+  const [libRev, setLibRev] = useState(0);
   return (
+    <>
+    <SsLibrarySection category="door" viewingLabel={viewingLabel} clientId={clientId} onChanged={() => setLibRev((n) => n + 1)} />
     <div style={S.card}>
       <div style={S.h2}>Doors</div>
       <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -6285,8 +10882,10 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
         other you’ve checked). Sizes are feet/inches — 8', 6'3", 36" (no spaces). <b>Export Excel</b> to edit in bulk and
         re-import — rows are matched by the ID column, and rows missing from the file are never deleted.
       </p>
-      <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+      <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={libRev} />
     </div>
+    <LayoutPricing group="doors" viewingLabel={viewingLabel} clientId={clientId} />
+    </>
   );
 }
 
@@ -6682,7 +11281,11 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
   // Bumped when the window-color list saves → remounts the catalog's data (refreshKey), so
   // a just-added color appears in each window's availability checkboxes immediately.
   const [colorsSavedAt, setColorsSavedAt] = useState(0);
+  // Bumped by the Library card after an entry changes (339), the same way the colors are.
+  const [libRev, setLibRev] = useState(0);
   return (
+    <>
+    <SsLibrarySection category="window" viewingLabel={viewingLabel} clientId={clientId} onChanged={() => setLibRev((n) => n + 1)} />
     <div style={S.card}>
       <div style={S.h2}>Windows</div>
       <WindowColorsEditor viewingLabel={viewingLabel} clientId={clientId} onSaved={() => setColorsSavedAt((n) => n + 1)} />
@@ -6693,8 +11296,10 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
         (no spaces). <b>Export Excel</b> to edit in bulk and re-import — rows are matched by the ID column, and rows missing
         from the file are never deleted.
       </p>
-      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={colorsSavedAt} />
+      <FixtureCatalog category="window" noun="window" addLabel="Add window" namePh="e.g. Slider window" labelPh="SL" wPh={'36"'} hPh={'36"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} refreshKey={colorsSavedAt * 1000 + libRev} />
     </div>
+    <LayoutPricing group="windows" viewingLabel={viewingLabel} clientId={clientId} />
+    </>
   );
 }
 
@@ -6703,11 +11308,15 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
 //
 // ⚠️ ONE component, one mount, one `rows` buffer — ColorsShell passes `section` to a SINGLE
 // <ColorsView> rather than rendering three of them behind {sub === ...} branches, and that is
-// load-bearing. `rows` is ONE flat list across all three categories and `save` submits the
-// whole list, so three mounts would remount on every tab switch: edits made in Paint would be
-// silently thrown away by a click on Shingles, and the Save button in each card — which
-// already saves all three categories — would submit a list that had just been re-fetched.
-// Keep the element in one stable position so React preserves this state.
+// load-bearing. `rows` is ONE flat list across all three categories, so three mounts would
+// remount on every tab switch and edits made in Paint would be silently thrown away by a click
+// on Shingles. Keep the element in one stable position so React preserves this state.
+//
+// SINCE 2026-10-30 EACH PAGE'S SAVE IS ITS OWN (Carolyn: "currently the save on each page is
+// saving all 3 pages"): `save(ckey)` sends only that section's rows plus `section`, which
+// narrows the server's delete sweep to match, and `load(ckey)` refreshes only that section so
+// unsaved edits on the other two survive. The shared buffer above is what makes that refresh
+// scoping necessary — a plain reload would wipe the pages you had not saved yet.
 function ColorsView({ viewingLabel = null, section = "all" }) {
   const [cat, setCat] = useState(null);
   // One flat list across all categories; a row's category is set by its flags:
@@ -6717,11 +11326,15 @@ function ColorsView({ viewingLabel = null, section = "all" }) {
   const [msg, setMsg] = useState(null);
   const [libOpen, setLibOpen] = useState(null);   // which section's library is open
 
-  const load = async () => {
+  // `only` reloads ONE section's rows and leaves the other two alone (see `save`): all three
+  // palettes share this one unsaved-edit buffer, so a scoped save must not refetch over edits
+  // a builder has sitting on another page. Without it, saving Paint silently discarded them —
+  // the same whole-buffer coupling the section-scoped save exists to break.
+  const load = async (only = null) => {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
-    setRows((data.colors || []).map((c) => ({
+    const fresh = (data.colors || []).map((c) => ({
       id: c.id, label: c.label, siding: c.siding !== false, trim: c.trim !== false,
       shingle: !!c.shingle, metal: !!c.metal, door: !!c.door,
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
@@ -6735,7 +11348,9 @@ function ColorsView({ viewingLabel = null, section = "all" }) {
       // every column added to `colors` has to be added in FOUR places -- the migration, the
       // server's SELECT, the server's write, and here. Three of the four were done.
       code: c.code || "",
-    })));
+    }));
+    if (!only) { setRows(fresh); return; }
+    setRows((prev) => [...prev.filter((r) => catOf(r) !== only), ...fresh.filter((r) => catOf(r) === only)]);
   };
   useEffect(() => { load(); }, []);
 
@@ -6752,14 +11367,29 @@ function ColorsView({ viewingLabel = null, section = "all" }) {
   // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
   const swap = (gi, gj) => setRows((rs) => { if (gj < 0 || gj >= rs.length) return rs; const next = rs.slice(); [next[gi], next[gj]] = [next[gj], next[gi]]; return next; });
 
-  // One save persists every section at once — the whole list is always sent, so the
-  // server's "delete anything not in the payload" stays safe across categories.
-  const save = async () => {
-    // Full-list replace: the server removes any colour not in this payload. Harmless
-    // on your own palette, not harmless on someone else's.
-    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE colour list with these ${rows.length} colour(s)?
+  // Which palette a row belongs to. Mirrors renderSection's filter exactly — paint is the
+  // absence of the other two flags, not a flag of its own. Defined above `save`/`load`
+  // because both now use it to work one section at a time.
+  const catOf = (r) => (r.shingle ? "shingle" : r.metal ? "metal" : "paint");
+  const SECTION_WORD = { paint: "paint", shingle: "shingle", metal: "metal" };
 
-Anything not shown here will be removed from their account.`)) return;
+  // EACH PAGE SAVES ITS OWN PALETTE (Carolyn 2026-10-30: "we need all the save colors to work
+  // on their own page. currently the save on each page is saving all 3 pages"). `ckey` is the
+  // section whose Save button was clicked; only that section's rows are validated and sent,
+  // and `section` tells the server to narrow its delete sweep to the same set.
+  //
+  // ⚠️ SENDING FEWER ROWS IS NOT ENOUGH ON ITS OWN — `save_colors` deletes anything absent
+  // from the payload, so posting only the paint rows without `section` would wipe every
+  // shingle and metal colour. The two halves ship together; never send a filtered list to a
+  // server build that does not read `section`.
+  const save = async (ckey) => {
+    const mine = rows.map((r, gi) => ({ r, gi })).filter(({ r }) => catOf(r) === ckey);
+    const word = SECTION_WORD[ckey] || ckey;
+    // Full-list replace WITHIN THIS SECTION: the server removes any colour of this kind not in
+    // the payload. Harmless on your own palette, not harmless on someone else's.
+    if (viewingLabel && !window.confirm(`Replace ${viewingLabel}'s ENTIRE ${word} colour list with these ${mine.length} colour(s)?
+
+Any ${word} colour not shown here will be removed from their account. Their other colour pages are left alone.`)) return;
     setBusy(true); setMsg(null);
     try {
       // Rates are validated, never coerced: `Number(r.rate) || 0` used to turn an unparseable
@@ -6771,24 +11401,31 @@ Anything not shown here will be removed from their account.`)) return;
       const numOf = (v) => { const s = String(v ?? "").trim(); return s === "" ? 0 : Number(s); };
       const badRate = (v) => { const n = numOf(v); return !Number.isFinite(n) || n < 0; };
       const bad = [];
-      rows.forEach((r) => {
+      mine.forEach(({ r }) => {
         const name = r.label || "unnamed colour";
         if (badRate(r.rate)) bad.push(`${name} ("${r.rate}")`);
         if (badRate(r.door_rate)) bad.push(`${name} door price ("${r.door_rate}")`);
       });
       if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.join(", ")}.`);
-      const colors = rows.map((r, i) => ({
+      // Serial code is REQUIRED on every siding, trim and roof colour (316, Carolyn 2026-10-18).
+      // A door-only colour never appears in a serial, so it is exempt.
+      const noCode = mine.filter(({ r }) => ssColorNeedsCode(r) && !String(r.code || "").trim()).map(({ r }) => r.label || "unnamed colour");
+      if (noCode.length) throw new Error(`Nothing was saved — every siding, trim and roof colour needs a serial code (it is part of each building's serial number). Missing: ${noCode.join(", ")}.`);
+      // sortOrder stays the row's GLOBAL index, exactly as before: the three palettes are read
+      // back filtered, so only the order WITHIN a section matters, and keeping the global index
+      // means a scoped save never renumbers rows it did not send.
+      const colors = mine.map(({ r, gi: i }) => ({
         id: r.id || undefined, label: r.label,
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: numOf(r.rate),
         doorRate: numOf(r.door_rate), taxable: r.taxable !== false, code: r.code || "",
       }));
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", section: ckey, colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      await load();
+      await load(ckey);
       const skipped = data.skipped || [];
-      setMsg({ ok: `Saved ${data.saved || 0} colour(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
+      setMsg({ ok: `Saved ${data.saved || 0} ${word} colour(s)` + (data.deleted ? `, removed ${data.deleted}` : "") + (skipped.length ? `, ${skipped.length} skipped` : "") + ".", skipped });
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
@@ -6799,10 +11436,6 @@ Anything not shown here will be removed from their account.`)) return;
   const tdc = { ...S.td, padding: "8px 5px" };
   const thc = { ...S.th, padding: "8px 5px", whiteSpace: "normal" };
   const chk = (gi, field) => <input type="checkbox" checked={!!rows[gi][field]} onChange={(e) => setRow(gi, field, e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer" }} />;
-
-  // Which palette a row belongs to. Mirrors renderSection's filter exactly — paint is the
-  // absence of the other two flags, not a flag of its own.
-  const catOf = (r) => (r.shingle ? "shingle" : r.metal ? "metal" : "paint");
 
   // "Custom" marks the ONE entry in a palette that lets the shopper type their own colour:
   // the designer looks it up with `colors.find((c) => c.allowCustom)` and, when it is picked,
@@ -6824,6 +11457,7 @@ Anything not shown here will be removed from their account.`)) return;
       ckey === "paint" ? (!r.shingle && !r.metal) : ckey === "shingle" ? r.shingle : r.metal);
     // Each section quick-adds from its own supplier palette, not the shared paint set.
     const lib = ckey === "metal" ? METAL_LIBRARY : ckey === "shingle" ? SHINGLE_LIBRARY : COLOR_LIBRARY;
+    const saveLabel = `Save ${SECTION_WORD[ckey] || ckey} colors`;
     return (
       <div style={S.card}>
         <div style={S.h2}>{title}</div>
@@ -6857,7 +11491,7 @@ Anything not shown here will be removed from their account.`)) return;
             </colgroup>
             <thead><tr>
               <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
-              <th style={thc} title="Your short code for this colour. It becomes a segment of every building serial number, e.g. the RE, BL and DW in 0826LBA1016REBLDWS5000.">Code</th>
+              <th style={thc} title="Required for siding, trim and roof colours. Your short code for this colour becomes part of every building serial number, e.g. the RE, BU and WH in 1027-LBA-1216-REBUWHM-25698.">Code *</th>
               {showST && <th style={thc}>Siding</th>}
               {showST && <th style={thc}>Trim</th>}
               {showST && <th style={thc} title="Customers can pick this color for doors set to use paint colors">Doors</th>}
@@ -6865,7 +11499,7 @@ Anything not shown here will be removed from their account.`)) return;
               {showST && <th style={thc} title="Flat $ added per door painted this color — separate from the siding/trim rate">Door price (USD)</th>}
               <th style={thc} title="Lets the customer type their own color instead of picking one">Custom</th>
               <th style={thc}>Default</th><th style={thc}>Active</th>
-              <th style={thc} title="Untick if you don’t charge sales tax on this colour’s upcharge. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th>
+              <th style={thc} title="Untick if you don’t charge sales tax on this colour’s upcharge. It then sits under the non-taxable subtotal on estimates and invoices.">Taxable</th>
               <th style={thc}></th>
             </tr></thead>
             <tbody>
@@ -6890,8 +11524,10 @@ Anything not shown here will be removed from their account.`)) return;
                   <td style={tdc}>
                     <input type="text" value={r.code || ""} maxLength={4}
                       placeholder={(r.label || "").replace(/[^A-Za-z]/g, "").slice(0, 2).toUpperCase() || "??"}
-                      onChange={(e) => setRow(gi, "code", e.target.value.toUpperCase().slice(0, 4))}
-                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", textTransform: "uppercase" }} />
+                      title={ssColorNeedsCode(r) && !String(r.code || "").trim() ? "Required — part of every building serial number" : undefined}
+                      onChange={(e) => setRow(gi, "code", e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4))}
+                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", textTransform: "uppercase",
+                        ...(ssColorNeedsCode(r) && !String(r.code || "").trim() ? { borderColor: "#DC2626", background: "#FEF2F2" } : {}) }} />
                   </td>
                   {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
                   {showST && <td style={ctr}>{chk(gi, "trim")}</td>}
@@ -6930,14 +11566,16 @@ Anything not shown here will be removed from their account.`)) return;
           <button onClick={() => addRow(undefined, ckey)} style={S.btn("#1E293B", "#FFF")}>+ Add color</button>
           <button onClick={() => setLibOpen((o) => o === ckey ? null : ckey)} style={S.btn("#F1F5F9", "#334155")}>{libOpen === ckey ? "▴ Hide color library" : "▾ Quick-add from library"}</button>
           <div style={{ flex: 1 }} />
-          <button onClick={save} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : "Save colors"}</button>
+          {/* Named for its own palette, because it only saves that one now — "Save colors" on
+              three pages is what made the old whole-list save look like a page-level save. */}
+          <button onClick={() => save(ckey)} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>{busy ? "Saving…" : saveLabel}</button>
         </div>
         {libOpen === ckey && (
           <div style={{ marginTop: 12, padding: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
-            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>Save colors</b>.</div>
+            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Click a color to add it to this list (swatches are approximate — rename or set exact codes after adding). Then click <b>{saveLabel}</b>.</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {lib.map((c) => (
-                <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click Save colors to apply.` }); }}
+                <button key={c.name} onClick={() => { addRow(c, ckey); setMsg({ ok: `Added “${c.name}” — click ${saveLabel} to apply.` }); }}
                   style={{ display: "flex", alignItems: "center", gap: 7, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 20, padding: "5px 12px 5px 6px", fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
                   <span style={{ width: 18, height: 18, borderRadius: "50%", background: c.hex, border: "1px solid rgba(0,0,0,0.15)", flexShrink: 0 }} />
                   {c.name}
@@ -7021,3 +11659,2313 @@ Anything not shown here will be removed from their account.`)) return;
   );
 }
 
+
+// ═══ THE SIZES & PRICES TABLE (/settings/sheds-table, 2026-10-30) ══════════════════════════════
+// Carolyn, 10-29 call: every style's sizes, prices and included options in one table, instead of
+// the Excel download and upload. Settings → Sheds opens it in its own tab (ssPricingTableHref,
+// 01-core.jsx), and Dashboard (12-shell.jsx) renders PricingTableGate for that address, chromeless,
+// before its main return. The build plan is _Extras/StructureStudio Pricing Table Editor Plan
+// 2026-10-30.md; this is its Phase 2 (the shell and the read-only grid) and Phase 3 (editing and
+// autosave). Paste, fill, clear, adding and removing sizes, refresh and the local backup come in
+// Phase 4, on the seams marked "Phase 4" below.
+//
+// The pure half (ssPgModel, ssPgRows, ssPgMove, ssPgReanchor, ssPgHeaderHeight, ssPgTemplate,
+// ssPgFmtPrice; the parsers, ssPgQueue and the save helpers) sits above PricingCsv, where
+// pricingTableHelpers_test.ts lifts it from this file.
+//
+// SPEED (plan 3.5). Cells are plain <td> text, not inputs. Each size row is a PgRow (React.memo)
+// whose props are primitives, or arrays built once per change of that size; the whole <thead> and
+// <tbody> are memoised. So moving the active cell re-renders the toolbar and nothing in the table:
+// the ring and the selection are ONE absolutely placed overlay (PgSelectionOverlay), and
+// aria-selected is set on that one <td> directly. A commit re-renders one row. One editor
+// (PgEditor) floats over the active cell while typing, and keeps its text out of React state, so a
+// keystroke re-renders nothing.
+//
+// SAVING (plan 4.6-4.7, 4.9). Every box edit goes into the save queue (ssPgQueue), which sends one
+// save_pricing_cells call at a time through ssStyleSaveCall, 800 ms after the last edit and at most
+// 3 s after the first unsent one, each size with the version and every starting value it was made
+// against. The server checks both and never merges; the queue rebases a conflict once and turns what
+// someone else changed red. Transport failures resend the same call with backoff, and the fifth stops.
+
+const SS_PRICING_HOLD_MS = 10000;          // how long "Opening <account>…" waits for ?view= to arm
+const SS_PG_NARROW_MQ = "(max-width: 699.98px)";
+const SS_PG_SHOW_HIDDEN_KEY = "ss-pg-show-hidden";
+const SS_PG_SEC_H = 22;                     // the section band above the option names
+const SS_PG_LINE_H = 15;                    // one line of a standing name (portal.html .ss-pg-vh)
+const SS_PG_HEAD_MIN = 64;
+const SS_PG_HEAD_MAX = 600;
+const SS_PG_HEAD_NARROW = 90;               // below 700 px: capped, with an ellipsis
+const SS_PG_FROZEN_W = 188;                 // Size 82 + Price 76 + Offered 30
+const SS_PG_COL_W = 44;                     // one option column, about three digits wide
+const SS_PG_DRAG_PX = 4;                    // how far a held pointer moves before it is a drag, not a click
+const SS_PG_LEGEND = "Empty = not included. A number = how many come included (loft = sq ft). Blank price = size not offered. $0 = free.";
+const SS_PG_TOO_BIG = "This catalog is too big for the table right now. Use the Excel sheet, and let us know.";
+const SS_PG_RTP = "Real-Time Pricing sets prices on this account";
+const SS_PG_NO_UNDO = "Undo isn't in this version yet. Type the old value back.";
+const SS_PG_ADD_PRICE = "Add a price first";
+const SS_PG_SIZE_FIXED = "A size's width and length can't be changed here.";
+const SS_PG_REFUSED_CALL = "This change couldn't be saved. Tell CSM Synergy if it keeps happening";
+const SS_PG_FORBIDDEN = "You can't change Sheds on this account";
+const SS_PG_REMOVING = "This size is being deleted.";
+// The tips that say no. They read amber, as every other refusal does.
+const SS_PG_TIP_NO = new Set([SS_PG_RTP + ".", SS_PG_NO_UNDO, SS_PG_ADD_PRICE + ".", SS_PG_SIZE_FIXED, SS_PG_REMOVING]);
+const SS_PG_OPEN_CH = "ss-pg-open";            // the tables that are open answer here (PricingTablePage, offerEarlier)
+
+// A Settings address in THIS tab that keeps the account (?view=) and the person (?as=), and
+// nothing else: Back to Sheds, Options, Billing.
+function ssPgSettingsHref(sub) {
+  const q = new URLSearchParams();
+  try {
+    const cur = new URLSearchParams(window.location.search || "");
+    ["view", "as"].forEach((k) => { const v = cur.get(k); if (v) q.set(k, v); });
+  } catch (_e) { /* no query */ }
+  const qs = q.toString();
+  return ssPageBase("settings", sub) + (qs ? "?" + qs : "");
+}
+
+// The browser's Back and Forward, held while the table has something unsaved: installed by
+// PricingTablePage while it is mounted, and asked first by Dashboard's popstate handler
+// (12-shell.jsx), which routes nothing when it answers true. The page has then put its own address
+// back and leaves once its edits have saved, the way Back to Sheds does. Asked from the shell, not
+// from a popstate listener of the page's own: Chrome runs window's popstate listeners in the order
+// they were added, and the shell's (added first, and again whenever its view-as state changes)
+// unmounts the table before a later one runs.
+let ssPgPopHold = null;
+
+// One canvas for measuring header names in the header's own font (ssPgHeaderHeight's `measure`).
+let ssPgCanvas = null;
+function ssPgMeasureCtx() {
+  try {
+    if (!ssPgCanvas) ssPgCanvas = document.createElement("canvas");
+    return ssPgCanvas.getContext("2d");
+  } catch (_e) { return null; }
+}
+
+// The table's two reads, side by side (plan 4.1): portal-settings `catalog` for the option columns
+// and `size_table` for styles, sizes, inclusions and their counts. Through ssStyleSaveCall
+// (12-shell.jsx) for its 25 s deadline and one retry through the functions host, filed as
+// pricing_table_side_door rather than as a style save.
+//
+// That side door is a raw fetch that skips 01-core's invoke wrapper, so:
+//   * `targetClientId` is ALWAYS on the body: the view-as target, or null on your own account;
+//   * `withUnpriced` is on the catalog body (the wrapper adds it on the main host only);
+//   * the wrapper's tenant tripwire never runs, so `expect` is checked HERE, on both answers, and a
+//     different account in either is a failure, never a table.
+// The Excel template's fresh read (PricingCsv) goes through here too.
+// Resolves { ok: true, cat, table } or { ok: false, error, status }.
+async function ssPgFetch(target, expect) {
+  const call = (body) => ssStyleSaveCall({ ...body, targetClientId: target || null }, "Pricing table", "pricing_table_side_door");
+  const [c, t] = await Promise.all([call({ action: "catalog", withUnpriced: true }), call({ action: "size_table" })]);
+  for (const r of [t, c]) {
+    if (r.error || !r.data || r.data.error) {
+      return { ok: false, status: (r.error && r.error.ssStatus) || null,
+        error: (r.error && r.error.message) || (r.data && r.data.error) || "No answer from the server." };
+    }
+  }
+  if (expect && (String(c.data.clientId || "") !== String(expect) || String(t.data.clientId || "") !== String(expect))) {
+    ssLogError("portal", "pricing table: the server answered for a different account", "pricing_table_wrong_tenant",
+      { asked: String(expect), catalog: c.data.clientId || null, sizeTable: t.data.clientId || null });
+    return { ok: false, status: null, error: "This account view isn't wired up on the server yet — reload, and tell CSM Synergy if it persists." };
+  }
+  if (!Array.isArray(t.data.styles) || !Array.isArray(t.data.sizes) || !Array.isArray(t.data.inclusions)) {
+    return { ok: false, status: null, error: "The server's answer was missing your sizes." };
+  }
+  return { ok: true, cat: c.data, table: t.data };
+}
+
+// The toolbar's badge (plan 3.13), aria-live: how the load went, why the page is view-only, or what
+// the save queue is doing. `onClick` makes the words a button ("3 boxes need you" jumps to the next
+// red box); `actions` (Retry now, Retry, Discard these changes) sit beside it, outside the live
+// region, so a screen reader hears the state and not the buttons on every change.
+function PgBadge({ tone, text, title = null, onClick = null, actions = null }) {
+  return (
+    <>
+      <span className={"ss-pg-badge ss-pg-badge-" + tone} aria-live="polite" title={title || text}>
+        {onClick ? <button type="button" className="ss-pg-badge-btn" onClick={onClick}>{text}</button> : text}
+      </span>
+      {actions}
+    </>
+  );
+}
+
+// A refused ✕ says no where the pointer is: the message is far up the page, and a second click changes
+// nothing else. A browser that can't run one keyframe throws, and that must not cost it the message.
+function ssPgNoFlash(td) {
+  if (!td || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  try { td.animate([{ backgroundColor: "#FDE68A", offset: 0 }], { duration: 1000, easing: "ease-out" }); } catch (_e) { /* no flash, then */ }
+}
+// The line under the toolbar (plan 3.14): the active red box's reason with what was typed, a note
+// from the queue (a column that went away), a one-off tip (undo, a locked price), or why the page is
+// view-only, or that the read did not add up. `.ss-pg-live` is the live region, and the view-only
+// line outside it passes its own role.
+function PgStatusLine({ tone = "grey", children, action = null, role = null }) {
+  return (
+    <div key={String(children)} className={"ss-pg-status ss-pg-status-" + tone} role={role || undefined}>
+      <span>{children}</span>
+      {action}
+    </div>
+  );
+}
+
+// A whole-tab message in the table's frame: the hold, its timeout, the billing lock, no access.
+function PgMessage({ children, onNav = null }) {
+  return (
+    <div className="ss-pg">
+      <div className="ss-pg-bar">
+        {onNav && <a className="ss-pg-back" href={ssPgSettingsHref("sheds")} onClick={ssNavClick(() => onNav("sheds"))}>← Back to Sheds</a>}
+        <span className="ss-pg-title">Sizes &amp; prices</span>
+      </div>
+      <div className="ss-pg-msg" role="status">{children}</div>
+    </div>
+  );
+}
+
+// THE GATE (plan 5). Whether this tab may show the table at all, and for which account.
+//
+// ⛔ THE HOLD. A new tab starts as the operator's OWN account: isOperator is false until its rpc
+// answers, ?view= arms only after that (Dashboard's ?view= effect), and ssTargetClientId follows
+// `viewing` during render. Mount the table any sooner and its reads go to the operator's own
+// tenant under the builder's address. So while ?view= is in the address and the account on screen
+// is not yet that one (the test Dashboard's ?open= effect uses, a support operator's viewedCtx
+// included), this draws "Opening <account>…" and mounts NOTHING. After SS_PRICING_HOLD_MS it says
+// the account could not be opened, and it never falls back to the operator's own.
+//
+// ?as= (an operator wearing a team member) opens the table VIEW-ONLY. A cold load never reads `as`
+// back into the shell, so this tab has the operator's full rights, not that person's.
+//
+// Every hook is above the first return (React #310); the timer lives here so Dashboard gains none.
+function PricingTableGate({ clientId, viewing, isSupportOp, supportCheckGaveUp, viewedCtx, canAdmin, access, gateLocked, billingActor, companyName, onNav }) {
+  // What this tab was opened with, read once. `view` is lowercased the way Dashboard reads it.
+  const params = useMemo(() => {
+    try {
+      const q = new URLSearchParams(window.location.search || "");
+      return { view: (q.get("view") || "").trim().toLowerCase() || null, as: (q.get("as") || "").trim() || null, style: (q.get("style") || "").trim() || null };
+    } catch (_e) { return { view: null, as: null, style: null }; }
+  }, []);
+  const v = params.view;
+  const held = !!v && (!(viewing && viewing.clientId === v && (isSupportOp !== null || supportCheckGaveUp))
+    || (!!isSupportOp && !(viewedCtx && viewedCtx.clientId === v)));
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    if (!held) { setTimedOut(false); return undefined; }
+    const ms = (typeof window !== "undefined" && Number(window.__ssPricingHoldMs)) || SS_PRICING_HOLD_MS;
+    const t = setTimeout(() => setTimedOut(true), ms);
+    return () => clearTimeout(t);
+  }, [held]);
+  // The tab's title names the account (the popout's pattern), and goes back when the page does.
+  const shown = held ? v : companyName;
+  useEffect(() => {
+    let prev = null;
+    try { prev = document.title; document.title = `Sizes & prices · ${shown || ""} · Structure Studio`; } catch (_e) { /* no document */ }
+    return () => { try { if (prev != null) document.title = prev; } catch (_e) { /* no document */ } };
+  }, [shown]);
+  // ?as= names the person in the view-only message (plan 5), but this tab has only their id: a cold
+  // load never reads `as` back into the shell. So the name comes from the people list the account
+  // switcher reads (operator-portal list_users), once the hold lets go. Until it answers, or if it
+  // is refused, the message says "a team member", as the shell's own banner does.
+  const [asName, setAsName] = useState(null);
+  useEffect(() => {
+    if (held || !v || !params.as) return undefined;
+    let gone = false;
+    (async () => {
+      try {
+        const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "list_users", clientId: v } });
+        if (gone || error || !data || data.error || !Array.isArray(data.users)) return;
+        const u = data.users.find((x) => x && x.userId === params.as);
+        if (u && (u.fullName || u.email)) setAsName(String(u.fullName || u.email));
+      } catch (_e) { /* the message keeps "a team member" */ }
+    })();
+    return () => { gone = true; };
+  }, [held, v, params.as]);
+
+  if (held) {
+    return (
+      <PgMessage>
+        {timedOut
+          ? "Couldn't open that account here. Close this tab and use the button on Sheds again."
+          : `Opening ${v}…`}
+      </PgMessage>
+    );
+  }
+  if (gateLocked) {
+    return (
+      <PgMessage onNav={onNav}>
+        This account's subscription needs attention.{" "}
+        {billingActor
+          ? <a href={ssPgSettingsHref("billing")} onClick={ssNavClick(() => onNav("billing"))}>Open Billing</a>
+          : "Ask the account owner to open Billing."}
+      </PgMessage>
+    );
+  }
+  // Both are booleans; never compare them with "edit" (memory disabled-ui-fails-silently).
+  const canRead = !!canAdmin || ssCanRead(access, "settings_structures");
+  const canEdit = !!canAdmin || ssCanWrite(access, "settings_structures");
+  if (!canRead) return <PgMessage onNav={onNav}>You don't have access to Sheds on this account.</PgMessage>;
+  const viewOnly = params.as
+    ? { as: true, short: "viewing as a team member", long: `You're viewing as ${asName || "a team member"}. The table is view-only here; open it from the account without “view as” to edit.` }
+    : !canEdit
+      ? { as: false, short: "no edit access", long: "You can see Sheds on this account but not change it. Ask an owner or admin for edit access to Sheds." }
+      : null;
+  return (
+    <PricingTablePage clientId={clientId} target={viewing ? viewing.clientId : null} companyName={companyName}
+      operatorView={!!viewing} viewOnly={viewOnly} styleParam={params.style} onNav={onNav} />
+  );
+}
+
+// THE PAGE (plan 3.2-3.17, 4.6-4.9). A flex column the height of the window: the toolbar, the
+// operator strip in view-as, the band (the status line and the legend, which can hang over the
+// header), and the grid box, which is all that scrolls the table, both ways.
+//
+// ⚠️ EVERY HOOK IS IN THE TOP BLOCK, and there is no early return at all: the one return picks what
+// to draw. Later phases add their state up here too, never beside the handlers that use it (React
+// #310 turns the page white the moment its data arrives).
+function PricingTablePage({ clientId, target, companyName, operatorView, viewOnly, styleParam, onNav }) {
+  const [load, setLoad] = useState({ phase: "loading" });     // { phase: loading|error|ready, model?, at?, error?, status? }
+  // On by default; remembered in this browser. Storage can be blocked: then it is simply not kept.
+  const [showHidden, setShowHidden] = useState(() => {
+    try { return localStorage.getItem(SS_PG_SHOW_HIDDEN_KEY) !== "0"; } catch (_e) { return true; }
+  });
+  const [narrow, setNarrow] = useState(() => { try { return window.matchMedia(SS_PG_NARROW_MQ).matches; } catch (_e) { return false; } });
+  const [legendOpen, setLegendOpen] = useState(() => !narrow);   // starts folded on a phone (plan 3.15)
+  const [noteOff, setNoteOff] = useState(false);
+  const [hiddenStylesOpen, setHiddenStylesOpen] = useState(false);
+  const [active, setActive] = useState(null);      // { sizeId, col }: the active cell
+  const [extent, setExtent] = useState(null);      // the far corner of a range (Shift+arrows, a drag); null: one cell
+  const [peek, setPeek] = useState(null);          // the header column being pointed at, for the readout
+  const [headH, setHeadH] = useState(SS_PG_HEAD_MIN);
+  const [jumpTick, setJumpTick] = useState(0);     // the style picker asked for a jump (jumpRef)
+  // Phase 3: the save queue and the editor.
+  const [q, setQ] = useState(null);                // the save queue (ssPgQueue); qRef holds the same state, synchronously
+  const [editing, setEditing] = useState(null);    // { sizeId, f, init, label, price, frozen } while the editor is open
+  const [draftDirty, setDraftDirty] = useState(false);   // the open editor's text differs from its box
+  const [tip, setTip] = useState(null);            // a one-off line under the toolbar (undo, a locked price)
+  const [retryAt, setRetryAt] = useState(null);    // when a failed call goes again (the amber badge counts down)
+  const [, setTick] = useState(0);                 // redraws that count once a second
+  const [leaving, setLeaving] = useState(null);    // { to, was }: Back to Sheds or Go to Options waits for the queue to empty
+  const [stuck, setStuck] = useState(null);        // { to }: that wait was called off (stopped, retrying, view only)
+  const [savedAt, setSavedAt] = useState(null);    // when the last save was answered (the green badge)
+  // Phase 4a: adding sizes, the refresh and the backup.
+  const [added, setAdded] = useState([]);          // [{ id, styleId, width, length, label }]: sizes this page added, in the order typed
+  const [addOpen, setAddOpen] = useState({});      // { [styleId]: true }: that style's "＋ Add sizes" strip is open
+  const [addFocus, setAddFocus] = useState(null);  // { id, n }: the cursor goes into that style's strip (each new n)
+  const [earlier, setEarlier] = useState(null);    // a backup from earlier on offer ({ savedAt, sizes, count }) until Save them or Discard
+  const [earlierRed, setEarlierRed] = useState(null);   // its red entries, listed in the status line until dismissed
+  // Phase 4b: copy, paste, fill down and clear.
+  const [confirm, setConfirm] = useState(null);    // { text, edits, area }: a change to more than one size, waiting for Continue
+  const [said, setSaid] = useState(null);          // { tone, text }: what the last copy, paste, fill or clear said (a refusal, "Copied 6 boxes.")
+  const [zeroIds, setZeroIds] = useState(null);    // the sizes the last change put at $0 in the designer (ssPgZeroNew): the $0 note
+  const boxRef = useRef(null);
+  const gridRef = useRef(null);
+  const seqRef = useRef(0);
+  const markRef = useRef(null);
+  const activeRef = useRef(null);
+  const extentRef = useRef(null);
+  const scrollNextRef = useRef(false);             // "active" | "extent": a keyboard move scrolls that cell into view
+  const jumpRef = useRef(null);
+  const styleDoneRef = useRef(false);
+  const measuredRef = useRef(null);
+  const drawnRef = useRef(null);                   // the size order last drawn (ssPgReanchor)
+  const qRef = useRef(null);
+  const editRef = useRef(null);                    // the open editor: { sizeId, f, text0, replace, seen }, on its FIELD (a read can move columns)
+  const draftRef = useRef("");                     // its text, out of React state: typing re-renders nothing
+  const dirtyRef = useRef(false);
+  const edInputRef = useRef(null);
+  const ringFRef = useRef(null);                   // the overlay's four pieces (PgSelectionOverlay): F in the
+  const ringBRef = useRef(null);                   // sticky lane over the frozen columns, B over the options
+  const rangeFRef = useRef(null);
+  const rangeBRef = useRef(null);
+  const awaitRef = useRef(0);                      // the flight this page last sent (ssPgQueue's flight.n)
+  const retryTimerRef = useRef(null);
+  const aliveRef = useRef(true);
+  const addrRef = useRef(null);                    // this page's own address, for putting it back over a held Back
+  const passRef = useRef(false);                   // the popstate this page sends itself on its way out (go)
+  const viewsRef = useRef({});                     // size id → its last row view (ssPgRowView), so PgRow's memo holds
+  const hidNowRef = useRef(null);                  // the last ssPgHiddenNow answer, handed back while nothing differs
+  const stayRef = useRef(null);                    // sizes drawn while "Show hidden sizes" is off: they stay drawn (ssPgRows' `stay`)
+  const dragRef = useRef(false);
+  const handFocusRef = useRef(false);              // focusGrid is giving the grid the focus, so no box is picked for it
+  const pressRef = useRef(null);                   // where the button went down, until the pointer has moved SS_PG_DRAG_PX from it
+  const firstBoxRef = useRef(null);                // the box a click's first press hit, null when it hit none: what a double click opens
+  const flashRef = useRef(null);
+  const fnRef = useRef({});                        // this render's handlers, for listeners added once
+  const loadRef = useRef(null);                    // `load`, for the refresh (an async read reads it after it lands)
+  const refreshTimerRef = useRef(null);            // the 1 s wait after a refresh trigger (plan 4.8), coalescing the rest
+  const refreshingRef = useRef(false);             // a refresh read is out
+  const refreshAgainRef = useRef(false);           // …and another trigger came meanwhile
+  const ownBackupRef = useRef(false);              // this page wrote the backup, so it clears it once nothing is left
+  const offeredRef = useRef(false);                // a backup from earlier was looked for (once, on the first read that can edit)
+  const tookRef = useRef([]);                      // the keys of the backups on offer (offerEarlier), left in place until answered
+  const adoptedRef = useRef([]);                   // keys to remove after this table's next successful own write (filled by Save them)
+  // This table's own name for its backup and the "who's open?" answer (plan 4.9 with two tabs): one
+  // per mount, so the same tab opening the table again finds what the last one left.
+  const [mountId] = useState(() => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`);
+  const cursorToRef = useRef(null);                // a size just added: the cursor goes to its price once it is drawn
+  const delNameRef = useRef({});                   // size id → "Test Barn 10x12", for the sizes sent to be deleted (the answer's line)
+  const delRunRef = useRef([]);                    // the answers' removes so far, while a delete of more than one call is still going
+  activeRef.current = active;
+  extentRef.current = extent;
+  loadRef.current = load;
+
+  // `base` is the last read; `model` is what the grid draws: that read with the sizes this page added
+  // and removed since (ssPgLocalModel). Header and columns come from the read alone.
+  const base = load.phase === "ready" ? load.model : null;
+  const model = useMemo(() => ssPgLocalModel(base, added, q ? q.sizes : null), [base, added, q && q.sizes]);
+  // Who may change what (plan 3.16): no editor, no add strip and no paste unless canEdit. RTP locks
+  // the price column alone (model.rtpOn). `readOnly` is every reason the badge says "View only", and
+  // the operator strip follows it too, so the page never says both "View only" and "Changes are live".
+  const tooBig = !!(model && model.guard);
+  const readOnly = !!viewOnly || tooBig;
+  const editable = load.phase === "ready" && !readOnly;
+  // …and once open: a 403 on a save turns the page view-only (q.viewOnly), and an answer for another
+  // account stops every save for good (stopped "tenant"). Saving stopped for any other reason still
+  // takes edits: they wait for Retry.
+  const lostEdit = !!(q && (q.viewOnly || (q.stopped && q.stopped.kind === "tenant")));
+  const canEdit = editable && !lostEdit;
+  const keepIds = useMemo(() => { const k = {}; added.forEach((a) => { k[a.id] = true; }); return k; }, [added]);
+  // Hidden NOW, as the rows draw it (ssPgHiddenNow): the same object until some size's hidden state
+  // moves, so a commit that hides or shows nothing leaves `rows` alone; one that does redraws its
+  // style's band, never another row.
+  const hidNow = useMemo(() => (hidNowRef.current = ssPgHiddenNow(model, q ? q.sizes : null, q ? q.fields : null, hidNowRef.current)),
+    [model, q && q.sizes, q && q.fields]);
+  // With "Show hidden sizes" off, the sizes drawn last time stay drawn (ssPgRows' `stay`): only
+  // turning the toggle off, or opening the page, folds what is hidden then. While it is on, or while
+  // there is no table yet, nothing is kept, so the next fold starts fresh.
+  const rows = useMemo(() => {
+    const out = ssPgRows(model, { showHidden, hiddenStylesOpen, adding: canEdit ? addOpen : null, addEmpty: canEdit, keep: keepIds, live: hidNow,
+      stay: showHidden ? null : stayRef.current });
+    const drawn = {};
+    if (!showHidden && model) out.forEach((r) => { if (r.kind === "size") drawn[r.id] = true; });
+    stayRef.current = showHidden || !model ? null : drawn;
+    return out;
+  }, [model, showHidden, hiddenStylesOpen, addOpen, canEdit, keepIds, hidNow]);
+  const order = useMemo(() => rows.filter((r) => r.kind === "size").map((r) => r.id), [rows]);
+  const byId = useMemo(() => {
+    const m = {};
+    rows.forEach((r) => { if (r.kind === "size") m[r.id] = r; });
+    return m;
+  }, [rows]);
+  const colAt = useMemo(() => {                    // option key → its column in the row
+    const m = {};
+    if (model) model.cols.forEach((c, i) => { m[c.key] = 3 + i; });
+    return m;
+  }, [model]);
+  const ncols = 3 + (model ? model.cols.length : 0);
+  const hh = narrow ? SS_PG_HEAD_NARROW : headH;
+  const counts = useMemo(() => ssPgCount(q), [q]);
+
+  // Both reads, and once more when the answer does not add up (plan 4.2): a save landing between two
+  // list reads is the usual cause, and a second read settles it. "cap" cannot change by reading
+  // again, so it is believed at once. Sequenced, so a Retry that overtakes a slow read wins.
+  // The save queue starts from what the read says the server holds: the FIRST load only (and a Retry
+  // after it failed). Once the queue exists, every read (the "too big" Reload, Reload after a
+  // Discard) is a refresh (refreshNow), through ssPgQueue's refresh and columns rules, which keep red
+  // boxes, unsent edits and the call out. Re-initialising would drop them.
+  // The first load also reads the backup from earlier (plan 4.9), before the queue can write over it.
+  const fetchAll = useCallback(async () => {
+    if (qRef.current) { fnRef.current.refreshNow(); return; }
+    const my = ++seqRef.current;
+    setLoad({ phase: "loading" });
+    let r = null, m = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      r = await ssPgFetch(target, clientId);
+      if (my !== seqRef.current) return;
+      if (!r.ok) break;
+      m = ssPgModel(r.cat, r.table);
+      if (!m.guard || m.guard === "cap") break;
+    }
+    if (!r.ok) { setLoad({ phase: "error", error: r.error, status: r.status || null }); return; }
+    // Where tests/harness/pricingTable.mjs starts its first-render clock.
+    try { performance.mark("ss-pg-data"); } catch (_m) { /* no User Timing */ }
+    const fresh = ssPgQueue(null, { type: "init", sizes: ssPgServerSizes(m), cols: m.cols.map((c) => c.key) });
+    qRef.current = fresh;
+    setQ(fresh);
+    setLoad({ phase: "ready", model: m, at: Date.now() });
+    fnRef.current.offerEarlier(m);
+  }, [target, clientId]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  useEffect(() => {
+    let mq = null;
+    try { mq = window.matchMedia(SS_PG_NARROW_MQ); } catch (_e) { return undefined; }
+    const on = () => { measuredRef.current = null; setNarrow(mq.matches); };
+    if (mq.addEventListener) mq.addEventListener("change", on); else mq.addListener(on);
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", on); else mq.removeListener(on); };
+  }, []);
+
+  // THE HEADER HEIGHT IS MEASURED, NOT CAPPED (plan 3.4). An estimate first, from the names' widths
+  // in the header's own font (ssPgHeaderHeight); then the drawn names are checked, and if any still
+  // runs to a third line or past its box the header grows 8 px and is checked again. All before
+  // paint, so no name is ever drawn cut. Below 700 px the header is a fixed 90 px with an ellipsis
+  // (portal.html), and the band's readout carries the full name.
+  React.useLayoutEffect(() => {
+    if (!base || narrow || !gridRef.current) return;
+    const spans = [...gridRef.current.querySelectorAll("thead .ss-pg-vh")];
+    if (!spans.length) return;
+    if (measuredRef.current !== base) {
+      measuredRef.current = base;
+      const ctx = ssPgMeasureCtx();
+      let est = SS_PG_HEAD_MIN;
+      if (ctx) {
+        // From the longhands: the computed `font` shorthand is "" here, because the grid's
+        // tabular-nums is a font-variant the shorthand cannot say, and the canvas then measures in
+        // its own 10px default and the header grows 8 px at a time, one layout of the grid each.
+        try {
+          const cs = getComputedStyle(spans[spans.length - 1]);
+          ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        } catch (_f) { /* the canvas default */ }
+        est = Math.max(est, ssPgHeaderHeight(spans.map((sp) => sp.textContent), (s) => ctx.measureText(s).width + 1, 16));
+      }
+      est = Math.min(SS_PG_HEAD_MAX, est);
+      if (est !== headH) { setHeadH(est); return; }
+    }
+    const cut = spans.some((sp) => sp.getBoundingClientRect().width > SS_PG_LINE_H * 2 + 1 || sp.scrollHeight > sp.clientHeight + 1);
+    if (cut && headH < SS_PG_HEAD_MAX) setHeadH(Math.min(SS_PG_HEAD_MAX, headH + 8));
+  }, [base, narrow, headH]);
+
+  // The active cell's size folded away ("Show hidden sizes" off) or did not come back on a Reload:
+  // the cursor moves to the nearest size still drawn (ssPgReanchor), before paint, so the readout
+  // keeps a cell and the next arrow key starts there. While a read is out there are no rows at all,
+  // so the cursor and the order it was on are kept until the rows return. A range is dropped, and so
+  // is one whose far corner went while the active cell stayed (a multi-delete that kept the size
+  // clicked first because saved designs use it): the keys and the toolbar then act on the one box
+  // still ringed, never on a range no rows hold ("Click a size first").
+  React.useLayoutEffect(() => {
+    if (!model) return;
+    const prev = drawnRef.current;
+    drawnRef.current = order;
+    const a = activeRef.current;
+    if (!a || !prev || prev === order) return;
+    const next = ssPgReanchor(prev, order, a, ncols);
+    if (next !== a) { setActive(next); setExtent(null); return; }
+    const x = extentRef.current;
+    if (x && order.indexOf(x.sizeId) < 0) { extentRef.current = null; setExtent(null); }
+  }, [order]);
+
+  // THE SELECTION OVERLAY AND THE EDITOR (plan 3.5): placed over the active cell and the range on
+  // every move, before paint, by writing their style; no row renders. aria-selected goes on the
+  // active <td> itself. A keyboard move scrolls the moved corner into view; the box's scroll-padding
+  // keeps it clear of the frozen header and columns (plan 3.6).
+  React.useLayoutEffect(() => { fnRef.current.place(); }, [active, extent, editing, rows, hh, narrow, model]);
+
+  // Where tests/harness/pricingTable.mjs stops its first-render clock: the grid committed at its
+  // measured height, and the frame after that.
+  React.useLayoutEffect(() => {
+    if (!base || !gridRef.current) return;
+    try {
+      performance.mark("ss-pg-grid");
+      requestAnimationFrame(() => setTimeout(() => { try { performance.mark("ss-pg-painted"); } catch (_m) { /* no User Timing */ } }, 0));
+    } catch (_m) { /* no User Timing */ }
+  }, [base, headH]);
+
+  // Jump to a style: ?style= once (Add style's link, which also opens the style's add box with the
+  // cursor in it, plan 3.1), then the toolbar's picker. A hidden style opens the hidden section first
+  // and jumps on the next commit. The scroll waits a frame, so it lands below the header at its
+  // MEASURED height.
+  React.useLayoutEffect(() => {
+    if (!model) return;
+    if (!styleDoneRef.current) {
+      styleDoneRef.current = true;
+      if (styleParam) {
+        jumpRef.current = styleParam;
+        const st = [...model.styles, ...model.hiddenStyles].find((s) => s.id === styleParam);
+        if (st && canEdit) {
+          if (st.sizes.length) setAddOpen((o) => ({ ...o, [st.id]: true }));
+          setAddFocus((f) => ({ id: st.id, n: (f ? f.n : 0) + 1 }));
+        }
+        // Spent: ?style= comes back out of the address, so Back to Sheds and a reload do not jump.
+        try {
+          const q0 = new URLSearchParams(window.location.search);
+          q0.delete("style");
+          const rest = q0.toString();
+          window.history.replaceState(window.history.state, "", window.location.pathname + (rest ? "?" + rest : "") + window.location.hash);
+        } catch (_e) { /* history unavailable */ }
+      }
+    }
+    const want = jumpRef.current;
+    if (!want) return;
+    if (!hiddenStylesOpen && model.hiddenStyles.some((s) => s.id === want)) { setHiddenStylesOpen(true); return; }
+    jumpRef.current = null;
+    const first = rows.find((r) => r.kind === "size" && r.style.id === want);
+    requestAnimationFrame(() => {
+      const g = gridRef.current, box = boxRef.current;
+      const band = g && g.querySelector(`tr[data-band="${(window.CSS && CSS.escape) ? CSS.escape(String(want)) : want}"]`);
+      const thead = g && g.querySelector("thead");
+      if (!band || !box) return;
+      box.scrollTop = Math.max(0, band.offsetTop - (thead ? thead.offsetHeight : 0));
+      if (first) { setActive({ sizeId: first.id, col: Math.min(1, ncols - 1) }); setExtent(null); }
+      // A style with no sizes has no box to land on: the cursor goes into its add strip (the
+      // placeholder), the keyboard's way to it.
+      else if (canEdit) setAddFocus((f) => ({ id: want, n: (f ? f.n : 0) + 1 }));
+    });
+  }, [model, rows, hiddenStylesOpen, jumpTick]);
+
+  // THE SEND CLOCK (plan 4.6): 800 ms after the last edit, at most 3 s after the first unsent one,
+  // at once after a flush. Re-armed on every change of the queue; one call out at a time.
+  useEffect(() => {
+    const due = ssPgDueIn(q, Date.now());
+    if (due == null) return undefined;
+    const t = setTimeout(() => fnRef.current.sendNow(), due);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // The amber badge's "Retrying in 15 s" counts down.
+  useEffect(() => {
+    if (retryAt == null) return undefined;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [retryAt]);
+
+  // Leaving (Back to Sheds, Go to Options, the browser's Back) waits for the queue to empty (plan
+  // 3.2: it flushes first). A box that went red since the click calls the wait off and the cursor
+  // goes to it, so the builder reads what didn't save before going anywhere (plan 1, 3.14): `was` is
+  // the queue's boxes at the click, and a red box is new when its mark is not the one it had then. A
+  // transport failure, a stop or a 403 calls the wait off too, and the status line says the page
+  // stayed, with Leave anyway (`stuck`); the click is never swallowed and nothing unsent is dropped
+  // unseen. Starting another edit while it waits calls it off as well (backToWork), so the page
+  // never goes with the editor open.
+  useEffect(() => {
+    if (!leaving || !q) return;
+    const isNew = (id, f, x) => { const p = leaving.was[id] && leaving.was[id][f]; return !p || p.error !== x.error; };
+    const red = Object.keys(q.fields).some((id) => Object.keys(q.fields[id]).some((f) => q.fields[id][f].error && isNew(id, f, q.fields[id][f])));
+    if (red) { setLeaving(null); fnRef.current.jumpRed(isNew); return; }
+    if (q.viewOnly || q.stopped || q.failures) { setLeaving(null); setStuck({ to: leaving.to }); return; }
+    if (!counts.pending && !counts.inflight && !counts.creating && !counts.removing && !q.flight) fnRef.current.go(leaving.to);
+  }, [leaving, q, counts]);
+  // This page's own address after every render (?style= comes back out of it once), for the held
+  // Back below: by the time popstate fires the address bar has already moved.
+  useEffect(() => {
+    addrRef.current = { url: window.location.pathname + window.location.search + window.location.hash, state: window.history.state };
+  });
+  // "You're still on this page" goes away once nothing is left unsent.
+  useEffect(() => {
+    if (stuck && !(counts.pending + counts.inflight + counts.creating + counts.removing)) setStuck(null);
+  }, [stuck, counts]);
+
+  // A saved box flashes green for 600 ms (plan 3.13), on the <td> itself, so no row renders for it.
+  // A box a refresh moved (someone else's save, an Excel upload) flashes grey the same way (plan 4.6).
+  React.useLayoutEffect(() => {
+    const fl = q && q.flash;
+    if (!fl || flashRef.current === fl || !gridRef.current) return;
+    flashRef.current = fl;
+    const tds = [];
+    const mark = (list, cls) => Object.keys(list || {}).forEach((id) => {
+      const tr = gridRef.current.querySelector(`tr[data-s="${(window.CSS && CSS.escape) ? CSS.escape(String(id)) : id}"]`);
+      if (!tr) return;
+      list[id].forEach((f) => {
+        const c = f === "price" ? 1 : f === "active" ? 2 : colAt[f.slice(2)];
+        const td = c != null ? tr.children[c] : null;
+        if (td) { td.classList.add(cls); tds.push([td, cls]); }
+      });
+    });
+    mark(fl.saved, "ss-pg-ok");
+    mark(fl.changed, "ss-pg-moved");
+    if (tds.length) setTimeout(() => tds.forEach(([td, cls]) => td.classList.remove(cls)), 600);
+  }, [q && q.flash]);
+
+  // A size just added (addSizes): once its row is drawn, the cursor goes to its price, so the builder
+  // types the prices straight away (plan 8.5, step 6). Before paint, like every move.
+  // The grid takes the focus first: its onFocus would otherwise put the cursor on the first price.
+  React.useLayoutEffect(() => {
+    const id = cursorToRef.current;
+    if (!id || order.indexOf(id) < 0) return;
+    cursorToRef.current = null;
+    const at = { sizeId: id, col: 1 };
+    activeRef.current = at;
+    try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+    scrollNextRef.current = "active";
+    setExtent(null);
+    setActive(at);
+  }, [order]);
+
+  // REFRESH (plan 4.8). The table reads both tables again when another page saves Settings for this
+  // account (the "ss:settings-saved" event, or the "ss-settings" BroadcastChannel from another tab of
+  // this browser: Add style, a rename, an Excel upload, a colleague's table), and EVERY time the tab
+  // comes back into view, which is how a save on another computer arrives (there is no push). Its
+  // own saves are told apart by `source` (SS_PAGE_ID, ssSettingsSaved); an event for another account
+  // is ignored, one that names none is believed (a read too many costs two reads). The read waits 1 s
+  // and coalesces whatever else arrives meanwhile (pokeRefresh), then goes through the queue's refresh
+  // and columns rules (refreshNow), never a re-initialised queue.
+  useEffect(() => {
+    const hear = (d) => {
+      if (d && d.source === SS_PAGE_ID) return;
+      if (d && d.clientId && clientId && String(d.clientId) !== String(clientId)) return;
+      fnRef.current.pokeRefresh();
+    };
+    const onSaved = (ev) => hear(ev ? ev.detail : null);
+    const onShown = () => { if (document.visibilityState === "visible") fnRef.current.pokeRefresh(); };
+    let bc = null;
+    window.addEventListener("ss:settings-saved", onSaved);
+    try { bc = new BroadcastChannel("ss-settings"); bc.onmessage = (m) => hear(m ? m.data : null); } catch (_b) { bc = null; }
+    document.addEventListener("visibilitychange", onShown);
+    return () => {
+      window.removeEventListener("ss:settings-saved", onSaved);
+      if (bc) { try { bc.close(); } catch (_c) { /* closed */ } }
+      document.removeEventListener("visibilitychange", onShown);
+      clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    };
+  }, [clientId]);
+
+  // COPY AND PASTE (plan 3.10-3.11): the browser's own copy and paste events, Ctrl/Cmd+C and V, while
+  // the grid itself has the focus (the editor, an add strip and the toolbar keep theirs). No clipboard
+  // permission is asked for: the events carry the text. Added once; they call this render's handlers.
+  useEffect(() => {
+    const mine = () => !!gridRef.current && document.activeElement === gridRef.current;
+    const onCopy = (e) => { if (mine()) fnRef.current.copySel(e); };
+    const onPaste = (e) => { if (mine()) fnRef.current.pasteFrom(e); };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("paste", onPaste);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("paste", onPaste);
+    };
+  }, []);
+
+  // An answer or a read that takes the open editor's size out of the queue (a create answered
+  // `exists`, the size removed elsewhere) closes the editor, with its text in the status line
+  // (dropGoneEditor). Before the backup's write below, so that write no longer holds the text.
+  useEffect(() => { fnRef.current.dropGoneEditor(); }, [q]);
+  // THE BACKUP (plan 4.9) is rewritten whenever the queue or the editor's text changes (the editor's
+  // keystrokes write it too, from onEditInput), and when a backup from earlier is answered.
+  useEffect(() => { fnRef.current.saveBackup(); }, [q, draftDirty, earlier, earlierRed]);
+  // TWO TABS OF ONE ACCOUNT (plan 8.5 step 10): each table keeps its backup under its own key and,
+  // while it is open, answers "who's open?" on this channel with its mountId, so a table opening
+  // beside it never offers its live edits back as "from earlier", and never clears or replaces them
+  // (offerEarlier). A table that closed, crashed or unmounted answers nothing.
+  useEffect(() => {
+    let ch = null;
+    try {
+      ch = new BroadcastChannel(SS_PG_OPEN_CH);
+      ch.onmessage = (m) => { if (m && m.data && m.data.ask) { try { ch.postMessage({ open: mountId }); } catch (_p) { /* closed */ } } };
+    } catch (_b) { ch = null; }
+    return () => { if (ch) { try { ch.close(); } catch (_c) { /* closed */ } } };
+  }, [mountId]);
+
+  // The overlay is placed on every move (place, above); the rows also move when the grid's own height
+  // changes with nothing else changing: an add strip switching to Add several, its tick-box grid
+  // appearing, its error line, its list box dragged taller. The ring then stays on its box.
+  useEffect(() => {
+    const g = gridRef.current;
+    if (!g || typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(() => fnRef.current.place());
+    ro.observe(g);
+    return () => ro.disconnect();
+  }, [load.phase]);
+
+  // LEAVING THE TAB (plan 4.9): the browser asks first while anything is unsent or in flight, or the
+  // editor holds text that differs from its box. There is no keepalive send (the invoke wrapper has
+  // none, and a request cut off by leaving is an abort); Phase 4's local backup is the safety net.
+  // Hiding the tab sends what is waiting at once (plan 4.6).
+  //
+  // THE BROWSER'S BACK AND FORWARD inside the app (and anything else that moves the address with
+  // popstate) leave the way Back to Sheds does (ssPgPopHold): while anything is unsent, in flight or
+  // typed in the editor, this page's address goes back (pushState, as the shell does for the
+  // Advanced page) and leaveFor sends first, then goes where the pop was going, or stays on what
+  // didn't save. Let through, the page would unmount with a follow-up still behind a call out (none
+  // can go while one is), and that call's answer, red or not, would never be read. Nothing waiting:
+  // the shell routes the pop as usual.
+  //
+  // Leaving any other way (an account change, signing out) commits the editor and sends what waits
+  // on the way out, as far as one call can: its answer is never read, and the server's checks make
+  // it safe.
+  useEffect(() => {
+    aliveRef.current = true;
+    const onLeave = (e) => {
+      const c = ssPgCount(qRef.current);
+      if (!(c.pending + c.inflight + c.creating + c.removing) && !dirtyRef.current) return undefined;
+      e.preventDefault();
+      e.returnValue = "";
+      return "";
+    };
+    const holdPop = () => {
+      if (passRef.current) return false;
+      const c = ssPgCount(qRef.current), back = addrRef.current;
+      if ((!(c.pending + c.inflight + c.creating + c.removing) && !dirtyRef.current) || !back) return false;
+      const to = { url: window.location.pathname + window.location.search + window.location.hash, state: window.history.state };
+      try { window.history.pushState(back.state, "", back.url); } catch (_h) { return false; }
+      try { ssPhonePortMoved(); } catch (_p) { /* the phone extension hears of it on the next move */ }
+      fnRef.current.leaveFor(to);
+      return true;
+    };
+    const onVis = () => { if (document.visibilityState === "hidden") fnRef.current.flushNow(); };
+    const onUp = () => { dragRef.current = false; };
+    window.addEventListener("beforeunload", onLeave);
+    ssPgPopHold = holdPop;
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      try { fnRef.current.commitEdit(); } catch (_c) { /* best effort: the page is going */ }
+      try { fnRef.current.flushNow(); } catch (_f) { /* best effort: the page is going */ }
+      aliveRef.current = false;
+      clearTimeout(retryTimerRef.current);
+      window.removeEventListener("beforeunload", onLeave);
+      if (ssPgPopHold === holdPop) ssPgPopHold = null;
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  const onPeek = useCallback((e) => {
+    const th = e.target && e.target.closest ? e.target.closest("th[data-col]") : null;
+    setPeek(th ? Number(th.getAttribute("data-col")) : null);
+  }, []);
+  const onPeekEnd = useCallback(() => setPeek(null), []);
+  const toggleHiddenStyles = useCallback(() => setHiddenStylesOpen((o) => !o), []);
+  const head = useMemo(() => (base ? (
+    <>
+      <colgroup>
+        <col style={{ width: 82 }} /><col style={{ width: 76 }} /><col style={{ width: 30 }} />
+        {base.cols.map((c) => <col key={c.key} style={{ width: SS_PG_COL_W }} />)}
+      </colgroup>
+      <PgHeader sections={base.sections} cols={base.cols} rtpOn={base.rtpOn} onPeek={onPeek} onPeekEnd={onPeekEnd} />
+    </>
+  ) : null), [base, onPeek, onPeekEnd]);
+  // The add strips' two callbacks, stable so the rows' memo holds; they call this render's handlers.
+  const onAddSizes = useCallback((styleId, sizes, skipped) => fnRef.current.addSizes(styleId, sizes, skipped), []);
+  const onCloseAdd = useCallback((styleId) => fnRef.current.closeAdd(styleId), []);
+  // Each size row draws the server's values with this page's edits on top (ssPgRowView). A row's
+  // view is rebuilt only when its own size or its own boxes changed, and handed back as the very same
+  // object when nothing it draws did, so PgRow's memo holds: an arrow key renders no row, a commit one.
+  const body = useMemo(() => {
+    const views = viewsRef.current;
+    const qs = q ? q.sizes : null, qf = q ? q.fields : null;
+    return rows.map((r, i) => {
+      const ri = 3 + i;   // aria-rowindex: the two header rows come first
+      if (r.kind === "size") {
+        const z = r.size;
+        const s = qs ? qs[z.id] : null, fs = qf ? qf[z.id] : null;
+        let c = views[z.id];
+        if (!c || c.z !== z || c.s !== s || c.fs !== fs) {
+          const v = ssPgRowView(z, s, fs, model.cols);
+          const was = c && c.v;
+          if (was && was.values.join("\u0001") === v.values.join("\u0001")) v.values = was.values;
+          const same = was && was.values === v.values && was.priceText === v.priceText && was.offered === v.offered
+            && was.noPrice === v.noPrice && was.hidden === v.hidden && was.marks === v.marks;
+          c = views[z.id] = { z, s, fs, v: same ? was : v };
+        }
+        const v = c.v;
+        const busy = s && s.creating ? "adding" : q && q.removes[z.id] ? "removing" : "";
+        // The ✕ on every size of an editable page (the delete plan, 10-31), greyed with its reason as
+        // its title when saved designs use the size (`delOff`, a string, so the memo holds).
+        return <PgRow key={r.id} rowIndex={ri} sizeId={z.id} label={z.label} title={z.title} priceText={v.priceText}
+          offered={v.offered} noPrice={v.noPrice} hidden={v.hidden} values={v.values} marks={v.marks} rtp={!!(model && model.rtpOn)}
+          busy={busy} deletable={canEdit && !busy} delOff={z.used ? ssPgDeleteWhy("used", { offered: v.offered, showHidden, hiddenStyle: !r.style.active }) : ""} />;
+      }
+      if (r.kind === "band") {
+        return <PgStyleBand key={r.id} rowIndex={ri} styleId={r.style.id} label={r.style.label} total={r.total} hidden={r.hidden} folded={r.folded} ncols={ncols}
+          canAdd={canEdit} open={!!addOpen[r.style.id] || !r.total} />;
+      }
+      if (r.kind === "add") {
+        return <PgAddSizes key={r.id} rowIndex={ri} styleId={r.style.id} styleLabel={r.style.label} existing={r.style.sizes} ncols={ncols}
+          empty={r.empty} focusKey={addFocus && addFocus.id === r.style.id ? addFocus.n : 0} onAdd={onAddSizes} onClose={onCloseAdd} />;
+      }
+      if (r.kind === "empty") return <PgNoteRow key={r.id} rowIndex={ri} text={r.text} ncols={ncols} />;
+      return <PgHiddenStylesRow key={r.id} rowIndex={ri} count={r.count} open={r.open} ncols={ncols} onToggle={toggleHiddenStyles} />;
+    });
+  }, [rows, model, ncols, toggleHiddenStyles, q && q.sizes, q && q.fields, q && q.removes, canEdit, addOpen, addFocus, onAddSizes, onCloseAdd, showHidden]);
+
+  // ── Handlers and what to draw (no hooks below this line) ──
+  // (tooBig, readOnly, editable, lostEdit and canEdit are worked out above: the rows need them.)
+  const canEditNow = () => editable && !!qRef.current && !qRef.current.viewOnly && !(qRef.current.stopped && qRef.current.stopped.kind === "tenant");
+  const rtp = !!(model && model.rtpOn);
+
+  // The queue, applied synchronously: qRef is the truth the transport reads, and setQ draws it.
+  const apply = (ev) => {
+    const next = ssPgQueue(qRef.current, ev);
+    if (next !== qRef.current) { qRef.current = next; setQ(next); }
+    return next;
+  };
+  // The $0 note: a change (`before` → `after`, around one apply) that just put sizes at $0 in the
+  // designer (ssPgZeroNew; `ids` the sizes it touched: a typed price, an Offered tick, a paste, a
+  // fill or a clear) says so on the status line, one note per change. A hidden style's sizes are
+  // never named: the designer doesn't show that style. It never holds the save back: the change is
+  // already in the queue.
+  const noteZero = (before, after, ids) => {
+    const z = ssPgZeroNew(before, after, ids, ssPgHiddenStyleSizes(model));
+    if (z.length) setZeroIds(z);
+  };
+  const fieldOf = (col) => (col === 1 ? "price" : col === 2 ? "active" : model && model.cols[col - 3] ? "c:" + model.cols[col - 3].key : null);
+  const colOf = (f) => (f === "price" ? 1 : f === "active" ? 2 : colAt[String(f).slice(2)]);
+  // A box's value as drawn: this page's newest edit, else the server's.
+  const shownOf = (sizeId, f) => {
+    const cur = qRef.current;
+    const s = cur && cur.sizes[sizeId];
+    const x = cur && cur.fields[sizeId] && cur.fields[sizeId][f];
+    return x && x.pending ? x.pending.to : x && x.inflight ? x.inflight.to : ssPgVal(s, f);
+  };
+  // A size whose delete is waiting or out takes no edit: its boxes would go with it, unsaid.
+  const removing = (sizeId) => !!(qRef.current && qRef.current.removes[sizeId]);
+  const focusGrid = () => {
+    handFocusRef.current = true;
+    try { gridRef.current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+    handFocusRef.current = false;
+  };
+  const colName = (c) => (c === 0 ? "Size" : c === 1 ? "Price" : c === 2 ? "Offered" : (model && model.cols[c - 3] ? model.cols[c - 3].label : ""));
+  const whereOf = (sizeId) => { const r = byId[sizeId]; return r ? `${r.style.label} ${r.size.label}` : ""; };
+
+  // ── The transport (plan 4.7) ──
+  // One call at a time through ssStyleSaveCall (25 s deadline, one retry through the functions
+  // host), filed as pricing_table_side_door, with targetClientId ALWAYS on the body: the side door is
+  // a raw fetch that skips 01-core's wrapper, so the view-as target must already be on it, and the
+  // answer's clientId is checked here (ssPgAnswerKind), not by the wrapper's tripwire.
+  const run = (flight) => {
+    awaitRef.current = flight.n;
+    clearTimeout(retryTimerRef.current);
+    setRetryAt(null);
+    const body = { action: "save_pricing_cells", targetClientId: target || null, creates: flight.body.creates, removes: flight.body.removes, sizes: flight.body.sizes };
+    Promise.resolve(ssStyleSaveCall(body, "Pricing table", "pricing_table_side_door"))
+      .catch((err) => ({ data: null, error: { message: (err && err.message) || "Save failed", name: "FunctionsFetchError" } }))
+      .then((r) => {
+        if (!aliveRef.current) return;   // the page is gone; the server's checks make a late answer harmless
+        const cur = qRef.current;
+        if (!cur || !cur.flight || cur.flight.n !== flight.n) return;   // discarded meanwhile
+        const v = ssPgAnswerKind(r, clientId);
+        if (v.kind === "ok") landed(flight, r.data); else failed(flight, v);
+      });
+  };
+  const landed = (flight, data) => {
+    apply({ type: "ok", n: flight.n, answer: data, at: Date.now() });
+    setSavedAt(Date.now());
+    const res = Array.isArray(data.results) ? data.results.filter(Boolean) : [];
+    const made = Array.isArray(data.created) ? data.created.filter(Boolean) : [];
+    const gone = Array.isArray(data.removed) ? data.removed.filter(Boolean) : [];
+    // Designers open in this browser look again (the side door skips the wrapper that says so).
+    if (res.some((x) => x.status === "saved") || made.some((x) => x.status === "created") || gone.some((x) => x.status === "removed" && !x.gone)) ssSettingsSaved(clientId);
+    // `exists`: someone else added that size first, and it takes the new row's place; it may not be
+    // in this page's read yet, so the table reads again to draw it (with what was typed on it, red).
+    // A refused remove means the size changed somewhere else since this page read it, or saved
+    // designs started using it: the read brings its new version and its `used` mark, so its next ✕
+    // goes through the confirm on that version, or is greyed. A conflict or a duplicate says someone else saved
+    // that size meanwhile, and its answer carries only the boxes this call named (and the price and
+    // Offered): the read brings the rest of the size (plan 4.6's refresh rule, through the queue), so
+    // no box goes on showing a number that is no longer on file.
+    if (made.some((x) => x.status === "exists") || gone.some((x) => x.status === "refused")
+      || res.some((x) => x.status === "conflict" || x.status === "duplicate")) pokeRefresh();
+    // ONE LINE FOR THE DELETE (ssPgDeleteResult): what went, then what stayed and why, set once, on
+    // `said`, so a refusal can never sit under an earlier "Deleted …" line. A delete of more than 50
+    // sizes takes more than one call: its answers are gathered until no delete is left queued, so 60
+    // sizes say "Deleted 60 sizes.", not the last call's 10.
+    const mine = gone.filter((x) => flight.removes.indexOf(x.id && typeof x.id === "object" ? x.id.id : x.id) >= 0);
+    if (mine.length) {
+      delRunRef.current = [...delRunRef.current, ...mine];
+      const cur = qRef.current;
+      if (!cur || !Object.keys(cur.removes || {}).length) {
+        const line = ssPgDeleteResult(delRunRef.current, (id) => delNameRef.current[id] || "");
+        delRunRef.current = [];
+        if (line) { setSaid(line); setTip(null); }
+      }
+    }
+    // One info row per answer that had conflicts or refusals: counts only (plan 4.7).
+    const conflicts = res.filter((x) => x.status === "conflict").length;
+    const refused = res.filter((x) => x.status === "refused" || x.status === "missing").length
+      + made.filter((x) => x.status === "refused" || x.status === "exists").length + gone.filter((x) => x.status === "refused").length;
+    const boxes = res.reduce((n, x) => n + (x.cellErrors ? Object.keys(x.cellErrors).length : 0), 0);
+    if (conflicts || refused || boxes) {
+      ssLogError("portal", `pricing table: a save came back with ${conflicts} conflict(s), ${refused} refused size(s), ${boxes} refused box(es)`,
+        "pricing_table_conflicts", { conflicts, refused, cellErrors: boxes, sizes: res.length }, "info");
+    }
+  };
+  const failed = (flight, v) => {
+    if (v.kind === "transport") {
+      const st = apply({ type: "fail", n: flight.n, kind: "transport", at: Date.now() });
+      if (st.stopped) {
+        ssLogError("portal", "pricing table: saving stopped after 5 failed tries", "pricing_table_saving_stopped", { status: v.status || null }, "info");
+        return;
+      }
+      const ms = ssPgBackoff(st.failures, typeof window !== "undefined" ? window.__ssPgBackoffMs : null);
+      setRetryAt(Date.now() + ms);
+      retryTimerRef.current = setTimeout(() => {
+        const cur = qRef.current;
+        if (aliveRef.current && cur && cur.flight && cur.flight.n === flight.n && !cur.stopped) run(cur.flight);
+      }, ms);
+      return;
+    }
+    if (v.kind === "refused") {
+      // The server named something the browser let through: a parity bug. The server's sentence goes
+      // in the row (it names fields and counts, never a price); the builder gets a plain one.
+      ssLogError("portal", `pricing table: the server refused a save the page let through: ${String(v.reason || "").slice(0, 300)}`,
+        "pricing_table_save_refused", { status: v.status || null });
+      apply({ type: "fail", n: flight.n, kind: "refused", reason: SS_PG_REFUSED_CALL });
+      // A delete's note goes on the line at once: `said` outranks it, and a line said while the delete
+      // is out (Ctrl+C, say) would otherwise hide the refused call's note.
+      if (flight.removes && flight.removes.length) setSaid(null);
+      return;
+    }
+    if (v.kind === "forbidden") { apply({ type: "fail", n: flight.n, kind: "forbidden", reason: SS_PG_FORBIDDEN }); closeEdit(); return; }
+    if (v.kind === "auth") {
+      apply({ type: "fail", n: flight.n, kind: "auth", reason: "you were signed out" });
+      // The main host's 401 already signed this browser out (ssFetch); the side door's did not.
+      try { if (ssOnSessionExpired) ssOnSessionExpired(); } catch (_s) { /* the shell's own guard */ }
+      return;
+    }
+    ssLogError("portal", "pricing table: a save was answered for a different account", "pricing_table_wrong_tenant",
+      { asked: String(clientId || ""), got: v.reason || null });
+    apply({ type: "fail", n: flight.n, kind: "tenant", reason: "the server answered for a different account. Reload this tab" });
+    closeEdit();
+  };
+  const sendNow = () => {
+    const cur = qRef.current;
+    if (!cur || cur.flight || cur.stopped || cur.viewOnly) return;
+    const st = apply({ type: "send" });
+    if (st.flight && st.flight.n !== awaitRef.current) run(st.flight);
+  };
+  const flushNow = () => { if (!qRef.current) return; apply({ type: "flush" }); sendNow(); };
+  const retryNow = () => { const cur = qRef.current; if (cur && cur.flight) run(cur.flight); };
+  const resume = () => {
+    const st = apply({ type: "resume" });
+    if (st.flight) run(st.flight); else sendNow();
+  };
+  // Discard, then read the table again when the dropped call may have landed (q.unsure): the boxes
+  // show what is on file, not what was last confirmed. If the read fails too, the badge keeps saying
+  // so, with Reload.
+  const discard = () => {
+    clearTimeout(retryTimerRef.current);
+    setRetryAt(null);
+    const st = apply({ type: "discard" });
+    if (st.unsure) refreshNow();
+  };
+
+  // ── The refresh (plan 4.6, 4.8) ──
+  // A trigger waits 1 s (the harness shortens it: window.__ssPgRefreshMs) and coalesces with any
+  // other that comes meanwhile; one read is out at a time, and a trigger during it reads once more
+  // after it.
+  const pokeRefresh = () => {
+    if (refreshTimerRef.current) return;
+    const w = typeof window !== "undefined" ? window.__ssPgRefreshMs : null;
+    const ms = w != null && isFinite(Number(w)) ? Number(w) : 1000;
+    refreshTimerRef.current = setTimeout(() => { refreshTimerRef.current = null; fnRef.current.refreshNow(); }, ms);
+  };
+  // Both reads, then the queue's rules (adoptRead). Like the first load, a read that does not add up
+  // is read once more. A read that fails changes nothing: the next trigger reads again.
+  const refreshNow = async () => {
+    clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = null;
+    if (refreshingRef.current) { refreshAgainRef.current = true; return; }
+    const cur = qRef.current;
+    if (!cur || !loadRef.current || loadRef.current.phase !== "ready") return;
+    refreshingRef.current = true;
+    const okAt = cur.oks, my = seqRef.current;
+    let r = null, m = null;
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        r = await ssPgFetch(target, clientId);
+        if (!aliveRef.current || my !== seqRef.current || !r.ok) break;
+        m = ssPgModel(r.cat, r.table);
+        if (!m.guard || m.guard === "cap") break;
+      }
+    } finally { refreshingRef.current = false; }
+    if (!aliveRef.current || my !== seqRef.current) return;
+    if (r && r.ok && m) fnRef.current.adoptRead(m, okAt);
+    if (refreshAgainRef.current) { refreshAgainRef.current = false; fnRef.current.pokeRefresh(); }
+  };
+  // A fresh read into the queue (never a re-initialised queue): the columns first (an option archived
+  // elsewhere drops its unsaved boxes, with the note; a new one is a new column), then the refresh
+  // rule, which keeps red boxes, unsent edits and the call out, turns an unsent box red when its
+  // starting value changed under it (an Excel upload, a colleague), and gives every other size the
+  // read's version and values. A read asked for before the latest answer landed may predate that
+  // save, so it is dropped and another is asked for. A read that does not add up (the guard) never
+  // replaces one that did; while the page is already "too big" it does, so Reload can clear it, and
+  // the backup from earlier, which the guarded first read could not offer, is offered then (before
+  // the first edit could write over it).
+  //
+  // The columns can move under the cursor (an option added or archived in Options, in another tab).
+  // The open editor is on its FIELD (editRef.f), so it still saves into its own option, wherever that
+  // column now is; the cursor and a range move with their options too (ssPgRekeyCell). An editor
+  // whose option went away is closed, and its changed text is counted in the columns note.
+  const adoptRead = (m, okAt) => {
+    const cur = qRef.current, was = loadRef.current && loadRef.current.model;
+    if (!cur || !was) return;
+    if (cur.oks !== okAt) { pokeRefresh(); return; }
+    if (m.guard && !was.guard) return;
+    const names = {};
+    was.cols.forEach((c) => { names[c.key] = c.label; });
+    const ed = editRef.current;
+    const edKey = ed && ed.f.slice(0, 2) === "c:" ? ed.f.slice(2) : null;
+    const edGone = edKey != null && !m.cols.some((c) => c.key === edKey);
+    apply({ type: "columns", keys: m.cols.map((c) => c.key), names, drafts: edGone && dirtyRef.current ? [edKey] : [] });
+    const st = apply({ type: "refresh", okAt, sizes: ssPgServerSizes(m) });
+    const a = activeRef.current, x = extentRef.current;
+    const na = ssPgRekeyCell(a, was.cols, m.cols), nx = ssPgRekeyCell(x, was.cols, m.cols);
+    if (na !== a) { activeRef.current = na; setActive(na); }
+    if (nx !== x) { extentRef.current = nx; setExtent(nx); }
+    if (edGone) {
+      const had = !!edInputRef.current && document.activeElement === edInputRef.current;
+      closeEdit();
+      if (had) focusGrid();
+    }
+    setLoad((l) => ({ phase: "ready", model: m, at: l.at }));
+    if (st.reread) pokeRefresh();
+    if (was.guard && !m.guard) offerEarlier(m);
+  };
+
+  // ── Adding and removing sizes (plan 3.7) ──
+  const byStyle = (id) => (model ? [...model.styles, ...model.hiddenStyles].find((st) => st.id === id) || null : null);
+  // A new id for a size, minted here (the server takes the browser's id: plan 4.3).
+  const newId = () => {
+    try { if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID(); } catch (_c) { /* not a secure context */ }
+    const b = new Uint8Array(16);
+    try { window.crypto.getRandomValues(b); } catch (_r) { for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256); }
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  };
+  // The strip hands over sizes it has checked (ssPgParseSizeList, ssPgSizeGrid). Each becomes a
+  // create in the queue, in the order typed, and a row at the end of its style saying "Adding…"; the
+  // queue sends creates first, at most 50 entries to a call, and edits typed on a new size wait for
+  // its answer (its version). The strip closes, unless it is a style's empty placeholder; the cursor
+  // goes to the first new price; sizes already there are named in the status line. False: nothing
+  // was taken (the page can't edit now), and the strip keeps what was typed.
+  const addSizes = (styleId, sizes, skipped) => {
+    if (!canEditNow() || !Array.isArray(sizes) || !sizes.length) return false;
+    commitEdit();
+    backToWork();
+    const made = sizes.map((z) => ({ id: newId(), styleId, width: z.width, length: z.length, label: z.label }));
+    made.forEach((a) => apply({ type: "create", id: a.id, styleId, width: a.width, length: a.length, at: Date.now() }));
+    setAdded((list) => [...list, ...made]);
+    setAddOpen((o) => { if (!o[styleId]) return o; const next = { ...o }; delete next[styleId]; return next; });
+    cursorToRef.current = made[0].id;
+    const st = byStyle(styleId);
+    const skip = Array.isArray(skipped) ? skipped : [];
+    setTip(skip.length ? `${skip.join(", ")} ${skip.length === 1 ? "is" : "are"} already in ${st ? st.label : "this style"}, so ${skip.length === 1 ? "it was" : "they were"} skipped.` : null);
+    sendNow();
+    return true;
+  };
+  const closeAdd = (styleId) => {
+    setAddOpen((o) => { if (!o[styleId]) return o; const next = { ...o }; delete next[styleId]; return next; });
+    focusGrid();
+  };
+  // "＋ Add sizes" on a band: opens the strip with the cursor in it, or closes it. On a style with no
+  // sizes the strip is the placeholder and is always open: the cursor goes into it.
+  const toggleAdd = (styleId) => {
+    if (!canEditNow()) return;
+    const st = byStyle(styleId);
+    if (st && st.sizes.length && addOpen[styleId]) { closeAdd(styleId); return; }
+    if (st && st.sizes.length) setAddOpen((o) => ({ ...o, [styleId]: true }));
+    setAddFocus((f) => ({ id: styleId, n: (f ? f.n : 0) + 1 }));
+  };
+  // DELETE (the delete plan, 10-31): the ✕ on a size, Delete on its Size box, and Delete sizes on one
+  // row. A size added by mistake (never priced or edited: ssPgNeverEdited) goes at once, as Remove
+  // always did; one that can't go (ssPgCanDelete: saved designs use it, a box of it is saving, it is
+  // still being added or already being deleted) says why on the status line and sends nothing; any
+  // other asks first (the confirm, Cancel focused). Every line goes on `said`, amber, which the status
+  // line draws ahead of a tip and a note, so it replaces an earlier "Deleted …" line instead of
+  // hiding under it.
+  const delSay = (text) => { setSaid({ tone: "amber", text }); setTip(null); };
+  // Names the sizes a delete sends, and starts its line afresh when no other delete is still going
+  // (one dropped by Discard or a failed call leaves nothing behind in it).
+  const delStart = (ids) => {
+    if (!Object.keys((qRef.current && qRef.current.removes) || {}).length) delRunRef.current = [];
+    ids.forEach((id) => { delNameRef.current[id] = whereOf(id); });
+  };
+  const offeredNow = (id) => !!shownOf(id, "active") && shownOf(id, "price") != null;
+  const inHiddenStyle = (id) => !!byId[id] && !byId[id].style.active;
+  const delWhy = (id, why) => ssPgDeleteWhy(why, { offered: offeredNow(id), showHidden, hiddenStyle: inHiddenStyle(id) });
+  const company = operatorView ? companyName || null : null;
+  const deleteSize = (id) => {
+    if (!canEditNow()) return;
+    // What an open editor holds counts first: a price typed on a never-priced size makes it one that
+    // asks. The ✕'s mouse down has committed it already; Delete sizes keeps the editor open.
+    commitEdit();
+    const z = byId[id] ? byId[id].size : null;
+    if (ssPgNeverEdited(qRef.current, id, z) && !(z && z.used)) {
+      backToWork();
+      setTip(null); setSaid(null);
+      delStart([id]);
+      apply({ type: "remove", id, at: Date.now() });
+      sendNow();
+      return;
+    }
+    const c = ssPgCanDelete(qRef.current, id, z);
+    if (!c.ok) { const where = whereOf(id); delSay((where ? where + ": " : "") + delWhy(id, c.why)); return; }
+    setConfirm({ text: ssPgDeleteText([id], whereOf, { used: 0, saving: 0 }, company), del: [id], danger: true });
+  };
+  // Delete sizes on the toolbar, and Delete or Backspace on a range that lies wholly in the Size
+  // column: every row the selection touches (the active box's row when there is no range). One row is
+  // its ✕. More rows are split into those that can go, those saved designs use and those still
+  // saving; none can go: the status line says which; else ONE confirm, counting the rest.
+  const deleteSel = () => {
+    if (!canEditNow()) return;
+    const sel = selRect();
+    if (!sel) { delSay(ssPgDeleteText(null)); return; }
+    const ids = order.slice(sel.r0, sel.r1 + 1);
+    if (ids.length === 1) { deleteSize(ids[0]); return; }
+    const go = [], counts = { used: 0, saving: 0, usedHidden: 0 };
+    ids.forEach((id) => {
+      const c = ssPgCanDelete(qRef.current, id, byId[id] ? byId[id].size : null);
+      if (c.ok) go.push(id);
+      else if (c.why === "used") { counts.used++; if (inHiddenStyle(id)) counts.usedHidden++; }
+      else counts.saving++;
+    });
+    if (!go.length) { delSay(ssPgDeleteText([], whereOf, counts, company)); return; }
+    commitEdit();
+    setConfirm({ text: ssPgDeleteText(go, whereOf, counts, company), del: go, danger: true });
+  };
+  // Delete on the confirm: each size is checked again first. One that left the queue or changed state
+  // while the confirm was open (a box went out to save, a read marked it used) stops the whole
+  // delete, all or nothing, as a paste does (applyChange), and the status line says why. Then one
+  // queue event for all of them, their unsent and red boxes with them, sent at once.
+  const deleteNow = (ids) => {
+    if (!canEditNow()) return;
+    const cur = qRef.current;
+    const stop = ids.map((id) => ({ id, c: ssPgCanDelete(cur, id, byId[id] ? byId[id].size : null) })).find((x) => !x.c.ok);
+    if (stop) {
+      const why = delWhy(stop.id, stop.c.why), where = whereOf(stop.id);
+      delSay(ids.length === 1 ? (where ? where + ": " : "") + why : `${where || "One of those sizes"}: ${why} Nothing was deleted.`);
+      return;
+    }
+    commitEdit();
+    backToWork();
+    setTip(null);
+    setSaid(null);
+    delStart(ids);
+    apply({ type: "removes", ids, at: Date.now() });
+    sendNow();
+  };
+  // Clicks on the grid's own buttons ("＋ Add sizes" on a band, ✕ on a size): one handler on the grid,
+  // so the bands and rows take no function and their memos hold. A greyed ✕ (aria-disabled) is still
+  // a button: its click says why.
+  const onAct = (e) => {
+    const b = e.target && e.target.closest ? e.target.closest("[data-pg-act]") : null;
+    if (!b || !gridRef.current || !gridRef.current.contains(b)) return;
+    const act = b.getAttribute("data-pg-act"), id = b.getAttribute("data-pg-id");
+    if (act === "delete" && e.detail < 2 && !ssPgCanDelete(qRef.current, id, byId[id] ? byId[id].size : null).ok) ssPgNoFlash(b.closest("td"));
+    if (act === "add") toggleAdd(id);
+    // Not the second click of a double click: a delete can land between the two and the next row
+    // slides up under the still pointer, so another size's ✕ may be there now.
+    else if (act === "delete" && e.detail < 2) deleteSize(id);
+  };
+
+  // ── The backup (plan 4.9) ──
+  // Under "ss-pg-pending:<userId>:<clientId>": this person, this account (the view-as target when an
+  // operator is viewing one), so a backup is only ever offered back to the account it was made on.
+  // Each table writes its own key under that, ":<mountId>" after it, so two tabs of one account never
+  // write over each other's (one tab's empty queue used to clear the other's draft); a backup under
+  // the plain key is one no open table owns. Written only by a page that can edit, and cleared by the
+  // page that wrote it once nothing is left. Storage can be blocked or full: then there is simply no
+  // backup, and the page works the same.
+  const backupKey = ssCurrentUserId && clientId ? `ss-pg-pending:${ssCurrentUserId}:${clientId}` : null;
+  const ownKey = backupKey ? `${backupKey}:${mountId}` : null;
+  const draftOf = () => {
+    const ed = editRef.current;
+    if (!ed || !dirtyRef.current) return null;
+    return ed.f !== "active" ? { sizeId: ed.sizeId, key: ed.f, text: draftRef.current, seen: ed.seen } : null;
+  };
+  // The backups Save them put into the queue (adoptedRef) go after this table's next own write, once
+  // the queue (and so this table's key) holds what they held; a write that fails keeps them in place.
+  const saveBackup = () => {
+    if (!backupKey || !editable || !qRef.current) return;
+    const b = ssPgBackup(qRef.current, draftOf(), Date.now());
+    try {
+      if (b) { localStorage.setItem(ownKey, JSON.stringify(b)); ownBackupRef.current = true; }
+      else if (ownBackupRef.current) { localStorage.removeItem(ownKey); ownBackupRef.current = false; }
+      if (adoptedRef.current.length) { adoptedRef.current.forEach((k) => localStorage.removeItem(k)); adoptedRef.current = []; }
+    } catch (_e) { /* storage blocked or full: no backup */ }
+  };
+  // Who else is open (SS_PG_OPEN_CH): `done` gets { mountId: true } for every table that answers
+  // within a moment. Without the channel nobody answers, and every backup is from earlier.
+  const whoIsOpen = (done) => {
+    let ch = null;
+    const open = {};
+    try { ch = new BroadcastChannel(SS_PG_OPEN_CH); } catch (_b) { done(open); return; }
+    ch.onmessage = (m) => { if (m && m.data && m.data.open) open[String(m.data.open)] = true; };
+    try { ch.postMessage({ ask: true }); } catch (_p) { /* closed */ }
+    setTimeout(() => { try { ch.close(); } catch (_c) { /* closed */ } done(open); }, 300);
+  };
+  // On open (the first read that can edit, once): the backups from earlier, every one under this
+  // person and account that no open table answers for (a tab closed, a crash, a sign-out), merged
+  // (ssPgBackupMerge) and offered back with the banner, unless this page can't edit (view-only pages
+  // never send one, and leave them stored). One older than 7 days, or one that can't be read, is
+  // dropped. What is offered stays under its own keys (tookRef) until Save them or Discard, so a
+  // second crash before the builder answers loses nothing; red entries alone are shown once and go.
+  const offerEarlier = (m) => {
+    if (!backupKey || viewOnly || (m && m.guard)) return;
+    if (offeredRef.current) return;
+    offeredRef.current = true;
+    const keys = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k !== ownKey && (k === backupKey || k.indexOf(backupKey + ":") === 0)) keys.push(k);
+      }
+    } catch (_e) { return; }
+    if (!keys.length) return;
+    whoIsOpen((open) => {
+      if (!aliveRef.current) return;
+      const found = [], took = [];
+      keys.forEach((k) => {
+        if (k !== backupKey && open[k.slice(backupKey.length + 1)]) return;   // another tab's own, live
+        let raw = null;
+        try { raw = localStorage.getItem(k); } catch (_e) { return; }
+        if (raw == null) return;
+        const b = ssPgBackupLoad(raw, Date.now());
+        if (!b) { try { localStorage.removeItem(k); } catch (_e) { /* blocked */ } return; }
+        found.push(b);
+        took.push(k);
+      });
+      const b = ssPgBackupMerge(found);
+      if (!b) return;
+      tookRef.current = took;
+      if (!b.count) {
+        try { took.forEach((k) => localStorage.removeItem(k)); } catch (_e) { /* blocked */ }
+        tookRef.current = [];
+      }
+      if (b.count) setEarlier({ savedAt: b.savedAt, sizes: b.sizes, creates: b.creates || null, count: b.count });
+      if (b.red.length) setEarlierRed(b.red);
+    });
+  };
+  // Save them: the stored edits go into the queue on their stored version and starting values
+  // (ssPgQueue "restore"), and out at once. The red entries stay listed until dismissed, and are no
+  // longer stored. Not while a call is out (the button is greyed): restore goes on stored versions
+  // only when nothing is in flight.
+  const saveEarlier = () => {
+    const b = earlier;
+    if (!b || !canEditNow() || (qRef.current && qRef.current.flight)) return;
+    setEarlier(null);
+    adoptedRef.current = [...adoptedRef.current, ...tookRef.current];
+    tookRef.current = [];
+    const had = qRef.current.sizes;
+    const st = apply({ type: "restore", sizes: b.sizes, creates: b.creates, at: Date.now() });
+    // A size added again (its create never landed) is drawn at the end of its style, "Adding…".
+    const again = Object.keys(b.creates || {}).filter((id) => !had[id] && st.sizes[id] && st.sizes[id].creating)
+      .map((id) => { const c = b.creates[id]; return { id, styleId: c.styleId, width: c.width, length: c.length, label: `${c.width}x${c.length}` }; });
+    if (again.length) setAdded((list) => [...list, ...again]);
+    sendNow();
+    focusGrid();
+  };
+  // Discard: the backup is gone, red entries and all.
+  const discardEarlier = () => {
+    try { tookRef.current.forEach((k) => localStorage.removeItem(k)); } catch (_e) { /* blocked */ }
+    tookRef.current = [];
+    setEarlier(null);
+    setEarlierRed(null);
+    focusGrid();
+  };
+  const dismissEarlierRed = () => {
+    setEarlierRed(null);
+    focusGrid();
+  };
+  // The open editor's size left the queue under it (dropGoneEditor's effect): a create answered
+  // `exists` (someone else added these dimensions first) or a read that no longer has the size. Its
+  // text has no box to go into, so the editor closes and the status line quotes it.
+  const dropGoneEditor = () => {
+    const ed = editRef.current, cur = qRef.current;
+    if (!ed || !cur || cur.sizes[ed.sizeId]) return;
+    const t = dirtyRef.current ? draftRef.current : null;
+    const label = editing ? editing.label : "";
+    const had = !!edInputRef.current && document.activeElement === edInputRef.current;
+    closeEdit();
+    if (had) focusGrid();
+    if (t == null) return;
+    setSaid({ tone: "amber", text: cur.renamed[ed.sizeId]
+      ? `${label}: someone else just added this size, so “${t}” wasn't saved. Check its numbers and type yours again.`
+      : `${label} isn't on this account any more, so “${t}” wasn't saved.` });
+  };
+
+  // ── Editing (plan 3.5, 3.9, 3.10) ──
+  // A box's text in the editor: the plain number ("4800.5", never "$4,800.50"), or empty.
+  const editText = (sizeId, f) => {
+    const v = shownOf(sizeId, f);
+    return f === "price" ? (v == null ? "" : String(v)) : (Number(v) > 0 ? String(Number(v)) : "");
+  };
+  // Typed text into the queue, for one box by its FIELD (`f`: "price" or "c:<key>"): refused right
+  // here when it breaks the rules (red, never sent), else a commit. "A value equal to what is stored
+  // is always accepted" is the parsers' `stored`. `extra` is the editor's { seen }. False when the box
+  // is red after it (refused text, or the box moved under the open editor): the caller keeps the
+  // cursor there. An option no longer drawn takes nothing (the editor on one is closed first, with
+  // the columns note: adoptRead).
+  const commitText = (sizeId, f, text, extra = null) => {
+    const s = qRef.current && qRef.current.sizes[sizeId];
+    if (!f || !s || f === "active" || colOf(f) == null) return true;
+    const p = f === "price" ? ssPgParsePrice(text, ssPgVal(s, f)) : ssPgParseQty(text, ssPgVal(s, f));
+    if (!p.ok) { apply({ type: "invalid", sizeId, f, typed: text, reason: p.error, at: Date.now() }); return false; }
+    const was = qRef.current;
+    const st = apply({ type: "commit", sizeId, f, value: p.value, at: Date.now(), ...(extra || {}) });
+    if (f === "price") noteZero(was, st, [sizeId]);
+    return !(st.fields[sizeId] && st.fields[sizeId][f] && st.fields[sizeId][f].error);
+  };
+  // Back to work while a leave waits for its save (Back clicked, then a box): the leave is called
+  // off, and the builder clicks Back again when done. Going once the queue emptied would drop an
+  // editor opened meanwhile, whose text is in no queue, or leave in the middle of the next edit.
+  const backToWork = () => { if (leaving) setLeaving(null); };
+  const startEdit = (cell, key) => {
+    if (!cell || !canEditNow()) return;
+    if (cell.col === 0) { setTip(SS_PG_SIZE_FIXED); return; }
+    if (cell.col === 2) { if (key == null) toggleOffered(cell); return; }
+    if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
+    const f = fieldOf(cell.col);
+    if (!f || !qRef.current.sizes[cell.sizeId]) return;
+    if (removing(cell.sizeId)) { setTip(SS_PG_REMOVING); return; }
+    backToWork();
+    const text0 = editText(cell.sizeId, f);
+    const init = key != null ? key : text0;
+    // `seen`: the value the builder is typing over, for the queue's check that nothing moved it
+    // while the editor was open. The editor is on the FIELD, never on the column number: a read
+    // that adds or archives an option moves the columns while it is open (adoptRead).
+    editRef.current = { sizeId: cell.sizeId, f, text0, replace: key != null, seen: shownOf(cell.sizeId, f) };
+    draftRef.current = init;
+    dirtyRef.current = init !== text0;
+    setDraftDirty(dirtyRef.current);
+    setTip(null);
+    setSaid(null);
+    setExtent(null);
+    setEditing({ sizeId: cell.sizeId, f, init, price: cell.col === 1, frozen: ssPgColBox(cell.col, narrow).frozen,
+      label: `${whereOf(cell.sizeId)}, ${colName(cell.col)}` });
+  };
+  // Close the editor without a word (Escape, or the page went view-only).
+  const closeEdit = () => {
+    if (!editRef.current) return;
+    editRef.current = null;
+    dirtyRef.current = false;
+    setDraftDirty(false);
+    setEditing(null);
+  };
+  // Close it and put what it holds into the queue. Opened in place and left as it was: nothing.
+  // False when the box is red after it (the text was refused here, or the box moved while the editor
+  // was open); nothing was sent.
+  const commitEdit = () => {
+    const ed = editRef.current;
+    if (!ed) return true;
+    const text = draftRef.current;
+    closeEdit();
+    return ed.replace || text !== ed.text0 ? commitText(ed.sizeId, ed.f, text, { seen: ed.seen }) : true;
+  };
+  const toggleOffered = (cell) => {
+    if (!canEditNow() || !qRef.current.sizes[cell.sizeId]) return;
+    if (removing(cell.sizeId)) { setTip(SS_PG_REMOVING); return; }
+    // Offered needs a price on file (the server ticks it with the first one): plan 3.9.
+    if (qRef.current.sizes[cell.sizeId].price == null || shownOf(cell.sizeId, "price") == null) { setTip(SS_PG_ADD_PRICE + "."); return; }
+    backToWork();
+    // Ticking Offered on a size at $0 puts it in the designer free: the same note as typing the 0.
+    const was = qRef.current;
+    const st = apply({ type: "commit", sizeId: cell.sizeId, f: "active", value: !shownOf(cell.sizeId, "active"), at: Date.now() });
+    noteZero(was, st, [cell.sizeId]);
+  };
+  // Delete or Backspace on one box (plan 3.10): a blank price, an empty option, Offered unticked.
+  // Never asks: only a change to more than one size does (plan 3.12: a range goes through clearSel).
+  // On the Size box it is the keyboard's ✕ (the ✕ is out of Tab's reach): deleteSize.
+  const clearCell = (cell) => {
+    if (!canEditNow() || !cell) return;
+    if (cell.col === 0) { deleteSize(cell.sizeId); return; }
+    if (removing(cell.sizeId)) { setTip(SS_PG_REMOVING); return; }
+    if (cell.col === 1 && rtp) { setTip(SS_PG_RTP + "."); return; }
+    if (cell.col === 2) { if (shownOf(cell.sizeId, "active")) toggleOffered(cell); return; }
+    backToWork();
+    commitText(cell.sizeId, fieldOf(cell.col), "");
+  };
+  const moveTo = (next, which = "active") => {
+    if (!next) return;
+    scrollNextRef.current = which;
+    if (which === "extent") { setExtent(next); return; }
+    setExtent(null);
+    setActive(next);
+  };
+  // The editor's keys: Enter commits and moves down (Shift+Enter up), Tab right (Shift+Tab left,
+  // wrapping rows), Up and Down commit and move; Left and Right stay in the text; Escape cancels.
+  // Text the rules refuse turns the box red and the cursor STAYS on it, so its reason is on the
+  // status line at once instead of behind the "boxes need you" badge.
+  const onEditKey = (e) => {
+    const k = e.key;
+    if (k === "Escape") { e.preventDefault(); closeEdit(); focusGrid(); return; }
+    if (k !== "Enter" && k !== "Tab" && k !== "ArrowUp" && k !== "ArrowDown") return;
+    e.preventDefault();
+    const ed = editRef.current;
+    if (!ed) return;
+    const at = { sizeId: ed.sizeId, col: colOf(ed.f) };
+    const took = commitEdit();
+    focusGrid();
+    if (!took) return;
+    moveTo(ssPgMove(order, ncols, at, k === "Enter" ? (e.shiftKey ? "ArrowUp" : "ArrowDown") : k, e.shiftKey));
+  };
+  const onEditInput = (e) => {
+    draftRef.current = e.target.value;
+    const d = !!editRef.current && e.target.value !== editRef.current.text0;
+    if (d !== dirtyRef.current) { dirtyRef.current = d; setDraftDirty(d); }
+    saveBackup();   // the open editor's text is part of the backup (plan 4.9), keystroke by keystroke
+  };
+  // Leaving the box commits it (plan 3.10: any move away commits), but not the window losing focus
+  // to another app: the editor is still there when the builder comes back.
+  const onEditBlur = () => {
+    try { if (!document.hasFocus()) return; } catch (_d) { /* no document */ }
+    commitEdit();
+  };
+
+  // ── Copy, paste, fill down and clear (plan 3.10-3.12, Phase 4b) ──
+  // The selection as rows of the drawn sizes (`order`) and grid columns: the active cell and the far
+  // corner of a range (ssPgFillPlan's `sel`). null when no box is active or its size isn't drawn.
+  const selRect = () => {
+    const a = activeRef.current;
+    if (!a) return null;
+    const x = extentRef.current || a;
+    const i = order.indexOf(a.sizeId), j = order.indexOf(x.sizeId);
+    if (i < 0 || j < 0) return null;
+    return { r0: Math.min(i, j), r1: Math.max(i, j), c0: Math.min(a.col, x.col), c1: Math.max(a.col, x.col) };
+  };
+  // What the planners read: the rows as drawn now, and the queue as it is now (qRef, so an editor
+  // committed a moment ago is in it).
+  const viewOf = () => ({ rows, order, cols: model ? model.cols : [], rtp, q: qRef.current });
+  // Ctrl/Cmd+C: the selection as TSV (ssPgToTsv), as drawn. A view-only page copies too.
+  const copySel = (e) => {
+    const sel = selRect();
+    if (!sel || !e.clipboardData) return;
+    e.preventDefault();
+    e.clipboardData.setData("text/plain", ssPgToTsv(ssPgSelectionBlock(viewOf(), order.slice(sel.r0, sel.r1 + 1), sel.c0, sel.c1)));
+    const k = (sel.r1 - sel.r0 + 1) * (sel.c1 - sel.c0 + 1);
+    setSaid({ tone: "grey", text: k === 1 ? "Copied 1 box." : `Copied ${k} boxes.` });
+  };
+  // Ctrl/Cmd+V: the clipboard's block, its top-left box on the selection's top-left box. A view-only
+  // page pastes nothing and sends nothing.
+  const pasteFrom = (e) => {
+    e.preventDefault();
+    if (!canEditNow()) return;
+    const sel = selRect();
+    if (!sel) { setSaid({ tone: "amber", text: "Click the box where the paste should start." }); return; }
+    const text = e.clipboardData ? e.clipboardData.getData("text/plain") : "";
+    propose(ssPgPastePlan(viewOf(), { sizeId: order[sel.r0], col: sel.c0 }, ssPgParseTsv(text)));
+  };
+  // Ctrl/Cmd+D or Fill down; Delete or Backspace on a range, or Clear. An open editor is committed
+  // first (any move away commits), and a box it turns red stops it there, with its reason on show.
+  const fillDown = () => {
+    if (!canEditNow()) return;
+    if (!commitEdit()) { focusGrid(); return; }
+    propose(ssPgFillPlan(viewOf(), selRect()));
+  };
+  const clearSel = () => {
+    if (!canEditNow()) return;
+    if (!commitEdit()) { focusGrid(); return; }
+    propose(ssPgClearPlan(viewOf(), selRect()));
+  };
+  // A checked paste, fill or clear (plan 3.11-3.12). Refused: the status line says why, and nothing
+  // changes. Nothing different: it says so. One size: done at once, as typing in a box is. More than
+  // one: the confirm first (PgConfirm), naming the range and counting the changes; Cancel changes
+  // nothing.
+  const propose = (plan) => {
+    if (!plan.ok) { setSaid({ tone: "amber", text: plan.error }); return; }
+    if (!plan.edits.length) { setSaid({ tone: "grey", text: "Nothing to change: those boxes already say that." }); return; }
+    const sum = ssPgChangeSummary(plan.sizes);
+    setSaid(null);
+    if (sum.ask) { setConfirm({ text: sum.text, edits: plan.edits, area: plan.area || null }); return; }
+    applyChange(plan.edits, plan.area || null);
+  };
+  // Into the queue in ONE event (ssPgQueue "commits": every box by the commit rule, against what it
+  // showed when it was checked, so a box an answer moved while the confirm was open turns red instead
+  // of overwriting a colleague's number), and sent at once in calls the server takes (plan 4.6). A
+  // pasted block stays selected, the way a sheet shows what it pasted.
+  const applyChange = (edits, area) => {
+    if (!canEditNow()) return;
+    // A size that left the queue while the confirm was open (someone else added the same dimensions
+    // first, or a read no longer has it) can take none of its boxes, so nothing changes (all or
+    // nothing) and the status line says why, instead of the rest going without a word.
+    const cur = qRef.current;
+    const gone = edits.find((d) => !cur.sizes[d.sizeId]);
+    if (gone) {
+      setSaid({ tone: "amber", text: cur.renamed[gone.sizeId]
+        ? "Someone else just added one of those sizes while you were deciding. Nothing was changed. Check its numbers and try again."
+        : "One of those sizes isn't on this account any more. Nothing was changed. Try again." });
+      return;
+    }
+    // A first price sent (or saved) while the confirm was open has said Offered already: a paste
+    // saying otherwise would lose that box, so nothing changes (all or nothing, as when the paste
+    // was checked: ssPgPlanCells) and the status line says why.
+    const late = edits.find((d) => ssPgOffLost(qRef.current, d));
+    if (late) { setSaid({ tone: "amber", text: `${whereOf(late.sizeId)}, Offered: its first price went out to save while you were deciding. Nothing was changed. Try again.` }); return; }
+    backToWork();
+    setTip(null);
+    const was = qRef.current;
+    apply({ type: "commits", edits, at: Date.now() });
+    noteZero(was, qRef.current, edits.map((d) => d.sizeId));
+    sendNow();
+    if (area) {
+      setActive({ sizeId: area.first, col: area.c0 });
+      setExtent(area.first === area.last && area.c0 === area.c1 ? null : { sizeId: area.last, col: area.c1 });
+    }
+  };
+  // Continue (a paste, fill or clear) or Delete (`del`: the sizes to delete, deleteNow checking each
+  // again before anything is queued).
+  const confirmYes = () => {
+    const c = confirm;
+    setConfirm(null);
+    focusGrid();
+    if (c && c.del) deleteNow(c.del);
+    else if (c) applyChange(c.edits, c.area);
+  };
+  const confirmNo = () => { setConfirm(null); focusGrid(); };
+  // The toolbar's buttons keep the focus where it was (the grid, or the open editor, which their
+  // click then commits; ?'s commits nothing).
+  const keepFocus = (e) => { e.preventDefault(); };
+
+  // ── The grid's own keys and mouse (plan 3.10) ──
+  // Only keys pressed on the grid itself: an add strip's boxes and the buttons in the bands are
+  // inside the table, and what is typed there is theirs.
+  const onKeyDown = (e) => {
+    if (e.target !== e.currentTarget) return;
+    const k = e.key;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "z" || k === "Z")) { e.preventDefault(); setTip(SS_PG_NO_UNDO); return; }
+    // Ctrl/Cmd+D fills down (held back from the browser, whose own is "bookmark this page"). Ctrl/Cmd+C
+    // and V go on to the browser, whose copy and paste events land in copySel and pasteFrom.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (k === "d" || k === "D")) { e.preventDefault(); fillDown(); return; }
+    // Alt+Enter opens (or closes) "＋ Add sizes" for the active size's style: the band's button is
+    // inside the grid, past every box Tab moves through, so the keyboard gets there this way (and
+    // Delete on a Size box is its ✕: clearCell).
+    if (e.altKey && !e.ctrlKey && !e.metaKey && k === "Enter") {
+      e.preventDefault();
+      const r = activeRef.current ? byId[activeRef.current.sizeId] : null;
+      if (r) toggleAdd(r.style.id);
+      return;
+    }
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const a = activeRef.current;
+    if (e.shiftKey && k.indexOf("Arrow") === 0) {
+      if (!a) return;
+      const next = ssPgMove(order, ncols, extentRef.current || a, k, false);
+      if (!next) return;
+      e.preventDefault();
+      moveTo(next, "extent");
+      return;
+    }
+    const next = ssPgMove(order, ncols, a, k, e.shiftKey);
+    if (next) { e.preventDefault(); setTip(null); setSaid(null); moveTo(next); return; }
+    if (!a) return;
+    if (k === "Enter" || k === "F2") { e.preventDefault(); startEdit(a, null); return; }
+    if (k === " ") { e.preventDefault(); if (a.col === 2 && !extentRef.current) toggleOffered(a); return; }
+    // Delete or Backspace: one box clears at once (clearCell); a range goes through Clear and, when it
+    // changes more than one size, the confirm (plan 3.12). A range wholly in the Size column, which
+    // Clear never empties, deletes its sizes (deleteSel, the delete plan).
+    if (k === "Delete" || k === "Backspace") {
+      e.preventDefault();
+      // A held key acts once: the ring moves on after each delete, so each repeat would be another size.
+      if (e.repeat) return;
+      const x = extentRef.current;
+      if (!x) clearCell(a); else if (a.col === 0 && x.col === 0) deleteSel(); else clearSel();
+      return;
+    }
+    if (k === "Escape") { setExtent(null); return; }
+    // A digit, `$` or any other character starts typing over the box (plan 3.10); the editor opens
+    // holding it, so nothing typed is lost.
+    if (k.length === 1) { e.preventDefault(); startEdit(a, k); }
+  };
+  const cellAt = (e) => {
+    const td = e.target && e.target.closest ? e.target.closest("td[data-c]") : null;
+    const tr = td && td.parentElement;
+    if (!td || !tr || !tr.getAttribute("data-s")) return null;
+    return { sizeId: tr.getAttribute("data-s"), col: Number(td.getAttribute("data-c")) || 0 };
+  };
+  const onMouseDown = (e) => {
+    if (e.detail < 2) firstBoxRef.current = null;
+    // The grid's own buttons (onAct) act on the click; pressing one commits the editor and keeps
+    // the focus where it was, so the keys still drive the grid afterwards.
+    if (e.target && e.target.closest && e.target.closest("[data-pg-act]")) { e.preventDefault(); commitEdit(); return; }
+    const cell = cellAt(e);
+    if (!cell) return;
+    e.preventDefault();   // no drag-select of text; focus is given by hand, without a scroll
+    // The second press of a double click stays on the first's box: rows can slide between the two
+    // presses, so the row under the pointer can be another size now.
+    if (e.detail > 1 && activeRef.current) return;
+    firstBoxRef.current = cell;
+    commitEdit();
+    focusGrid();
+    const a = activeRef.current;
+    if (e.shiftKey && a) { setExtent(cell); return; }   // Shift+click: a range from the active cell
+    const again = !!a && a.sizeId === cell.sizeId && a.col === cell.col && !extentRef.current;
+    setActive(cell);
+    setExtent(null);
+    setTip(null);
+    setSaid(null);
+    if (e.button === 0) { dragRef.current = true; pressRef.current = { x: e.clientX, y: e.clientY }; }
+    // A click on an Offered box that is already selected ticks or unticks it.
+    if (again && cell.col === 2 && e.button === 0 && e.detail === 1) toggleOffered(cell);
+  };
+  // A drag with the button held stretches the range over the cells it passes (not on touch). It is a
+  // drag once the pointer has moved SS_PG_DRAG_PX from the press. Before that the pointer is still,
+  // whatever passes under it: a shake of a pixel or two across a row edge, or rows sliding during the
+  // hold, reports the next row as passed over, so one click would select two boxes.
+  const dragStarted = (e) => {
+    const p = pressRef.current;
+    if (!p) return true;
+    if (Math.abs(e.clientX - p.x) < SS_PG_DRAG_PX && Math.abs(e.clientY - p.y) < SS_PG_DRAG_PX) return false;
+    pressRef.current = null;
+    return true;
+  };
+  const onMouseOver = (e) => {
+    if (!dragRef.current || !dragStarted(e)) return;
+    const cell = cellAt(e);
+    const a = activeRef.current;
+    if (!cell || !a) return;
+    setExtent(cell.sizeId === a.sizeId && cell.col === a.col ? null : cell);
+  };
+  // The pointer can cross into the next box inside those few pixels and stay there, so no mouse over
+  // comes: the move that starts the drag counts the box it is in.
+  const onMouseMove = (e) => { if (dragRef.current && pressRef.current && dragStarted(e)) onMouseOver(e); };
+  // Opens the box the first press hit, wherever the rows have slid since. One that began on a ✕ opens
+  // nothing: the ring can be on another size.
+  const onDoubleClick = () => {
+    const cell = firstBoxRef.current;
+    if (cell && cell.col !== 2) startEdit(cell, null);
+  };
+  // Tabbing into the grid lands on the first price (the grid itself: not a box in an add strip). Only
+  // Tab: focus given back after a button would pick a size nobody clicked, and Delete sizes would then
+  // act on it just after saying "Click a size first".
+  const onFocus = (e) => { if (e.target === e.currentTarget && !handFocusRef.current && !activeRef.current && order.length) setActive({ sizeId: order[0], col: Math.min(1, ncols - 1) }); };
+  const toggleShowHidden = (on) => {
+    setShowHidden(on);
+    try { localStorage.setItem(SS_PG_SHOW_HIDDEN_KEY, on ? "1" : "0"); } catch (_e) { /* not remembered */ }
+  };
+  // "3 boxes need you" jumps to the next red box, in reading order, after the active one. The badge
+  // counts every red box, so this looks in every size, folded ones too: a red box on a hidden size
+  // with "Show hidden sizes" off, or in the collapsed Hidden styles section, is unfolded first.
+  // `keep(id, f, x)` narrows which red boxes count (leaving: only those gone red since the click).
+  const jumpRed = (keep = null) => {
+    const cur = qRef.current;
+    if (!cur || !model) return;
+    const all = ssPgRows(model, { showHidden: true, hiddenStylesOpen: true }).filter((r) => r.kind === "size");
+    const reds = [];
+    all.forEach((r, i) => {
+      const fs = cur.fields[r.id];
+      if (!fs) return;
+      Object.keys(fs).forEach((f) => { const c = colOf(f); if (fs[f].error && c != null && (!keep || keep(r.id, f, fs[f]))) reds.push({ i, r, col: c }); });
+    });
+    if (!reds.length) return;
+    reds.sort((x, y) => x.i - y.i || x.col - y.col);
+    const a = activeRef.current;
+    const ai = a ? all.findIndex((r) => r.id === a.sizeId) : -1;
+    const next = reds.find((x) => x.i > ai || (x.i === ai && x.col > a.col)) || reds[0];
+    // Folded away (ssPgRows): not drawn, hidden now and not added here. A size in the collapsed
+    // Hidden styles section is not drawn either, and opening it draws it unless it is that too.
+    const hidNowOf = (z) => (hidNow[z.id] != null ? !!hidNow[z.id] : !!z.hidden);
+    if (!showHidden && !byId[next.r.id] && hidNowOf(next.r.size) && !keepIds[next.r.id]) toggleShowHidden(true);
+    if (!next.r.style.active && !hiddenStylesOpen) setHiddenStylesOpen(true);
+    focusGrid();
+    moveTo({ sizeId: next.r.id, col: next.col });
+  };
+
+  // Places the overlay's pieces and the editor over the active cell and the range (plan 3.5): rows
+  // from their own offsetTop, columns from ssPgColBox. Frozen pieces go in the sticky lane.
+  const place = () => {
+    const g = gridRef.current;
+    const pieces = [ringFRef.current, ringBRef.current, rangeFRef.current, rangeBRef.current];
+    pieces.forEach((el) => { if (el) el.style.display = "none"; });
+    const prev = markRef.current;
+    if (prev) { prev.removeAttribute("aria-selected"); markRef.current = null; }
+    const a = activeRef.current;
+    if (!g || !a) return;
+    const esc = (s) => ((window.CSS && CSS.escape) ? CSS.escape(String(s)) : String(s));
+    const tr = g.querySelector(`tr[data-s="${esc(a.sizeId)}"]`);
+    if (!tr) return;
+    const show = (el, x, y, w, h) => {
+      if (!el) return;
+      el.style.display = "block";
+      el.style.left = x + "px"; el.style.top = y + "px"; el.style.width = w + "px"; el.style.height = h + "px";
+    };
+    const y0 = g.offsetTop;
+    const ca = ssPgColBox(a.col, narrow);
+    show(ca.frozen ? ringFRef.current : ringBRef.current, ca.x, y0 + tr.offsetTop, ca.w, tr.offsetHeight);
+    // The editor sits over its own field's column, wherever a read has moved it.
+    const ec = edInputRef.current && editRef.current ? colOf(editRef.current.f) : null;
+    if (ec != null) {
+      const cb = ssPgColBox(ec, narrow);
+      const et = editRef.current.sizeId === a.sizeId ? tr : g.querySelector(`tr[data-s="${esc(editRef.current.sizeId)}"]`);
+      if (et) show(edInputRef.current, cb.x, y0 + et.offsetTop, cb.w, et.offsetHeight);
+    }
+    const td = tr.children[a.col];
+    if (td) { td.setAttribute("aria-selected", "true"); markRef.current = td; }
+    const x = extentRef.current;
+    let far = null;
+    if (x && (x.sizeId !== a.sizeId || x.col !== a.col)) {
+      const tx = g.querySelector(`tr[data-s="${esc(x.sizeId)}"]`);
+      if (tx) {
+        far = tx.children[x.col] || null;
+        const top = y0 + Math.min(tr.offsetTop, tx.offsetTop);
+        const bottom = y0 + Math.max(tr.offsetTop + tr.offsetHeight, tx.offsetTop + tx.offsetHeight);
+        const c0 = Math.min(a.col, x.col), c1 = Math.max(a.col, x.col), fz = narrow ? 1 : 3;
+        if (c0 < fz) {
+          const l = ssPgColBox(c0, narrow), r = ssPgColBox(Math.min(c1, fz - 1), narrow);
+          show(rangeFRef.current, l.x, top, r.x + r.w - l.x, bottom - top);
+        }
+        if (c1 >= fz) {
+          const l = ssPgColBox(Math.max(c0, fz), narrow), r = ssPgColBox(c1, narrow);
+          show(rangeBRef.current, l.x, top, r.x + r.w - l.x, bottom - top);
+        }
+      }
+    }
+    const which = scrollNextRef.current;
+    if (which) {
+      scrollNextRef.current = false;
+      const el = which === "extent" ? far : td;
+      try { if (el) el.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (_s) { /* old browser */ }
+    }
+  };
+  // Where leaving goes: a Settings tab by name (Back to Sheds, Go to Options), or the address a held
+  // Back or Forward was going to, routed the way the shell routes those (the address moves, then a
+  // popstate, which this page's hold lets through).
+  const go = (to) => {
+    if (typeof to === "string") { onNav(to); return; }
+    passRef.current = true;
+    try {
+      window.history.pushState(to.state, "", to.url);
+      window.dispatchEvent(new PopStateEvent("popstate", { state: to.state }));
+    } catch (_h) { /* history unavailable */ } finally { passRef.current = false; }
+  };
+
+  // Back to Sheds, Go to Options and a held Back or Forward leave the same way (plan 3.2, 4.6): the
+  // editor is committed and what waits is sent first; the page goes once the queue is empty (the
+  // `leaving` effect). It stays when the editor's text went red (the cursor is on that box, its
+  // reason on the status line), and when nothing can be sent first (saving stopped or retrying, or
+  // view-only after a 403): then the status line says the page stayed, with Leave anyway. A middle
+  // click or a modified one is the browser's: a new tab, nothing waits.
+  const leaveFor = (to) => {
+    setStuck(null);
+    if (!commitEdit()) { focusGrid(); return; }
+    const cur = qRef.current, c = ssPgCount(cur);
+    if (!cur || !(c.pending + c.inflight + c.creating + c.removing)) { go(to); return; }
+    if (cur.viewOnly || cur.stopped || cur.failures) { setStuck({ to }); return; }
+    setLeaving({ to, was: cur.fields });
+    flushNow();
+  };
+  const leaveTo = (sub) => ssNavClick(() => leaveFor(sub));
+  const toSheds = leaveTo("sheds");
+  fnRef.current = { place, sendNow, flushNow, jumpRed, go, commitEdit, leaveFor,
+    refreshNow, pokeRefresh, adoptRead, addSizes, closeAdd, saveBackup, offerEarlier, copySel, pasteFrom, dropGoneEditor };
+  // Pressing a link would blur the open editor, and the blur commits it before the click, so the
+  // click would never see a box that commit turned red. Held on the editor, the click commits it.
+  const holdEditor = (e) => { if (editRef.current) e.preventDefault(); };
+
+  const at = active ? byId[active.sizeId] : null;
+  // The active-column readout (plan 3.2): the full name of the column pointed at or in use, which
+  // is also where a name cut short on a phone is read in full.
+  const readout = !model ? "" : peek != null ? colName(peek) : at ? `${colName(active.col)} · ${at.style.label} ${at.size.label}` : "";
+  const stamp = savedAt || load.at;
+  const time = stamp ? new Date(stamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).toLowerCase() : "";
+  const n = (k, one, many) => (k === 1 ? one : `${k} ${many}`);
+  const unsent = counts.pending + counts.creating + counts.removing + (draftDirty ? 1 : 0);
+  const out = q && q.flight ? q.flight.changes : 0;
+  const secs = retryAt ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) : 0;
+  const bact = (label, fn) => <button type="button" className="ss-pg-bact" onClick={fn}>{label}</button>;
+  // The badge (plan 3.13), first match wins.
+  const badge = load.phase === "loading" ? { tone: "grey", text: "Loading…" }
+    : load.phase === "error" ? { tone: "red", text: "Couldn't load" }
+    : viewOnly ? { tone: "grey", text: "View only: " + viewOnly.short, title: viewOnly.long }
+    : tooBig ? { tone: "grey", text: "View only: catalog too big", title: SS_PG_TOO_BIG }
+    : q && q.viewOnly ? { tone: "grey", text: "View only: " + q.viewOnly.reason }
+    : q && q.stopped ? { tone: "red", text: "Saving stopped: " + q.stopped.reason,
+      actions: q.stopped.kind === "tenant" ? null : <>{bact("Retry", resume)}{bact("Discard these changes", discard)}</> }
+    : q && q.flight && q.failures ? { tone: "amber", text: retryAt ? `Can't reach the server. Retrying in ${secs} s; your changes are kept` : "Can't reach the server. Trying again; your changes are kept",
+      actions: retryAt ? bact("Retry now", retryNow) : null }
+    : out ? { tone: "blue", text: `Saving ${n(out, "1 change", "changes")}…` }
+    : unsent ? { tone: "blue", text: `${n(unsent, "1 change", "changes")} not saved yet` }
+    : q && q.unsure ? { tone: "amber", text: "Discarded, but the last try may have saved", title: "Discarded, but the last try may have saved. Reload to see what's on file", actions: bact("Reload", fetchAll) }
+    : counts.red ? { tone: "red", text: `${n(counts.red, "1 box needs", "boxes need")} you`, onClick: () => jumpRed(), title: "Go to the next box that didn't save" }
+    : { tone: "green", text: `All changes saved · ${time}` };
+  const noStyles = !!model && model.styles.length === 0;
+  const noCols = !!model && model.cols.length === 0;
+  const choices = model ? [...model.styles, ...model.hiddenStyles] : [];
+  const shedsHref = ssPgSettingsHref("sheds");
+  // The status line (plan 3.14): the active box's reason when it is red, else a note from the queue,
+  // else a one-off tip.
+  const af = active ? fieldOf(active.col) : null;
+  const aerr = af && q && q.fields[active.sizeId] && q.fields[active.sizeId][af] ? q.fields[active.sizeId][af].error : null;
+  const errLine = aerr && at ? ssPgErrorLine(`${at.style.label} ${at.size.label}`,
+    { name: colName(active.col), kind: active.col === 1 ? "price" : active.col === 2 ? "active" : "qty" }, aerr) : null;
+  // The button goes with the line it dismisses, so the keyboard goes back to the grid, not <body>.
+  const dismissBtn = (fn) => <button type="button" onClick={() => { fn(); focusGrid(); }}>Dismiss</button>;
+  // The backup's red entries (plan 4.9), named by what is drawn now; never sent.
+  let earlierLine = "";
+  if (earlierRed && model) {
+    const where = {}, fields = { price: { name: "Price", kind: "price" }, active: { name: "Offered", kind: "active" } };
+    [...model.styles, ...model.hiddenStyles].forEach((st) => st.sizes.forEach((z) => { where[z.id] = `${st.label} ${z.label}`; }));
+    model.cols.forEach((c) => { fields["c:" + c.key] = { name: c.label, kind: "qty" }; });
+    earlierLine = ssPgEarlierText(earlierRed, where, fields);
+  }
+  // The $0 note (ssPgZeroText), for the sizes of the last such change still at $0 in the designer as
+  // drawn now (ssPgFreeAt) and not in a hidden style: it goes by itself once the builder clears the
+  // price, unticks Offered or types another price, and a page that can't edit never shows it.
+  let zeroLine = "";
+  if (zeroIds && canEdit && q && model) {
+    const nameOf = (id) => {
+      for (const st of [...model.styles, ...model.hiddenStyles]) { const z = st.sizes.find((x) => x.id === id); if (z) return `${st.label} ${z.label}`; }
+      return "";
+    };
+    const hid = ssPgHiddenStyleSizes(model);
+    zeroLine = ssPgZeroText(zeroIds.filter((id) => ssPgFreeAt(q, id) && !hid[id]), nameOf);
+  }
+  const tableW = SS_PG_FROZEN_W + SS_PG_COL_W * (ncols - 3);
+  // Leaving was called off (`stuck`): the badge says why (stopped, retrying, view only), this says
+  // the page stayed, and Leave anyway goes without what is unsent.
+  const unsaved = counts.pending + counts.inflight + counts.creating + counts.removing;
+  const stuckLine = stuck && unsaved > 0 ? (
+    <PgStatusLine tone="amber" action={<>
+      <button type="button" onClick={() => { const to = stuck.to; setStuck(null); go(to); }}>Leave anyway</button>
+      {dismissBtn(() => setStuck(null))}
+    </>}>{`${n(unsaved, "1 change isn't", "changes aren't")} saved yet, so you're still on this page.`}</PgStatusLine>
+  ) : null;
+
+  const readoutEl = <span className="ss-pg-readout" title={readout || undefined}>{readout}</span>;
+  return (
+    <div className="ss-pg" data-ss-pg-editable={canEdit ? "1" : "0"}>
+      <div className="ss-pg-bar">
+        <a className="ss-pg-back" href={shedsHref} onMouseDown={holdEditor} onClick={toSheds}>← Back to Sheds</a>
+        <span className="ss-pg-title">Sizes &amp; prices</span>
+        {operatorView && <span className="ss-pg-co" title={companyName}>{companyName}</span>}
+        <select className="ss-pg-jump" aria-label="Jump to style" value="" disabled={!choices.length}
+          onChange={(e) => { const id = e.target.value; if (id) { jumpRef.current = id; setJumpTick((k) => k + 1); } }}>
+          <option value="">Jump to style…</option>
+          {choices.map((s) => <option key={s.id} value={s.id}>{s.label}{s.active ? "" : " (hidden)"}</option>)}
+        </select>
+        <label className="ss-pg-tog">
+          <input type="checkbox" checked={showHidden} onChange={(e) => toggleShowHidden(e.target.checked)} />
+          Show hidden sizes
+        </label>
+        {/* Fill down, Clear and Delete sizes (plan 3.10; the delete plan, 10-31), for builders who don't
+            know the keys. Drawn only while the page can edit, as the editor and the add strips are
+            (plan 3.16). */}
+        {canEdit && (
+          <>
+            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { fillDown(); focusGrid(); }}
+              title="Copy the top row of the selected boxes into the rows under it (Ctrl+D)">Fill down</button>
+            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={() => { clearSel(); focusGrid(); }}
+              title="Empty the selected price and option boxes (Delete)">Clear</button>
+            <button type="button" className="ss-pg-tbtn" onMouseDown={keepFocus} onClick={(e) => { if (e.detail < 2) deleteSel(); focusGrid(); }}
+              title="Delete the sizes in the selected rows">Delete sizes</button>
+          </>
+        )}
+        {!narrow && readoutEl}
+        <PgBadge {...badge} />
+        <button type="button" className="ss-pg-q" aria-expanded={narrow ? legendOpen : undefined} aria-controls="ss-pg-legend"
+          title="What the boxes mean" onMouseDown={keepFocus} onClick={() => { if (narrow) setLegendOpen((o) => !o); }}>?</button>
+      </div>
+      {/* The chromeless page has no top bar, so it says for itself whose account this is. */}
+      {operatorView && (
+        <div className="ss-pg-op" role="note">
+          {(readOnly || lostEdit)
+            ? `Viewing ${companyName} as operator. This table is view-only.`
+            : `Editing ${companyName} as operator. Changes are live.`}
+        </div>
+      )}
+      {viewOnly && <PgStatusLine role="status">{viewOnly.long}</PgStatusLine>}
+      {/* One band that is always this high, so nothing that comes and goes in it moves the grid. What
+          runs longer than the band hangs over the frozen header, and --ss-pg-hd stops it there. Only
+          what is said sits in the live region: the legend and the note would be read out. */}
+      <div className="ss-pg-slot" style={{ "--ss-pg-hd": SS_PG_SEC_H + hh + "px" }}>{narrow && readoutEl}<div className="ss-pg-slot-in"><div className="ss-pg-live" role="status">
+      {tooBig && <PgStatusLine tone="amber" action={<button type="button" onClick={fetchAll}>Reload</button>}>{SS_PG_TOO_BIG}</PgStatusLine>}
+      {/* The backup from earlier (plan 4.9): offered back once, until Save them or Discard. */}
+      {earlier && canEdit && (
+        <div className="ss-pg-earlier">
+          <span>{earlier.count === 1 ? "You have 1 change from earlier that wasn't saved." : `You have ${earlier.count} changes from earlier that weren't saved.`}</span>
+          {/* Greyed while a call is out (about a second, or while saving is stopped): Save them goes on
+              the stored versions only when nothing is in flight (ssPgQueue's restore). */}
+          <button type="button" onClick={saveEarlier} disabled={!!(q && q.flight)}
+            title={q && q.flight ? "Wait a moment: a save is going out." : undefined}>Save them</button>
+          <button type="button" onClick={discardEarlier}>Discard</button>
+        </div>
+      )}
+      {stuckLine ? stuckLine
+        : said ? <PgStatusLine tone={said.tone} action={dismissBtn(() => setSaid(null))}>{said.text}</PgStatusLine>
+        : errLine ? <PgStatusLine tone={aerr.kind === "conflict" ? "amber" : "red"} action={dismissBtn(() => apply({ type: "dismiss", sizeId: active.sizeId, f: af }))}>{errLine}</PgStatusLine>
+        : earlierLine ? <PgStatusLine tone="amber" action={dismissBtn(dismissEarlierRed)}>{earlierLine}</PgStatusLine>
+        : q && q.note ? <PgStatusLine tone="amber" action={dismissBtn(() => apply({ type: "note-off" }))}>{q.note.text}</PgStatusLine>
+        : tip ? <PgStatusLine tone={SS_PG_TIP_NO.has(tip) ? "amber" : "grey"} action={dismissBtn(() => setTip(null))}>{tip}</PgStatusLine>
+        : zeroLine ? <PgStatusLine tone="amber" action={dismissBtn(() => setZeroIds(null))}>{zeroLine}</PgStatusLine> : null}
+      </div>
+      {(legendOpen || !narrow) && <div id="ss-pg-legend" className="ss-pg-legend">{SS_PG_LEGEND}</div>}
+      {narrow && !noteOff && (
+        <div className="ss-pg-narrow">
+          <span>Easiest on a computer. You can still check and change numbers here.</span>
+          <button type="button" aria-label="Dismiss" onClick={() => setNoteOff(true)}>✕</button>
+        </div>
+      )}
+      </div></div>
+      {noCols && (
+        <div className="ss-pg-optbox">
+          <b>Set up your Options first.</b> Every door, window, ramp, and add-on you offer becomes a column here — that's
+          how you say what comes <b>included</b> with each size.{" "}
+          <a href={ssPgSettingsHref("options")} onMouseDown={holdEditor} onClick={leaveTo("options")}>Go to Options →</a>
+        </div>
+      )}
+      {noStyles && (
+        <div className="ss-pg-msg ss-pg-msg-inline" role="status">
+          No building styles yet. <a href={shedsHref} onMouseDown={holdEditor} onClick={toSheds}>Add one on Sheds.</a>
+        </div>
+      )}
+      <div className="ss-pg-box" ref={boxRef} aria-busy={load.phase === "loading" ? "true" : undefined}
+        style={{ scrollPaddingTop: SS_PG_SEC_H + hh, scrollPaddingLeft: narrow ? 82 : SS_PG_FROZEN_W }}>
+        {load.phase === "loading" ? <PgSkeleton />
+          : load.phase === "error" ? (
+            <div className="ss-pg-fail" role="alert">
+              <b>{load.status === 403 ? "You don't have access to Sheds on this account." : "Couldn't load your sizes."}</b>
+              {load.status !== 403 && load.error && <span className="ss-pg-fail-why">{load.error}</span>}
+              <button type="button" onClick={fetchAll}>Retry</button>
+            </div>
+          ) : (noStyles && !model.hiddenStyles.length) ? null : (
+            <div className="ss-pg-sheet" style={{ width: tableW }}>
+              <PgSelectionOverlay lane ringRef={ringFRef} rangeRef={rangeFRef}>
+                {editing && editing.frozen && <PgEditor key={editing.sizeId + "|" + editing.f} inputRef={edInputRef} init={editing.init} label={editing.label}
+                  price={editing.price} onKeyDown={onEditKey} onInput={onEditInput} onBlur={onEditBlur} />}
+              </PgSelectionOverlay>
+              <table ref={gridRef} className="ss-pg-grid" role="grid" aria-label="Sizes and prices" tabIndex={0}
+                aria-rowcount={2 + rows.length} aria-colcount={ncols} aria-readonly={canEdit ? undefined : "true"}
+                style={{ width: tableW, "--ss-pg-hh": hh + "px" }}
+                onKeyDown={onKeyDown} onMouseDown={onMouseDown} onMouseOver={onMouseOver} onMouseMove={onMouseMove} onDoubleClick={onDoubleClick} onFocus={onFocus}
+                onClick={onAct}>
+                {head}
+                <tbody>{body}</tbody>
+              </table>
+              <PgSelectionOverlay ringRef={ringBRef} rangeRef={rangeBRef}>
+                {editing && !editing.frozen && <PgEditor key={editing.sizeId + "|" + editing.f} inputRef={edInputRef} init={editing.init} label={editing.label}
+                  price={editing.price} onKeyDown={onEditKey} onInput={onEditInput} onBlur={onEditBlur} />}
+              </PgSelectionOverlay>
+            </div>
+          )}
+      </div>
+      {/* The confirm before a change to more than one size (plan 3.12), and before a delete (`del`:
+          Cancel and a red Delete, the focus on Cancel). Gone if the page stops being able to edit
+          meanwhile (a 403 on a save already out). */}
+      {confirm && canEdit && <PgConfirm text={confirm.text} onYes={confirmYes} onNo={confirmNo}
+        yesLabel={confirm.del ? "Delete" : "Continue"} danger={!!confirm.danger} />}
+    </div>
+  );
+}
+
+// THE CONFIRM (plan 3.12): before a paste, fill or clear that changes boxes on more than one size.
+// A modal alertdialog named by its own question ("Change 6 sizes, Test Barn 10x12 to Test Barn 12x24:
+// 6 prices, … Continue?"). The focus goes to Continue and stays inside (Tab and Shift+Tab go round
+// the two buttons); Escape, Cancel or a click outside it cancel, and Cancel changes nothing. The page
+// gives the focus back to the grid either way. Every hook is above the return.
+// A DELETE (`danger`, the delete plan, 10-31): the yes button says `yesLabel` ("Delete") in red, and
+// the focus starts on CANCEL, so Enter on a freshly opened delete confirm cancels: a builder from
+// Excel who presses Delete then Enter out of habit deletes nothing. Tab then Enter, or a click, deletes.
+function PgConfirm({ text, onYes, onNo, yesLabel = "Continue", danger = false }) {
+  const yesRef = useRef(null);
+  const noRef = useRef(null);
+  React.useLayoutEffect(() => {
+    try { (danger ? noRef : yesRef).current.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+  }, []);
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onNo(); return; }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const next = document.activeElement === yesRef.current ? noRef.current : yesRef.current;
+      try { next.focus(); } catch (_f) { /* gone */ }
+    }
+  };
+  return (
+    <div className="ss-pg-confirm" onMouseDown={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); onNo(); } }}>
+      <div className="ss-pg-confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="ss-pg-confirm-q" onKeyDown={onKey}>
+        <p id="ss-pg-confirm-q">{text}</p>
+        <div className="ss-pg-confirm-acts">
+          <button type="button" ref={noRef} onClick={onNo}>Cancel</button>
+          <button type="button" ref={yesRef} className={danger ? "ss-pg-confirm-yes ss-pg-confirm-del" : "ss-pg-confirm-yes"} onClick={onYes}>{yesLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The two header rows (plan 3.3-3.4): the section band in each section's template colour, then the
+// names. Option names stand on end in a .ss-pg-vh span, top to bottom (Carolyn Q6), and wrap onto a
+// second line inside the column rather than being cut; the full name is also each header's title
+// and aria-label, and the readout while it is pointed at.
+const PgHeader = React.memo(function PgHeader({ sections, cols, rtpOn, onPeek, onPeekEnd }) {
+  // A section too narrow for its name (ssPgSecNarrow) draws it in the narrow style instead of
+  // cutting it. Measured in the band's own style (portal.html .ss-pg-sec th: weight 800, 10.5 px,
+  // capitals, 0.4 px letter spacing) in the page's font; the harness's C1 holds the two together.
+  const narrowSecs = useMemo(() => {
+    const ctx = ssPgMeasureCtx();
+    let measure = null;
+    if (ctx) {
+      try {
+        ctx.font = `800 10.5px ${getComputedStyle(document.body).fontFamily}`;
+        measure = (t) => ctx.measureText(t.toUpperCase()).width + 0.4 * t.length + 1;
+      } catch (_e) { measure = null; }
+    }
+    return ssPgSecNarrow(sections, measure, SS_PG_COL_W);
+  }, [sections]);
+  let from = 4;
+  return (
+    <thead onMouseOver={onPeek} onMouseLeave={onPeekEnd}>
+      <tr role="row" aria-rowindex={1} className="ss-pg-sec">
+        <th className="ss-pg-corner" colSpan={3} role="columnheader" aria-colindex={1} aria-colspan={3} aria-label="Size, price and offered" />
+        {sections.map((s, i) => {
+          const at = from;
+          from += s.cols.length;
+          return (
+            <th key={s.name} colSpan={s.cols.length} role="columnheader" aria-colindex={at} aria-colspan={s.cols.length}
+              title={s.name} className={narrowSecs[i] ? "ss-pg-secn" : undefined}
+              style={{ background: "#" + String(s.argb || "FFF1F5F9").slice(2) }}>{narrowSecs[i] ? ssPgSecText(s.name) : s.name}</th>
+          );
+        })}
+      </tr>
+      <tr role="row" aria-rowindex={2} className="ss-pg-names">
+        <th role="columnheader" aria-colindex={1} data-col={0} className="ss-pg-f0 ss-pg-fh">Size</th>
+        <th role="columnheader" aria-colindex={2} data-col={1} className={"ss-pg-f1 ss-pg-fh" + (rtpOn ? " ss-pg-rtp" : "")}
+          title={rtpOn ? SS_PG_RTP : "Base price"}>Price{rtpOn ? " 🔒" : ""}</th>
+        <th role="columnheader" aria-colindex={3} data-col={2} className="ss-pg-f2" title="Offered in your designer" aria-label="Offered">
+          <span className="ss-pg-vh">Offered</span>
+        </th>
+        {cols.map((c, i) => (
+          <th key={c.key} role="columnheader" aria-colindex={4 + i} data-col={3 + i} title={c.label} aria-label={c.label}
+            className={i === 0 || cols[i - 1].section !== c.section ? "ss-pg-oh ss-pg-s0" : "ss-pg-oh"}>
+            <span className="ss-pg-vh">{c.label}</span>
+          </th>
+        ))}
+      </tr>
+    </thead>
+  );
+});
+
+// One size (plan 3.5). Primitive props only, plus `values`, which the page hands back as the same
+// array while that size's boxes are unchanged, so a row re-renders only when its own size does.
+// Size, Price and Offered are frozen (portal.html). The price is also the cell's title:
+// "$123,456.78", or three decimals shown as stored, is wider than the 76 px column and ends in an
+// ellipsis, and the title is where it reads whole. Under Real-Time Pricing the cell is grey with a
+// lock (portal.html), and the title says why.
+// `marks` (ssPgRowView) is one character per column, a shape as well as a colour (plan 3.13): "p"
+// waiting to save (a blue corner), "r" refused or not valid (red outline and "!"), "c" changed
+// elsewhere (amber outline and "↺"); "" when the size has nothing local. A red box is aria-invalid.
+// Phase 4a: `busy` is "adding" while the size's create is unanswered, said in the empty Price box
+// ("Adding…"), and "removing" while its delete is queued or out, said over the price ("Deleting…").
+// `deletable` (the delete plan, 10-31: every size of a page that can edit, unless busy) puts a small
+// ✕ at the right of the Size box. The box is 82 px, so beside the ✕ a label keeps the room it had in
+// 64 px with none (56 px, 100x100 fits). A word is too wide to fit there as well, so its title and
+// name say "Delete". `delOff` (ssPgDeleteWhy) greys it, aria-disabled with that reason as its
+// title, when saved designs use the size; a click then says the same on the status line. It is
+// handled by the grid's own click (data-pg-act), so PgRow takes no function and its memo holds.
+const PgRow = React.memo(function PgRow({ rowIndex, sizeId, label, title, priceText, offered, noPrice, hidden, values, rtp, marks = "",
+  busy = "", deletable = false, delOff = "" }) {
+  const mark = (c) => {
+    const m = marks ? marks.charAt(c) : "";
+    return m === "p" ? "ss-pg-m-p" : m === "r" ? "ss-pg-m-r" : m === "c" ? "ss-pg-m-c" : "";
+  };
+  const cls = (c, base) => ([base, mark(c)].filter(Boolean).join(" ") || undefined);
+  const bad = (c) => { const m = marks ? marks.charAt(c) : ""; return m === "r" || m === "c" ? "true" : undefined; };
+  return (
+    <tr role="row" aria-rowindex={rowIndex} data-s={sizeId} className={[hidden ? "ss-pg-hid" : "", busy ? "ss-pg-busy" : ""].filter(Boolean).join(" ") || undefined}>
+      <td role="gridcell" aria-colindex={1} data-c={0} className={"ss-pg-f0 ss-pg-size" + (deletable ? " ss-pg-rmable" : "")} title={title || undefined} aria-readonly="true">
+        {label}
+        {deletable && <button type="button" className="ss-pg-rm" data-pg-act="delete" data-pg-id={sizeId} tabIndex={-1} aria-disabled={delOff ? "true" : undefined}
+          title={delOff || "Delete this size. Delete on its Size box does the same."} aria-label={`Delete size ${label}`}>✕</button>}
+      </td>
+      <td role="gridcell" aria-colindex={2} data-c={1} className={cls(1, "ss-pg-f1 ss-pg-price" + (rtp ? " ss-pg-rtp" : ""))}
+        aria-invalid={bad(1)} aria-readonly={rtp ? "true" : undefined}
+        title={rtp ? (priceText ? `${priceText} · ${SS_PG_RTP}` : SS_PG_RTP) : (priceText || undefined)}>
+        {busy === "removing" ? <span className="ss-pg-wait">Deleting…</span> : busy && !priceText ? <span className="ss-pg-wait">Adding…</span> : priceText}
+      </td>
+      <td role="gridcell" aria-colindex={3} data-c={2} className={cls(2, "ss-pg-f2 ss-pg-off" + (noPrice ? " ss-pg-dis" : ""))} aria-invalid={bad(2)}
+        title={noPrice ? "Add a price to offer it" : offered ? "Offered in your designer" : "Not offered"}>{offered ? "✓" : ""}</td>
+      {values.map((v, i) => <td key={i} role="gridcell" aria-colindex={4 + i} data-c={3 + i} className={cls(3 + i, "")} aria-invalid={bad(3 + i)}>{v}</td>)}
+    </tr>
+  );
+});
+
+// THE SELECTION OVERLAY (plan 3.5): the active cell's ring and the range's rectangle, absolutely
+// placed over the grid by the page (PricingTablePage `place`), so a move re-renders no row. It comes
+// twice, because Size, Price and Offered are sticky: the `lane` copy lives in a zero-size sticky strip
+// at the grid's left edge, so it rides along with those columns as the grid scrolls sideways (above
+// their cells, under the header); the other scrolls with the option columns, under the frozen ones.
+// The editor sits in whichever holds its column.
+function PgSelectionOverlay({ lane = false, ringRef, rangeRef, children = null }) {
+  const parts = (
+    <>
+      <div ref={rangeRef} className="ss-pg-range" aria-hidden="true" />
+      <div ref={ringRef} className="ss-pg-ring" aria-hidden="true" />
+      {children}
+    </>
+  );
+  return lane ? <div className="ss-pg-lane">{parts}</div> : parts;
+}
+
+// THE EDITOR (plan 3.5, 3.10, 3.17): one text box over the active cell while typing; type="text"
+// with an inputMode, never type="number", whose spinners eat the 44 px. Its text lives in the DOM
+// (the page reads it through a ref), so a keystroke re-renders nothing. Focused on mount with the
+// caret at the end; named for screen readers ("Test Barn 12x24, Loft (sq ft)").
+function PgEditor({ inputRef, init, label, price, onKeyDown, onInput, onBlur }) {
+  React.useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    try { el.focus({ preventScroll: true }); } catch (_f) { el.focus(); }
+    try { el.setSelectionRange(el.value.length, el.value.length); } catch (_s) { /* not a text box */ }
+  }, []);
+  return (
+    <input ref={inputRef} type="text" className={"ss-pg-ed" + (price ? " ss-pg-ed-price" : "")} defaultValue={init}
+      inputMode={price ? "decimal" : "numeric"} aria-label={label} autoComplete="off" spellCheck={false}
+      onKeyDown={onKeyDown} onInput={onInput} onBlur={onBlur} />
+  );
+}
+
+// A style's band: its name and how many sizes it has. The name sticks to the left edge while the
+// grid scrolls sideways. "＋ Add sizes" (plan 3.7, `canAdd`: the page can edit) opens the style's add
+// strip under it, or closes it (`open`); it is handled by the grid's own click (data-pg-act), so the
+// band takes no function and its memo holds. `hidden` is what its rows show now (ssPgRows' `live`),
+// and `folded` how many of them are not drawn: all of them ("3 hidden, folded away"), or some, when
+// sizes added here or hidden under the builder stay drawn ("3 hidden, 2 folded away").
+const PgStyleBand = React.memo(function PgStyleBand({ rowIndex, styleId, label, total, hidden, folded, ncols, canAdd = false, open = false }) {
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-band" data-band={styleId}>
+      <td role="rowheader" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
+        <div className="ss-pg-bandin">
+          <b title={label}>{label}</b>
+          <span>{total === 1 ? "1 size" : `${total} sizes`}{hidden ? ` · ${hidden} hidden${folded ? (folded < hidden ? `, ${folded} folded away` : ", folded away") : ""}` : ""}</span>
+          {canAdd && <button type="button" className="ss-pg-addbtn" title="Add sizes to this style (Alt+Enter on any of its sizes)" data-pg-act="add" data-pg-id={styleId} aria-expanded={open}>＋ Add sizes</button>}
+        </div>
+      </td>
+    </tr>
+  );
+});
+
+// "＋ Add sizes" (plan 3.7): the strip under a style's band, in two modes.
+//   List: type sizes like 10x12, 12x16 (commas, semicolons or new lines) and press Enter or Add.
+//   Add several: the widths and the lengths you sell, and a tick-box grid of every pair, widths down
+//   and lengths across, all ticked, the sizes already in the style greyed "already there"; untick what
+//   you don't sell, then [Add N sizes].
+// Every check runs here before anything is sent (ssPgParseSizeList, ssPgSizeGrid, the server's own
+// number rule): one bad entry refuses the whole add and is named. Under a style with no sizes this is
+// the placeholder row (`empty`), list box open. `onAdd(styleId, sizes, skipped)` hands the sizes to
+// the page (it answers false when it could not take them); `focusKey` moves the cursor into the list
+// box each time it changes. Its keys and clicks stay its own: the grid's handlers ignore anything
+// that happens inside it. Every hook is above the return.
+function PgAddSizes({ rowIndex, styleId, styleLabel, existing, ncols, empty, focusKey = 0, onAdd, onClose }) {
+  const [mode, setMode] = useState("list");
+  const [text, setText] = useState("");
+  const [widths, setWidths] = useState("");
+  const [lengths, setLengths] = useState("");
+  const [off, setOff] = useState({});
+  const [err, setErr] = useState(null);
+  const listRef = useRef(null);
+  const widthRef = useRef(null);
+  const grid = useMemo(() => (mode === "several" ? ssPgSizeGrid(widths, lengths, existing, off) : null), [mode, widths, lengths, existing, off]);
+  useEffect(() => {
+    if (!focusKey) return;
+    const el = mode === "several" ? widthRef.current : listRef.current;
+    try { if (el) el.focus({ preventScroll: true }); } catch (_f) { /* gone */ }
+  }, [focusKey]);
+  const addList = () => {
+    const p = ssPgParseSizeList(text, existing);
+    if (!p.ok) { setErr(p.error); return; }
+    if (!p.sizes.length) {
+      setErr(`${p.skipped.join(", ")} ${p.skipped.length === 1 ? "is" : "are"} already in ${styleLabel}. Nothing to add.`);
+      return;
+    }
+    if (onAdd(styleId, p.sizes, p.skipped) === false) return;
+    setErr(null);
+    setText("");
+  };
+  const n = grid ? grid.sizes.length : 0;
+  const canGo = !!grid && grid.ok && n > 0;
+  const addGrid = () => {
+    if (!canGo) return;
+    if (onAdd(styleId, grid.sizes, []) === false) return;
+    setErr(null);
+    setOff({});
+    setWidths("");
+    setLengths("");
+  };
+  const onListKey = (e) => {
+    // Enter adds (plan 3.7: "and press Enter"); Shift+Enter starts a new line; Escape closes.
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addList(); }
+    else if (e.key === "Escape" && !empty) { e.preventDefault(); onClose(styleId); }
+  };
+  const tick = (label) => setOff((o) => { const next = { ...o }; if (next[label]) delete next[label]; else next[label] = true; return next; });
+  const modeBtn = (m, label) => (
+    <button type="button" className={"ss-pg-addmode" + (mode === m ? " ss-pg-on" : "")} aria-pressed={mode === m}
+      onClick={() => { setMode(m); setErr(null); }}>{label}</button>
+  );
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-add-row" data-add={styleId}>
+      <td role="gridcell" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
+        <div className="ss-pg-add" role="group" aria-label={`Add sizes to ${styleLabel}`}>
+          <div className="ss-pg-addtop">
+            {empty && mode === "list"
+              ? <span className="ss-pg-addhint">No sizes yet. Type sizes like 10x12, 12x16 and press Enter</span>
+              : <b>Add sizes to {styleLabel}</b>}
+            {modeBtn("list", "List")}
+            {modeBtn("several", "Add several")}
+            {!empty && <button type="button" className="ss-pg-addx" aria-label="Close" title="Close" onClick={() => onClose(styleId)}>✕</button>}
+          </div>
+          {mode === "list" ? (
+            <div className="ss-pg-addline">
+              <textarea ref={listRef} className="ss-pg-addin" rows={1} value={text} placeholder="10x12, 12x16"
+                aria-label={`Sizes to add to ${styleLabel}`} spellCheck={false}
+                onChange={(e) => { setText(e.target.value); if (err) setErr(null); }} onKeyDown={onListKey} />
+              <button type="button" className="ss-pg-addgo" onClick={addList}>Add</button>
+            </div>
+          ) : (
+            <>
+              <div className="ss-pg-addline">
+                <label>Widths <input ref={widthRef} className="ss-pg-addnum" value={widths} placeholder="8, 10, 12" spellCheck={false}
+                  onChange={(e) => setWidths(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape" && !empty) onClose(styleId); }} /></label>
+                <span aria-hidden="true">×</span>
+                <label>Lengths <input className="ss-pg-addnum" value={lengths} placeholder="12, 16, 20" spellCheck={false}
+                  onChange={(e) => setLengths(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape" && !empty) onClose(styleId); }} /></label>
+                <span className="ss-pg-addhint">feet</span>
+              </div>
+              {grid && grid.rows.length > 0 && (
+                <div className="ss-pg-tick" role="group" aria-label="Sizes to add: untick the ones you don't sell"
+                  style={{ gridTemplateColumns: `auto repeat(${grid.lengths.length}, minmax(52px, auto))` }}>
+                  <span />
+                  {grid.lengths.map((l) => <span key={"l" + l} className="ss-pg-tickh">{l}</span>)}
+                  {grid.rows.map((r, i) => (
+                    <React.Fragment key={"w" + grid.widths[i]}>
+                      <span className="ss-pg-tickh">{grid.widths[i]}</span>
+                      {r.map((c) => (c.there
+                        ? <span key={c.label} className="ss-pg-there" title={`${c.label} is already in ${styleLabel}`}>already there</span>
+                        : (
+                          <label key={c.label} className="ss-pg-tickc">
+                            <input type="checkbox" checked={c.ticked} onChange={() => tick(c.label)} aria-label={c.label} />
+                            {c.label}
+                          </label>
+                        )))}
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+              {grid && !grid.blank && (
+                <div className="ss-pg-addline">
+                  <button type="button" className="ss-pg-addgo" disabled={!canGo} onClick={addGrid}>{n === 1 ? "Add 1 size" : `Add ${n} sizes`}</button>
+                </div>
+              )}
+            </>
+          )}
+          {(err || (grid && grid.error)) && <div className="ss-pg-adderr" role="alert">{err || grid.error}</div>}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// A placeholder under a style with nothing to show. Not a cell: the cursor and a paste never land here.
+function PgNoteRow({ rowIndex, text, ncols }) {
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-note-row">
+      <td role="gridcell" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}><div className="ss-pg-bandin">{text}</div></td>
+    </tr>
+  );
+}
+
+// "Hidden styles (not in your designer)": folded until opened (plan 3.3).
+function PgHiddenStylesRow({ rowIndex, count, open, ncols, onToggle }) {
+  return (
+    <tr role="row" aria-rowindex={rowIndex} className="ss-pg-hs">
+      <td role="gridcell" colSpan={ncols} aria-colindex={1} aria-colspan={ncols}>
+        <div className="ss-pg-bandin">
+          <button type="button" aria-expanded={open} onClick={onToggle}>{open ? "▾" : "▸"} Hidden styles (not in your designer) · {count}</button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// The grid while it loads: grey blocks in the grid's own shape (see SkelBar, 01-core.jsx).
+function PgSkeleton() {
+  const cols = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+  return (
+    <div className="ss-pg-skel" aria-hidden="true">
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <SkelBar w={164} h={96} />
+        {cols.map((i) => <SkelBar key={i} w={38} h={96} />)}
+      </div>
+      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((r) => (
+        <div key={r} style={{ display: "flex", gap: 6, marginBottom: 6, opacity: 1 - r * 0.07 }}>
+          <SkelBar w={164} h={20} />
+          {cols.map((i) => <SkelBar key={i} w={38} h={20} />)}
+        </div>
+      ))}
+    </div>
+  );
+}

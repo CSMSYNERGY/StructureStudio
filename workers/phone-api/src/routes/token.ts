@@ -1,11 +1,12 @@
 // POST /token: a Twilio Access Token for the Voice SDK (SPEC section 3).
 //
 // Checks the login locally, then in ONE parallel round: the caller's phone context (uncached),
-// their DND/forwarding settings, and whether their Auth session still exists. The session check
-// is what makes "Sign out all devices" stop a lost phone from minting a fresh line: an access
-// token stays valid until it expires even after every session is revoked, and this is the one
-// endpoint that turns a login into a working line. It fails OPEN on an Auth outage (a phone that
-// cannot get a token cannot take calls) and CLOSED on Auth saying the session is gone.
+// their DND/forwarding settings, their answer to the apps' transcripts notice (migration 307, read
+// on its own so /token never depends on it), and whether their Auth session still exists. The
+// session check is what makes "Sign out all devices" stop a lost phone from minting a fresh line:
+// an access token stays valid until it expires even after every session is revoked, and this is
+// the one endpoint that turns a login into a working line. It fails OPEN on an Auth outage (a
+// phone that cannot get a token cannot take calls) and CLOSED on Auth saying the session is gone.
 //
 // `wallet` tells the apps whether outbound calls and texts are going through, for the banner
 // (wallet.ts walletStateOf): ok, low (still allowed, under twice the floor) or blocked, with
@@ -17,20 +18,35 @@
 
 import type { Ctx, Env } from "../env";
 import { mintAccessToken, pushCredentialFor, pushCredentialSecretFor, type BuildType, type Platform } from "../accessToken";
-import { adminClient, callerContext } from "../db";
+import { readMyConsent } from "../aiConsent";
+import { adminClient, callerContext, type RecordingSettings } from "../db";
 import { ApiError, ok, readJson } from "../http";
 import { toIdentity } from "../identity";
 import { bearerToken, verifySupabaseJwt } from "../jwt";
 import { logFault } from "../log";
-import { armedFor } from "../recording";
+import { armedFor, callTranscribeOn } from "../recording";
+import { transcribeOn } from "../voicemail";
 import { maySendToContacts } from "../scope";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
 import { greetingOut } from "./me";
 import { onDnd } from "./voice";
+import { callerTwilioEnv } from "../twilioAccount";
+import { cellForwardAllowed } from "../dialGuard";
 
 export const TOKEN_TTL = 3600;
 /** The setup test only needs long enough to run Twilio's preflight. */
 export const PREFLIGHT_TTL = 600;
+
+/**
+ * /token `transcripts`: whether this business's recorded calls are transcribed and summarised
+ * (Workers AI, then Claude) and whether its voicemails are transcribed (Twilio), right now. The
+ * same three business-wide facts the minute tick reads before it transcribes (cron/transcribe.ts):
+ * the call was recorded (armedFor, announced or not), the business wants transcripts, and the rail
+ * is on. One call also needs everyone on it to have allowed it (`ai_consent`, ../aiConsent.ts).
+ */
+export function transcriptsFor(env: Env, s: RecordingSettings): { calls: boolean; voicemail: boolean } {
+  return { calls: armedFor(env, s) && s.transcribe && callTranscribeOn(env), voicemail: transcribeOn(env) };
+}
 
 /** true = alive, false = Auth says the session is gone, null = could not tell. */
 async function sessionAlive(env: Env, token: string): Promise<boolean | null> {
@@ -59,13 +75,14 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
   const claims = await verifySupabaseJwt(env, jwt);
   const admin = adminClient(env);
 
-  const [ctx, settingsRes, alive] = await Promise.all([
+  const [ctx, settingsRes, consentRes, alive] = await Promise.all([
     callerContext(admin, claims.sub),
     // ⚠️ dnd_cover_user_id, ring_hours, ring_hours_tz and the greeting columns are migration 264's:
     // this Worker must not be deployed before it is applied.
     admin.from("phone_user_settings")
       .select("dnd, dnd_until, forward_to_cell, dnd_cover_user_id, ring_hours, ring_hours_tz, greeting_recording_sid, greeting_updated_at")
       .eq("user_id", claims.sub).maybeSingle(),
+    readMyConsent(admin, claims.sub),
     sessionAlive(env, jwt),
   ]);
   if (alive === false) throw new ApiError("unauthorized", "You were signed out. Please sign in again.");
@@ -74,10 +91,30 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
   }
   if (!ctx || ctx.phone_level === "none") throw new ApiError("no_phone_access");
   if (ctx.phone_status !== "on") throw new ApiError("phone_off");
+  if (consentRes.error) {
+    ec.waitUntil(logFault({
+      code: "ai_consent_unreadable", severity: "warn", throttleMs: 10 * 60_000,
+      message: `The transcripts answer couldn't be read during /token (database code ${consentRes.error}); is migration 307 applied? The apps keep transcripts hidden meanwhile.`,
+    }));
+  }
 
-  const appSid = preflight ? env.TWILIO_ECHO_APP_SID : env.TWILIO_TWIML_APP_SID;
-  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_API_KEY || !env.TWILIO_API_SECRET || !appSid) {
-    ec.waitUntil(logFault({ code: "token_not_configured", message: "The Twilio account SID, API key pair or TwiML App SID is missing.", throttleMs: 10 * 60_000 }));
+  // ── WHICH ACCOUNT SIGNS THE TOKEN (Workstream 2, phase 5) ──────────────────────────────────
+  // A Voice token must be signed with an API key of the SAME account its TwiML App and push
+  // credential live in (Twilio error 31203), so all three come from one account: the business's
+  // own sub-account when it has one (its key, its app, its push credential: scopedTwilioEnv clears
+  // anything the sub lacks rather than lending it the parent's), the parent otherwise. Switch off:
+  // `env` itself, nothing looked up. The SETUP TEST stays on the parent whatever the business is:
+  // its Echo app (TWILIO_ECHO_APP_SID) is the parent's, so it is signed with the parent's key.
+  const acct = preflight ? env : await callerTwilioEnv(env, { admin, ctx });
+  const appSid = preflight ? env.TWILIO_ECHO_APP_SID : acct.TWILIO_TWIML_APP_SID;
+  if (!acct.TWILIO_ACCOUNT_SID || !acct.TWILIO_API_KEY || !acct.TWILIO_API_SECRET || !appSid) {
+    const sub = acct !== env;
+    ec.waitUntil(logFault({
+      code: "token_not_configured", throttleMs: 10 * 60_000, ...(sub ? { clientId: ctx.client_id } : {}),
+      message: sub
+        ? "This business's Twilio sub-account has no API key pair or no TwiML App yet: its tokens can't be minted (finish it in the operator console)."
+        : "The Twilio account SID, API key pair or TwiML App SID is missing.",
+    }));
     throw new ApiError("internal", "The phone service isn't configured yet.");
   }
 
@@ -95,7 +132,7 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
   // A phone's token without a push credential still signs the person in and still places calls,
   // but Twilio refuses to register it for incoming ones. That is a missing secret, not the
   // person's problem: logged by name, and `incoming_push: false` tells the app why.
-  const pushCredential = preflight ? undefined : pushCredentialFor(env, platform, buildType);
+  const pushCredential = preflight ? undefined : pushCredentialFor(acct, platform, buildType);
   const wantsPush = !preflight && platform !== "chrome";
   if (wantsPush && !pushCredential) {
     const name = String(pushCredentialSecretFor(platform, buildType));
@@ -105,9 +142,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     }));
   }
   const jwtOut = await mintAccessToken({
-    accountSid: env.TWILIO_ACCOUNT_SID,
-    apiKeySid: env.TWILIO_API_KEY,
-    apiKeySecret: env.TWILIO_API_SECRET,
+    accountSid: acct.TWILIO_ACCOUNT_SID,
+    apiKeySid: acct.TWILIO_API_KEY,
+    apiKeySecret: acct.TWILIO_API_SECRET,
     identity,
     ttlSeconds: ttl,
     voice: preflight
@@ -148,7 +185,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     numbers: ctx.numbers,
     settings: {
       dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
-      forward_to_cell: s?.forward_to_cell ?? null,
+      // Never a guarded login's (../dialGuard.ts): it is never rung, and the old reviewer login is
+      // shared by reviewer after reviewer, so a number one saved must not show to the next.
+      forward_to_cell: cellForwardAllowed(env, claims.sub, ctx.client_id) ? s?.forward_to_cell ?? null : null,
       // Who rings in this person's place while they're away (migration 264), or null.
       dnd_cover_user_id: s?.dnd_cover_user_id ?? null,
       // The hours this person's phone rings and their zone (migration 264), or null for always.
@@ -160,15 +199,32 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       greeting: greetingOut(s),
     },
     wallet,
-    // Are this business's calls recorded (and announced) right now: its owner's choice and this
+    // Are this business's calls recorded right now (announced or not): its owner's choice and this
     // Worker's CALL_RECORDING rail together (../recording.ts armedFor), so the apps can say
     // "Calls are recorded" in settings. A single call's own state is GET /calls `recording`.
     recording: { on: armedFor(env, ctx.recording) },
+    // Which outside services turn this business's audio into text right now (2026-10-13), so the
+    // apps can say so before they show a transcript or summary (App Store guideline 5.1.2(i): the
+    // in-app third-party AI notice). `calls`: its recorded calls go to Cloudflare Workers AI for a
+    // transcript and on to Anthropic's Claude for a summary: recorded (above), the owner left
+    // transcripts on, and the CALL_TRANSCRIBE rail is on (and, per call, everyone on it allowed
+    // it: `ai_consent` below). `voicemail`: Twilio transcribes its voicemails (the TRANSCRIBE
+    // rail, every business). An older Worker sends no `transcripts`: the apps then can't tell,
+    // and keep transcripts hidden.
+    transcripts: transcriptsFor(env, ctx.recording),
+    // This person's own answer to that notice (migration 307, ../aiConsent.ts): choice "allowed",
+    // "declined" or null (never answered), the notice version answered, and when. Their calls go
+    // to Workers AI and Claude only while everyone on the call has allowed it. Left out when it
+    // couldn't be read (307 not applied, or a database fault): the apps then can't tell, keep
+    // transcripts hidden and don't ask.
+    ...(consentRes.consent ? { ai_consent: consentRes.consent } : {}),
     // What this Worker can do that older ones could not, so an app shows a button only when
     // the server behind it has the endpoint. handoff: moving a live call to the person's
     // other device (../handoff.ts, routes/handoff.ts). recordings: GET /recordings/:id/audio and
     // GET /calls/:id/transcript, and the recording keys on a call (routes/reads.ts).
-    features: { handoff: true, recordings: true },
+    // list_search (2026-10-13): POST /threads/search, POST /calls/search and GET /calls?voicemail=1
+    // (routes/reads.ts). An older Worker has no search routes and ignores voicemail=1.
+    features: { handoff: true, recordings: true, list_search: true },
     // Whether this token can register the phone for incoming calls (it carries the build's push
     // credential). false: the Worker has no credential for this platform and build, so register()
     // would only fail. null: not a phone token (the extension, or the setup test).

@@ -57,9 +57,9 @@ there is no third party any more. The hashes above are provenance for a human, n
 
 ## Rules
 
-- **Root-absolute `/vendor/…` references only.** `portal.html` is served at `/portal/<page>/<sub>`
+- **Root-absolute `/vendor/…` references only.** `portal.html` is served at `/<page>/<sub>`
   as well as `/portal.html`, so a relative `src` resolves against whatever depth the URL has and
-  gets rewritten by the `/portal/*` splat in `_redirects`. That exact mistake once blanked the
+  gets rewritten by that page's `/<page>/*` rule in `_redirects` (the `/portal/*` splat until 2026-10-13). That exact mistake once blanked the
   entire portal (see the comment above the tag in `portal.html`).
 - **The version is in the filename.** A library bump is then a visible rename in the diff and a
   new URL for caches, never a silent byte change under the same name.

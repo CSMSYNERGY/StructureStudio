@@ -220,6 +220,18 @@ Deno.test("the wallet refuses the Verify button only: one caller in the tree, an
     "send_invoice reads the wallet or refuses on it — an empty wallet must never stop an invoice");
 });
 
+Deno.test("both charges write the memo the Transactions line shows: meter, document, state (taxChargeMemo)", () => {
+  const verify = block(SETTINGS, 'if (action === "verify_tax") {', "\n  if (action ===", "verify_tax");
+  assert(/chargeLookup\(admin, lookup, \{[\s\S]*?memo: taxChargeMemo\(\{ kind: VERIFY_TAX_METER, quoteNumber: d\.ss_quote_number \|\| shortCode, state: address\?\.state \}\)/.test(verify),
+    "verify_tax's charge memo is not taxChargeMemo with the quote number and the delivery state");
+  const at0 = at(SETTINGS, "const plan = invoiceTaxCheckPlan({", "send_invoice");
+  const check = SETTINGS.slice(at0, SETTINGS.indexOf("return json({ ok: true, invoiceNumber: invNumber", at0));
+  assert(/memo: taxChargeMemo\(\{ kind: "tax_invoice", invoiceNumber: invNumber, state: addressFrom\(c\?\.contact\)\?\.state \}\)/.test(check),
+    "the invoice check's charge memo is not taxChargeMemo with the invoice number and the delivery state");
+  assert(/if \(action === "tax_settings"\) \{[\s\S]*?monthTaxUsage\(admin, clientId\)/.test(SETTINGS) &&
+    [...SETTINGS.matchAll(/monthTaxUsage\(/g)].length === 1, "the month's usage is read outside tax_settings");
+});
+
 Deno.test("tax_settings prices the Verify confirm from the same meter, redacted, and status never carries it", () => {
   const settings = block(SETTINGS, 'if (action === "tax_settings") {', "\n  if (action ===", "tax_settings");
   assert(/from\("usage_prices"\)\.select\("price_cents, active, visible"\)\.eq\("kind", VERIFY_TAX_METER\)/.test(settings),

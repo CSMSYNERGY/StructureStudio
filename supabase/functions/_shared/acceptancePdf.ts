@@ -15,6 +15,8 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
+import { companyOf } from "./customerNaming.ts";
+import { shareCodeIsGuessable } from "./shareCode.ts";
 
 const PAGE_W = 612;
 const PAGE_H = 792;
@@ -64,6 +66,18 @@ export interface AcceptanceCert {
    *  document number is the first thing anyone disputing it would point at.
    *  Ignored when subjectLabel is set (a change order names its own subject). */
   docLabel?: "Quote" | "Invoice";
+  /** The business the signer signs for (designs.contact.company, quote to a business entity,
+   *  2026-10-21): an "On behalf of" row under "Signed by". Absent = no row, the page as before. */
+  onBehalfOf?: string | null;
+}
+
+/** The "On behalf of" business for a design's certificate: its contact's company, or null. Null too
+ *  for a share code short enough to guess, under the same rule as estimatePdf's pdfCustomerFrom:
+ *  the certificate rides a PDF in the public bucket under a key derived from the code. */
+// deno-lint-ignore no-explicit-any
+export function onBehalfOfFrom(contact: any, shortCode: unknown): string | null {
+  if (shareCodeIsGuessable(shortCode)) return null;
+  return companyOf(contact) || null;
 }
 
 /**
@@ -104,6 +118,9 @@ export async function appendAcceptancePage(pdfBytes: Uint8Array, cert: Acceptanc
   row(cert.subjectLabel ? "Change to" : (cert.docLabel || "Quote"), cert.quoteNumber + (cert.subjectLabel ? ` — ${cert.subjectLabel}` : ""));
   if (cert.total != null && Number.isFinite(Number(cert.total))) row("Total", fmtMoney(Number(cert.total)));
   row("Signed by", cert.signerName);
+  // One line, like every row here: 80 characters keeps a long business name on the page.
+  const behalf = String(cert.onBehalfOf ?? "").replace(/\s+/g, " ").trim();
+  if (behalf) row("On behalf of", behalf.length > 80 ? behalf.slice(0, 79) + "..." : behalf);
   {
     const d = new Date(cert.acceptedAtIso);
     const when = isNaN(d.getTime()) ? cert.acceptedAtIso : d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");

@@ -133,13 +133,16 @@ type AdminCfg = {
   attemptId?: string;
   balanceCents?: number;
   failUpdates?: boolean;
-  gateway?: "approve" | "unknown";
+  gateway?: "approve" | "unknown" | "decline";
+  /** What the approving gateway answers with, beyond response=1 and the transaction id. */
+  answer?: Record<string, string>;
 };
 
 function fakeAdmin(cfg: AdminCfg) {
   const attemptId = cfg.attemptId ?? "att-7";
   const inserts: { table: string; row: Row }[] = [];
   const updates: { table: string; patch: Row; filters: Row }[] = [];
+  const upserts: { table: string; row: Row }[] = [];
   const rpcs: { fn: string; args: Row }[] = [];
 
   // No prior closed_unknown and no stale open: the clean path into the sale.
@@ -176,6 +179,10 @@ function fakeAdmin(cfg: AdminCfg) {
           };
           return b;
         },
+        upsert(row: Row) {
+          upserts.push({ table, row });
+          return Promise.resolve({ data: null, error: null });
+        },
         update(patch: Row) {
           const filters: Row = {};
           // deno-lint-ignore no-explicit-any
@@ -199,26 +206,33 @@ function fakeAdmin(cfg: AdminCfg) {
       return Promise.resolve({ data: cfg.balanceCents ?? 30000, error: null });
     },
   };
-  return { admin, inserts, updates, rpcs, attemptId };
+  return { admin, inserts, updates, upserts, rpcs, attemptId };
 }
 
 const CLIENT = "pw-demo-barns";
 
-async function runTopup(cfg: AdminCfg = {}) {
+type TopupOpts = Partial<Parameters<typeof chargeTopup>[1]>;
+
+async function runTopup(cfg: AdminCfg = {}, opts: TopupOpts = {}) {
   const fake = fakeAdmin(cfg);
   const sent: Record<string, string>[] = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = ((_input: unknown, init?: { body?: unknown }) => {
     sent.push(Object.fromEntries(new URLSearchParams(String(init?.body ?? ""))));
     if (cfg.gateway === "unknown") return Promise.reject(new Error("connection reset"));
+    if (cfg.gateway === "decline") {
+      return Promise.resolve(new Response("response=2&responsetext=DECLINE&response_code=200&cof_supported=stored", { status: 200 }));
+    }
+    const extra = new URLSearchParams(cfg.answer ?? {}).toString();
     return Promise.resolve(
-      new Response("response=1&responsetext=SUCCESS&transactionid=TXN9911", { status: 200 }),
+      new Response(`response=1&responsetext=SUCCESS&transactionid=TXN9911${extra ? `&${extra}` : ""}`, { status: 200 }),
     );
   }) as unknown as typeof fetch;
   try {
     const res = await chargeTopup(fake.admin, {
-      clientId: CLIENT, vaultId: "vault-1", amountCents: 25000, auto: false,
-    });
+      clientId: CLIENT, vaultId: "vault-1", amountCents: 25000, auto: false, cof: "cit_used", initialTxn: "INIT-1",
+      ...opts,
+    } as Parameters<typeof chargeTopup>[1]);
     return { ...fake, res, sent };
   } finally {
     globalThis.fetch = realFetch;
@@ -274,6 +288,88 @@ Deno.test("an unverifiable top-up names the order id an operator has to look up"
   check("a fault row was filed", message.length > 0);
   check("naming the gateway order id", message.includes(sent[0].orderid), message);
   check("and the attempt row", message.includes(attemptId), message);
+});
+
+
+// ── Stored credentials (317): what each kind of top-up tells the card networks ───────────
+//
+// The gateway stand-in records every field the sale carried. These pin the four framings
+// _shared/nmi.ts cofFields builds, and the two things a first top-up must do on approval and
+// never on a decline: keep the card (a NEW card is stored by the sale itself) and keep the sale
+// as the card's unscheduled initial, the id every automatic top-up names afterwards.
+
+const COF_KEYS = ["initiated_by", "stored_credential_indicator", "initial_transaction_id", "billing_method"];
+const cofOf = (sent: Record<string, string>) => Object.fromEntries(COF_KEYS.filter((k) => k in sent).map((k) => [k, sent[k]]));
+
+Deno.test("317: a later top-up the builder asks for is customer + used, naming the unscheduled initial", async () => {
+  const { sent, res, inserts } = await runTopup({}, { cof: "cit_used", initialTxn: "INIT-1" });
+  check("approved", res.ok === true, JSON.stringify(res));
+  check("fields", JSON.stringify(cofOf(sent[0])) === JSON.stringify({ initiated_by: "customer", stored_credential_indicator: "used", initial_transaction_id: "INIT-1" }), JSON.stringify(cofOf(sent[0])));
+  check("charged the vault", sent[0].customer_vault_id === "vault-1" && !("customer_vault" in sent[0]), JSON.stringify(sent[0]));
+  check("the attempt row says what it was", inserts.find((i) => i.table === "billing_charge_attempts")?.row.cof === "cit_used");
+});
+
+Deno.test("317: an automatic (or unasked operator) top-up is merchant + used + the initial, no billing_method", async () => {
+  const { sent } = await runTopup({}, { cof: "mit_unscheduled", initialTxn: "INIT-7", auto: true });
+  check("fields", JSON.stringify(cofOf(sent[0])) === JSON.stringify({ initiated_by: "merchant", stored_credential_indicator: "used", initial_transaction_id: "INIT-7" }), JSON.stringify(cofOf(sent[0])));
+});
+
+Deno.test("317: a merchant-initiated top-up with NO initial charges nothing and records nothing", async () => {
+  const { sent, res, inserts } = await runTopup({}, { cof: "mit_unscheduled", initialTxn: null, auto: true });
+  check("refused", res.ok === false && res.blocking === false, JSON.stringify(res));
+  check("no gateway call", sent.length === 0, JSON.stringify(sent));
+  check("no attempt row", !inserts.some((i) => i.table === "billing_charge_attempts"));
+});
+
+Deno.test("317: a NEW card is stored BY the first top-up's sale (customer + stored, no billing_method)", async () => {
+  const { sent, res, upserts } = await runTopup({ answer: { customer_vault_id: "VAULT-NEW", cof_supported: "stored" } }, {
+    vaultId: null, newCard: { paymentToken: "tok-1", firstName: "A", lastName: "B", email: "a@example.test" },
+    cof: "cit_initial_unscheduled", initialTxn: null, card: { last4: "4242", brand: "visa" },
+  });
+  check("approved", res.ok === true, JSON.stringify(res));
+  check("one call that stores and charges", sent.length === 1 && sent[0].type === "sale" && sent[0].customer_vault === "add_customer" && sent[0].payment_token === "tok-1", JSON.stringify(sent));
+  check("no vault id on the request", !("customer_vault_id" in sent[0]));
+  check("fields", JSON.stringify(cofOf(sent[0])) === JSON.stringify({ initiated_by: "customer", stored_credential_indicator: "stored" }), JSON.stringify(cofOf(sent[0])));
+  const cust = upserts.find((u) => u.table === "billing_customers")?.row ?? {};
+  check("the card is recorded with the vault the gateway returned", cust.vault_id === "VAULT-NEW", JSON.stringify(cust));
+  check("and this sale is its unscheduled initial", cust.unscheduled_initial_txn === "TXN9911", JSON.stringify(cust));
+  check("with its last 4", cust.card_last4 === "4242" && cust.card_brand === "visa", JSON.stringify(cust));
+  check("the result names the new vault", res.ok === true && res.vaultId === "VAULT-NEW" && res.cofSupported === "stored", JSON.stringify(res));
+});
+
+Deno.test("317: a DECLINED first top-up stores nothing and records no initial", async () => {
+  const { sent, res, upserts, updates } = await runTopup({ gateway: "decline" }, {
+    vaultId: null, newCard: { paymentToken: "tok-1" }, cof: "cit_initial_unscheduled", initialTxn: null, card: { last4: "4242", brand: "visa" },
+  });
+  check("declined, not blocking", res.ok === false && res.blocking === false, JSON.stringify(res));
+  check("the sale was tried once", sent.length === 1);
+  check("no card recorded", !upserts.some((u) => u.table === "billing_customers"), JSON.stringify(upserts));
+  const closed = updates.find((u) => u.table === "billing_charge_attempts" && u.patch.state === "closed_declined");
+  check("the decline's cof_supported is kept", closed?.patch.cof_supported === "stored", JSON.stringify(closed));
+});
+
+Deno.test("317: the first top-up on a card a SUBSCRIPTION saved starts the top-up agreement on that vault", async () => {
+  // NMI: a recurring series' id cannot be reused for unscheduled charges, so this sale, not the
+  // subscription's, is what automatic top-ups will name.
+  const { sent, upserts } = await runTopup({}, { cof: "cit_initial_unscheduled", initialTxn: null });
+  check("on the vault", sent[0].customer_vault_id === "vault-1" && !("customer_vault" in sent[0]), JSON.stringify(sent[0]));
+  check("stored", sent[0].stored_credential_indicator === "stored" && sent[0].initiated_by === "customer");
+  const cust = upserts.find((u) => u.table === "billing_customers")?.row ?? {};
+  check("initial recorded", cust.unscheduled_initial_txn === "TXN9911" && cust.vault_id === "vault-1", JSON.stringify(cust));
+  check("a card's known last 4 is not wiped by a request that did not carry one", !("card_last4" in cust), JSON.stringify(cust));
+});
+
+Deno.test("317: a new card can only come with the first-top-up framing, and never beside a vault", async () => {
+  const a = await runTopup({}, { vaultId: null, newCard: { paymentToken: "tok" }, cof: "cit_used" });
+  check("new card + used refused", a.res.ok === false && a.sent.length === 0, JSON.stringify(a.res));
+  const b = await runTopup({}, { newCard: { paymentToken: "tok" }, cof: "cit_initial_unscheduled" });
+  check("vault + new card refused", b.res.ok === false && b.sent.length === 0, JSON.stringify(b.res));
+});
+
+Deno.test("317: the agreement a top-up was made under is stamped with its sale", async () => {
+  const { updates } = await runTopup({}, { cof: "cit_initial_unscheduled", initialTxn: null, consentId: 55 });
+  const stamp = updates.find((u) => u.table === "billing_consents");
+  check("stamped", stamp?.patch.transaction_id === "TXN9911" && stamp?.filters.id === 55, JSON.stringify(stamp));
 });
 
 if (failures) throw new Error(`${failures} failed`);

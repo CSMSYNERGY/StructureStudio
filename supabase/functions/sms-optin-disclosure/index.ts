@@ -98,7 +98,7 @@ Deno.serve(withErrorLog("sms-optin-disclosure", async (req: Request): Promise<Re
   const [{ data: cfg }, { data: reg }, { data: box, error: boxErr }] = await Promise.all([
     admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
     admin.from("sms_registrations")
-      .select("legal_business_name, campaign_description, campaign_message_flow, privacy_policy_url, terms_url, campaign_message_samples")
+      .select("legal_business_name, brand_tier, campaign_description, campaign_message_flow, privacy_policy_url, terms_url, campaign_message_samples")
       .eq("client_id", clientId).maybeSingle(),
     admin.from("client_settings").select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle(),
   ]);
@@ -127,9 +127,18 @@ Deno.serve(withErrorLog("sms-optin-disclosure", async (req: Request): Promise<Re
   ));
   // A DBA is not a discrepancy — but only if the page says so. A reviewer is matching this
   // against a brand registration filed under the legal name.
+  //
+  // ⚠️ A SOLE PROPRIETOR IS REGISTERED UNDER THEIR OWN NAME (2026-10-27). With no EIN, the name the
+  // carriers hold is the person's first and last name (twilioTrustHub.ts soleProprietorBrandName;
+  // 30914 refuses anything else), so calling it a "business name" would tell the reviewer the
+  // brand is a company, which is the 30915 rejection. Same line, the label says what it is. It is
+  // the registration's own public name, the one the reviewer is matching, not a representative's
+  // contact detail (rule 2): their phone and email still never appear here.
   if (legalName && legalName.toLowerCase() !== name.toLowerCase()) {
     out.push("");
-    out.push(wrap(`Registered business name: ${legalName}`));
+    out.push(wrap(reg?.brand_tier === "sole_proprietor"
+      ? `Registered sole proprietor: ${legalName}`
+      : `Registered business name: ${legalName}`));
   }
 
   out.push(heading("What we text about"));

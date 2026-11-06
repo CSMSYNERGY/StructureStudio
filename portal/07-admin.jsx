@@ -400,7 +400,7 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
                                       project serves both hosts, so a password set there works on beta
                                       too. Said out loud because a beta operator WILL notice. */}
                                   <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5 }}>
-                                    The link opens app.structurestudiosuite.com/portal — a password set there works everywhere, including beta.
+                                    The link opens app.structurestudiosuite.com — a password set there works everywhere, including beta.
                                   </div>
                                 </div>
                               )}
@@ -649,8 +649,14 @@ function AdmOverlay({ onClose, maxWidth = 520, labelledBy, children }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+  // Close only on a press that STARTED on the backdrop. Selecting text inside the dialog and letting
+  // go over the backdrop fires a click on the backdrop itself (the nearest common ancestor), which
+  // closed the dialog mid-selection (Support chats review, 2026-10-30).
+  const downOnBackdrop = useRef(false);
   return (
-    <div onClick={onClose} role="presentation"
+    <div onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (e.target === e.currentTarget && downOnBackdrop.current) onClose(); downOnBackdrop.current = false; }}
+      role="presentation"
       style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1000 }}>
       <div role="dialog" aria-modal="true" aria-labelledby={labelledBy} onClick={(e) => e.stopPropagation()}
         style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
@@ -719,6 +725,75 @@ function admGatewayNote(g) {
   return bits.length ? ` Payment gateway: ${bits.join(", ")}.` : "";
 }
 
+// What delete_client did and what outlived the builder, as sentences for the same confirmation
+// (2026-10-21, migration 321): how much was deleted, the customer-data export, the records kept on
+// purpose, anything left behind (nothing should be), steps outside the database that were done, that
+// a person still has to do, and that failed. The server derives it from _shared/tenantTables.ts and
+// sends names and counts only, plus the export's signed link. admin.app.jsx has a twin.
+const ADM_DONE = {
+  resend_domain: "removed their sending domain at Resend",
+  resend_inbound_domain: "removed their reply domain at Resend",
+  quickbooks: "disconnected QuickBooks at Intuit",
+};
+const ADM_BY_HAND = {
+  resend_domain: "remove their sending domain at Resend",
+  resend_inbound_domain: "remove their reply domain at Resend",
+  quickbooks: "disconnect QuickBooks at Intuit",
+  twilio_a2p: "close their texting registration (A2P brand and campaign) on our Twilio account",
+  connections_unknown: "check whether Resend and QuickBooks are still connected (the check failed)",
+};
+function admFailedStep(f) {
+  const [kind, what] = String(f).split(":");
+  if (kind === "storage") return `the file cleanup in ${what}`;
+  if (kind === "logins") return `deleting ${what} login${what === "1" ? "" : "s"}`;
+  if (kind === "resend_domain" || kind === "resend_inbound_domain") return ADM_BY_HAND[kind];
+  if (kind === "quickbooks") return ADM_BY_HAND.quickbooks;
+  return f;
+}
+// "1,234 rows from 41 tables, 2 logins and 57 files": the purge reports every table it touched.
+function admDeletedSummary(d) {
+  if (!d) return "";
+  let rows = 0, tables = 0;
+  for (const [k, v] of Object.entries(d)) {
+    if (k === "auth_logins" || k === "storage_files" || !v) continue;
+    rows += v; tables++;
+  }
+  const bits = [];
+  if (tables) bits.push(`${rows.toLocaleString()} row${rows === 1 ? "" : "s"} from ${tables} table${tables === 1 ? "" : "s"}`);
+  if (d.auth_logins) bits.push(`${d.auth_logins} login${d.auth_logins === 1 ? "" : "s"}`);
+  if (d.storage_files) bits.push(`${d.storage_files} file${d.storage_files === 1 ? "" : "s"}`);
+  return bits.join(", ");
+}
+function admDeleteReport(r) {
+  if (!r) return "";
+  const rows = (m) => {
+    const e = Object.entries(m || {});
+    const n = e.reduce((s, [, v]) => s + v, 0);
+    return e.length ? `${n} row${n === 1 ? "" : "s"} in ${e.length} table${e.length === 1 ? "" : "s"} (${e.map(([k, v]) => `${k} ${v}`).join(", ")})` : "";
+  };
+  const withFiles = (rowText, buckets) => [rowText, (buckets || []).length ? `files in ${buckets.join(", ")}` : ""].filter(Boolean).join(", plus ");
+  const files = r.files || {};
+  const c = r.cleanup || {};
+  const out = [];
+  if (r.export) {
+    out.push(`Their customer data (CRM, texts, emails, calls, customer logins) was exported first: ${r.export.rows} row${r.export.rows === 1 ? "" : "s"}`
+      + `${r.export.files ? ` and ${r.export.files} file${r.export.files === 1 ? "" : "s"}` : ""}. The download link works for 7 days.`);
+  }
+  const kept = withFiles(rows(r.retained), files.retained);
+  if (kept) out.push(`Kept for good (money, signed and consent records): ${kept}.`);
+  if ((files.notExported || []).length) out.push(`Too large to export, so kept: files in ${files.notExported.join(", ")}.`);
+  const left = withFiles(rows(r.leftBehind), (files.leftBehind || []).filter((b) => !(files.notExported || []).includes(b)));
+  if (left) out.push(`Still there after the delete (tell CSM Synergy): ${left}.`);
+  if ((c.done || []).length) out.push(`Also ${c.done.map((k) => ADM_DONE[k] || k).join("; ")}.`);
+  const byHand = (c.byHand || []).map((k) => (k === "twilio_numbers"
+    ? `release their number${(c.numbers || []).length === 1 ? "" : "s"} on our Twilio account (${(c.numbers || []).join(", ")})`
+    : ADM_BY_HAND[k] || k));
+  if (byHand.length) out.push(`Still to do by hand: ${byHand.join("; ")}.`);
+  if ((c.failed || []).length) out.push(`Did not finish, do by hand: ${c.failed.map(admFailedStep).join("; ")}.`);
+  if ((r.notCounted || []).length) out.push(`Could not check ${r.notCounted.join(", ")}.`);
+  return out.join(" ");
+}
+
 // One destructive action = one dialog = one password prompt. There is deliberately no
 // second "now enter your password" modal and no cached password: delete_client is terminal
 // (the tenant is gone, so "the same action again" cannot happen), so a cache would avoid
@@ -755,9 +830,11 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
         Delete {client.company_name || id} permanently?
       </div>
       <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 16 }}>
-        This erases <strong>{id}</strong> from nine tables, deletes every login attached to it, and empties
-        its stored images and branding. Their designer link stops working immediately. Any paid plans are
-        cancelled at the payment gateway and their saved card is removed, so they are never charged again.
+        This erases all of <strong>{id}</strong>'s data: catalog, pricing, designs and estimates, settings,
+        logins, files, and their customers' contacts, texts, emails and calls. That customer data is exported
+        first, and you get a download link. Money, signed and consent records are kept for good, and the id
+        can never be used again. Their designer link stops working immediately. Any paid plans are cancelled
+        at the payment gateway and their saved card is removed, so they are never charged again.
         <strong> This cannot be undone.</strong> To stop offering the account without destroying its data, set a paused billing
         posture instead.
       </div>
@@ -1742,6 +1819,146 @@ function AdmPhoneBilling({ clients }) {
   );
 }
 
+// ── Sales tax lookups (2026-10-21, migration 319) ─────────────────────────────
+// Every Avalara rate lookup a builder made (a Verify press or the invoice-time check), from the
+// call ledger, and what each one was charged: Carolyn 2026-10-19, "connect tax generation API calls
+// to wallet and tracking". READ-ONLY: the meters are armed and the per-builder switch
+// (tax_lookup_enabled) is set by hand for now, and this card shows both as they are. admin-catalog
+// tax_usage_get backs it, on can_bill (an operator without it sees the server's sentence). The
+// counting rules are _shared/taxUsage.ts's, with its tests; this card only formats them. Dates are
+// UTC days, both inclusive, like the phone report's months.
+const taxUsd = (cents) => "$" + (Number(cents || 0) / 100).toFixed(2);
+const TAX_FAILURE_WORDS = {
+  bad_address: "address not found", timeout: "timed out", network: "unreachable", rate_limited: "busy",
+  credentials_rejected: "credentials refused", subscription: "account not set up", malformed: "unreadable answer",
+  not_configured: "not connected",
+};
+
+function AdmTaxLookups() {
+  const today = new Date().toISOString().slice(0, 10);
+  const [from, setFrom] = useState(() => today.slice(0, 8) + "01");
+  const [to, setTo] = useState(today);
+  const [report, setReport] = useState(null);   // null = loading | { err } | payload
+  const seq = useRef(0);
+
+  const load = useCallback(async (f, t) => {
+    const n = ++seq.current;
+    setReport(null);
+    try {
+      const r = await adminApi("tax_usage_get", { from: f, to: t });
+      if (n === seq.current) setReport(r);
+    } catch (e) {
+      if (n === seq.current) setReport({ err: e.message || "Couldn't load the sales tax report." });
+    }
+  }, []);
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to) && from <= to;
+  useEffect(() => { if (valid) load(from, to); }, [from, to, valid, load]);
+
+  const rep = report && !report.err ? report : null;
+  const tot = rep && rep.totals;
+  const TH = { textAlign: "left", fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const TD = { fontSize: 13, color: "#1E293B", padding: "9px 10px", borderBottom: "1px solid #F1F5F9", whiteSpace: "nowrap" };
+  const R = { textAlign: "right" };
+  const meterLine = (m) => {
+    const name = m.kind === "tax_lookup" ? "Tax verification (Verify button)" : "Invoice tax check";
+    if (!m.exists) return <>{name}: <span style={{ color: "#B91C1C" }}>missing from the price list</span></>;
+    return <>{name}: {m.armed ? <strong style={{ color: "#15803D" }}>charging {taxUsd(m.priceCents)} a lookup</strong>
+      : m.active ? <span style={{ color: "#92400E" }}>on, but priced at $0, so nothing is charged</span>
+      : <span style={{ color: "#64748B" }}>off, so nothing is charged{m.priceCents > 0 ? ` (price set: ${taxUsd(m.priceCents)})` : ""}</span>}</>;
+  };
+  const failText = (f) => Object.entries(f || {}).map(([k, n]) => `${n} ${TAX_FAILURE_WORDS[k] || k}`).join(", ");
+
+  return (
+    <div style={S.card} data-adm-tax-lookups>
+      <CardHead title="Sales tax lookups"
+        desc="Each verified sales tax lookup (a Verify press on an estimate, or the check when an invoice is sent) is one Avalara call. This shows who made them and what each was charged to their wallet. The switch per builder and the prices are still set by hand." />
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <label style={{ fontSize: 12.5, color: "#334155", display: "flex", alignItems: "center", gap: 6 }}>From
+          <input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} style={{ ...S.input, width: "auto", padding: "5px 8px" }} />
+        </label>
+        <label style={{ fontSize: 12.5, color: "#334155", display: "flex", alignItems: "center", gap: 6 }}>to
+          <input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} style={{ ...S.input, width: "auto", padding: "5px 8px" }} />
+        </label>
+        <button type="button" onClick={() => valid && load(from, to)} disabled={!valid}
+          style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 12px", marginLeft: "auto", opacity: valid ? 1 : 0.5 }}>Refresh</button>
+      </div>
+      {!valid && <div style={{ ...PB_HELP, marginTop: 0, color: "#B91C1C" }}>Pick a start date on or before the end date.</div>}
+      {valid && report === null && <SkelBar w="70%" h={12} />}
+      {report && report.err && <div style={{ ...S.err, marginBottom: 0 }}>{report.err}</div>}
+      {rep && (
+        <>
+          <div style={{ fontSize: 12.5, color: "#334155", lineHeight: 1.6, marginBottom: 12 }}>
+            {rep.meters.map((m) => <div key={m.kind}>{meterLine(m)}</div>)}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 14 }}>
+            <AdmBillingStat label="Lookups" value={tot.calls} sub={`${tot.verify} Verify · ${tot.invoice} invoice`} />
+            <AdmBillingStat label="Charged" value={taxUsd(tot.chargedCents)} sub={`${tot.charged} lookup${tot.charged === 1 ? "" : "s"}`} />
+            <AdmBillingStat label="Not charged" value={tot.inactive + tot.unpriced + tot.exempt}
+              sub={`${tot.exempt} non-billable · ${tot.inactive + tot.unpriced} meter off`} />
+            <AdmBillingStat label="Failed lookups" value={tot.failed} sub={tot.failed ? failText(tot.failures) : "none"} />
+          </div>
+          {rep.chargesUnknown && (
+            <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8, color: "#92400E" }}>
+              The database doesn't record charges per lookup yet (migration 319 isn't applied), so only the calls are counted.
+            </div>
+          )}
+          {(tot.errors > 0 || tot.pending > 0) && (
+            <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8, color: "#B91C1C" }}>
+              {tot.errors > 0 && <>{tot.errors} charge{tot.errors === 1 ? "" : "s"} failed and {tot.errors === 1 ? "was" : "were"} not taken. </>}
+              {tot.pending > 0 && <>{tot.pending} charge{tot.pending === 1 ? " is" : "s are"} unfinished. </>}
+              An operator can replay the ones that got as far as the wallet (admin-catalog tax_charge_retry), at the price first attempted; a replay never charges one lookup twice.
+            </div>
+          )}
+          {rep.truncated && (
+            <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8, color: "#B91C1C" }}>
+              This range has more lookups than the report reads at once ({rep.rowCount} counted). Pick a shorter range.
+            </div>
+          )}
+          {rep.tenants.length === 0
+            ? <div style={{ fontSize: 13, color: "#64748B" }}>No builder made a lookup in this range, and none has lookups switched on.</div>
+            : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={TH}>Builder</th><th style={TH}>Lookups</th>
+                    <th style={{ ...TH, ...R }}>Verify</th><th style={{ ...TH, ...R }}>Invoice</th>
+                    <th style={{ ...TH, ...R }}>Failed</th><th style={{ ...TH, ...R }}>Charged</th>
+                    <th style={{ ...TH, ...R }}>Amount</th><th style={{ ...TH, ...R }}>Non-billable</th>
+                    <th style={{ ...TH, ...R }}>Charge errors</th>
+                  </tr></thead>
+                  <tbody>
+                    {rep.tenants.map((t) => (
+                      <tr key={t.clientId} data-tax-usage-row={t.clientId}>
+                        <td style={TD}>
+                          <div style={{ fontWeight: 700 }}>{t.companyName}</div>
+                          <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{t.clientId}{t.billingExempt ? " · non-billable" : ""}{t.ssMode ? "" : " · CRM paperwork"}</div>
+                        </td>
+                        <td style={TD}>{t.lookupEnabled ? <AdmChip tone="on">On</AdmChip> : <AdmChip tone="neutral">Off</AdmChip>}</td>
+                        <td style={{ ...TD, ...R }}>{t.verify}</td>
+                        <td style={{ ...TD, ...R }}>{t.invoice}</td>
+                        <td style={{ ...TD, ...R }} title={failText(t.failures)}>{t.failed}</td>
+                        <td style={{ ...TD, ...R }}>{t.charged}</td>
+                        <td style={{ ...TD, ...R }}>{taxUsd(t.chargedCents)}</td>
+                        <td style={{ ...TD, ...R }}>{t.exempt}</td>
+                        <td style={{ ...TD, ...R, color: t.errors + t.pending > 0 ? "#B91C1C" : TD.color }}>{t.errors + t.pending}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          {rep.platform && rep.platform.pings > 0 && (
+            <div style={{ ...PB_HELP, marginTop: 8 }}>
+              Plus {rep.platform.pings} credential check{rep.platform.pings === 1 ? "" : "s"} from this console (not a builder's, never charged).
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── The shell ────────────────────────────────────────────────────────────────
 // Seven sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
 // Items" wrote one tenant's row while "Master Items" read the platform-wide palette, and
@@ -1751,11 +1968,12 @@ function AdmPhoneBilling({ clients }) {
 const ADM_TABS = [
   ["clients", "Builders",        "Every tenant on the platform — search, create, and open",       "global"],
   ["billing", "Billing",         "Subscribers, revenue, billing health and phone & text charges across the platform", "global"],
+  ["chats",   "Support chats",   "Every chat builders had with the Studio Assistant, newest first (read-only)", "global"],
   ["account", "Account",        "Owner logins, billing posture, and deletion",                   "client"],
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
   ["pricing", "Pricing",        "Bulk price and inclusion import/export by CSV",                 "client"],
-  ["master",  "Master Catalog", "The global layout-item palette and Avalara tax code list every builder draws from", "global"],
+  ["master",  "Master Catalog", "The global layout-item palette, the cladding/door/window library and the Avalara tax code list every builder draws from", "global"],
 ];
 
 function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
@@ -1789,7 +2007,15 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   // after whatever is current — including an error flashed 5s after the save it reports on,
   // gone before anyone could read it. The functional updater checks identity (every flash
   // makes a fresh object), so a superseded timer no-ops instead of clobbering.
-  const flash = (m) => { setMsg(m); if (m && m.ok) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000); };
+  // A `sticky` message (a delete that left data behind, 2026-10-21) stays until dismissed: six
+  // seconds is not long enough to read what was kept.
+  // A sticky report that carries a link (a deleted builder's customer-data export, the only copy)
+  // keeps it when an unrelated error arrives: the error shows above it instead (2026-10-23 promotion
+  // review: the Builders list's number-requests load, failing in the same outage, replaced it).
+  const flash = (m) => {
+    setMsg((cur) => (m && m.err && !m.ok && cur && cur.ok && cur.sticky && cur.link ? { ...cur, err: m.err } : m));
+    if (m && m.ok && !m.sticky) setTimeout(() => setMsg((cur) => (cur === m ? null : cur)), 6000);
+  };
   const selRow = (clients || []).find((c) => c.client_id === sel) || null;
   const active = ADM_TABS.find((t) => t[0] === sub) || ADM_TABS[0];
   const needsClient = active[3] === "client";
@@ -1934,15 +2160,36 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
 
       {bootErr && <div style={S.err}>{bootErr}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
-      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.ok && (
+        <div style={S.okMsg}>
+          {msg.ok}
+          {msg.link && (
+            <a href={msg.link.href} target="_blank" rel="noopener noreferrer" data-adm-export-link=""
+              style={{ marginLeft: 10, color: "#15803D", fontWeight: 800, textDecoration: "underline" }}>
+              {msg.link.label}
+            </a>
+          )}
+          {msg.sticky && (
+            <button type="button" onClick={() => setMsg(null)}
+              style={{ marginLeft: 10, background: "none", border: "none", color: "#15803D", fontWeight: 700, textDecoration: "underline", cursor: "pointer", fontSize: 13, padding: 0 }}>
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
 
+      {sub === "clients" && <AdmNumberRequests onPick={pickClient} onFlash={flash} />}
+      {sub === "clients" && <AdmLibraryRequests onPick={pickClient} onFlash={flash} />}
       {sub === "clients" && (
         <AdmClients clients={clients} features={features} sel={sel}
           onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
       )}
       {sub === "billing" && <AdmBilling />}
       {sub === "billing" && <AdmPhoneBilling clients={clients} />}
+      {sub === "billing" && <AdmTaxLookups />}
+      {sub === "chats" && <AdmSupportChats onOpenBuilder={(cid) => { pickClient(cid); setSub("account"); }} onFlash={flash} />}
       {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
+      {sub === "master" && <AdmLibrary />}
       {sub === "master" && <AdmTaxCodes />}
 
       {needsClient && !sel && clients && (
@@ -1975,6 +2222,688 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   );
 }
 
+// ── The StructureStudio library (global; migration 339) ──────────────────────────────────────
+// The templates every builder copies from: claddings, doors and windows. A builder's copy is theirs
+// (Ahsan 2026-10-27), so nothing edited here changes a builder's entry or any of their rows; the
+// "copies" count says how many builders' entries came from each one. Every edit is a new version.
+// Archive hides a template from new picks and leaves every copy alone. ssLibLookWords, SsLibPic and
+// SsLibLookEdit are the builder side's (portal/03-catalog.jsx), so both sides describe a look alike.
+const ADM_LIB_CATS = [["cladding", "Claddings"], ["door", "Doors"], ["window", "Windows"]];
+const ADM_LIB_BLANK_LOOK = { cladding: { profile: "lap" }, door: { doorStyle: "plank" }, window: { liteRows: 2, liteCols: 2 } };
+// Doors builders made from photos (347; Carolyn's 10-27 call): every builder's saved 3D door, for an
+// operator to copy into the StructureStudio library under a NEW name. The template carries no builder
+// name or id (Ahsan 10-27: promote freely, strip the name); the builder keeps their own copy.
+function AdmLibraryDoorLooks({ items, onPromoted }) {
+  const [looks, setLooks] = useState(null);
+  const [installed, setInstalled] = useState(true);
+  const [form, setForm] = useState(null);       // { look, name, description, searchTerms }
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await adminApi("library_door_looks_list", {});
+      setInstalled(r.installed !== false);
+      setLooks(r.looks || []);
+    } catch (e) { setMsg({ err: e.message || "Couldn't load builders' doors." }); setLooks([]); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const itemName = (id) => ((items || []).find((t) => t.id === id) || {}).name || "a template";
+  const promote = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await adminApi("library_door_look_promote", { doorLookId: form.look.id, name: form.name, description: form.description, searchTerms: form.searchTerms });
+      setMsg({ ok: `Added "${r.item.name}" to the StructureStudio library. Builders with door looks on can use it now.${r.tileCopied ? "" : " (Its picture couldn't be copied.)"}` });
+      setForm(null);
+      await load();
+      if (onPromoted) onPromoted();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  if (!installed) return null;
+  return (
+    <div style={{ marginTop: 14, borderTop: "1px solid #E2E8F0", paddingTop: 10 }} data-adm-door-looks="1">
+      <div style={{ fontWeight: 800, fontSize: 13.5, color: "#1E293B" }}>Doors builders made from photos</div>
+      <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px", maxWidth: 680 }}>
+        Add one to the StructureStudio library under a StructureStudio name. The template keeps no builder name or details; the builder keeps their own copy.
+      </div>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {!looks && <SkelBar />}
+      {looks && !looks.length && <div style={{ fontSize: 12.5, color: "#64748B" }}>No builder has saved a 3D door yet.</div>}
+      {(looks || []).map((l) => (
+        <div key={l.id}>
+          <div style={{ ...ADM_ROW, flexWrap: "wrap" }} data-adm-door-look={l.name}>
+            <SsLibPic category="door" look={{ doorStyle: l.base }} size={38} thumbUrl={l.thumbUrl} />
+            <div style={{ flex: "1 1 300px", minWidth: 0, fontSize: 12.5 }}>
+              <div style={{ fontWeight: 800, color: "#1E293B" }}>{l.name}</div>
+              <div style={{ color: "#64748B" }}>{l.companyName || l.clientId} · drawn over {ssLibLookWords("door", { doorStyle: l.base }).replace(/ \(built in 3D\)$/, "")}{l.leaves === 2 ? " · double" : ""}{l.fromPhoto ? " · from a photo" : ""}</div>
+            </div>
+            {l.promotedItemId
+              ? <AdmChip tone="on">In the library as {itemName(l.promotedItemId)}</AdmChip>
+              : <button type="button" onClick={() => { setForm({ look: l, name: "", description: "", searchTerms: "" }); setMsg(null); }}
+                  style={{ ...S.btn("#ECFDF5", "#047857"), padding: "4px 10px", fontSize: 12 }}>Add to the StructureStudio library</button>}
+          </div>
+          {form && form.look.id === l.id && (
+            <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, margin: "6px 0 10px", background: "#F8FAFC", display: "grid", gap: 8, maxWidth: 640 }} data-adm-door-look-promote="1">
+              <input type="text" value={form.name} maxLength={80} placeholder="A StructureStudio name (not the builder's)" onChange={(e) => setForm({ ...form, name: e.target.value })} style={S.input} aria-label="StructureStudio name" />
+              <textarea rows={2} maxLength={600} value={form.description} placeholder="What it looks like, in a sentence" onChange={(e) => setForm({ ...form, description: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Description" />
+              <input type="text" value={form.searchTerms} placeholder="Search words, comma separated (e.g. barn, z brace, ranch)" onChange={(e) => setForm({ ...form, searchTerms: e.target.value })} style={S.input} aria-label="Search words" />
+              <div style={{ fontSize: 11.5, color: "#64748B" }}>No builder or supplier names here: every builder with door looks on sees it.</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" disabled={busy} onClick={promote} style={S.btn(ACCENT, "#FFF")}>{busy ? "Adding…" : "Add to the library"}</button>
+                <button type="button" onClick={() => setForm(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AdmLibrary() {
+  const [items, setItems] = useState(null);
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);
+  const [cat, setCat] = useState("cladding");
+  const [edit, setEdit] = useState(null);       // { id|null, category, name, description, searchTerms, look, sortOrder }
+  const [busy, setBusy] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await adminApi("library_items_list", {});
+      setInstalled(r.installed !== false);
+      setItems(r.items || []);
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+      setMsg({ err: e.message || "Couldn't load the library." });
+      setItems([]);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  if (hidden) return null;
+  const list = (items || []).filter((t) => t.category === cat);
+  const save = async () => {
+    setBusy("save"); setMsg(null);
+    try {
+      const body = { name: edit.name, description: edit.description, searchTerms: edit.searchTerms, ...(edit.fromPhoto ? {} : { look: edit.look }) };
+      if (edit.id) await adminApi("library_item_save", { id: edit.id, ...body });
+      else await adminApi("library_item_save", { category: edit.category, ...body, sortOrder: (list.length + 1) * 10 });
+      setMsg({ ok: edit.id ? `Saved "${edit.name}". Builders' copies are unchanged.` : `Added "${edit.name}". Builders can use it now.` });
+      setEdit(null);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const archive = async (t) => {
+    setBusy(t.id); setMsg(null);
+    try {
+      await adminApi("library_item_save", { id: t.id, status: t.status === "archived" ? "active" : "archived" });
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const move = async (idx, dir) => {
+    const ids = list.map((t) => t.id);
+    const j = idx + dir;
+    if (j < 0 || j >= ids.length) return;
+    [ids[idx], ids[j]] = [ids[j], ids[idx]];
+    setBusy("order"); setMsg(null);
+    try { await adminApi("library_items_reorder", { category: cat, orderedIds: ids }); await load(); }
+    catch (e) { setMsg({ err: e.message }); }
+    setBusy(null);
+  };
+  const editor = edit && (
+    <div style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, margin: "8px 0", background: "#F8FAFC", display: "grid", gap: 8, maxWidth: 640 }} data-adm-library-editor="1">
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <SsLibPic category={edit.category} look={edit.look} />
+        <input type="text" value={edit.name} maxLength={80} placeholder="Name builders see" onChange={(e) => setEdit({ ...edit, name: e.target.value })} style={{ ...S.input, width: 280 }} aria-label="Template name" />
+        {edit.category === "cladding" && !edit.id && (
+          <select value={edit.look.profile} onChange={(e) => setEdit({ ...edit, look: { profile: e.target.value } })} style={{ ...S.input, width: "auto", minWidth: 0 }} aria-label="Drawn as">
+            {Object.keys(SS_LIB_CLADDING_NAMES).map((k) => <option key={k} value={k}>Drawn as {SS_LIB_CLADDING_NAMES[k]}</option>)}
+          </select>
+        )}
+        {!edit.fromPhoto && <SsLibLookEdit category={edit.category} look={edit.look} onChange={(look) => setEdit({ ...edit, look })} />}
+      </div>
+      <textarea rows={2} maxLength={600} value={edit.description} placeholder="What it looks like, in a sentence" onChange={(e) => setEdit({ ...edit, description: e.target.value })} style={{ ...S.input, resize: "vertical" }} aria-label="Description" />
+      <input type="text" value={edit.searchTerms} placeholder="Search words, comma separated (e.g. lap, clapboard, engineered wood)" onChange={(e) => setEdit({ ...edit, searchTerms: e.target.value })} style={S.input} aria-label="Search words" />
+      <div style={{ fontSize: 11.5, color: "#64748B" }}>No builder or supplier names here: every builder sees these.{edit.category === "cladding" && edit.id ? " A cladding keeps the look it is drawn as; add a new template for another." : ""}</div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" disabled={busy === "save"} onClick={save} style={S.btn(ACCENT, "#FFF")}>{busy === "save" ? "Saving…" : edit.id ? "Save template" : "Add template"}</button>
+        <button type="button" onClick={() => setEdit(null)} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+      </div>
+    </div>
+  );
+  return (
+    <div style={S.card} data-adm-library="1">
+      <CardHead title="StructureStudio library" count={items ? items.length : null}
+        desc="The cladding, door and window templates every builder with the library turned on can copy. A builder's copy is theirs: editing or archiving a template here never changes a builder's entry or anything they sell." />
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {!installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 339 isn't applied on this database yet.</div>}
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+        {ADM_LIB_CATS.map(([k, t]) => (
+          <button key={k} type="button" onClick={() => { setCat(k); setEdit(null); }}
+            style={{ ...S.btn(cat === k ? ACCENT : "#F1F5F9", cat === k ? "#FFF" : "#334155"), padding: "6px 12px", fontSize: 12.5 }}>{t}</button>
+        ))}
+        <button type="button" onClick={() => setEdit({ id: null, category: cat, name: "", description: "", searchTerms: "", look: ADM_LIB_BLANK_LOOK[cat] })}
+          style={{ ...S.btn("#ECFDF5", "#047857"), padding: "6px 12px", fontSize: 12.5 }}>+ Add a {cat} template</button>
+      </div>
+      {edit && !edit.id && editor}
+      {!items && <SkelBar />}
+      {list.map((t, i) => (
+        <div key={t.id}>
+          <div style={{ ...ADM_ROW, opacity: t.status === "archived" ? 0.55 : 1, flexWrap: "wrap" }} data-adm-library-item={t.name}>
+            <SsLibPic category={t.category} look={t.look} size={38} thumbUrl={t.fromPhoto ? t.thumbUrl : null} />
+            <div style={{ flex: "1 1 300px", minWidth: 0, fontSize: 12.5 }}>
+              <div style={{ fontWeight: 800, color: "#1E293B" }}>{t.name} <span style={{ fontWeight: 500, color: "#94A3B8" }}>v{t.version}</span></div>
+              <div style={{ color: "#64748B" }}>{t.fromPhoto ? "Drawn in 3D from a builder's photo" : ssLibLookWords(t.category, t.look)}{t.searchTerms && t.searchTerms.length ? ` · ${t.searchTerms.join(", ")}` : ""}</div>
+            </div>
+            {t.fromPhoto && <AdmChip tone="neutral">From a photo</AdmChip>}
+            <AdmChip tone={t.copies ? "on" : "neutral"}>{t.copies} {t.copies === 1 ? "copy" : "copies"}</AdmChip>
+            {t.status === "archived" && <AdmChip tone="warn">Archived</AdmChip>}
+            <button type="button" disabled={!!busy || i === 0} onClick={() => move(i, -1)} title="Move up" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↑</button>
+            <button type="button" disabled={!!busy || i === list.length - 1} onClick={() => move(i, 1)} title="Move down" style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 8px", fontSize: 12 }}>↓</button>
+            <button type="button" onClick={() => setEdit({ id: t.id, category: t.category, name: t.name, description: t.description || "", searchTerms: (t.searchTerms || []).join(", "), look: t.look || {}, fromPhoto: t.fromPhoto === true })}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>Edit</button>
+            <button type="button" disabled={busy === t.id} onClick={() => archive(t)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 12 }}>{t.status === "archived" ? "Restore" : "Archive"}</button>
+          </div>
+          {edit && edit.id === t.id && editor}
+        </div>
+      ))}
+      {cat === "door" && <AdmLibraryDoorLooks items={items} onPromoted={load} />}
+    </div>
+  );
+}
+
+// ── Library requests (global; migration 339) ─────────────────────────────────────────────────
+// A builder asking for a window or a cladding that is not in the library. Windows and cladding are
+// built by hand: "Take it", then "Done" with the template it became (and, ticked by default, a copy
+// in that builder's library under the name they asked for, so it is in their pickers at once), or
+// "Not possible" with a note. A charged request is refunded from here with a reason (the money grant;
+// the server says so to an operator without it). Photos are one-hour signed links.
+const ADM_LIBREQ_WORDS = { submitted: "New", in_progress: "Being built", done: "Done", refused: "Not possible", cancelled: "Cancelled", failed: "Failed", generating: "Generating", review: "In review", ready: "Ready" };
+function AdmLibraryRequests({ onPick, onFlash }) {
+  const [list, setList] = useState(null);
+  const [templates, setTemplates] = useState([]);
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const [form, setForm] = useState(null);       // { id, kind: "done"|"refuse"|"refund", ... }
+  const load = useCallback(async () => {
+    try {
+      const [r, t] = await Promise.all([adminApi("library_requests_list", {}), adminApi("library_items_list", {})]);
+      setInstalled(r.installed !== false);
+      setList(r.requests || []);
+      setTemplates((t.items || []).filter((x) => x.status !== "archived"));
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+      onFlash({ err: e.message || "Couldn't load the library requests." });
+      setList([]);
+    }
+  }, [onFlash]);
+  useEffect(() => { load(); }, []);
+  if (hidden) return null;
+  const open = (list || []).filter((r) => ["submitted", "in_progress", "generating", "review", "ready"].includes(r.status));
+  const act = async (key, fn, ok) => {
+    setBusy(key);
+    try { await fn(); onFlash({ ok }); setForm(null); await load(); }
+    catch (e) { onFlash({ err: e.message }); }
+    setBusy(null);
+  };
+  const smallBtn = (bg, fg) => ({ ...S.btn(bg, fg), padding: "5px 10px", fontSize: 12 });
+  return (
+    <div style={S.card} data-adm-library-requests={open.length}>
+      <CardHead title={`Library requests${open.length ? ` (${open.length} open)` : ""}`}
+        desc="Builders asking for a window or a cladding that isn't in the StructureStudio library. Build it, add it as a template under Master Catalog, then mark it Done with that template: it lands in the builder's library under the name they asked for." />
+      {!list && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
+      {list && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 339 isn't applied on this database yet.</div>}
+      {list && installed && list.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B" }}>No requests.</div>}
+      {list && list.map((r) => {
+        const owed = (r.chargedCents || 0) - (r.refundedCents || 0);
+        const forThis = form && form.id === r.id ? form : null;
+        const fits = templates.filter((t) => t.category === r.category);
+        return (
+          <div key={r.id} data-adm-library-request={r.status} style={{ ...ADM_ROW, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 340px", minWidth: 240, fontSize: 12.5, color: "#1E293B", lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 800 }}>{r.name} <span style={{ fontWeight: 500, color: "#64748B" }}>· a {r.category} for {r.companyName || r.clientId}</span></div>
+              <div style={{ color: "#475569" }}>
+                {r.widthIn || r.heightIn ? `${r.widthIn || "?"} × ${r.heightIn || "?"} in · ` : ""}
+                asked {new Date(r.createdAt).toLocaleDateString()}
+                {r.chargedCents ? ` · paid $${(r.chargedCents / 100).toFixed(2)}${r.refundedCents ? `, $${(r.refundedCents / 100).toFixed(2)} refunded` : ""}` : " · free"}
+              </div>
+              {r.supplierUrl && <div><a href={r.supplierUrl} target="_blank" rel="noopener noreferrer nofollow" style={{ color: ACCENT }}>Supplier link</a></div>}
+              {r.notes && <div style={{ color: "#334155", whiteSpace: "pre-wrap" }}>{r.notes}</div>}
+              {r.photos && r.photos.length > 0 && (
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  {r.photos.map((p, k) => p.url
+                    ? <a key={k} href={p.url} target="_blank" rel="noopener noreferrer"><img src={p.url} alt={`Photo ${k + 1}`} style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 6, border: "1px solid #CBD5E1" }} /></a>
+                    : <span key={k} style={{ width: 64, height: 64, borderRadius: 6, background: "#F1F5F9", display: "inline-block" }} title="Photo unavailable" />)}
+                </div>
+              )}
+              {r.resultNote && <div style={{ color: "#047857" }}>Told them: {r.resultNote}</div>}
+              {forThis && forThis.kind === "done" && (
+                <div style={{ display: "grid", gap: 6, marginTop: 8, maxWidth: 520 }}>
+                  <select value={forThis.itemId} onChange={(e) => setForm({ ...forThis, itemId: e.target.value })} style={S.input} aria-label="The template it became">
+                    <option value="">The template it became (add it under Master Catalog first)…</option>
+                    {fits.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input type="checkbox" checked={forThis.addToBuilder} onChange={(e) => setForm({ ...forThis, addToBuilder: e.target.checked })} />
+                    Add it to their library as “{r.name}”
+                  </label>
+                  <input type="text" value={forThis.note} maxLength={1000} placeholder="Note to the builder (optional)" onChange={(e) => setForm({ ...forThis, note: e.target.value })} style={S.input} />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button type="button" disabled={!!busy || !forThis.itemId} onClick={() => act(r.id, () => adminApi("library_request_set", { id: r.id, status: "done", resultItemId: forThis.itemId, addToBuilder: forThis.addToBuilder, resultNote: forThis.note }), "Marked done.")}
+                      style={smallBtn("#ECFDF5", "#047857")}>Mark done</button>
+                    <button type="button" onClick={() => setForm(null)} style={smallBtn("#F1F5F9", "#334155")}>Cancel</button>
+                  </div>
+                </div>
+              )}
+              {forThis && (forThis.kind === "refuse" || forThis.kind === "refund") && (
+                <div style={{ display: "grid", gap: 6, marginTop: 8, maxWidth: 520 }}>
+                  <input type="text" value={forThis.note} maxLength={300} placeholder={forThis.kind === "refuse" ? "Why it isn't possible (the builder sees this)" : "Why it's refunded (the builder sees this)"}
+                    onChange={(e) => setForm({ ...forThis, note: e.target.value })} style={S.input} />
+                  {owed > 0 && forThis.kind === "refuse" && (
+                    <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input type="checkbox" checked={forThis.refund} onChange={(e) => setForm({ ...forThis, refund: e.target.checked })} />
+                      Refund the ${(owed / 100).toFixed(2)} they paid
+                    </label>
+                  )}
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button type="button" disabled={!!busy || !forThis.note.trim()} style={smallBtn(forThis.kind === "refuse" ? "#FEE2E2" : "#FEF3C7", forThis.kind === "refuse" ? "#991B1B" : "#92400E")}
+                      onClick={() => act(r.id, async () => {
+                        if (forThis.kind === "refuse") await adminApi("library_request_set", { id: r.id, status: "refused", resultNote: forThis.note });
+                        if ((forThis.kind === "refuse" && forThis.refund && owed > 0) || forThis.kind === "refund") await adminApi("library_request_refund", { id: r.id, reason: forThis.note });
+                      }, forThis.kind === "refuse" ? "Marked not possible." : "Refunded.")}>
+                      {forThis.kind === "refuse" ? "Mark not possible" : `Refund $${(owed / 100).toFixed(2)}`}
+                    </button>
+                    <button type="button" onClick={() => setForm(null)} style={smallBtn("#F1F5F9", "#334155")}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <AdmChip tone={r.status === "submitted" ? "warn" : r.status === "in_progress" ? "on" : r.status === "done" ? "good" : r.status === "refused" ? "danger" : "neutral"}>{ADM_LIBREQ_WORDS[r.status] || r.status}</AdmChip>
+              {r.status === "submitted" && <button type="button" disabled={!!busy} onClick={() => act(r.id, () => adminApi("library_request_set", { id: r.id, status: "in_progress" }), "Taken.")} style={smallBtn(ACCENT, "#FFF")}>Take it</button>}
+              {(r.status === "submitted" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => setForm({ id: r.id, kind: "done", itemId: "", addToBuilder: true, note: "" })} style={smallBtn("#ECFDF5", "#047857")}>Done…</button>}
+              {(r.status === "submitted" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => setForm({ id: r.id, kind: "refuse", note: "", refund: true })} style={smallBtn("#F1F5F9", "#334155")}>Not possible…</button>}
+              {owed > 0 && !(r.status === "submitted" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => setForm({ id: r.id, kind: "refund", note: "" })} style={smallBtn("#F1F5F9", "#334155")}>Refund…</button>}
+              <button type="button" onClick={() => onPick(r.clientId)} style={smallBtn("#F1F5F9", "#334155")}>Open builder</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── "Bring your number" requests (global; Workstream 2, phase 8) ──────────────────────────
+// A builder's request to move numbers they already have is the operator's notification: it shows
+// here, on the first tab, until someone takes it. Each says what is needed to book the move
+// (workers/phone-api/PORTING.md): a GoHighLevel LC Phone number is a HighLevel ticket, any other a
+// Twilio Port In request made in the Twilio Console, into the builder's own Twilio account. No PIN,
+// bill or account number is ever here: those are asked for by phone and typed into Twilio only.
+// When the number arrives, "Adopt a moved number" on the builder's Phone tab (view-as) lands it and
+// marks the request done.
+const ADM_REQ_WORDS = { new: "New", in_progress: "Being moved", done: "Done", cancelled: "Cancelled" };
+function AdmNumberRequests({ onPick, onFlash }) {
+  const [list, setList] = useState(null);
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);   // admin-catalog older than this page
+  const [busy, setBusy] = useState(null);
+  const load = useCallback(async () => {
+    try {
+      const r = await adminApi("number_requests_list", {});
+      setInstalled(r.installed !== false);
+      setList(r.requests || []);
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+      onFlash({ err: e.message || "Couldn't load the number requests." });
+      setList([]);
+    }
+  }, [onFlash]);
+  // Once, on mount: `onFlash` is the shell's flash, a new function every render, so `load` as a
+  // dependency would reload on every render.
+  useEffect(() => { load(); }, []);
+  if (hidden) return null;
+  const open = (list || []).filter((r) => r.status === "new" || r.status === "in_progress");
+  const set = async (r, status) => {
+    if (status === "cancelled" && !window.confirm(`Cancel ${r.companyName || r.clientId}'s request for ${r.numbers.join(", ")}? Tell them why first.`)) return;
+    setBusy(r.id);
+    try {
+      await adminApi("number_request_set", { id: r.id, status });
+      onFlash({ ok: `Marked ${ADM_REQ_WORDS[status].toLowerCase()}.` });
+      await load();
+    } catch (e) { onFlash({ err: e.message }); }
+    setBusy(null);
+  };
+  return (
+    <div style={S.card} data-adm-number-requests={open.length}>
+      <CardHead title={`Bring-your-number requests${open.length ? ` (${open.length} open)` : ""}`}
+        desc="Builders asking to move numbers they already have. GoHighLevel (LC Phone) numbers move by a HighLevel support ticket; any other by a Twilio Port In request made in the Twilio Console, into the builder's own Twilio account (PORTING.md). Ask for the account number (and a mobile number's PIN) by phone and type them into Twilio only." />
+      {!list && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
+      {list && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migration 298 isn't applied on this database yet, so there are no requests to show.</div>}
+      {list && installed && list.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B" }}>No requests.</div>}
+      {list && list.map((r) => (
+        <div key={r.id} data-adm-number-request={r.status} style={{ ...ADM_ROW, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 320px", minWidth: 240, fontSize: 12.5, color: "#1E293B", lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 800 }}>{r.companyName || r.clientId} <span style={{ fontWeight: 400, color: "#64748B" }}>{r.clientId}</span></div>
+            <div style={{ fontFamily: "ui-monospace, monospace" }}>{r.numbers.join(", ")}</div>
+            <div>
+              {r.isLcPhone === true ? "GoHighLevel (LC Phone): a HighLevel ticket" : r.isLcPhone === false ? `${r.currentCarrier}: a Twilio Port In` : `${r.currentCarrier} (not sure if GoHighLevel: ask)`}
+              {r.cutoverWindow ? ` · when: ${r.cutoverWindow}` : ""}
+            </div>
+            <div style={{ color: "#475569" }}>Approves the move: {r.contactName} &lt;{r.contactEmail}&gt; · asked {phoneWhen(r.createdAt) || r.createdAt}</div>
+            {/* Review 2026-10-09: the builder is never told another business holds or asked for a
+                number; the operator is, here, before booking anything. */}
+            {r.flags && (r.flags.liveElsewhere.length > 0 || r.flags.askedElsewhere.length > 0) && (
+              <div data-adm-number-request-flag style={{ color: "#B45309", fontWeight: 700 }}>
+                {r.flags.liveElsewhere.map((f) => `${f.number} is live on ${f.clientId}. `).join("")}
+                {r.flags.askedElsewhere.map((f) => `${f.number} is also asked for by ${f.clientId}. `).join("")}
+                Check whose it is before booking the move.
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <AdmChip tone={r.status === "new" ? "warn" : r.status === "in_progress" ? "on" : r.status === "done" ? "good" : "neutral"}>{ADM_REQ_WORDS[r.status] || r.status}</AdmChip>
+            {r.status === "new" && <button type="button" disabled={!!busy} onClick={() => set(r, "in_progress")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 10px", fontSize: 12 }}>Take it</button>}
+            {(r.status === "new" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => set(r, "done")} style={{ ...S.btn("#ECFDF5", "#047857"), padding: "5px 10px", fontSize: 12 }}>Done</button>}
+            {(r.status === "new" || r.status === "in_progress") && <button type="button" disabled={!!busy} onClick={() => set(r, "cancelled")} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Cancel…</button>}
+            <button type="button" onClick={() => onPick(r.clientId)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Open builder</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Support chats (global; Ahsan 2026-10-30) ─────────────────────────────────────────────
+// Every Studio Assistant chat, newest first, read-only: admin-catalog support_chats_list and
+// support_chat_get (admin-catalog/supportChats.ts). The chats are service-role only (migration 340),
+// so this page never reads a table itself; the server refuses everyone but a signed-in operator and
+// records each chat opened in admin_audit.
+// A link to one chat is /console/chats?chat=<id>: it opens that chat, and the ?chat= comes off the
+// address at once, because ssPagePath carries the query string onto every page opened next.
+// Tracking (migration 348): the builders' 👍/👎 on each answer, the line under a 👎, and the
+// assistant's own "didn't know" notes, with a Show filter for each.
+const ADM_CHAT_STATUS = { open: ["Open", "on"], handed_off: ["Became a ticket", "warn"], closed: ["Closed", "neutral"] };
+// The assistant's lookups (support-agent/tools.ts), in words. Its two other tools are not lookups:
+// an answer that used offer_handoff says "offered a ticket", and note_gap shows as its "Didn't know" line.
+const ADM_CHAT_TOOLS = {
+  get_account_overview: "their account", get_catalog_summary: "their catalog", get_my_requests: "their requests",
+  search_whats_new: "What's new",
+};
+function admChatUsd(micros) {
+  if (micros == null) return "—";
+  const usd = Number(micros) / 1e6;
+  return usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
+}
+function admChatWhen(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+const admChatWho = (c) => (c && c.person ? (c.person.name || c.person.email || "Unknown person") : "Unknown person");
+// "👍 2 · 👎 1 · didn't know 1", the non-zero parts only.
+const admChatTally = (c) => [c.up ? `👍 ${c.up}` : "", c.down ? `👎 ${c.down}` : "", c.gaps ? `didn't know ${c.gaps}` : ""].filter(Boolean).join(" · ");
+const ADM_CHAT_SHOW = [["", "Every chat"], ["down", "👎 Not helpful"], ["handed_off", "Became a ticket"], ["gap", "Didn't know"]];
+
+function AdmSupportChatDialog({ open, onClose, onOpenBuilder }) {
+  const [copied, setCopied] = useState(false);
+  // Focus moves into the dialog, and back to what opened it on close. Left on the row button behind
+  // the overlay, Space or Enter would click that row again: the chat reloads and is audited twice.
+  const bodyRef = useRef(null);
+  useEffect(() => {
+    const opener = document.activeElement;
+    if (bodyRef.current) bodyRef.current.focus();
+    return () => { if (opener && typeof opener.focus === "function" && document.contains(opener)) opener.focus(); };
+  }, []);
+  const c = open.chat;
+  const link = `${window.location.origin}/console/chats?chat=${open.id}`;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(link); setCopied(true); }
+    catch (_e) { window.prompt("Copy this link to the chat:", link); }
+  };
+  const smallBtn = (bg, fg) => ({ ...S.btn(bg, fg), padding: "6px 12px", fontSize: 12.5 });
+  return (
+    <AdmOverlay onClose={onClose} maxWidth={760} labelledBy="adm-chat-title">
+      <div ref={bodyRef} tabIndex={-1} data-adm-chat-dialog style={{ outline: "none" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div id="adm-chat-title" style={{ fontSize: 16, fontWeight: 800, color: "#1E293B" }}>{c ? (c.companyName || c.clientId) : "Support chat"}</div>
+          {c && (
+            <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+              {admChatWho(c)}{c.person && c.person.name && c.person.email ? ` <${c.person.email}>` : ""}
+              {` · started ${admChatWhen(c.createdAt)} · ${c.messageCount} message${c.messageCount === 1 ? "" : "s"} · ${admChatUsd(c.costMicros)}`}
+              {admChatTally(c) ? ` · ${admChatTally(c)}` : ""}
+            </div>
+          )}
+          {c && c.ticket && (
+            <div data-adm-chat-ticket style={{ fontSize: 12.5, color: "#92400E", fontWeight: 700, marginTop: 2 }}>
+              Became a ticket{c.ticket.title ? `: “${c.ticket.title}”` : ""}{c.ticket.status ? ` (${String(c.ticket.status).replace(/_/g, " ")})` : ""}
+            </div>
+          )}
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close"
+          style={{ background: "none", border: "none", fontSize: 24, lineHeight: 1, cursor: "pointer", color: "#64748B", padding: "0 4px" }}>×</button>
+      </div>
+      {open.err && <div style={S.err}>{open.err}</div>}
+      {!open.err && !open.messages && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading the chat…</div>}
+      {open.messages && (
+        <div data-adm-chat-messages={open.messages.length}
+          style={{ maxHeight: "min(60vh, 560px)", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "4px 2px", borderTop: "1px solid #F1F5F9", borderBottom: "1px solid #F1F5F9" }}>
+          {open.messages.length === 0 && <div style={{ fontSize: 12.5, color: "#64748B", padding: "8px 0" }}>No messages in this chat.</div>}
+          {open.truncated && (
+            <div data-adm-chat-truncated style={{ fontSize: 12, color: "#92400E", fontWeight: 700 }}>
+              {`A long chat: only its newest ${open.messages.length.toLocaleString()} messages are shown.`}
+            </div>
+          )}
+          {open.messages.map((m) => {
+            const mine = m.role === "user";
+            const used = (m.tools || []).filter((t) => t !== "offer_handoff" && t !== "note_gap").map((t) => ADM_CHAT_TOOLS[t] || t);
+            const offered = (m.tools || []).includes("offer_handoff");
+            return (
+              <div key={m.id} data-adm-chat-msg={m.role} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "88%" }}>
+                <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 700, margin: mine ? "0 4px 2px auto" : "0 0 2px 4px", textAlign: mine ? "right" : "left" }}>
+                  {mine ? admChatWho(c) : "Studio Assistant"} · {admChatWhen(m.createdAt)}
+                  {!mine && used.length > 0 ? ` · looked at ${used.join(", ")}` : ""}
+                  {!mine && offered ? " · offered a ticket" : ""}
+                  {!mine && m.costMicros ? ` · ${admChatUsd(m.costMicros)}` : ""}
+                </div>
+                <div style={{
+                  background: mine ? "#DBEAFF" : "#F8FAFC", border: mine ? "1px solid #C3D9F7" : "1px solid #E2E8F0",
+                  borderRadius: 10, padding: "8px 11px", fontSize: 13, color: "#1E293B", lineHeight: 1.5,
+                  whiteSpace: "pre-wrap", overflowWrap: "anywhere",
+                }}>
+                  {m.body}
+                </div>
+                {!mine && (m.rating === 1 || m.rating === -1) && (
+                  <div data-adm-chat-rating={m.rating === 1 ? "up" : "down"}
+                    style={{ fontSize: 12, fontWeight: 700, color: m.rating === 1 ? "#166534" : "#B91C1C", margin: "3px 0 0 4px" }}>
+                    {m.rating === 1 ? "👍 Helpful" : "👎 Not helpful"}
+                    {m.rating === -1 && m.ratingNote ? <span style={{ fontWeight: 500, color: "#334155" }}>{` — “${m.ratingNote}”`}</span> : ""}
+                  </div>
+                )}
+                {!mine && m.gap && (
+                  <div data-adm-chat-gap style={{ fontSize: 12, fontWeight: 700, color: "#92400E", margin: "3px 0 0 4px" }}>
+                    Didn't know: <span style={{ fontWeight: 500 }}>{m.gap}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        <button type="button" onClick={copy} style={smallBtn("#F1F5F9", "#334155")}>{copied ? "Link copied" : "Copy link"}</button>
+        {c && <button type="button" onClick={() => { onClose(); onOpenBuilder(c.clientId); }} style={smallBtn("#F1F5F9", "#334155")}>Open builder</button>}
+      </div>
+      </div>
+    </AdmOverlay>
+  );
+}
+
+function AdmSupportChats({ onOpenBuilder, onFlash }) {
+  const [list, setList] = useState(null);        // null = loading
+  const [installed, setInstalled] = useState(true);
+  const [hidden, setHidden] = useState(false);   // admin-catalog older than this page
+  const [month, setMonth] = useState(null);
+  const [builders, setBuilders] = useState([]);
+  const [next, setNext] = useState(null);        // the `before` marker of the next page, or null
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [builder, setBuilder] = useState("");
+  const [show, setShow] = useState("");          // "", "down", "handed_off" or "gap" (ADM_CHAT_SHOW)
+  const [open, setOpen] = useState(null);        // { id, chat, messages, truncated, err }
+  // `onFlash` is the shell's flash, a new function every render; a ref keeps the loads off it.
+  const flashRef = useRef(onFlash);
+  flashRef.current = onFlash;
+  // A filter changed while a page was loading: the older answer is dropped, not shown.
+  const seq = useRef(0);
+  const filters = () => ({
+    clientId: builder || undefined,
+    status: show === "handed_off" ? "handed_off" : undefined,
+    show: show === "down" || show === "gap" ? show : undefined,
+  });
+
+  useEffect(() => {
+    const mine = ++seq.current;
+    setList(null);
+    setNext(null);
+    (async () => {
+      try {
+        const r = await adminApi("support_chats_list", filters());
+        if (mine !== seq.current) return;
+        setInstalled(r.installed !== false);
+        setList(r.chats || []);
+        setNext(r.more ? r.next : null);
+        if (r.month) setMonth(r.month);
+        if (r.builders) setBuilders(r.builders);
+      } catch (e) {
+        if (mine !== seq.current) return;
+        if (/Unknown action/i.test(String(e.message || ""))) { setHidden(true); return; }
+        flashRef.current({ err: e.message || "Couldn't load the support chats." });
+        setList([]);
+      }
+    })();
+  }, [builder, show]);
+
+  const loadMore = async () => {
+    if (!next) return;
+    const mine = seq.current;
+    setLoadingMore(true);
+    try {
+      const r = await adminApi("support_chats_list", { ...filters(), before: next });
+      if (mine === seq.current) {
+        setList((cur) => {
+          const have = new Set((cur || []).map((c) => c.id));
+          return [...(cur || []), ...(r.chats || []).filter((c) => !have.has(c.id))];
+        });
+        setNext(r.more ? r.next : null);
+      }
+    } catch (e) {
+      flashRef.current({ err: e.message || "Couldn't load older chats." });
+    }
+    setLoadingMore(false);
+  };
+
+  const openChat = async (id, clientId) => {
+    setOpen({ id, chat: null, messages: null, truncated: false, err: null });
+    try {
+      const r = await adminApi("support_chat_get", { chatId: id, ...(clientId ? { clientId } : {}) });
+      setOpen((cur) => (cur && cur.id === id ? { id, chat: r.chat, messages: r.messages || [], truncated: !!r.truncated, err: null } : cur));
+    } catch (e) {
+      setOpen((cur) => (cur && cur.id === id ? { ...cur, err: e.message || "Couldn't open that chat." } : cur));
+    }
+  };
+
+  // A link to one chat (/console/chats?chat=<id>): open it once, and take ?chat= off the address.
+  useEffect(() => {
+    let id = "";
+    try {
+      const qs = new URLSearchParams(window.location.search);
+      if (qs.has("chat")) {
+        id = String(qs.get("chat") || "").trim().toLowerCase();
+        qs.delete("chat");
+        const rest = qs.toString();
+        window.history.replaceState(window.history.state, "", window.location.pathname + (rest ? "?" + rest : "") + window.location.hash);
+      }
+    } catch (_e) { /* history unavailable */ }
+    if (id && SS_UUID_RE.test(id)) openChat(id, null);
+    else if (id) flashRef.current({ err: "That chat link isn't complete." });
+  }, []);
+
+  if (hidden) return null;
+  const quiet = { fontSize: 12.5, color: "#64748B" };
+  return (
+    <>
+      <div style={S.card} data-adm-support-chats={list ? list.length : "loading"}>
+        <CardHead title="Support chats"
+          desc="Every chat builders had with the Studio Assistant, newest first. Read-only: nothing here changes a chat or a ticket. Builders are told chats are saved so our team can follow up; each is deleted after 180 days without a message." />
+        {month && (
+          <div data-adm-chat-month style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(108px, 1fr))", gap: 14, padding: "2px 0 14px", borderBottom: "1px solid #F1F5F9", marginBottom: 12 }}>
+            <AdmBillingStat label="Chats this month" value={month.chats ?? "—"} />
+            <AdmBillingStat label="Questions" value={month.questions ?? "—"} />
+            <AdmBillingStat label="Became tickets" value={month.tickets ?? "—"} />
+            <AdmBillingStat label="👍 Helpful" value={month.up ?? "—"} />
+            <AdmBillingStat label="👎 Not helpful" value={month.down ?? "—"} />
+            <AdmBillingStat label="Didn't know" value={month.gaps ?? "—"} />
+            <AdmBillingStat label="Spend" value={admChatUsd(month.costMicros)} sub={`of the ${admChatUsd(month.capMicros)} monthly limit`} />
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 6 }}>
+          <select value={builder} onChange={(e) => setBuilder(e.target.value)} aria-label="Builder"
+            style={{ ...S.input, width: "auto", minWidth: 200, maxWidth: "100%" }}>
+            <option value="">Every builder</option>
+            {builders.map((b) => <option key={b.clientId} value={b.clientId}>{`${b.companyName || b.clientId} (${b.chats})`}</option>)}
+          </select>
+          <select value={show} onChange={(e) => setShow(e.target.value)} aria-label="Show"
+            style={{ ...S.input, width: "auto", minWidth: 170, maxWidth: "100%" }}>
+            {ADM_CHAT_SHOW.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+          </select>
+        </div>
+        {!list && <div style={quiet}>Loading…</div>}
+        {list && !installed && <div style={quiet}>Migration 340 isn't applied on this database yet.</div>}
+        {list && installed && list.length === 0 && <div style={quiet}>{builder || show ? "No chats match." : "No chats yet."}</div>}
+        {list && list.map((c) => {
+          const [word, tone] = ADM_CHAT_STATUS[c.status] || [c.status, "neutral"];
+          return (
+            <button key={c.id} type="button" onClick={() => openChat(c.id, c.clientId)} data-adm-chat-row={c.status}
+              style={{ ...ADM_ROW, width: "100%", background: "none", border: "none", borderBottom: "1px solid #F1F5F9", cursor: "pointer", textAlign: "left", fontFamily: "inherit", alignItems: "flex-start" }}>
+              <AdmTile name={c.companyName || c.clientId} size={30} />
+              <span style={{ display: "block", flex: "1 1 auto", minWidth: 0, fontSize: 12.5, color: "#1E293B", lineHeight: 1.5 }}>
+                <span style={{ display: "block", fontWeight: 800 }}>
+                  {c.companyName || c.clientId} <span style={{ fontWeight: 500, color: "#64748B" }}>· {admChatWho(c)}</span>
+                </span>
+                <span style={{ display: "block", color: "#334155", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {c.firstQuestion || <span style={{ color: "#94A3B8", fontStyle: "italic" }}>No question yet</span>}
+                </span>
+                {c.gapNote && (
+                  <span data-adm-chat-row-gap style={{ display: "block", color: "#92400E", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    Didn't know: {c.gapNote}
+                  </span>
+                )}
+                <span style={{ display: "block", color: "#64748B" }}>
+                  {admChatWhen(c.lastMessageAt)} · {c.messageCount} message{c.messageCount === 1 ? "" : "s"} · {admChatUsd(c.costMicros)}
+                  {admChatTally(c) ? ` · ${admChatTally(c)}` : ""}
+                </span>
+              </span>
+              <span style={{ flexShrink: 0 }}><AdmChip tone={tone}>{word}</AdmChip></span>
+            </button>
+          );
+        })}
+        {next && (
+          <div style={{ marginTop: 10 }}>
+            <button type="button" disabled={loadingMore} onClick={loadMore} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 12px", fontSize: 12.5 }}>
+              {loadingMore ? "Loading…" : "Load older chats"}
+            </button>
+          </div>
+        )}
+      </div>
+      {open && <AdmSupportChatDialog open={open} onClose={() => setOpen(null)} onOpenBuilder={onOpenBuilder} />}
+    </>
+  );
+}
+
 // ── Clients (global) ─────────────────────────────────────────────────────────
 function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, onReload }) {
   const [q, setQ] = useState("");
@@ -1982,6 +2911,8 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
   const [id, setId] = useState("");
   const [company, setCompany] = useState("");
   const [tpl, setTpl] = useState("__none__");
+  // "sheds" | "smartbuild" (Carolyn 2026-11-05) — see create_client's ACCOUNT TYPE in admin-catalog.
+  const [acctType, setAcctType] = useState("sheds");
   const [idTouched, setIdTouched] = useState(false);
   const [exempt, setExempt] = useState(false);
   const [discount, setDiscount] = useState("0");
@@ -2082,15 +3013,22 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
     }
     setBusy(true);
     try {
-      await adminApi("create_client", {
-        clientId: slug, companyName: company.trim(), templateClientId: tpl,
+      const made = await adminApi("create_client", {
+        clientId: slug, companyName: company.trim(), templateClientId: acctType === "smartbuild" ? "__none__" : tpl,
         billingExempt: exempt, discountPercent: exempt ? 0 : pctNum,
         discountFeatures: allFeat ? [] : picked,
+        accountType: acctType,
       });
       await onReload();
-      setOpenNew(false); setId(""); setCompany(""); setTpl("__none__"); setIdTouched(false);
+      setOpenNew(false); setId(""); setCompany(""); setTpl("__none__"); setAcctType("sheds"); setIdTouched(false);
       setExempt(false); setDiscount("0"); setAllFeat(true); setPicked([]);
-      onFlash({ ok: `Created “${slug}”. Next: give the owner a login on the Account tab, then styles, items and pricing.` });
+      // The pipeline step is best-effort on the server, and the one failure worth saying out loud:
+      // the first board open of an account with no pipeline seeds the SHED board instead.
+      onFlash(acctType !== "smartbuild"
+        ? { ok: `Created “${slug}”. Next: give the owner a login on the Account tab, then styles, items and pricing.` }
+        : made && made.smartbuildPipeline === false
+          ? { err: `Created “${slug}” as a SmartBuild builder, but its SmartBuild Jobs pipeline was not made. Add it from Settings → Customer Hub → Pipelines (New pipeline → the SmartBuild template) before anyone opens the board.` }
+          : { ok: `Created “${slug}” as a SmartBuild builder. Next: give the owner a login on the Account tab.` });
       onPick(slug);
     } catch (e) { onFlash({ err: e.message }); }
     setBusy(false);
@@ -2187,13 +3125,31 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
                 {idErr || (idTouched ? "Used in the customer designer link: ?client=junior-barns." : "Auto-generated from the company name — edit to override.")}
               </div>
             </div>
+            {/* ACCOUNT TYPE (Carolyn 2026-11-05): "after we have Joe set as it needs to be then I will
+                want to see this clearly set this way for same instances in the future". SmartBuild =
+                the no-shed-designer shape (migration 364), its pipeline, and its setup list (368). */}
             <div>
+              <label style={S.lbl}>Account type</label>
+              <select value={acctType} onChange={(e) => setAcctType(e.target.value)} style={S.input}>
+                <option value="sheds">Shed builder</option>
+                <option value="smartbuild">SmartBuild builder (no shed designer)</option>
+              </select>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                {acctType === "smartbuild"
+                  ? "Customer Hub without the designer, catalog, lots or schedules. Starts with the SmartBuild Jobs pipeline and the SmartBuild setup list."
+                  : "The shed designer and everything that goes with it."}
+              </div>
+            </div>
+            <div style={{ opacity: acctType === "smartbuild" ? 0.5 : 1, pointerEvents: acctType === "smartbuild" ? "none" : "auto" }}>
               <label style={S.lbl}>Copy catalog from</label>
-              <select value={tpl} onChange={(e) => setTpl(e.target.value)} style={S.input}>
+              <select value={acctType === "smartbuild" ? "__none__" : tpl} onChange={(e) => setTpl(e.target.value)} style={S.input}
+                disabled={acctType === "smartbuild"}>
                 <option value="__none__">Start empty</option>
                 {(clients || []).map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id}</option>)}
               </select>
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Copies styles, sizes and items — not designs or settings.</div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                {acctType === "smartbuild" ? "A SmartBuild builder has no shed catalog, so it always starts empty." : "Copies styles, sizes and items — not designs or settings."}
+              </div>
             </div>
           </div>
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>
@@ -2265,7 +3221,7 @@ function AdmMaster({ master, masterErr }) {
 }
 
 // ── Avalara tax codes (global) ───────────────────────────────────────────────
-// The platform catalog every builder's Settings → Company → Tax picker searches (migration 246).
+// The platform catalog behind every builder's Settings → Company → Sales Tax picker (migration 246).
 // Builders never call Avalara: an operator fills the stored copy from here, on purpose, through
 // admin-catalog's avalara_sync_tax_codes. The row first shows what the copy holds
 // (avalara_tax_codes_status, a read of the table only), so a sync is pressed because the list
@@ -2311,7 +3267,7 @@ function AdmTaxCodes() {
   return (
     <div style={S.card}>
       <CardHead title="Avalara tax codes" count={status && !status.err ? n(status.count) : null}
-        desc="The list every builder's Settings → Company → Tax picker searches. Builders never call Avalara: a sync here reads Avalara's full list and stores it."
+        desc="The stored copy of Avalara's full list. A builder's Settings → Company → Sales Tax picker reads it for the short Sales Tax list, so builders never call Avalara. A sync here reads Avalara's full list and stores it."
         right={
           /* Disabled only while a sync runs, and the label says so. */
           <button type="button" onClick={sync} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.7 : 1 }}>
@@ -2373,6 +3329,175 @@ function AdminClientPanes({ sub, clientId, clientRow, master, masterErr, feature
       {sub === "items" && <AdmItems {...common} />}
       {sub === "pricing" && <AdmPricing {...common} />}
     </>
+  );
+}
+
+// ── The builder's own Twilio account (Workstream 2, phase 9) ────────────────────────────────
+// Every builder but our own texts and calls from a Twilio sub-account of theirs, billed to ours
+// (Carolyn 2026-10-08). It is made by itself, once TWILIO_SUBACCOUNTS is on, when they get their
+// first number or first submit their texting registration (admin-catalog -> _shared/
+// twilioProvision.ts). This card shows where it stands and lets an operator make one by hand (the
+// first TEST account, while the switch is still off), re-check one, suspend it, or close it. SIDs are
+// masked by the server; nothing secret ever reaches this page. Create and Close are on the money
+// grant (can_bill). Close is typed, because Twilio releases every number in a closed account for
+// good; so is Create whenever the switch is not "on" (review M4: there it is the only way a
+// sub-account is made, and a closed one can never be undone).
+function AdmTwilioAccount({ clientId, label, onFlash }) {
+  const [acct, setAcct] = useState(null);
+  const [err, setErr] = useState(null);
+  // The server has no such action yet (admin-catalog deployed before this card): said quietly.
+  const [notDeployed, setNotDeployed] = useState(false);
+  const [busy, setBusy] = useState(null);
+
+  const load = useCallback(async (check) => {
+    setErr(null);
+    try {
+      const r = await adminApi("twilio_account_get", check ? { clientId, check: true } : { clientId });
+      setAcct((r && r.account) || null);
+    } catch (e) {
+      if (/Unknown action/i.test(String(e.message || ""))) { setNotDeployed(true); return; }
+      setErr(e.message || "Couldn't load this builder's phone account.");
+    }
+  }, [clientId]);
+  useEffect(() => { setAcct(null); setNotDeployed(false); load(false); }, [load]);
+
+  const run = async (kind, action, body, okMsg) => {
+    setBusy(kind);
+    try {
+      const r = await adminApi(action, Object.assign({ clientId }, body));
+      if (r && r.account) setAcct(r.account);
+      onFlash({ ok: okMsg(r || {}) });
+    } catch (e) {
+      onFlash({ err: e.message });
+      await load(false);
+    }
+    setBusy(null);
+  };
+
+  const sub = acct && acct.kind === "sub";
+  const status = sub ? acct.status : null;
+  const mode = (acct && acct.switchMode) || (acct && acct.switchOn ? "on" : "off");
+  const installed = !acct || acct.installed !== false;
+  const canCreate = installed && acct && (acct.kind === "none" ? !acct.parentReason
+    : sub && (status === "provisioning" || status === "failed" || status === "suspended" || status === "active"));
+  const createLabel = status === "suspended" ? "Reactivate"
+    : status === "active" ? ((acct.pushSkipped || []).length ? "Add the missing push credentials" : "Re-check set-up")
+    : status === "provisioning" || status === "failed" ? "Finish setting it up" : "Create Twilio account";
+
+  const create = () => {
+    let confirmId = clientId;
+    if (status === "suspended") {
+      if (!window.confirm(`Reactivate ${label}'s Twilio account? Their calls and texts start working again.`)) return;
+    } else if (status === "active") {
+      if (!window.confirm(`${createLabel} for ${label}? Every piece of their Twilio account is checked again and anything missing is filled in `
+        + "(push credentials loaded since, an auth token rotated in Twilio, the calling app's URLs). Nothing is made twice.")) return;
+    } else {
+      const what = "This makes a Twilio sub-account billed to ours, with its own key, calling app, push credentials and event stream. "
+        + "Pressing it again after a failure carries on from where it stopped; nothing is made twice.";
+      if (mode !== "on") {
+        // Typed, like Close: with the switch not "on" this is the only way a sub-account is made.
+        const typed = window.prompt(`${createLabel} for ${label}?\n\n`
+          + (mode === "manual" ? "TWILIO_SUBACCOUNTS is \"manual\": this builder's calls and texts move into it as soon as it is made.\n\n"
+            : "TWILIO_SUBACCOUNTS is off, so this is a TEST account: make one only for a test builder. It is used only once the switch is \"manual\" or \"on\".\n\n")
+          + `${what}\n\nType ${clientId} to make it.`);
+        if (typed == null) return;
+        if (typed.trim() !== clientId) { onFlash({ err: "That isn't this builder's id, so nothing was made." }); return; }
+        confirmId = typed.trim();
+      } else if (!window.confirm(`${createLabel} for ${label}?\n\n${what}`)) return;
+    }
+    run("create", "twilio_account_provision", { confirmClientId: confirmId }, (r) => (r.reactivated
+      ? `${label}'s Twilio account is active again.`
+      : `${label} has its own Twilio account.${(r.pushSkipped || []).length ? ` No push credential yet for: ${r.pushSkipped.join(", ")} (load it in Vault, then press again).` : ""}`));
+  };
+  const suspend = () => {
+    if (!window.confirm(`Suspend ${label}'s Twilio account? Their calls and texts stop until you reactivate it. Their numbers are kept.`)) return;
+    run("suspend", "twilio_account_suspend", {}, () => `${label}'s Twilio account is suspended.`);
+  };
+  const close = () => {
+    const typed = window.prompt(`CLOSE ${label}'s Twilio account for good? A closed Twilio account can't be reopened, and every number in it is released. Release their numbers first (it refuses while any are left).
+
+Type ${clientId} to close it.`);
+    if (typed == null) return;
+    if (typed.trim() !== clientId) { onFlash({ err: "That isn't this builder's id, so nothing was closed." }); return; }
+    run("close", "twilio_account_close", { confirmClientId: typed.trim() }, () => `${label}'s Twilio account is closed.`);
+  };
+  const check = async () => { setBusy("check"); await load(true); setBusy(null); };
+  // 2026-10-21 (migration 323): the builder's own Verify service, so their customers' login codes
+  // say "Your <name> verification code is". Made by Create; this re-names it after a name change.
+  const syncLogin = () => run("verify", "twilio_verify_sync", {}, (r) => {
+    const v = r.verifyService || {};
+    return v.outcome === "unchanged" ? `${label}'s login texts already say "${v.name}".` : `${label}'s login texts now say "${v.name}".`;
+  });
+
+  const tone = status === "active" ? "good" : status === "suspended" || status === "failed" ? "warn" : status === "closed" ? "danger" : "neutral";
+  const row = (k, v) => (
+    <div style={ADM_ROW}>
+      <div style={{ width: 170, fontSize: 12, fontWeight: 700, color: "#64748B", flexShrink: 0 }}>{k}</div>
+      <div style={{ fontSize: 12.5, color: "#1E293B", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>{v}</div>
+    </div>
+  );
+  const have = (on, name) => <AdmChip key={name} tone={on ? "good" : "neutral"}>{name}{on ? "" : ": none"}</AdmChip>;
+  const checkChip = (v) => <AdmChip tone={v === "ok" ? "good" : v === "missing" ? "neutral" : "danger"}>{v === "ok" ? "accepted" : v}</AdmChip>;
+  const btn = (kind, text, onClick, bg, fg) => (
+    <button type="button" onClick={onClick} disabled={!!busy}
+      style={{ ...S.btn(bg, fg), padding: "8px 14px", fontSize: 12.5, opacity: busy ? 0.6 : 1, cursor: busy ? "default" : "pointer" }}>
+      {busy === kind ? "Working…" : text}
+    </button>
+  );
+
+  return (
+    <div style={S.card} data-adm-twilio-account>
+      <CardHead title="Twilio account"
+        desc="Where this builder's texting and calling live. Every builder but our own gets a Twilio sub-account of their own, billed to ours: it is made by itself when they get their first number or submit their texting registration, once sub-accounts are switched on." />
+      {err && <div style={S.err}>{err}</div>}
+      {notDeployed && <div style={{ fontSize: 12.5, color: "#64748B" }}>This server doesn't have the Twilio account tools yet (admin-catalog is older than this page).</div>}
+      {!acct && !err && !notDeployed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Loading…</div>}
+      {acct && !installed && <div style={{ fontSize: 12.5, color: "#64748B" }}>Migrations 292 and 295 aren't applied on this database yet, so there is nothing to show.</div>}
+      {acct && installed && (
+        <div>
+          {row("Switch", <AdmChip tone={mode === "on" ? "on" : mode === "manual" ? "warn" : "neutral"}
+            title={mode === "manual" ? "Existing sub-accounts are used; new ones are made only here" : undefined}>{`TWILIO_SUBACCOUNTS ${mode}`}</AdmChip>)}
+          {row("Account", acct.kind === "sub"
+            ? <><AdmChip tone={tone}>{status}</AdmChip><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.accountSid || "not made yet"}</span></>
+            : <span>{acct.kind === "parent" ? "Stays on our main account (pinned)." : acct.parentReason ? `Stays on our main account: it has ${acct.parentReason}.` : "None yet: on our main account until one is made."}</span>)}
+          {sub && row("Set-up step", <><span>{acct.step === "done" ? "finished" : acct.step || "not started"}</span>{acct.lastError && <AdmChip tone="warn" title="The step and Twilio's code where it last stopped">{acct.lastError}</AdmChip>}{acct.lockedUntil && <AdmChip tone="on">being set up now</AdmChip>}</>)}
+          {sub && row("Key and calling app", <><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.apiKeySid || "no key"}</span><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.twimlAppSid || "no app"}</span></>)}
+          {sub && row("Push credentials", <>{have(acct.push && acct.push.apns_dev, "iPhone dev")}{have(acct.push && acct.push.apns_prod, "iPhone")}{have(acct.push && acct.push.fcm, "Android")}</>)}
+          {sub && row("Event Streams", <>{have(acct.sink, "sink")}{have(acct.subscription, "subscription")}</>)}
+          {/* The customer login code text (migration 323). verifyService undefined = an older server. */}
+          {acct.verifyService !== undefined && row("Login text name", acct.verifyService && acct.verifyService.name
+            ? <><span data-adm-login-text>&ldquo;Your {acct.verifyService.name} verification code is&hellip;&rdquo;</span><span style={{ fontFamily: "ui-monospace, monospace" }}>{acct.verifyService.sid}</span></>
+            : <span data-adm-login-text>{sub ? "Our name (Structure Studio) until their own is made: press Sync login text name." : "Our name: Structure Studio."}</span>)}
+          {row("Live numbers", <span>{acct.liveNumbers == null ? "unknown" : acct.liveNumbers}</span>)}
+          {/* Workstream 2, phase 8: their open "Bring your number" requests (listed on the Builders tab). */}
+          {acct.openNumberRequests > 0 && row("Number requests", <AdmChip tone="warn">{`${acct.openNumberRequests} open: see Builders, Bring-your-number requests`}</AdmChip>)}
+          {/* Workstream 2, phase 6: each number's caller-ID registrations (statuses only; registered
+              from the builder's Phone tab in view-as). `cnam` undefined = migration 297 not applied. */}
+          {Array.isArray(acct.callerId) && acct.callerId.length > 0 && row("Caller ID", (
+            <span data-adm-caller-id style={{ display: "grid", gap: 4 }}>
+              {acct.callerId.map((n, i) => (
+                <span key={i} style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontFamily: "ui-monospace, monospace" }}>{n.number}</span>
+                  {[["SHAKEN/STIR", n.shaken], ["Voice Integrity", n.voiceIntegrity], ...(n.cnam !== undefined ? [["CNAM", n.cnam]] : [])].map(([k, s]) => (
+                    <AdmChip key={k} tone={s === "twilio-approved" ? "good" : s === "twilio-rejected" ? "danger" : s ? "warn" : "neutral"}>{`${k}: ${s || "none"}`}</AdmChip>
+                  ))}
+                  {n.cnamName && <span data-adm-cnam-name>&ldquo;{n.cnamName}&rdquo;</span>}
+                </span>
+              ))}
+            </span>
+          ))}
+          {acct.tokenCheck && row("Token check", <><span>auth token</span>{checkChip(acct.tokenCheck.authToken)}<span>API key</span>{checkChip(acct.tokenCheck.apiKey)}</>)}
+          {status === "closed" && row("Closed", <span>Closed for good. This builder stays off calls and texts while the closed account is on record: deleting the builder removes it, or run <code>select public.twilio_account_forget('{clientId}');</code> (SETUP.md 7f).</span>)}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+            {canCreate && btn("create", createLabel, create, ACCENT, "#FFF")}
+            {sub && acct.accountSid && status !== "closed" && btn("check", "Check token", check, "#F1F5F9", "#334155")}
+            {sub && status === "active" && acct.verifyService !== undefined && btn("verify", "Sync login text name", syncLogin, "#F1F5F9", "#334155")}
+            {sub && status === "active" && btn("suspend", "Suspend", suspend, "#FEF3C7", "#92400E")}
+            {sub && acct.accountSid && status !== "closed" && btn("close", "Close…", close, "#FEF2F2", "#DC2626")}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2471,7 +3596,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       `Make ${label} non-billable?
 
 `
-      + `This switches on Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D free `
+      + `This switches on Scheduling, QuickBooks Sync, Real-Time Pricing, the Customer Hub and 3D free `
       + `(about $755/mo), and makes AI generations free.
 
 `
@@ -2585,7 +3710,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
             Non-billable — full access to every feature, and never charged
             <span style={{ display: "block", fontSize: 12, color: "#64748B", marginTop: 2, fontWeight: 400 }}>
               More than skipping the billing gate: it switches on Scheduling, QuickBooks Sync, Real-Time Pricing,
-              the CRM and 3D with no subscription, and makes AI generations free. For CSM Synergy's own, demo and
+              the Customer Hub and 3D with no subscription, and makes AI generations free. For CSM Synergy's own, demo and
               test accounts only.
             </span>
           </span>
@@ -2647,14 +3772,18 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
         </div>
       )}
 
+      {/* Workstream 2, phase 9: the builder's own Twilio sub-account (AdmTwilioAccount above). */}
+      <AdmTwilioAccount clientId={clientId} label={label} onFlash={onFlash} />
+
       {/* The only tinted card in the shell, which is what makes the tint mean something.
           Last card on the tab, below a scroll — unreachable by accident, and impossible to
           hit while aiming for "Billing", which is exactly what the old button row made easy. */}
       <div style={{ ...S.card, background: "#FEE2E2", border: "1px solid #DC2626" }}>
         <div style={{ fontSize: 15, fontWeight: 800, color: "#991B1B", letterSpacing: 0.3, marginBottom: 6 }}>Danger zone</div>
         <div style={{ fontSize: 12.5, color: "#991B1B", lineHeight: 1.55, marginBottom: 14 }}>
-          Deleting {label} erases their catalog, designs, settings, logins and stored images. It cannot be
-          undone, and it still asks for the operator password even though you're signed in.
+          Deleting {label} erases all of their data; their customers' records are exported first, and money,
+          signed and consent records are kept. It cannot be undone, and it still asks for the operator password
+          even though you're signed in.
         </div>
         <button type="button" onClick={() => setDelOpen(true)} style={S.btn("#FEF2F2", "#DC2626")}>Delete this builder…</button>
       </div>
@@ -2663,9 +3792,21 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
         <AdmDeleteDialog client={clientRow || { client_id: clientId }} onClose={() => setDelOpen(false)}
           onDeleted={async (id, r) => {
             setDelOpen(false);
-            const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
-            await onReloadClients();
-            onFlash({ ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}` });
+            const parts = admDeletedSummary(r && r.deleted);
+            const report = admDeleteReport(r);
+            const exportUrl = r && r.export && r.export.url;
+            // Sticky while there is anything to read, and always with an export: the link is the only
+            // copy of their customers' data. Shown BEFORE the list refresh, as admin.app.jsx does: a
+            // failed refresh must not swallow it (2026-10-23 promotion review).
+            onFlash({
+              ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}${report ? ` ${report}` : ""}`,
+              sticky: !!(report || exportUrl),
+              link: exportUrl ? { href: exportUrl, label: "Download the customer-data export" } : null,
+            });
+            try { await onReloadClients(); } catch (e) {
+              // The list catches up on the next load; the flash above already holds the link.
+              if (window.ssLogError) window.ssLogError("portal", `Builders list did not reload after deleting ${id}: ${(e && e.message) || e}`, "delete_list_reload");
+            }
             onDeleted();
           }} />
       )}

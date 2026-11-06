@@ -273,7 +273,7 @@ function PMDrawer({ onClose, labelledBy, children }) {
 // The one thing that cannot live in a row — a conversation — lives here, and the
 // client's original words sit at the bottom of it as the first entry in the thread.
 // Header and footer are pinned; only the thread scrolls.
-function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
+function PMItemPanel({ item, columns = [], canWrite, onClose, onRename, onArchive, onMove }) {
   const [detail, setDetail] = useState(null);      // { updates, submission }
   const [err, setErr] = useState("");
   const [name, setName] = useState(item.name);
@@ -368,6 +368,12 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   const tag = (bg, fg, text) => (
     <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.4, borderRadius: 4, padding: "1px 6px", background: bg, color: fg, whiteSpace: "nowrap" }}>{text}</span>
   );
+  // The card's own LINK cells, under the Created line: on the Support board that is a ticket's
+  // "Full chat" (Carolyn, 10-29), which is easy to miss in the grid once the card is open. Any link
+  // column counts, only http(s) values, the same anchor as the grid cell. A plain array, no hook.
+  const links = columns.filter((c) => c.type === "link")
+    .map((c) => ({ c, v: item.values && item.values[c.id] }))
+    .filter(({ v }) => v && typeof v.url === "string" && /^https?:\/\//i.test(v.url));
 
   return (
     <>
@@ -403,6 +409,18 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
             <span style={{ color: "#94A3B8" }}>Loading history…</span>
           )}
         </div>
+        {links.length > 0 && (
+          <div style={{ fontSize: 12, marginTop: 6, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "baseline" }}>
+            {links.map(({ c, v }) => (
+              <span key={c.id} style={{ color: "#64748B" }}>
+                {c.name}:{" "}
+                <a href={v.url} target="_blank" rel="noreferrer" style={{ color: "#1B7895", fontWeight: 600 }}>
+                  {v.text || v.url.replace(/^https?:\/\//, "").slice(0, 40)}
+                </a>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Thread — the only scrolling region */}
@@ -515,8 +533,17 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
 
       {/* Footer — pinned, so Remove never hides below a long thread */}
       {canWrite && (
-        <div style={{ padding: "10px 18px", borderTop: "1px solid #E2E8F0", textAlign: "right", flexShrink: 0 }}>
-          <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
+        <div style={{ padding: "10px 18px", borderTop: "1px solid #E2E8F0", display: "flex", alignItems: "center", gap: 14, flexShrink: 0 }}>
+          {/* Moving is not removing, so it does not wear the red. An overlay row is
+              somebody else's card sitting on this table — it is moved from the board it
+              lives on, the same rule archiving already follows. */}
+          {onMove && !item.overlay && (
+            <button type="button" style={{ background: "none", border: "none", color: ACCENT, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 0 }}
+              onClick={() => { onMove(item); onClose(); }}>
+              Move to another board
+            </button>
+          )}
+          <button type="button" style={{ marginLeft: "auto", background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
             onClick={() => { if (window.confirm("Remove this item from the board? (It is archived, not destroyed.)")) { onArchive(item); onClose(); } }}>
             Remove from board
           </button>
@@ -539,6 +566,140 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   );
 }
 
+// ── Move cards to another board (Carolyn 2026-10-26) ──────────────────────────────────────
+//
+// Two round trips on purpose. Pick a board and the server answers a PLAN — what lines up,
+// what does not, and what the alternatives are for each leftover — and only then is there
+// anything to confirm. The alternative was to move first and report the damage, which is the
+// one shape Carolyn ruled out: "Give the option of matching the field to an existing or the
+// option to create new, or disregard and delete."
+//
+// Nothing here decides anything. Every rule — same-type candidates only, what a leftover
+// defaults to, whether these cards may leave this board at all — is the server's, and this
+// renders the answer. A dialog that computed its own matches would be a second copy of
+// columnIdMap, drifting quietly from the one that does the writing.
+function PMMoveDialog({ items, fromBoard, boards, onClose, onDone }) {
+  const [toBoardId, setToBoardId] = useState("");
+  const [plan, setPlan] = useState(null);
+  const [groupId, setGroupId] = useState("");
+  const [decisions, setDecisions] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const ids = items.map((i) => i.id);
+  // A locked board is one you cannot see into (migration 334), and the ＋ board you are on
+  // is not a destination. Both are left out rather than offered and refused.
+  const targets = (boards || []).filter((b) => !b.locked && b.id !== fromBoard.id);
+
+  useEffect(() => {
+    if (!toBoardId) { setPlan(null); return; }
+    let alive = true;
+    setErr(""); setPlan(null);
+    pmCall({ action: "move_plan", ids, toBoardId })
+      .then((p) => {
+        if (!alive) return;
+        setPlan(p);
+        setGroupId((p.groups && p.groups[0] && p.groups[0].id) || "");
+        // Every leftover starts at "leave it behind" — the same thing that happens if the
+        // dialog is never touched, so the default and the do-nothing path agree.
+        setDecisions(Object.fromEntries((p.unmatched || []).map((u) => [u.id, { action: "drop" }])));
+      })
+      .catch((e) => { if (alive) setErr(e.message); });
+    return () => { alive = false; };
+  }, [toBoardId]);
+
+  const go = async () => {
+    if (busy || !plan || !groupId) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await pmCall({ action: "move_to_board", ids, toBoardId, groupId, decisions });
+      onDone(plan.to.name, r.created || []);
+      onClose();
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  const flabel = { fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "14px 0 5px", display: "block" };
+  const rowStyle = { display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.8 };
+
+  return (
+    <AdmOverlay onClose={onClose} maxWidth={620} labelledBy="pm-mv-title">
+      <div style={{ padding: "16px 20px", maxHeight: "82vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <b id="pm-mv-title" style={{ fontSize: 15 }}>Move {items.length === 1 ? "this card" : `${items.length} cards`} to another board</b>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ marginLeft: "auto", background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer" }}>✕</button>
+        </div>
+        {err && <div style={{ ...S.err, marginTop: 8 }}>{err}</div>}
+
+        <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 6 }}>
+          {items.length === 1 ? <b style={{ color: "#334155" }}>{items[0].name}</b> : `${items.length} cards`} · now on {fromBoard.name}
+        </div>
+
+        <span style={flabel}>Move to</span>
+        <select style={{ ...S.input, maxWidth: 320 }} value={toBoardId} onChange={(e) => setToBoardId(e.target.value)}>
+          <option value="">Pick a board…</option>
+          {targets.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+        {!targets.length && <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>There is no other board you can move these to.</div>}
+
+        {toBoardId && !plan && !err && <div style={{ fontSize: 12.5, color: "#94A3B8", marginTop: 10 }}>Checking what lines up…</div>}
+
+        {plan && (
+          <>
+            <span style={flabel}>Land them in</span>
+            <select style={{ ...S.input, maxWidth: 320 }} value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+              {(plan.groups || []).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+
+            <span style={flabel}>Fields</span>
+            {!plan.matched.length && !plan.unmatched.length && (
+              <div style={{ fontSize: 12.5, color: "#64748B" }}>Nothing is filled in on {items.length === 1 ? "this card" : "these cards"}, so there is nothing to carry over.</div>
+            )}
+            {plan.matched.map((m) => (
+              <div key={m.id} style={rowStyle}>
+                <span style={{ fontWeight: 700, color: "#334155" }}>{m.name}</span>
+                <span style={{ color: "#94A3B8" }}>→ {m.destName}</span>
+                <span style={{ marginLeft: "auto", fontSize: 10.5, fontWeight: 700, color: "#0E9F6E", background: "#ECFDF5", borderRadius: 4, padding: "2px 6px" }}>CARRIES OVER</span>
+                {/* The columns line up and a cell can still be lost: the label this card
+                    uses may not exist on the other board. Said here, because afterwards
+                    the cell is simply empty and nothing explains why. */}
+                {!!(m.lostChoices || []).length && (
+                  <span style={{ flexBasis: "100%", fontSize: 11.5, color: "#B45309" }}>
+                    ⚠ {plan.to.name} has no “{m.lostChoices.join("”, “")}” — {m.lostChoices.length === 1 ? "that cell" : "those cells"} will be empty.
+                  </span>
+                )}
+              </div>
+            ))}
+            {plan.unmatched.map((u) => (
+              <div key={u.id} style={rowStyle}>
+                <span style={{ fontWeight: 700, color: "#334155" }}>{u.name}</span>
+                <span style={{ color: "#94A3B8", fontSize: 11.5 }}>{u.type} · filled on {u.filled} of {items.length}</span>
+                <select style={{ ...S.input, marginLeft: "auto", maxWidth: 230, padding: "4px 8px", fontSize: 12.3 }}
+                  value={decisions[u.id] && decisions[u.id].action === "map" ? "map:" + decisions[u.id].destColId : (decisions[u.id] || {}).action || "drop"}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setDecisions((d) => ({ ...d, [u.id]: v.startsWith("map:") ? { action: "map", destColId: v.slice(4) } : { action: v } }));
+                  }}>
+                  <option value="drop">Leave it behind</option>
+                  <option value="create">Add “{u.name}” to {plan.to.name}</option>
+                  {u.candidates.map((c) => <option key={c.id} value={"map:" + c.id}>Put it in “{c.name}”</option>)}
+                </select>
+              </div>
+            ))}
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 16 }}>
+              <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={busy || !groupId} onClick={go}>
+                {busy ? "Moving…" : `Move to ${plan.to.name}`}
+              </button>
+              <button type="button" style={S.btn("#F1F5F9", "#334155")} onClick={onClose}>Cancel</button>
+              <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Notes, attachments and history go with {items.length === 1 ? "the card" : "the cards"}.</span>
+            </div>
+          </>
+        )}
+      </div>
+    </AdmOverlay>
+  );
+}
+
 // ── Board settings modal: name · groups · columns (incl. status labels ↔ client map) ──
 function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchivedBoard }) {
   const [err, setErr] = useState("");
@@ -547,12 +708,26 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
   const [newColName, setNewColName] = useState("");
   const [newColType, setNewColType] = useState("text");
   const [labelCol, setLabelCol] = useState(null); // status/dropdown column being edited
+  // WHO CAN SEE THIS BOARD (migration 334). Loaded here rather than carried on `board`
+  // because the answer for a public board is the whole Projects roster, which has nothing
+  // to do with this board and should not ride along on every get_board.
+  const [access, setAccess] = useState(null);
+  const [addWho, setAddWho] = useState("");
 
   const run = async (body, after) => {
     setErr("");
     try { const d = await pmCall(body); if (after) after(d); onChanged(); }
     catch (e) { setErr(e.message); }
   };
+  const loadAccess = useCallback(() => {
+    pmCall({ action: "board_access", boardId: board.id })
+      .then(setAccess).catch((e) => setErr(e.message));
+  }, [board.id]);
+  useEffect(() => { loadAccess(); }, [loadAccess]);
+  // Every privacy write re-reads the list AND tells the page, so the tab strip's padlock
+  // and the board itself follow in the same click.
+  const runAccess = (body) => run(body, () => { setAddWho(""); loadAccess(); });
+
   const flabel = { fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "14px 0 5px", display: "block" };
   const rowStyle = { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.8 };
 
@@ -587,6 +762,90 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
           <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={!boardName.trim() || boardName === board.name}
             onClick={() => run({ action: "update_board", id: board.id, name: boardName.trim() })}>Save</button>
         </div>
+
+        {/* ── WHO CAN SEE THIS BOARD ─────────────────────────────────────────────────────
+            Carolyn 2026-10-23: "privacy settings so admins can create a board for themselves
+            that others can't see" + "we need to easily see who all has access to see a board".
+            Both halves are one section on purpose: the list under the switch always answers
+            "who can see it", whichever way the switch is set. On "everyone" that list is the
+            Projects roster (not a member list — there is nothing here to add or remove, and
+            pretending otherwise would make removing somebody look like it did something). */}
+        <span style={flabel}>Who can see this board</span>
+        {!access && <div style={{ fontSize: 12.5, color: "#94A3B8" }}>Loading…</div>}
+        {access && (
+          <>
+            <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", fontSize: 12.8 }}>
+              {[["everyone", "Everyone on Workbench"], ["private", "🔒 Only people I add"]].map(([v, lbl]) => (
+                <label key={v} style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: access.iOwn ? "pointer" : "default", color: access.iOwn ? "#334155" : "#94A3B8" }}>
+                  <input type="radio" name={"pm-vis-" + board.id} checked={access.visibility === v}
+                    disabled={!access.iOwn}
+                    onChange={() => runAccess({ action: "set_board_visibility", boardId: board.id, visibility: v })} />
+                  {lbl}
+                </label>
+              ))}
+            </div>
+            {!access.iOwn && access.visibility === "private" && (
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                You are on this board but do not own it, so you cannot change who else is.
+              </div>
+            )}
+            {access.visibility === "everyone" && (
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                Everyone who can open Workbench — {access.people.length} {access.people.length === 1 ? "person" : "people"}. Make it private to choose.
+              </div>
+            )}
+            {access.people.map((p) => (
+              <div key={p.user_id} style={rowStyle}>
+                <span style={{ fontWeight: 700, color: "#334155" }}>{p.name}</span>
+                <span style={{ color: "#94A3B8", fontSize: 11.5 }}>{p.email || ""}</span>
+                <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6, alignItems: "center" }}>
+                  {/* How they got here, which is the question behind "who all has access".
+                      On a private board `via` is null for somebody whose Projects access was
+                      taken away since they were added — they are on the list and still
+                      cannot open the console, and that is worth saying out loud. */}
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", background: "#F1F5F9", borderRadius: 4, padding: "2px 6px" }}>
+                    {p.role === "owner" ? "OWNER · " : ""}
+                    {p.via === "operator" ? "OPERATOR" : p.via === "team" ? "TEAM" : "NO PROJECTS ACCESS"}
+                    {p.level ? (p.level === "edit" ? " · CAN EDIT" : " · READ ONLY") : ""}
+                  </span>
+                  {/* Hand the board over. An owner stepping down promotes their replacement
+                      first and then demotes themselves — the server refuses the demotion
+                      while they are the last owner, so the two clicks can only happen in the
+                      order that cannot strand the board. */}
+                  {access.visibility === "private" && access.iOwn && (
+                    <button type="button"
+                      title={p.role === "owner" ? "Make them an ordinary member of this board" : "Let them add and remove people on this board"}
+                      onClick={() => runAccess({ action: "set_board_member_role", boardId: board.id, userId: p.user_id, role: p.role === "owner" ? "member" : "owner" })}
+                      style={{ background: "none", border: "1px solid #CBD5E1", borderRadius: 4, color: "#64748B", fontSize: 10.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: "2px 6px", whiteSpace: "nowrap" }}>
+                      {p.role === "owner" ? "Step down" : "Make owner"}
+                    </button>
+                  )}
+                  {access.visibility === "private" && access.iOwn && (
+                    <button type="button" title="Remove from this board"
+                      onClick={() => runAccess({ action: "remove_board_member", boardId: board.id, userId: p.user_id })}
+                      style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>✕</button>
+                  )}
+                </span>
+              </div>
+            ))}
+            {access.visibility === "private" && access.iOwn && (
+              <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+                <select style={{ ...S.input, maxWidth: 280, padding: "5px 8px", fontSize: 12.5 }}
+                  value={addWho} onChange={(e) => setAddWho(e.target.value)}>
+                  <option value="">Add somebody…</option>
+                  {(access.addable || []).map((a) => (
+                    <option key={a.user_id} value={a.user_id}>{a.name}{a.email ? ` — ${a.email}` : ""}</option>
+                  ))}
+                </select>
+                <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={!addWho}
+                  onClick={() => runAccess({ action: "add_board_member", boardId: board.id, userId: addWho })}>Add</button>
+                {!(access.addable || []).length && (
+                  <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Everyone with Workbench access is already on it.</span>
+                )}
+              </div>
+            )}
+          </>
+        )}
 
         <span style={flabel}>Groups</span>
         {groups.map((g, gi) => (
@@ -816,7 +1075,7 @@ function PMPeopleEditor({ onChanged }) {
             </>
           )}
           {o.teamManaged && (
-            <span title={`${o.title || "team member"} · Projects: ${o.projectsLevel || "none"}`}
+            <span title={`${o.title || "team member"} · Workbench: ${o.projectsLevel || "none"}`}
               style={{ fontSize: 10.5, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px" }}>
               Settings → Team
             </span>
@@ -857,10 +1116,10 @@ function PMPeopleEditor({ onChanged }) {
               refuses it too, because it would take this screen away from you. */}
           {o.isOperator && o.user_id !== me && (
             <label style={{ fontSize: 11.5, fontWeight: 600, color: o.supportOnly ? "#7C3AED" : "#334155", display: "inline-flex", alignItems: "center", gap: 4 }}
-              title="On: they see each builder's account exactly as that builder's owner sees it — Billing hidden, and no Admin or Projects console. Use this for support.">
+              title="On: they see each builder's account exactly as that builder's owner sees it — Billing hidden, and no Admin or Workbench console. Use this for support.">
               <input type="checkbox" checked={!!o.supportOnly} disabled={busy}
                 onChange={(ev) => {
-                  if (ev.target.checked && !window.confirm(`Put ${o.name} in support mode? They will see each builder's account exactly as that builder's owner does — Billing hidden — and they will LOSE the Admin and Projects consoles, including this screen.`)) { load(); return; }
+                  if (ev.target.checked && !window.confirm(`Put ${o.name} in support mode? They will see each builder's account exactly as that builder's owner does — Billing hidden — and they will LOSE the Admin and Workbench consoles, including this screen.`)) { load(); return; }
                   run({ action: "set_operator_support", id: o.id, supportOnly: ev.target.checked });
                 }} />
               support mode
@@ -871,7 +1130,7 @@ function PMPeopleEditor({ onChanged }) {
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>you</span>
             : o.teamManaged
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}
-                title="Take Projects away on Settings → Team and they leave this list automatically.">Managed in Team</span>
+                title="Take Workbench away on Settings → Team and they leave this list automatically.">Managed in Team</span>
             : (
               <button type="button" disabled={busy}
                 onClick={() => { if (window.confirm(`Remove ${o.name} from the assignable list? Work already assigned to them keeps their name, and this does not change their access to builder accounts.`)) run({ action: "remove_person", id: o.id }); }}
@@ -1099,7 +1358,7 @@ function PMSetupAdmin({ canWrite }) {
                 </div>
               )}
               {t.detail && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{t.detail}</div>}
-              {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /portal/{t.link_page}</div>}
+              {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /{t.link_page}</div>}
               {t.image_url && (
                 <img src={t.image_url} alt="" onClick={() => setViewing({ url: t.image_url, title: t.title })}
                   style={{ display: "block", height: 56, borderRadius: 6, border: "1px solid #E2E8F0", marginTop: 6, cursor: "zoom-in" }} />
@@ -1128,6 +1387,17 @@ function PMSetupAdmin({ canWrite }) {
                   style={{ fontSize: 11, fontFamily: "inherit", color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "2px 4px", maxWidth: 150 }}>
                   <option value="">— no add-on —</option>
                   {SS_SETUP_FEATURE_CHOICES.map((k) => <option key={k} value={k}>{ssFeatureLabel(k)}</option>)}
+                </select>
+                {/* WHICH ACCOUNTS (migration 368): portal-setup shows a step only to the account
+                    shape it is for — client_settings.sheds_enabled. Sends only its own field, like
+                    the two above. */}
+                <select value={t.account_type || "all"} disabled={busy}
+                  title="Which accounts see this step"
+                  onChange={(e) => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", accountType: e.target.value }, loadTpl)}
+                  style={{ fontSize: 11, fontFamily: "inherit", color: t.account_type && t.account_type !== "all" ? "#1B7895" : "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "2px 4px", maxWidth: 150 }}>
+                  <option value="all">Every account</option>
+                  <option value="sheds">Shed builders only</option>
+                  <option value="smartbuild">SmartBuild builders only</option>
                 </select>
                 <button type="button" disabled={busy}
                   title={t.builder_visible === false ? "Builders cannot see this step" : "Hide while we finish building it"}
@@ -1292,6 +1562,20 @@ function ProjectsTab({ sub, onSub }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newBoardOpen, setNewBoardOpen] = useState(false);
   const [newBoardName, setNewBoardName] = useState("");
+  const [newBoardPrivate, setNewBoardPrivate] = useState(false);
+  // DRAGGING A BOARD TAB into a new slot (Carolyn 2026-11-01: "In projects I want to be able
+  // to slide the different boards around to my specific likings"). The order is the tenant's,
+  // not the viewer's — pm_boards.position is one column shared by the team, which is what the
+  // tab strip has always sorted on, so whoever drags sets it for everyone. Same hand-rolled
+  // HTML5 drag the table engine uses for column headers (09-table-engine thProps); this app
+  // carries no drag library and should not gain one.
+  const [dragBoardId, setDragBoardId] = useState(null);
+  const [boardDropId, setBoardDropId] = useState(null);
+  // Ticked rows, and the cards a move dialog is open for. Selection lives HERE rather than
+  // in PMTable because a re-sort, a re-group or a reload rebuilds that table, and all three
+  // happen while somebody is still deciding what to move.
+  const [selIds, setSelIds] = useState(() => new Set());
+  const [moving, setMoving] = useState(null);     // [{id, name}, …]
 
   const loadBoards = useCallback(() => {
     return pmCall({ action: "list_boards" }).then((d) => {
@@ -1301,14 +1585,44 @@ function ProjectsTab({ sub, onSub }) {
   }, []);
   useEffect(() => { loadBoards(); }, [loadBoards]);
 
+  // Drop `dragId` into `targetId`'s slot. The whole ordered list goes to the server, which
+  // renumbers it 1024, 2048, … — the reorder_columns shape, not reorder_item's midpoint, because
+  // a tab strip is a handful of rows and the browser already holds every one of them.
+  // ⚠️ A LOCKED (private, not-yours) board is in `boards` as a stub and MUST stay in the list:
+  // list_boards carries its real `position`, so sending the full list keeps its slot. Filter it
+  // out and the renumber would silently shuffle boards the dragger cannot even see.
+  const reorderBoards = (dragId, targetId) => {
+    if (!dragId || !targetId || dragId === targetId || !boards) return;
+    const from = boards.findIndex((b) => b.id === dragId);
+    const to = boards.findIndex((b) => b.id === targetId);
+    if (from < 0 || to < 0) return;
+    const next = boards.slice();
+    next.splice(to, 0, next.splice(from, 1)[0]);
+    setBoards(next);                                   // optimistic: the tab moves under the cursor
+    pmCall({ action: "reorder_boards", orderedIds: next.map((b) => b.id) })
+      .catch((e) => { setErr(e.message); loadBoards(); });
+  };
+
   // "setup" is a reserved slug, not a board: the Client Setup surface rides the same tab
-  // strip and the same /portal/projects/<sub> routing, but has no pm_board behind it. A
+  // strip and the same /projects/<sub> routing, but has no pm_board behind it. A
   // real board can never take the slug — create_board suffixes it like any other clash.
   const setupMode = sub === "setup";
+  // A LOCKED board is one somebody made private and did not put you on (migration 334).
+  // list_boards still names it — Carolyn's call: you can see it exists and who to ask — but
+  // it answers a stub with no columns, no items and no count, and get_board would 403. So a
+  // locked board may be the ACTIVE tab (its slug is a real address somebody can be sent, and
+  // landing on a blank screen reads as a broken page) but it is never the FALLBACK: opening
+  // Projects must land you on a board you can actually work on.
   const activeBoard = useMemo(() => {
     if (setupMode || !boards || !boards.length) return null;
-    return boards.find((b) => b.slug === sub) || boards[0];
+    return boards.find((b) => b.slug === sub) || boards.find((b) => !b.locked) || boards[0];
   }, [boards, sub, setupMode]);
+  const lockedBoard = activeBoard && activeBoard.locked ? activeBoard : null;
+  // NO BOARDS AT ALL: list_boards answered an empty list (a fresh project, or the last board was
+  // just archived). There is no board to open, so get_board is never asked and `data` never
+  // arrives; "Loading board…" used to wait for it forever. The board body is gated on this too:
+  // for the one render before the effect below clears it, `data` still holds the archived board.
+  const noBoards = !setupMode && !!boards && boards.length === 0;
 
   // ONLY THE LATEST get_board MAY LAND. Responses do not come back in the order they were
   // asked for — opening Roadmap runs the roadmap sync first, so it is routinely the slow one —
@@ -1319,6 +1633,11 @@ function ProjectsTab({ sub, onSub }) {
   const boardReq = useRef({ seq: 0, boardId: null });
   const loadBoard = useCallback((b) => {
     if (!b) return;
+    // Never ask for a board the server has already said is not ours: the 403 would land in
+    // `err` above the strip and read as a fault rather than as a closed door. Retire any
+    // get_board still out, so a slower answer for the board we came FROM cannot repaint
+    // the table underneath the locked panel.
+    if (b.locked) { boardReq.current.seq++; boardReq.current.boardId = null; setData(null); setLoading(false); setErr(""); return; }
     const seq = ++boardReq.current.seq;
     boardReq.current.boardId = b.id;
     const latest = () => boardReq.current.seq === seq;
@@ -1338,8 +1657,20 @@ function ProjectsTab({ sub, onSub }) {
     }).catch((e) => { if (latest()) setErr(e.message); }).finally(() => { if (latest()) setLoading(false); });
   }, []);
   useEffect(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard && activeBoard.id]);
+  // Ticks belong to the board you ticked them on. Carried across a board switch they would
+  // sit invisible under another table and ride along into the next move.
+  useEffect(() => { setSelIds(new Set()); }, [activeBoard && activeBoard.id]);
+  // An empty list also lets go of the board that was on screen. Kept, the archived board came
+  // back the moment a new one was made: its table and ⚙ Board settings sat under the new tab
+  // until the new get_board answered (for good if that failed), and "＋ Add item" filed into the
+  // archived board meanwhile. A get_board still out for it is retired too, so it cannot land later.
+  useEffect(() => {
+    if (!noBoards) return;
+    boardReq.current.seq++; boardReq.current.boardId = null;
+    setData(null); setLoading(false);
+  }, [noBoards]);
 
-  const reload = useCallback(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard, loadBoard]);
+  const reload =useCallback(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard, loadBoard]);
 
   const setViewPart = (p) => setView((v) => {
     const next = { ...v, ...p };
@@ -1602,34 +1933,75 @@ function ProjectsTab({ sub, onSub }) {
           style={{ display: "flex", gap: 2, alignItems: "flex-end", flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", margin: "-4px -4px 14px" }}>
           {(boards || []).map((b) => {
             const on = activeBoard && b.id === activeBoard.id;
+            // A private board you are not on still gets a tab — the padlock and the owners'
+            // names ARE the feature (ask the owner, rather than wonder). It carries no
+            // count, because an item count is a fact about the board's contents.
+            const owners = (b.owners || []).join(", ");
             return (
               <button key={b.id} type="button" role="tab" aria-selected={on ? "true" : "false"}
                 onClick={() => onSub(b.slug)}
+                draggable={canWrite}
+                onDragStart={(e) => { setDragBoardId(b.id); e.dataTransfer.effectAllowed = "move"; }}
+                onDragEnd={() => { setDragBoardId(null); setBoardDropId(null); }}
+                /* preventDefault on dragover is what makes an element a drop target at all;
+                   stopPropagation keeps this tab's claim over the strip behind it. */
+                onDragOver={(e) => { if (dragBoardId && dragBoardId !== b.id) { e.preventDefault(); e.stopPropagation(); setBoardDropId(b.id); } }}
+                onDragEnter={(e) => { if (dragBoardId && dragBoardId !== b.id) { e.preventDefault(); setBoardDropId(b.id); } }}
+                onDragLeave={() => setBoardDropId((t) => (t === b.id ? null : t))}
+                onDrop={(e) => { e.preventDefault(); e.stopPropagation(); const d = dragBoardId; setDragBoardId(null); setBoardDropId(null); reorderBoards(d, b.id); }}
+                /* The same move without a mouse. A drag is unreachable from the keyboard, and
+                   this strip is how Projects is navigated — Alt+←/→ steps the focused tab one
+                   slot, and focus rides with it because the button is keyed on the board id.
+                   Plain ←/→ is left alone: it is how a browser walks a role="tablist". */
+                onKeyDown={(e) => {
+                  if (!canWrite || !e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+                  const i = boards.findIndex((x) => x.id === b.id);
+                  const to = i + (e.key === "ArrowLeft" ? -1 : 1);
+                  if (i < 0 || to < 0 || to >= boards.length) return;
+                  e.preventDefault();
+                  reorderBoards(b.id, boards[to].id);
+                }}
+                title={b.locked ? (owners ? `Private board — ask ${owners} to add you.` : "Private board.")
+                  : (canWrite ? "Drag to move this board, or Alt+← / Alt+→" : undefined)}
                 style={{ background: on ? "#FFF" : "none", border: "none", borderBottom: `3px solid ${on ? ACCENT : "transparent"}`,
-                  marginBottom: -2, padding: "9px 16px", fontSize: 13.5, fontWeight: on ? 800 : 600,
-                  color: on ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
-                {b.name}
+                  borderLeft: boardDropId === b.id ? `3px solid ${ACCENT}` : "3px solid transparent",
+                  marginBottom: -2, padding: "9px 16px 9px 13px", fontSize: 13.5, fontWeight: on ? 800 : 600,
+                  opacity: dragBoardId === b.id ? 0.4 : 1,
+                  color: on ? ACCENT : (b.locked ? "#94A3B8" : "#64748B"), cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                {b.locked ? "🔒 " : (b.visibility === "private" ? "🔒 " : "")}{b.name}
                 <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, color: on ? ACCENT : "#94A3B8", opacity: 0.75 }}>
-                  {counts[b.id] != null ? counts[b.id] : ""}
+                  {b.locked ? "" : (counts[b.id] != null ? counts[b.id] : "")}
                 </span>
               </button>
             );
           })}
           {canWrite && (
             newBoardOpen ? (
-              <input autoFocus placeholder="Board name — Enter to create"
-                style={{ ...S.input, maxWidth: 220, padding: "5px 9px", fontSize: 12.5, margin: "0 0 4px 8px" }}
-                value={newBoardName} onChange={(e) => setNewBoardName(e.target.value)}
-                onBlur={() => { setNewBoardOpen(false); setNewBoardName(""); }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && newBoardName.trim()) {
-                    pmCall({ action: "create_board", name: newBoardName.trim() })
-                      .then((d) => loadBoards().then(() => onSub(d.board.slug)))
-                      .catch((er) => setErr(er.message));
-                    setNewBoardOpen(false); setNewBoardName("");
-                  }
-                  if (e.key === "Escape") { setNewBoardOpen(false); setNewBoardName(""); }
-                }} />
+              /* The private tick is HERE, not only in Board settings, because "a board for
+                 myself" is usually private from the first card (Carolyn 2026-10-23) — made
+                 public and locked down a minute later, its first few rows were readable by
+                 the whole team. The blur that closes this now ignores a move INSIDE the
+                 wrapper, or ticking the box would cancel the board you are naming. */
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8, margin: "0 0 4px 8px" }}
+                onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) { setNewBoardOpen(false); setNewBoardName(""); setNewBoardPrivate(false); } }}>
+                <input autoFocus placeholder="Board name — Enter to create"
+                  style={{ ...S.input, maxWidth: 220, padding: "5px 9px", fontSize: 12.5 }}
+                  value={newBoardName} onChange={(e) => setNewBoardName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && newBoardName.trim()) {
+                      pmCall({ action: "create_board", name: newBoardName.trim(), visibility: newBoardPrivate ? "private" : "everyone" })
+                        .then((d) => loadBoards().then(() => onSub(d.board.slug)))
+                        .catch((er) => setErr(er.message));
+                      setNewBoardOpen(false); setNewBoardName(""); setNewBoardPrivate(false);
+                    }
+                    if (e.key === "Escape") { setNewBoardOpen(false); setNewBoardName(""); setNewBoardPrivate(false); }
+                  }} />
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 700, color: newBoardPrivate ? ACCENT : "#94A3B8", whiteSpace: "nowrap", cursor: "pointer" }}
+                  title="Only you, plus anyone you add in Board settings.">
+                  <input type="checkbox" checked={newBoardPrivate} onChange={(e) => setNewBoardPrivate(e.target.checked)} />
+                  🔒 Private
+                </label>
+              </span>
             ) : (
               <button type="button" onClick={() => setNewBoardOpen(true)} title="New board"
                 style={{ background: "none", border: "none", padding: "9px 12px", fontSize: 13, fontWeight: 700, color: "#94A3B8", cursor: "pointer", fontFamily: "inherit" }}>＋</button>
@@ -1646,18 +2018,18 @@ function ProjectsTab({ sub, onSub }) {
               color: setupMode ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
             Client Setup
           </button>
-          {canWrite && data && !setupMode && (
+          {canWrite && data && !setupMode && !noBoards && (
             <button type="button" onClick={() => setSettingsOpen(true)}
               style={{ background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
           )}
           {!SS_POPOUT && (
-            <button type="button" title="Open Projects in its own window"
+            <button type="button" title="Open Workbench in its own window"
               onClick={() => {
                 const slug = setupMode ? "setup" : (activeBoard ? activeBoard.slug : "");
                 // Fresh URL, nothing carried from this window's search: ?view= must NOT ride
                 // into the popout — Projects is the operator's own console, and a popout
                 // booted with ?view= would re-enter view-as and flip supportView.
-                window.open("/portal/projects" + (slug ? "/" + slug : "") + "?popout=1",
+                window.open(ssPageBase("workbench", slug || null) + "?popout=1",
                   "ss_projects_popout", "popup=yes,width=1100,height=800,noopener");
               }}
               style={{ background: "none", border: "none", padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>↗</button>
@@ -1672,9 +2044,38 @@ function ProjectsTab({ sub, onSub }) {
         {!setupMode && !boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
         {/* The board body has its own wait: the first open after new roadmap entries also
             runs the sync, and a silent blank panel reads as a broken screen. */}
-        {!setupMode && boards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
+        {!setupMode && boards && !noBoards && !data && !err && !lockedBoard && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
+        {/* A private board you are not on. There is nothing to load and nothing to retry, so
+            this is a closed door rather than an error: it says whose board it is and what to
+            do about it. Without it the panel below would wait on "Loading board…" forever. */}
+        {!setupMode && lockedBoard && (
+          <div data-ss-projects-locked="" style={{ padding: "28px 4px", fontSize: 13, color: "#64748B", lineHeight: 1.6 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#334155", marginBottom: 4 }}>🔒 {lockedBoard.name} is private</div>
+            <div>
+              {(lockedBoard.owners || []).length
+                ? `Ask ${lockedBoard.owners.join(" or ")} to add you to it.`
+                : "Nobody is listed as its owner, so an operator will have to set it back to visible to everyone."}
+            </div>
+          </div>
+        )}
+        {/* Not hidden behind `err`: a create_board that fails shows its message above, and this
+            stays, so there is still a way to try again. The button opens the strip's own ＋ input,
+            the one place boards are created. */}
+        {noBoards && (
+          <div data-ss-projects-empty="" style={{ padding: "28px 4px", fontSize: 13, color: "#64748B", lineHeight: 1.5 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#334155", marginBottom: 4 }}>No boards yet</div>
+            {canWrite ? (
+              <>
+                <div style={{ marginBottom: 12 }}>A board is a list of work with an owner. Make the first one and it opens here.</div>
+                <button type="button" onClick={() => setNewBoardOpen(true)} style={S.btn("#EEF2FF", ACCENT)}>＋ New board</button>
+              </>
+            ) : (
+              <div>Nobody has made a board yet. Someone who can edit Workbench can add the first one.</div>
+            )}
+          </div>
+        )}
 
-        {!setupMode && data && (
+        {!setupMode && !noBoards && data && (
           <>
             {/* ONE ROW, and it stays one row (Carolyn 2026-09-12: "condense the top… fit the
                 filter options into one single row"). What used to wrap — a separate saved-views
@@ -1908,6 +2309,28 @@ function ProjectsTab({ sub, onSub }) {
               );
             })()}
 
+            {/* The selection bar exists ONLY while something is ticked — a permanently
+                visible "0 selected" strip costs a row of table on every board forever. It
+                counts what is ticked AND still on screen: a filter can hide a ticked row,
+                and offering to move cards you cannot see is how the wrong card moves. */}
+            {canWrite && (() => {
+              const shown = filtered.filter((r) => selIds.has(r.id));
+              if (!shown.length) return null;
+              const hidden = selIds.size - shown.length;
+              return (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8, padding: "7px 12px", background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, fontSize: 12.5 }}>
+                  <b style={{ color: ACCENT }}>{shown.length} selected</b>
+                  {!!hidden && <span style={{ color: "#64748B" }}>({hidden} more ticked but filtered out — only the {shown.length} shown will move)</span>}
+                  <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), padding: "4px 12px", fontSize: 12.3 }}
+                    onClick={() => setMoving(shown.map((r) => ({ id: r.id, name: r.name })))}>
+                    Move to another board
+                  </button>
+                  <button type="button" onClick={() => setSelIds(new Set())}
+                    style={{ background: "none", border: "none", color: "#64748B", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Clear</button>
+                </div>
+              );
+            })()}
+
             <PMTable
               columns={data.columns} rows={filtered} boardGroups={data.groups} ctx={ctx}
               groupBy={view.groupBy} hiddenCols={new Set(view.hiddenCols)}
@@ -1920,7 +2343,14 @@ function ProjectsTab({ sub, onSub }) {
                 { action: "reorder_columns", boardId: data.board.id, orderedIds: ids },
                 () => setData((d) => d && ({ ...d, columns: ids.map((id) => d.columns.find((c) => c.id === id)).filter(Boolean) })),
               )}
-              activeItemId={openItemId} />
+              activeItemId={openItemId}
+              selectedIds={canWrite ? selIds : undefined}
+              onToggleSelect={(id) => setSelIds((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; })}
+              onSelectMany={(ids, on) => setSelIds((s) => {
+                const n = new Set(s);
+                for (const id of ids) on ? n.add(id) : n.delete(id);
+                return n;
+              })} />
           </>
         )}
       </div>
@@ -1931,12 +2361,26 @@ function ProjectsTab({ sub, onSub }) {
            commit would wipe a half-typed update draft (found live, 2026-08-27). */
         <PMItemPanel key={openItem.id}
           item={openItem} canWrite={canWrite}
+          columns={data.columns}
           onClose={() => setOpenItemId(null)}
-          onRename={onRename} onArchive={onArchive} />
+          onRename={onRename} onArchive={onArchive}
+          onMove={canWrite ? ((it) => setMoving([{ id: it.id, name: it.name }])) : null} />
+      )}
+      {moving && data && (
+        <PMMoveDialog items={moving} fromBoard={data.board} boards={boards || []}
+          onClose={() => setMoving(null)}
+          onDone={(toName, created) => {
+            setSelIds(new Set()); setOpenItemId(null);
+            flashOk(`Moved ${moving.length === 1 ? `“${moving[0].name}”` : `${moving.length} cards`} to ${toName}.`
+              + (created.length ? ` Added ${created.join(", ")} there.` : ""));
+            // Both ends changed: this board lost rows and the other gained them, so the
+            // counts in the tab strip are stale as well as this table.
+            reload(); loadBoards();
+          }} />
       )}
       {settingsOpen && data && (
         <PMBoardSettings board={data.board} columns={data.columns} groups={data.groups}
-          onClose={() => setSettingsOpen(false)} onChanged={reload}
+          onClose={() => setSettingsOpen(false)} onChanged={() => { reload(); loadBoards(); }}
           onArchivedBoard={() => loadBoards().then((bs) => { if (bs && bs.length) onSub(bs[0].slug); })} />
       )}
     </div>

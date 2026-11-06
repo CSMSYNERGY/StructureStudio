@@ -6,16 +6,16 @@
 //
 // What is pinned here fails quietly in production. A heading key the database shape CHECK
 // refuses fails every save that ticks it, after the builder pressed Save. A payload parser that
-// lets one target into two rows stores whichever row the upsert reached last. A search pattern
-// that leaves `%` or `_` live matches codes the builder never typed. A save plan that deletes
+// lets one target into two rows stores whichever row the upsert reached last. A code that slips
+// onto or off the Sales Tax list changes what every builder can pick. A save plan that deletes
 // instead of re-coding a moved target drops it for the instant between the two writes, and one
 // that rewrites unchanged rows makes updated_by name somebody who changed nothing. And a sync row
 // that keeps Avalara's company or user ids puts account details in a platform table.
 
 const {
-  COMMON_CODES, DESCRIPTION_MAX, headingsView, mapAvalaraTaxCode, MAX_ASSIGNMENT_ROWS, MAX_ASSIGNMENT_TARGETS,
-  mergeCodeLists, normalizeTaxCode, orderCodes, parseAssignmentsPayload, planAssignments, SEARCH_MAX, searchQuery,
-  TAX_CODE_SEARCH_LIMIT, TAX_HEADING_GROUPS, TAX_HEADINGS, taxCodeView, UNMATCHED_LINES, visibleAssignments,
+  codesOffTheList, DESCRIPTION_MAX, headingsView, mapAvalaraTaxCode, MAX_ASSIGNMENT_ROWS, MAX_ASSIGNMENT_TARGETS,
+  normalizeTaxCode, orderCodes, parseAssignmentsPayload, planAssignments, SALES_TAX_CODE_GROUPS, SALES_TAX_CODES,
+  SEARCH_MAX, searchCodes, TAX_HEADING_GROUPS, TAX_HEADINGS, taxCodeView, UNMATCHED_LINES, visibleAssignments,
 } = await import("./taxCodes.ts");
 
 const assertEquals = (a: unknown, b: unknown, msg?: string) => {
@@ -98,17 +98,29 @@ Deno.test("vents and windows share kind window, told apart only by fixture categ
   assertEquals(TAX_HEADINGS.find((h) => h.key === "doors")!.lineMatch.layoutItems, ["singleDoor", "doubleDoor", "roughOpeningDoor"]);
 });
 
-// ── The starter codes ───────────────────────────────────────────────────────────────────────
+// ── The Sales Tax list ──────────────────────────────────────────────────────────────────────
 
-Deno.test("the common codes are the twelve starter codes, in seed order, each with a hint", () => {
-  assertEquals(COMMON_CODES.map((c) => c.code), [
-    "P0000000", "NT", "ON030000", "SI020100", "SI020200", "SC150100",
-    "FR010000", "FR010100", "FR010200", "FR020100", "FR030000", "OH010000",
-  ]);
-  for (const c of COMMON_CODES) {
+Deno.test("the Sales Tax list is the 31 codes approved 2026-11-02, grouped, each with a hint", () => {
+  const byGroup = (key: string) => SALES_TAX_CODES.filter((c: { group: string }) => c.group === key).map((c: { code: string }) => c.code);
+  assertEquals(byGroup("products"), ["P0000000", "SF010001", "PH101300", "NT"]);
+  assertEquals(byGroup("on_site"), ["SC150100", "SC150600", "SC150601", "SC150200", "SI020100", "SI020200", "SI026665", "SI026666", "SI026667"]);
+  assertEquals(byGroup("site_work"), ["SC156211", "SC156213", "SC156210", "SC156212"]);
+  assertEquals(byGroup("delivery"), ["FR010000", "FR010100", "FR010200", "FR020100", "FR020200", "FR020400", "FR020500", "FR030000", "OH010000", "FR059314", "FR060000"]);
+  assertEquals(byGroup("other"), ["S0000001", "S0000000", "ON030000"]);
+  assertEquals(SALES_TAX_CODES.length, 31);
+  assertEquals(new Set(SALES_TAX_CODES.map((c: { code: string }) => c.code)).size, 31, "a code is listed twice");
+  assertEquals(SALES_TAX_CODES.map((c: { group: string }) => c.group).filter((g: string, i: number, a: string[]) => a[i - 1] !== g),
+    SALES_TAX_CODE_GROUPS.map((g: { key: string }) => g.key), "the groups must run in display order, each in one piece, or the picker repeats a heading");
+  for (const c of SALES_TAX_CODES) {
     assertEquals(normalizeTaxCode(c.code), c.code, `${c.code} is a well-formed code`);
     assert(c.hint.length > 5 && c.hint.length <= 120, `${c.code} needs a short hint`);
   }
+});
+
+Deno.test("Use Tax's labor and materials codes stay off the Sales Tax list", () => {
+  const codes = SALES_TAX_CODES.map((c: { code: string }) => c.code);
+  for (const held of ["SC150606", "SC150607", "SC150307", "SC150308"]) assert(!codes.includes(held), `${held} is on the list`);
+  assert(!codes.some((c: string) => c.startsWith("PB150")), "a building materials code is on the list");
 });
 
 // ── The migration agrees ────────────────────────────────────────────────────────────────────
@@ -119,7 +131,7 @@ const MIGRATION = new URL("../../migrations/246_avalara_tax_codes.sql", import.m
 const canRead = Deno.permissions.querySync({ name: "read", path: MIGRATION }).state === "granted";
 
 Deno.test({
-  name: "migration 246 seeds exactly COMMON_CODES, in order",
+  name: "every code migration 246 seeds is on the Sales Tax list",
   ignore: !canRead,
   fn: async () => {
     const sql = (await Deno.readTextFile(MIGRATION)).replace(/\r\n/g, "\n");
@@ -127,7 +139,9 @@ Deno.test({
     assert(start >= 0, "the seed insert moved");
     const block = sql.slice(start, sql.indexOf("on conflict (code) do nothing;", start));
     const seeded = [...block.matchAll(/^\s*\('([A-Z0-9]+)',\s*'((?:[^']|'')*)',\s*'seed',\s*true\)/gm)];
-    assertEquals(seeded.map((m) => m[1]), COMMON_CODES.map((c) => c.code));
+    assertEquals(seeded.length, 12, "the seed insert changed");
+    const listed = SALES_TAX_CODES.map((c: { code: string }) => c.code);
+    for (const m of seeded) assert(listed.includes(m[1]), `${m[1]} is seeded but off the list, so a builder could never pick it`);
     for (const m of seeded) assert(m[2].length > 0 && m[2].length <= DESCRIPTION_MAX, `${m[1]} has a description within the cap`);
   },
 });
@@ -281,42 +295,66 @@ Deno.test("a body that is not a mapping is refused, not read as 'clear everythin
   }
 });
 
-// ── searchQuery ─────────────────────────────────────────────────────────────────────────────
+// ── Views, ordering, the search ─────────────────────────────────────────────────────────────
 
-Deno.test("a search is trimmed, capped, and its ILIKE metacharacters are literal", () => {
-  assertEquals(searchQuery("  delivery "), "delivery");
-  assertEquals(searchQuery("10%"), "10\\%");
-  assertEquals(searchQuery("fr_01"), "fr\\_01");
-  assertEquals(searchQuery("a\\b"), "a\\\\b", "the escape character itself is escaped first");
-  assertEquals(searchQuery("lumber*"), "lumber", "PostgREST turns * into % before Postgres sees it, so it is dropped");
-  assertEquals(searchQuery("x".repeat(SEARCH_MAX + 20)), "x".repeat(SEARCH_MAX));
-  for (const blank of ["", "   ", "***", null, undefined, 42, ["fr"]]) assertEquals(searchQuery(blank), "", JSON.stringify(blank));
+const codesOf = (list: { code: string }[]) => list.map((c) => c.code);
+const VIEWS = SALES_TAX_CODES.map((c: { code: string }) => taxCodeView({ code: c.code, description: `Avalara words for ${c.code}`, is_active: true }));
+
+Deno.test("an empty search is the whole list, in order; anything else that is not text is empty too", () => {
+  for (const blank of ["", "   ", null, undefined, 42, ["fr"]]) assertEquals(searchCodes(VIEWS, blank).length, 31, JSON.stringify(blank));
 });
 
-// ── Views, ordering, merging ────────────────────────────────────────────────────────────────
+Deno.test("a search matches the code, ignoring case", () => {
+  assertEquals(codesOf(searchCodes(VIEWS, "fr0102")), ["FR010200"]);
+  assertEquals(codesOf(searchCodes(VIEWS, "  SI020200 ")), ["SI020200"]);
+});
 
-Deno.test("a catalog row reads as the portal's shape, with a hint only on a common code", () => {
+Deno.test("a search finds a builder's own words in the hint and the group name", () => {
+  assertEquals(codesOf(searchCodes(VIEWS, "foundation")), ["SC156211", "SC156213", "SC156210", "SC156212"]);
+  assert(codesOf(searchCodes(VIEWS, "truck")).includes("FR010000"), "truck should find delivery on your own truck");
+});
+
+Deno.test("every word of a search must match, in any order", () => {
+  assertEquals(codesOf(searchCodes(VIEWS, "commercial capital")), ["SC156210", "SC156212"]);
+  assertEquals(codesOf(searchCodes(VIEWS, "truck commercial")), []);
+});
+
+Deno.test("a search keeps the list's order, finds nothing off the list, and treats its text as text", () => {
+  const offList = taxCodeView({ code: "PA3000400", description: "Lumber - Solid Wood Product", is_active: true });
+  assertEquals(codesOf(searchCodes([...VIEWS, offList], "delivery")).slice(0, 3), ["FR010000", "FR010100", "FR010200"]);
+  assertEquals(codesOf(searchCodes(VIEWS, "lumber")), []);
+  assertEquals(codesOf(searchCodes(VIEWS, "%")), [], "a % is a character here, not a wildcard");
+  assertEquals(searchCodes(VIEWS, "a".repeat(SEARCH_MAX + 20)).length, 0);
+});
+
+Deno.test("a catalog row reads as the portal's shape, with a hint and group only on a listed code", () => {
   assertEquals(taxCodeView({ code: "FR010000", description: "Delivery by company vehicle", type_id: "F", is_active: true }), {
-    code: "FR010000", description: "Delivery by company vehicle", typeId: "F", isActive: true, hint: "Delivery on your own truck",
+    code: "FR010000", description: "Delivery by company vehicle", typeId: "F", isActive: true, hint: "Delivery on your own truck", group: "Delivery",
   });
   assertEquals(taxCodeView({ code: "PA3000400", description: "Lumber", type_id: "", is_active: false }), {
-    code: "PA3000400", description: "Lumber", typeId: null, isActive: false, hint: null,
+    code: "PA3000400", description: "Lumber", typeId: null, isActive: false, hint: null, group: null,
   });
   assertEquals(taxCodeView({ code: "X1", is_active: "true" }).isActive, false, "only a real true is active");
 });
 
-Deno.test("common codes lead in their own order, then everything else by code", () => {
+Deno.test("the list's codes lead in its own order, then everything else by code", () => {
   const got = orderCodes([{ code: "ZZ1" }, { code: "OH010000" }, { code: "AA1" }, { code: "P0000000" }, { code: "FR010000" }]);
   assertEquals(got.map((c) => c.code), ["P0000000", "FR010000", "OH010000", "AA1", "ZZ1"]);
 });
 
-Deno.test("merged results keep the first list's order, drop repeats and stop at the limit", () => {
-  const a = [{ code: "FR010000" }, { code: "FR010100" }];
-  const b = [{ code: "FR010100" }, { code: "OH010000" }, { code: "FR030000" }];
-  assertEquals(mergeCodeLists(a, b).map((c) => c.code), ["FR010000", "FR010100", "OH010000", "FR030000"]);
-  assertEquals(mergeCodeLists(a, b, 3).map((c) => c.code), ["FR010000", "FR010100", "OH010000"]);
-  const many = Array.from({ length: 80 }, (_, i) => ({ code: `C${i}` }));
-  assertEquals(mergeCodeLists(many, many).length, TAX_CODE_SEARCH_LIMIT);
+// ── The save's rule ─────────────────────────────────────────────────────────────────────────
+
+const storedAs = (code: string) => ({ target_type: "heading", target_key: "doors", tax_code: code });
+
+Deno.test("a save may not add a code off the list", () => {
+  assertEquals(codesOffTheList(["P0000000", "PA3000400"], []), ["PA3000400"]);
+  assertEquals(codesOffTheList(["P0000000", "FR060000"], []), []);
+});
+
+Deno.test("a code this builder already has stored is let through, whatever the list says", () => {
+  assertEquals(codesOffTheList(["PA3000400"], [storedAs("PA3000400")]), []);
+  assertEquals(codesOffTheList(["PA3000400", "PA3000401"], [storedAs("PA3000400")]), ["PA3000401"], "only the stored one");
+  assertEquals(codesOffTheList([], [storedAs("PA3000400")]), []);
 });
 
 Deno.test("stored assignments for a deleted style or a retired heading are not shown", () => {

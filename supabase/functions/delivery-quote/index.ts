@@ -113,12 +113,25 @@ Deno.serve(withErrorLog("delivery-quote", async (req: Request) => {
     }
   } catch { repUserId = null; }
 
-  const [q, cs] = await Promise.all([
-    quoteDelivery(admin, { clientId, address, repUserId }),
+  // The Online Shop (shop.html, 2026-10-17) asks from a building's own lot and follows the SHOP's
+  // price switch, not the designer's: a builder may hide catalog prices in the designer and still
+  // sell lot buildings with prices online, or the reverse.
+  const fromShop = body?.source === "shop";
+  const originLocationId = fromShop && typeof body?.originLocationId === "string"
+      && /^[0-9a-f-]{36}$/i.test(body.originLocationId)
+    ? body.originLocationId : null;
+
+  const [q, cs, shop] = await Promise.all([
+    quoteDelivery(admin, { clientId, address, repUserId, originLocationId }),
     admin.from("client_settings").select("show_pricing").eq("client_id", clientId).maybeSingle(),
+    fromShop
+      ? admin.from("shop_settings").select("enabled, hide_all_prices").eq("client_id", clientId).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
   // show_pricing off nulls the money and keeps the miles — get_config's own rule for rates.
-  const showPricing = cs.data?.show_pricing === true;
+  const showPricing = fromShop
+    ? shop.data?.enabled === true && shop.data?.hide_all_prices !== true
+    : cs.data?.show_pricing === true;
   return json({
     ok: true,
     ready: true,

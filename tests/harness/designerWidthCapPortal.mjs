@@ -22,7 +22,6 @@
 // MACHINE — capture-lead, save_design and log_error would otherwise write into the one database
 // beta and production share.
 //
-//   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/designerWidthCapPortal.mjs      (exit 0 = every check held)
 import { launch, stubSupabase, collectErrors, reporter, shotsDir, BASE, REF } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES } from "./gableProbe.mjs";
@@ -148,12 +147,12 @@ const run = async () => {
     await page.route(`**/${REF}.supabase.co/**`, shell);
     await page.route(`**/${REF}.functions.supabase.co/**`, shell);
 
-    // CLICKED, not deep-linked: python -m http.server serves files, so /portal/designer 404s
+    // CLICKED, not deep-linked: python -m http.server serves files, so /designer 404s
     // here even though it is a real URL on the live site (the app owns that path client-side).
     await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
     // Designer is the FIRST nav item; the Settings sub-page of the same name is the last.
-    await page.getByText("Designer", { exact: true }).first().click();
+    await page.getByText("Shed Designer", { exact: true }).first().click();
     await page.waitForSelector(".ssd-frame.is-embedded", { timeout: 60000 });
     await page.waitForTimeout(1200);
 

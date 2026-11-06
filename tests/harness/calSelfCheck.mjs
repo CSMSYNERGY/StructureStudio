@@ -786,16 +786,26 @@ async function main() {
   await answer("porch", "No");
   const fixPorch = page.locator("#ssc-fix-porch");
   const fixCount = fixPorch.locator('input[data-ss-step-count="ss-fix"]');
+  // What the count counts (Carolyn 2026-10-06): a line under the box, inside its label.
+  const fixWhat = fixPorch.locator('[data-ss-step-what="ss-fix"]');
+  const TREADS = "The treads you walk on, not counting the porch floor at the top.";
+  const fixWhatSays = async () => (await fixWhat.count()) === 1 && (await fixWhat.isVisible())
+    && (await fixWhat.innerText()).replace(/\s+/g, " ").trim() === TREADS
+    && (await fixWhat.evaluate((e) => !!(e.closest("label") && e.closest("label").querySelector('input[data-ss-step-count="ss-fix"]'))));
+  const fixWhatText = async () => ((await fixWhat.count()) ? (await fixWhat.innerText()).replace(/\s+/g, " ").trim() : "(none)");
   // A projecting porch's steps leave its front or (2026-10-03) one of its sides: "Where its steps are".
   const fixSteps = fixPorch.locator("label").filter({ hasText: /^Where its steps are/ }).locator("select");
   const typeFixCount = async (v) => { await fixCount.click(); await fixCount.fill(String(v)); await page.keyboard.press("Tab"); await page.waitForTimeout(300); };
   r.ok("the porch fix panel has no step count while the porch has no steps",
     (await fixPorch.count()) === 1 && (await fixSteps.count()) === 1 && (await fixCount.count()) === 0);
+  r.ok("...and no treads line either", (await fixWhat.count()) === 0, await fixWhatText());
   await fixSteps.selectOption("left");
   await page.waitForTimeout(300);
   r.ok("with steps chosen, \"How many steps\" appears blank, its placeholder the rule's count at grade",
     (await fixCount.count()) === 1 && (await fixCount.inputValue()) === "" && (await fixCount.getAttribute("placeholder")) === "blank = 1",
     `${await fixCount.count()} ${await fixCount.getAttribute("placeholder").catch(() => "")}`);
+  r.ok("⚠️ UNDER IT, THE COUNT IS THE TREADS YOU WALK ON, NOT THE PORCH FLOOR AT THE TOP", await fixWhatSays(), await fixWhatText());
+  await fixPorch.screenshot({ path: join(shots, "05a-porch-fix-treads-left.png") }).catch(() => {});
   r.ok("...and What we drew says steps on the left, no count", /\bsteps on the left/.test(await spanLine()) && !/\d steps on the left|one step on the left/.test(await spanLine()), await spanLine());
   await typeFixCount(4);
   r.ok("⚠️ A COUNT TYPED IN THE FIX PANEL REACHES THE DRAWING: \"4 steps on the left\"", /4 steps on the left/.test(await spanLine()), await spanLine());
@@ -813,6 +823,7 @@ async function main() {
   await fixSteps.selectOption("");
   await page.waitForTimeout(300);
   r.ok("\"No steps\" hides the count and the drawing has no steps", (await fixCount.count()) === 0 && !/steps? on the left/.test(await spanLine()), await spanLine());
+  r.ok("...and the treads line goes with it", (await fixWhat.count()) === 0, await fixWhatText());
   await fixSteps.selectOption("left");
   await page.waitForTimeout(300);
   r.ok("⚠️ STEPS BACK ON, THE COUNT WENT WITH \"No steps\": blank, no count drawn",
@@ -823,6 +834,21 @@ async function main() {
   await fixSteps.selectOption("rightSide");
   await page.waitForTimeout(300);
   r.ok("...and What we drew says \"steps off its right side\"", /\bsteps off its right side/.test(await spanLine()), await spanLine());
+  r.ok("...and the treads line says the same for steps down a side", await fixWhatSays(), await fixWhatText());
+  await fixPorch.screenshot({ path: join(shots, "05a-porch-fix-treads-right-side.png") }).catch(() => {});
+  // A RECESSED porch (2026-10-07) is open at its two sides and takes a flight down either: cut into the end, the
+  // right-side flight stays picked and What we drew says it; back in front of the end, the deck's flight again.
+  const fixOpts = async () => (await fixSteps.locator("option").evaluateAll((os) => os.map((o) => `${o.value}${o.disabled ? "(off)" : ""}`))).join("|");
+  await fixPorch.getByRole("button", { name: /^Cut into the end/ }).click();
+  await page.waitForTimeout(300);
+  r.ok("cut into the end, the fix panel offers the recessed porch's two open sides as well, the right-side flight kept",
+    (await fixOpts()) === "|left|center|right|leftSide|rightSide" && (await fixSteps.inputValue()) === "rightSide", `${await fixOpts()} = ${await fixSteps.inputValue()}`);
+  r.ok("...and What we drew says the recessed porch has steps off its right side", /is cut 6 ft 6 in into the front end\. It has steps off its right side\./.test(await spanLine()), await spanLine());
+  await fixPorch.screenshot({ path: join(shots, "05a-porch-fix-recessed-right-side.png") }).catch(() => {});
+  await fixPorch.getByRole("button", { name: /^In front of the end/ }).click();
+  await page.waitForTimeout(300);
+  r.ok("...and back in front of the end, the deck's flight off its right side", /stands 6 ft 6 in out from the front end[^.]*\. It has steps off its right side\./.test(await spanLine())
+    && (await fixSteps.inputValue()) === "rightSide", await spanLine());
   await fixSteps.selectOption("left");
   await page.waitForTimeout(300);
 

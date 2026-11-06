@@ -16,6 +16,9 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+// The Roof line's words, the quote's and this file's alike (2026-10-06: the metal profile is per design).
+import { roofLineDesc, type MetalRoofProfile } from "./roofProfile.ts";
+
 /** The designer/config and the catalog render sizes with × vs x — normalize both sides
  *  (lowercase, ×→x, strip spaces), match by key OR label. Same as submit-estimate:398. */
 export const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
@@ -109,18 +112,25 @@ export function computePaintLine(
 /**
  * The Roof line: Type + Color in the description; amount is the roof color's rate,
  * resolved ONLY among colors flagged for that roof type (shingle/metal), with the
- * allow-custom fallback. Mirrors submit-estimate:700-726 over the preloaded palette.
+ * allow-custom fallback. Mirrors submit-estimate's Line 3 over the preloaded palette.
+ *
+ * `profile` (2026-10-06) is the design's EFFECTIVE metal profile (roofProfile.ts
+ * effectiveRoofProfile: its own pick, else its style's starting value). It changes the words
+ * only, through roofLineDesc: "Metal (Standing Seam) — Black" for a metal roof on standing
+ * seam, today's string for everything else, and never the amount. The default keeps every
+ * four-argument call exactly as it was.
  */
 export function computeRoofLine(
   palette: any[],
   ctx: BuildingContext,
   roofType: unknown,
   roofColor: unknown,
+  profile: MetalRoofProfile = "agpanel",
 ): { amount: number; desc: string } {
   const type = String(roofType ?? "").trim();
   const color = String(roofColor ?? "").trim();
-  if (!type) return { amount: 0, desc: "No roof selected" };
-  const desc = color ? `${type} — ${color}` : `${type} — (color TBD)`;
+  const desc = roofLineDesc(type, color, profile);
+  if (!type) return { amount: 0, desc };
   let amount = 0;
   if (color && norm(color) !== norm("TBD")) {
     const flag = norm(type) === norm("Metal") ? "metal" : "shingle";
@@ -132,7 +142,7 @@ export function computeRoofLine(
   return { amount, desc };
 }
 
-/** The CLOSED cladding vocabulary — the designer's D3_CLADDING ids, all four of them.
+/** The CLOSED cladding vocabulary — the designer's D3_CLADDING ids, all five of them.
  *  id ↔ label both directions, as the FALLBACK for display and validation.
  *
  *  ⚠️ `batten` was missing here until 2026-09-07 and it was not cosmetic. This list is what
@@ -140,14 +150,19 @@ export function computeRoofLine(
  *  design's CURRENT value — so a design saved as Board & Batten made every attribute change
  *  on its order fail with "That cladding isn't offered", including a pure roof-colour edit.
  *  claddingLabel() also fell through to CLADDING_OPTIONS[0], printing "Builder's standard" in
- *  the sentence the customer signs. Keep all four here; the designer offers all four.
+ *  the sentence the customer signs. Keep all five here; the designer offers all five.
+ *
+ *  2026-10-06: lap's built-in name became 7" LP Lap Siding (its drawing did not change) and
+ *  "vinyl", 4.5" Vinyl Siding, joined (migration 285). ASCII quotes: the quote PDF's standard
+ *  fonts are WinAnsi only.
  *
  *  Since 207 the OFFERED set and the customer-facing NAME are per tenant, per style
  *  (style_cladding). This list is what a caller uses when it has no tenant rows to consult —
  *  never the authority on what is offered. */
 export const CLADDING_OPTIONS: { id: string; label: string }[] = [
   { id: "", label: "Builder's standard" },
-  { id: "lap", label: "Lap Siding" },
+  { id: "lap", label: '7" LP Lap Siding' },
+  { id: "vinyl", label: '4.5" Vinyl Siding' },
   { id: "panel", label: "Panel Siding" },
   { id: "batten", label: "Board & Batten" },
   { id: "agpanel", label: "AG Panel" },

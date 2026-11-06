@@ -12,6 +12,11 @@
 //      blank → NULL; a row that does not name it (production's portal, until it is promoted) never
 //      touches the size. A size on any other cladding, or outside 3..12 in, or not a number, is
 //      refused with a sentence and that row is not written; the other rows still save.
+//   3. 4.5" VINYL SIDING (2026-10-06, migration 285) is a fifth id: save_cladding stores a vinyl row,
+//      refuses a course size on it (vinyl is fixed at 4.5, its name says so) and still refuses an id
+//      we ship nothing for; and stage_order_attribute_change accepts vinyl on an order for a tenant
+//      with no cladding rows (the CLADDING_OPTIONS fallback), naming it 4.5" Vinyl Siding in the
+//      sentence the customer signs, beside the lap's new built-in name, 7" LP Lap Siding.
 //
 // HOW. quoteCornerViewsWiring_test's idiom: Deno.serve is stubbed while portal-settings/index.ts is
 // imported, so a request goes through withErrorLog, resolveTenant and the action's branch as it does
@@ -25,7 +30,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
-import { stubAuth, stubDb } from "./supabase_stub.ts";
+import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 
 // ─── The real handler ──────────────────────────────────────────────────────────────────────────
 const realServe = Deno.serve;
@@ -56,6 +61,8 @@ const ROWS = [
 type World = {
   noColumn?: boolean;    // the database has no exposure_in (a deploy ahead of 275)
   claddingFails?: boolean;  // style_cladding's read fails for some other reason
+  noCladdingRows?: boolean; // the tenant has configured no cladding at all (the fallback list)
+  design?: Record<string, unknown>; // the order stage_order_attribute_change reads
 };
 type Trace = { claddingSelects: string[]; upserts: Record<string, unknown>[]; rows: Record<string, unknown>[] };
 
@@ -69,6 +76,10 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]) {
   if (table === "client_users") return { data: [{ client_id: T, role: "owner", title: null, access: null, user_id: "u1", prefs: null }], error: null };
   if (table === "admin_audit") return { data: null, error: null };
   if (table === "building_styles" && has("maybeSingle")) return { data: { id: STYLE }, error: null };
+  // resolveBuildingContext's two catalog reads (stage_order_attribute_change prices against them).
+  if (table === "building_styles") return { data: [{ id: STYLE, key: "deluxe", label: "Deluxe Gable" }], error: null };
+  if (table === "building_sizes") return { data: [{ id: "z1", base_price: 9000, label: "10x12", width_ft: 10, length_ft: 12 }], error: null };
+  if (table === "designs" && has("maybeSingle") && world.design) return { data: world.design, error: null };
   if (table === "style_cladding") {
     if (has("upsert")) {
       const row = arg("upsert");
@@ -77,6 +88,7 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]) {
     }
     trace.claddingSelects.push(cols);
     if (world.claddingFails) return { data: null, error: TIMEOUT };
+    if (world.noCladdingRows) return { data: [], error: null };
     if (/\bexposure_in\b/.test(cols)) return world.noColumn ? { data: null, error: MISSING } : { data: ROWS, error: null };
     return { data: ROWS.map(({ exposure_in: _e, ...r }) => r), error: null };
   }
@@ -109,6 +121,12 @@ async function drive(payload: Record<string, unknown>, world: World = {}) {
   stubAuth.user = { id: "u1", email: "owner@example.test" };
   stubAuth.error = null;
   stubDb.from = (table: string) => chain(world, trace, table, []);
+  // The order's amendment gate (an RPC): open, as on an order nobody has signed. Any other RPC
+  // throws, as the stub does by default.
+  stubRpc.rpc = (fn: string) => {
+    if (fn === "order_amendment_gate") return Promise.resolve({ data: { signed: false, open: true, authority: "free_window", reason: "" }, error: null });
+    throw new Error(`unexpected rpc: ${fn}`);
+  };
   globalThis.fetch = ((input: string | URL | Request) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     return Promise.reject(new Error(`unexpected fetch: ${url}`));
@@ -123,6 +141,7 @@ async function drive(payload: Record<string, unknown>, world: World = {}) {
   } finally {
     globalThis.fetch = realFetch;
     stubDb.from = null;
+    stubRpc.rpc = null;
     stubAuth.user = null;
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) Deno.env.delete(k);
@@ -164,7 +183,7 @@ const row = (claddingId: string, extra: Record<string, unknown> = {}) =>
 const save = (rows: unknown[], world: World = {}) => drive({ action: "save_cladding", styleId: STYLE, rows }, world);
 const upsertFor = (trace: Trace, cid: string) => trace.upserts.find((u) => u.cladding_id === cid);
 
-Deno.test("save: a size on the lap row is written; blank is NULL (the 3D's 6 in)", async () => {
+Deno.test("save: a size on the lap row is written; blank is NULL (the 3D's standard lap, 7 in)", async () => {
   for (const [sent, stored] of [["4.5", 4.5], [4.5, 4.5], [" 5 ", 5], ["3", 3], ["12", 12], ["", null], [null, null]] as const) {
     const { status, body, trace } = await save([row("panel"), row("lap", { exposureIn: sent })]);
     assertEquals(status, 200, JSON.stringify(body));
@@ -192,7 +211,7 @@ Deno.test("save: a blank size on another cladding is nothing to write, not a ref
 });
 
 Deno.test("save: a size on any other cladding is refused with a sentence; the other rows still save", async () => {
-  for (const cid of ["panel", "batten", "agpanel"]) {
+  for (const cid of ["panel", "vinyl", "batten", "agpanel"]) {
     const { status, body, trace } = await save([row(cid, { exposureIn: "4.5" }), row("lap", { exposureIn: "4.5" })]);
     assertEquals(status, 200, JSON.stringify(body));
     assertEquals(body.skipped, [`${cid}: only lap siding takes a course size`]);
@@ -211,4 +230,68 @@ Deno.test("save: a lap size outside 3..12 or not a number is refused, never coer
     assert(!upsertFor(trace, "lap"), `${JSON.stringify(sent)} wrote nothing for lap`);
     assertEquals(body.saved, 1, "the panel row still saved");
   }
+});
+
+// ─── 3. 4.5" Vinyl Siding, the fifth id (2026-10-06, migration 285) ────────────────────────────
+Deno.test("save: a vinyl row is stored like any other cladding, with no course size", async () => {
+  const { status, body, trace } = await save([row("panel"), row("lap"), row("vinyl", { rate: "2.25", labelOverride: "Vinyl" })]);
+  assertEquals(status, 200, JSON.stringify(body));
+  assertEquals([body.saved, body.skipped], [3, []]);
+  const v = upsertFor(trace, "vinyl")!;
+  assertEquals([v.client_id, v.style_id, v.cladding_id, v.rate, v.label_override, v.sort_order], [T, STYLE, "vinyl", 2.25, "Vinyl", 2]);
+  assert(!("exposure_in" in v), "a vinyl row never names the course size");
+});
+
+Deno.test("save: a course size on the vinyl row is refused with the lap-only sentence; the other rows still save", async () => {
+  const { status, body, trace } = await save([row("lap", { exposureIn: "7" }), row("vinyl", { exposureIn: "4.5" })]);
+  assertEquals(status, 200, JSON.stringify(body));
+  assertEquals(body.skipped, ["vinyl: only lap siding takes a course size"]);
+  assertEquals(body.saved, 1);
+  assert(!upsertFor(trace, "vinyl"), "the vinyl row was not written");
+  assertEquals(upsertFor(trace, "lap")!.exposure_in, 7, "7 on the lap row: the standard lap, typed");
+  // A blank course on the vinyl row is simply nothing to write.
+  const blank = await save([row("vinyl", { exposureIn: "" })]);
+  assertEquals([blank.body.saved, blank.body.skipped], [1, []]);
+  assert(!("exposure_in" in upsertFor(blank.trace, "vinyl")!));
+});
+
+Deno.test("save: an id we ship nothing for is still refused (barn siding waits for its profile)", async () => {
+  for (const cid of ["barn", "Vinyl", "vinylsiding"]) {
+    const { status, body, trace } = await save([row("vinyl"), row(cid)]);
+    assertEquals(status, 200, JSON.stringify(body));
+    assertEquals(body.skipped, [`row 1: "${cid}" is not a cladding we ship`]);
+    assertEquals(body.saved, 1);
+    assert(!upsertFor(trace, cid), `${cid} was not written`);
+  }
+});
+
+// stage_order_attribute_change, the order screen's Cladding dropdown, on an order nobody signed yet.
+const DESIGN = {
+  short_code: "SS-HARNESS01", status: "quoted", accepted_at: null, ss_quote_number: "1001", ss_quote_pdf_url: null, image_url: null,
+  estimate_lines: { version: 1, discount: 0, lines: [{ kind: "building", itemKey: "", name: "10x12 Deluxe Gable", desc: "", qty: 1, amount: 9000 }] },
+  accepted_snapshot: null, selections: { style: "deluxe", size: "10x12", cladding: "lap", paint: "No Paint" }, paint_colors: {},
+  contact: {}, custom_options: null, ro_dimensions: null, items: [], bldg_w: 10, bldg_h: 12, inventory_unit_id: null,
+};
+const stage = (cladding: string, world: World = {}) =>
+  drive({ action: "stage_order_attribute_change", shortCode: DESIGN.short_code, dryRun: true, attrs: { cladding } }, { design: DESIGN, noCladdingRows: true, ...world });
+
+Deno.test("order screen: vinyl is accepted for a tenant with no cladding rows, and named in the sentence the customer signs", async () => {
+  const { status, body, trace } = await stage("vinyl");
+  assertEquals(status, 200, JSON.stringify(body));
+  assertEquals([body.ok, body.preview], [true, true]);
+  assert(String(body.description).split("\n").includes('Cladding: 7" LP Lap Siding → 4.5" Vinyl Siding'), String(body.description));
+  assertEquals(trace.claddingSelects, ["cladding_id, label_override"], "it asked the tenant's rows first, found none, and fell back");
+  assertEquals(trace.rows.length, 0, "nothing logged");
+});
+
+Deno.test("order screen: an id outside the five is refused the same way, so the fallback is a real list", async () => {
+  const { status, body } = await stage("barn");
+  assertEquals(status, 400, JSON.stringify(body));
+  assertEquals(body.error, "That cladding isn't offered on this building style. Check Settings → Options → Cladding.");
+});
+
+Deno.test("order screen: a tenant whose rows do not offer vinyl on this style is refused vinyl", async () => {
+  const { status, body } = await stage("vinyl", { noCladdingRows: false });
+  assertEquals(status, 400, JSON.stringify(body));
+  assertEquals(body.error, "That cladding isn't offered on this building style. Check Settings → Options → Cladding.");
 });

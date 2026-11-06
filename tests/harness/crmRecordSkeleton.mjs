@@ -10,7 +10,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine), the same
 // shape quoteSalesTax.mjs uses.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmRecordSkeleton.mjs       (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-skeleton (SS_SHOTS overrides).
@@ -136,7 +135,7 @@ try {
   await page.waitForTimeout(600);
 
   // ── A. A DEAL, while crm_record is still in flight ────────────────────────────────────
-  await go(`/portal/designs/d-${CODE}`);
+  await go(`/designs/d-${CODE}`);
   const aText = await bodyText();
   const a = await shape();
   await page.screenshot({ path: join(shots, "design-skeleton.png") });
@@ -152,7 +151,7 @@ try {
   ok("B1 Back leaves the record while it is still loading", leftIt, await page.evaluate(() => location.pathname));
 
   // ── C. A CONTACT, same held reply ─────────────────────────────────────────────────────
-  await go(`/portal/contacts/c-${CONTACT_ID}`);
+  await go(`/contacts/c-${CONTACT_ID}`);
   const cText = await bodyText();
   const c = await shape();
   await page.screenshot({ path: join(shots, "contact-skeleton.png") });
@@ -174,7 +173,7 @@ try {
 
   // ── E. The deal again, this time answered immediately ─────────────────────────────────
   gate = Promise.resolve();
-  await go(`/portal/designs/d-${CODE}`);
+  await go(`/designs/d-${CODE}`);
   const eLanded = await page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 }).then(() => true, () => false);
   await page.waitForTimeout(400);
   await page.screenshot({ path: join(shots, "design-loaded.png") });

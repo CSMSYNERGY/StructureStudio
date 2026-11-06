@@ -123,6 +123,10 @@ export function choiceIdMap(srcCol: PmColumn | null | undefined, destCol: PmColu
 /**
  * Re-key one item's values through a column map, dropping anything unmappable — and re-key the
  * CHOICE ids inside status/dropdown cells too, since those are per-board as well.
+ *
+ * ⚠️ `values` MUST BE KEYED BY THE SOURCE BOARD'S COLUMN IDS, the ones `map` was built from. Values
+ * already re-keyed to the destination miss every lookup and come back as {} — a write built on
+ * that stores nothing and still reports success. update_item passes the browser's own payload.
  */
 export function remapValues(
   values: Record<string, unknown> | null | undefined,

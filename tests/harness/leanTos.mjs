@@ -50,21 +50,23 @@
 //      corner; asked off by its numbers it says by how much and what to type; typed, the two join, the porch's
 //      card says who meets it, Save carries meetPorch, and "Runs past it" takes the key off; a second lean-to
 //      is offered it until it is set up the roof, where it never can meet the porch.
+//   PW A WING ALONG PART OF ITS WALL (lengthFt, 2026-10-07): a lean-to inside the wing's stretch hangs off it; one
+//      past the wing's ends, or across the open corner beside it, is not drawn (its card says so: wingList.mjs PWA).
 //   and zero page errors.
 //
 //   python -m http.server 8321 --bind 127.0.0.1 --directory <repo root>
-//   SS_BASE=http://127.0.0.1:8321 SS_SHOTS=<dir> node tests/harness/leanTos.mjs     (SS_CASES=S,U,C,P,J,M for a subset)
+//   SS_BASE=http://127.0.0.1:8321 SS_SHOTS=<dir> node tests/harness/leanTos.mjs     (SS_CASES=S,U,C,P,J,M,PW for a subset)
 //
 // Exit 0 = every assertion held.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, purePorch, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, purePorch, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
 const SHOTS = shotsDir("leanTos");
-const CASES = (process.env.SS_CASES || "S,U,C,P,J,M").split(",");
+const CASES = (process.env.SS_CASES || "S,U,C,P,J,M,PW").split(",");
 const want = (k) => CASES.includes(k);
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
 const near = (a, b, tol = 0.02) => Math.abs(a - b) <= tol;
@@ -414,7 +416,7 @@ async function openPortal(path) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
+  await serveAppRoutes(page, PORTAL_HTML);
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   return { c, page, errors, calls };
@@ -446,7 +448,7 @@ const aimDock = (page, dir, at) => page.evaluate(({ dir, at }) => {
 const list = (page) => page.evaluate(() => { const M = window.__ss3dPanel && window.__ss3dPanel.model; return M && M.leanTos ? JSON.parse(JSON.stringify(M.leanTos)) : null; });
 
 if (want("U")) {
-  const { c, page, errors, calls } = await openPortal("/portal/advanced");
+  const { c, page, errors, calls } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     await page.locator('[data-ss-adv-sec="leanto"]').click();
@@ -600,7 +602,7 @@ const dockMembers = (page, tag) => page.evaluate((tag) => {
 }, tag);
 const singleCount = "(M) => { let n = 0; M.root.traverse((o) => { if (o.isMesh && o.userData && o.userData.ssLeanTo === true) n++; }); return n > 0 && !M.leanTos; }";
 if (want("C")) {
-  const { c, page, errors } = await openPortal("/portal/advanced");
+  const { c, page, errors } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     page.on("dialog", (d) => d.accept());
@@ -817,7 +819,7 @@ if (want("J")) {
 
   // J5: the Advanced page says it on both cards; a drop changed by 3 in turns the words into a near-miss with
   // the number, on both.
-  const { c, page, errors } = await openPortal("/portal/advanced");
+  const { c, page, errors } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     await page.locator('[data-ss-adv-sec="leanto"]').click();
@@ -995,7 +997,7 @@ if (want("M")) {
   } catch (e) { ok("M4: ran", false, e && e.stack); }
 
   // M5: the Advanced page.
-  const { c, page, errors, calls } = await openPortal("/portal/advanced");
+  const { c, page, errors, calls } = await openPortal("/advanced");
   try {
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
     // A projecting porch across the front, 8 ft deep, its roof hung at 7' 6" at 1 in 12 (which leaves 6 ft under its beam).
@@ -1082,6 +1084,34 @@ if (want("M")) {
     ok("M5: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
   } catch (e) { ok("M5: ran", false, e && e.stack); await page.screenshot({ path: join(SHOTS, "m5-failure.png") }).catch(() => {}); }
   await c.close();
+}
+
+// PW · A WING ALONG PART OF ITS WALL (roof.wingList[i].lengthFt, 2026-10-07): a 24 x 40 whose left wing runs 20 ft
+// of its wall, centred (10..30), with four lean-tos: on the left wall inside the wing's stretch (drawn, off the
+// wing's outer wall), on the left wall whole (past the wing's ends, into open ground: not drawn), on the back end
+// wall whole (across the open corner: not drawn) and on the right wall (no wing there: drawn). The Advanced page's
+// card sentence is in wingList.mjs case PWA.
+if (want("PW")) {
+  try {
+    const d3 = { roof: { type: "gable", front: "gable", pitch: 0.5, overhang: 1, eave: "fascia", wingList: [{ wall: "left", widthFt: 8, lengthFt: 20 }], leanTos: [
+      { wall: "left", widthFt: 6, dropFt: 1, lengthFt: 12, offsetFt: 2 },
+      { wall: "left", widthFt: 6, dropFt: 1 },
+      { wall: "back", widthFt: 5, dropFt: 1 },
+      { wall: "right", widthFt: 6, dropFt: 1 },
+    ] }, siding: "lap", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" };
+    const { page, errors } = await openCase(ctx, "Harness Part Wing Lean-tos", "24x40", d3);
+    const sc = await page.evaluate(SCENE, "__ss3dEngine");
+    const L = sc.by;
+    ok("PW1: the lean-to inside the wing's stretch and the right one are built, tagged 0 and 3", !!(L["0"] && L["3"]), JSON.stringify(Object.keys(L)));
+    ok("PW1: the one past the wing's ends and the one across the open corner are not", !L["1"] && !L["2"], JSON.stringify(Object.keys(L)));
+    ok("PW1: the list as built is those two", JSON.stringify((sc.leanTos || []).map((q) => q.i)) === "[0,3]", JSON.stringify((sc.leanTos || []).map((q) => q.i)));
+    const s0 = L["0"] && L["0"].slab;
+    ok("PW2: the one inside hangs off the wing's outer wall (x -12) over z -6..6 (12 ft, 2 toward the front)", !!s0 && s0.mx[0] <= -11.9 && s0.mn[0] <= -17.9 && s0.mn[2] >= -6 - 1.1 && s0.mx[2] <= 6 + 1.1 + 2,
+      s0 && JSON.stringify(s0));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "pw-part-wing-leantos.png"), [-40, 20, 30], [0, 5, 0]);
+    ok("PW: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await page.close();
+  } catch (e) { ok("PW: ran", false, e && e.stack); }
 }
 
 await browser.close();

@@ -26,7 +26,6 @@
 //      "notched" is a fascia-eave distinction and must not reach them. Asserted by measuring
 //      both framings on an open eave and requiring every number to be identical.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/overhangNotch.mjs
 //
 // Exit 0 = every assertion held.

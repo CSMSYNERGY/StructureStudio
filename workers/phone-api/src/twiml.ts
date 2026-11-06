@@ -1,11 +1,12 @@
 // A tiny TwiML builder. Every attribute value and every piece of text is escaped here, so no
 // handler ever concatenates a caller-supplied string (a business name, a URL with &) into XML.
 //
-// Call recording is REST-ONLY AND ANNOUNCED (release B2, ../recording.ts): nothing in this file
-// emits a `record` attribute, and <Record> is used only for voicemail, which is the caller leaving
-// a message on purpose. A call is recorded only through Twilio's REST API, on a call whose TwiML
-// carried the announcement (a <Say> before the inbound <Dial>, the whisper url on the outbound
-// <Number>), and only for a business that turned it on.
+// Call recording is REST-ONLY (release B2, ../recording.ts): nothing in this file emits a
+// `record` attribute, and <Record> is used only for voicemail, which is the caller leaving a
+// message on purpose. A call is recorded only through Twilio's REST API, on a call the Worker
+// armed when it started, and only for a business that turned it on. Its TwiML carries the
+// announcement (a <Say> before the inbound <Dial>, the whisper url on the outbound <Number>)
+// unless the owner turned the announcement off.
 
 type AttrValue = string | number | boolean | null | undefined;
 export type Attrs = Record<string, AttrValue>;

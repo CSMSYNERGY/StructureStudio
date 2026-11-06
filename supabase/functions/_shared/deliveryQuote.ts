@@ -110,7 +110,19 @@ function lotOrigin(row: any): NamedOrigin | null {
 export async function quoteDelivery(
   // deno-lint-ignore no-explicit-any
   admin: any,
-  opts: { clientId: string; address: StopAddress; repUserId: string | null; fetchImpl?: typeof fetch },
+  opts: {
+    clientId: string;
+    address: StopAddress;
+    repUserId: string | null;
+    /**
+     * The Online Shop prices delivery from the lot a building actually sits on (2026-10-17).
+     * Honoured only for an ACTIVE lot of this tenant with a usable address; anything else is
+     * ignored and the origin mode decides, so a stale or foreign id can never refuse a quote.
+     * Optional and absent for every other caller, so their behaviour is unchanged.
+     */
+    originLocationId?: string | null;
+    fetchImpl?: typeof fetch;
+  },
 ): Promise<DeliveryQuote> {
   const { clientId, address, repUserId } = opts;
   const distanceConfigured = isConfigured();
@@ -159,7 +171,21 @@ export async function quoteDelivery(
   let candidates: NamedOrigin[] = [];
   const business = businessOrigin(cs);
 
-  if (originMode === "business") {
+  let unitLot: NamedOrigin | null = null;
+  if (opts.originLocationId) {
+    try {
+      const { data: lot } = await admin.from("builder_locations")
+        .select("name, street, city, state, zip, active")
+        .eq("client_id", clientId).eq("id", opts.originLocationId).maybeSingle();
+      unitLot = lotOrigin(lot);
+    } catch {
+      // A malformed id or a read failure: ignore the override, the origin mode decides.
+    }
+  }
+
+  if (unitLot) {
+    candidates = [unitLot];
+  } else if (originMode === "business") {
     candidates = business ? [business] : [];
   } else {
     let repLot: NamedOrigin | null = null;

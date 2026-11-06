@@ -4,6 +4,8 @@
 // (supabase/functions/_shared/smsSend.ts → twilioSms.ts, logError.ts) read them unchanged
 // through Deno.env.get. The full list, with what each one is for, is in README.md.
 
+import type { WebhookAccount } from "../../../supabase/functions/_shared/twilioAccount.ts";
+
 export interface Env {
   // ── vars (wrangler.jsonc) ──────────────────────────────────────────────────────────
   PUBLIC_BASE_URL: string;
@@ -27,8 +29,9 @@ export interface Env {
   TRANSCRIBE?: string;
   /**
    * Call recording's kill switch (src/recording.ts). Exactly "on" lets a business that turned
-   * recording on have its calls announced and recorded. Anything else: no announcement, no
-   * recording, whatever the business chose. Recordings already made are still played and expired.
+   * recording on have its calls recorded (and announced, unless the owner turned that off).
+   * Anything else: no announcement, no recording, whatever the business chose. Recordings already
+   * made are still played and expired.
    */
   CALL_RECORDING?: string;
   /**
@@ -58,6 +61,21 @@ export interface Env {
   /** The setup-test TwiML App that answers with <Echo/>. */
   TWILIO_ECHO_APP_SID?: string;
   /**
+   * Workstream 2's switch, the same name and meaning as the edge secret: exactly "on" or "manual"
+   * lets a builder's own Twilio sub-account (migration 292's twilio_accounts) sign its webhooks and,
+   * from phase 5, carry its calls ("manual" differs only on the edge, where no sub-account is made
+   * by itself). Anything else (unset included): everything is the parent account in the TWILIO_*
+   * values above and nothing is looked up, which is how the Worker ran before it.
+   */
+  TWILIO_SUBACCOUNTS?: string;
+  /**
+   * NOT A VAR. Set by the router on the Env a verified Twilio webhook's handler gets, only while
+   * TWILIO_SUBACCOUNTS is "on" or "manual": the account the webhook came from (src/twilioAccount.ts webhookEnv),
+   * so a handler can refuse a tenant in another account. An object, so the Deno.env shim (strings
+   * only) never exposes it.
+   */
+  TWILIO_WEBHOOK_ACCOUNT?: WebhookAccount;
+  /**
    * The iPhone push credentials (accessToken.ts pushCredentialFor), both with Sandbox unticked:
    * _DEV from the development bundle id's VoIP certificate, _PROD from the store bundle id's.
    */
@@ -76,6 +94,12 @@ export interface Env {
    * or more; unset or shorter, those reports are saved with no pseudonym at all.
    */
   LOG_PSEUDONYM_KEY?: string;
+  /**
+   * The dial guard (src/dialGuard.ts, DEVIATIONS 83): one JSON object naming the demo businesses,
+   * the old reviewer logins, the extra numbers a demo may call, the guard's start time and a demo's
+   * daily minutes. Unset: nobody is guarded. Set but unreadable: anyone it could name is refused.
+   */
+  PHONE_DIAL_GUARD?: string;
 
   // ── Text alerts ───────────────────────────────────────────────────────────────────
   /** The Firebase service account JSON, whole. */

@@ -17,7 +17,6 @@
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine); the stub
 // skeleton, the pushState navigation and the shots directory are all crmRecordSkeleton.mjs's.
 //
-//   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/crmContactDeal.mjs          (exit 0 = every check held)
 //
 // Shots land in %TEMP%/ss-harness/crm-contact-deal (SS_SHOTS overrides).
@@ -133,7 +132,7 @@ try {
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForTimeout(600);
 
-  await go(`/portal/contacts/c-${CONTACT_ID}`);
+  await go(`/contacts/c-${CONTACT_ID}`);
   await page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 });
   await page.waitForTimeout(500);
 

@@ -18,7 +18,7 @@
 // the row in `feedback_submissions`, and then creates the Monday item. Status changes
 // and /client-marked replies come back via the `feedback-monday-webhook` function.
 // Tenants track it all under Support → My Requests (the tab was renamed from "What's New"
-// on 2026-08-30; /portal/releases still resolves via SS_TAB_ALIASES).
+// on 2026-08-30; /releases still resolves via SS_TAB_ALIASES).
 //
 // See migration 054_feedback_submissions.sql for the data model and its trust boundary.
 //

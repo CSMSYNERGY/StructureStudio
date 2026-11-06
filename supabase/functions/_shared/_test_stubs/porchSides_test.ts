@@ -13,7 +13,7 @@
 // The promise tested hardest: FRONT, BACK AND ABSENT COME OUT EXACTLY AS THEY DID, and outside the frame
 // a side is the front, everywhere.
 
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert";
 
 const JSX = await Deno.readTextFile(new URL("../../../../StructureStudio.jsx", import.meta.url));
 const CMP = await Deno.readTextFile(new URL("../../../../structure-studio.component.js", import.meta.url));
@@ -36,6 +36,8 @@ const REGIONS: Array<[string, string]> = [
   ["const D3_CASE_F =", "// Built-in 3D appearance per building style"],
   // d3RoofAxes, d3NewFrame, d3PorchEnd / d3PorchWall / d3PorchOnEave, d3Massing, the lean-to list,
   // d3PorchJoins, d3RoofStep, d3PorchToRoot, d3RecessedPorchToRoot, d3RecessedLostWords.
+  // D3_CLADDING and d3CladdingFor: the corner boards' face the recessed porch's posts stand on (2026-10-07).
+  ["const D3_CLADDING = {", "// ── METAL ROOF PROFILE"],
   ["function d3RoofAxes(", "function d3FtIn("],
   // ssPorchTrussWall, d3ProjectingPorch, d3PorchSpan.
   ["function ssVentSpan(", "function buildFixtureTools("],
@@ -215,7 +217,10 @@ Deno.test("a front gable's side walls are EAVE walls: the porch runs down the ri
     assertEquals(F.d3RecessedPorch({ ...rec, porchDepthFt: 30 }, 12, 24, H).depth, 8);
     assertEquals(F.ssPorchTrussWall(rec, 12, 24), null, "no gable over an eave wall: no truss");
     const fr = F.d3RecessedPorchFrame(rec, 12, 24, H);
-    assertEquals([fr.bays, fr.posts, fr.side], [3, 4, 12 - 0.4], "24 ft of eave: three bays, a post every 8 ft");
+    // The end posts' outer faces on the end walls' corner-board line (2026-10-07): the panel's 0.22 when no
+    // cladding face is given, as here.
+    assertEquals([fr.bays, fr.posts], [3, 4], "24 ft of eave: three bays, a post every 8 ft");
+    assertAlmostEquals(fr.side, 12 + 0.22, 1e-12, "24 ft of eave: the end posts at the corners");
     assertEquals(F.d3RecessedPorchFrame({ ...rec, porchSteps: "center" }, 12, 20, H).posts, 4, "two bays and centre steps: one more, so no post stands at the top of them");
   }
 });

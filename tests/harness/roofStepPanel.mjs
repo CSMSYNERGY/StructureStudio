@@ -22,7 +22,6 @@
 // The public ?admin=1 operator page with Supabase stubbed at the network layer (lib.mjs), the
 // calNewKeys.mjs technique: no login, nothing leaves the machine, the COMPILED bundle.
 //
-//   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/roofStepPanel.mjs          (SS_BASE=http://127.0.0.1:<port> to move it)
 //
 // Exit 0 = every assertion held.

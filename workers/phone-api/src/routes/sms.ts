@@ -30,6 +30,7 @@ import { ApiError, ok, readJson, UUID_RE, type ErrorCode } from "../http";
 import { phoneDigits, toE164 } from "../identity";
 import { logFault } from "../log";
 import { WALLET_WORDS } from "../wallet";
+import { GUARD_WORDS, guardedNumberAllowed, guardFor, logGuardRefusal } from "../dialGuard";
 import { mayReadUnknownNumbers, maySendToContacts, narrowedToOwn, visibleContactIds } from "../scope";
 
 const TEMP_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -93,6 +94,17 @@ export async function sendSms(env: Env, ec: Ctx, req: Request): Promise<Response
   const contactId = body.contact_id == null || body.contact_id === "" ? null : String(body.contact_id);
   if (contactId !== null && !UUID_RE.test(contactId)) throw new ApiError("bad_request", "That contact id isn't valid.");
   if (!c.ctx.number) throw new ApiError("no_number");
+
+  // The dial guard (../dialGuard.ts): a guarded login texts only numbers it may call. `to` is
+  // what is texted: a contact's own phone must normalise to it (step 3 below).
+  const guard = guardFor(env, ec, c.userId, c.ctx.client_id);
+  if (guard.mode) {
+    const verdict = await guardedNumberAllowed(c.admin, guard.state, guard.mode, { clientId: c.ctx.client_id, numbers: c.ctx.numbers }, to);
+    if (!verdict.ok) {
+      logGuardRefusal(ec, verdict, "text", c.ctx.client_id);
+      throw new ApiError("not_your_customer", verdict.mode === "demo" ? GUARD_WORDS.demoText : GUARD_WORDS.blockedText);
+    }
+  }
 
   let toPhone: string;
   if (contactId) {

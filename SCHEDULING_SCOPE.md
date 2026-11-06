@@ -330,7 +330,7 @@ ComingSoon stubs in portal.html and are already in `NONADMIN_TABS`.
 
 | Source | Backing rows today | Build board | Delivery loads |
 |---|---|---|---|
-| **Customer order** | `orders` + `designs` (status accepted/invoiced) | Yes — "build for customer X". Mints a shop **serial** from `take_next_serial()` (this is exactly why migration 075 put the counter on `client_settings`). | Yes — becomes a stop on a load once built (or planned ahead against its build due date). |
+| **Customer order** | `orders` + `designs` (status accepted/invoiced) | Yes — "build for customer X". The building gets a shop **serial** from `take_next_serial()` the first time it goes on the board (this is exactly why migration 075 put the counter on `client_settings`) and keeps it on its order (`orders.shop_serial`, migration 284): one number per building, never one per job. | Yes — becomes a stop on a load once built (or planned ahead against its build due date). |
 | **Inventory build** | `inventory_units` + master design (`status='inventory'`) | Yes — builder queues a spec unit for a lot. Unit already owns its serial; the job reuses it. | Only when the unit **sells** — already built, so the stop has no build dependency (pickup point = the lot, not the shop). Lot-to-lot moves also ride loads. |
 | **Repair** | **New `repairs` table (this project)** | Shop repairs (building comes in / bench work). | Field visits and pick-up/return hauls ride a load like any other stop. |
 | **Manual** | none | Free-form card (e.g. "shop maintenance day") | Free-form stop (e.g. haul a trade-in back) |
@@ -366,9 +366,13 @@ assignee_user_id uuid · notes text · created_by uuid · created_at/updated_at`
   (same denormalize-for-the-list pattern as OrdersView deriving from `designs.contact`).
   There is no detail drawer (decision 6) — the row IS the detail, so snapshots must be
   complete enough to render everything inline.
-- Serial minting: an **order** build job calls `take_next_serial()` at creation (LAST in the
-  transaction, after validation — same "a rejected payload must not burn a number" rule as
-  `save_inventory`). Inventory/repair jobs carry the existing serial if known.
+- Serial minting: one number per BUILDING (Carolyn 2026-10-06). An **order** build job reuses
+  its building's `orders.shop_serial` (migration 284); only a building without one calls
+  `take_next_serial()` (LAST, after validation — same "a rejected payload must not burn a
+  number" rule as `save_inventory`), and the number goes on the order before the job is
+  inserted, so deleting the job and adding it back keeps it. A stop added from a bare design
+  code and a repair logged against a code show the building's number when it has one and never
+  mint. Inventory/repair jobs carry the existing serial if known.
 - Partial unique guards: one build job per `design_short_code`, one per `inventory_unit_id`
   — no accidental duplicate cards for the same building.
 

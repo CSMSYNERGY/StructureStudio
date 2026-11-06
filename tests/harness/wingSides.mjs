@@ -37,7 +37,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE, REF, PASS_THROUGH_GET, serveAppRoutes } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ROOF_T = 0.2, WALL_T = 0.3;
@@ -386,8 +386,8 @@ async function openAdvanced(browser, viewport = { width: 1440, height: 1000 }) {
   await page.route(`**/${REF}.supabase.co/**`, handler);
   await page.route(`**/${REF}.functions.supabase.co/**`, handler);
   await page.route(`**/${REF}.storage.supabase.co/**`, handler);
-  await page.route(/\/portal\/[a-z]/, (r) => r.fulfill({ status: 200, contentType: "text/html", body: PORTAL_HTML }));
-  await page.goto(`${BASE}/portal/advanced`, { waitUntil: "domcontentloaded" });
+  await serveAppRoutes(page, PORTAL_HTML);
+  await page.goto(`${BASE}/advanced`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForSelector('[data-ss-adv="sections"]', { timeout: 60000 });
   return { ctx, page, errors, calls };

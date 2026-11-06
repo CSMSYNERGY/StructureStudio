@@ -128,6 +128,10 @@ Deno.test("the extension IDs: the unpacked dev build's stable id by default, an 
   assertEquals(h.ssPhoneExtensionIds(), ["deoplohngfikappgihmmofhfhhdcpkch", "ipiccbfkkbenmiaiaoecbhbjalkbikjk"], "the store ID and the unpacked dev ID, both real Chrome id shapes, so both ARE messaged");
   assert(/add the Chrome Web Store id to this list, FIRST/.test(CORE), "the note to add the store id is next to the constant");
   assert(!h.ssPhoneLinkReady(h.SS_PHONE_LINKS.chrome), "a placeholder store link must read as not ready");
+  // The phone apps are published (2026-10-30). 11-sms's SS_APP_QR codes encode these exact addresses.
+  assertEquals(h.SS_PHONE_LINKS.ios, "https://apps.apple.com/app/id6819597681");
+  assertEquals(h.SS_PHONE_LINKS.android, "https://play.google.com/store/apps/details?id=com.mysynergyphone.app");
+  assert(h.ssPhoneLinkReady(h.SS_PHONE_LINKS.ios) && h.ssPhoneLinkReady(h.SS_PHONE_LINKS.android), "published store links read as ready");
   const injected: Win = { location: { href: "" }, SS_PHONE_EXTENSION_IDS: ["abcdefghijklmnopabcdefghijklmnop", "not-an-id", 7] };
   assertEquals(helpers(injected).ssPhoneExtensionIds(), ["abcdefghijklmnopabcdefghijklmnop"]);
 });

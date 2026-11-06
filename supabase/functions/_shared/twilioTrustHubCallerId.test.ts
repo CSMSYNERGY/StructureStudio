@@ -15,6 +15,9 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   attachNumberToService,
   clearNumberSmsUrl,
+  CNAM_INFO_REQUIRED,
+  parseCnamDisplayName,
+  POLICY_CNAM_TRUST_PRODUCT,
   fetchCustomerProfile,
   fetchTrustProduct,
   findIncomingNumberSid,
@@ -538,6 +541,65 @@ Deno.test("attachNumberToService / numberInService / clearNumberSmsUrl / findInc
     let e2: unknown = null;
     try { await f(); } catch (e) { e2 = e; }
     assert(e2 instanceof TrustHubError && e2.status === 400);
+  }
+});
+
+// ── CNAM (Workstream 2, phase 6) ─────────────────────────────────────────────────────────────
+// "Brand your calls using CNAM": the SHAKEN/STIR steps plus one EndUser of type cnam_information
+// carrying cnam_display_name, assigned before the profile, under Twilio's CNAM policy.
+const cnamBase = () => ({
+  kind: "cnam" as const, profileSid: PROFILE, numberSid: NUMBER, email: "owner@example.test",
+  friendlyName: voiceTrustFriendlyName("demo-tenant", "cnam"),
+});
+
+Deno.test("CNAM: Twilio's policy, its EndUser with the display name, assigned before the profile, then submitted", async () => {
+  assertEquals(POLICY_CNAM_TRUST_PRODUCT, "RNf3db3cd1fe25fcfd3c3ded065c8fea53");
+  assertEquals(voiceTrustFriendlyName("demo-tenant", "cnam"), "demo-tenant — CNAM");
+  const w = trustWorld({ profileNumbers: [NUMBER] });
+  const out = await setupVoiceTrust({ ...cnamBase(), cnam: { displayName: "Demo Barns" } }, w.http);
+  assertEquals(w.writes(), [
+    "POST /v1/TrustProducts",
+    "POST /v1/EndUsers",
+    "POST /v1/TrustProducts/BU/EntityAssignments",
+    "POST /v1/TrustProducts/BU/EntityAssignments",
+    "POST /v1/TrustProducts/BU/ChannelEndpointAssignments",
+    "POST /v1/TrustProducts/BU",
+  ]);
+  assertEquals(w.reqs.find((r) => r.path === "/v1/TrustProducts" && r.method === "POST")!.form,
+    { FriendlyName: "demo-tenant — CNAM", Email: "owner@example.test", PolicySid: POLICY_CNAM_TRUST_PRODUCT });
+  assertEquals(w.endUsers[0].form.Type, "cnam_information");
+  assertEquals(w.endUsers[0].form.FriendlyName, "demo-tenant — CNAM display name");
+  assertEquals(JSON.parse(w.endUsers[0].form.Attributes), { cnam_display_name: "Demo Barns" });
+  const assigned = w.reqs.filter((r) => r.path.endsWith("/EntityAssignments") && r.method === "POST").map((r) => r.form.ObjectSid);
+  assertEquals(assigned, [w.endUsers[0].sid, PROFILE]);
+  assertEquals([out.created, out.endUserCreated, out.submitted, out.status], [true, true, true, "pending-review"]);
+  assert(!w.reqs.some((r) => /Evaluations/.test(r.path)), "the CNAM guide runs no Evaluation");
+});
+
+Deno.test("CNAM with no name stops before its EndUser; a rejected one is resubmitted with the NEW name on its EndUser", async () => {
+  const w = trustWorld({ profileNumbers: [NUMBER] });
+  let caught: unknown = null;
+  try { await setupVoiceTrust(cnamBase(), w.http); } catch (e) { caught = e; }
+  assert(caught instanceof TrustHubError && caught.message === CNAM_INFO_REQUIRED, String(caught));
+  assertEquals(w.endUsers.length, 0);
+  // Rejected (the name, say), the operator sends a corrected one: the SAME EndUser is updated, not a second.
+  const made = w.products[0];
+  const first = trustWorld({ profileNumbers: [NUMBER] });
+  const out = await setupVoiceTrust({ ...cnamBase(), cnam: { displayName: "Demo Barns" } }, first.http);
+  first.products[0].status = "twilio-rejected";
+  const again = await setupVoiceTrust({ ...cnamBase(), existingSid: out.trustProductSid, cnam: { displayName: "Demo Barns LLC" } }, first.http);
+  assertEquals(first.endUsers.length, 1);
+  assertEquals(first.endUserUpdates.map((u) => JSON.parse(u.form.Attributes)), [{ cnam_display_name: "Demo Barns LLC" }]);
+  assertEquals([again.endUserUpdated, again.submitted, again.status], [true, true, "pending-review"]);
+  assert(made && made.policy_sid === POLICY_CNAM_TRUST_PRODUCT, "the product was handed back before the refusal");
+});
+
+Deno.test("parseCnamDisplayName: Twilio's rules, checked before anything is sent", () => {
+  assertEquals(parseCnamDisplayName("  Demo   Barns  "), { ok: true, name: "Demo Barns" });
+  assertEquals(parseCnamDisplayName("J.R. Sheds, LLC"), { ok: true, name: "J.R. Sheds, LLC" });
+  for (const bad of ["", "   ", "Sixteen chars xx", "9 Barns", "Barns & Sheds", "Barns!", "Bärns"]) {
+    const r = parseCnamDisplayName(bad);
+    assert(!r.ok, `accepted ${JSON.stringify(bad)}`);
   }
 });
 

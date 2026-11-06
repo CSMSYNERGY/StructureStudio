@@ -5,6 +5,7 @@
   "scripts": {
     "compile": "node scripts/compile.mjs",
     "preflight": "node scripts/preflight.mjs",
+    "ship": "node scripts/ship-beta.mjs",
     "selftest:pre-push": "node scripts/pre-push-selftest.mjs",
     "test:e2e": "playwright test"
   },

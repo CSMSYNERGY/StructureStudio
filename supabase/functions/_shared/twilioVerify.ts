@@ -21,12 +21,15 @@
  *
  * Three Twilio facts callers must not have to re-learn:
  *   - HTTP 403 with code 60204 on the START path means the Verify service refused a premium
- *     parameter it has not been enabled for. For us that is `CustomFriendlyName` ("Custom
- *     Company Name", which only Twilio Sales can switch on), and it refuses EVERY send that
- *     carries it. Every branded text login request from 2026-08-26 to 2026-09-16 was
- *     refused this way, and the 502 "try again" answer hid it as a transient fault.
- *     `twStartVerification` now resends once without the name, and 60204 is permanent
- *     everywhere else.
+ *     parameter it has not been enabled for. For us that was `CustomFriendlyName` ("Custom
+ *     Company Name", which only Twilio Sales can switch on): it refused EVERY send that carried
+ *     it, every branded text login request from 2026-08-26 to 2026-09-16 died that way behind a
+ *     502 "try again", and from then until 2026-10-21 each isolate paid one refused request
+ *     before resending unbranded. ⛔ NOTHING SENDS IT NOW. The builder's name comes from the
+ *     SERVICE instead: each builder has their own Verify service inside their own Twilio
+ *     sub-account, named after them (_shared/twilioVerifyService.ts), and a caller passes it as a
+ *     VerifyTarget. Do not bring the parameter back: a Sales enable would only make it work on the
+ *     parent's service, and it would still name the vendor on any service that lacks it.
  *   - On VerificationCheck, HTTP 404 with code 20404 is the NORMAL wrong-flow case, not an
  *     outage: the verification expired (Twilio's default 10-minute TTL) or was already
  *     consumed by a prior approved check. `twCheckVerification` maps it to
@@ -104,9 +107,30 @@ function basicAuthPair(): { user: string; pass: string } | null {
 
 /** Credentials + service SID present — the ONE test for "may the verification path run at
  *  all". Callers gate on this before offering SMS verification; requireCreds below is the
- *  belt-and-braces for anyone reaching an API call directly. */
+ *  belt-and-braces for anyone reaching an API call directly. It is about the PARENT's service:
+ *  a builder's own service is only ever used next to it, and every builder falls back to it. */
 export function twilioConfigured(): boolean {
   return basicAuthPair() !== null && verifyServiceSid() !== null;
+}
+
+/**
+ * A Verify service to start and check codes on, with the credentials of the account that owns
+ * it. Omitted, the parent's service and credentials come from the environment (above).
+ *
+ * A builder's target is their OWN service inside their OWN sub-account, read by the caller from
+ * twilio_accounts.verify_service_sid (migration 323) with the sub's credentials from Vault
+ * (twilioAccount.ts resolveTwilioAccount). ⚠️ The pair must belong together: a sub's service
+ * with the parent's credentials (or the reverse) answers 404/20404, which reads as "not found".
+ * The credentials travel as a value, never through Deno.env (twilioAccount.ts's rule).
+ */
+export type VerifyTarget = { serviceSid: string; user: string; pass: string };
+
+/** The parent's own target, or null when it is not configured. For code that must ask the
+ *  parent's service something (twilioVerifyService.ts reads its settings to copy them). */
+export function parentVerifyTarget(): VerifyTarget | null {
+  const pair = basicAuthPair();
+  const serviceSid = verifyServiceSid();
+  return pair && serviceSid ? { serviceSid, user: pair.user, pass: pair.pass } : null;
 }
 
 export class TwilioNotConfigured extends Error {
@@ -147,8 +171,9 @@ export class TwilioApiError extends Error {
  *   60205  SMS is not supported by this landline number
  *   60203  max send attempts reached — locked until the verification's TTL expires
  *   60202  max check attempts reached — same lock, on the check side
- *   60204  premium feature not enabled on the Verify service (e.g. Custom Company Name);
- *          only Twilio can switch it on, so an identical retry fails identically
+ *   60204  premium feature not enabled on the Verify service (it was Custom Company Name,
+ *          which nothing sends any more); only Twilio can switch one on, so an identical
+ *          retry fails identically
  *   21608  (HTTP 403) the account's messaging compliance profile is missing, so Twilio
  *          refuses sends to every number until an operator completes it (seen 22 times
  *          2026-08-12..08-19, each answered "try again")
@@ -168,7 +193,15 @@ function codeOf(body: string): number {
 
 type TwCreds = { user: string; pass: string; verifySid: string };
 
-function requireCreds(): TwCreds {
+/** The target's own pair when there is one (a builder's service), else the parent's from the
+ *  environment. A target with an empty field is a caller bug, refused like a missing secret. */
+function requireCreds(target?: VerifyTarget): TwCreds {
+  if (target) {
+    if (!target.serviceSid || !target.user || !target.pass) {
+      throw new TwilioNotConfigured("The builder's Verify service is missing its SID or credentials.");
+    }
+    return { user: target.user, pass: target.pass, verifySid: target.serviceSid };
+  }
   const pair = basicAuthPair();
   const verifySid = verifyServiceSid();
   if (!pair || !verifySid) {
@@ -231,47 +264,33 @@ async function twFetch(
 }
 
 /**
- * Twilio's default Verify body is "Your <friendly name> verification code is 123456", and
- * the friendly name is a property of the SERVICE — one service, one brand, every tenant.
- * So a customer logging in to a builder's portal got a code branded with OUR name, not
- * the builder's. A white-label product naming its own vendor to the end customer is the
- * one place the label slips.
+ * A builder's business name as a Verify service FriendlyName, which is what Twilio's default
+ * text puts in "Your <friendly name> verification code is 123456". twilioVerifyService.ts names
+ * each builder's own service with it.
  *
- * `CustomFriendlyName` overrides it PER REQUEST, which is why this is a parameter and not a
- * service per tenant: a service each would mean provisioning on signup, a SID to store and
- * migrate, and a second thing to go wrong at 2am — for a string substitution.
- *
- * ⚠️ THE PARAMETER IS A PREMIUM FEATURE ("Custom Company Name"). Twilio refuses every send
- * that carries it (HTTP 403, code 60204) until Twilio Sales enables it on the service, so
- * twStartVerification falls back to an unbranded send when it is refused.
- *
- * Twilio documents a 30-character limit, and a name it cannot take must not be able to stop
- * a customer logging in, so this sanitizes rather than trusts: letters, digits and spaces
- * only, collapsed, capped at 30. A tenant's business name is free text they typed —
- * "Example Barns & Sheds, LLC" is a normal thing to type. If nothing survives, the parameter
- * is omitted and Twilio falls back to the service default.
+ * Twilio's rules for the name (Verify Services API): at most 30 characters, letters, digits,
+ * spaces, dashes and underscores, no links or phone numbers, and NO MORE THAN 4 DIGITS in all.
+ * A name it cannot take must not leave a builder's customers on our name forever, so this
+ * sanitizes rather than trusts: letters, digits and spaces only, collapsed, digits kept only while
+ * the total stays at 4 or fewer (a whole run of digits that would pass 4 is dropped, so "Route 66
+ * Sheds 2024" keeps "66" and loses "2024"), capped at 30. A tenant's business name is free text
+ * they typed: "Example Barns & Sheds, LLC" is a normal thing to type. Empty means nothing usable
+ * survived: the builder gets no service of their own and their codes stay on the parent's.
  */
 export function twSanitizeBrand(name: unknown): string {
   if (typeof name !== "string") return "";
+  let digits = 0;
   return name
     .replace(/[^A-Za-z0-9 ]+/g, " ")
+    .replace(/[0-9]+/g, (run) => {
+      if (digits + run.length > 4) return " ";
+      digits += run.length;
+      return run;
+    })
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 30)
     .trim();
-}
-
-/** True once THIS isolate has seen Twilio refuse the brand (403/60204) AND the unbranded
- *  resend go through. From then on the brand is not offered, so an isolate pays the refused
- *  round trip once instead of on every send. It is module state on purpose: it dies with the
- *  isolate, so once Twilio enables the feature, fresh isolates brand codes again with no code
- *  change (a redeploy makes that immediate). It flips only on PROOF — an unbranded send that
- *  worked — so a service refusing 60204 for some other reason never silently loses the brand. */
-let brandRefused = false;
-
-/** Tests only: forget what this module learned about the brand. */
-export function _resetBrandRefusedForTests(): void {
-  brandRefused = false;
 }
 
 /**
@@ -279,43 +298,20 @@ export function _resetBrandRefusedForTests(): void {
  * verification's `status` (normally "pending") and its `sid`. The sid is informational —
  * the CHECK path keys on the phone number, not the sid, so nothing breaks if it is lost.
  *
- * `brand` is the tenant's own name for the message body (see twSanitizeBrand). Omit it and
- * the request is exactly `To` + `Channel`.
- *
- * THE ONE RETRY. When a BRANDED send comes back HTTP 403 with code 60204, the send goes again
- * once with `To` + `Channel` only. That is safe to repeat because a 60204 refusal creates no
- * verification: Twilio never sent anything, so the retry is the only text that can go out.
- * Every other failure (a 429, a 5xx, a network error, a 60204 on an UNBRANDED send, or a
- * 60204 without the 403) is thrown as-is and never retried here. Whatever the retry throws
- * is rethrown unchanged, so a 429 or a network error on the second call stays transient.
- * `brandRefused` is true on the call that fell back, so the caller can log the fallback once;
- * later calls in the same isolate send unbranded straight away and report false.
+ * `target` is the service to send on (a builder's own, see VerifyTarget); omitted, the parent's.
+ * The request is exactly `To` + `Channel`, one request, never retried here: what the text says
+ * comes from the service, and a caller that wants another service after a refusal asks again
+ * itself (customer-auth falls back from a builder's service to the parent's).
  */
 export async function twStartVerification(
   toE164: string,
-  brand?: string,
-): Promise<{ status: string; sid: string; brandRefused: boolean }> {
-  const creds = requireCreds();
-  const plain: Record<string, string> = { To: toE164, Channel: "sms" };
-  const friendly = brandRefused ? "" : twSanitizeBrand(brand);
-  let raw: Record<string, unknown>;
-  let fellBack = false;
-  if (!friendly) {
-    raw = await twFetch(creds, "Verifications", plain);
-  } else {
-    try {
-      raw = await twFetch(creds, "Verifications", { ...plain, CustomFriendlyName: friendly });
-    } catch (e) {
-      if (!(e instanceof TwilioApiError && e.status === 403 && e.code === 60204)) throw e;
-      raw = await twFetch(creds, "Verifications", plain);
-      brandRefused = true;
-      fellBack = true;
-    }
-  }
+  target?: VerifyTarget,
+): Promise<{ status: string; sid: string }> {
+  const creds = requireCreds(target);
+  const raw = await twFetch(creds, "Verifications", { To: toE164, Channel: "sms" });
   return {
     status: typeof raw.status === "string" ? raw.status : "",
     sid: typeof raw.sid === "string" ? raw.sid : "",
-    brandRefused: fellBack,
   };
 }
 
@@ -340,16 +336,33 @@ export function twStartFailureKind(e: TwilioApiError): TwStartFailure {
 }
 
 /**
+ * Did a BUILDER's service refuse in a way that says the service or its account cannot be used,
+ * whoever the customer is? Then the caller should ask the parent's service instead (it sent
+ * nothing, so that is still one text). True for a config refusal (60204, 20404: the service was
+ * deleted, 21608) and for credentials Twilio rejects (HTTP 401, code 20003: the sub's key revoked,
+ * or the sub suspended). Everything else is about this request or this number, and a second
+ * service would fail it identically (60200, 60203) or might double-send it (429, 5xx, network).
+ */
+export function twBuilderServiceUnusable(e: TwilioApiError): boolean {
+  return e.status === 401 || e.code === 20003 || twStartFailureKind(e) === "config";
+}
+
+/**
  * Check a code the user typed against the pending verification for `toE164`.
  * `approved` is the ONLY success signal — any other status ("pending" after a wrong code,
  * "expired") means the user is not verified. See the header for why an HTTP 404 here comes
  * back as `{approved: false, status: "expired"}` instead of throwing.
+ *
+ * `target` must be the service the code was STARTED on (a verification lives in one service):
+ * checked anywhere else it reads "expired". customer-auth asks the parent's service once more
+ * when a builder's says expired, for a code started there before the builder had their own.
  */
 export async function twCheckVerification(
   toE164: string,
   code: string,
+  target?: VerifyTarget,
 ): Promise<{ approved: boolean; status: string }> {
-  const creds = requireCreds();
+  const creds = requireCreds(target);
   let raw: Record<string, unknown>;
   try {
     raw = await twFetch(creds, "VerificationCheck", { To: toE164, Code: code });
