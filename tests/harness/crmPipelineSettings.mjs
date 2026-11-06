@@ -599,6 +599,29 @@ try {
     && cKinds.includes("add_label") && cKinds.includes("create_task") && cKinds.includes("assign_owner")
     && !cKinds.includes("set_status") && !cKinds.includes("mark_lost"),
     JSON.stringify({ evs: evs.length, cKinds }));
+  // 367: the facts after the estimate, and email + the shop, each in its own group of the list.
+  const groups = await ed.locator("select[aria-label='Which event']").evaluate((s) =>
+    [...s.querySelectorAll("optgroup")].map((g) => ({ label: g.label, keys: [...g.querySelectorAll("option")].map((o) => o.value) })));
+  const grp = (re) => (groups.find((g) => re.test(g.label)) || { keys: [] }).keys;
+  const evSel = ed.locator("select[aria-label='Which event']");
+  await evSel.selectOption("email_opened");
+  await page.waitForTimeout(150);
+  const emailNote = (await ed.locator("[data-ss-rule-inbound-note]").innerText().catch(() => "")).replace(/\s+/g, " ");
+  await evSel.selectOption("call_missed");
+  await page.waitForTimeout(150);
+  const phoneNote = (await ed.locator("[data-ss-rule-inbound-note]").innerText().catch(() => "")).replace(/\s+/g, " ");
+  await evSel.selectOption("payment_received");
+  await page.waitForTimeout(150);
+  ok("E26 (367) payments, change orders, builds, repairs, the lot, email and the shop are offered in their own groups; email facts run once a day",
+    groups.length === 4
+    && JSON.stringify(grp(/^Payments/)) === JSON.stringify(["payment_received", "change_order_sent", "change_order_signed",
+      "build_completed", "delivery_scheduled", "lot_sold", "repair_requested", "repair_completed"])
+    && JSON.stringify(grp(/^Email/)) === JSON.stringify(["email_received", "email_opened", "email_bounced", "shop_request", "shop_purchase"])
+    && grp(/^Customers/).includes("call_missed") && !grp(/^Customers/).includes("email_opened")
+    && /once a day/.test(emailNote) && /hint, not proof/.test(emailNote) && !/missed callers/.test(emailNote)
+    && /missed callers/.test(phoneNote)
+    && (await ed.locator("[data-ss-rule-inbound-note]").count()) === 0,
+    JSON.stringify({ groups: groups.map((g) => g.label + ":" + g.keys.length), emailNote, phoneNote }));
   // THE MONDAY TEXT: tagged Lot visitor, weekly Mon + Thu at 08:00, a text — armed with the count.
   await ed.locator("select[aria-label='When the rule runs']").selectOption("schedule");
   await page.waitForTimeout(250);

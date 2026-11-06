@@ -7546,10 +7546,33 @@ const SS_RULE_CONTACT_EVENTS = [
   ["stage_changed", "A card moves to another stage"],
   ["deal_lost", "A card is marked lost"],
   ["deal_reopened", "A lost card is reopened"],
+  // 367 (round 3a): after the estimate — money, paperwork, the build and the lot.
+  ["payment_received", "A payment comes in"],
+  ["change_order_sent", "A change order is sent to sign"],
+  ["change_order_signed", "A change order is signed"],
+  ["build_completed", "Their building is finished"],
+  ["delivery_scheduled", "A delivery is scheduled"],
+  ["lot_sold", "A building on your lot is sold to them"],
+  ["repair_requested", "A repair is requested"],
+  ["repair_completed", "A repair is finished"],
+  // 367: email and the online shop.
+  ["email_received", "They send an email"],
+  ["email_opened", "They open an email"],
+  ["email_bounced", "An email to them bounces"],
+  ["shop_request", "They send a request from your online shop"],
+  ["shop_purchase", "They buy from your online shop"],
 ];
-// The three a customer can produce at will: an "every time" rule on them still fires at most once
-// a day per customer (365), and never for a stranger.
-const SS_RULE_INBOUND_EVENTS = ["call_missed", "voicemail_left", "text_received"];
+// Which group of the "Which event" list each of those sits in (the eight status events head the
+// first group). Display only; the vocabulary is the list above.
+const SS_RULE_SALE_EVENTS = ["payment_received", "change_order_sent", "change_order_signed", "build_completed",
+  "delivery_scheduled", "lot_sold", "repair_requested", "repair_completed"];
+const SS_RULE_EMAIL_SHOP_EVENTS = ["email_received", "email_opened", "email_bounced", "shop_request", "shop_purchase"];
+// The ones a customer (or their mail app) can produce at will: an "every time" rule on them still
+// fires at most once a day per customer (365 for the phone three, 367 for the email three — an
+// open or a bounce would otherwise feed a rule that emails them again, for ever), and never for a
+// stranger.
+const SS_RULE_PHONE_EVENTS = ["call_missed", "voicemail_left", "text_received"];
+const SS_RULE_INBOUND_EVENTS = SS_RULE_PHONE_EVENTS.concat(["email_received", "email_opened", "email_bounced"]);
 // How often a schedule runs. Mirrors RULE_SCHEDULE_FREQS.
 const SS_RULE_SCHEDULE_FREQS = [
   ["daily", "Every day"],
@@ -8342,8 +8365,17 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel, onTimeZone }) {
             <optgroup label="Estimates, invoices, building and delivery">
               {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </optgroup>
+            <optgroup label="Payments, change orders, builds, repairs and the lot">
+              {SS_RULE_CONTACT_EVENTS.filter(([k]) => SS_RULE_SALE_EVENTS.indexOf(k) >= 0)
+                .map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </optgroup>
             <optgroup label="Customers, calls, texts and meetings">
-              {SS_RULE_CONTACT_EVENTS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              {SS_RULE_CONTACT_EVENTS.filter(([k]) => SS_RULE_SALE_EVENTS.indexOf(k) < 0 && SS_RULE_EMAIL_SHOP_EVENTS.indexOf(k) < 0)
+                .map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </optgroup>
+            <optgroup label="Email and your online shop">
+              {SS_RULE_CONTACT_EVENTS.filter(([k]) => SS_RULE_EMAIL_SHOP_EVENTS.indexOf(k) >= 0)
+                .map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </optgroup>
           </select>
         ) : (
@@ -8403,7 +8435,9 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel, onTimeZone }) {
       {draft.triggerKind === "event" && SS_RULE_INBOUND_EVENTS.indexOf(draft.triggerEvent) >= 0 && (
         <div data-ss-rule-inbound-note="" style={{ fontSize: 12, color: "#475569", background: "#F1F5F9", borderRadius: 8, padding: "6px 8px", marginBottom: 8, lineHeight: 1.45 }}>
           Runs only for customers already in your Customer Hub — never a stranger — and at most once a day each.
-          A text goes only to people who have texted you before or ticked the texting box, so most missed callers will not get one.
+          {SS_RULE_PHONE_EVENTS.indexOf(draft.triggerEvent) >= 0
+            ? " A text goes only to people who have texted you before or ticked the texting box, so most missed callers will not get one."
+            : " Many email apps open a message by themselves, so “they open an email” is a hint, not proof they read it."}
         </div>
       )}
       {draft.triggerKind === "schedule" ? (

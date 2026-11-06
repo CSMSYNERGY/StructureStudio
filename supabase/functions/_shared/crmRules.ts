@@ -49,7 +49,7 @@ export const RULE_ANCHORS: Record<string, string> = {
 const CUSTOMER_ANCHORS = ["last_contact", "contact_created"];
 
 /**
- * THE FACTS 365 RAISES, beside the eight a status uses (RULE_EVENTS). Queued by triggers on the
+ * THE FACTS 365 AND 367 RAISE, beside the eight a status uses (RULE_EVENTS). Queued by triggers on the
  * tables that record them and fired by crm-rules-tick, never in the write itself. Mirrors the
  * CHECK on crm_rules.trigger_event and SS_RULE_CONTACT_EVENTS in the browser.
  */
@@ -67,6 +67,24 @@ export const RULE_CONTACT_EVENTS: Record<string, string> = {
   stage_changed: "A card moves to another stage",
   deal_lost: "A card is marked lost",
   deal_reopened: "A lost card is reopened",
+  // 367 (round 3a): after the estimate — money, paperwork, the build and the lot. Each is found
+  // through the design's code: the card carrying it, else the design's own customer.
+  payment_received: "A payment comes in",
+  change_order_sent: "A change order is sent to sign",
+  change_order_signed: "A change order is signed",
+  build_completed: "Their building is finished",
+  delivery_scheduled: "A delivery is scheduled",
+  lot_sold: "A building on your lot is sold to them",
+  repair_requested: "A repair is requested",
+  repair_completed: "A repair is finished",
+  // 367: email and the online shop. The three email facts are INBOUND like a text: an "every
+  // time" rule on them fires at most once a day per customer (crm_rules_run), because an open or
+  // a bounce can otherwise feed a rule that sends another email for ever.
+  email_received: "They send an email",
+  email_opened: "They open an email",
+  email_bounced: "An email to them bounces",
+  shop_request: "They send a request from your online shop",
+  shop_purchase: "They buy from your online shop",
 };
 const ruleEventLabel = (k: string): string | undefined => RULE_EVENTS[k] ?? RULE_CONTACT_EVENTS[k];
 

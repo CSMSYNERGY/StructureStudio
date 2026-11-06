@@ -35,12 +35,16 @@ Deno.test("the event vocabulary is the SAME eight a status uses", () => {
     "estimate_accepted", "estimate_sent", "invoiced", "paid_in_full",
   ], "events");
   eq(Object.keys(RULE_ANCHORS).sort(), ["contact_created", "delivered", "expected_close", "last_contact", "stage_entered"], "anchors");
-  // 365's facts — pinned against the CHECK on crm_rules.trigger_event.
+  // 365's and 367's facts — pinned against the CHECK on crm_rules.trigger_event.
   eq(Object.keys(RULE_CONTACT_EVENTS).sort(), [
     "call_missed", "contact_created", "deal_lost", "deal_reopened", "form_submitted", "label_added",
     "meeting_booked", "meeting_cancelled", "meeting_completed", "meeting_no_show",
     "stage_changed", "text_received", "voicemail_left",
-  ], "365 events");
+    // 367
+    "build_completed", "change_order_sent", "change_order_signed", "delivery_scheduled",
+    "email_bounced", "email_opened", "email_received", "lot_sold", "payment_received",
+    "repair_completed", "repair_requested", "shop_purchase", "shop_request",
+  ].sort(), "365 + 367 events");
   eq([...RULE_SCHEDULE_FREQS], ["daily", "weekly", "monthly", "yearly", "date_field"], "schedule freqs");
 });
 
