@@ -2517,7 +2517,7 @@ function Dashboard({ session }) {
           ? popMsg("Loading…")
           : projectsOpen
             ? <ProjectsTab sub={tab === "workbench" ? sub : null} onSub={(x) => navigate("workbench", x)} />
-            : popMsg("You don't have access to Projects.")}
+            : popMsg("You don't have access to Workbench.")}
       </div>
     );
   }

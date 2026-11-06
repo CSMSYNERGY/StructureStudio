@@ -775,7 +775,7 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
         {access && (
           <>
             <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", fontSize: 12.8 }}>
-              {[["everyone", "Everyone on Projects"], ["private", "🔒 Only people I add"]].map(([v, lbl]) => (
+              {[["everyone", "Everyone on Workbench"], ["private", "🔒 Only people I add"]].map(([v, lbl]) => (
                 <label key={v} style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: access.iOwn ? "pointer" : "default", color: access.iOwn ? "#334155" : "#94A3B8" }}>
                   <input type="radio" name={"pm-vis-" + board.id} checked={access.visibility === v}
                     disabled={!access.iOwn}
@@ -791,7 +791,7 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
             )}
             {access.visibility === "everyone" && (
               <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
-                Everyone who can open Projects — {access.people.length} {access.people.length === 1 ? "person" : "people"}. Make it private to choose.
+                Everyone who can open Workbench — {access.people.length} {access.people.length === 1 ? "person" : "people"}. Make it private to choose.
               </div>
             )}
             {access.people.map((p) => (
@@ -840,7 +840,7 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
                 <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={!addWho}
                   onClick={() => runAccess({ action: "add_board_member", boardId: board.id, userId: addWho })}>Add</button>
                 {!(access.addable || []).length && (
-                  <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Everyone with Projects access is already on it.</span>
+                  <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Everyone with Workbench access is already on it.</span>
                 )}
               </div>
             )}
@@ -1075,7 +1075,7 @@ function PMPeopleEditor({ onChanged }) {
             </>
           )}
           {o.teamManaged && (
-            <span title={`${o.title || "team member"} · Projects: ${o.projectsLevel || "none"}`}
+            <span title={`${o.title || "team member"} · Workbench: ${o.projectsLevel || "none"}`}
               style={{ fontSize: 10.5, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px" }}>
               Settings → Team
             </span>
@@ -1116,10 +1116,10 @@ function PMPeopleEditor({ onChanged }) {
               refuses it too, because it would take this screen away from you. */}
           {o.isOperator && o.user_id !== me && (
             <label style={{ fontSize: 11.5, fontWeight: 600, color: o.supportOnly ? "#7C3AED" : "#334155", display: "inline-flex", alignItems: "center", gap: 4 }}
-              title="On: they see each builder's account exactly as that builder's owner sees it — Billing hidden, and no Admin or Projects console. Use this for support.">
+              title="On: they see each builder's account exactly as that builder's owner sees it — Billing hidden, and no Admin or Workbench console. Use this for support.">
               <input type="checkbox" checked={!!o.supportOnly} disabled={busy}
                 onChange={(ev) => {
-                  if (ev.target.checked && !window.confirm(`Put ${o.name} in support mode? They will see each builder's account exactly as that builder's owner does — Billing hidden — and they will LOSE the Admin and Projects consoles, including this screen.`)) { load(); return; }
+                  if (ev.target.checked && !window.confirm(`Put ${o.name} in support mode? They will see each builder's account exactly as that builder's owner does — Billing hidden — and they will LOSE the Admin and Workbench consoles, including this screen.`)) { load(); return; }
                   run({ action: "set_operator_support", id: o.id, supportOnly: ev.target.checked });
                 }} />
               support mode
@@ -1130,7 +1130,7 @@ function PMPeopleEditor({ onChanged }) {
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>you</span>
             : o.teamManaged
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}
-                title="Take Projects away on Settings → Team and they leave this list automatically.">Managed in Team</span>
+                title="Take Workbench away on Settings → Team and they leave this list automatically.">Managed in Team</span>
             : (
               <button type="button" disabled={busy}
                 onClick={() => { if (window.confirm(`Remove ${o.name} from the assignable list? Work already assigned to them keeps their name, and this does not change their access to builder accounts.`)) run({ action: "remove_person", id: o.id }); }}
@@ -2023,7 +2023,7 @@ function ProjectsTab({ sub, onSub }) {
               style={{ background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
           )}
           {!SS_POPOUT && (
-            <button type="button" title="Open Projects in its own window"
+            <button type="button" title="Open Workbench in its own window"
               onClick={() => {
                 const slug = setupMode ? "setup" : (activeBoard ? activeBoard.slug : "");
                 // Fresh URL, nothing carried from this window's search: ?view= must NOT ride
@@ -2070,7 +2070,7 @@ function ProjectsTab({ sub, onSub }) {
                 <button type="button" onClick={() => setNewBoardOpen(true)} style={S.btn("#EEF2FF", ACCENT)}>＋ New board</button>
               </>
             ) : (
-              <div>Nobody has made a board yet. Someone who can edit Projects can add the first one.</div>
+              <div>Nobody has made a board yet. Someone who can edit Workbench can add the first one.</div>
             )}
           </div>
         )}

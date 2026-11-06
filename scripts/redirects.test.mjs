@@ -212,7 +212,11 @@ test("both address shapes read the same, and every page's own address reads back
   for (const id of PAGE_IDS) {
     const sub = id === "settings" ? "colors" : "x-1";
     assert.deepEqual(parse(R.ssPageBase(id, null)), { page: id, sub: null }, id);
-    assert.deepEqual(parse(R.ssPageBase(id, sub)), { page: id, sub }, `${id}/${sub}`);
+    // The one deliberate exception (2026-11-05): /projects is the customers' Project Management
+    // teaser and has no sub-pages, so /projects/<sub> is an old link to the internal board, which
+    // moved to /workbench — ssCanonRoute reads it as that.
+    const want = id === "projects" ? { page: "workbench", sub } : { page: id, sub };
+    assert.deepEqual(parse(R.ssPageBase(id, sub)), want, `${id}/${sub}`);
     assert.ok(isApp(resolveRequest(REDIRECTS, R.ssPageBase(id, sub))), `${R.ssPageBase(id, sub)} is not served the app`);
   }
 });

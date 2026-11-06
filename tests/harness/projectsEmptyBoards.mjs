@@ -248,7 +248,7 @@ try {
   // ── B: zero boards, read-only ──
   const B = await run("B", { canWrite: false, boards: [], itemsOf: {} });
   ok("B: the empty state is drawn", B.first.empty === 1, B.first.empty === 1 ? "" : B.first.text.slice(-200));
-  ok("B: …and says who can add a board", /Someone who can edit Projects/.test(B.first.emptyText));
+  ok("B: …and says who can add a board", /Someone who can edit Workbench/.test(B.first.emptyText));
   ok("B: no create control in it, and no ＋ in the strip", B.first.newBoardBtn === 0 && B.first.stripPlus === 0);
   ok("B: \"Loading board…\" is never shown", !B.first.seen.loadingBoard);
   ok("B: no get_board", sent(B, "get_board").length === 0);
