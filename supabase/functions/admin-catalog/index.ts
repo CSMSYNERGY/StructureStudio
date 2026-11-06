@@ -831,7 +831,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // templateClientId === "__none__" => start blank (no clone): a standard contact
         // form so the designer works, and empty sizes/options the operator fills in via
         // the tabs + pricing CSV. Otherwise clone the named template (or junior-barns).
-        const blank = String(p.templateClientId || "").trim().toLowerCase() === "__none__";
+        // A SmartBuild builder always starts blank: there is no shed catalog for them to use, and a
+        // cloned one would sit in tables no page of theirs shows (accountType is validated below,
+        // before the first write).
+        const blank = String(p.templateClientId || "").trim().toLowerCase() === "__none__" || p.accountType === "smartbuild";
         let contactFields: unknown, defaultSizes: unknown, options: unknown;
         let templateId: string | null = null;
         if (blank) {
@@ -857,6 +860,17 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const newDiscountFeatures = Array.isArray(p.discountFeatures) && p.discountFeatures.length
           ? p.discountFeatures.map((f: unknown) => String(f))
           : null;
+        // ACCOUNT TYPE (Carolyn 2026-11-05: "after we have Joe set as it needs to be then I will
+        // want to see this clearly set this way for same instances in the future"). "sheds" — every
+        // account until now, and the default — or "smartbuild": a builder who works leads in our
+        // Customer Hub and prices in SmartBuild, with no shed designer (migration 364's shape).
+        // Refused, not coerced, and BEFORE the config insert for the discount's reason above.
+        const accountType = p.accountType === undefined || p.accountType === null || p.accountType === ""
+          ? "sheds" : String(p.accountType);
+        if (accountType !== "sheds" && accountType !== "smartbuild") {
+          throw new Error('accountType must be "sheds" or "smartbuild".');
+        }
+        const smartbuild = accountType === "smartbuild";
 
         const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
         const ins = await sb.from("client_configs").insert({
@@ -873,15 +887,39 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // owner to fill in via the portal. A normal new client gets no row here, so
         // billing_exempt reads false and the gate applies: they land on Billing and pay
         // before anything unlocks.
-        if (p.billingExempt === true || newDiscount > 0) {
+        // A SmartBuild builder needs the row too: the shape lives on it. ramp_enabled off with it,
+        // exactly as the first such account was set by hand — there is no designer to offer a ramp.
+        if (p.billingExempt === true || newDiscount > 0 || smartbuild) {
           const bx = await sb.from("client_settings").upsert({
             client_id: clientId,
             billing_exempt: p.billingExempt === true,
             discount_percent: newDiscount,
             discount_features: newDiscountFeatures,
+            ...(smartbuild ? { sheds_enabled: false, ramp_enabled: false } : {}),
             updated_at: new Date().toISOString(),
           }, { onConflict: "client_id" });
           if (bx.error) throw bx.error;
+        }
+
+        // ── A SmartBuild builder's pipeline ─────────────────────────────────────
+        // SmartBuild Jobs (migrations 360 + 361), marked as the account's design feed so the account
+        // is identical to the first one set up by hand. Shed Deals is NEVER made: portal-settings
+        // seeds it lazily (crm_ensure_pipelines) only when an account opens its board with ZERO live
+        // pipelines, and this one already has one. Best-effort, like the checklist below — but said
+        // in the answer, because without it the first board open WOULD seed Shed Deals.
+        let smartbuildPipeline: boolean | null = null;
+        if (smartbuild) {
+          try {
+            const seeded = await sb.rpc("crm_seed_pipeline", { p_client_id: clientId, p_kind: "smartbuild" });
+            if (seeded.error) throw new Error(seeded.error.message);
+            const fd = await sb.from("crm_pipelines").update({ feeds_designs: true, updated_at: new Date().toISOString() })
+              .eq("id", seeded.data).eq("client_id", clientId);
+            if (fd.error) throw new Error(fd.error.message);
+            smartbuildPipeline = true;
+          } catch (e) {
+            smartbuildPipeline = false;
+            console.error("SmartBuild pipeline seed failed for", clientId, e instanceof Error ? e.message : String(e));
+          }
         }
 
         // Clone the template's FULL catalog so the new client is usable immediately — the
@@ -1144,6 +1182,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
 
         return json({
           ok: true, clientId, blank, cloned: clonedCounts, setupAssigned, electricalSeeded,
+          accountType, ...(smartbuildPipeline === null ? {} : { smartbuildPipeline }),
           twilio: twilio.outcome,
           ...(twilio.reason ? { twilioReason: twilio.reason } : {}),
           ...(twilio.code ? { twilioCode: twilio.step ? `${twilio.step}:${twilio.code}` : twilio.code } : {}),

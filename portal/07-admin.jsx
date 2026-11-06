@@ -2911,6 +2911,8 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
   const [id, setId] = useState("");
   const [company, setCompany] = useState("");
   const [tpl, setTpl] = useState("__none__");
+  // "sheds" | "smartbuild" (Carolyn 2026-11-05) — see create_client's ACCOUNT TYPE in admin-catalog.
+  const [acctType, setAcctType] = useState("sheds");
   const [idTouched, setIdTouched] = useState(false);
   const [exempt, setExempt] = useState(false);
   const [discount, setDiscount] = useState("0");
@@ -3011,15 +3013,22 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
     }
     setBusy(true);
     try {
-      await adminApi("create_client", {
-        clientId: slug, companyName: company.trim(), templateClientId: tpl,
+      const made = await adminApi("create_client", {
+        clientId: slug, companyName: company.trim(), templateClientId: acctType === "smartbuild" ? "__none__" : tpl,
         billingExempt: exempt, discountPercent: exempt ? 0 : pctNum,
         discountFeatures: allFeat ? [] : picked,
+        accountType: acctType,
       });
       await onReload();
-      setOpenNew(false); setId(""); setCompany(""); setTpl("__none__"); setIdTouched(false);
+      setOpenNew(false); setId(""); setCompany(""); setTpl("__none__"); setAcctType("sheds"); setIdTouched(false);
       setExempt(false); setDiscount("0"); setAllFeat(true); setPicked([]);
-      onFlash({ ok: `Created “${slug}”. Next: give the owner a login on the Account tab, then styles, items and pricing.` });
+      // The pipeline step is best-effort on the server, and the one failure worth saying out loud:
+      // the first board open of an account with no pipeline seeds the SHED board instead.
+      onFlash(acctType !== "smartbuild"
+        ? { ok: `Created “${slug}”. Next: give the owner a login on the Account tab, then styles, items and pricing.` }
+        : made && made.smartbuildPipeline === false
+          ? { err: `Created “${slug}” as a SmartBuild builder, but its SmartBuild Jobs pipeline was not made. Add it from Settings → Customer Hub → Pipelines (New pipeline → the SmartBuild template) before anyone opens the board.` }
+          : { ok: `Created “${slug}” as a SmartBuild builder. Next: give the owner a login on the Account tab.` });
       onPick(slug);
     } catch (e) { onFlash({ err: e.message }); }
     setBusy(false);
@@ -3116,13 +3125,31 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
                 {idErr || (idTouched ? "Used in the customer designer link: ?client=junior-barns." : "Auto-generated from the company name — edit to override.")}
               </div>
             </div>
+            {/* ACCOUNT TYPE (Carolyn 2026-11-05): "after we have Joe set as it needs to be then I will
+                want to see this clearly set this way for same instances in the future". SmartBuild =
+                the no-shed-designer shape (migration 364), its pipeline, and its setup list (368). */}
             <div>
+              <label style={S.lbl}>Account type</label>
+              <select value={acctType} onChange={(e) => setAcctType(e.target.value)} style={S.input}>
+                <option value="sheds">Shed builder</option>
+                <option value="smartbuild">SmartBuild builder (no shed designer)</option>
+              </select>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                {acctType === "smartbuild"
+                  ? "Customer Hub without the designer, catalog, lots or schedules. Starts with the SmartBuild Jobs pipeline and the SmartBuild setup list."
+                  : "The shed designer and everything that goes with it."}
+              </div>
+            </div>
+            <div style={{ opacity: acctType === "smartbuild" ? 0.5 : 1, pointerEvents: acctType === "smartbuild" ? "none" : "auto" }}>
               <label style={S.lbl}>Copy catalog from</label>
-              <select value={tpl} onChange={(e) => setTpl(e.target.value)} style={S.input}>
+              <select value={acctType === "smartbuild" ? "__none__" : tpl} onChange={(e) => setTpl(e.target.value)} style={S.input}
+                disabled={acctType === "smartbuild"}>
                 <option value="__none__">Start empty</option>
                 {(clients || []).map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id}</option>)}
               </select>
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Copies styles, sizes and items — not designs or settings.</div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                {acctType === "smartbuild" ? "A SmartBuild builder has no shed catalog, so it always starts empty." : "Copies styles, sizes and items — not designs or settings."}
+              </div>
             </div>
           </div>
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>

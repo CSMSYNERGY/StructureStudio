@@ -211,7 +211,8 @@ try {
   await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
-  await page.goto(`${BASE}/projects`, { waitUntil: "domcontentloaded" });
+  // The internal board's address since 2026-11-05 (/projects is the customers' page now).
+  await page.goto(`${BASE}/workbench`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   await page.waitForFunction((n) => document.body.innerText.includes(n), CARDS[CARDS.length - 1].name, { timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(600);

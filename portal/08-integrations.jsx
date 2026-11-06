@@ -2360,7 +2360,7 @@ function AccessGrid({ member, meta, myAccess, isOwner, busy, onCancel, onSave })
   );
 }
 
-function CommissionTeam({ viewingLabel = null }) {
+function CommissionTeam({ viewingLabel = null, shedsOn = true }) {
   // portal-commissions resolves the tenant from the CALLER's own client_users row and takes
   // no targetClientId — it predates the shared resolveTenant. So in operator view-as every
   // action here silently acts on the OPERATOR's own account while the banner names someone
@@ -2378,10 +2378,10 @@ function CommissionTeam({ viewingLabel = null }) {
       </div>
     );
   }
-  return <CommissionTeamInner />;
+  return <CommissionTeamInner shedsOn={shedsOn} />;
 }
 
-function CommissionTeamInner() {
+function CommissionTeamInner({ shedsOn = true }) {
   const [data, setData] = useState(null);       // { members, canSeeRates, isOwner, role } | { members: [] }
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -2518,6 +2518,15 @@ function CommissionTeamInner() {
   const pagedMembers = members.slice((memberPage - 1) * pageSize, memberPage * pageSize);
   // Areas, titles and presets all come from the server (accessMetadata) — see AccessGrid.
   const meta = data.meta || { areas: [], titles: [], presets: {} };
+  // WHAT IS OFFERED, not what is labelled (migration 364). A builder without the shed product is
+  // not offered its areas or its job titles (SS_SHED_AREAS / SS_SHED_TITLES). `meta` itself stays
+  // whole, because it also names what people already hold: a Driver added before the switch keeps
+  // that title, its chip, and — in their own grid — the option to stay one.
+  const offerMeta = (holder) => shedsOn ? meta : {
+    ...meta,
+    areas: (meta.areas || []).filter((a) => SS_SHED_AREAS.indexOf(a.key) === -1),
+    titles: (meta.titles || []).filter((t) => SS_SHED_TITLES.indexOf(t.key) === -1 || (holder && t.key === holder.title)),
+  };
   const canManageTeam = !!data.canManageTeam;
 
   const th = { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
@@ -2561,7 +2570,7 @@ function CommissionTeamInner() {
           <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
             <span style={S.lbl}>Job title</span>
             <select value={add.title} onChange={(e) => setAdd((p) => ({ ...p, title: e.target.value }))} style={{ ...S.input, width: 150 }}>
-              {(meta.titles || []).filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => (
+              {(offerMeta(null).titles || []).filter((t) => isOwner || (t.key !== "owner" && t.key !== "admin")).map((t) => (
                 <option key={t.key} value={t.key}>{t.label}</option>
               ))}
             </select>
@@ -2696,7 +2705,7 @@ function CommissionTeamInner() {
       {/* `editing` is resolved against the FULL members array, so the access panel still opens
           for someone who is not on the visible page. That is correct — leave it. */}
       {editing && canManageTeam && (
-        <AccessGrid key={editing.userId} member={editing} meta={meta} myAccess={data.myAccess} isOwner={isOwner}
+        <AccessGrid key={editing.userId} member={editing} meta={offerMeta(editing)} myAccess={data.myAccess} isOwner={isOwner}
           busy={busy} onCancel={() => setEditingAccess(null)} onSave={(next) => saveAccess(editing, next)} />
       )}
 
@@ -5479,7 +5488,7 @@ function BillingShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   );
 }
 
-function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false, view3d = false }) {
+function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false, view3d = false, shedsOn = true }) {
   // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
   // settings_team has no Business Details tab, so the rail's Company link cannot be the
   // `company` slug for them — it points at their first visible tab instead (see 12-shell).
@@ -5495,9 +5504,11 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
       {/* Building serial numbers ride with Business Details (Carolyn 2026-09-11). They are a
           shop-wide counter, not a property of any one lot, which is why they left Locations. */}
       {/* view3d: Business Details shows the four-corner quote switch only where 3D is unlocked. */}
-      {sub === "company" && (<><SettingsView section="company" view3d={view3d} /><SerialNumbersCard /></>)}
+      {/* No serial numbers without the shed product (migration 364): they number buildings sold
+          through the designer and lots, and a SmartBuild builder has neither. */}
+      {sub === "company" && (<><SettingsView section="company" view3d={view3d} />{shedsOn && <SerialNumbersCard />}</>)}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
-      {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
+      {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} shedsOn={shedsOn} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
       {/* The tab and its lots ride on the team/branding areas; the tax rates on it are settings_crm. See LocationsCard. */}
       {sub === "locations" && <LocationsCard canReadTax={canReadTax} canEditTax={canEditTax} />}
@@ -5529,7 +5540,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
 // teaser rather than a screen whose every button 403s. The Customer login tab is NOT gated —
 // the customer login is ours whether or not a tenant has the CRM add-on or a GHL connection,
 // which is exactly why that card was worth lifting off the connection page.
-function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false, clientId = null, canEdit = true, isAdmin = false, access = null }) {
+function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUnlocked = true, crmPending = false, clientId = null, canEdit = true, isAdmin = false, access = null, shedsOn = true }) {
   // The same clamp SettingsShell and CompanyShell run: an unknown slug must land on a tab that
   // really renders, or the sub-tab bar appears over an empty body.
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
@@ -5537,7 +5548,7 @@ function CustomerHubShell({ sub: rawSub, onSub, tabs, viewingLabel = null, crmUn
     <div>
       <SubTabs tabs={tabs} sub={sub} onSub={onSub} href={(id) => ssPagePath("settings", id)} />
       {sub === "pipelines" && (crmUnlocked || crmPending
-        ? <PipelineSettings viewing={!!viewingLabel} />
+        ? <PipelineSettings viewing={!!viewingLabel} shedsOn={shedsOn} />
         : <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Pipelines and card statuses are part of the Customer Hub. Add it under Settings → Billing.</p></div>)}
       {/* AUTOMATIONS (Carolyn 2026-11-04). Behind the CRM like Pipelines, for the same reason and
           with the same teaser: every crm_rule_* action refuses an unentitled tenant by the crm_
@@ -6960,7 +6971,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
              from app_operators), sees and edits; everyone else by their own map. The server
              refuses regardless, and a refusal shows its own sentence. */
           canReadTax={isAdmin || !access || ssCanRead(access, "settings_crm")}
-          canEditTax={isAdmin || !access || ssCanWrite(access, "settings_crm")} />
+          canEditTax={isAdmin || !access || ssCanWrite(access, "settings_crm")}
+          shedsOn={shedsOn} />
       )}
       {/* The company rate lives on Company → Tax now; the Estimates & Invoices card links there. */}
       {sub === "connection" && <SettingsView section="connection" onOpenTax={() => setSub("tax")} />}
@@ -6974,7 +6986,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <CustomerHubShell sub={sub} onSub={setSub} tabs={hubs.pipelines}
           viewingLabel={viewingLabel} crmUnlocked={crmUnlocked} crmPending={crmPending}
           clientId={clientId} canEdit={isAdmin || !access || ssCanWrite(access, "settings_crm")}
-          isAdmin={isAdmin} access={access} />
+          isAdmin={isAdmin} access={access} shedsOn={shedsOn} />
       )}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /settings/quickbooks is a link people actually have. */}

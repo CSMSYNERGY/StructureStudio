@@ -97,6 +97,7 @@
 /accounts                      /portal.html   200
 /console                       /portal.html   200
 /projects                      /portal.html   200
+/workbench                     /portal.html   200
 # Old page names the router still reads and rewrites in the address bar (SS_TAB_ALIASES and
 # ssCanonRoute): Leads became Contacts, Releases became Support, and the Pipeline page and
 # the Leads tab's boards are views inside the Contacts hub now.
@@ -144,6 +145,7 @@
 /accounts/*                    /portal.html   200
 /console/*                     /portal.html   200
 /projects/*                    /portal.html   200
+/workbench/*                   /portal.html   200
 /leads/*                       /portal.html   200
 /releases/*                    /portal.html   200
 /designs/*                     /portal.html   200

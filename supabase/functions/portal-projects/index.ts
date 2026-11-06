@@ -2129,6 +2129,17 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           row.requires_feature = rf || null;   // "" clears it
         }
         if (payload.builderVisible !== undefined) row.builder_visible = payload.builderVisible === true;
+        // WHICH ACCOUNTS (migration 368): every account, shed builders only, or SmartBuild builders
+        // only (client_settings.sheds_enabled = false). Refused rather than coerced, for the
+        // requires_feature reason above: a wrong value would hide a step with nothing on screen to
+        // say why. Same `!== undefined` rule.
+        if (payload.accountType !== undefined) {
+          const at = str(payload.accountType, 20) || "all";
+          if (!["all", "sheds", "smartbuild"].includes(at)) {
+            return json({ error: `"${at}" is not an account type. Pick Every account, Shed builders or SmartBuild builders.` }, 400);
+          }
+          row.account_type = at;
+        }
         if (id) {
           const { error } = await admin.from("setup_template_items").update(row).eq("id", id);
           if (error) throw error;

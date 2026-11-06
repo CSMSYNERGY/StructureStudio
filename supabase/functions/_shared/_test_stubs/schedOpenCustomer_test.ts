@@ -60,16 +60,18 @@ const ROUTE_SRC = slice(CORE, "const SS_HUB_PEOPLE =", "function ssParsePath()",
 const ssCanonRoute = new Function(`${ROUTE_SRC}; return ssCanonRoute;`)() as (p: string, s: string | null) => { page: string; sub: string | null };
 
 const OPENER_SRC = slice(SHELL, "const scheduleCustomerOpener = (fromPage) => {", "// Mirrors portal-settings' own gate", "scheduleCustomerOpener");
-type World = { crm?: boolean; isOperator?: boolean; canAdmin?: boolean; access?: Record<string, string> | null; supportView?: boolean };
+// shedsOn: the slice now reaches the shell's hubReach line, which reads it (migration 364). The
+// schedules only exist with the shed product, so it defaults to true here.
+type World = { crm?: boolean; isOperator?: boolean; canAdmin?: boolean; access?: Record<string, string> | null; supportView?: boolean; shedsOn?: boolean };
 function opener(w: World, fromPage = "build-schedule") {
   const did: { nav: unknown[][] } = { nav: [] };
   const make = new Function(
-    "crmUnlocked", "isOperator", "canAdmin", "myAccess", "supportView", "ssClampTab", "ssHubCan", "schedCustomerDest", "navigate",
+    "crmUnlocked", "isOperator", "canAdmin", "myAccess", "supportView", "ssClampTab", "ssHubCan", "schedCustomerDest", "navigate", "shedsOn",
     `${OPENER_SRC}; return scheduleCustomerOpener;`,
   );
   const scheduleCustomerOpener = make(
     w.crm ?? true, w.isOperator ?? false, w.canAdmin ?? false, w.access ?? null, w.supportView ?? false, ssClampTab, ssHubCan, schedCustomerDest,
-    (...a: unknown[]) => did.nav.push(a),
+    (...a: unknown[]) => did.nav.push(a), w.shedsOn ?? true,
   );
   return { open: scheduleCustomerOpener(fromPage) as null | ((l: Link) => null | (() => void)), did };
 }

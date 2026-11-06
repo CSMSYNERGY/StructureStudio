@@ -1388,6 +1388,17 @@ function PMSetupAdmin({ canWrite }) {
                   <option value="">— no add-on —</option>
                   {SS_SETUP_FEATURE_CHOICES.map((k) => <option key={k} value={k}>{ssFeatureLabel(k)}</option>)}
                 </select>
+                {/* WHICH ACCOUNTS (migration 368): portal-setup shows a step only to the account
+                    shape it is for — client_settings.sheds_enabled. Sends only its own field, like
+                    the two above. */}
+                <select value={t.account_type || "all"} disabled={busy}
+                  title="Which accounts see this step"
+                  onChange={(e) => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", accountType: e.target.value }, loadTpl)}
+                  style={{ fontSize: 11, fontFamily: "inherit", color: t.account_type && t.account_type !== "all" ? "#1B7895" : "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "2px 4px", maxWidth: 150 }}>
+                  <option value="all">Every account</option>
+                  <option value="sheds">Shed builders only</option>
+                  <option value="smartbuild">SmartBuild builders only</option>
+                </select>
                 <button type="button" disabled={busy}
                   title={t.builder_visible === false ? "Builders cannot see this step" : "Hide while we finish building it"}
                   onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", builderVisible: t.builder_visible === false }, loadTpl)}
@@ -2018,7 +2029,7 @@ function ProjectsTab({ sub, onSub }) {
                 // Fresh URL, nothing carried from this window's search: ?view= must NOT ride
                 // into the popout — Projects is the operator's own console, and a popout
                 // booted with ?view= would re-enter view-as and flip supportView.
-                window.open(ssPageBase("projects", slug || null) + "?popout=1",
+                window.open(ssPageBase("workbench", slug || null) + "?popout=1",
                   "ss_projects_popout", "popup=yes,width=1100,height=800,noopener");
               }}
               style={{ background: "none", border: "none", padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>↗</button>

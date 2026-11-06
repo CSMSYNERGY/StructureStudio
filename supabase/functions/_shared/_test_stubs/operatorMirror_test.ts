@@ -67,7 +67,7 @@ Deno.test("the grace / transition banners read the viewed tenant's entitlement t
 
 Deno.test("the operator consoles stay reachable from a locked tenant", () => {
   assert(
-    SHELL.includes('const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "projects";'),
+    SHELL.includes('const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "workbench";'),
     "gateLockedFor must exempt exactly the three operator consoles",
   );
   assert(

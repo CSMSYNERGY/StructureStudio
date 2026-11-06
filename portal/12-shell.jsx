@@ -23,7 +23,7 @@ const ICONS = {
   designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/></svg>,
   // Clipboard with a check — the internal boards. NOT kanban columns: "designs" (Pipeline)
   // took that glyph in the same week, and two column icons in one rail read as one thing.
-  projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
+  workbench: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
   contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
   // Two speech bubbles: a back-and-forth. Not Settings → SMS's single bubble, which is one channel.
   conversations: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>,
@@ -41,6 +41,8 @@ const ICONS = {
   // Faceted wireframe cube — deliberately NOT the rounded package glyph used by
   // "orders", so the two read as different things in the rail.
   "view-3d": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>,
+  // Project Management (2026-11-05): a timeline — bars that start where the one above ends.
+  projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18" /><rect x="7" y="5" width="7" height="3" rx="1" /><rect x="11" y="10" width="8" height="3" rx="1" /><rect x="8" y="15" width="6" height="3" rx="1" /></svg>,
   "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
   "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
   "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
@@ -2514,7 +2516,7 @@ function Dashboard({ session }) {
         {canProjects === null || (isSupportOp === null && !supportCheckGaveUp)
           ? popMsg("Loading…")
           : projectsOpen
-            ? <ProjectsTab sub={tab === "projects" ? sub : null} onSub={(x) => navigate("projects", x)} />
+            ? <ProjectsTab sub={tab === "workbench" ? sub : null} onSub={(x) => navigate("workbench", x)} />
             : popMsg("You don't have access to Projects.")}
       </div>
     );
@@ -2740,7 +2742,9 @@ function Dashboard({ session }) {
   // ── The Contacts hub's views THIS person may open (ssHubCan, 01-core) ──
   // The same two answers the schedule opener above asks for, so the hub's tab row and every way
   // into a record agree on who sees the contact list and who sees the Design list.
-  const hubReach = { people: ssHubCan("people", canAdmin, myAccess), designs: ssHubCan("designs", canAdmin, myAccess) };
+  // No Design list without the shed product (migration 364): it lists designs from the designer,
+  // which this builder does not have. The hub snaps a typed /contacts/designs to a view he can open.
+  const hubReach = { people: ssHubCan("people", canAdmin, myAccess), designs: shedsOn && ssHubCan("designs", canAdmin, myAccess) };
   // A CARD OR A DESIGN OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19, after
   // watching it: "this pipeline click is going to take you into the customer view where you can
   // see everything about that customer ... I don't want the two different views." The deal she
@@ -2829,11 +2833,11 @@ function Dashboard({ session }) {
   // A page your access does not include is not something you can buy your way into, so
   // showing it would just be a dead end. accounts/admin are operator-gated separately.
   const navHidden = (id) =>
-    id !== "accounts" && id !== "admin" && id !== "projects" && !canAdmin && !ssCanSeeTab(id, myAccess);
+    id !== "accounts" && id !== "admin" && id !== "workbench" && !canAdmin && !ssCanSeeTab(id, myAccess);
   // The operator consoles are never padlocked: they are not part of the viewed tenant's
   // product, and they are how an operator leaves a locked account (their content renders
   // outside `!gateLocked` below for the same reason).
-  const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "projects";
+  const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "workbench";
   // Intent warming: a pointer entering a rail link, or keyboard focus reaching it, warms the
   // function(s) that page opens on (SS_NAV_WARM, 01-core). Skipped for the page you are already on
   // and behind a billing lock, where the page is BillingGate. The consoles are never padlocked.
@@ -3074,7 +3078,7 @@ function Dashboard({ session }) {
           {shedsOn && navItem("build-schedule", "Build Schedule")}
           {shedsOn && navItem("delivery-schedule", "Delivery Schedule")}
           {shedsOn && navItem("repairs", "Repairs")}
-          {shedsOn && navItem("commissions", "Commissions")}
+          {navItem("commissions", "Commissions")}
           {/* My Synergy Phone's report. Only where calling is offered (ssPhoneOffered) — a Calls page
               on an account that cannot call is a list of zeros that reads as broken. The route
               itself still resolves for anyone with phone access, for old links. */}
@@ -3105,9 +3109,14 @@ function Dashboard({ session }) {
               the Designer (view3d prop) and calibration lives in Settings → Designer, so
               the standalone tab came off the rail. The /view-3d route and its
               render block stay so old deep links still land somewhere sensible. */}
-          {soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
+          {/* Rent to Own and Self Serve Displays "are sheds so should not be shown for Smart Build
+              Users" (Carolyn 2026-11-05); SS_SHED_TABS bars their addresses too. Project Management is
+              every builder's (beta only, like the rest), at /projects since the internal board
+              moved to /workbench. */}
+          {shedsOn && soonItem("rent-to-own-contracts", "Rent to Own", "4th Qtr")}
           {soonItem("reports", "Reports", "4th Qtr")}
-          {soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
+          {soonItem("projects", "Project Management", "1st Qtr")}
+          {shedsOn && soonItem("self-serve-display-units", "Self Serve Displays", "2027")}
         </nav>
         </>)}
 
@@ -3126,7 +3135,7 @@ function Dashboard({ session }) {
           {/* Projects is OUR console (the internal bug board), so a support account standing
               in a builder's shoes has no business in it. ssClampTab refuses the route too, so
               a typed URL lands on a real page rather than a hidden-but-reachable one. */}
-          {navItem("projects", "Projects")}
+          {navItem("workbench", "Workbench")}
         </nav>
         </>)}
 
@@ -3180,7 +3189,7 @@ function Dashboard({ session }) {
             <nav className="ss-nav">
               {isOperator && navItem("accounts", "Accounts")}
               {isOperator && isSupportOp === false && navItem("admin", "Admin")}
-              {projectsOpen && navItem("projects", "Projects")}
+              {projectsOpen && navItem("workbench", "Workbench")}
             </nav>
           </>)}
           <div className="ss-spacer"></div>
@@ -3247,7 +3256,7 @@ function Dashboard({ session }) {
         + (activeTab === "designer" && !gateLocked ? " ss-designer-active" : "")
         /* Projects owns its scroll the way the designer does: the shell takes the viewport
            height and the board's table scrolls inside it under a pinned header. */
-        + (activeTab === "projects" ? " ss-projects-active" : "")
+        + (activeTab === "workbench" ? " ss-projects-active" : "")
         /* The Advanced page is full-bleed like the Designer (no .ss-body padding), so at a 1440 px
            window its frame reaches the Designer's xl width and shows the same step rail. The page
            still scrolls the window: no fixed-height shell, which is what keeps its 3D sticky. Only
@@ -3852,10 +3861,10 @@ function Dashboard({ session }) {
                 accounts/admin; ssClampTab bounces everyone else. Deliberately NOT behind
                 `!gateLocked` — like the Admin console, an operator whose OWN tenant is
                 billing-locked must still reach the internal boards. */}
-            {activeTab === "projects" && projectsOpen && (
-              <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
+            {activeTab === "workbench" && projectsOpen && (
+              <ProjectsTab sub={sub} onSub={(x) => navigate("workbench", x)} />
             )}
-            {activeTab === "projects" && !projectsOpen && canProjects && !supportView && isSupportOp === null && (
+            {activeTab === "workbench" && !projectsOpen && canProjects && !supportView && isSupportOp === null && (
               <div style={{ padding: 60, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading…</div>
             )}
             {!gateLocked && activeTab === "support" && (
@@ -4066,6 +4075,18 @@ function Dashboard({ session }) {
                   "Turn any estimate into a rent-to-own agreement in a click",
                   "Set the term, down payment, and monthly schedule",
                   "Every signed contract stored and easy to find",
+                ]}
+              />
+            )}
+            {!gateLocked && activeTab === "projects" && (
+              <ComingSoon
+                title="Project Management"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18" /><rect x="7" y="5" width="7" height="3" rx="1" /><rect x="11" y="10" width="8" height="3" rx="1" /><rect x="8" y="15" width="6" height="3" rx="1" /></svg>}
+                blurb="Run every job from sold to complete. Set your own job stages, see every job on a timeline, and when one step slips, everything tied to it moves with it."
+                bullets={[
+                  "Your own job stages, from sold to final walkthrough",
+                  "A timeline where a slipped step moves everything tied to it",
+                  "Crews, material orders, notes, files and photos on every job",
                 ]}
               />
             )}

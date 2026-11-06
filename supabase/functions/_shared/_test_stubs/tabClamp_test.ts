@@ -65,15 +65,15 @@ const OWNER_MAP: Access = {
 };
 
 Deno.test("a platform operator keeps both consoles", () => {
-  for (const tab of ["accounts", "admin", "projects"]) {
+  for (const tab of ["accounts", "admin", "workbench"]) {
     assertEquals(ssClampTab(tab, true, true, OWNER_MAP, false), tab);
   }
 });
 
-Deno.test("a SUPPORT operator keeps Accounts but loses Admin and Projects", () => {
+Deno.test("a SUPPORT operator keeps Accounts but loses Admin and Workbench", () => {
   // Accounts is the switcher — without it support cannot reach the next builder at all.
   assertEquals(ssClampTab("accounts", true, false, OWNER_MAP, true), "accounts");
-  for (const tab of ["admin", "projects"]) {
+  for (const tab of ["admin", "workbench"]) {
     const got = ssClampTab(tab, true, false, OWNER_MAP, true);
     assert(got !== tab, `${tab} must not resolve for a support operator, got "${got}"`);
     assertEquals(got, ssFallbackTab(OWNER_MAP));
@@ -90,7 +90,7 @@ Deno.test("support still reaches every tab the owner's map allows", () => {
 
 Deno.test("a non-operator never reaches the operator routes, support flag or not", () => {
   for (const supportView of [false, true]) {
-    for (const tab of ["accounts", "admin", "projects"]) {
+    for (const tab of ["accounts", "admin", "workbench"]) {
       assert(ssClampTab(tab, false, false, OWNER_MAP, supportView) !== tab);
     }
   }
@@ -100,7 +100,7 @@ Deno.test("supportView defaults to FALSE so every existing caller is unchanged",
   // The 4-argument call shape still exists in the codebase; a default of true would have
   // silently taken the consoles away from every operator.
   assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("admin", true, true, OWNER_MAP), "admin");
-  assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("projects", true, true, OWNER_MAP), "projects");
+  assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("workbench", true, true, OWNER_MAP), "workbench");
 });
 
 Deno.test("canAdmin still unclamps everything, which is why support must not hold it", () => {
@@ -144,7 +144,7 @@ Deno.test("a refused Advanced lands where a refused Designer would", () => {
 });
 
 Deno.test("the Advanced argument changes no other tab", () => {
-  for (const tab of ["designer", "designs", "orders", "settings", "accounts", "admin", "projects"]) {
+  for (const tab of ["designer", "designs", "orders", "settings", "accounts", "admin", "workbench"]) {
     for (const on of [false, true]) {
       assertEquals(ssClampTab(tab, true, true, OWNER_MAP, false, true, on), ssClampTab(tab, true, true, OWNER_MAP, false, true));
     }
@@ -220,7 +220,7 @@ Deno.test("only My Profile: the rest of Settings still needs an area", () => {
 });
 
 Deno.test("the sub argument changes no other tab", () => {
-  for (const tab of ["designer", "designs", "orders", "accounts", "admin", "projects", "advanced"]) {
+  for (const tab of ["designer", "designs", "orders", "accounts", "admin", "workbench", "advanced"]) {
     for (const access of [SALES_REP, OWNER_MAP]) {
       assertEquals(ssClampTab(tab, false, false, access, false, false, false, "myprofile"), ssClampTab(tab, false, false, access, false, false, false));
     }
@@ -261,4 +261,44 @@ Deno.test("the landing page is the hub for anyone who holds either list", () => 
   // "designs" and "pipelines" are no longer pages of their own.
   assert(ssClampTab("designs", false, false, OWNER_MAP) !== "designs");
   assert(ssClampTab("pipelines", false, false, OWNER_MAP) !== "pipelines");
+});
+
+// PROJECT MANAGEMENT AND WORKBENCH (2026-11-05). Carolyn: "customers get projects and ours becomes
+// workbench". /projects is a Coming Soon page for every builder (beta only, like the other three),
+// and the internal board moved to /workbench. The production-pinned factory above already proves
+// the board's console rules under the new name; these need the BETA host, where teasers exist.
+const onBeta = (new Function("window", `${BLOCK}; return { ssClampTab };`)(
+  { location: { hostname: "beta.structurestudiosuite.com" } },
+) as { ssClampTab: Clamp }).ssClampTab;
+const clampShed = onBeta as unknown as (t: string, o: boolean, c: boolean, a: Access | null, sv: boolean, cp: boolean, ad: boolean, sub: string | null, sh: boolean) => string;
+
+Deno.test("Project Management: every builder opens /projects on beta, and nobody on production", () => {
+  for (const access of [SALES_REP, DRIVER, OWNER_MAP]) {
+    assertEquals(onBeta("projects", false, false, access), "projects");
+    assertEquals(ssClampTab("projects", false, false, access), ssFallbackTab(access), "production has no teasers");
+  }
+  // An operator on a bare /projects sees the customers' page too: only a SUB means the old board.
+  assertEquals(onBeta("projects", true, true, OWNER_MAP, false, true, false, null), "projects");
+  // The shed shape does not hide it — it is every builder's.
+  assertEquals(clampShed("projects", false, false, SALES_REP, false, false, false, null, false), "projects");
+});
+
+Deno.test("an old /projects/<board> link opens Workbench for the people who may, everywhere", () => {
+  for (const clamp of [ssClampTab, onBeta]) {
+    assertEquals(clamp("projects", true, true, OWNER_MAP, false, true, false, "bugs"), "workbench");
+    // A support operator is barred from the board, so the link does not smuggle them in.
+    assert(clamp("projects", true, false, OWNER_MAP, true, true, false, "bugs") !== "workbench");
+    // Nor does it for a builder: no canProjects, no board.
+    assert(clamp("projects", false, false, SALES_REP, false, false, false, "bugs") !== "workbench");
+  }
+});
+
+Deno.test("no sheds: Rent to Own and Self Serve Displays are refused, Reports and Commissions stay", () => {
+  for (const tab of ["rent-to-own-contracts", "self-serve-display-units"]) {
+    assertEquals(clampShed(tab, false, true, OWNER_MAP, false, false, false, null, false), ssFallbackTab(OWNER_MAP));
+    assertEquals(clampShed(tab, false, true, OWNER_MAP, false, false, false, null, true), tab);
+  }
+  for (const tab of ["reports", "commissions"]) {
+    assertEquals(clampShed(tab, false, true, OWNER_MAP, false, false, false, null, false), tab);
+  }
 });

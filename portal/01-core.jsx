@@ -682,7 +682,7 @@ const TAB_META = {
   advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
-  projects: ["Projects", "Internal boards — bugs, feature requests, roadmap. Operators only"],
+  workbench: ["Workbench", "Internal boards — bugs, feature requests, roadmap. Operators only"],
   // ONE SECTION AGAIN: THE CONTACTS HUB (Carolyn 2026-10-12). Contacts and Pipeline were two
   // sidebar items from 08-26 to 10-12, and on the 10-12 call she asked for one: "Let's have one
   // tab and we can have contacts, and we can have this instead of list is designs, and then we
@@ -719,6 +719,7 @@ const TAB_META = {
   "view-3d": ["3D Design", "Give each building style its own 3D look"],
   "rent-to-own-contracts": ["Rent to Own", "Generate and manage RTO agreements — coming soon"],
   "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
+  projects: ["Project Management", "Run every job from sold to complete — coming soon"],
   "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
   "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
   // My Synergy Phone's report (plan section 12). Carolyn, 08-27: "the reporting is inside Structure
@@ -912,7 +913,8 @@ function ssIsBetaHost() {
 // renders for exactly that person. quickbooks and view-3d got the same nav-entry-removed
 // treatment and were correctly never listed here; this now matches them. The other three
 // stay clamped on production (Carolyn 2026-08-27, "Go ahead and do it, yes").
-const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-units"];
+// `projects` joined 2026-11-05: Project Management, for every builder, beta only like the rest.
+const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-units", "projects"];
 
 // The Advanced page (Carolyn 2026-09-28): "an advanced tab that is only available in Structure
 // Studio for us yet", later switched on per builder as "advanced mode" in Settings. THIS IS THE
@@ -983,15 +985,24 @@ function ssShedsOn(entitlement) {
 // shed-specific, and a builder should not have to ask us before connecting their accounting.
 const SS_SHED_SETTINGS = ["sheds", "options", "colors", "designer", "online-inventory", "connection"];
 // Inside Company: the tabs that configure the designer's public link and our own paperwork.
-// Business Details and Team stay — "he only needs like the company set up".
-const SS_SHED_COMPANY_TABS = ["branding", "locations", "tax", "payments", "commissions"];
+// Business Details and Team stay — "he only needs like the company set up". Commissions stays too
+// (Carolyn 2026-11-05: "I want to also keep commissions as an option").
+const SS_SHED_COMPANY_TABS = ["branding", "locations", "tax", "payments"];
 // Inside Customer Hub: one tab. Customer login exists so a customer can accept an estimate and pay
 // an invoice — paperwork this builder does not issue ("he's not emailing quotes from here").
 const SS_SHED_HUB_TABS = ["customer-login"];
 // The WORKSPACE pages, for the rail and for ssClampTab. `advanced` and `view-3d` ride along
-// because both are the designer wearing a different hat.
+// because both are the designer wearing a different hat. Commissions left this list on
+// 2026-11-05 (she kept it), and two Coming Soon pages joined it: Rent to Own and Self Serve
+// Displays "are sheds so should not be shown for Smart Build Users".
 const SS_SHED_TABS = ["designer", "advanced", "view-3d", "inventory", "orders",
-  "build-schedule", "delivery-schedule", "repairs", "commissions"];
+  "build-schedule", "delivery-schedule", "repairs", "rent-to-own-contracts", "self-serve-display-units"];
+// The Team screen's access grid and job titles, filtered the same way (browser only — the server's
+// list is unchanged, and a hidden area's preset value is harmless because its pages are refused
+// above). Keys are _shared/access.ts AREAS and TITLES.
+const SS_SHED_AREAS = ["designer", "price_override", "designs", "inventory", "orders", "change_orders",
+  "change_order_approve", "build_schedule", "delivery_schedule", "repairs", "settings_structures", "settings_options"];
+const SS_SHED_TITLES = ["scheduler", "crew_leader", "crew_member", "driver"];
 
 // AN OLD /portal ADDRESS HEALS THE MOMENT THE APP LOADS (2026-10-13). On beta and production the
 // host has already 301'd it, so this only acts where nothing did: a local static server, a tab
@@ -1017,14 +1028,14 @@ const SS_POPOUT = (() => {
   try { return new URLSearchParams(window.location.search).get("popout") === "1"; }
   catch (_e) { return false; }
 })();
-if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch (_e) {} }
+if (SS_POPOUT) { try { document.title = "Workbench — Structure Studio"; } catch (_e) {} }
 
 // Non-admins are confined to the Contacts hub (contacts, designs and pipelines), the Support tab
 // (product news, the setup checklist and their own submissions), and the coming-soon teaser tabs
 // (previews, no data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports", "projects"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
@@ -2065,7 +2076,11 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     if (id === "online-inventory") return access.inventory === "edit";
     const area = SETTINGS_TAB_AREA[id];
     return area ? ssCanRead(access, area) : true;
-  });
+  })
+  // Without the shed product Company holds only Business Details, Team and Commissions, so its
+  // caption names those. Swapped here rather than written as a ternary in the tuple above, because
+  // scripts/support-kb.mjs reads those tuples as plain strings and would lose the whole entry.
+  .map((t) => (shedsOn || t[0] !== "company") ? t : [t[0], t[1], "Your business details, team and commissions", t[3]]);
 }
 
 // ── Inside Company ───────────────────────────────────────────────────────────────────────
@@ -2288,8 +2303,11 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
   return {
     // The shed tabs are filtered HERE rather than inside each builder because this is their
     // only call site, so the rail highlight and SettingsShell's clamp read one list.
+    // Business Details loses its serial numbers with the shed product, so its caption stops
+    // promising them (the card itself is CompanyShell's shedsOn).
     company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked })
-      .filter(([id]) => shedsOn || SS_SHED_COMPANY_TABS.indexOf(id) === -1),
+      .filter(([id]) => shedsOn || SS_SHED_COMPANY_TABS.indexOf(id) === -1)
+      .map((t) => (shedsOn || t[0] !== "company") ? t : [t[0], t[1], "Your legal business details and address"]),
     // Options and Colors are shed-catalog hubs end to end (wall heights, doors, ramps, cladding,
     // paint, shingles...). The rail already drops their entries for a builder who sells no sheds;
     // emptying the hubs too is what stops a typed /settings/doors or /settings/shingles from
@@ -2502,7 +2520,7 @@ function ssFallbackTab(access) {
   return t || "support";
 }
 
-// "accounts", "admin" and "projects" are operator-gated (independent of tenant role) and sit
+// "accounts", "admin" and "workbench" are operator-gated (independent of tenant role) and sit
 // OUTSIDE the role clamp; everything else keeps it. Note none of them may go in NONADMIN_TABS —
 // that array is the role escape hatch and would hand the operator surfaces to every team
 // member. Content renders are ALSO gated (and the server re-checks regardless).
@@ -2531,6 +2549,12 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // the settings filter is: the builder is their own admin. Defaults true, so every existing
   // caller is unchanged — the treatment supportView and advancedOn each got.
   if (!shedsOn && SS_SHED_TABS.indexOf(tab) !== -1) return ssFallbackTab(access);
+  // AN OLD BOARD LINK STILL OPENS THE BOARD (2026-11-05). /projects was the internal board until
+  // it went to the customers' Project Management page, and the board moved to /workbench. That page
+  // has no sub-pages, so /projects/<anything> can only ever have meant a board — for the people
+  // who may open one, it lands on Workbench with the sub intact. Above the Coming Soon line,
+  // which would otherwise turn it away on production before it got here.
+  if (tab === "projects" && sub && canProjects && !supportView) return "workbench";
   // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
@@ -2553,7 +2577,10 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // operator-only, while Projects is a board a CSM team member can be granted from Settings →
   // Team without any access to builders' accounts. `!supportView` still applies to both —
   // someone standing in a builder's shoes has no business in either console.
-  if (tab === "projects") return (canProjects && !supportView) ? tab : ssFallbackTab(access);
+  // WORKBENCH is that board's address since 2026-11-05 (Carolyn: "customers get projects and ours
+  // becomes workbench"). Route only: the permission area, canProjects and portal-projects keep the
+  // name "projects".
+  if (tab === "workbench") return (canProjects && !supportView) ? tab : ssFallbackTab(access);
   // MY PROFILE IS EVERY ROLE'S. It is the one Settings sub-page with no permission area
   // (ssSettingsTabs), the account menu offers it to everyone, the needsDetails nudge sends
   // people there, and its two actions (save_prefs / save_profile) are "self" on the server.
@@ -3681,7 +3708,7 @@ const SS_NAV_WARM = {
   support: ["portal-setup"],                            // the setup checklist
   accounts: ["operator-portal"],
   admin: ["admin-catalog"],
-  projects: ["portal-projects"],
+  workbench: ["portal-projects"],
 };
 // Settings rail items that open on something other than portal-settings.
 const SS_SETTINGS_WARM = { billing: ["portal-billing"], sms: ["portal-sms"] };

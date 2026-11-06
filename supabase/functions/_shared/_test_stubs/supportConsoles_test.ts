@@ -115,9 +115,10 @@ Deno.test("a support account on its OWN portal: no Admin nav, no AdminShell, nei
       assert(!admin.adminMount, `AdminShell mounted for a support account (role ${role}) — it would fire get_master + list_clients`);
       assertEquals(admin.resolvedTab, ssFallbackTab(OWN_MAP), "the URL clamp let /portal/admin through");
       assertEquals(admin.activeTab, ssFallbackTab(OWN_MAP), "the render clamp let /portal/admin through");
-      const projects = shell({ isOperator: true, isSupportOp: true, viewing: null, role, canProjects, tab: "projects" });
-      assert(projects.resolvedTab !== "projects" && projects.activeTab !== "projects",
-        `/portal/projects resolved for a support account (role ${role}, canProjects ${canProjects})`);
+      // The internal board is /workbench since 2026-11-05 (/projects is the customers' page now).
+      const board = shell({ isOperator: true, isSupportOp: true, viewing: null, role, canProjects, tab: "workbench" });
+      assert(board.resolvedTab !== "workbench" && board.activeTab !== "workbench",
+        `/workbench resolved for a support account (role ${role}, canProjects ${canProjects})`);
     }
   }
 });
@@ -139,7 +140,7 @@ Deno.test("supportView itself is unchanged — still false on the support accoun
 });
 
 Deno.test("a support account in view-as is still barred from both consoles", () => {
-  for (const tab of ["admin", "projects"]) {
+  for (const tab of ["admin", "workbench"]) {
     const r = shell({ isOperator: true, isSupportOp: true, viewing: VIEWING, role: "user", canProjects: true, tab });
     assert(r.activeTab !== tab && r.resolvedTab !== tab, `${tab} resolved for support in view-as`);
     assert(!r.adminNav && !r.adminMount);
@@ -166,8 +167,8 @@ Deno.test("a platform operator keeps Admin and Projects, on their own portal and
     assert(a.adminNav && a.adminMount, `platform operator lost Admin (viewing ${!!viewing})`);
     assertEquals(a.resolvedTab, "admin");
     assertEquals(a.activeTab, "admin");
-    const p = shell({ isOperator: true, isSupportOp: false, viewing, role: "user", canProjects: true, tab: "projects" });
-    assertEquals(p.activeTab, "projects");
+    const p = shell({ isOperator: true, isSupportOp: false, viewing, role: "user", canProjects: true, tab: "workbench" });
+    assertEquals(p.activeTab, "workbench");
   }
 });
 
@@ -222,14 +223,15 @@ Deno.test("PROJECTS: the newest can_open_projects() answers a support_only row a
     `${latest.name}: door 1 must return (not fall through) for any operator row, false for support_only`);
 });
 
-Deno.test("NO SHED PRODUCT (migration 364): both lifted clamps refuse the nine shed routes", () => {
+Deno.test("NO SHED PRODUCT (migration 364): both lifted clamps refuse the shed routes", () => {
   // The shell's `shedsOn` is the account SHAPE, not an entitlement (see migration 364). It is
   // pinned HERE, from the shell's own clamp lines, for the same reason the Advanced case above is:
   // the rule lives in ssClampTab (tabClamp_test drives that directly), but whether the SHELL
   // actually hands it to both clamps is a wiring question, and that wiring was missing from one of
   // the two call sites for a while before anything noticed.
+  // Commissions left on 2026-11-05 (Carolyn kept it); the two shed teasers joined.
   const SHED_TABS = ["designer", "advanced", "view-3d", "inventory", "orders",
-    "build-schedule", "delivery-schedule", "repairs", "commissions"];
+    "build-schedule", "delivery-schedule", "repairs", "rent-to-own-contracts", "self-serve-display-units"];
   for (const isOperator of [false, true]) {
     for (const tab of SHED_TABS) {
       // Sheds OFF: refused, and never landed on another shed route — the fallback must be
@@ -252,4 +254,8 @@ Deno.test("NO SHED PRODUCT (migration 364): both lifted clamps refuse the nine s
   const op = shell({ isOperator: true, isSupportOp: false, viewing: VIEWING, role: "owner",
     canProjects: true, tab: "admin", shedsOn: false });
   assertEquals(op.activeTab, "admin");
+  // …and Commissions is no longer one of them: a no-sheds owner keeps it.
+  const com = shell({ isOperator: false, isSupportOp: false, viewing: null, role: "owner",
+    canProjects: false, tab: "commissions", shedsOn: false });
+  assertEquals([com.resolvedTab, com.activeTab], ["commissions", "commissions"]);
 });

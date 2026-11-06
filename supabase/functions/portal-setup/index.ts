@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { usableFeatureSet } from "../_shared/featureCheck.ts";
+import { setupStepFits, shedsOnOrOpen } from "../_shared/setupShape.ts";
 
 // The builder's SETUP checklist (portal.html → What's New → "Getting set up").
 //
@@ -48,6 +49,12 @@ import { usableFeatureSet } from "../_shared/featureCheck.ts";
 // wrongly padlocking a step a builder can do strands them mid-setup, and the feature's own
 // screens fail closed anyway — this one is guidance, not enforcement.
 //
+//   account_type (368)       'all' | 'sheds' | 'smartbuild' against the account's shape
+//                            (client_settings.sheds_enabled, migration 364). A step for the
+//                            other shape never leaves this function, like builder_visible —
+//                            the counts and the section headers only ever see the survivors.
+//                            The shape read fails OPEN (a shed builder); see _shared/setupShape.ts.
+//
 // A tenant-only step (added via portal-projects' setup_client_save, so template_item_id is
 // NULL) is always visible and never gated. Those are bespoke instructions written for one
 // builder who is already in the conversation.
@@ -67,7 +74,7 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 }
 
-type Gate = { requires: string | null; visible: boolean };
+type Gate = { requires: string | null; visible: boolean; audience: string };
 
 /** The template flags for a set of tenant rows, keyed by template_item_id.
  *
@@ -83,11 +90,11 @@ async function templateGate(
   const out = new Map<string, Gate>();
   if (!ids.length) return out;
   const { data, error } = await admin.from("setup_template_items")
-    .select("id, requires_feature, builder_visible").in("id", ids);
+    .select("id, requires_feature, builder_visible, account_type").in("id", ids);
   if (error) throw error;
   // deno-lint-ignore no-explicit-any
   for (const t of (data ?? []) as any[]) {
-    out.set(t.id, { requires: t.requires_feature || null, visible: t.builder_visible !== false });
+    out.set(t.id, { requires: t.requires_feature || null, visible: t.builder_visible !== false, audience: t.account_type || "all" });
   }
   return out;
 }
@@ -149,11 +156,15 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
       const gate = await templateGate(admin, rows);
       const needed = [...new Set([...gate.values()].map((g) => g.requires).filter(Boolean))] as string[];
       const usable = await usableOrOpen(admin, clientId, needed);
+      // Only asked when some step is for one shape — an all-'all' list costs no extra read.
+      const shaped = [...gate.values()].some((g) => g.audience !== "all");
+      const shedsOn = shaped ? await shedsOnOrOpen(admin, clientId) : true;
 
       const items = [];
       for (const r of rows ?? []) {
         const g = r.template_item_id ? gate.get(r.template_item_id) : null;
         if (g && !g.visible) continue;   // not built yet — never leaves the server
+        if (g && !setupStepFits(g.audience, shedsOn)) continue;   // the other shape's step (368)
         // A step they ALREADY TICKED never re-locks. They plainly had the add-on when they
         // did it, so padlocking it back would rewrite their own history and shrink the
         // progress bar under them for work they did not undo.
@@ -196,6 +207,10 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
       // The SAME wording and status as an id from another tenant, on purpose — a step we
       // have not built yet must not be distinguishable from one that does not exist.
       if (tGate && !tGate.visible) return json({ error: "That setup step is not on your list." }, 404);
+      // The same for a step the list hides from this account's shape (368): not on their list.
+      if (tGate && tGate.audience !== "all" && !setupStepFits(tGate.audience, await shedsOnOrOpen(admin, clientId))) {
+        return json({ error: "That setup step is not on your list." }, 404);
+      }
       // Only TICKING is gated. Un-ticking can only reach an already-completed row, which
       // the rule above never locks — so a builder can always undo their own tick.
       if (done && tGate && tGate.requires && !row.completed_at) {

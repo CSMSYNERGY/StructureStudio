@@ -18,7 +18,9 @@ Deno.test("knowledge.ts is exactly kb.md + faq.md (rerun scripts/support-kb.mjs 
 
 Deno.test("the knowledge names no inbox and none of our own consoles", () => {
   assert(!/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(KNOWLEDGE), "no email address");
-  for (const internal of ["(/accounts)", "(/admin)", "(/projects)", "(/advanced)", "Operator console"]) {
+  // (/workbench) is our internal board; until 2026-11-05 it was (/projects), which is now every
+  // builder's Project Management teaser and SHOULD be in here.
+  for (const internal of ["(/accounts)", "(/admin)", "(/workbench)", "(/advanced)", "Operator console"]) {
     assert(!KNOWLEDGE.includes(internal), `no ${internal}`);
   }
   assert(KNOWLEDGE.includes("24 hours"), "the reply promise is in the FAQ");

@@ -69,9 +69,11 @@ async function run(label, S, path) {
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
     // "Never drawn" needs a witness from the first render on, not a look at the end.
-    window.__navSeen = { admin: false, projects: false, accounts: false };
+    // "workbench", not "projects": the internal board moved there on 2026-11-05, and /projects is now
+    // the customers' Project Management teaser, which every account on beta is SUPPOSED to see.
+    window.__navSeen = { admin: false, workbench: false, accounts: false };
     const scan = () => {
-      for (const k of ["admin", "projects", "accounts"]) {
+      for (const k of ["admin", "workbench", "accounts"]) {
         // Not .ss-back: the Settings rail is always in the markup (hidden by CSS on workspace
         // pages) and its "Back to Workspace" link just mirrors the current tab, so on a cold
         // /projects it points there for the first render. It is not a way into a console.
@@ -150,7 +152,7 @@ async function run(label, S, path) {
     seen: await page.evaluate(() => window.__navSeen),
     nav: await page.evaluate(() => ({
       admin: !!document.querySelector('a[href^="/console"]:not(.ss-back)'),
-      projects: !!document.querySelector('a[href^="/projects"]:not(.ss-back)'),
+      workbench: !!document.querySelector('a[href^="/workbench"]:not(.ss-back)'),
       accounts: !!document.querySelector('a[href^="/accounts"]'),
     })),
     path: await page.evaluate(() => location.pathname),
@@ -172,15 +174,15 @@ try {
   ok("A: no admin-catalog call of any kind", sent(A, "admin-catalog").length === 0);
   ok("A: the address bar leaves /console", A.path !== "/console", A.path);
   ok("A: the Accounts switcher is still offered", A.nav.accounts);
-  ok("A: no Projects item (can_open_projects answers false after migration 250)", !A.seen.projects);
+  ok("A: no Workbench item (can_open_projects answers false after migration 250)", !A.seen.workbench);
   ok("A: no portal-projects call", sent(A, "portal-projects").length === 0);
   ok("A: no uncaught page errors", A.pageErrors.length === 0, A.pageErrors.join(" | "));
 
   // ── B: support operator, own portal, reload on /projects ──
-  const B = await run("B", { operator: true, support: true, supportDelayMs: 800, canProjects: false }, "/projects");
-  ok("B: the Projects item is never drawn", !B.seen.projects);
+  const B = await run("B", { operator: true, support: true, supportDelayMs: 800, canProjects: false }, "/workbench");
+  ok("B: the Workbench item is never drawn", !B.seen.workbench);
   ok("B: ProjectsTab never mounts: no list_boards", sent(B, "portal-projects", "list_boards").length === 0, JSON.stringify(sent(B, "portal-projects")));
-  ok("B: the address bar leaves /projects", B.path !== "/projects", B.path);
+  ok("B: the address bar leaves /workbench", B.path !== "/workbench", B.path);
   ok("B: no Admin item and no admin-catalog call", !B.seen.admin && sent(B, "admin-catalog").length === 0);
   ok("B: no portal-projects request of ANY kind, ?warm=1 included", sent(B, "portal-projects").length === 0, JSON.stringify(sent(B, "portal-projects")));
   ok("B: no uncaught page errors", B.pageErrors.length === 0, B.pageErrors.join(" | "));
@@ -197,7 +199,7 @@ try {
   const cWarm = sent(C, "admin-catalog").filter((c) => c.warm);
   ok("C: the operator warm-up pings admin-catalog (?warm=1), after is_support_operator answered false",
     cWarm.length > 0 && answeredAt(C) !== null && cWarm[0].at >= answeredAt(C), JSON.stringify(cWarm));
-  ok("C: Projects and Accounts are drawn too", C.nav.projects && C.nav.accounts);
+  ok("C: Workbench and Accounts are drawn too", C.nav.workbench && C.nav.accounts);
   ok("C: no uncaught page errors", C.pageErrors.length === 0, C.pageErrors.join(" | "));
 
   // ── D: a platform operator whose is_support_operator call FAILS ──
@@ -213,8 +215,8 @@ try {
   // ── E: the frontend alone, before migration 250 is applied ──
   // can_open_projects still answers true for a support account here, as the live database did
   // before 250. The shell's own projectsOpen gate (isSupportOp === false) must close it anyway.
-  const E = await run("E", { operator: true, support: true, supportDelayMs: 800, canProjects: true }, "/projects");
-  ok("E: pre-250 rpc: the Projects item is never drawn", !E.seen.projects);
+  const E = await run("E", { operator: true, support: true, supportDelayMs: 800, canProjects: true }, "/workbench");
+  ok("E: pre-250 rpc: the Workbench item is never drawn", !E.seen.workbench);
   ok("E: pre-250 rpc: ProjectsTab never mounts: no list_boards", sent(E, "portal-projects", "list_boards").length === 0, JSON.stringify(sent(E, "portal-projects")));
   ok("E: pre-250 rpc: no portal-projects request of ANY kind, ?warm=1 included", sent(E, "portal-projects").length === 0, JSON.stringify(sent(E, "portal-projects")));
   ok("E: no admin-catalog request of any kind", sent(E, "admin-catalog").length === 0, JSON.stringify(sent(E, "admin-catalog")));
@@ -222,10 +224,10 @@ try {
 
   // ── G: a CSM team member with the Projects area (not an operator), is_support_operator FAILS ──
   // Team members never depended on this rpc before; a blip must not cost them the board.
-  const G = await run("G", { operator: false, support: false, supportFails: true, canProjects: true }, "/projects");
-  ok("G: the Projects item is drawn once the rpc gives up", G.nav.projects);
+  const G = await run("G", { operator: false, support: false, supportFails: true, canProjects: true }, "/workbench");
+  ok("G: the Workbench item is drawn once the rpc gives up", G.nav.workbench);
   ok("G: ProjectsTab mounts: list_boards is sent", sent(G, "portal-projects", "list_boards").length > 0, JSON.stringify(sent(G, "portal-projects")));
-  ok("G: the deep link survives (still /projects)", G.path === "/projects", G.path);
+  ok("G: the deep link survives (still /workbench)", G.path === "/workbench", G.path);
   ok("G: no Admin item for a non-operator", !G.seen.admin);
   ok("G: no uncaught page errors", G.pageErrors.length === 0, G.pageErrors.join(" | "));
 } finally {

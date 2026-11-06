@@ -42,7 +42,9 @@ const MAX_TOKENS = 30000;
 const CHARS_PER_TOKEN = 3.6;
 
 /** Pages builders never see (our consoles), and Advanced mode, limited to the internal account. */
-const HIDDEN_PAGES = new Set(["accounts", "admin", "projects", "advanced"]);
+// "workbench" is our internal board (it was "projects" until 2026-11-05; /projects is now every
+// builder's Project Management teaser, so it is NOT hidden).
+const HIDDEN_PAGES = new Set(["accounts", "admin", "workbench", "advanced"]);
 
 /** Routes that still exist for old links but have no sidebar entry any more (12-shell.jsx says so
  *  beside each), with where the thing lives now. Listed apart, so "find it in the sidebar" is never

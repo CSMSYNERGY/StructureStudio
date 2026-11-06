@@ -130,7 +130,8 @@ test.describe("portal routes", () => {
 
   test("operator-only routes are clamped for a tenant owner", async () => {
     // /console is the Admin page: /admin is admin.html, the standalone console, not the app.
-    for (const route of ["/accounts", "/console", "/projects"]) {
+    // /workbench is the internal board since 2026-11-05; /projects is now every builder's teaser.
+    for (const route of ["/accounts", "/console", "/workbench"]) {
       await page.goto(route);
       await page.waitForFunction(() => window.__ssAppBooted === true);
       await expect.poll(() => page.evaluate(() => location.pathname), { timeout: 20_000 }).not.toBe(route);

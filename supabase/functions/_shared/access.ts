@@ -317,7 +317,7 @@ export const AREAS: Area[] = [
   //
   // Omitted from every preset below, so it resolves to 'none' for every non-owner on every
   // tenant. internalOnly keeps it off builders' Team screens entirely.
-  { key: "projects",          label: "Projects",           group: "workspace", hint: "CSM Synergy's internal boards — bugs, features, roadmap", levels: RVE, internalOnly: true },
+  { key: "projects",          label: "Workbench",           group: "workspace", hint: "CSM Synergy's internal boards — bugs, features, roadmap", levels: RVE, internalOnly: true },
 
   // ── Settings ─────────────────────────────────────────────────────────────
   { key: "settings_structures", label: "Sheds",                group: "settings", hint: "Styles, sizes, base prices",          levels: RVE },

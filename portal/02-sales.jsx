@@ -9092,8 +9092,13 @@ function SalesPipelines({ clientId, viewing = false, embedded = false, hosted = 
                 {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             )}
-            {meta.canManage && !viewing && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
-            {meta.canManage && !viewing && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
+            {/* Pipeline SET-UP is a settings change, and an operator in view-as makes those live like
+                every other Settings page ("Editing as operator — changes are live"): portal-settings
+                resolves the viewed tenant and refuses a read-only operator. Carolyn 2026-11-05: "we
+                should be able to edit pipelines and add more". The CARDS stay read-only above —
+                moving a customer's deal is the builder's work, not set-up. */}
+            {meta.canManage && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
+            {meta.canManage && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
             {canWrite && pipe && <button type="button" onClick={() => setDialog("add")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px" }}>＋ Add lead</button>}
             {/* REFRESH ON EVERY BOARD (2026-10-13). It used to show only when not embedded, and the
                 board is only ever drawn embedded now (a Contacts hub tab), so there was no way to
@@ -9350,7 +9355,7 @@ const SS_STATUS_EVENTS = [
   ["build_scheduled", "It is added to the build schedule"],
   ["delivered", "It is delivered"],
 ];
-function PipelineSettings({ viewing = false }) {
+function PipelineSettings({ viewing = false, shedsOn = true }) {
   const [meta, setMeta] = useState(null);
   const [err, setErr] = useState(null);
   // THE OPEN PIPELINE IS HELD BY ID, NOT AS AN OBJECT (355). It used to be the object itself,
@@ -9365,7 +9370,8 @@ function PipelineSettings({ viewing = false }) {
   }, []);
   useEffect(() => { load(); }, [load]);
   if (!meta) return <div style={S.card}><div style={S.h2}>Pipelines</div><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
-  const can = !!meta.canManage && !viewing;
+  // Not `&& !viewing` any more: see the board's Edit stages button. `viewing` is kept for callers.
+  const can = !!meta.canManage;
   const pipes = meta.pipelines || [];
   const openPipe = editing && editing !== "new" ? (pipes.find((p) => p.id === editing) || null) : null;
   return (
@@ -9381,8 +9387,9 @@ function PipelineSettings({ viewing = false }) {
         <div style={S.h2}>Pipelines</div>
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
           Each pipeline has its own stages, its own statuses and its own lost reasons — a shed pipeline and a
-          post-frame one do not move through the same steps. New designs land in the pipeline marked
-          <b> new designs</b>, in its first stage. Open one to edit it.
+          post-frame one do not move through the same steps.
+          {/* No designer, no designs to land anywhere (migration 364) — so neither the sentence nor the badge. */}
+          {shedsOn && <> New designs land in the pipeline marked <b>new designs</b>, in its first stage.</>} Open one to edit it.
         </p>
         {err && <div style={S.err}>{err}</div>}
         {pipes.map((p) => {
@@ -9395,7 +9402,7 @@ function PipelineSettings({ viewing = false }) {
               background: open ? "#F0F9FF" : undefined, borderRadius: open ? 8 : undefined }}>
             <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
               {p.name}
-              {p.feedsDesigns && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: "#1B7895", background: "#E0F2FE", borderRadius: 999, padding: "1px 8px" }}>new designs</span>}
+              {shedsOn && p.feedsDesigns && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: "#1B7895", background: "#E0F2FE", borderRadius: 999, padding: "1px 8px" }}>new designs</span>}
               <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 600, color: "#94A3B8" }}>
                 {p.stages.length} {p.stages.length === 1 ? "stage" : "stages"} · {(p.statuses || []).length} {(p.statuses || []).length === 1 ? "status" : "statuses"}
               </span>

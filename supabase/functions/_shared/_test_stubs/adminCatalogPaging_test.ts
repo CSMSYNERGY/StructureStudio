@@ -66,8 +66,12 @@ const INCLUSIONS = [
   { client_id: OTHER, size_id: uid(900), item_key: "loft", included: true, qty: 9 },
 ];
 
-async function call(body: Record<string, unknown>) {
+// `rpc` answers the database functions a call is expected to make (anything else rejects), and
+// `writes` records every insert/update/upsert on the tables the generic stub serves.
+async function call(body: Record<string, unknown>, rpc: Record<string, (args: any) => unknown> = {}) {
   const db = fakeDb({ building_styles: STYLES, building_sizes: SIZES, building_size_inclusions: INCLUSIONS }, { maxRows: 1000 });
+  const writes: { table: string; ops: any[][] }[] = [];
+  const rpcs: { fn: string; args: any }[] = [];
   const generic = (table: string) => {
     const build = (ops: any[][]): any => {
       const q: any = {};
@@ -83,9 +87,12 @@ async function call(body: Record<string, unknown>) {
         }
         return { data: one ? null : [], count: 0, error: null };
       };
-      q.maybeSingle = () => Promise.resolve(answer(true));
-      q.single = () => Promise.resolve(answer(true));
-      q.then = (ok: any, bad: any) => Promise.resolve(answer(false)).then(ok, bad);
+      const record = () => {
+        if (ops.some((o) => ["insert", "update", "upsert"].includes(o[0]))) writes.push({ table, ops });
+      };
+      q.maybeSingle = () => { record(); return Promise.resolve(answer(true)); };
+      q.single = () => { record(); return Promise.resolve(answer(true)); };
+      q.then = (ok: any, bad: any) => { record(); return Promise.resolve(answer(false)).then(ok, bad); };
       return q;
     };
     return build([]);
@@ -94,14 +101,17 @@ async function call(body: Record<string, unknown>) {
   for (const k of CLEARED) Deno.env.delete(k);
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
   stubDb.from = (table: string) => table.startsWith("building_") ? db.sb.from(table) : generic(table);
-  stubRpc.rpc = (fn: string) => Promise.reject(new Error(`adminCatalogPaging: unexpected rpc ${fn}`));
+  stubRpc.rpc = (fn: string, args: any) => {
+    rpcs.push({ fn, args });
+    return rpc[fn] ? Promise.resolve(rpc[fn](args)) : Promise.reject(new Error(`adminCatalogPaging: unexpected rpc ${fn}`));
+  };
   try {
     const res = await ADMIN(new Request("http://localhost/functions/v1/admin-catalog", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-forwarded-for": "203.0.113.9" },
       body: JSON.stringify({ ...body, adminPassword: ADMIN_PASSWORD }),
     }));
-    return { status: res.status, body: await res.json(), db };
+    return { status: res.status, body: await res.json(), db, writes, rpcs };
   } finally {
     stubDb.from = null;
     stubRpc.rpc = null;
@@ -150,4 +160,44 @@ Deno.test("create_client's clone copies all 1,200 of the template's inclusions o
   assertEquals([...byQty.entries()].sort((a, b) => a[0] - b[0]), [[1, 240], [2, 240], [3, 240], [4, 240], [5, 240]]);
   assert(!r.db.tables.building_sizes.some((z: any) => z.client_id === NEWBIE && z.label === "8x8"), "another builder's size came along");
   assertEquals(r.db.ins, [], "no read of the catalog tables carries a list of ids");
+});
+
+// ACCOUNT TYPE (2026-11-05). A SmartBuild builder is made the way the first one was set by hand:
+// sheds_enabled false (+ ramp_enabled false) on its settings row, SmartBuild Jobs seeded and marked
+// as the design feed, and no shed catalog cloned whatever template was picked. Shed Deals is never
+// seeded here — portal-settings only does that for an account with ZERO live pipelines.
+Deno.test("create_client with accountType smartbuild: the shape, the pipeline, and no catalog", async () => {
+  const PIPE = "20000000-0000-4000-8000-000000000001";
+  const r = await call(
+    { action: "create_client", clientId: NEWBIE, companyName: "Test SmartBuild Co", templateClientId: TEMPLATE, accountType: "smartbuild" },
+    { crm_seed_pipeline: () => ({ data: PIPE, error: null }) },
+  );
+  assertEquals(r.status, 200, JSON.stringify(r.body).slice(0, 400));
+  assertEquals(r.body.accountType, "smartbuild");
+  assertEquals(r.body.smartbuildPipeline, true);
+  assertEquals(r.body.blank, true, "a SmartBuild account starts blank even with a template picked");
+  assertEquals(r.body.cloned, null);
+  const settings = r.writes.find((w) => w.table === "client_settings" && w.ops.some((o) => o[0] === "upsert"));
+  assert(settings, "a client_settings row is written");
+  const row = settings!.ops.find((o) => o[0] === "upsert")![1];
+  assertEquals([row.sheds_enabled, row.ramp_enabled, row.billing_exempt], [false, false, false]);
+  const seeds = r.rpcs.filter((c) => c.fn === "crm_seed_pipeline");
+  assertEquals(seeds.map((c) => c.args), [{ p_client_id: NEWBIE, p_kind: "smartbuild" }], "only the SmartBuild starter");
+  const feed = r.writes.find((w) => w.table === "crm_pipelines" && w.ops.some((o) => o[0] === "update"));
+  assert(feed, "SmartBuild Jobs is marked as the design feed");
+  assertEquals(feed!.ops.find((o) => o[0] === "update")![1].feeds_designs, true);
+  assert(feed!.ops.some((o) => o[0] === "eq" && o[1] === "id" && o[2] === PIPE));
+  assert(!r.rpcs.some((c) => c.fn === "crm_ensure_pipelines"), "Shed Deals is never seeded");
+});
+
+Deno.test("create_client: a shed builder is unchanged, and an unknown account type is refused before any write", async () => {
+  const sheds = await call({ action: "create_client", clientId: NEWBIE, companyName: "Test Shed Co", templateClientId: "__none__" });
+  assertEquals(sheds.status, 200, JSON.stringify(sheds.body).slice(0, 400));
+  assertEquals(sheds.body.accountType, "sheds");
+  assertEquals(sheds.body.smartbuildPipeline, undefined);
+  assert(!sheds.writes.some((w) => w.table === "client_settings"), "no settings row for a plain shed builder, as before");
+  assert(!sheds.rpcs.some((c) => c.fn === "crm_seed_pipeline"));
+  const bad = await call({ action: "create_client", clientId: NEWBIE, companyName: "Test Co", templateClientId: "__none__", accountType: "barns" });
+  assert(bad.status >= 400, "refused");
+  assert(!bad.writes.some((w) => w.table === "client_configs"), "refused before the config row is written");
 });

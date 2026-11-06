@@ -141,6 +141,10 @@
   X-Frame-Options: DENY
 /projects/*
   X-Frame-Options: DENY
+/workbench
+  X-Frame-Options: DENY
+/workbench/*
+  X-Frame-Options: DENY
 /leads
   X-Frame-Options: DENY
 /leads/*

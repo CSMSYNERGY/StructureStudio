@@ -183,7 +183,8 @@ async function run(label, S, act) {
   await serveAppRoutes(page, PORTAL_HTML);
   if (ARTIFACT) await page.route(/portal\.app\.compiled\.js/, (r) => r.fulfill({ status: 200, contentType: "application/javascript", body: ARTIFACT }));
 
-  await page.goto(`${BASE}/projects`, { waitUntil: "domcontentloaded" });
+  // The internal board's address since 2026-11-05 (/projects is the customers' page now).
+  await page.goto(`${BASE}/workbench`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
   // list_boards answers at once; give get_board (held up to 800 ms) and the render after it time to land.
   await page.waitForFunction(() => !document.body.innerText.includes("Loading boards…"), null, { timeout: 30000 }).catch(() => {});

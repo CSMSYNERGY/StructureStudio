@@ -28,6 +28,7 @@ account's subscription itself isn't active. Pages marked "coming soon" are not a
 - **Repairs** (/repairs): Manage repair jobs from request to done
 - **Rent to Own** (/rent-to-own-contracts): Generate and manage RTO agreements — coming soon
 - **Self Serve Displays** (/self-serve-display-units): In-unit kiosk to design, estimate, and get live help — coming soon
+- **Project Management** (/projects): Run every job from sold to complete — coming soon
 - **Commissions** (/commissions): Track and calculate sales commissions — coming soon
 - **Reports** (/reports): Sales, leads, revenue, and delivery reporting — coming soon
 - **Calls** (/calls): Calls and texts, person by person — yours, or the whole team's
@@ -80,14 +81,15 @@ The Settings page has a rail of sections. Some sections are hubs with their own 
 - **Customer Hub** (/settings/pipelines): Your pipelines, forms, customer emails and texts, your phone, and your meetings
   (Customer Hub is being reworked; this list is as of the last knowledge build and may have moved.)
   - **Pipelines** (/settings/pipelines): Each pipeline's stages, its statuses and when each one is set, and its lost reasons
-  - **Customer login** (/settings/customer-login): How customers get the code that logs them in to accept estimates and pay invoices
-  - **Forms** (/settings/forms): Lead forms for your website: design, publish, and see who filled them in
-  - **Email Templates** (/settings/email-templates): Designed emails your forms send: the lead's auto-reply and your team's alert
-  - **Email Settings** (/settings/email): Send estimates and invoices from your own email domain
-  - **Text Messaging** (/settings/sms): Text customers from your own number, once the carriers approve your business
-  - **Phone** (/settings/phone): Who answers your business number, and the My Synergy Phone apps
-  - **Meetings** (/settings/meetings): The meeting types your team chooses from, and the booking pages. Your own link and hours are in My Profile
   - **Fields** (/settings/fields): Every field on a contact and on a design/deal, and your own custom fields
+  - **Meetings** (/settings/meetings): The meeting types your team chooses from, and the booking pages. Your own link and hours are in My Profile
+  - **Automations** (/settings/automations): Rules that run by themselves: when something happens, do this
+  - **Phone** (/settings/phone): Who answers your business number, and the My Synergy Phone apps
+  - **SMS - A2P** (/settings/sms): Text customers from your own number, once the carriers approve your business
+  - **Email Settings** (/settings/email): Send estimates and invoices from your own email domain
+  - **Email Templates** (/settings/email-templates): Designed emails your forms send: the lead's auto-reply and your team's alert
+  - **Forms** (/settings/forms): Lead forms for your website: design, publish, and see who filled them in
+  - **Customer login** (/settings/customer-login): How customers get the code that logs them in to accept estimates and pay invoices
 - **GHL Connection** (/settings/connection): GHL credentials and pipeline mapping
 - **QuickBooks** (/settings/quickbooks): QuickBooks Online connection and invoice item mappings
 - **My Profile** (/settings/myprofile): How the portal opens for you — your settings, not the business's
