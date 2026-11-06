@@ -34,6 +34,7 @@ import {
   rsTrackingRecords,
   rsCheckOpenTracking,
   rsVerifyDomain,
+  RS_TIMEOUT_MS,
   TRACKING_RECHECK_MS,
   TRACKING_SUBDOMAIN,
   type RsDomain,
@@ -1149,6 +1150,104 @@ Deno.test("rsCheckOpenTracking: a finished look that did not find the record say
     calls = domainStub(TRACKING_ACTIVE);
     r = await rsCheckOpenTracking(DOMAIN_ID, now - 2 * TRACKING_RECHECK_MS, now);
     assertEquals([posts(calls).length, r.notFound].join(","), "0,false", "found is found");
+  } finally {
+    teardown();
+  }
+});
+
+// ── Timeout and Idempotency-Key (2026-11-06) ────────────────────────────────────────────────
+// A send used to have no timeout, so a hung Resend held the caller until the edge runtime killed
+// it, and an automation's retry of a send that DID go out (its answer lost) could email the
+// customer twice. Every call now has a hang bound, and a caller that will retry passes a key, which
+// Resend answers from memory instead of sending again. rsSendEmail itself makes ONE try: an
+// ask-again loop that lived here was taken out after two review rounds (see its comment).
+
+const KEYED = { ...SEND, idempotencyKey: "crm-outbox/41/abcdef0123456789" };
+
+Deno.test("the hang bound sits far past a slow answer", () => {
+  // The first version cut every call off at 10 s, which turned a slow send that WORKED into a
+  // "failed" one, and submit-estimate then emailed the quote again through GHL (review 2026-11-06).
+  assert(RS_TIMEOUT_MS >= 30_000, `the hang bound must sit well past a slow answer, got ${RS_TIMEOUT_MS}`);
+});
+
+Deno.test("a key goes out as the Idempotency-Key header; no key, no header", async () => {
+  setup();
+  try {
+    let calls = stub(() => jsonResponse({ id: "em_1" }));
+    await rsSendEmail(KEYED);
+    assertEquals(calls[0].headers.get("Idempotency-Key"), KEYED.idempotencyKey);
+    assertEquals(calls[0].headers.get("Authorization"), `Bearer ${API_KEY}`, "ours still win");
+    assert(!("idempotencyKey" in JSON.parse(calls[0].body ?? "{}")), "the key is a header, never a body field");
+
+    calls = stub(() => jsonResponse({ id: "em_2" }));
+    await rsSendEmail(SEND);
+    assertEquals(calls[0].headers.get("Idempotency-Key"), null);
+
+    // Outside Resend's 1 to 256 characters it is left off (Resend would 400 the whole send).
+    calls = stub(() => jsonResponse({ id: "em_3" }));
+    await rsSendEmail({ ...SEND, idempotencyKey: "x".repeat(257) });
+    assertEquals(calls[0].headers.get("Idempotency-Key"), null);
+    calls = stub(() => jsonResponse({ id: "em_4" }));
+    await rsSendEmail({ ...SEND, idempotencyKey: "   " });
+    assertEquals(calls[0].headers.get("Idempotency-Key"), null);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("one try, keyed or not: a failure is the caller's to retry, under its key", async () => {
+  setup();
+  try {
+    for (const send of [SEND, KEYED]) {
+      for (const answer of [
+        () => new Response("", { status: 503 }),
+        () => jsonResponse({ statusCode: 409, name: "concurrent_idempotent_requests", message: "in progress" }, 409),
+        () => jsonResponse({ statusCode: 429, name: "rate_limit_exceeded", message: "slow down" }, 429),
+      ]) {
+        const calls = stub(answer);
+        const err = await expectApiError(() => rsSendEmail(send), "transient");
+        assertEquals(calls.length, 1, "rsSendEmail never asks twice itself");
+        assertEquals(err.permanent, false, "and the caller hears it is worth trying again");
+      }
+    }
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("409 invalid_idempotent_request is PERMANENT: the key was used with a different body", async () => {
+  setup();
+  try {
+    const calls = stub(() => jsonResponse({ statusCode: 409, name: "invalid_idempotent_request", message: "body changed" }, 409));
+    const err = await expectApiError(() => rsSendEmail(KEYED), "409 invalid");
+    assertEquals(err.permanent, true);
+    assertEquals(calls.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a Resend that never answers times out as a transient status-0 'timeout', in one bounded try", async () => {
+  setup();
+  try {
+    // stub() hands its handler no signal, so this fetch is written out: it never answers, and
+    // rejects only when the request's own timeout signal fires, as a real hung socket would.
+    const calls: RequestInit[] = [];
+    globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    }) as typeof fetch;
+    const t0 = Date.now();
+    for (const send of [SEND, KEYED]) {
+      const err = await expectApiError(() => rsSendEmail(send, { timeoutMs: 40 }), "timeout");
+      assertEquals([err.status, err.name_, err.permanent].join(","), "0,timeout,false",
+        "a timed-out send may have gone: transient, never permanent");
+    }
+    assertEquals(calls.length, 2, "one try each");
+    assert(calls.every((i) => i.signal instanceof AbortSignal), "every try carries its own timeout signal");
+    assert(Date.now() - t0 < 5_000, "bounded by the timeout, not left hanging");
   } finally {
     teardown();
   }

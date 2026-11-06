@@ -55,15 +55,42 @@ const SEND_PER_RUN = 40;
  */
 const LEASE_MS = 4 * 60_000;
 /**
- * How many times a queued message is retried before it is given up on.
+ * How long a message waits after each failed try before the next one, in minutes (2026-11-06).
  *
- * ⚠️ A CAP IS LOAD-BEARING HERE, in the direction that is easy to get backwards: a message with
- * no cap retries every five minutes for ever, and the failures that last are the ones where the
- * provider ACCEPTED something each time — a number that is billed on every attempt. Four tries
- * over twenty minutes is enough for a blip; past that a person needs to look, and the run log
- * says so.
+ * ⚠️ WHY IT CHANGED: it used to be four tries five minutes apart, so any outage longer than
+ * twenty minutes (Resend's or Twilio's) dropped every automated email and text queued in it, for
+ * good. Now the waits grow, and the last try is about 22 hours after the first. That stays inside
+ * Resend's 24-hour memory of an Idempotency-Key, which is what stops a retry of an email that did
+ * go out (its answer lost to a timeout) from sending a second copy.
+ *
+ * Each wait is a minute short of a whole number of five-minute ticks, so the row is free again
+ * just before the tick that should pick it up rather than just after it.
+ *
+ * The wait rides on `leased_until`, the claim lease, and NOT on `hold_until`: the run log reads
+ * hold_until as "outside texting hours where they live", which a retry is not. A row waiting for
+ * its next try shows as "queued — waiting to go out", which it is.
  */
-const MAX_ATTEMPTS = 4;
+const RETRY_AFTER_MIN = [4, 14, 29, 59, 119, 239, 359, 479];
+/**
+ * How many times a queued message is tried before it is given up on: one first try plus one per
+ * wait above, so nine.
+ *
+ * ⚠️ A CAP IS STILL LOAD-BEARING HERE, in the direction that is easy to get backwards: a message
+ * with no cap retries for ever, and the failures that last are the ones where the provider
+ * ACCEPTED something each time — a number that is billed on every attempt. The text's proof check
+ * below (an earlier try that already went out is marked sent, not sent again) and the email and
+ * team-note keys keep that rare; the cap bounds it. Past the last try a person needs to look, and
+ * the run log says so. A refusal that no retry can change stops at once (see `permanent` below),
+ * and a rule paused or removed meanwhile stops its queued messages.
+ */
+const MAX_ATTEMPTS = RETRY_AFTER_MIN.length + 1;
+/**
+ * Stop starting new messages once this run is this old (2026-11-06). A send that hangs now ends at
+ * resend.ts's 30 s bound instead of running on, but forty hung sends would still outlast the edge
+ * runtime's wall clock. A row this run never claimed loses nothing: it keeps its attempts and its
+ * place, and the next tick takes it.
+ */
+const RUN_BUDGET_MS = 150_000;
 
 function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -148,7 +175,7 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
   // still running (leased_until), and not out of attempts.
   const nowIso = new Date().toISOString();
   const { data: queued, error: qErr } = await admin.from("crm_rule_outbox")
-    .select("id, client_id, deal_id, contact_id, kind, params, attempts, queued_at")
+    .select("id, rule_id, client_id, deal_id, contact_id, kind, params, attempts, queued_at")
     .eq("state", "queued").lte("attempts", MAX_ATTEMPTS - 1)
     .or(`hold_until.is.null,hold_until.lte.${nowIso}`)
     .or(`leased_until.is.null,leased_until.lt.${nowIso}`)
@@ -172,7 +199,11 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
   let skipped = 0;
   let held = 0;
   let recovered = 0;
+  let deferred = 0;
+  const runStarted = Date.now();
   for (const row of (queued ?? [])) {
+    // See RUN_BUDGET_MS: what is left waits for the next tick, unclaimed and untouched.
+    if (Date.now() - runStarted > RUN_BUDGET_MS) { deferred++; continue; }
     const r = row as Record<string, unknown>;
     const id = r.id as number;
     const clientId = String(r.client_id);
@@ -193,16 +224,47 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
     const done = async (patch: Record<string, unknown>) => {
       await admin.from("crm_rule_outbox").update({ ...patch, leased_until: null }).eq("id", id);
     };
-    const fail = async (why: string, state: "failed" | "skipped" = "failed") => {
-      await done({
-        state: attempts >= MAX_ATTEMPTS || state === "skipped" ? state : "queued",
-        last_error: why.slice(0, 500),
-      });
+    // `permanent`: the provider refused in a way no retry changes, so stop now (2026-11-06).
+    const fail = async (why: string, state: "failed" | "skipped" = "failed", permanent = false) => {
+      const last_error = why.slice(0, 500);
+      if (state === "failed" && !permanent && attempts < MAX_ATTEMPTS) {
+        // Back in the queue, but not before its next try is due (see RETRY_AFTER_MIN). hold_until is
+        // cleared: a text that waited for the morning and then failed is retrying now, and the run
+        // log would otherwise keep calling it "outside texting hours" all day.
+        const waitMin = RETRY_AFTER_MIN[Math.min(attempts, RETRY_AFTER_MIN.length) - 1];
+        await admin.from("crm_rule_outbox").update({
+          state: "queued",
+          last_error,
+          hold_until: null,
+          leased_until: new Date(Date.now() + waitMin * 60_000).toISOString(),
+        }).eq("id", id);
+      } else {
+        await done({ state, last_error });
+      }
       if (state === "skipped") skipped++; else failed++;
     };
     const markSent = async (note: string | null = null) => {
       await done({ state: "sent", sent_at: new Date().toISOString(), last_error: note });
     };
+
+    // ⛔ A PAUSED OR REMOVED RULE SENDS NOTHING MORE (2026-11-06). The row was queued while the rule
+    // was on; if the builder has since paused it ("it will not run") or removed it, its queued
+    // messages stop here. This mattered little while a failing message gave up in twenty minutes;
+    // with a day of retries, a builder who switches off a rule that texted the wrong people during
+    // an outage would otherwise see every one of those messages go out when sending came back.
+    if (r.rule_id) {
+      const { data: rule, error: ruleErr } = await admin.from("crm_rules").select("enabled, archived_at")
+        .eq("client_id", clientId).eq("id", r.rule_id).maybeSingle();
+      // A read that FAILED is not a rule that is gone: back on the retry schedule, never "skipped".
+      if (ruleErr) {
+        await fail(`Could not check the rule: ${ruleErr.message ?? "read failed"}`);
+        continue;
+      }
+      if (!rule || rule.enabled === false || rule.archived_at) {
+        await fail("The rule was paused or removed, so this was not sent.", "skipped");
+        continue;
+      }
+    }
 
     // A customer rule's message has no card (363); a card is read only when the row names one.
     const { data: deal } = r.deal_id
@@ -243,9 +305,11 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         const to = await teamEmails(admin, clientId, Array.isArray(params.userIds) ? (params.userIds as string[]) : []);
         const c = (contact ?? null) as Record<string, unknown> | null;
         const about = c ? `\n\nCustomer: ${[c.name, c.phone, c.email].filter(Boolean).join(" · ")}` : "";
+        // Keyed on this row (2026-11-06), so a retry after a lost answer is not a second copy.
         const out = await sendTeamNote(clientId, to,
           fillMergeFields(String(params.subject ?? ""), vals),
-          fillMergeFields(String(params.body ?? ""), vals) + about);
+          fillMergeFields(String(params.body ?? ""), vals) + about,
+          `crm-outbox/${id}`);
         if (out.sent > 0) { await markSent(out.error); sent++; }
         else if (out.error === "platform email is not configured" || out.error === "no recipient") {
           await fail(out.error === "no recipient" ? "Nobody on your team has an email address to send to." : "Team email isn't switched on yet.", "skipped");
@@ -304,13 +368,13 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         const email = String((contact as Record<string, unknown>).email ?? "").trim();
         if (!email) { await fail("That customer has no email address.", "skipped"); continue; }
         const subject = fillMergeFields(String(params.subject ?? ""), vals);
-        // The same proof for email: Resend's message id on a matching send since this was queued.
-        if (before > 0) {
-          const { data: prior } = await admin.from("email_sends").select("id")
-            .eq("client_id", clientId).eq("contact_id", contact!.id).eq("subject", subject)
-            .gte("created_at", String(r.queued_at)).not("provider_message_id", "is", null).limit(1);
-          if (prior && prior.length) { await markSent("Recovered: it had already gone out."); recovered++; continue; }
-        }
+        // ⚠️ NO SUBJECT-MATCH PROOF FOR EMAIL ANY MORE (2026-11-06). There used to be one, like the
+        // text's above: any sent email to this customer with the same subject since this row was
+        // queued counted as this one. It matched on nothing unique to the row, so a DIFFERENT rule's
+        // email with the same subject wording — common, "An update from {{business}}" — sent while this
+        // one was retrying marked it "Recovered" and its words never went. With a day of retries that
+        // overlap stopped being rare. The Idempotency-Key below does the proof's job exactly: a try of
+        // THIS email that did go out is answered by Resend with its first id and is not sent again.
         // ⚠️ THE UNSUBSCRIBE LINK (366), on every automated email: in the footer, and as the
         // List-Unsubscribe header Gmail and Apple Mail turn into their own button. It sets this
         // customer's Email box, which the check above refuses on. The builder never writes it.
@@ -339,6 +403,11 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
           headers: { "List-Unsubscribe": `<${unsub}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
           contactId: String(contact!.id),
           shortCode,
+          // ONE KEY FOR EVERY TRY OF THIS ROW (2026-11-06). Whether a try went out and was recorded,
+          // or went out while we stopped listening (a timeout, which leaves no id anywhere), Resend
+          // answers the next try with the first send instead of a second email. The schedule's last
+          // try (about 22 h) is inside the 24 h Resend remembers a key for.
+          idempotencyKey: `crm-outbox/${id}`,
         });
         if (out.sent) {
           await markSent();
@@ -346,7 +415,7 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         } else if (out.reason === "not_active") {
           await fail("Email isn't switched on for this account yet.", "skipped");
         } else {
-          await fail(out.error ?? `Not sent: ${out.reason ?? "unknown"}.`);
+          await fail(out.error ?? `Not sent: ${out.reason ?? "unknown"}.`, "failed", out.permanent === true);
         }
       }
     } catch (e) {
@@ -354,5 +423,5 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
     }
   }
 
-  return json({ ok: true, drained, swept, sweepError, sent, failed, skipped, held, recovered, considered: (queued ?? []).length });
+  return json({ ok: true, drained, swept, sweepError, sent, failed, skipped, held, recovered, deferred, considered: (queued ?? []).length });
 }));

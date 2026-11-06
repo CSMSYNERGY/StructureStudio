@@ -35,6 +35,14 @@ export type MeetingSendResult = {
   sent: boolean;
   /** Why not, when not — for the response, never for a retry decision. */
   reason?: string;
+  /**
+   * The ONE field a retry may be decided on (2026-11-06): true only when the email provider (or
+   * the email ledger, or the meeting read before anything was sent) failed in a way a later try may
+   * fix — never for "no address", "switched off", or a refusal emailSend calls permanent. Even then,
+   * retry only a send that carried an idempotencyKey, or a try that did go out could reach the
+   * customer twice.
+   */
+  transient?: boolean;
 };
 
 /** The From name/address a calendar invite's ORGANIZER carries.
@@ -70,6 +78,9 @@ export async function sendMeetingEmail(
     /** Already-bumped sequence, when the caller bumped it as part of its own write. Omit and
      *  this reads whatever is on the row. */
     sequence?: number | null;
+    /** Passed straight to sendTenantEmail (see TenantMail.idempotencyKey): the same value on
+     *  every try of one email. meeting-reminders sets it, so it can retry a failed reminder. */
+    idempotencyKey?: string | null;
   },
 ): Promise<MeetingSendResult> {
   const { meetingId, which, req } = opts;
@@ -85,7 +96,17 @@ export async function sendMeetingEmail(
           "meeting_hosts!inner(public_name)",
       )
       .eq("id", meetingId).maybeSingle();
-    if (error) throw error;
+    // A read that FAILED (a timeout, a schema-cache reload) is not a meeting that is gone: nothing
+    // reached the provider, so a later try is safe and may well work (2026-11-06). Logged like any
+    // other failure. Before this it threw, and meeting-reminders lost the reminder for good.
+    if (error) {
+      await logEdgeError({
+        fn: "meetingSend",
+        code: "meeting_mail_read_failed",
+        message: `${which} email for meeting ${meetingId}: the meeting could not be read: ${error.message ?? error}`,
+      });
+      return { sent: false, reason: "read_failed", transient: true };
+    }
     if (!m) return { sent: false, reason: "no_meeting" };
 
     // No address, no email. Not a failure worth logging: a booking taken over the phone with
@@ -199,6 +220,7 @@ export async function sendMeetingEmail(
       html: body.html,
       text: body.text,
       attachments,
+      ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
     });
 
     if (!out.sent) {
@@ -212,7 +234,7 @@ export async function sendMeetingEmail(
           message: `${which} email for meeting ${m.id} was not sent: ${out.reason}${out.error ? ` (${out.error})` : ""}`,
         });
       }
-      return { sent: false, reason: out.reason };
+      return { sent: false, reason: out.reason, transient: out.reason === "failed" && !out.permanent };
     }
     return { sent: true };
   } catch (e) {

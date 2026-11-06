@@ -41,7 +41,7 @@ function assertArrayEquals(actual: unknown, expected: unknown[], msg = ""): void
 
 const realFetch = globalThis.fetch;
 
-type FetchCall = { url: string; method: string; body: string | null };
+type FetchCall = { url: string; method: string; body: string | null; headers: Headers };
 
 function stubFetch(handler: (call: FetchCall) => Response | Promise<Response>): FetchCall[] {
   const calls: FetchCall[] = [];
@@ -51,6 +51,7 @@ function stubFetch(handler: (call: FetchCall) => Response | Promise<Response>): 
       url,
       method: (init?.method ?? "GET").toUpperCase(),
       body: typeof init?.body === "string" ? init.body : null,
+      headers: new Headers(init?.headers ?? {}),
     };
     calls.push(call);
     return Promise.resolve(handler(call));
@@ -1109,6 +1110,104 @@ Deno.test("261: deployed before the migration, the claim is retried without the 
     const db4 = stubAdmin({ settings: VERIFIED, insertError: { message: "column does not exist", code: "42703" } });
     await sendTenantEmail(db4.admin, CLIENT_ID, MAIL);
     assertEquals(inserts(db4.calls).length, 1, "document mail carries no 261 keys: no retry");
+  } finally {
+    teardown();
+  }
+});
+
+// ── Idempotency-Key and permanence (2026-11-06) ─────────────────────────────────────────────
+// An automation retries one message for up to a day. Its key must come out the same on every
+// try of the SAME email (so Resend answers a retry of one that did go out instead of sending it
+// again), and different for an email that changed between tries (so the new version goes out,
+// rather than being refused for reusing a key with a new body).
+
+const CONVO_KEYED: TenantMail = {
+  kind: "conversation",
+  contactId: "22222222-2222-4222-8222-222222222222",
+  to: "lead@example.net",
+  subject: "Checking in",
+  html: "<p>Hi Sam</p>",
+  text: "Hi Sam",
+  idempotencyKey: "crm-outbox/41",
+};
+
+const wireOf = (c: FetchCall) => ({
+  key: c.headers.get("Idempotency-Key") ?? "",
+  msgId: String(JSON.parse(c.body ?? "{}").headers?.["Message-ID"] ?? ""),
+});
+
+Deno.test("a caller key: the same email twice → same key and Message-ID; a changed email → a new key", async () => {
+  setup();
+  try {
+    const a = stubFetch(() => jsonResponse(OK_SEND));
+    await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, CONVO_KEYED);
+    const b = stubFetch(() => jsonResponse(OK_SEND));
+    await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, CONVO_KEYED);
+    const [w1, w2] = [wireOf(a[0]), wireOf(b[0])];
+    assert(/^crm-outbox\/41\/[0-9a-f]{16}$/.test(w1.key), `key is the caller's plus a fingerprint, got ${w1.key}`);
+    assertEquals(w2.key, w1.key, "a retry of the same email must carry the same key");
+    assert(w1.msgId.startsWith("<ss.tenant-1.c.22222222-2222-4222-8222-222222222222."), `threads on the contact: ${w1.msgId}`);
+    assertEquals(w2.msgId, w1.msgId, "the Message-ID's random part is fixed by the key, so the body is identical");
+    assertEquals(b[0].body, a[0].body, "byte-identical body on both tries");
+
+    const c = stubFetch(() => jsonResponse(OK_SEND));
+    await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, { ...CONVO_KEYED, html: "<p>Hi Sam, moved to 3pm</p>" });
+    const w3 = wireOf(c[0]);
+    assert(w3.key.startsWith("crm-outbox/41/") && w3.key !== w1.key, "a changed email gets a key of its own");
+    assertEquals(w3.msgId, w1.msgId, "and still threads the same way");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("no caller key (a person's send): no Idempotency-Key at all, and the Message-ID stays random", async () => {
+  setup();
+  try {
+    const a = stubFetch(() => jsonResponse(OK_SEND));
+    await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, MAIL);
+    assertEquals(a[0].headers.get("Idempotency-Key"), null, "the wire exactly as before keys existed");
+    const ids = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const f = stubFetch(() => jsonResponse(OK_SEND));
+      await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, MAIL);
+      ids.add(wireOf(f[0]).msgId);
+    }
+    assert(ids.size > 1, "without a caller key two sends must not share a Message-ID");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a refusal no retry can change is reported permanent; a transient failure is not", async () => {
+  setup();
+  try {
+    stubFetch(() => jsonResponse({ statusCode: 422, name: "invalid_parameter", message: "bad" }, 422));
+    const r1 = await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, CONVO_KEYED);
+    assert(!r1.sent && r1.reason === "failed" && r1.permanent === true, `422 must be permanent: ${JSON.stringify(r1)}`);
+
+    const calls = stubFetch(() => new Response("", { status: 503 }));
+    const r2 = await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, CONVO_KEYED);
+    assert(!r2.sent && r2.reason === "failed" && !r2.permanent, `503 must stay retryable: ${JSON.stringify(r2)}`);
+    assertEquals(calls.length, 1, "one try: the retry is the caller's, under its key");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a 403 is NOT permanent here: it is the account or the domain, which a person fixes within hours", async () => {
+  // resend.ts calls every 403 permanent. A suspended key or a domain that lost its DNS is not the
+  // email's fault, and an automation must keep its day of retries through it (review 2026-11-06).
+  setup();
+  try {
+    for (const name of ["suspended_api_key", "restricted_api_key", "validation_error", "invalid_permission"]) {
+      stubFetch(() => jsonResponse({ statusCode: 403, name, message: "no" }, 403));
+      const r = await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, CONVO_KEYED);
+      assert(!r.sent && r.reason === "failed" && !r.permanent, `403/${name} must stay retryable: ${JSON.stringify(r)}`);
+      assert(!r.sent && r.error === `resend 403/${name}`, "and the ledger still names it");
+    }
+    stubFetch(() => jsonResponse({ statusCode: 400, name: "validation_error", message: "bad" }, 400));
+    const bad = await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, CONVO_KEYED);
+    assert(!bad.sent && bad.permanent === true, "a malformed request is still permanent");
   } finally {
     teardown();
   }

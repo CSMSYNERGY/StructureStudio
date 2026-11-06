@@ -67,6 +67,13 @@ export async function teamEmails(admin: Db, clientId: string, userIds: string[],
   return [...new Set([...emails, ...extra.map((e) => e.toLowerCase())].filter((e) => EMAIL.test(e)))].slice(0, MAX_RECIPIENTS);
 }
 
+/** The first `chars` lowercase hex characters of SHA-256(s): an address or a note's words, made
+ *  short and safe for an Idempotency-Key (no address ever goes into a header in the clear). */
+async function hex(s: string, chars: number): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, chars);
+}
+
 function bounded<T>(work: Promise<T>, onTimeout: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([work, new Promise<T>((r) => { timer = setTimeout(() => r(onTimeout), SEND_MS); })])
@@ -99,8 +106,14 @@ export async function sendLeadAlert(clientId: string, to: string[], tpl: Tpl, to
  * A NOTE TO THE BUILDER'S OWN TEAM from an automation (migration 365's notify_team). Plain text the
  * builder wrote, from the platform address like the lead alert — our product telling the team
  * something, never the builder writing to a customer. Same switch as sendLeadAlert; never throws.
+ *
+ * `key` (2026-11-06): the same value on every try of one note — crm-rules-tick passes its outbox
+ * row. Each recipient's send then carries its own Idempotency-Key (the key, the address and a
+ * fingerprint of the words), so a retry after a lost answer is answered by Resend instead of
+ * emailing that person a second copy. A changed
+ * note (a customer's details moved between tries) gets a new fingerprint and goes out.
  */
-export async function sendTeamNote(clientId: string, to: string[], subject: string, text: string): Promise<{ sent: number; error: string | null }> {
+export async function sendTeamNote(clientId: string, to: string[], subject: string, text: string, key?: string | null): Promise<{ sent: number; error: string | null }> {
   try {
     if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
     if (!to.length) return { sent: 0, error: "no recipient" };
@@ -108,10 +121,13 @@ export async function sendTeamNote(clientId: string, to: string[], subject: stri
     const html = `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#1E293B">${
       text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string)).replace(/\r?\n/g, "<br>")}</div>`;
     const subj = subject.replace(/[\r\n]+/g, " ").slice(0, 200) || "A note from your automations";
+    const base = typeof key === "string" ? key.trim() : "";
+    const words = base ? await hex(`${subj}\u0000${text}`, 16) : "";
     return await bounded((async () => {
-      const results = await Promise.allSettled(to.map((addr) => rsSendEmail({
+      const results = await Promise.allSettled(to.map(async (addr) => rsSendEmail({
         from: PLATFORM_NOTIFY_FROM, to: addr, subject: subj, html, text,
         tags: [{ name: "kind", value: "team_note" }, { name: "client_id", value: clientId }],
+        ...(base ? { idempotencyKey: `${base}/${await hex(addr, 12)}/${words}` } : {}),
       })));
       const failed = results.filter((x): x is PromiseRejectedResult => x.status === "rejected");
       if (!failed.length) return { sent: to.length, error: null };

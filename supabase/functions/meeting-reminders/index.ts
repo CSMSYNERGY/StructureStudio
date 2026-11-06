@@ -68,9 +68,25 @@ const HORIZON_MS = 15 * 86_400_000;
  */
 const LATE_GRACE_MS = 2 * 3_600_000;
 
+/**
+ * The grace for ONE offset: two hours, or a quarter of the offset when that is shorter
+ * (2026-11-06). A flat two hours is the whole of a 2-hour reminder, so "in 2 hours" could go out
+ * minutes before the meeting — and with failed reminders now retried every tick, any email outage
+ * up to two hours long would do exactly that. A quarter keeps the words roughly true: a 2-hour
+ * reminder may be up to 30 minutes late, a 24-hour one up to two hours, as before.
+ */
+function lateGraceMs(hours: number): number {
+  return Math.min(LATE_GRACE_MS, (hours * 3_600_000) / 4);
+}
+
 /** One invocation's cap. The tick is every five minutes, so a backlog drains quickly; an
  *  unbounded batch would risk the Worker's subrequest budget and the function's wall clock. */
 const MAX_PER_RUN = 60;
+
+/** And a time cap (2026-11-06): a hung send now ends at resend.ts's 30 s bound, but sixty of them
+ *  could still outlast the wall clock. Stop starting new reminders once a run is this old; what is
+ *  left is still unclaimed, and the next tick takes it. */
+const RUN_BUDGET_MS = 150_000;
 
 function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -110,6 +126,26 @@ function callerAllowed(authorization: string | null, secretHeader: string | null
   // verify_jwt = true, so the gateway checked the signature before this function ran. With
   // verification off, anyone could forge the claim.
   return jwtRole(presented) === "service_role";
+}
+
+/**
+ * Give one reminder offset back, so the next tick tries it again (2026-11-06). True when it was
+ * given back.
+ *
+ * A read and a write, not one UPDATE: there is no un-claim function and this is not worth a
+ * migration. Two ticks overlapping on the same meeting could in theory put back an offset the
+ * other just claimed, which would only mean that offset is tried twice — and its idempotency key
+ * makes the second try an answer from Resend, not a second email.
+ */
+// deno-lint-ignore no-explicit-any
+async function unclaimReminder(admin: any, meetingId: string, hours: number): Promise<boolean> {
+  const { data: row, error } = await admin.from("meetings").select("reminders_sent").eq("id", meetingId).maybeSingle();
+  if (error || !row) return false;
+  const cur: number[] = Array.isArray(row.reminders_sent) ? row.reminders_sent.map(Number) : [];
+  if (!cur.includes(hours)) return false;
+  const { error: ue } = await admin.from("meetings")
+    .update({ reminders_sent: cur.filter((x) => x !== hours) }).eq("id", meetingId);
+  return !ue;
 }
 
 Deno.serve(withErrorLog("meeting-reminders", async (req: Request) => {
@@ -168,12 +204,13 @@ Deno.serve(withErrorLog("meeting-reminders", async (req: Request) => {
     .limit(500);
   if (error) throw error;
 
-  let sent = 0, skippedLate = 0, noEmail = 0, failed = 0;
+  let sent = 0, skippedLate = 0, noEmail = 0, failed = 0, retrying = 0;
   let considered = 0;
 
   // deno-lint-ignore no-explicit-any
   for (const m of ((rows ?? []) as any[])) {
     if (sent + skippedLate + failed >= MAX_PER_RUN) break;
+    if (Date.now() - now > RUN_BUDGET_MS) break; // see RUN_BUDGET_MS
 
     const hours: number[] = wants.get(m.client_id) ?? [];
     if (!hours.length) continue;
@@ -207,26 +244,45 @@ Deno.serve(withErrorLog("meeting-reminders", async (req: Request) => {
       }
       if (!claimed) break; // somebody else took it in this same tick
 
-      if (now - dueAt > LATE_GRACE_MS) {
-        // Claimed so it never retries, deliberately NOT sent — see LATE_GRACE_MS.
+      // The clock read NOW, not at the top of the run: a run slowed by a slow provider must not
+      // judge a reminder by a time that has already passed.
+      const lateBy = Date.now() - dueAt;
+      const grace = lateGraceMs(h);
+      if (lateBy > grace) {
+        // Claimed so it never retries, deliberately NOT sent — see LATE_GRACE_MS and lateGraceMs.
         skippedLate++;
         await logEdgeError({
           fn: "meeting-reminders", req, clientId: m.client_id, code: "reminder_too_late",
-          message: `The ${h}h reminder for meeting ${m.id} came due ${Math.round((now - dueAt) / 60000)} min ago, past the ${LATE_GRACE_MS / 3_600_000}h grace, so it was marked done WITHOUT being sent. A cron outage is the usual cause.`,
+          message: `The ${h}h reminder for meeting ${m.id} came due ${Math.round(lateBy / 60000)} min ago, past its ${Math.round(grace / 60000)} min grace, so it was marked done WITHOUT being sent. A cron or email outage is the usual cause.`,
         });
         break;
       }
 
       if (!m.customer_email) { noEmail++; break; }
 
-      const out = await sendMeetingEmail(admin, { meetingId: m.id, which: "reminder", reminderHours: h, req });
+      const out = await sendMeetingEmail(admin, {
+        meetingId: m.id, which: "reminder", reminderHours: h, req,
+        // The same on every try of this one reminder: see the retry below.
+        idempotencyKey: `meeting-reminder/${m.id}/${h}`,
+      });
       if (out.sent) sent++; else failed++;
-      // One reminder per meeting per tick, whatever happened. A failure is already claimed,
-      // so it will not be retried — the alternative (un-claiming) risks a double-send, and a
-      // missing reminder is the lesser of the two. meetingSend logs every failure.
+      // ⚠️ A FAILED REMINDER IS RETRIED NOW (2026-11-06). It used to stay claimed and never go:
+      // un-claiming risked a double-send, and a missing reminder was the lesser harm. The key
+      // above removes that risk — if the try that "failed" did reach Resend, the retry gets the
+      // first answer back and the customer one email — so a failure the provider may recover from
+      // (out.transient) is un-claimed, and the next tick tries again. The late grace still ends it:
+      // once the reminder is later than its grace (two hours, or a quarter of the offset) it is
+      // claimed without sending, so a long outage never turns into "see you tomorrow" an hour
+      // before the meeting, or "in 2 hours" minutes before it.
+      // A refusal no retry changes (no address, switched off, a permanent provider verdict) stays
+      // claimed. meetingSend logs every failure.
+      if (!out.sent && out.transient) {
+        if (await unclaimReminder(admin, m.id, h)) retrying++;
+      }
+      // One reminder per meeting per tick, whatever happened.
       break;
     }
   }
 
-  return await finish({ ok: true, considered, sent, skippedLate, noEmail, failed, candidates: (rows ?? []).length });
+  return await finish({ ok: true, considered, sent, skippedLate, noEmail, failed, retrying, candidates: (rows ?? []).length });
 }));
