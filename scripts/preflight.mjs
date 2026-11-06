@@ -116,7 +116,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (f) => readFileSync(join(root, f), "utf8");
@@ -2173,6 +2173,14 @@ function quickTestGroups(groups, read) {
 function readTestFile(g, f) {
   return readFileSync(join(g.cwd ?? join(root, FUNCTIONS_DIR), f), "utf8");
 }
+// `groups` minus the files `done` already ran, matched within their own group; an emptied group
+// drops out. Pure, so --self-test can check it directly.
+function groupsWithout(groups, done) {
+  const ran = new Set(done.flatMap((g) => g.files.map((f) => `${g.label}\0${f}`)));
+  return groups
+    .map((g) => ({ ...g, files: g.files.filter((f) => !ran.has(`${g.label}\0${f}`)) }))
+    .filter((g) => g.files.length);
+}
 // `npm run ship` reads "preflight:" and "push refused" as a real refusal, so it stops instead of
 // retrying as if it had lost a race. Keep both words in the first line.
 function refuseEarly(errors) {
@@ -2231,7 +2239,185 @@ function sqlSubjectTouched(cwd = root) {
 function sqlTestsRequired(env = process.env, touched = []) {
   return !!env.CI || env.SS_REQUIRE_SQL_TESTS === "1" || touched.length > 0;
 }
-function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired(), touched = []) {
+
+// ── ONLY WHEN SOMETHING THEY READ CHANGED, AND 8 AT A TIME (2026-11-06) ─────────────────
+// These tests were three quarters of the gate: 68 files at 27 seconds each, one at a time, about
+// 31 of a clean push's 40 minutes on Ahsan's PC. Carolyn's agents push about once an hour, so a
+// gate that long lost the race to her about half the time and then ran again in full. Two
+// changes, neither of which drops a check:
+//
+//   1. A push that changes nothing these tests read skips them, silently. Their verdict depends
+//      on their own folder, the migrations, and the few other repo files they name (today
+//      _shared/access.ts, billingPeriods.ts and billingWebhookRedact.ts), so if none of those
+//      moved, the result is the one they gave when those files last changed, which was also a
+//      push through this gate. 24 of 134 beta commits from 10-30 to 11-06 touched any of them.
+//      What they read is DISCOVERED from the test files, not listed here, and it fails closed:
+//      a file that builds a path this scan cannot read, or a push whose changes git cannot
+//      name (a new branch, no upstream, git missing), runs the whole suite. CI and
+//      SS_REQUIRE_SQL_TESTS=1 always run it. --no-verify breaks the chain, as it breaks
+//      everything else here; the promotion's CI run puts it back together.
+//   2. When they run, they run SQL_JOBS_MAX at a time (measured: 424 s for all 68, against
+//      about 31 minutes). Each one peaks near 1 GB, so the count also respects free memory.
+//      SS_SQL_JOBS=<n> sets it by hand.
+
+// What one test file reads from the repo. `WT` is the repo root in every file here
+// (path.resolve(__dirname, "../..")), and every read is path.join(WT, "<literal>", ...) or a
+// variable built that way. A module the test loads to run it (four of them load a _shared .ts:
+// `await import(pathToFileURL(path.join(WT, "<literal>")).href)`) counts with everything it imports
+// in turn. Anything else that leaves the folder, a path from a variable, another use of
+// __dirname, a relative require, any other dynamic import, a module importing something that is
+// not a relative path, makes the file `always`: it runs whenever the suite does, which is every
+// push. Comments count too, which only ever adds inputs.
+const SQL_WT_DEF = /\bWT\s*=\s*path\.resolve\(\s*__dirname\s*,\s*(["'`])\.\.\/\.\.\1\s*\)/g;
+const SQL_WT_ARG = /path\.(?:join|resolve)\(\s*WT\s*,\s*/g;
+const SQL_TS_IMPORT = /\bimport\(\s*pathToFileURL\(\s*path\.join\(\s*WT\s*,\s*(["'])([^"'`$]+)\1\s*\)\s*\)\.href\s*\)/g;
+const SQL_MODULE_SPEC = /\b(?:import|export)\b[^;'"`]*?\bfrom\s*(["'])([^"']+)\1|\bimport\s*(["'])([^"']+)\3/g;
+// Adds `rel` and every module it imports, relative path by relative path, to `out`. False when it
+// cannot follow them: a file it cannot read, a require or dynamic import, or a specifier that is
+// not relative (npm:, jsr:, a bare name), which is never a file in this repo it could name.
+function sqlModuleInputs(rel, readRepo, out, depth = 0) {
+  if (out.has(rel)) return true;
+  out.add(rel);
+  const text = readRepo(rel);
+  if (text === null || depth > 20 || /\brequire\(|\bimport\(/.test(text)) return false;
+  for (const m of text.matchAll(SQL_MODULE_SPEC)) {
+    const spec = m[2] ?? m[4];
+    if (!spec.startsWith("./") && !spec.startsWith("../")) return false;
+    const next = posix.normalize(posix.join(posix.dirname(rel), spec));
+    if (next.startsWith("..") || !sqlModuleInputs(next, readRepo, out, depth + 1)) return false;
+  }
+  return true;
+}
+function sqlTestInputs(texts, ownDir = SQL_TESTS_DIR, readRepo = readIfExists) {
+  const paths = new Set([ownDir.replace(/\\/g, "/").replace(/\/+$/, "")]);
+  const always = [];
+  for (const [name, text] of Object.entries(texts)) {
+    const modules = [...text.matchAll(SQL_TS_IMPORT)].map((m) => m[2].replace(/\\/g, "/").replace(/^\.\//, ""));
+    let blind = /\brequire\(\s*(["'`])\.{1,2}\//.test(text)
+      || (text.match(/\bimport\(/g) || []).length !== modules.length
+      || /\bprocess\.cwd\(\)/.test(text)
+      || (text.match(/__dirname/g) || []).length !== (text.match(SQL_WT_DEF) || []).length;
+    for (const mod of modules) {
+      const seen = new Set();
+      if (mod.startsWith("..") || !sqlModuleInputs(mod, readRepo, seen)) blind = true;
+      for (const p of seen) paths.add(p);
+    }
+    for (const m of text.matchAll(SQL_WT_ARG)) {
+      const rest = text.slice(m.index + m[0].length);
+      const q = rest[0];
+      let lit = null;
+      if (q === '"' || q === "'") {
+        const end = rest.indexOf(q, 1);
+        if (end > 0) lit = rest.slice(1, end);
+      } else if (q === "`") {
+        const end = rest.indexOf("`", 1);
+        const hole = rest.indexOf("${", 1);
+        if (end > 0 && (hole < 0 || hole > end)) lit = rest.slice(1, end);
+        else if (hole > 0) lit = rest.slice(1, hole).replace(/[^/]*$/, ""); // the folder before the hole
+      }
+      lit = lit === null ? "" : lit.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+      if (!lit || lit.startsWith("..")) blind = true;
+      else paths.add(lit);
+    }
+    if (blind) always.push(name);
+  }
+  return { paths: [...paths].sort(), always: always.sort() };
+}
+function sqlInputHit(changed, paths) {
+  return paths.some((p) => changed === p || changed.startsWith(`${p}/`));
+}
+
+// What this push changes, or null when that cannot be said, in which case the tests run.
+// .githooks/pre-push hands over the exact ranges it was given (SS_PUSH_RANGES, "unknown" for a new
+// branch); a hand run of `npm run preflight` compares with the upstream. Both add what is not
+// committed yet and new files git does not track, so a check before the commit sees them too.
+// Local git only, never the network.
+function pushChangedPaths(env = process.env, cwd = root) {
+  const ask = (args) => {
+    try {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      return r.status === 0 && typeof r.stdout === "string" ? r.stdout.split("\n") : null;
+    } catch (_e) { return null; }
+  };
+  const lists = [];
+  if (env.SS_PUSH_RANGES !== undefined) {
+    const ranges = env.SS_PUSH_RANGES.trim().split(/\s+/).filter(Boolean);
+    if (!ranges.length || ranges.some((r) => !/^[0-9a-f]{7,64}\.\.[0-9a-f]{7,64}$/i.test(r))) return null;
+    for (const r of ranges) lists.push(ask(["diff", "--name-only", ...r.split("..")]));
+  } else {
+    lists.push(ask(["diff", "--name-only", "@{u}...HEAD"]));
+  }
+  lists.push(ask(["diff", "--name-only", "HEAD"]), ask(["ls-files", "--others", "--exclude-standard"]));
+  if (lists.some((l) => l === null)) return null;
+  return [...new Set(lists.flat().map((f) => f.trim().replace(/\\/g, "/")).filter(Boolean))];
+}
+
+const SQL_JOBS_MAX = 8;
+const SQL_JOB_BYTES = 1280 * 1024 * 1024;
+function machineNow() {
+  const os = createRequire(import.meta.url)("node:os");
+  return { cores: typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length, free: os.freemem() };
+}
+function sqlJobs(env = process.env, { cores, free } = machineNow()) {
+  const asked = Number(env.SS_SQL_JOBS);
+  if (Number.isInteger(asked) && asked >= 1) return asked;
+  return Math.max(1, Math.min(SQL_JOBS_MAX, cores - 1, Math.floor(free / SQL_JOB_BYTES)));
+}
+
+// Runs `node <file>` for each file, `jobs` at a time, in `cwd`. The pool lives in a child Node so
+// this step stays synchronous like every other one here (the self-test calls it that way): this
+// process waits on one spawnSync while the child keeps the files going. Each result keeps its
+// output's last 25 lines, sorted by file name so a report reads the same on every run. `error` is
+// set when the pool itself did not finish, which is no verdict on any test.
+function sqlPool() {
+  const { spawn } = require("child_process");
+  const { files, cwd, jobs } = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  const results = [];
+  let next = 0;
+  const one = (f) => new Promise((resolve) => {
+    let out = "";
+    let done = false;
+    const finish = (status, signal) => {
+      if (done) return;
+      done = true;
+      results.push({ f, status, signal, out: out.trim().split("\n").slice(-25).join("\n") });
+      resolve();
+    };
+    let child;
+    try {
+      child = spawn(process.execPath, [f], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      out = String(e && e.message ? e.message : e);
+      return finish(null, null);
+    }
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { out += d; });
+    child.on("error", (e) => { out += `\n${e.message}`; finish(null, null); });
+    child.on("close", finish);
+  });
+  const worker = async () => { while (next < files.length) await one(files[next++]); };
+  Promise.all(Array.from({ length: Math.max(1, Math.min(jobs, files.length)) }, worker)).then(() => {
+    results.sort((a, b) => (a.f < b.f ? -1 : a.f > b.f ? 1 : 0));
+    process.stdout.write(JSON.stringify(results));
+  });
+}
+function runNodeFilesPooled(files, cwd, jobs) {
+  const res = spawnSync(process.execPath, ["-e", `(${sqlPool.toString()})()`], {
+    cwd, encoding: "utf8", input: JSON.stringify({ files, cwd, jobs }), maxBuffer: 64 * 1024 * 1024,
+  });
+  try {
+    const results = res.status === 0 ? JSON.parse(res.stdout) : null;
+    // Every file answers once, or the pool has no verdict: a test that never ran must not read as passed.
+    if (Array.isArray(results) && results.length === files.length
+      && [...files].sort().every((f, i) => results[i] && results[i].f === f)) return { results };
+  } catch (_e) { /* falls through to the no-verdict answer */ }
+  const why = res.error ? res.error.message : `exit ${res.status ?? res.signal}`;
+  return { results: [], error: `${why}\n${`${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n")}` };
+}
+
+// `changed` is what this push changes (pushChangedPaths()): left out, as the self-test's older
+// calls do, the suite runs exactly as it did before 2026-11-06; null means "cannot tell" and runs it.
+function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired(), touched = [], changed = undefined) {
   if (!existsSync(dir)) return { errors: [], skipped: true, why: `${SQL_TESTS_DIR}/ does not exist`, files: [] };
   const files = readdirSync(dir).filter((f) => f.endsWith(".test.cjs")).sort();
   if (!files.length) return { errors: [], skipped: true, why: `no *.test.cjs files in ${SQL_TESTS_DIR}/`, files };
@@ -2262,14 +2448,25 @@ function sqlTests(dir = join(root, SQL_TESTS_DIR), required = sqlTestsRequired()
       shortWhy: `${SQL_TESTS_DIR}/node_modules is not installed`,
     };
   }
+  // Nothing they read changed: silent, like any other passing step (see the section above).
+  if (!required && Array.isArray(changed)) {
+    const texts = Object.fromEntries(files.map((f) => [f, readFileSync(join(dir, f), "utf8")]));
+    const own = relative(root, dir).replace(/\\/g, "/") || ".";
+    const inputs = sqlTestInputs(texts, own);
+    if (!inputs.always.length && !changed.some((p) => sqlInputHit(p, inputs.paths))) {
+      return { errors: [], skipped: false, unchanged: true, files };
+    }
+  }
   const errors = [];
-  for (const f of files) {
-    // process.execPath, no shell: the same Node that is running this gate, and no quoting of a
-    // path that may contain a space.
-    const res = spawnSync(process.execPath, [f], { cwd: dir, encoding: "utf8" });
-    if (res.status !== 0) {
-      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`.trim().split("\n").slice(-25).join("\n");
-      errors.push(`migration tests: ${SQL_TESTS_DIR}/${f} failed (exit ${res.status ?? res.signal})\n${out}`);
+  // process.execPath, no shell: the same Node that is running this gate, and no quoting of a
+  // path that may contain a space.
+  const pool = runNodeFilesPooled(files, dir, sqlJobs());
+  if (pool.error) {
+    errors.push(`migration tests: the runner did not finish, so this is not a test verdict: ${pool.error}`);
+  }
+  for (const r of pool.results) {
+    if (r.status !== 0) {
+      errors.push(`migration tests: ${SQL_TESTS_DIR}/${r.f} failed (exit ${r.status ?? r.signal})\n${r.out}`);
     }
   }
   return { errors, skipped: false, files };
@@ -3514,6 +3711,142 @@ if (process.argv.includes("--self-test")) {
   }
   console.log(`self-test passed: the migration tests run only when ${SQL_TESTS_DIR}/node_modules exists (SKIPPED otherwise, a FAILURE when required by CI, SS_REQUIRE_SQL_TESTS=1, or because the push touches a migration or _shared/access.ts), the refusal names what made it required, the subject matcher fires both ways, and a failing test fails the gate (${realSql.files.length} file(s) found)`);
 
+  // ── Migration tests: only when what they read changed, and 8 at a time (2026-11-06) ──────
+  {
+    const fail = (why) => { console.error(`self-test FAILED: ${why}`); process.exit(1); };
+
+    // What a test reads: literal paths and the folder before a template hole count, and anything
+    // the scan cannot read makes the file `always`, so it can only ever run more, never less.
+    const inp = sqlTestInputs({
+      "a.test.cjs": 'const WT = path.resolve(__dirname, "../..");\n'
+        + 'const M = path.join(WT, "supabase/migrations/300_x.sql");\n'
+        + "const A = path.join(WT, 'supabase/functions/_shared/access.ts');\n"
+        + 'const D = path.join(WT, "supabase/migrations", f);\n'
+        + "const T = path.join(WT, `supabase/functions/_shared/${n}.ts`);\n",
+      "b.test.cjs": 'const WT = path.resolve(__dirname, "../..");\nconst X = path.join(WT, name);\n',
+      "c.test.cjs": 'const ROOT = path.resolve(__dirname, "..", "..");\nfs.readFileSync(path.join(ROOT, "portal/01-core.jsx"));\n',
+      "d.test.cjs": 'const WT = path.resolve(__dirname, "../..");\nconst Y = path.join(WT, `${dir}/x.sql`);\n',
+      "e.test.cjs": 'const lib = require("../lib.cjs");\n',
+      "f.test.cjs": 'const WT = path.resolve(__dirname, "../..");\nconst Z = path.join(WT, "../outside.sql");\n',
+      // A module loaded to run it counts with what it imports; one importing a package cannot be followed.
+      "g.test.cjs": 'const WT = path.resolve(__dirname, "../..");\n'
+        + 'const m = await import(pathToFileURL(path.join(WT, "supabase/functions/_shared/mod.ts")).href);\n',
+      "h.test.cjs": 'const WT = path.resolve(__dirname, "../..");\n'
+        + 'const m = await import(pathToFileURL(path.join(WT, "supabase/functions/_shared/pkg.ts")).href);\n',
+    }, SQL_TESTS_DIR, (p) => ({
+      "supabase/functions/_shared/mod.ts": 'import { a } from "./dep.ts";\nexport type { T } from "../types/t.ts";\n',
+      "supabase/functions/_shared/dep.ts": "export const a = 1;\n",
+      "supabase/functions/types/t.ts": "export type T = number;\n",
+      "supabase/functions/_shared/pkg.ts": 'import { z } from "npm:zod";\n',
+    })[p] ?? null);
+    const wantPaths = ["supabase/functions/_shared", "supabase/functions/_shared/access.ts", "supabase/functions/_shared/dep.ts",
+      "supabase/functions/_shared/mod.ts", "supabase/functions/_shared/pkg.ts", "supabase/functions/types/t.ts",
+      "supabase/migrations", "supabase/migrations/300_x.sql", SQL_TESTS_DIR].sort();
+    if (JSON.stringify(inp.paths) !== JSON.stringify(wantPaths)
+      || JSON.stringify(inp.always) !== JSON.stringify(["b.test.cjs", "c.test.cjs", "d.test.cjs", "e.test.cjs", "f.test.cjs", "h.test.cjs"])) {
+      fail(`sqlTestInputs read the fixtures wrong: ${JSON.stringify(inp)}`);
+    }
+    if (!sqlInputHit("supabase/migrations/301_y.sql", ["supabase/migrations"])
+      || !sqlInputHit("supabase/functions/_shared/access.ts", ["supabase/functions/_shared/access.ts"])
+      || sqlInputHit("supabase/migrations-old/x.sql", ["supabase/migrations"])
+      || sqlInputHit("portal/01-core.jsx", ["supabase/migrations", SQL_TESTS_DIR])) {
+      fail("sqlInputHit matches a path it should not, or misses one it should");
+    }
+
+    // The real suite: every file must be readable by the scan, or the skip never happens and the
+    // gate quietly goes back to 30 minutes. The three _shared files are the ones read today.
+    const realInputs = sqlTestInputs(Object.fromEntries(realSql.files.map((f) => [f, readFileSync(join(root, SQL_TESTS_DIR, f), "utf8")])));
+    if (realInputs.always.length) {
+      fail(`these migration tests read the repo in a way the scan cannot follow, so the suite now runs on every push: ${realInputs.always.join(", ")}. Read through path.join(WT, "<literal>") as the others do.`);
+    }
+    for (const want of ["supabase/migrations", "supabase/functions/_shared/access.ts", "supabase/functions/_shared/billingPeriods.ts", SQL_TESTS_DIR]) {
+      if (!realInputs.paths.includes(want)) fail(`the real migration tests' inputs no longer include ${want}: ${JSON.stringify(realInputs.paths)}`);
+    }
+    if (sqlInputHit("portal/01-core.jsx", realInputs.paths) || sqlInputHit("scripts/preflight.mjs", realInputs.paths)) {
+      fail("a portal or gate change counts as a migration-test input, so the skip would never happen");
+    }
+
+    // What a push changes: an unknown answer is null, never "nothing".
+    if (pushChangedPaths({ SS_PUSH_RANGES: "unknown" }) !== null || pushChangedPaths({ SS_PUSH_RANGES: "" }) !== null
+      || pushChangedPaths({ SS_PUSH_RANGES: "HEAD..HEAD" }) !== null || pushChangedPaths({}, tmpdir()) !== null) {
+      fail("pushChangedPaths answered a list where it cannot know what the push changes");
+    }
+    const headSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim();
+    if (/^[0-9a-f]{40,64}$/.test(headSha) && !Array.isArray(pushChangedPaths({ SS_PUSH_RANGES: `${headSha}..${headSha}` }))) {
+      fail("pushChangedPaths could not read an exact range the hook would hand it");
+    }
+
+    // How many at a time: SS_SQL_JOBS wins, then cores - 1, free memory and SQL_JOBS_MAX, never 0.
+    const GB = 2 ** 30;
+    const jobsCases = [
+      [{ SS_SQL_JOBS: "3" }, { cores: 22, free: 64 * GB }, 3], [{}, { cores: 22, free: 12 * GB }, 8],
+      [{}, { cores: 4, free: 16 * GB }, 3], [{}, { cores: 22, free: 2 * GB }, 1],
+      [{}, { cores: 1, free: 64 * GB }, 1], [{ SS_SQL_JOBS: "0" }, { cores: 22, free: 12 * GB }, 8],
+    ];
+    for (const [env, box, want] of jobsCases) {
+      if (sqlJobs(env, box) !== want) fail(`sqlJobs(${JSON.stringify(env)}, ${JSON.stringify(box)}) is ${sqlJobs(env, box)}, not ${want}`);
+    }
+
+    const tmpQ = mkdtempSync(join(tmpdir(), "ss-preflight-sqlq-"));
+    try {
+      // The skip, on a fixture whose one test always fails, so "it ran" and "it was skipped" differ.
+      mkdirSync(join(tmpQ, "node_modules"));
+      writeFileSync(join(tmpQ, "fails.test.cjs"),
+        '// reads path.join(WT, "supabase/migrations/999_fixture.sql")\nconsole.log("FAIL deliberately"); process.exit(1);\n');
+      const unrelated = sqlTests(tmpQ, false, [], ["portal/01-core.jsx", "scripts/preflight.mjs"]);
+      if (unrelated.errors.length || !unrelated.unchanged || unrelated.skipped) fail("a push changing nothing the migration tests read still ran them");
+      for (const [why, req, changed] of [
+        ["a push changing the migration they read", false, ["supabase/migrations/999_fixture.sql"]],
+        ["a push whose changes git could not name", false, null],
+        ["a REQUIRED run (CI, SS_REQUIRE_SQL_TESTS=1, or a touched subject)", true, ["portal/01-core.jsx"]],
+        ["a call that passes no changes, as the older callers do", false, undefined],
+      ]) {
+        const r = sqlTests(tmpQ, req, [], changed);
+        if (r.unchanged || r.errors.length !== 1 || !/fails\.test\.cjs failed/.test(r.errors[0])) fail(`${why} did not run the migration tests`);
+      }
+
+      // The pool really runs them side by side: a and b each wait for the other to start, so one
+      // at a time would fail both after 20 seconds. c fails, and only c is reported.
+      const waitFor = (me, other) => `const fs = require("fs"); fs.writeFileSync("${me}.start", ""); const t = Date.now();\n`
+        + `(function wait() { if (fs.existsSync("${other}.start")) process.exit(0);\n`
+        + `  if (Date.now() - t > 20000) { console.log("${other} never started"); process.exit(1); } setTimeout(wait, 50); })();\n`;
+      const tmpP = join(tmpQ, "pool");
+      mkdirSync(tmpP);
+      writeFileSync(join(tmpP, "a.test.cjs"), waitFor("a", "b"));
+      writeFileSync(join(tmpP, "b.test.cjs"), waitFor("b", "a"));
+      writeFileSync(join(tmpP, "c.test.cjs"), 'console.log("FAIL on purpose"); process.exit(2);\n');
+      const pool = runNodeFilesPooled(["c.test.cjs", "b.test.cjs", "a.test.cjs"], tmpP, 2);
+      const got = pool.results.map((r) => `${r.f}:${r.status}`).join(" ");
+      if (pool.error || got !== "a.test.cjs:0 b.test.cjs:0 c.test.cjs:2" || !/FAIL on purpose/.test(pool.results[2].out)) {
+        fail(`the migration-test pool did not run two at a time, or misreported: ${got} ${pool.error ?? ""}`);
+      }
+    } finally {
+      rmSync(tmpQ, { recursive: true, force: true });
+    }
+
+    // The quick tests are not run twice: the full step gets the rest, matched within each group.
+    const gw = groupsWithout(
+      [{ label: "x", files: ["1", "2"], importMap: "m" }, { label: "y", files: ["2"] }, { label: "z", files: ["3"] }],
+      [{ label: "x", files: ["2"] }, { label: "z", files: ["3"] }]);
+    if (JSON.stringify(gw) !== JSON.stringify([{ label: "x", files: ["1"], importMap: "m" }, { label: "y", files: ["2"] }])) {
+      fail(`groupsWithout is wrong: ${JSON.stringify(gw)}`);
+    }
+    const allGroups = testGroups();
+    const quickGroups = quickTestGroups(allGroups, readTestFile);
+    const count = (gs) => gs.reduce((n, g) => n + g.files.length, 0);
+    if (count(groupsWithout(allGroups, quickGroups)) + count(quickGroups) !== count(allGroups)) {
+      fail("the quick tests and the rest do not add up to the whole Deno suite");
+    }
+    // ...and the main flow uses both halves, with the final wording checks kept for CI.
+    const selfText = readFileSync(join(root, "scripts", "preflight.mjs"), "utf8").replace(/\r\n/g, "\n");
+    if (!selfText.includes("\nconst restGroups = groupsWithout(testGroups(), quickPassed);\n")
+      || !selfText.includes("\nif (process.env.CI) {\n  errors.push(...checkEstimateWording());\n")
+      || !selfText.includes("pushChangedPaths());\n")) {
+      fail("the main flow no longer leaves out the quick tests, keeps the final wording checks for CI, or hands the migration tests the push's changes");
+    }
+    console.log(`self-test passed: the migration tests skip a push that changes nothing they read (${realInputs.paths.length} input path(s) found in ${realSql.files.length} file(s)) and run when it does, when git cannot tell, and when required; they run ${sqlJobs()} at a time here, side by side; the quick tests are not run twice (${count(quickGroups)} of ${count(allGroups)})`);
+  }
+
   // ── The script-test step (scripts/*.test.mjs, node --test) ───────────────────
   // Discovered for real (the nudge's test must be among them), and on a fixture directory a failing
   // test fails the gate while a passing one does not.
@@ -4217,9 +4550,14 @@ const errors = run(load());
 // See "The quick tests". The lint above took seconds and so do these, so a failure in any of them
 // refuses the push now, before the artifact check (minutes) and the slow steps. Not under CI:
 // nobody is waiting on the promotion's gate, and its report should name everything it finds.
+// quickPassed: the files that stop ran and passed (any failure exits), so the full step below
+// leaves them out instead of running them twice (2026-11-06; about 40 seconds on a clean push).
+let quickPassed = [];
 if (!process.env.CI) {
-  errors.push(...checkMigrationNumbers(), ...denoTest(quickTestGroups(testGroups(), readTestFile)).errors);
+  const quick = quickTestGroups(testGroups(), readTestFile);
+  errors.push(...checkMigrationNumbers(), ...denoTest(quick).errors);
   refuseEarly(errors);
+  quickPassed = quick;
 }
 
 errors.push(...await artifactCheck());
@@ -4241,7 +4579,8 @@ if (deno.skipped) {
   console.error("           supabase/functions/ is NOT covered by this run. Install Deno: https://docs.deno.com/runtime/getting_started/installation/");
 }
 
-const tests = denoTest();
+const restGroups = groupsWithout(testGroups(), quickPassed);
+const tests = restGroups.length || !quickPassed.length ? denoTest(restGroups) : { errors: [], skipped: false };
 errors.push(...tests.errors);
 if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
@@ -4250,7 +4589,7 @@ if (tests.skipped) {
 // What this push would add, so a change to a migration or to the permission model cannot skip
 // the tests that cover it. Local git, never the network; "nothing touched" is the safe answer.
 const sqlTouched = sqlSubjectTouched();
-const sql = sqlTests(join(root, SQL_TESTS_DIR), sqlTestsRequired(process.env, sqlTouched), sqlTouched);
+const sql = sqlTests(join(root, SQL_TESTS_DIR), sqlTestsRequired(process.env, sqlTouched), sqlTouched, pushChangedPaths());
 errors.push(...sql.errors);
 
 const scriptRes = scriptTests();
@@ -4266,9 +4605,13 @@ errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 errors.push(...checkCardTokenMaxAge(Object.fromEntries(CARD_TOKEN_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
-errors.push(...checkEstimateWording());
-errors.push(...checkCustomerHubWording());
-errors.push(...checkMigrationNumbers());
+// Outside CI these three already ran, and passed, at the two early stops (a failure there exits),
+// so only CI, which skips those stops, needs them here (2026-11-06; about 30 seconds a push).
+if (process.env.CI) {
+  errors.push(...checkEstimateWording());
+  errors.push(...checkCustomerHubWording());
+  errors.push(...checkMigrationNumbers());
+}
 
 // The skip is now the LOUDEST thing this gate prints, and on a clean run it is the LAST.
 // It used to be one line in the middle of the output, which is how a skipped migration suite read

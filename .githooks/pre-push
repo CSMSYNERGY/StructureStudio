@@ -67,6 +67,11 @@ all_zero() {
 
 stale=0
 nudge_ranges=""
+# What this push changes on the remote, for the preflight steps that run only when their inputs
+# moved (the migration tests, 2026-11-06). A new branch has no remote tip to compare with, so it
+# says "unknown" and those steps run.
+push_ranges=""
+push_unknown=0
 # `|| [ -n "$local_ref" ]` so a final line with no trailing newline is still processed.
 # No pipeline here on purpose: a `while` fed by a pipe runs in a subshell in POSIX sh and
 # $stale would not survive the loop.
@@ -77,6 +82,7 @@ while read -r local_ref local_oid remote_ref remote_oid || [ -n "$local_ref" ]; 
     *) continue ;;
   esac
   all_zero "$local_oid"  && continue   # deleting the remote ref
+  if all_zero "$remote_oid"; then push_unknown=1; else push_ranges="$push_ranges $remote_oid..$local_oid"; fi
 
   # >>> nudge-collect  (pre-push-selftest.mjs part E moves this block to prove where it must be)
   # The release-note nudge's input: what this push adds to beta. Collected HERE, before the
@@ -142,4 +148,10 @@ if [ ! -d node_modules/eslint ]; then
   exit 1
 fi
 
+if [ "$push_unknown" -eq 0 ] && [ -n "$push_ranges" ]; then
+  SS_PUSH_RANGES="${push_ranges# }"
+else
+  SS_PUSH_RANGES="unknown"
+fi
+export SS_PUSH_RANGES
 node scripts/preflight.mjs || exit 1
