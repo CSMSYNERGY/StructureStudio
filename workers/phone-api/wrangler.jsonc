@@ -50,7 +50,7 @@
     // order (the edge secret first, then this, then a pilot business, then everyone) is
     // SETUP.md 7e. Once it is "on" live, commit it here too: a deploy from a tree that still
     // says "off" stops every charge without a word, and the same goes for CALL_RECORDING.
-    "PHONE_USAGE_METERS": "off",
+    "PHONE_USAGE_METERS": "on",
     // Release 2. Anything but "off" records what every call and text cost at Twilio, and what
     // it would charge at the current markup, as `shadow` rows in usage_charges, while nothing
     // is charged. On from day one so Carolyn has real costs before she sets the markup.
