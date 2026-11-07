@@ -901,6 +901,58 @@ function SmsConsentBoxCard({ on, readOnly, card, onSave }) {
   );
 }
 
+/** "$29.00" from 2900, "-$7.00" from -700. A wallet can go below zero (charges posted after the
+ *  fact), and the Billing card stopped clamping that to $0.00 for the same reason. */
+const smsDollars = (cents) => {
+  const c = Number(cents) || 0;
+  return `${c < 0 ? "-" : ""}$${(Math.abs(c) / 100).toFixed(2)}`;
+};
+
+/**
+ * What a wallet charge on these tabs will cost THIS business, read from the same price list the
+ * server charges from: portal-billing `status` → wallet.meters (active meters only) and
+ * wallet.exempt (metered_exempt, the only flag wallet_hold honours). Billing went live for every
+ * builder on 2026-11-07, and until then no buy button said what it took.
+ *
+ * Each fee is a number of cents (0 = free: ONLY when the business is exempt) or null = unknown.
+ * ⚠️ A METER MISSING FROM THE LIST IS UNKNOWN, NEVER FREE. portal-billing sends the same empty
+ * list when its usage_prices read fails, and the server still holds the full price then (the trap
+ * portal-settings' meter read documents: "A FAILED READ IS null, NOT METER OFF"). Unknown never
+ * guesses: the screen says where the price is listed and adds no confirm, so a press behaves
+ * exactly as it did before this existed.
+ *
+ * `enabled` is true only while a priced button is on screen (one billing read, one operator audit
+ * row in view-as, per visit otherwise). `refreshKey` re-reads after anything that spends: a
+ * status change or a new number.
+ */
+function useSmsWalletFees(enabled, refreshKey) {
+  const [fees, setFees] = useState(null);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let live = true;
+    sb.functions.invoke("portal-billing", { body: { action: "status" } })
+      .then(({ data: d, error }) => {
+        if (!live) return;
+        const w = !error && d && d.wallet;
+        if (!w || !Array.isArray(w.meters)) { setFees(null); return; }
+        const fee = (kind) => {
+          if (w.exempt) return 0;
+          const m = w.meters.find((x) => x && x.kind === kind);
+          if (!m) return null;
+          return typeof m.priceCents === "number" && m.priceCents > 0 ? m.priceCents : null;
+        };
+        setFees({
+          numberCents: fee("sms_number_monthly"),
+          registrationCents: fee("sms_registration"),
+          availableCents: Number(w.balanceCents || 0) - Number(w.heldCents || 0),
+        });
+      })
+      .catch(() => { if (live) setFees(null); });
+    return () => { live = false; };
+  }, [enabled, refreshKey]);
+  return fees;
+}
+
 function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN. This file's siblings guard with
   // early returns and a hook added below one white-screens the page on React #310 — which
@@ -943,6 +995,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   const [found, setFound] = useState(null);
   const [foundFor, setFoundFor] = useState("");      // the digits `found` came back for
   const [problems, setProblems] = useState([]);
+  // The $49 registration and the $29 number, as this business will be charged (null = unknown).
+  const fees = useSmsWalletFees(
+    !!canEdit && !!data && (data.status === "profile_pending" || data.status === "campaign_approved"),
+    data ? `${data.status}:${(data.numbers || []).length}` : "");
+  const regCents = fees ? fees.registrationCents : null;
+  const numCents = fees ? fees.numberCents : null;
+  const walletCents = fees ? fees.availableCents : null;
 
   const call = useCallback(async (action, body) => {
     const { data: d, error } = await sb.functions.invoke("portal-sms", { body: { action, ...(body || {}) } });
@@ -1402,9 +1461,26 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             Your business details are lodged with the carriers. The next step registers the
             business itself so they can start their checks — that usually takes a few days.
           </p>
-          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }}>
-            <strong>This is the step that costs money.</strong> Pressing Register submits a paid
-            carrier registration for your business. It cannot be undone and it is not refundable.
+          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }} data-ss-sms-reg-price={regCents == null ? "unknown" : regCents}>
+            {regCents === 0 ? (
+              <>
+                <strong>This is the carrier registration.</strong> Pressing Register submits it for
+                your business. It cannot be undone. There is no charge for it on this account.
+              </>
+            ) : regCents > 0 ? (
+              <>
+                <strong>This step costs {smsDollars(regCents)}.</strong> Pressing Register takes{" "}
+                {smsDollars(regCents)} from your wallet and submits the carrier registration for your
+                business. It cannot be undone and it is not refundable. Your wallet has{" "}
+                {smsDollars(walletCents)}{walletCents < regCents ? ", so add funds in Settings → Billing first." : "."}
+              </>
+            ) : (
+              <>
+                <strong>This is the step that costs money.</strong> Pressing Register submits a paid
+                carrier registration for your business. It cannot be undone and it is not refundable.
+                The price is listed in Settings → Billing.
+              </>
+            )}
           </div>
           {readOnly ? (
             <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
@@ -1429,8 +1505,15 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
                 if (!window.confirm(
                   lead
                   + "Register this business with the phone carriers?\n\n"
-                  + "This is the paid step. It cannot be undone or refunded, and it only needs "
+                  + (regCents === 0
+                    ? "There is no charge for this on this account. It cannot be undone, and it only needs "
+                    : regCents > 0
+                      ? `This takes ${smsDollars(regCents)} from your wallet. It cannot be undone or refunded, and it only needs `
+                      : "This is the paid step. It cannot be undone or refunded, and it only needs ")
                   + "to be done once for this business."
+                  + (regCents > 0 && walletCents < regCents
+                    ? `\n\nYour wallet has ${smsDollars(walletCents)}, so this will be refused until funds are added in Settings → Billing.`
+                    : "")
                   + (bad.length ? "\n\nThe items above are the usual reasons a registration is turned down." : ""))) return;
                 act(() => call("advance"));
               }}
@@ -1608,6 +1691,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       {status === "campaign_approved" && !readOnly && !smsAdoptNumber(data.numbers) && (
         <div style={card}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Choose your number</h4>
+          {numCents !== 0 && (
+            <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }} data-ss-sms-number-price={numCents == null ? "unknown" : numCents}>
+              {numCents > 0
+                ? `A number costs ${smsDollars(numCents)} a month from your wallet: the first month when you pick it, then once a month while you keep it. Your wallet has ${smsDollars(walletCents)}${walletCents < numCents ? ", so add funds in Settings → Billing first." : "."}`
+                : "Numbers are charged to your wallet each month. The price is listed in Settings → Billing."}
+            </p>
+          )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 12 }}>
             <SmsField label="Area code or first digits">
               {/* maxLength leaves room to paste a formatted number; phoneSearchDigits keeps six digits. */}
@@ -1635,7 +1725,18 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
                   {/* locality comes back null on real Twilio results — render nothing, never "null". */}
                   <div style={{ fontSize: 12, color: "#64748B" }}>{[n.locality, n.region].filter(Boolean).join(", ")}</div>
                   <button type="button" disabled={busy}
-                    onClick={() => act(() => call("buy_number", { phoneNumber: n.phoneNumber }))}
+                    onClick={() => {
+                      // The price is said before the money moves. Only when it is known and above
+                      // zero: an unknown price keeps the press as it was (the line above says where
+                      // the price is listed), and a free one needs no second click.
+                      if (numCents > 0 && !window.confirm(
+                        `Use ${n.friendlyName || n.phoneNumber} for texting? It takes ${smsDollars(numCents)} from your wallet now, `
+                        + `then ${smsDollars(numCents)} every month while you keep the number.`
+                        + (walletCents < numCents
+                          ? ` Your wallet has ${smsDollars(walletCents)}, so this will be refused until funds are added in Settings → Billing.`
+                          : ""))) return;
+                      act(() => call("buy_number", { phoneNumber: n.phoneNumber }));
+                    }}
                     style={{ marginLeft: "auto", background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
                     Use this number
                   </button>
@@ -2197,6 +2298,10 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const [numResults, setNumResults] = useState(null);  // null = not searched yet
   const [numFor, setNumFor] = useState("");            // the digits numResults came back for
   const [numNote, setNumNote] = useState(null);        // { ok } | { err }
+  // What "Get this number" takes from the wallet (useSmsWalletFees; null = unknown).
+  const numberFees = useSmsWalletFees(
+    !!canEdit && !!data && !!data.canBuyNumber && !!data.numbersForSale,
+    data ? phoneNumbersOf(data).length : 0);
   // Plan phase 6, caller ID (plan §14): what the last register / check said, and the Voice
   // Integrity answers an operator fills in (opened by its button).
   const [trustNote, setTrustNote] = useState(null);    // { ok } | { err }
@@ -2411,9 +2516,14 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     // Before builder launch only an operator reaches this button (the server's rollout check).
     // Texting takes this same number over once the carriers approve the business (portal-sms
     // buy_number adopts a calling-only number, plan phase 6), so there is no caveat to give.
-    if (!window.confirm(numbers.length
+    // Billing went live 2026-11-07: say what it takes before the money moves.
+    const feeCents = numberFees ? numberFees.numberCents : null;
+    const feeLine = feeCents > 0
+      ? ` It takes ${smsDollars(feeCents)} from the business's wallet now, then ${smsDollars(feeCents)} every month while it keeps the number (the wallet has ${smsDollars(numberFees.availableCents)}${numberFees.availableCents < feeCents ? ", so this will be refused until funds are added" : ""}).`
+      : feeCents === 0 ? "" : " Numbers are charged to the business's wallet each month; the price is listed in Settings → Billing.";
+    if (!window.confirm((numbers.length
       ? `Add ${phoneDisplay(e164)} as another business number? It takes calls right away${data.textingActive ? ", and it can text once the carriers approve it" : ""}. You can give it a name and a person after.`
-      : `Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the SMS - A2P tab.`)) return;
+      : `Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the SMS - A2P tab.`) + feeLine)) return;
     setBusy(true); setNumNote(null);
     try {
       const d = await phoneAction("phone_buy_number", { phoneNumber: e164 });
