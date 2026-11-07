@@ -1252,3 +1252,71 @@ Deno.test("a Resend that never answers times out as a transient status-0 'timeou
     teardown();
   }
 });
+
+// ── Domain create keeps Resend's reason (2026-11-07) ─────────────────────────────────────
+// A builder's Connect was refused twice with a 403 and app_errors could not say why: the
+// cause (our plan's domain slots were all used) took the Resend dashboard to find. Domain
+// create is the one request that names no person, so it alone keeps Resend's words.
+
+Deno.test("domain create KEEPS Resend's reason in `detail`, and only there", async () => {
+  setup();
+  try {
+    stub(() => jsonResponse({
+      statusCode: 403,
+      name: "validation_error",
+      message: "The example.com domain has been registered already.",
+    }, 403));
+    const err = await expectApiError(() => rsCreateDomain("example.com"), "create 403");
+    assertEquals(err.status, 403);
+    assertEquals(err.permanent, true);
+    assertEquals(err.detail, "The example.com domain has been registered already.");
+    assert(!err.message.includes("registered already"), "provider text moved into `message`, which every caller logs");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("an address in a domain-create message is still masked, flattened and capped", async () => {
+  setup();
+  try {
+    stub(() => jsonResponse({
+      statusCode: 403,
+      name: "validation_error",
+      message: "Ask owner@example.com (the account holder)\nabout example.com " + "x".repeat(400),
+    }, 403));
+    const err = await expectApiError(() => rsCreateDomain("example.com"), "create 403 with an address");
+    assert(!err.detail.includes("owner@example.com"), "an address survived into detail");
+    assert(err.detail.includes("[address]"), "the address was not replaced by the mask");
+    assert(!err.detail.includes("\n"), "a newline survived into detail");
+    assert(err.detail.length <= 200, `detail is ${err.detail.length} characters, cap is 200`);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a send NEVER keeps Resend's message: `detail` stays empty", async () => {
+  setup();
+  try {
+    stub(() => jsonResponse({
+      statusCode: 403,
+      name: "validation_error",
+      message: "You can only send testing emails to your own email address (lead@example.net).",
+    }, 403));
+    const err = await expectApiError(() => rsSendEmail(SEND), "send 403");
+    assertEquals(err.detail, "");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("domain create with an unreadable error body keeps an empty detail", async () => {
+  setup();
+  try {
+    stub(() => new Response("<html>forbidden</html>", { status: 403 }));
+    const err = await expectApiError(() => rsCreateDomain("example.com"), "create 403, html body");
+    assertEquals(err.status, 403);
+    assertEquals(err.detail, "");
+  } finally {
+    teardown();
+  }
+});

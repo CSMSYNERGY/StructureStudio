@@ -1167,6 +1167,43 @@ function rsFail(req: Request, clientId: string | null, where: string, e: unknown
   }, 502);
 }
 
+/**
+ * Resend REFUSED a domain create (403). Neither cause is the builder's to fix by trying
+ * again, which is what rsFail's sentence tells them:
+ *   - our Resend plan has no domain slots left (2026-11-06: a builder was refused twice on
+ *     the Free plan with 3 of 3 domains used, and was told "Please try again");
+ *   - the domain is already registered on ANOTHER Resend account (a web developer's, say),
+ *     which its owner claims with a DNS TXT record.
+ * resend.ts keeps Resend's own words for domain create only (`detail`; they name the domain,
+ * never a person), so the row says which cause it was without opening the Resend dashboard.
+ * Unknown wording gets the "our side" sentence: both causes need CSM Synergy either way.
+ */
+function rsDomainRefused(req: Request, clientId: string | null, where: string, domain: string, e: ResendApiError) {
+  const detail = e.detail || "";
+  const planLimit = /limit|plan|upgrade|maximum|quota/i.test(detail);
+  const elsewhere = !planLimit && /registered already|already registered|already been registered|already exists/i.test(detail);
+  logEdgeError({
+    fn: "portal-settings",
+    req,
+    clientId,
+    code: 403,
+    message: `${where}: resend 403/${e.name_ || "unknown"} refused ${domain}${detail ? ` - ${detail}` : ""}`,
+    context: {
+      where,
+      domain,
+      resendErrorName: e.name_ || null,
+      resendMessage: detail || null,
+      refusal: elsewhere ? "registered_on_another_account" : planLimit ? "plan_domain_limit" : "unknown",
+    },
+  }).catch(() => {});
+  return json({
+    error: elsewhere
+      ? `${domain} is already set up with our email provider under a different account, often a web developer's. Trying again won't help. Contact CSM Synergy support and mention "${where}", and we'll help you claim it.`
+      : `We can't add ${domain} right now. The hold-up is on our side, not yours, so trying again won't help. Contact CSM Synergy support and mention "${where}".`,
+    ref: where,
+  }, 502);
+}
+
 // Upper bound on any caller-supplied bulk array. Not a business limit — it is far above
 // the largest real catalog (the biggest tenant runs ~424 sizes) — but these actions loop
 // per element issuing DB round trips, and several DELETE whatever is absent from the list,
@@ -14723,6 +14760,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ? await rsGetDomain(String(cur.resend_domain_id))
         : await rsCreateDomain(domain);
     } catch (e) {
+      if (e instanceof ResendApiError && e.status === 403) return rsDomainRefused(req, clientId, "connect that domain", domain, e);
       return rsFail(req, clientId, "connect that domain", e);
     }
 
@@ -15088,6 +15126,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ? await rsGetDomain(String(cur.resend_inbound_domain_id))
         : await rsCreateDomain(inboundDomain, { receiving: true });
     } catch (e) {
+      if (e instanceof ResendApiError && e.status === 403) return rsDomainRefused(req, clientId, "set up your reply address", inboundDomain, e);
       return rsFail(req, clientId, "set up your reply address", e);
     }
 

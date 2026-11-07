@@ -43,6 +43,11 @@
  * Only the HTTP status and the enum-ish error `name` survive, and the name is kept ONLY
  * when it matches the lowercase-snake shape Resend's error names use — a body field that
  * fails that gate could carry anything, so it is dropped rather than trusted.
+ *
+ * ONE EXCEPTION (2026-11-07): domain create keeps Resend's message in `detail`. That request
+ * carries a domain name and a region, never a person, and its refusals are the ones only the
+ * words can tell apart (no domain slots left on our plan, or the domain registered on another
+ * Resend account). Address-shaped text is masked anyway. See providerDetailOf.
  */
 
 const API_BASE = "https://api.resend.com";
@@ -79,12 +84,16 @@ export class ResendApiError extends Error {
   readonly status: number;
   readonly name_: string;
   readonly permanent: boolean;
-  constructor(init: { message: string; status: number; name_: string; permanent: boolean }) {
+  /** Resend's own message, masked and capped: set ONLY by calls whose request names no
+   *  person (domain create). "" everywhere else, so no caller can surface it by accident. */
+  readonly detail: string;
+  constructor(init: { message: string; status: number; name_: string; permanent: boolean; detail?: string }) {
     super(init.message);
     this.name = "ResendApiError";
     this.status = init.status;
     this.name_ = init.name_;
     this.permanent = init.permanent;
+    this.detail = init.detail ?? "";
   }
 }
 
@@ -152,6 +161,25 @@ function errorNameOf(body: string): string {
   }
 }
 
+/** Resend's `message`, for the one call that opts in (domain create — see the header). Its
+ *  request is a domain name and a region, so the answer has no person to echo; anything shaped
+ *  like an address is masked all the same, control characters go, and the text is capped, so a
+ *  future message that does name someone still cannot carry them into app_errors. */
+function providerDetailOf(body: string): string {
+  try {
+    const msg = (JSON.parse(body) as { message?: unknown })?.message;
+    if (typeof msg !== "string") return "";
+    // Control characters by code, not a regex class (deno lint's no-control-regex).
+    return Array.from(msg, (c) => (c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127 ? " " : c)).join("")
+      .replace(/[^\s@<>()"',;:]+@[^\s@<>()"',;:]+/g, "[address]")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 200);
+  } catch {
+    return "";
+  }
+}
+
 function requireKey(): string {
   const key = apiKey();
   if (!key) throw new ResendNotConfigured("RESEND_API_KEY is not set.");
@@ -169,6 +197,7 @@ async function rsFetch(
   init: RequestInit = {},
   extraHeaders: Record<string, string> = {},
   timeoutMs = RS_TIMEOUT_MS,
+  keepDetail = false,
 ): Promise<unknown> {
   let res: Response;
   let text: string;
@@ -212,6 +241,7 @@ async function rsFetch(
       status: res.status,
       name_,
       permanent: verdictOf(res.status, name_),
+      detail: keepDetail ? providerDetailOf(text) : "",
     });
   }
   try {
@@ -453,7 +483,7 @@ export async function rsCreateDomain(
       // fail, which is where this flow already dies.
       ...(opts?.receiving ? { capabilities: { sending: "disabled", receiving: "enabled" } } : {}),
     }),
-  }, {}, CREATE_DOMAIN_TIMEOUT_MS);
+  }, {}, CREATE_DOMAIN_TIMEOUT_MS, true);
   return toRsDomain(raw);
 }
 
