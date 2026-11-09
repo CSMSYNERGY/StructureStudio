@@ -691,3 +691,55 @@ Deno.test("a usage read that fails on the recount fails the price list's card, u
   const [p] = madeNow(s);
   assertEquals([p.status, p.failure], ["failed", SENTENCES.usageUnread]);
 });
+
+import { resetStrictMemo } from "./agent.ts";
+
+Deno.test("a strict grammar the API calls too large: the turn asks again with no strict tool, and the instance stays that way", async () => {
+  resetStrictMemo();
+  try {
+    const s = makeStore();
+    const bodies: Record<string, unknown>[] = [];
+    // deno-lint-ignore no-explicit-any
+    const anyStrict = (b: any) => (b.tools ?? []).some((t: { strict?: boolean }) => t.strict === true);
+    const d = makeDeps(s.store, {
+      fetch: (_u, init) => {
+        const b = JSON.parse(String(init.body));
+        bodies.push(b);
+        if (anyStrict(b)) {
+          return Promise.resolve(new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." } }), { status: 400 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify(said("You have one style, Garden Shed.")), { status: 200 }));
+      },
+    });
+    const t = await runTurn(d.deps, turn(), "key", "claude-sonnet-5-5", "person", [], "what do I sell?");
+    assertEquals([t.text, t.stopReason], ["You have one style, Garden Shed.", "end_turn"]);
+    assertEquals(bodies.map(anyStrict), [true, false], "strict first, then the same round again with none");
+    assertEquals(d.logs.map((l) => l.code), ["jack_strict_off"]);
+    // The next turn on this instance sends no strict tool at all: one call.
+    const again = await runTurn(d.deps, turn(), "key", "claude-sonnet-5-5", "person", [], "and the sizes?");
+    assertEquals(again.stopReason, "end_turn");
+    assertEquals(bodies.map(anyStrict), [true, false, false]);
+    assertEquals(d.logs.length, 1, "learned once");
+  } finally {
+    resetStrictMemo();
+  }
+});
+
+Deno.test("any other 400 is not retried and leaves strict on", async () => {
+  resetStrictMemo();
+  try {
+    const s = makeStore();
+    let calls = 0;
+    const d = makeDeps(s.store, {
+      fetch: () => {
+        calls++;
+        return Promise.resolve(new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "tools.2.name: bad" } }), { status: 400 }));
+      },
+    });
+    const t = await runTurn(d.deps, turn(), "key", "claude-sonnet-5-5", "person", [], "what do I sell?");
+    assertEquals([t.text, t.stopReason, calls], [SENTENCES.failed, "error", 1]);
+    assertEquals(d.logs.map((l) => [l.code, l.context?.detail]), [["jack_failed", "invalid_request_error: tools.2.name: bad"]]);
+  } finally {
+    resetStrictMemo();
+  }
+});

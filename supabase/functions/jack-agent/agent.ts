@@ -668,6 +668,19 @@ export function strictCost(defs: ToolDef[]): { tools: number; optional: number; 
   return out;
 }
 
+/** The API also refuses strict tools whose schemas together compile to too big a grammar (400 "The
+ *  compiled grammar is too large", seen on beta 11-09 with an owner's 19 strict writers, inside every
+ *  published limit). That budget isn't published, so it's learned: the turn that meets it asks again with
+ *  no strict tool, and this instance sends none from then on. Every tool checks its own input in code, so
+ *  a malformed call is refused, never applied. */
+export const GRAMMAR_TOO_BIG = /compiled grammar is too large/i;
+let strictOff = false;
+/** For the tests: forget what this instance learned. */
+export function resetStrictMemo(): void {
+  strictOff = false;
+}
+const sendable = (defs: ToolDef[]): ToolDef[] => (strictOff ? defs.map(unstrict) : defs);
+
 /** Read tools never strict; and should the writers alone ever go past a limit, none is strict, so the
  *  turn still runs (each tool checks its own input). */
 export function withinStrictLimits(defs: ToolDef[]): ToolDef[] {
@@ -794,12 +807,12 @@ export async function runTurn(deps: Deps, s: TurnState, apiKey: string, model: s
 
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     const lastChance = round === MAX_TOOL_ROUNDS;
-    const res = await askClaude(deps.fetch, apiKey, {
+    const ask = () => askClaude(deps.fetch, apiKey, {
       model,
       max_tokens: MAX_TOKENS,
       output_config: { effort: "medium" },
       cache_control: { type: "ephemeral" },
-      tools: toolsFor(deps, s),
+      tools: sendable(toolsFor(deps, s)),
       tool_choice: { type: lastChance ? "none" : "auto" },
       system: [
         { type: "text", text: systemText(), cache_control: { type: "ephemeral" } },
@@ -808,6 +821,12 @@ export async function runTurn(deps: Deps, s: TurnState, apiKey: string, model: s
       ],
       messages,
     }, Math.min(CALL_TIMEOUT_MS, deadline - deps.now()));
+    let res = await ask();
+    if (!res.ok && res.why === "http" && res.status === 400 && !strictOff && GRAMMAR_TOO_BIG.test(res.detail ?? "")) {
+      strictOff = true;
+      await deps.log({ code: "jack_strict_off", severity: "info", clientId: s.who.clientId, message: "The API refused the strict tools' grammar as too large; asking again with none strict.", context: { round } });
+      res = await ask();
+    }
 
     if (!res.ok && res.why === "limit") {
       await deps.log({ code: "jack_spend_limit", severity: "warn", clientId: s.who.clientId, message: "Jack's workspace spend limit is reached.", context: { round } });
