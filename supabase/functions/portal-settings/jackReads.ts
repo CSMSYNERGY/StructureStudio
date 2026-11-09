@@ -183,6 +183,9 @@ export function cleanTerm(v: unknown): string | null {
   return s.length >= 2 ? s : null;
 }
 
+/** Customers a name search reads by name, and by company, before the caller's scope narrows them. */
+export const NAME_READ = 50;
+
 async function customerFacts(x: JackReadCtx): Promise<Response> {
   const { admin, clientId, payload: p, json } = x;
   const now = x.now ? x.now() : Date.now();
@@ -194,6 +197,11 @@ async function customerFacts(x: JackReadCtx): Promise<Response> {
 
   // 1. The customers. Merged records are left out: their history moved to the record they were merged into.
   let contacts: Row[];
+  // A name search whose read by name came back full (NAME_READ) before the scope below kept only the ones
+  // this caller may see: a match can sit past it, so the answer says so (capped), and jack-agent's
+  // same-name check counts it as unchecked rather than "no other customer by that name" (11-09). Only the
+  // read by name can hold a namesake; the read by company is left out of it.
+  let capped = false;
   if (term) {
     // Initials only ("J R") leave no word of two letters: the whole term is the pattern then. With no
     // pattern at all, the name read had no filter and answered the 50 latest customers as "matches".
@@ -202,10 +210,11 @@ async function customerFacts(x: JackReadCtx): Promise<Response> {
     let byName = admin.from("crm_contacts").select(CONTACT_COLS).eq("client_id", clientId).is("merged_into", null);
     for (const w of words) byName = byName.ilike("name", `%${w}%`);
     const [a, b] = await Promise.all([
-      must(byName.order("updated_at", { ascending: false }).limit(50), "find that customer"),
+      must(byName.order("updated_at", { ascending: false }).limit(NAME_READ), "find that customer"),
       must(admin.from("crm_contacts").select(CONTACT_COLS).eq("client_id", clientId).is("merged_into", null)
-        .ilike("company", `%${term}%`).order("updated_at", { ascending: false }).limit(50), "find that customer"),
+        .ilike("company", `%${term}%`).order("updated_at", { ascending: false }).limit(NAME_READ), "find that customer"),
     ]);
+    capped = a.length >= NAME_READ;
     const seen = new Set<string>();
     contacts = [...a, ...b].filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
   } else if (askedIds) {
@@ -223,7 +232,7 @@ async function customerFacts(x: JackReadCtx): Promise<Response> {
   if (term) contacts = contacts.slice(0, 10);
   const meetingsSeen = x.canRead("meetings");
   const callsSeen = x.canRead("phone") && !x.phoneOwnOnly;
-  if (!contacts.length) return json({ ok: true, complete: true, contacts: [], seen: { meetings: meetingsSeen, calls: callsSeen } });
+  if (!contacts.length) return json({ ok: true, complete: true, contacts: [], seen: { meetings: meetingsSeen, calls: callsSeen }, ...(term ? { capped } : {}) });
   const ids = contacts.map((c) => c.id as string);
   const idSet = new Set(ids);
 
@@ -358,7 +367,7 @@ async function customerFacts(x: JackReadCtx): Promise<Response> {
     if (meetings) row.nextMeetingAt = meetings.get(c.id) ?? null;
     return row;
   });
-  return json({ ok: true, complete: true, contacts: out, seen: { meetings: meetingsSeen, calls: callsSeen } });
+  return json({ ok: true, complete: true, contacts: out, seen: { meetings: meetingsSeen, calls: callsSeen }, ...(term ? { capped } : {}) });
 }
 
 /** The next booked appointment per customer, crm_deals_list's way: soonest first, and only the ones this

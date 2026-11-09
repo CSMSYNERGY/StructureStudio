@@ -1,9 +1,9 @@
 import { assert, assertEquals } from "./test_assert.ts";
-import { runTool, toolsFor, type Deps, type Store, type TurnState, type Who } from "./agent.ts";
+import { runTool, toolsFor, type Deps, type ProposalRow, type Store, type TurnState, type Who } from "./agent.ts";
 import { register } from "./pieces.ts";
 import { BILLING_SWITCH, LEDGER_FILTER_NAMES, LEDGER_PAGES, lineWords, MIN_BUDGET_MS, moneyMicros, READ_WINDOW_MS, READS_SAID, readsPiece } from "./reads.ts";
 import { SAID } from "./common.ts";
-import { INBOX_PAGES, SAID_LOOKUP } from "./lookups.ts";
+import { CARD_SAME_NAMES, INBOX_PAGES, lookupTarget, SAID_LOOKUP } from "./lookups.ts";
 import { leaksContactDetails } from "./redact.ts";
 import { FOUNDING_ANNUAL_ONLY } from "../_shared/foundingPricing.ts";
 // The fakes answer with the real routes' own parsers and row shapes, so a body the route would refuse
@@ -19,16 +19,31 @@ type Route = (body: R) => { status: number; data: R | null };
 const parse = (c: string) => JSON.parse(c);
 const ALLOWED = new Set(["portal-billing status", "portal-billing wallet_transactions", "portal-settings crm_inbox"]);
 
-/** A world with no network: routes by "fn action", a store that refuses every use (no tool here may
- *  write a card), and the calls made, in order. */
+/** A world with no network: routes by "fn action", a store whose one allowed use is writing a look-up list
+ *  card (find_conversations' list, 11-09) and reading it back, and the calls made, in order. Billing
+ *  writes no card at all. */
 function world(o: { routes?: Record<string, Route>; canRead?: (a: string) => boolean; who?: Who; off?: string[]; now?: () => number; budget?: number } = {}) {
   const calls: { fn: string; action: string; body: R }[] = [];
   const storeUsed: string[] = [];
-  const refuse = (what: string) => new Proxy({}, { get: (_t, k) => { storeUsed.push(`${what}.${String(k)}`); return () => { throw new Error(`${what}.${String(k)} was used`); }; } });
+  const cards = new Map<string, ProposalRow>();
+  const refuse = (what: string, allowed: Record<string, unknown> = {}) => new Proxy({}, { get: (_t, k) => {
+    if (typeof k === "string" && k in allowed) return allowed[k];
+    storeUsed.push(`${what}.${String(k)}`);
+    return () => { throw new Error(`${what}.${String(k)} was used`); };
+  } });
   const routes = o.routes ?? {};
+  let n = 0;
   const deps = {
     env: () => undefined,
-    store: refuse("store") as Store,
+    store: refuse("store", {
+      insertProposal: (p: Partial<ProposalRow>) => {
+        const id = `20000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+        const row = { id, conversation_id: null, file_name: null, source: {}, preview: {}, payload: {}, answers: {}, result: null, undo: null, shown_hash: null, failure: null, approved_by: null, approved_by_operator: null, approved_at: null, applied_at: null, undone_at: null, expires_at: new Date(NOW + 86_400_000).toISOString(), created_at: new Date(NOW).toISOString(), ...p } as ProposalRow;
+        cards.set(id, row);
+        return Promise.resolve(row);
+      },
+      getProposal: (c: string, id: string) => { const r = cards.get(id); return Promise.resolve(r && r.client_id === c ? r : null); },
+    }) as Store,
     wallet: refuse("wallet"),
     fetch: () => { throw new Error("no network"); },
     portal: (a: string, b: R) => deps.call("portal-settings", a, b),
@@ -48,12 +63,17 @@ function world(o: { routes?: Record<string, Route>; canRead?: (a: string) => boo
     now: o.now ?? (() => NOW),
   } as unknown as Deps;
   const s: TurnState = { who: o.who ?? { clientId: "builder-a", userId: "u1", operatorEmail: null }, chatId: "chat1", off: o.off ?? [], proposalIds: [] };
-  const done = () => {
-    assertEquals(storeUsed, [], "a read tool touched the store or the wallet");
-    assertEquals(s.proposalIds, [], "a read tool put a card up");
+  /** `lists`: how many look-up lists the world's tools put up (find_conversations, one a search that
+   *  found someone); nothing else is ever written. */
+  const done = (lists = 0) => {
+    assertEquals(storeUsed, [], "a read tool touched the store or the wallet beyond its list card");
+    assertEquals(s.proposalIds.length, lists, "the list cards put up");
+    for (const p of cards.values()) {
+      assertEquals([p.kind, p.status, p.shown_hash, p.title, p.payload?.look, p.payload?.area], ["lookup", "applied", null, "Conversations", "conversations", "contacts"], "only a conversations list is written");
+    }
     for (const c of calls) assert(ALLOWED.has(`${c.fn} ${c.action}`), `called ${c.fn} ${c.action}`);
   };
-  return { deps, s, calls, done };
+  return { deps, s, calls, done, cards };
 }
 const tool = (name: string) => readsPiece.tools.find((t) => t.def.name === name)!;
 const run = (w: ReturnType<typeof world>, name: string, input: R) => tool(name).run(w.deps, w.s, input);
@@ -461,12 +481,16 @@ Deno.test("conversations: finds a name three pages back, through the route's cur
   assert(!out.isError, out.content);
   const a = parse(out.content);
   assertEquals(a.found, 1);
-  assertEquals(a.rows, [{ name: "Dale Smith", channel: "email", lastFrom: "them", waiting: false, at: new Date(NOW - 1210 * 60_000).toISOString(), daysAgo: 0, said: "Re: your estimate" }]);
+  assertEquals(a.rows, [{ ref: "c1", name: "Dale Smith", channel: "email", lastFrom: "them", waiting: false, at: new Date(NOW - 1210 * 60_000).toISOString(), daysAgo: 0, said: "Re: your estimate" }]);
   assertEquals(a.searched, { customers: 130, all: true });
   assertEquals(w.calls.map((c) => Object.keys(c.body).sort().join(",")), ["channel,mine", "channel,cursor,mine", "channel,cursor,mine"]);
   assertEquals(w.calls[0].body, { channel: "all", mine: false });
   assert(!/c0ffee00|contactId/.test(out.content), "no id reaches Claude");
-  w.done();
+  // The ref names Dale to the reply tools: the list card holds his id, and only the asker's list resolves.
+  assertEquals(a.list, w.s.proposalIds[0]);
+  assertEquals((await lookupTarget(w.deps, w.s.who, a.list, "c1"))?.contactId, threads[121].contactId);
+  assertEquals(await lookupTarget(w.deps, { clientId: "builder-a", userId: "u2", operatorEmail: null }, a.list, "c1"), null);
+  w.done(1);
 });
 
 Deno.test("conversations: a name that is really an email or a number is dropped, and words are scrubbed", async () => {
@@ -486,7 +510,11 @@ Deno.test("conversations: a name that is really an email or a number is dropped,
   assertEquals((await run(byMail, "find_conversations", { ...SEARCH, name: "pat.lee@example.com" })).content, READS_SAID.nameOnly);
   assertEquals((await run(byMail, "find_conversations", { ...SEARCH, name: "816 555 0123" })).content, READS_SAID.nameOnly);
   assertEquals(byMail.calls.length, 0);
-  w.done();
+  // The card holds no fallback address either: the names Claude saw are the names on it.
+  const card = [...w.cards.values()][0];
+  assertEquals(card.preview.groups[0].rows.map((r: R) => r.name), [null, null, "Pat Lee"]);
+  assert(!/Main St|County Road|example\.com|8165550123/.test(JSON.stringify(card.preview)), JSON.stringify(card.preview));
+  w.done(1);
 });
 
 Deno.test("conversations: texts, waiting and Mine go to the route as the tab sends them", async () => {
@@ -505,7 +533,7 @@ Deno.test("conversations: texts, waiting and Mine go to the route as the tab sen
     assertEquals((await run(w, "find_conversations", { ...SEARCH, ...input })).content, said);
   }
   assertEquals(w.calls.length, 2, "a request it can't run reads nothing");
-  w.done();
+  w.done(2);
 });
 
 Deno.test("conversations: calls are counts only, with no label, summary or voicemail words", async () => {
@@ -519,9 +547,13 @@ Deno.test("conversations: calls are counts only, with no label, summary or voice
   const out = await run(w, "find_conversations", SEARCH);
   const a = parse(out.content);
   assertEquals([a.calls, a.missedCallsOrVoicemails, a.waitingOnYou], [3, 2, 3]);
-  assertEquals(a.rows.filter((r: R) => r.channel === "call").map((r: R) => Object.keys(r).sort().join(",")), Array(3).fill("at,channel,daysAgo,lastFrom,name,waiting"));
+  assertEquals(a.rows.filter((r: R) => r.channel === "call").map((r: R) => Object.keys(r).sort().join(",")), Array(3).fill("at,channel,daysAgo,lastFrom,name,ref,waiting"));
   assert(!/\bVoicemail\b|Missed call|3:12/.test(out.content), "a call's label never reaches Claude");
-  w.done();
+  // Opening the list later needs phone access too, since it shows calls; its lines are fixed words.
+  const card = [...w.cards.values()][0];
+  assertEquals(card.payload.also, ["phone"]);
+  assert(!/\bVoicemail\b|Missed call|3:12/.test(JSON.stringify(card.preview)), JSON.stringify(card.preview));
+  w.done(1);
 });
 
 Deno.test("conversations: without phone access, calls alone is answered without a read, and all says it can't see them", async () => {
@@ -533,7 +565,8 @@ Deno.test("conversations: without phone access, calls alone is answered without 
   const a = parse((await run(w, "find_conversations", SEARCH)).content);
   assertEquals([a.cantSee, a.calls, a.rows.map((r: R) => r.name)], ["calls", undefined, ["Gray Text"]]);
   assert(a.notes.includes(READS_SAID.noCalls));
-  w.done();
+  assertEquals([...w.cards.values()][0].payload.also, undefined, "no calls on it, so no phone area");
+  w.done(1);
 });
 
 Deno.test("conversations: a date range stops paging at its start, leaves newer ones out, and says each customer shows once", async () => {
@@ -546,7 +579,7 @@ Deno.test("conversations: a date range stops paging at its start, leaves newer o
   assertEquals([a.found, a.searched], [20, { customers: 31, all: true }]);
   assertEquals(w.calls.length, 1, "page one already reached the start, so no second page");
   assert(a.notes.some((n: string) => /shows once/.test(n)));
-  w.done();
+  w.done(1);
 });
 
 Deno.test("conversations: past the newest pages it says so, and never 'none'", async () => {
@@ -561,7 +594,9 @@ Deno.test("conversations: past the newest pages it says so, and never 'none'", a
   const b = parse((await run(small, "find_conversations", { ...SEARCH, name: "Zelda" })).content);
   assertEquals([b.found, b.searched.all], [0, true]);
   assert(b.notes.some((n: string) => /No conversation under that name/.test(n)));
-  w.done();
+  // Nobody found, so no list to put up and no ref to give.
+  assertEquals([a.list, b.list], [undefined, undefined]);
+  w.done(0);
 });
 
 Deno.test("conversations: Customer Hub off and a lost page are the route's refusals, asked once", async () => {
@@ -605,7 +640,7 @@ Deno.test("access: billing needs Billing access and its own switch; conversation
   }
 });
 
-Deno.test("the budget: no strict tool, read names only, no cards, and customer words mark the turn", async () => {
+Deno.test("the budget: no strict tool, read names only, only a conversations list card, and customer words mark the turn", async () => {
   assertEquals(readsPiece.kinds, []);
   for (const t of readsPiece.tools) {
     assert(/^(look_|find_)/.test(t.def.name), t.def.name);
@@ -619,8 +654,68 @@ Deno.test("the budget: no strict tool, read names only, no cards, and customer w
   const w = world({ routes: { "portal-billing status": statusRoute(), "portal-settings crm_inbox": inboxRoute([thread(1, { name: "Ivy" })]) } });
   await runTool(w.deps, w.s, "look_at_billing", OVERVIEW);
   assertEquals(w.s.customerWordsRead, undefined);
+  assertEquals(w.s.proposalIds, [], "billing put a card up");
   const out = await runTool(w.deps, w.s, "find_conversations", SEARCH);
   assert(!out.isError, out.content);
   assertEquals(w.s.customerWordsRead, true);
-  w.done();
+  w.done(1);
+});
+
+Deno.test("conversations: each row Claude sees has a ref on a private list card that holds the id; Claude is told to reply by it, never by a name search (11-09)", async () => {
+  const threads = [
+    thread(5, { name: "test", preview: "i want to buy a building" }),
+    thread(9, { name: "Corner Test", channel: "email", direction: "out", awaitingReply: false, preview: "Your estimate" }),
+  ];
+  const w = inboxWorld(threads);
+  const out = await run(w, "find_conversations", { ...SEARCH, name: "test" });
+  assert(!out.isError, out.content);
+  const a = parse(out.content);
+  assertEquals(a.rows.map((r: R) => [r.ref, r.name]), [["c1", "test"], ["c2", "Corner Test"]]);
+  assertEquals(a.note, READS_SAID.byRef);
+  assert(/use this list and that row's ref with look_at_customer_for_reply/.test(READS_SAID.byRef) && /Don't search their name again/.test(READS_SAID.byRef), READS_SAID.byRef);
+  for (const t of threads) assert(!out.content.includes(t.contactId), "an id reached Claude");
+  // The card: a private look-up list, shown only; its rows hold the ids, the fixed-word line the next
+  // turn's note carries, and the customer's words for the person only.
+  const card = [...w.cards.values()][0];
+  assertEquals([card.id, card.kind, card.status, card.payload], [a.list, "lookup", "applied", { look: "conversations", area: "contacts" }]);
+  assertEquals(card.preview.asked, ['Named like "test".']);
+  assertEquals(card.preview.groups[0].rows.map((r: R) => [r.ref, r.contactId, r.brief, r.words ?? null]), [
+    ["c1", threads[0].contactId, "text · waiting on you", ["i want to buy a building"]],
+    ["c2", threads[1].contactId, "email · you wrote last", ["Your estimate"]],
+  ]);
+  // Each ref reaches that very customer for the reply tools, and only for the person who asked.
+  assertEquals((await lookupTarget(w.deps, w.s.who, a.list, "c1"))?.contactId, threads[0].contactId);
+  assertEquals((await lookupTarget(w.deps, w.s.who, a.list, "c2"))?.contactId, threads[1].contactId);
+  // The tool's own description says so.
+  const d = tool("find_conversations").def.description;
+  assert(/each with a ref/.test(d) && /never a new search by name/.test(d) && /look_at_customer_for_reply/.test(d), d);
+  w.done(1);
+});
+
+Deno.test("conversations: two customers of one name on the answer are marked, the card and Claude are told, and neither can be written to from it in that turn (11-09 review)", async () => {
+  // Two named test with threads, and one other name. A name search finds all three.
+  const threads = [
+    thread(5, { name: "test", preview: "i want to buy a building" }),
+    thread(9, { name: "Corner Test", channel: "email", direction: "out", awaitingReply: false, preview: "Your estimate" }),
+    thread(30, { name: "TEST ", channel: "sms", direction: "in", awaitingReply: false, preview: "ok" }),
+  ];
+  const w = inboxWorld(threads);
+  const a = parse((await run(w, "find_conversations", { ...SEARCH, name: "test" })).content);
+  assertEquals(a.rows.map((r: R) => [r.ref, r.name, r.sameNameAsAnother ?? false]), [["c1", "test", true], ["c2", "Corner Test", false], ["c3", "TEST", true]]);
+  assert(a.notes.includes(SAID_LOOKUP.sameNames), JSON.stringify(a.notes));
+  assert(/Don't pick one yourself/.test(SAID_LOOKUP.sameNames) && !/[—–]/.test(SAID_LOOKUP.sameNames), SAID_LOOKUP.sameNames);
+  const card = [...w.cards.values()][0];
+  assert(card.preview.notes.includes(CARD_SAME_NAMES), JSON.stringify(card.preview.notes));
+  // The ids stay on the card, and the payload is the plain list's: the hold is worked out from its rows.
+  assertEquals(card.payload, { look: "conversations", area: "contacts" });
+  // Each test row is held back in the turn the list was made; the one other name isn't.
+  const t = async (ref: string) => (await lookupTarget(w.deps, w.s.who, a.list, ref))!;
+  assertEquals([(await t("c1")).unpicked, (await t("c2")).unpicked, (await t("c3")).unpicked], [true, false, true]);
+  assertEquals([(await t("c1")).contactId, (await t("c3")).contactId], [threads[0].contactId, threads[2].contactId]);
+  // With no namesake on the answer, nothing is marked and nothing is said.
+  const w2 = inboxWorld([threads[0], threads[1]]);
+  const b = parse((await run(w2, "find_conversations", { ...SEARCH, name: "test" })).content);
+  assert(!b.rows.some((r: R) => "sameNameAsAnother" in r) && !b.notes.includes(SAID_LOOKUP.sameNames), JSON.stringify(b));
+  assertEquals((await lookupTarget(w2.deps, w2.s.who, b.list, "c1"))?.unpicked, false);
+  w.done(1);
 });

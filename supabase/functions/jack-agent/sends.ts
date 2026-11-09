@@ -16,8 +16,12 @@
 //                                               was made; opensAt is an ISO time (8am their time)
 //     plus fullName, company, town: who it goes to, on this private card only (never to Claude). A record
 //     with no name gets no card that sends (reply_draft), so a press always shows exactly who it goes to.
+//     plus to: where it goes, "(816) 555-0142" for a text or the address for an email (11-09), and
+//     sameName: a sentence when another customer has the same name ("Another customer is also named Dale
+//     Rivers. Check the number before you approve."), or null. Both on this private card only.
 //   estimate_resend preview:
-//     { contactId, dealKey (the design's code), firstName, fullName, company, town, dealLabel,
+//     { contactId, dealKey (the design's code), firstName, fullName, company, town, to (the address saved
+//       on the estimate, which the record's must match), sameName, dealLabel,
 //       estimateNumber, total ("$8,450", or null), lastSentOn (ISO time it last went out, or null when their
 //       record's recent history doesn't show it: the card then shows no row, and Claude isn't told), ageDays
 //       (whole days from when the estimate was made: a send, Jack's own included, re-sends the old price and
@@ -33,15 +37,20 @@
 //   called (agent.ts approvePiece), ends as "unclear" with the same report and sentence; its result
 //   may carry no `sent` key, so read the report. A press on a card that waited clears the old wait
 //   first, so `waiting` never shows on a card being sent or on one that stalled.
-//   payload (never to the browser): reply_send { contactId, dealKey, channel, subject, body,
+//   payload (never to the browser): reply_send { contactId, dealKey, channel, subject, body, to,
 //     oldQuoteDays, daysCard, nonce }; estimate_resend { contactId, dealKey, estimateNumber, totalCents,
-//     updatedAt, oldQuoteDays, daysCard, nonce }. totalCents and updatedAt pin the estimate as the card
+//     updatedAt, to, oldQuoteDays, daysCard, nonce }. totalCents and updatedAt pin the estimate as the card
 //     showed it: the route emails the design as it stands at the press, and a revised estimate keeps its
-//     number, so a press on a card whose estimate changed sends nothing. daysCard is the old_quote_days
-//     question card the person answered in this chat (drafts.ts answeredDays), or null.
+//     number, so a press on a card whose estimate changed sends nothing. `to` pins where the card said it
+//     goes (the number's smsPhoneKey, or the address in lower case): the route still sends to what the
+//     record holds at the press, so a press whose record now holds another number or address sends
+//     nothing, and a card with no `to` (made before 11-09) sends nothing either. An email reply hands that
+//     address to crm_send_email as its `to`, which the route checks against the record itself. daysCard is
+//     the old_quote_days question card the person answered in this chat (drafts.ts answeredDays), or null.
 //   The press itself says send: true (Approve on a send card, on a page that shows its words), so a page
 //   from before these cards, which draws one as a plain card with Approve and no words, can't send it
-//   (agent.ts approvePiece).
+//   (agent.ts approvePiece). It also posts the `to` the page drew under the title (11-09): a page from
+//   before the To line posts none, so its press sends nothing either.
 //
 // ══ THE RULES ══
 //   - The button is the approval. Claude only proposes. A press runs exactly the words on the card, ONCE:
@@ -71,15 +80,16 @@
 //     role, as one boolean and nothing else: whether Structure Studio issues the estimates
 //     (Store.paperworkInSS). The estimate's saved address is read through crm_record as the caller.
 //   - Nothing new reaches Claude: no phone digits, no email address, no street line. The estimate's own
-//     address and the record's are compared here and never shown.
+//     address and the record's are compared here, and only the person's own private card shows where it
+//     goes. A refusal names neither (a card's failure is kept for good; its preview is cleared at 30 days).
 
 import type { ApplyOutcome, Deps, KindSpec, Piece, ProposalRow, ToolSpec, TurnState, Who } from "./types.ts";
 import { daysSince, dollars, err, ok, putCard, SAID, saidBy } from "./common.ts";
 import { memoryMap, needsAnswer, remembered, validValue } from "./memory.ts";
 import { sendRuleNotes } from "./ruleWarn.ts";
 import {
-  answeredDays, checkDraft, contactIdOf, customerOf, DRAFT_SAID, type DraftIn, type Facts, giveCardSlot, OLD_PAGE_NOTE, precheck, quietFor, readCustomer,
-  REPLACED_ESTIMATE, replaceOlder, SENDS_SWITCH, takeCardSlot, UNPROVEN_DAYS,
+  answeredDays, checkDraft, CONSENT_WHERE, contactIdOf, customerOf, DRAFT_SAID, type DraftIn, type Facts, giveCardSlot, OLD_PAGE_NOTE, precheck, quietFor, readCustomer,
+  REPLACED_ESTIMATE, refusalFor, replaceOlder, sameNameForClaude, sameNameLine, sameNameOf, SENDS_SWITCH, takeCardSlot, UNPROVEN_DAYS,
 } from "./drafts.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -108,6 +118,11 @@ export const SEND_SAID = {
   // the person can do from here.
   carrier: (code: string) => `The carrier refused the text (carrier code ${code}), so nothing was sent. Ask me to write it again, or call them instead.`,
   damagedNumber: "Their phone number looks damaged (its last digit was lost when it was first saved), so nothing was sent. Fix the number on their record, then ask me to write it again.",
+  // Where it goes (11-09). Said without the number or the address: a card's failure is kept for good.
+  noTo: "This card doesn't show where it goes, so nothing was sent. Ask me again and I'll make a fresh card.",
+  toChanged: (channel: "sms" | "email") =>
+    `The ${channel === "sms" ? "number" : "email address"} on their record isn't the one this card showed, so nothing was sent. Check their record, then ask me again.`,
+  noConsentNow: `There's no consent to text on file for them now, so nothing was sent. ${CONSENT_WHERE} Once it's on file, ask me again.`,
 };
 
 /** A refusal at the press, in words for someone who just pressed Approve on a send card. checkDraft's refusals are written
@@ -117,7 +132,7 @@ function atPress(refuse: string): string {
     case DRAFT_SAID.dndAll: return "They're on Do Not Disturb for everything now, so nothing was sent. That's set on their record.";
     case DRAFT_SAID.dndEmail: return "They've turned off email from you since this was written (Email Do Not Disturb), so nothing was sent.";
     case DRAFT_SAID.optedOut: return "They've opted out of texts since this was written, so nothing was sent.";
-    case DRAFT_SAID.noConsent: return "There's no consent to text on file for them now, so nothing was sent.";
+    case DRAFT_SAID.noConsent: return SEND_SAID.noConsentNow;
     case DRAFT_SAID.dealNotTheirs: return "That deal isn't on this customer's record any more, so nothing was sent.";
     case DRAFT_SAID.merged: return "That customer was merged into another record, so nothing was sent. Look them up again and ask me to write it there.";
   }
@@ -147,7 +162,11 @@ export const RESEND_SAID = {
   changed: "That estimate changed since I showed it to you, so nothing was sent. Ask me again and I'll look at it as it is now.",
   notTheirsNow: "That estimate isn't on this customer's record any more, so nothing was sent.",
   noName: `Their record has no name on it, so the card couldn't show who it goes to. Check their record, then send it from ${RESEND_WHERE}.`,
+  toChanged: "The email address on their record isn't the one this card showed, so nothing was sent. Check their record, then ask me again.",
 };
+
+/** The resend refusals about this record's own channels (drafts.ts refusalFor). */
+const RESEND_RECORD_REFUSALS = new Set<string>([RESEND_SAID.dndAll, RESEND_SAID.dndEmail]);
 
 // ── What a route's answer means ────────────────────────────────────────────────────────────────────
 
@@ -198,6 +217,9 @@ export function classifyEmail(r: Res): SendAnswer {
   // The route's own "not switched on" refusal touches no network. Any other 5xx may have gone.
   if (r.status === 503 && /switched on/i.test(errorOf(r))) return { kind: "refused", sentence: SEND_SAID.emailOff };
   if (r.status === 0 || r.status >= 500) return UNCLEAR;
+  // The address on the record isn't the one the card showed (the `to` it was handed): refused before the
+  // provider is called, in the press's own words rather than the route's ("reopen the record").
+  if (r.status === 400 && /doesn't match this customer/i.test(errorOf(r))) return { kind: "refused", sentence: SEND_SAID.toChanged("email") };
   return refusedBy(r, "The email wasn't sent.");
 }
 
@@ -315,6 +337,9 @@ async function applyReply(deps: Deps, who: Who, p: ProposalRow, progress: Progre
   };
   const pre = precheck(draft);
   if (pre) return refused(`${pre} ${SEND_SAID.nothingSent}`);
+  // Where the card said it goes. A card that never said sends nothing.
+  const shownTo = typeof pl.to === "string" && pl.to ? pl.to : null;
+  if (!shownTo) return refused(SEND_SAID.noTo);
 
   await startClean(p, progress);
   draft.oldQuoteDays = await daysAtPress(deps, who, p);
@@ -328,6 +353,12 @@ async function applyReply(deps: Deps, who: Who, p: ProposalRow, progress: Progre
   // The rest were written for Claude while drafting, so the press says them its own way.
   if ("refuse" in v) return refused(v.fact ? SEND_SAID.factsMoved : v.stale ? SEND_SAID.priceTooOld : atPress(v.refuse));
   if ("ask" in v) return refused(SEND_SAID.askAgain);
+  // The route sends to what the record holds now: never to a number or an address the person never saw.
+  // An email also hands the route the address the card showed (crm_send_email's `to`, a confirmation it
+  // compares with the record it reads itself), so an address changed between this read and the route's
+  // is refused there too. crm_send_sms takes no such confirmation: a text reads the number again at the
+  // route, and that window of a moment is accepted.
+  if ((channel === "sms" ? read.keys.textTo : read.keys.email) !== shownTo) return refused(SEND_SAID.toChanged(channel));
   if (channel === "sms") {
     const quiet = quietFor(read.keys, deps.now());
     // Pressed again once texting hours open, inside the card's 24 hours. When they open only after the
@@ -342,7 +373,7 @@ async function applyReply(deps: Deps, who: Who, p: ProposalRow, progress: Progre
   const action = channel === "sms" ? "crm_send_sms" : "crm_send_email";
   const body = channel === "sms"
     ? { contactId, ...(shortCode ? { shortCode } : {}), body: draft.body }
-    : { contactId, ...(shortCode ? { shortCode } : {}), subject: draft.subject, body: draft.body };
+    : { contactId, ...(shortCode ? { shortCode } : {}), to: shownTo, subject: draft.subject, body: draft.body };
   const r = await deps.portal(action, body).catch(() => ({ status: 0, data: null }));
   return await ending(deps, who, p, channel === "sms" ? classifySms(r) : classifyEmail(r), channel, channel === "sms" ? "sms_messages" : "email_sends");
 }
@@ -374,22 +405,28 @@ interface EstimateOk {
   updatedAt: string | null;
   lastSentAt: string | null;
   ageDays: number | null;
+  /** The address it emails: the one saved on the estimate (resend_quote_email's), which is the record's.
+   *  `to` in lower case for the press's compare, `toShown` as it's saved, for the card. Never to Claude. */
+  to: string;
+  toShown: string;
 }
 
 /** What the card showed, which the press must find unchanged. */
-interface Shown { number: string; totalCents: number | null; updatedAt: string | null }
+interface Shown { number: string; totalCents: number | null; updatedAt: string | null; to: string }
 
 /** Everything that decides whether this estimate may be emailed again, read as the caller. The card runs
  *  it, and the press runs it again on fresh reads with `shown`, what the card showed: resend_quote_email
  *  emails the design as it stands at the press (its lines, its total, its PDF), and a revised or re-taxed
  *  estimate keeps its number, so the number alone can't say it's the one the person saw. */
-async function checkEstimate(deps: Deps, s: TurnState, contactId: string, dealKey: string, oldQuoteDays: number | null, shown: Shown | null): Promise<EstimateOk | { refuse: string } | { ask: string }> {
+async function checkEstimate(deps: Deps, s: TurnState, contactId: string, dealKey: string, oldQuoteDays: number | null, shown: Shown | null): Promise<EstimateOk | { refuse: string; facts?: Facts } | { ask: string }> {
   const read = await readFresh(deps, contactId);
   if ("error" in read) return { refuse: read.error };
   const f = read.facts;
   if (f.merged) return { refuse: RESEND_SAID.merged };
-  if (f.dndAll) return { refuse: RESEND_SAID.dndAll };
-  if (f.dndEmail) return { refuse: RESEND_SAID.dndEmail };
+  // About this record's own channels: the facts ride along, so the card's tool can say when another
+  // customer has the same name (drafts.ts refusalFor).
+  if (f.dndAll) return { refuse: RESEND_SAID.dndAll, facts: f };
+  if (f.dndEmail) return { refuse: RESEND_SAID.dndEmail, facts: f };
   // Their orders couldn't be read: an estimate that is already an order would look open.
   if (!f.ordersRead) return { refuse: SAID.readFailed };
   if (!f.dealKeys.has(dealKey)) return { refuse: RESEND_SAID.notTheirs };
@@ -419,6 +456,8 @@ async function checkEstimate(deps: Deps, s: TurnState, contactId: string, dealKe
   const saved = typeof d.contact?.email === "string" ? d.contact.email.trim().toLowerCase() : "";
   if (!saved) return { refuse: RESEND_SAID.noEmail };
   if (!read.keys.email || read.keys.email !== saved) return { refuse: RESEND_SAID.mismatch };
+  // Where the card said it goes: never an address the person never saw.
+  if (shown && saved !== shown.to) return { refuse: RESEND_SAID.toChanged };
 
   const ss = deps.store.paperworkInSS ? await deps.store.paperworkInSS(s.who.clientId).catch(() => null) : null;
   if (ss === null) return { refuse: SAID.readFailed };
@@ -440,7 +479,7 @@ async function checkEstimate(deps: Deps, s: TurnState, contactId: string, dealKe
   const n = typeof kept === "number" ? kept : oldQuoteDays;
   if (typeof n !== "number") return { ask: "old_quote_days" };
   if (ageDays === null || ageDays > n) return { refuse: RESEND_SAID.old(ageDays, n) };
-  return { code, number, facts: f, label: deal.label, totalCents, updatedAt, lastSentAt, ageDays };
+  return { code, number, facts: f, label: deal.label, totalCents, updatedAt, lastSentAt, ageDays, to: saved, toShown: String(d.contact.email).trim().slice(0, 320) };
 }
 
 /** Send for an estimate: every check again, the estimate as the card showed it, then ONE
@@ -451,18 +490,21 @@ async function applyResend(deps: Deps, who: Who, p: ProposalRow, progress: Progr
   const dealKey = typeof pl.dealKey === "string" ? pl.dealKey : "";
   const expect = typeof pl.estimateNumber === "string" ? pl.estimateNumber : "";
   if (!contactId || !dealKey || !expect) return refused(SEND_SAID.nothing);
+  // Where the card said it goes (11-09). A card that never said sends nothing.
+  if (typeof pl.to !== "string" || !pl.to) return refused(SEND_SAID.noTo);
   // A card from before the total and the design's stamp were pinned has neither: it reads as changed.
   const shown: Shown = {
     number: expect,
     totalCents: typeof pl.totalCents === "number" ? pl.totalCents : null,
     updatedAt: typeof pl.updatedAt === "string" ? pl.updatedAt : null,
+    to: pl.to,
   };
   await startClean(p, progress);
   const s = await stateAt(deps, who, p);
   if (!s) return refused(SEND_SAID.readAtPress);
   const est = await checkEstimate(deps, s, contactId, dealKey, await daysAtPress(deps, who, p), shown);
   if ("refuse" in est) {
-    if (est.refuse === RESEND_SAID.changed) return refused(est.refuse);
+    if (est.refuse === RESEND_SAID.changed || est.refuse === RESEND_SAID.toChanged) return refused(est.refuse);
     // Written for Claude ("use a dealKey from their deals", "please try again"), so the press says it
     // its own way.
     if (est.refuse === RESEND_SAID.notTheirs) return refused(RESEND_SAID.notTheirsNow);
@@ -523,7 +565,8 @@ const resendTool: ToolSpec = {
         if (!daysCard) { oldQuoteDays = null; unproven = true; }
       }
       const est = await checkEstimate(deps, s, target.contactId, dealKey, oldQuoteDays, null);
-      if ("refuse" in est) return err(est.refuse);
+      // Do Not Disturb on this record says so when another customer has the same name (11-09).
+      if ("refuse" in est) return err(est.facts ? await refusalFor(deps, s, est.facts, est.refuse, RESEND_RECORD_REFUSALS) : est.refuse);
       if ("ask" in est) {
         return ok({
           ...needsAnswer(est.ask), shown: false,
@@ -531,8 +574,10 @@ const resendTool: ToolSpec = {
           then: "When they answer, call propose_estimate_resend again with oldQuoteDays set to the number they picked.",
         });
       }
-      // One press sends, so the card names exactly who it goes to.
+      // One press sends, so the card names exactly who it goes to, and where.
       if (!est.facts.fullName) return err(RESEND_SAID.noName);
+      // Another customer this person can see by the same name: the card says so (11-09).
+      const twin = await sameNameOf(deps, s, est.facts);
       const ruleNotes = await sendRuleNotes(deps, "estimate");
       // What Approve does is the card's own line; OLD_PAGE_NOTE is for a page from before round 2.
       const notes = [
@@ -544,14 +589,15 @@ const resendTool: ToolSpec = {
         kind: "estimate_resend",
         // Teammates see titles on the activity page, so a title never names the customer.
         title: "An estimate to send again",
-        // fullName, company and town: who it goes to, on the asker's private card only (never to Claude).
+        // fullName, company, town and to: who it goes to and where, on the asker's private card only
+        // (never to Claude). sameName: the line when another customer has the same name.
         preview: {
           contactId: target.contactId, dealKey: est.code, firstName: est.facts.firstName, fullName: est.facts.fullName,
-          company: est.facts.company, town: est.facts.town, dealLabel: est.label,
+          company: est.facts.company, town: est.facts.town, to: est.toShown, sameName: sameNameLine(est.facts, twin, "email", true), dealLabel: est.label,
           estimateNumber: est.number, total, lastSentOn: est.lastSentAt, ageDays: est.ageDays, notes, ruleNotes,
         },
         payload: {
-          contactId: target.contactId, dealKey: est.code, estimateNumber: est.number, totalCents: est.totalCents, updatedAt: est.updatedAt,
+          contactId: target.contactId, dealKey: est.code, estimateNumber: est.number, totalCents: est.totalCents, updatedAt: est.updatedAt, to: est.to,
           oldQuoteDays, daysCard, nonce: deps.makeId(),
         },
       });
@@ -575,10 +621,12 @@ const resendTool: ToolSpec = {
           note: "Their earlier card for this estimate was being sent at that very moment, so this new one was put away and nothing was sent from it. Tell them in a sentence.",
         });
       }
+      const same = sameNameForClaude(twin, "card", "email");
       return ok({
         // The last send comes from their record's recent history, which can leave an older one out, so
         // a missing date is left out rather than told as "never sent".
         shown: true, estimate: est.number, ageDays: est.ageDays, ...(est.lastSentAt ? { lastSentOn: est.lastSentAt.slice(0, 10) } : {}),
+        ...(same ? { sameName: same } : {}),
         ...(ruleNotes.length ? { rules: ruleNotes } : {}),
         ...(replaced ? { replacedOlderCards: replaced } : {}),
         ...(unproven ? { unproven: UNPROVEN_DAYS } : {}),

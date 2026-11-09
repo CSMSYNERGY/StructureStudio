@@ -7,7 +7,7 @@ import type { Deps, ProposalRow, Store, ToolSpec, TurnState, Who } from "./types
 import { register } from "./pieces.ts";
 import { leaksContactDetails } from "./redact.ts";
 import { SAID } from "./common.ts";
-import { datesIn, DRAFT_SAID, draftsPiece, moneyIn } from "./drafts.ts";
+import { CONSENT_WHERE, datesIn, DRAFT_SAID, draftsPiece, LIST_THEM, moneyIn, phoneShown, sameNameOnRefusal } from "./drafts.ts";
 
 register([draftsPiece]);
 
@@ -67,6 +67,22 @@ function record(over: Rec = {}): Rec {
   };
 }
 
+/** crm_customer_facts' row for one customer (portal-settings jackReads.ts customerFacts), the fields
+ *  lookups.ts reads. Dale himself by default. */
+const factRow = (o: Rec = {}): Rec => ({
+  id: CID, name: "Dale Miller", company: null, town: "Sedalia", source: "design", createdAt: daysAgo(40), hasPhone: true, hasEmail: true,
+  textsOff: false, textsOffReason: null, textsConsented: true, dndAll: false, emailOff: false, emailOffBy: null, callsOff: false,
+  lastInAt: daysAgo(1), lastInChannel: "sms", lastOutAt: daysAgo(2), lastOutChannel: "sms", deals: [], ...o,
+});
+const OTHER_DALE = "99999999-2222-4333-8444-555555555555";
+/** crm_customer_facts by name, as the route searches: every word of two letters or more is in the name,
+ *  at most 10. */
+function byName(people: Rec[], nameLike: unknown) {
+  const words = String(nameLike ?? "").toLowerCase().split(/\s+/).filter((w) => w.length >= 2);
+  const contacts = people.filter((p) => words.every((w) => String(p.name ?? "").toLowerCase().includes(w))).slice(0, 10);
+  return { status: 200, data: { ok: true, complete: true, contacts, seen: { meetings: true, calls: true } } };
+}
+
 function makeStore() {
   const proposals = new Map<string, ProposalRow>();
   let seq = 0;
@@ -108,7 +124,7 @@ function makeStore() {
   return { store, proposals };
 }
 
-function makeDeps(opts: { answer?: { status: number; data: Rec | null }; canRead?: (a: string) => boolean; canEdit?: (a: string) => boolean } = {}) {
+function makeDeps(opts: { answer?: { status: number; data: Rec | null }; canRead?: (a: string) => boolean; canEdit?: (a: string) => boolean; people?: Rec[]; facts?: { status: number; data: Rec | null } } = {}) {
   const { store, proposals } = makeStore();
   const calls: { action: string; body: Record<string, unknown> }[] = [];
   const logs: string[] = [];
@@ -118,6 +134,7 @@ function makeDeps(opts: { answer?: { status: number; data: Rec | null }; canRead
     portal: (action, body) => {
       calls.push({ action, body });
       if (action === "crm_record") return Promise.resolve(opts.answer ?? { status: 200, data: record() });
+      if (action === "crm_customer_facts") return Promise.resolve(opts.facts ?? byName(opts.people ?? [factRow()], body.nameLike));
       return Promise.resolve({ status: 404, data: null });
     },
     call(fn, action, body) { return fn === "portal-settings" ? this.portal(action, body) : Promise.resolve({ status: 404, data: null }); },
@@ -177,8 +194,10 @@ Deno.test("look: the fact sheet holds no phone number, email or street line, and
   for (const bad of ["816", "0142", "0100", "0177", "0188", "0199", "@", "Main St", "PO Box", "65301", "Sue", "evil", "SN-12345678", "+1", "wife", "call me back"]) {
     assert(!out.content.includes(bad), `the sheet holds ${bad}`);
   }
-  assertEquals(calls, [{ action: "crm_record", body: { kind: "contact", id: CID } }]);
+  // The record, then the same-name check (by the record's own name, as the caller).
+  assertEquals(calls, [{ action: "crm_record", body: { kind: "contact", id: CID } }, { action: "crm_customer_facts", body: { nameLike: "Dale Miller" } }]);
   const sheet = JSON.parse(out.content);
+  assertEquals(sheet.sameName, undefined, "no other customer has his name");
   assertEquals(sheet.firstName, "Dale");
   assertEquals(sheet.town, "Sedalia, MO");
   assertEquals(sheet.assignedTo, "Mike Rep");
@@ -250,7 +269,8 @@ Deno.test("look and draft: a look-up's list and ref name the customer, and Claud
   const s = turn();
   const out = await look.run(deps, s, { list, ref: "c1" });
   assert(!out.isError, out.content);
-  assertEquals(calls, [{ action: "crm_record", body: { kind: "contact", id: CID } }]);
+  assertEquals(calls.map((c) => c.action), ["crm_record", "crm_customer_facts"]);
+  assertEquals(calls[0].body, { kind: "contact", id: CID });
   const sheet = JSON.parse(out.content);
   assertEquals([sheet.list, sheet.ref], [list, "c1"]);
   assert(!out.content.includes(CID), "the contact's id reached Claude");
@@ -301,8 +321,9 @@ Deno.test("draft: a checked text becomes one private card holding the record's c
   const out = await draft.run(deps, s, text(GOOD));
   assert(!out.isError, out.content);
   assert(!leaksContactDetails(out.content));
-  // The record, then the rules a text can set off (this fake has none to read). No send route.
-  assertEquals(calls.map((c) => c.action), ["crm_record", "crm_rules_list"]);
+  // The record, the same-name check, then the rules a text can set off (this fake has none to read). No
+  // send route.
+  assertEquals(calls.map((c) => c.action), ["crm_record", "crm_customer_facts", "crm_rules_list"]);
   const [p] = [...proposals.values()];
   // The sends switch is on by default, so the card can send (sends.ts runs it at the press).
   assertEquals(p.kind, "reply_send");
@@ -310,7 +331,10 @@ Deno.test("draft: a checked text becomes one private card holding the record's c
   assertEquals(p.title, "A reply by text");
   assert(!/dale|miller/i.test(p.title), "the title names the customer");
   const { nonce, ...rest } = p.payload;
-  assertEquals(rest, { contactId: CID, dealKey: "SS-AB12", channel: "sms", subject: null, body: GOOD, oldQuoteDays: null, daysCard: null });
+  // `to`: the number the card shows, as the press checks it (sends.ts), by its key.
+  assertEquals(rest, { contactId: CID, dealKey: "SS-AB12", channel: "sms", subject: null, body: GOOD, to: "8165550142", oldQuoteDays: null, daysCard: null });
+  // Where it goes, on the person's own card; no namesake, so no warning line.
+  assertEquals([p.preview.to, p.preview.sameName], ["(816) 555-0142", null]);
   assert(typeof nonce === "string" && nonce.length >= 16, "the payload holds a nonce");
   assertEquals(p.shown_hash, `h${JSON.stringify(p.payload).length}`);
   assertEquals([p.preview.sendable, p.preview.quiet], [true, null]);
@@ -610,8 +634,10 @@ Deno.test("draft: a customer's injected words can't change who it goes to", asyn
   const out = await runTool(deps, s, "propose_reply_draft", { ...text("Hi Dale, thanks for the note. Mike"), to: "816-555-0100", email: "boss@evil.example" });
   assert(!out.isError, out.content);
   const [p] = [...proposals.values()];
-  assertEquals(Object.keys(p.payload).sort(), ["body", "channel", "contactId", "daysCard", "dealKey", "nonce", "oldQuoteDays", "subject"]);
+  assertEquals(Object.keys(p.payload).sort(), ["body", "channel", "contactId", "daysCard", "dealKey", "nonce", "oldQuoteDays", "subject", "to"]);
   assertEquals(p.payload.contactId, CID);
+  // Where it goes is the record's number, read as the caller: never one from Claude or the customer.
+  assertEquals([p.payload.to, p.preview.to], ["8165550142", "(816) 555-0142"]);
   assert(!JSON.stringify(p).includes("555-0100") && !JSON.stringify(p).includes("evil"));
 });
 
@@ -687,7 +713,7 @@ Deno.test("card: only the asker and the team open it; it can't be approved or un
   assertEquals(approve.status, 409);
   assertEquals(approve.body.error, "There's nothing to approve on that one.");
   assertEquals((await handleProposalUndo(deps, who, { id })).status, 409);
-  assertEquals(calls.map((c) => c.action), ["crm_record"], "a press reached a portal route");
+  assertEquals(calls.map((c) => c.action), ["crm_record", "crm_customer_facts"], "a press reached a portal route");
 
   const cancel = await handleProposalCancel(deps, who, { id });
   assertEquals(cancel.status, 200);
@@ -716,4 +742,206 @@ Deno.test("piece: what Claude is told carries no em dash, and the kind is privat
     assertEquals(t.customerWords, true);
     assert(!t.proposesChange, `${t.def.name} would vanish after a look`);
   }
+});
+
+// ── 11-09: where it goes, two customers with one name, and where consent is recorded ─────────────────
+
+Deno.test("same name: the look tells Claude to ask which one, with what tells them apart, and never a contact detail", async () => {
+  // Another live Dale Miller in Sedalia, added by hand, who never wrote and has no texting consent.
+  const other = factRow({ id: OTHER_DALE, source: "manual", createdAt: daysAgo(4), lastInAt: null, lastInChannel: null, textsConsented: false });
+  const { deps, calls } = makeDeps({ people: [factRow(), other, factRow({ id: "88888888-2222-4333-8444-555555555555", name: "Dale Millerton" })] });
+  const out = await look.run(deps, turn(), { ref: CID });
+  assert(!out.isError, out.content);
+  assertEquals(calls[1], { action: "crm_customer_facts", body: { nameLike: "Dale Miller" } });
+  const sheet = JSON.parse(out.content);
+  assertEquals(sheet.sameName.others, 1, "Dale Millerton is another name");
+  assertEquals(sheet.sameName.thisOne, ["from a design Sep 27", "texted you yesterday", "agreed to texts"]);
+  assertEquals(sheet.sameName.othersAre, [["added by hand Nov 2", "nothing from them yet", "no texting consent"]]);
+  assert(/ask them which one they mean before you write anything/.test(sheet.sameName.note) && /not by the name alone/.test(sheet.sameName.note) && /Write only after they say/.test(sheet.sameName.note), sheet.sameName.note);
+  // (Claude came in with Dale's id here, so the sheet's ref is that id: the other one's never shows.)
+  assert(!leaksContactDetails(out.content) && !out.content.includes(OTHER_DALE), "the other one's id or a contact detail reached Claude");
+  // The same name is name, company and town, case and spacing aside: another town, or a company, is
+  // another customer; "DALE  miller" is the same one. A town on only one of them tells nothing apart
+  // (11-09 review: a record added by hand often has none).
+  // A company on only one of them is no difference either (11-09 review): this record has none.
+  for (const [o, twins] of [[{ town: "Warsaw" }, 0], [{ company: "Miller Farms" }, 1], [{ name: "DALE  miller", town: "sedalia" }, 1], [{ town: null }, 1], [{ town: " " }, 1]] as [Rec, number][]) {
+    const w = makeDeps({ people: [factRow(), factRow({ id: OTHER_DALE, ...o })] });
+    const sh = JSON.parse((await look.run(w.deps, turn(), { ref: CID })).content);
+    assertEquals(sh.sameName?.others ?? 0, twins, JSON.stringify(o));
+  }
+  // Two companies that are both there and differ are two customers; the same company is one name.
+  for (const [theirs, twins] of [["Miller Farms", 0], ["dale  BARNS", 1]] as [string, number][]) {
+    const w = makeDeps({ answer: { status: 200, data: record({ contact: { company: "Dale Barns" } }) }, people: [factRow({ company: "Dale Barns" }), factRow({ id: OTHER_DALE, company: theirs })] });
+    const sh = JSON.parse((await look.run(w.deps, turn(), { ref: CID })).content);
+    assertEquals(sh.sameName?.others ?? 0, twins, theirs);
+  }
+  // And the other way: this record has no town, the other one has.
+  const noTown = makeDeps({ answer: { status: 200, data: record({ contact: { city: null } }) }, people: [factRow({ town: null }), factRow({ id: OTHER_DALE, town: "Sedalia" })] });
+  assertEquals(JSON.parse((await look.run(noTown.deps, turn(), { ref: CID })).content).sameName?.others, 1);
+  // A check that couldn't run is said, never read as "no namesake".
+  const failed = makeDeps({ facts: { status: 500, data: null } });
+  const sf = JSON.parse((await look.run(failed.deps, turn(), { ref: CID })).content);
+  assertEquals(sf.sameName.unchecked, true);
+});
+
+Deno.test("same name: the card says another customer has the name, and Claude is told to have the person check", async () => {
+  const other = factRow({ id: OTHER_DALE, source: "manual", lastInAt: null, textsConsented: false });
+  const { deps, proposals } = makeDeps({ people: [factRow(), other] });
+  const out = await draft.run(deps, turn(), text("Hi Dale, any questions?"));
+  assert(!out.isError, out.content);
+  const p = [...proposals.values()].at(-1)!;
+  assertEquals(p.preview.sameName, "Another customer is also named Dale Miller. Check the number before you approve.");
+  const said = JSON.parse(out.content);
+  assertEquals(said.sameName.others, 1);
+  assert(/the card says so/.test(said.sameName.note) && /check the number on the card/.test(said.sameName.note), said.sameName.note);
+  assert(!leaksContactDetails(out.content) && !out.content.includes("Dale Miller"), "the whole name or a contact detail reached Claude");
+  // An email says the address; a draft that can't send says before you send it.
+  await draft.run(deps, turn(), email("Hello", "Hi Dale, any questions?"));
+  assertEquals([...proposals.values()].at(-1)!.preview.sameName, "Another customer is also named Dale Miller. Check the address before you approve.");
+  await draft.run(deps, turn({ off: ["sends"] }), text("Hi Dale, any questions?"));
+  assertEquals([...proposals.values()].at(-1)!.kind, "reply_draft");
+  assertEquals([...proposals.values()].at(-1)!.preview.sameName, "Another customer is also named Dale Miller. Check the number before you send it.");
+  // The check couldn't run: the card says so too.
+  const failed = makeDeps({ facts: { status: 0, data: null } });
+  const o2 = await draft.run(failed.deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals([...failed.proposals.values()].at(-1)!.preview.sameName, "I couldn't check whether another customer has the same name. Check the number before you approve.");
+  assertEquals(JSON.parse(o2.content).sameName.unchecked, true);
+});
+
+Deno.test("to: the card shows the number a text goes to, or the address an email goes to, and Claude gets neither", async () => {
+  const { deps, proposals } = makeDeps();
+  const t = await draft.run(deps, turn(), text("Hi Dale, any questions?"));
+  const e = await draft.run(deps, turn(), email("Hello", "Hi Dale, any questions?"));
+  const [a, b] = [...proposals.values()];
+  assertEquals([a.preview.to, a.payload.to], ["(816) 555-0142", "8165550142"]);
+  assertEquals([b.preview.to, b.payload.to], ["dale@example.com", "dale@example.com"]);
+  for (const o of [t, e]) assert(!leaksContactDetails(o.content) && !/555-0142|8165550142|@/.test(o.content), o.content);
+  // Saved as "+1 816 555 0142" it reads the same; a number with a digit missing, or one whose last digit
+  // was lost, is shown as it's saved, never dressed up as whole.
+  assertEquals([phoneShown("+1 816 555 0142"), phoneShown("816.555.0142"), phoneShown(" 816555014 "), phoneShown("1816555014"), phoneShown(""), phoneShown(null)],
+    ["(816) 555-0142", "(816) 555-0142", "816555014", "1816555014", null, null]);
+});
+
+Deno.test("consent: the refusal says where it's recorded, in the record page's own words, and never calls it a setting", async () => {
+  const { deps, proposals } = makeDeps({ answer: { status: 200, data: record({ sms: { ready: true, optedOut: false, consented: false } }) } });
+  const out = await draft.run(deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals([out.isError, out.content, proposals.size], [true, DRAFT_SAID.noConsent, 0]);
+  for (const words of ["so I won't write them a text", "open the Send SMS tab", "\"They already gave permission\"", "when they text you first", "tick the texting box on your design link"]) {
+    assert(out.content.includes(words), `${words}: ${out.content}`);
+  }
+  assert(!/setting|switch|turn (it )?on|toggle/i.test(out.content), out.content);
+  assert(!/[—–]/.test(CONSENT_WHERE));
+  // The look says the same where, so Claude never makes up a setting.
+  const sheet = JSON.parse((await look.run(deps, turn(), { ref: CID })).content);
+  assertEquals(sheet.channels.text, { ok: false, why: "no consent to text on file", where: CONSENT_WHERE });
+  // And what Claude is told about the piece says it isn't a setting and that it can't record it.
+  assert((draftsPiece.rules ?? []).some((r) => /isn't a setting or a switch, and you can't record it/.test(r)));
+});
+
+// ── 11-09 review: a number that isn't one, a merged record, a search cut short, the record page's words ──
+
+Deno.test("no number: a phone saved as words ('n/a') is no number, so no text card is made that could never send", async () => {
+  // The digits a booking kept (consent and opt-out are keyed on them) still pass every check, but
+  // crm_send_sms texts crm_contacts.phone, which has none: the card would have no To line and no send.
+  for (const phone of ["n/a", "see notes", "  "]) {
+    const { deps, proposals } = makeDeps({ answer: { status: 200, data: record({ contact: { phone, phone_digits: "8165550142" } }) } });
+    const out = await draft.run(deps, turn(), text("Hi Dale, any questions?"));
+    assertEquals([out.isError, out.content, proposals.size], [true, DRAFT_SAID.noPhone, 0], phone);
+    const sheet = JSON.parse((await look.run(deps, turn(), { ref: CID })).content);
+    assertEquals(sheet.channels.text, { ok: false, why: "no phone number on file" }, phone);
+  }
+  // A number written any way with its digits is a number.
+  const { deps, proposals } = makeDeps({ answer: { status: 200, data: record({ contact: { phone: "+1 816 555 0142" } }) } });
+  assert(!(await draft.run(deps, turn(), text("Hi Dale, any questions?"))).isError);
+  assertEquals([...proposals.values()][0].preview.to, "(816) 555-0142");
+});
+
+Deno.test("merged: a look at a record merged away says so, and never asks the person to choose between one customer's two records", async () => {
+  // A carried list's row can name a record merged since. The name search leaves merged records out, so it
+  // would find only the record this one became, and call it another customer of the same name.
+  const { deps, calls } = makeDeps({ answer: { status: 200, data: record({ contact: { merged_into: OTHER_DALE } }) }, people: [factRow({ id: OTHER_DALE })] });
+  const out = await look.run(deps, turn(), { ref: CID });
+  assertEquals([out.isError, out.content], [true, DRAFT_SAID.merged]);
+  assertEquals(calls.map((c) => c.action), ["crm_record"], "a same-name check ran for a merged record");
+});
+
+Deno.test("same name: a name search that comes back full, or cut short before the scope, with no twin counts as unchecked", async () => {
+  const near = (n: number) => Array.from({ length: n }, (_, i) => factRow({ id: `99999999-2222-4333-8444-${String(i).padStart(12, "0")}`, name: "Dale Millerton" }));
+  const full = makeDeps({ people: [factRow(), ...near(9)] });
+  const o = await draft.run(full.deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals([...full.proposals.values()].at(-1)!.preview.sameName, "I couldn't check whether another customer has the same name. Check the number before you approve.");
+  assertEquals(JSON.parse(o.content).sameName.unchecked, true);
+  const short = makeDeps({ people: [factRow(), ...near(8)] });
+  await draft.run(short.deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals([...short.proposals.values()].at(-1)!.preview.sameName, null);
+  // The route read 50 by name before it kept only the ones this rep may see (portal-settings jackReads.ts
+  // capped): fewer than 10 came back, but a namesake may be past the 50.
+  const capped = makeDeps({ facts: { status: 200, data: { ok: true, complete: true, capped: true, contacts: [factRow()], seen: { meetings: true, calls: true } } } });
+  const oc = await draft.run(capped.deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals([...capped.proposals.values()].at(-1)!.preview.sameName, "I couldn't check whether another customer has the same name. Check the number before you approve.");
+  assertEquals(JSON.parse(oc.content).sameName.unchecked, true);
+  // Not cut short: as before, no namesake and no line.
+  const whole = makeDeps({ facts: { status: 200, data: { ok: true, complete: true, capped: false, contacts: [factRow()], seen: { meetings: true, calls: true } } } });
+  await draft.run(whole.deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals([...whole.proposals.values()].at(-1)!.preview.sameName, null);
+});
+
+Deno.test("consent: the words Jack quotes are the record page's own (portal/02-sales.jsx), so a renamed tab or button fails here", async () => {
+  const src = (await Deno.readTextFile(new URL("../../../portal/02-sales.jsx", import.meta.url))).replace(/\r/g, "");
+  // The record page's tab, and the button in its "no permission yet" box.
+  assert(src.includes('key: "sms", label: "Send SMS"'), "the record page has no Send SMS tab");
+  assert(/>\s*They already gave permission\b/.test(src), "the record page has no \"They already gave permission\" button");
+  // And the two ways it's recorded by itself, which Jack also names.
+  assert(/ticking the texting box on your design\s+link/.test(src) && /texting you first/.test(src), "the box no longer names the design link or texting first");
+  assert(CONSENT_WHERE.includes("open the Send SMS tab") && CONSENT_WHERE.includes('press "They already gave permission"'), CONSENT_WHERE);
+  assert(CONSENT_WHERE.includes("tick the texting box on your design link") && CONSENT_WHERE.includes("when they text you first"), CONSENT_WHERE);
+  // Plain words: the record isn't said twice, and nothing is a setting.
+  assert(!/record it on their record/.test(CONSENT_WHERE) && !/setting|switch|turn (it )?on/i.test(CONSENT_WHERE), CONSENT_WHERE);
+});
+
+// ── 11-09 review, round 2: a refusal about one of two customers of one name, and listing them first ───
+
+Deno.test("same name: a refusal about their own channels says another customer has the name, what tells each apart, and to ask first", async () => {
+  const other = factRow({ id: OTHER_DALE, source: "manual", createdAt: daysAgo(4), lastInAt: null, lastInChannel: null, textsConsented: false });
+  const me = factRow({ textsConsented: false });
+  const noConsent = record({ sms: { ready: true, optedOut: false, consented: false } });
+  const { deps, calls, proposals } = makeDeps({ answer: { status: 200, data: noConsent }, people: [me, other] });
+  const out = await draft.run(deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals([out.isError, proposals.size], [true, 0]);
+  assertEquals(out.content, `${DRAFT_SAID.noConsent} Another customer this person can see has the same name, so this may not be the one they mean. This one: from a design Sep 27, texted you yesterday, no texting consent. The other one: added by hand Nov 2, nothing from them yet, no texting consent. Unless they already picked this one by what tells them apart (not by the name alone), ask them which one they mean before you tell them any of this. ${LIST_THEM}`);
+  assertEquals(sameNameOnRefusal({ others: [["added by hand Nov 2", "nothing from them yet", "no texting consent"]], self: ["from a design Sep 27", "texted you yesterday", "no texting consent"] }), out.content.slice(DRAFT_SAID.noConsent.length + 1));
+  assert(!leaksContactDetails(out.content) && !out.content.includes(OTHER_DALE) && !/[—–]/.test(out.content), out.content);
+  assertEquals(calls.map((c) => c.action), ["crm_record", "crm_customer_facts"]);
+  // The other channel refusals about this record say it too.
+  for (const [answer, input, said] of [
+    [record({ contact: { phone: null, phone_digits: null } }), text("Hi Dale, any questions?"), DRAFT_SAID.noPhone],
+    [record({ sms: { ready: true, optedOut: true, consented: true } }), text("Hi Dale, any questions?"), DRAFT_SAID.optedOut],
+    [record({ contact: { dnd_all_at: daysAgo(1) } }), text("Hi Dale, any questions?"), DRAFT_SAID.dndAll],
+    [record({ contact: { dnd_email_at: daysAgo(1) } }), email("Hello", "Hi Dale, any questions?"), DRAFT_SAID.dndEmail],
+    [record({ contact: { email: null } }), email("Hello", "Hi Dale, any questions?"), DRAFT_SAID.noEmail],
+  ] as [Rec, Rec, string][]) {
+    const w = makeDeps({ answer: { status: 200, data: answer }, people: [factRow(), other] });
+    const o = await draft.run(w.deps, turn(), input);
+    assert(o.isError && o.content.startsWith(`${said} Another customer this person can see has the same name`), o.content);
+  }
+  // A check that couldn't run is said too, never read as "no namesake".
+  const failed = makeDeps({ answer: { status: 200, data: noConsent }, facts: { status: 500, data: null } });
+  const f = await draft.run(failed.deps, turn(), text("Hi Dale, any questions?"));
+  assertEquals(f.content, `${DRAFT_SAID.noConsent} I couldn't check whether another customer has the same name. If the person named them only by name, make sure this is the one they mean before you tell them any of this.`);
+  // No namesake: the refusal as it was. A refusal about the words, not the record, never reads for one.
+  const alone = makeDeps({ answer: { status: 200, data: noConsent } });
+  assertEquals((await draft.run(alone.deps, turn(), text("Hi Dale, any questions?"))).content, DRAFT_SAID.noConsent);
+  const words = makeDeps({ people: [factRow(), other] });
+  const d = await draft.run(words.deps, turn(), text("Hi Dale, it's $9,999 now."));
+  assert(d.isError && !/same name/.test(d.content), d.content);
+  assertEquals(words.calls.map((c) => c.action), ["crm_record"]);
+});
+
+Deno.test("same name: the look and the piece's rule say to put them all on the screen before asking, so the answer can use that list's ref", async () => {
+  const other = factRow({ id: OTHER_DALE, source: "manual", lastInAt: null, textsConsented: false });
+  const { deps } = makeDeps({ people: [factRow(), other] });
+  const sheet = JSON.parse((await look.run(deps, turn(), { ref: CID })).content);
+  assert(sheet.sameName.note.includes(LIST_THEM) && /Write only after they say/.test(sheet.sameName.note), sheet.sameName.note);
+  assert(/look_up_customer by their name/.test(LIST_THEM) && !/[—–]/.test(LIST_THEM), LIST_THEM);
+  assert((draftsPiece.rules ?? []).some((r) => /\(sameName\)/.test(r) && r.includes(LIST_THEM)), "the rule doesn't say to list them first");
 });

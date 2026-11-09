@@ -1854,10 +1854,16 @@ JACK_CARDS.lookup = JackLookupCard;
 //     view-as never sends a text (the record page hides texting there, and the server refuses the press).
 //     No Copy on a card that sends: words copied and sent by hand, then Approved, would reach the customer
 //     twice. Only a draft that can't send offers Copy (the same for estimate_resend and a change order).
-// preview = { contactId, dealKey, channel, subject, body, firstName, fullName, company, town, dealLabel,
-//   factsUsed, notes, sendable, ruleNotes: string[], quiet: { sentence, opensAt } | null }. fullName, company
-//   and town say exactly who a press sends to (a record with no name gets no card that sends).
-// Approve posts send: true: the server runs a send card only from a page that shows its words.
+// preview = { contactId, dealKey, channel, subject, body, firstName, fullName, company, town, to, sameName,
+//   dealLabel, factsUsed, notes, sendable, ruleNotes: string[], quiet: { sentence, opensAt } | null }.
+//   fullName, company and town say exactly who a press sends to (a record with no name gets no card that
+//   sends), and `to` exactly where: "(816) 555-0142" for a text, the address for an email (11-09; the press
+//   refuses when their record's number or address isn't this one). sameName: a sentence when another
+//   customer has the same name, shown while the card waits. A card from before 11-09 has neither.
+// Approve posts send: true: the server runs a send card only from a page that shows its words. It also
+//   posts `to`, the destination this card drew (11-09): the server runs a card whose preview has a `to` only
+//   from a page that drew that line. A card with no `to` (made before 11-09) can't be sent at all, so it
+//   shows no Approve and says to ask again.
 // result (reply_send): sent { sent: 1, channel, at, ledgerId } on "applied"; waiting { waiting: { reason,
 //   sentence, retryAt } } back on "ready" with nothing sent; refused is "failed" with the sentence in
 //   failure; unclear is "partly_applied" with the sentence in reports[].reason (a stalled press may have
@@ -1962,6 +1968,12 @@ const jackMergedAway = (p) => p.status === "failed" && /was merged into another 
 const jackWho = (pv) => pv.fullName || pv.firstName || "this customer";
 /** The line under the title: their company and town, so two people with one name can be told apart. */
 const jackWhere = (pv) => [pv.company, pv.town].filter((x) => typeof x === "string" && x.trim()).join(" · ");
+/** Where a send card goes, right under who: "To (816) 555-0142", or "To dale@example.com". Approve posts
+ *  exactly this back, so the server knows the page showed it. */
+const jackTo = (pv) => (typeof pv.to === "string" && pv.to.trim() ? pv.to.trim() : "");
+/** A ready send card from before 11-09 says nowhere where it goes: it can't be sent, so it says so. */
+const JACK_NO_WHERE = "This card doesn't show where it goes, so it can't be sent. Ask me again and I'll make a fresh card.";
+const jackToLine = { fontSize: 12.5, fontWeight: 600, color: "#1E293B", marginTop: 2, overflowWrap: "anywhere" };
 const jackRuleBox = { fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 8, lineHeight: 1.45 };
 
 function JackDraftCard({ proposal, viewingName, onChanged, onNavigate }) {
@@ -1984,7 +1996,10 @@ function JackDraftCard({ proposal, viewingName, onChanged, onNavigate }) {
   const waiting = sends && live && res.waiting && typeof res.waiting === "object" ? res.waiting : null;
   // The team in view-as can't text from here: the record page hides texting, and the server refuses it.
   const noTextHere = sends && isText && !!viewingName;
-  const canSend = sends && live && !!p.hash && !noTextHere;
+  // A send card that doesn't say where it goes (made before 11-09) can only be refused at the press, so it
+  // offers no Approve and says to ask again.
+  const noWhere = sends && live && !noTextHere && !jackTo(pv);
+  const canSend = sends && live && !!p.hash && !noTextHere && !noWhere;
   // What can't be undone is said once, right above Approve, in words that match the button. drafts.ts
   // OLD_PAGE_NOTE ("Reload the page...", for a page from before round 2) is left out here.
   const backNote = sends ? allNotes.find((n) => /can't be taken back/i.test(String(n))) : undefined;
@@ -2040,6 +2055,8 @@ function JackDraftCard({ proposal, viewingName, onChanged, onNavigate }) {
     ? (isText && viewingName
       ? "Nothing has been sent. Texting isn't available while you're viewing another account: copy it for the builder to send, or ask me for an email instead."
       : "Nothing has been sent. Read it, change anything you like, and send it from their record.")
+    : noWhere
+    ? `${nothingYet} ${JACK_NO_WHERE}`.trim()
     : waiting
     ? `${lost ? waitSaid.replace(/^Nothing was sent\.\s*/, "") : waitSaid}${waiting.retryAt && canSend && insideCard(waiting.retryAt) ? ` You can press Approve again from ${jackAt(waiting.retryAt)} your time.` : ""}`.trim()
     : noTextHere
@@ -2049,6 +2066,8 @@ function JackDraftCard({ proposal, viewingName, onChanged, onNavigate }) {
     <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
       <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{isText ? "Text" : "Email"} to {jackWho(pv)}</div>
       {jackWhere(pv) && <div data-jack-send-who="" style={{ fontSize: 12, color: "#64748B", marginTop: 2, overflowWrap: "anywhere" }}>{jackWhere(pv)}</div>}
+      {jackTo(pv) && <div data-jack-send-to="" style={jackToLine}>To {jackTo(pv)}</div>}
+      {live && typeof pv.sameName === "string" && pv.sameName && <div data-jack-same-name="" style={jackRuleBox}>{pv.sameName}</div>}
       {pv.dealLabel && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, overflowWrap: "anywhere" }}>About {jackKeepNumbers(pv.dealLabel)}</div>}
       {viewingName && live && <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>This is <b>{viewingName}</b>'s customer.</div>}
       <div role="status" style={{ fontSize: 13, color: after ? after.tone : waiting ? "#B45309" : "#64748B", marginTop: 6 }}>
@@ -2082,7 +2101,7 @@ function JackDraftCard({ proposal, viewingName, onChanged, onNavigate }) {
       {live && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: canSend ? 6 : 10, alignItems: "center" }}>
           {canSend && (
-            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash, send: true })} style={jackWaitLook(btn(ACCENT, "#FFF"), busy)}>{sending ? "Sending…" : "Approve"}</button>
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash, send: true, to: jackTo(pv) })} style={jackWaitLook(btn(ACCENT, "#FFF"), busy)}>{sending ? "Sending…" : "Approve"}</button>
           )}
           {pv.contactId && onNavigate && (
             <button type="button" disabled={!!busy} onClick={openRecord} style={jackWaitLook(sends ? btn("#FFF", "#334155", "#CBD5E1") : btn(ACCENT, "#FFF"), busy)}>Open their record</button>
@@ -2111,7 +2130,8 @@ JACK_CARDS.reply_send = JackDraftCard;
 
 // renders: estimate_resend (register: JACK_CARDS.estimate_resend = JackEstimateResendCard;)
 // props: { proposal, viewingName, onChanged, onNavigate }, the props JackAnyCard already passes (onSay and busy are ignored).
-// preview = { contactId, dealKey (the design's code), firstName, fullName, company, town, dealLabel, estimateNumber,
+// preview = { contactId, dealKey (the design's code), firstName, fullName, company, town, to (the address saved on
+//   the estimate, 11-09), sameName (a sentence, or null), dealLabel, estimateNumber,
 //   total ("$8,450" or null), lastSentOn (ISO, or null when it can't be told: no row), ageDays (from when it was made),
 //   notes: string[], ruleNotes: string[] }.
 // result: as a reply_send card's (sent, refused, unclear). Never "waiting": an email has no quiet hours.
@@ -2136,7 +2156,9 @@ function JackEstimateResendCard({ proposal, viewingName, onChanged, onNavigate }
   const backNote = allNotes.find((n) => /can't be taken back/i.test(String(n)));
   const notes = allNotes.filter((n) => n !== backNote);
   const ruleNotes = Array.isArray(pv.ruleNotes) ? pv.ruleNotes : [];
-  const canSend = live && !!p.hash;
+  // No `to` (a card from before 11-09): it can't be sent, so no Approve (as the reply card).
+  const noWhere = live && !jackTo(pv);
+  const canSend = live && !!p.hash && !noWhere;
   const after = jackSendSays(p, "estimate", sending);
   const days = typeof pv.ageDays === "number" && pv.ageDays >= 0 ? pv.ageDays : null;
   // Once it has gone again, Last sent is that send, so the row never keeps the old date beside "Its sent
@@ -2171,10 +2193,12 @@ function JackEstimateResendCard({ proposal, viewingName, onChanged, onNavigate }
     <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
       <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{number ? <>Estimate <span style={{ whiteSpace: "nowrap" }}>{number}</span></> : "An estimate"} for {jackWho(pv)}</div>
       {jackWhere(pv) && <div data-jack-send-who="" style={{ fontSize: 12, color: "#64748B", marginTop: 2, overflowWrap: "anywhere" }}>{jackWhere(pv)}</div>}
+      {jackTo(pv) && <div data-jack-send-to="" style={jackToLine}>To {jackTo(pv)}</div>}
+      {live && typeof pv.sameName === "string" && pv.sameName && <div data-jack-same-name="" style={jackRuleBox}>{pv.sameName}</div>}
       {viewingName && live && <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>This is <b>{viewingName}</b>'s customer.</div>}
       <div role="status" style={{ fontSize: 13, color: after ? after.tone : "#64748B", marginTop: 6 }}>
         {/* "From this card": their record shows when it last went. Not said beside a lost press's sentence. */}
-        {after ? after.text : live && !lost ? "Nothing has been sent from this card yet." : null}
+        {after ? after.text : live && !lost ? `Nothing has been sent from this card yet.${noWhere ? ` ${JACK_NO_WHERE}` : ""}` : live && noWhere ? JACK_NO_WHERE : null}
       </div>
       {rows.length > 0 && (
         <table style={{ borderCollapse: "collapse", marginTop: 8, opacity: live || sending || p.status === "applying" || p.status === "applied" ? 1 : 0.6 }}>
@@ -2192,7 +2216,7 @@ function JackEstimateResendCard({ proposal, viewingName, onChanged, onNavigate }
       {live && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: canSend ? 6 : 10, alignItems: "center" }}>
           {canSend && (
-            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash, send: true })} style={jackWaitLook(btn(ACCENT, "#FFF"), busy)}>{sending ? "Sending…" : "Approve"}</button>
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash, send: true, to: jackTo(pv) })} style={jackWaitLook(btn(ACCENT, "#FFF"), busy)}>{sending ? "Sending…" : "Approve"}</button>
           )}
           {pv.contactId && onNavigate && <button type="button" disabled={!!busy} onClick={openRecord} style={jackWaitLook(btn("#FFF", "#334155", "#CBD5E1"), busy)}>Open their record</button>}
           <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={jackWaitLook(btn("#FFF", "#334155", "#CBD5E1"), busy)}>{busy === "proposal_cancel" ? "Putting it away…" : "Not now"}</button>

@@ -80,6 +80,11 @@ class World {
     resend_quote_email: () => ({ status: 200, data: { ok: true, sent: true, reason: null, id: EMAIL_ROW } }),
   };
   recordAnswer: Res | null = null;
+  /** The other customers this builder has, as crm_customer_facts answers them (Dale himself is always
+   *  there, from `contact`): the same-name check reads them by name. */
+  others: Any[] = [];
+  /** crm_customer_facts' answer when it must not be the search (a failed read). */
+  factsAnswer: Res | null = null;
   calls: { action: string; body: Any }[] = [];
   /** Card writes and route calls, in the order they happened. */
   events: string[] = [];
@@ -170,9 +175,32 @@ class World {
     if (action === "crm_rules_list") {
       return { status: 200, data: { ok: true, rulesVersion: 2, pipelines: [], team: [], canManage: true, rules: this.rules, labels: [], timeZone: "America/Chicago" } };
     }
+    if (action === "crm_customer_facts") {
+      if (this.factsAnswer) return structuredClone(this.factsAnswer);
+      return { status: 200, data: { ok: true, complete: true, contacts: this.byName(String(body.nameLike ?? "")), seen: { meetings: true, calls: true } } };
+    }
     const a = this.answer[action];
     if (a) return await a(body);
     return { status: 500, data: { error: `${action} must never be called` } };
+  }
+
+  /** crm_customer_facts by name as portal-settings jackReads.ts searches: every word of two letters or
+   *  more (four at most) inside the name, or the whole term inside the company; merged records left
+   *  out; ten at most. The rows carry the fields lookups.ts reads. */
+  byName(term: string): Any[] {
+    const t = term.replace(/[^\p{L}\p{N} '-]/gu, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const words = t.split(" ").filter((x) => x.length >= 2).slice(0, 4);
+    const me = {
+      id: CID, name: this.contact.name, company: this.contact.company, town: this.contact.city, source: "design", createdAt: daysAgo(40),
+      hasPhone: !!this.contact.phone, hasEmail: !!this.contact.email, textsOff: this.sms.optedOut, textsOffReason: null, textsConsented: this.sms.consented,
+      dndAll: false, emailOff: false, emailOffBy: null, callsOff: false, lastInAt: daysAgo(1), lastInChannel: "sms", lastOutAt: null, lastOutChannel: null, deals: [],
+      merged: !!this.contact.merged_into,
+    };
+    return [me, ...this.others]
+      .filter((c) => !c.merged)
+      .filter((c) => (words.length ? words : [t]).every((w) => String(c.name ?? "").toLowerCase().includes(w)) || String(c.company ?? "").toLowerCase().includes(t))
+      .slice(0, 10)
+      .map(({ merged: _m, ...c }) => structuredClone(c));
   }
 
   contactRecord(): Any {
@@ -204,8 +232,14 @@ class World {
   row(id: string) { return this.proposals.get(id)!; }
   last(kind?: string) { return [...this.proposals.values()].filter((p) => !kind || p.kind === kind).at(-1)!; }
   sends() { return this.calls.filter((c) => /^(crm_send_|resend_quote_email)/.test(c.action)); }
-  /** A press of the card's Approve, which says send: true on a send card (portal useJackSend). */
+  /** A press of the card's Approve, which says send: true on a send card and posts the `to` the card drew
+   *  under its title (portal useJackSend, jackTo). */
   async press(id: string, by: Who = who) {
+    const to = this.row(id).preview?.to;
+    return await handleProposalApprove(this.deps, by, { id, hash: this.row(id).shown_hash, send: true, ...(typeof to === "string" ? { to } : {}) });
+  }
+  /** A press from a page built before 11-09: send: true, and no To line drawn, so no `to`. */
+  async oldPress(id: string, by: Who = who) {
     return await handleProposalApprove(this.deps, by, { id, hash: this.row(id).shown_hash, send: true });
   }
   /** The person's own answer to the old_quote_days question card in this chat (memory.ts handleMemoryPick
@@ -287,20 +321,25 @@ Deno.test("a send card's preview: v1's keys plus sendable, ruleNotes and quiet; 
   const w = new World();
   w.rules = [{ id: "r1", name: "Made contact", scopeKind: "pipeline", triggerKind: "event", triggerEvent: "contact_made", elapsedAnchor: null, actions: [{ kind: "send_email", params: {} }], enabled: true, stale: [] }];
   const a = await sendCard(w);
-  assertEquals(Object.keys(a.preview).sort(), ["body", "channel", "company", "contactId", "dealKey", "dealLabel", "factsUsed", "firstName", "fullName", "notes", "quiet", "ruleNotes", "sendable", "subject", "town"]);
-  // Who it goes to, whole: one press sends.
-  assertEquals([a.preview.fullName, a.preview.town, a.preview.company], ["Dale Miller", "Sedalia, MO", null]);
+  // Plus `to` and `sameName` (11-09): where it goes, and the line when another customer has the name.
+  assertEquals(Object.keys(a.preview).sort(), ["body", "channel", "company", "contactId", "dealKey", "dealLabel", "factsUsed", "firstName", "fullName", "notes", "quiet", "ruleNotes", "sameName", "sendable", "subject", "to", "town"]);
+  // Who it goes to, whole, and where: one press sends.
+  assertEquals([a.preview.fullName, a.preview.town, a.preview.company, a.preview.to, a.preview.sameName], ["Dale Miller", "Sedalia, MO", null, "(816) 555-0142", null]);
   assertEquals(a.preview.ruleNotes, ['This text can set off your rule "Made contact" (it starts when contact is made), which texts or emails the customer by itself.']);
   // A page from before round 2 shows only the notes, and its Approve sends nothing: the note says reload,
   // never that Approve sends.
   assert(a.preview.notes.includes(OLD_PAGE_NOTE.text), JSON.stringify(a.preview.notes));
   assert(!a.preview.notes.some((n: string) => /Approve (sends|emails)/.test(n)), JSON.stringify(a.preview.notes));
-  assertEquals(Object.keys(a.payload).sort(), ["body", "channel", "contactId", "daysCard", "dealKey", "nonce", "oldQuoteDays", "subject"]);
+  assertEquals(Object.keys(a.payload).sort(), ["body", "channel", "contactId", "daysCard", "dealKey", "nonce", "oldQuoteDays", "subject", "to"]);
   const b = await sendCard(w, email());
   const c = await sendCard(w, email());
   assert(b.shown_hash !== c.shown_hash, "two identical drafts share a hash");
-  // Nothing private on the card either: no number, no address.
-  for (const p of [a, b, c]) assert(!/555-0142|8165550142|@example|Main St/.test(JSON.stringify([p.preview, p.payload, p.title])), p.kind);
+  // The card shows where it goes and nothing else private: a text its number, an email its address,
+  // never the other one, the street or the zip, and the title neither.
+  assertEquals([b.preview.to, b.payload.to], ["dale@example.com", "dale@example.com"]);
+  assert(!/@|Main St|65301/.test(JSON.stringify([a.preview, a.payload, a.title])), "the text card holds more than its number");
+  for (const p of [b, c]) assert(!/555-0142|8165550142|Main St|65301/.test(JSON.stringify([p.preview, p.payload, p.title])), p.kind);
+  for (const p of [a, b, c]) assert(!/555|@/.test(p.title), p.title);
   // An email can't set off the contact-made rule; someone who can't open Automations hears no names.
   assertEquals(b.preview.ruleNotes, []);
   const blind = new World();
@@ -363,8 +402,9 @@ Deno.test("Approve on an email: one crm_send_email with the subject and words, s
   const w = new World();
   const p = await sendCard(w, email("Hi Dale,\n\nAny questions on the barn?", "Your barn", null));
   await w.press(p.id);
-  // No deal picked: no shortCode, the route files it by the contact.
-  assertEquals(w.sends(), [{ action: "crm_send_email", body: { contactId: CID, subject: "Your barn", body: "Hi Dale,\n\nAny questions on the barn?" } }]);
+  // No deal picked: no shortCode, the route files it by the contact. `to` is the address the card showed,
+  // which the route checks against the record it reads itself (crm_send_email's confirmation).
+  assertEquals(w.sends(), [{ action: "crm_send_email", body: { contactId: CID, to: "dale@example.com", subject: "Your barn", body: "Hi Dale,\n\nAny questions on the barn?" } }]);
   assertEquals(w.row(p.id).result, { sent: 1, channel: "email", at: new Date(DAY).toISOString(), ledgerId: EMAIL_ROW });
   assertEquals(w.stamps, [["email_sends", EMAIL_ROW, who.userId]]);
 });
@@ -413,7 +453,8 @@ Deno.test("at the press, a fresh read refuses what changed since the card: nothi
     ["Do Not Disturb on email", (w) => { w.contact.dnd_email_at = daysAgo(0); }, email(), "They've turned off email from you since this was written (Email Do Not Disturb), so nothing was sent."],
     ["merged", (w) => { w.contact.merged_into = "33333333-2222-4333-8444-555555555555"; }, email(), "That customer was merged into another record, so nothing was sent. Look them up again and ask me to write it there."],
     ["STOP", (w) => { w.sms.optedOut = true; }, text(), "They've opted out of texts since this was written, so nothing was sent."],
-    ["consent gone", (w) => { w.sms.consented = false; }, text(), "There's no consent to text on file for them now, so nothing was sent."],
+    // Where consent is recorded, in the record page's own words (11-09), never a setting.
+    ["consent gone", (w) => { w.sms.consented = false; }, text(), "There's no consent to text on file for them now, so nothing was sent. If they told you they agree, open the Send SMS tab on their record and press \"They already gave permission\". It's also recorded by itself when they text you first or tick the texting box on your design link. Once it's on file, ask me again."],
     ["deal gone", (w) => { w.designs = w.designs.filter((d) => d.short_code !== "SS-AB12"); }, text("Hi Dale, any questions on the barn?"), "That deal isn't on this customer's record any more, so nothing was sent."],
     ["texting off", (w) => { w.sms.ready = false; }, text(), nothing(DRAFT_SAID.smsNotReady)],
     ["no email now", (w) => { w.contact.email = null; }, email(), nothing(DRAFT_SAID.noEmail)],
@@ -764,7 +805,9 @@ Deno.test("estimate card: what it shows, what it holds, and nothing private to C
   const p = w.last();
   assertEquals([p.kind, p.status, p.title], ["estimate_resend", "ready", "An estimate to send again"]);
   assertEquals(p.preview, {
-    contactId: CID, dealKey: "SS-AB12", firstName: "Dale", fullName: "Dale Miller", company: null, town: "Sedalia, MO", dealLabel: "12x24 Lofted Barn, estimate Q-1043",
+    contactId: CID, dealKey: "SS-AB12", firstName: "Dale", fullName: "Dale Miller", company: null, town: "Sedalia, MO",
+    // Where it goes (the address saved on the estimate, which is the record's), and no namesake (11-09).
+    to: "dale@example.com", sameName: null, dealLabel: "12x24 Lofted Barn, estimate Q-1043",
     // Its age is from when it was made (20 days), not from its last send (18): a send never re-prices it.
     estimateNumber: "Q-1043", total: "$8,450", lastSentOn: daysAgo(18), ageDays: 20,
     notes: [OLD_PAGE_NOTE.email, "Its sent date moves to today, so the count of days with no answer starts again today."],
@@ -772,10 +815,13 @@ Deno.test("estimate card: what it shows, what it holds, and nothing private to C
   });
   const { nonce, ...rest } = p.payload;
   // What the card showed, pinned: the total and the design's own stamp, so a press sends this estimate.
-  assertEquals(rest, { contactId: CID, dealKey: "SS-AB12", estimateNumber: "Q-1043", totalCents: 845000, updatedAt: daysAgo(18), oldQuoteDays: null, daysCard: null });
+  assertEquals(rest, { contactId: CID, dealKey: "SS-AB12", estimateNumber: "Q-1043", totalCents: 845000, updatedAt: daysAgo(18), to: "dale@example.com", oldQuoteDays: null, daysCard: null });
   assert(typeof nonce === "string");
-  assert(!/@|555-0142/.test(JSON.stringify([p.preview, p.payload])));
-  assertEquals(w.calls.map((c) => c.action), ["crm_record", "crm_record", "crm_rules_list"]);
+  // The card shows the address it goes to and nothing else private: no number, no street.
+  assert(!/555-0142|8165550142|Main St|65301/.test(JSON.stringify([p.preview, p.payload])));
+  // The record, the estimate, the same-name check (by his name, as the caller), the rules.
+  assertEquals(w.calls.map((c) => c.action), ["crm_record", "crm_record", "crm_customer_facts", "crm_rules_list"]);
+  assertEquals(w.calls[2].body, { nameLike: "Dale Miller" });
   assertEquals(w.calls[1].body, { kind: "design", id: "SS-AB12" });
   assertEquals(w.sends().length, 0);
   const said = JSON.parse(out.content);
@@ -1668,4 +1714,180 @@ Deno.test("a database still on 377's kind list: the reply falls back to v1's cop
   assert(w.logs.includes("jack_send_card_refused"));
   assertEquals((await w.press(p.id)).status, 409);
   assertEquals(w.sends().length, 0);
+});
+
+// ── 11-09: where a send goes, and two customers with one name ──────────────────────────────────────
+
+Deno.test("at the press, a number or an address that isn't the one the card showed sends nothing, and the refusal names neither", async () => {
+  const cases: [string, Any, (w: World) => void, string][] = [
+    // Another number saved since: the route would text it, and the person never saw it.
+    ["new number", text(), (w) => { w.contact.phone = "(816) 555-0177"; w.contact.phone_digits = "8165550177"; }, SEND_SAID.toChanged("sms")],
+    ["new address", email(), (w) => { w.contact.email = "dale.miller@example.com"; }, SEND_SAID.toChanged("email")],
+  ];
+  for (const [name, input, change, said] of cases) {
+    const w = new World();
+    const p = await sendCard(w, input);
+    change(w);
+    await w.press(p.id);
+    assertEquals([w.row(p.id).status, w.row(p.id).failure, w.sends().length, w.stamps.length], ["failed", said, 0, 0], name);
+    // A card's failure is kept for good (its preview is cleared at 30 days): no number, no address in it.
+    assert(!/555|@/.test(String(w.row(p.id).failure)), `${name}: ${w.row(p.id).failure}`);
+  }
+  // The same number written another way is the same number: it sends, once, to the record's contact.
+  const same = new World();
+  const p = await sendCard(same);
+  same.contact.phone = "+1 816 555 0142";
+  await same.press(p.id);
+  assertEquals([same.row(p.id).status, same.sends().map((c) => c.action)], ["applied", ["crm_send_sms"]]);
+  // A card made before 11-09 holds no `to`: it never showed where it goes, so it sends nothing.
+  for (const input of [text(), email()]) {
+    const old = new World();
+    const q = await sendCard(old, input);
+    delete old.row(q.id).payload.to;
+    delete old.row(q.id).preview.to;
+    await old.press(q.id);
+    assertEquals([old.row(q.id).status, old.row(q.id).failure, old.sends().length], ["failed", SEND_SAID.noTo, 0], input.channel);
+  }
+  // Nothing in these sentences has a dash or says "quote".
+  for (const s of [SEND_SAID.noTo, SEND_SAID.toChanged("sms"), SEND_SAID.toChanged("email"), SEND_SAID.noConsentNow, RESEND_SAID.toChanged]) {
+    assert(!/[—–]|\bquote/i.test(s), s);
+  }
+});
+
+Deno.test("estimate Send: an address saved since, on the estimate and the record alike, isn't the one the card showed, so nothing goes", async () => {
+  const w = new World();
+  const p = await resendCard(w);
+  assertEquals([p.preview.to, p.payload.to], ["dale@example.com", "dale@example.com"]);
+  // Both moved together, so the old mismatch check passes: only the card's own `to` stops it.
+  w.contact.email = "dale.new@example.com";
+  w.snapshot["SS-AB12"] = { name: "Dale Miller", email: "dale.new@example.com", phone: "(816) 555-0142" };
+  await w.press(p.id);
+  assertEquals([w.row(p.id).status, w.row(p.id).failure, w.sends().length], ["failed", RESEND_SAID.toChanged, 0]);
+  // Saved with capitals, it's the same address: the card shows it as saved, and it sends.
+  const caps = new World();
+  caps.snapshot["SS-AB12"] = { name: "Dale Miller", email: "Dale@Example.com", phone: "(816) 555-0142" };
+  caps.contact.email = "dale@example.com";
+  const q = await resendCard(caps);
+  assertEquals([q.preview.to, q.payload.to], ["Dale@Example.com", "dale@example.com"]);
+  await caps.press(q.id);
+  assertEquals([caps.row(q.id).status, caps.sends().map((c) => c.action)], ["applied", ["resend_quote_email"]]);
+  // A card from before 11-09 has no `to`, and sends nothing.
+  const old = new World();
+  const o = await resendCard(old);
+  delete old.row(o.id).payload.to;
+  await old.press(o.id);
+  assertEquals([old.row(o.id).status, old.row(o.id).failure, old.sends().length], ["failed", SEND_SAID.noTo, 0]);
+});
+
+Deno.test("same name on a send: the card says check the number or the address, Claude is told to have the person check, and nothing private reaches Claude", async () => {
+  // Another live Dale Miller in Sedalia, added by hand, no texting consent; one merged away doesn't count.
+  const twin = {
+    id: "99999999-2222-4333-8444-555555555555", name: "dale miller", company: null, town: "Sedalia", source: "manual", createdAt: daysAgo(3),
+    hasPhone: true, hasEmail: false, textsOff: false, textsOffReason: null, textsConsented: false, dndAll: false, emailOff: false, emailOffBy: null, callsOff: false,
+    lastInAt: null, lastInChannel: null, lastOutAt: null, lastOutChannel: null, deals: [],
+  };
+  const merged = { ...twin, id: "88888888-2222-4333-8444-555555555555", merged: true };
+  for (const [name, make, line] of [
+    ["text", (w: World) => sendCard(w, text()), "Another customer is also named Dale Miller. Check the number before you approve."],
+    ["email", (w: World) => sendCard(w, email()), "Another customer is also named Dale Miller. Check the address before you approve."],
+    ["estimate", (w: World) => resendCard(w), "Another customer is also named Dale Miller. Check the address before you approve."],
+  ] as [string, (w: World) => Promise<ProposalRow>, string][]) {
+    const w = new World();
+    w.others = [twin, merged];
+    const p = await make(w);
+    assertEquals(p.preview.sameName, line, name);
+    const without = new World();
+    without.others = [merged];
+    assertEquals((await make(without)).preview.sameName, null, `${name}: a merged record isn't another customer`);
+  }
+  const w = new World();
+  w.others = [twin];
+  const out = await resendTool.run(w.deps, w.turn(), resend());
+  assertNothingPrivate(out.content);
+  const said = JSON.parse(out.content);
+  assertEquals([said.sameName.others, said.sameName.othersAre], [1, [["added by hand Nov 3", "nothing from them yet", "no texting consent"]]]);
+  assert(/the card says so/.test(said.sameName.note) && /check the address on the card/.test(said.sameName.note), said.sameName.note);
+  assert(!out.content.includes("Dale Miller") && !out.content.includes(twin.id), "the whole name or the other one's id reached Claude");
+  // The check that can't run is said on the card, never read as "no namesake".
+  const failed = new World();
+  failed.factsAnswer = { status: 500, data: null };
+  assertEquals((await resendCard(failed)).preview.sameName, "I couldn't check whether another customer has the same name. Check the address before you approve.");
+});
+
+// ── 11-09 review: a page that never drew the To line, and the email route's own check ───────────────
+
+Deno.test("a page from before the To line (send: true, no `to`) sends nothing: the card stays ready and says reload", async () => {
+  for (const [name, make] of [["text", (w: World) => sendCard(w, text())], ["email", (w: World) => sendCard(w, email())], ["estimate", (w: World) => resendCard(w)]] as [string, (w: World) => Promise<ProposalRow>][]) {
+    const w = new World();
+    const p = await make(w);
+    assert(typeof p.preview.to === "string" && p.preview.to, `${name}: the card has no To line`);
+    // An open tab from this morning: it posts what it always did, and draws no To line.
+    const old = await w.oldPress(p.id);
+    assertEquals([old.status, old.body.error], [409, SENTENCES.reloadToSend], name);
+    assertEquals([w.row(p.id).status, w.row(p.id).approved_by, w.sends().length, w.stamps.length], ["ready", null, 0, 0], name);
+    // A `to` that isn't the one the card shows is the same: that page didn't draw this card's line.
+    const wrong = await handleProposalApprove(w.deps, who, { id: p.id, hash: p.shown_hash, send: true, to: "(816) 555-0100" });
+    assertEquals([wrong.status, wrong.body.error, w.sends().length], [409, SENTENCES.reloadToSend, 0], name);
+    // The new page's Approve posts the line it drew, and sends once.
+    await w.press(p.id);
+    assertEquals([w.row(p.id).status, w.sends().length], ["applied", 1], name);
+  }
+  // A card that never showed a To line (made before 11-09) isn't held back here: the press refuses it
+  // itself (SEND_SAID.noTo), and nothing is sent.
+  const w = new World();
+  const q = await sendCard(w);
+  delete w.row(q.id).preview.to;
+  delete w.row(q.id).payload.to;
+  await w.oldPress(q.id);
+  assertEquals([w.row(q.id).status, w.row(q.id).failure, w.sends().length], ["failed", SEND_SAID.noTo, 0]);
+});
+
+Deno.test("an email reply hands the route the address the card showed, so one changed after Jack's own read is refused there", async () => {
+  // crm_send_email reads the record again itself and refuses a `to` that isn't on it (portal-settings
+  // claimedTo), before the provider is called. Here a teammate saves a new address between the two reads.
+  const ROUTE_SAYS = "That address doesn't match this customer's — reopen the record and try again.";
+  const w = new World();
+  const p = await sendCard(w, email());
+  let routeHas = "dale@example.com";
+  w.answer.crm_send_email = (b) => (typeof b.to === "string" && b.to.toLowerCase() !== routeHas
+    ? { status: 400, data: { error: ROUTE_SAYS } }
+    : { status: 200, data: { ok: true, messageId: "<m1@example.test>", id: EMAIL_ROW } });
+  const fresh = w.deps.portal;
+  w.deps = { ...w.deps, portal: async (action, body) => { const r = await fresh(action, body); if (action === "crm_record") routeHas = "dale.new@example.com"; return r; } };
+  await w.press(p.id);
+  assertEquals(w.sends().map((c) => c.body.to), ["dale@example.com"]);
+  assertEquals([w.row(p.id).status, w.row(p.id).failure, w.stamps.length], ["failed", SEND_SAID.toChanged("email"), 0]);
+  // The press says it in its own words: no dash, no "reopen", no address.
+  assert(!/[—–]|reopen|@/.test(String(w.row(p.id).failure)), String(w.row(p.id).failure));
+  // As an answer on its own.
+  assertEquals(classifyEmail({ status: 400, data: { error: ROUTE_SAYS } }), { kind: "refused", sentence: SEND_SAID.toChanged("email") });
+  // A text has no such confirmation at the route: its body is unchanged.
+  const t = new World();
+  await t.press((await sendCard(t, text())).id);
+  assertEquals(Object.keys(t.sends()[0].body).sort(), ["body", "contactId", "shortCode"]);
+});
+
+Deno.test("estimate card: Do Not Disturb on one of two customers of one name says so, and to ask which one first", async () => {
+  const twin = {
+    id: "99999999-2222-4333-8444-555555555555", name: "dale miller", company: null, town: "Sedalia", source: "manual", createdAt: daysAgo(3),
+    hasPhone: true, hasEmail: false, textsOff: false, textsOffReason: null, textsConsented: false, dndAll: false, emailOff: false, emailOffBy: null, callsOff: false,
+    lastInAt: null, lastInChannel: null, lastOutAt: null, lastOutChannel: null, deals: [],
+  };
+  for (const [name, change, said] of [
+    ["Do Not Disturb", (w: World) => { w.contact.dnd_all_at = daysAgo(2); }, RESEND_SAID.dndAll],
+    ["Email Do Not Disturb", (w: World) => { w.contact.dnd_email_at = daysAgo(2); }, RESEND_SAID.dndEmail],
+  ] as [string, (w: World) => void, string][]) {
+    const w = new World();
+    w.others = [twin];
+    change(w);
+    const out = await resendTool.run(w.deps, w.turn(), resend());
+    assert(out.isError && out.content.startsWith(`${said} Another customer this person can see has the same name`) && /The other one: added by hand Nov 3, nothing from them yet, no texting consent\./.test(out.content), `${name}: ${out.content}`);
+    assert(/ask them which one they mean before you tell them any of this/.test(out.content) && !/@|555-0142|Dale Miller/.test(out.content) && !out.content.includes(twin.id), out.content);
+    assertEquals(w.proposals.size, 0, name);
+  }
+  // Another refusal (the estimate, not the record) reads for no namesake.
+  const w = new World();
+  w.others = [twin];
+  assertEquals(await resendTool.run(w.deps, w.turn(), resend("SS-GH78")), { content: RESEND_SAID.accepted, isError: true });
+  assert(!w.calls.some((c) => c.action === "crm_customer_facts"), "a same-name read for a refusal about the estimate");
 });

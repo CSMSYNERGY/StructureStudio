@@ -128,6 +128,15 @@
 //   BU THE SENDS SWITCH AND CHANGE ORDERS (11-09): its label names change orders; switched off, a change order
 //      card made before is refused at the press with nothing staged or emailed, and asked again the tool makes
 //      no card and says why.
+//   BV WHERE A SEND GOES, AND ONE NAME FOR TWO CUSTOMERS (11-09): a text card says "To (816) 555-0199" under who
+//      it's to, and warns that another customer has the name; a number changed before the press sends nothing
+//      and says so; an email card says the address and still sends, once.
+//   BW A CONVERSATIONS ANSWER, THEN "REPLY <NAME>" (11-09): the list card's refs carry into the next message, so
+//      the reply reaches the customer the answer listed, never the other one of the same name.
+//   BX A PAGE FROM BEFORE THE TO LINE, AND CARDS THAT NEVER SAID WHERE (11-09 review): the page built before
+//      11-09 (an open tab, a cached bundle) draws a text card with no To line, and its Approve sends nothing;
+//      reloaded, the card says "To ..." and its Approve posts exactly that, and sends once (an estimate too).
+//      A text card and an estimate card made before 11-09, with no `to`: no Approve, and a sentence to ask again.
 //   BL also covers a person cut from an area altogether: on a reload that area's card is its title only.
 //
 //   AA to AW also leave proof shots, pNN-slug.png (and pNN-slug.card.png for a tall card), with manifest.json
@@ -1670,6 +1679,9 @@ function customer(w) {
     ],
     reads: [],
     sends: [],
+    // Other customers of this builder, as crm_customer_facts answers them (BV, BW): the same-name check
+    // reads them by name, the way the route searches (portal-settings jackReads.ts).
+    others: [],
     answer: {
       crm_send_sms: () => ({ status: 200, data: { ok: true, id: SMS_ROW } }),
       crm_send_email: () => ({ status: 200, data: { ok: true, messageId: "<m1@example.test>", id: EMAIL_ROW } }),
@@ -1697,12 +1709,36 @@ function customer(w) {
     w.extra[a] = async (b) => { c.sends.push({ action: a, body: clone(b) }); return c.answer[a](b); };
   }
   w.extra.crm_rules_list = rulesList(SEND_RULES);
+  // crm_customer_facts by name, as the route searches: every word of two letters or more inside the name,
+  // or the whole term inside the company; merged records left out; ten at most. Dale is always there.
+  w.extra.crm_customer_facts = async (b) => {
+    const term = String(b.nameLike ?? "").replace(/[^\p{L}\p{N} '-]/gu, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const words = term.split(" ").filter((x) => x.length >= 2).slice(0, 4);
+    const me = {
+      id: CID, name: c.contact.name, company: c.contact.company, town: c.contact.city, source: "design", createdAt: ago(30),
+      hasPhone: !!c.contact.phone, hasEmail: !!c.contact.email, textsOff: c.sms.optedOut, textsOffReason: null, textsConsented: c.sms.consented,
+      dndAll: false, emailOff: false, emailOffBy: null, callsOff: false, lastInAt: ago(1), lastInChannel: "sms", lastOutAt: null, lastOutChannel: null, deals: [],
+    };
+    const all = [me, ...c.others];
+    const hit = Array.isArray(b.contactIds) ? all.filter((x) => b.contactIds.includes(x.id))
+      : all.filter((x) => words.every((w2) => String(x.name ?? "").toLowerCase().includes(w2)) || String(x.company ?? "").toLowerCase().includes(term));
+    return { status: 200, data: { ok: true, complete: true, contacts: clone(hit.slice(0, 10)), seen: { meetings: true, calls: true } } };
+  };
   w.memory.set("old_quote_days", { value: 30, updated_at: ago(2) });
   return c;
 }
 /** Whether anything Claude was sent holds the customer's number, address or street. */
 const reachedClaude = (w) => PRIVATE.filter((x) => w.toClaude.some((b) => b.includes(x)));
 const holdsPrivate = (text) => PRIVATE.some((x) => text.includes(x));
+/** A send card shows where it goes (11-09) and nothing else private: a text card its number, an email or
+ *  estimate card its address, never the other one, the street or the zip, and its title nothing at all. */
+const NOT_ON = { sms: [MAIL, STREET, "65301"], email: [DIGITS, "555-0199", STREET, "65301"] };
+const showsOnlyWhere = (shown, p, channel) => {
+  const to = channel === "sms" ? PHONE : MAIL;
+  const held = JSON.stringify([p.preview, p.payload]);
+  return shown.includes(`To ${to}`) && p.preview.to === to && p.payload.to === (channel === "sms" ? DIGITS : MAIL)
+    && !NOT_ON[channel].some((x) => shown.includes(x) || held.includes(x)) && !holdsPrivate(p.title);
+};
 const cardById = (page, id) => page.locator(`[data-jack-card="${id}"]`);
 /** What the page shows about who is acting in view-as: the red banner, the account switcher's line, and
  *  the signed-in address at the foot of the menu. */
@@ -1755,8 +1791,8 @@ await scenario("AA", async (track) => {
   ok("AA a send card's button is named Approve, like every other card's: no Send text, Send email or Resend estimate on it", (await card(page).getByRole("button", { name: "Approve", exact: true }).count()) === 1 && (await card(page).getByRole("button", { name: /^(Send|Send text|Send email|Resend estimate)$/ }).count()) === 0);
   ok("AA Jack's own line says to press Approve, not the chat box's Send", (await page.locator("body").innerText()).includes("It's on the screen. Read it over and press Approve to send the text when it looks right."));
   ok("AA nothing is sent before the press", c.sends.length === 0 && w.stamps.length === 0);
-  ok("AA no number, address or street reached Claude, the card or its payload", w.toClaude.length === 2 && !reachedClaude(w).length && !holdsPrivate(shown) && !holdsPrivate(JSON.stringify([p.preview, p.payload, p.title])), reachedClaude(w).join(","));
-  await proof(page, "text-ready", G.AA, "A text card, ready to send", "The card reads \"Text to Dale Rivers\" (Sedalia, MO), about the 12x24 Lofted Barn, estimate E-2041, with \"Nothing has been sent from this card yet. Approve sends exactly these words.\" and the text's exact words. Under them: the amount it checked against their record, the rule a text can set off, the line \"Approve sends this text now if it's texting hours where they live. A text can't be taken back.\", and the buttons Approve, Open their record and Not now. There is no Copy on a card that sends.", { at: card(page), words: ["Nothing has been sent from this card yet. Approve sends exactly these words.", "can't be taken back"] });
+  ok("AA no number, address or street reached Claude; the card shows only the number it texts, under who it's to (11-09)", w.toClaude.length === 2 && !reachedClaude(w).length && showsOnlyWhere(shown, p, "sms") && (await card(page).locator("[data-jack-send-to]").innerText()) === `To ${PHONE}` && (await card(page).locator("[data-jack-same-name]").count()) === 0, reachedClaude(w).join(",") || shown.slice(0, 300));
+  await proof(page, "text-ready", G.AA, "A text card, ready to send", "The card reads \"Text to Dale Rivers\" (Sedalia, MO) and \"To (816) 555-0199\", the number it texts, about the 12x24 Lofted Barn, estimate E-2041, with \"Nothing has been sent from this card yet. Approve sends exactly these words.\" and the text's exact words. Under them: the amount it checked against their record, the rule a text can set off, the line \"Approve sends this text now if it's texting hours where they live. A text can't be taken back.\", and the buttons Approve, Open their record and Not now. There is no Copy on a card that sends.", { at: card(page), words: ["Nothing has been sent from this card yet. Approve sends exactly these words.", "can't be taken back"] });
 
   // The press waits on the server here, so the card's own sending state shows.
   let release;
@@ -1920,7 +1956,7 @@ await scenario("AE", async (track) => {
   ok("AE in view-as at 1280 wide the header line fits beside the operator banner, not cut off", fitAE.text.includes(JACK_HEADER) && fitAE.over <= 0, JSON.stringify(fitAE));
   await proof(page, "view-as-email-ready", G.AE, "The Structure Studio team in view-as: an email card that sends", `An operator is signed in as themselves (${OPS.email} at the foot of the menu) and is viewing the builder's account: the header shows the red "Editing as operator — changes are live" banner and "${acting.business}, Viewing as operator" (an account opened from a link shows its short name there). The card reads "Email to Dale Rivers", "This is Harness Barns's customer.", the subject "Your barn estimate" and the email's words, and says no signature is added from here. Right above the buttons: "Approve emails this to them right away. An email can't be taken back." The buttons are Approve, Open their record and Not now, with no Copy.`, { at: card(page), words: ["This is Harness Barns's customer.", "Subject:"], cardShows: "The card alone: \"Email to Dale Rivers\" (Sedalia, MO), \"This is Harness Barns's customer.\", \"Nothing has been sent from this card yet. Approve sends exactly these words.\", the subject \"Your barn estimate\" and the email's words, the amount it checked against their record, \"No signature is added while you're viewing another account.\", and the rule opening this email can set off (\"If they open this email, that can set off your rule \"They opened it\" later...\"). Right above the buttons: \"Approve emails this to them right away. An email can't be taken back.\" The buttons are Approve, Open their record and Not now, with no Copy." });
   await press(page, "Approve", "applied");
-  ok("AE one crm_send_email with exactly the card's subject and words", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_email", body: { contactId: CID, shortCode: EST, subject: "Your barn estimate", body: EMAIL_BODY } }), JSON.stringify(c.sends));
+  ok("AE one crm_send_email with exactly the card's subject and words, and the address it showed as the route's check", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_email", body: { contactId: CID, shortCode: EST, to: MAIL, subject: "Your barn estimate", body: EMAIL_BODY } }), JSON.stringify(c.sends));
   const row = w.proposals.get(p.id);
   ok("AE the record names the operator, and the stamp names who pressed", row.approved_by_operator === "ops@example.test" && row.approved_by === OPS_USER && same(w.stamps, [["email_sends", EMAIL_ROW, OPS_USER]]), JSON.stringify(w.stamps));
   ok("AE the card says it went, with no Approve or Undo left", (await card(page).innerText()).includes("It's on their record.") && same(await buttonsOn(card(page)), ["Open their record"]));
@@ -1954,8 +1990,9 @@ await scenario("AF", async (track) => {
   ok("AF opened by the team in view-as, that text card has no Approve, and says why", (await cardById(as.page, mine.id).getByRole("button", { name: "Approve", exact: true }).count()) === 0 && theirs.includes(NO_TEXT_HERE) && theirs.includes("This is Harness Barns's customer."), theirs.slice(0, 400));
   ok("AF and no Copy on it either: it's a card that sends, so its words aren't copied to be sent by hand", same(await buttonsOn(cardById(as.page, mine.id)), ["Open their record", "Not now"]), (await buttonsOn(cardById(as.page, mine.id))).join(","));
   await proof(as.page, "view-as-owners-text", G.AF, "The owner's text card, opened by the team in view-as", `The owner (Pat) asked for this text and left it unsent. An operator, signed in as ${OPS.email} (foot of the menu) and viewing the account (the red "Editing as operator — changes are live" banner, "${acting.business}, Viewing as operator"), opens the same chat: Pat's "Text to Dale Rivers" card has no Approve button here. It says "Nothing has been sent from this card yet." and "Texting isn't available while you're viewing another account, so this text can't be sent from here.", and the buttons are Open their record and Not now, with no Copy, since it's a card that sends (checked: the server refuses the operator's press too, and the card stays ready for Pat).`, { at: cardById(as.page, mine.id), words: [NO_TEXT_HERE] });
-  // As the new page's Approve would press it (send: true); a press without it is refused before anything else.
-  const pressed = await w.handle({ action: "proposal_approve", id: mine.id, hash: mine.shown_hash, send: true });
+  // As the new page's Approve would press it (send: true, and the To line it drew); a press without
+  // send: true is refused before anything else.
+  const pressed = await w.handle({ action: "proposal_approve", id: mine.id, hash: mine.shown_hash, send: true, to: mine.preview.to });
   const row = w.proposals.get(mine.id);
   ok("AF the server refuses the team's press and leaves it ready for its asker", pressed.status === 403 && pressed.body.error === NO_TEXT_HERE && row.status === "ready" && row.approved_by === null && c.sends.length === 0, `${pressed.status} ${JSON.stringify(pressed.body).slice(0, 200)}`);
   await askForCard(as.page, "text Dale and ask if he has questions", answers);
@@ -1991,9 +2028,9 @@ await scenario("AG", async (track) => {
   ok("AG right above the button: it goes to the address saved on the estimate, and can't be taken back", (await card(page).locator("[data-jack-send-final]").innerText()) === "Approve emails the estimate right away to the address saved on it. An email can't be taken back." && (shown.match(/can't be taken back/g) || []).length === 1);
   ok("AG the buttons: Approve, Open their record, Not now", same(await buttonsOn(card(page)), ["Approve", "Open their record", "Not now"]), (await buttonsOn(card(page))).join(","));
   ok("AG the estimate was read as the person, and nothing is sent before the press", c.reads.some((r) => r.kind === "design" && r.id === EST) && c.sends.length === 0);
-  ok("AG no address reached Claude or the card", w.toClaude.length === 2 && !reachedClaude(w).length && !holdsPrivate(shown) && !holdsPrivate(JSON.stringify([p.preview, p.payload])), reachedClaude(w).join(","));
+  ok("AG no address reached Claude; the card shows only the address it emails, under who it's to (11-09)", w.toClaude.length === 2 && !reachedClaude(w).length && showsOnlyWhere(shown, p, "email") && (await card(page).locator("[data-jack-send-to]").innerText()) === `To ${MAIL}`, reachedClaude(w).join(",") || shown.slice(0, 300));
   ok("AG person-readable words say estimate, never the other word", !/quote/i.test(shown), shown.slice(0, 300));
-  await proof(page, "estimate-ready", G.AG, "An estimate card, ready to resend", `The card reads "Estimate E-2041 for Dale Rivers" (Sedalia, MO), "Nothing has been sent from this card yet.", and rows Building 12x24 Lofted Barn, Total $8,450, Last sent ${lastBefore} (from their record) and Age 9 days, from when it was made. It says the sent date moves to today, names the rule an opened estimate email can set off ("If they open the estimate email, that can set off your rule "They opened it" later..."), says "Approve emails the estimate right away to the address saved on it. An email can't be taken back.", and the buttons are Approve, Open their record and Not now.`, { at: card(page), words: ["Estimate E-2041 for Dale Rivers", "Its sent date moves to today"] });
+  await proof(page, "estimate-ready", G.AG, "An estimate card, ready to resend", `The card reads "Estimate E-2041 for Dale Rivers" (Sedalia, MO) and "To ${MAIL}", the address it emails, "Nothing has been sent from this card yet.", and rows Building 12x24 Lofted Barn, Total $8,450, Last sent ${lastBefore} (from their record) and Age 9 days, from when it was made. It says the sent date moves to today, names the rule an opened estimate email can set off ("If they open the estimate email, that can set off your rule "They opened it" later..."), says "Approve emails the estimate right away to the address saved on it. An email can't be taken back.", and the buttons are Approve, Open their record and Not now.`, { at: card(page), words: ["Estimate E-2041 for Dale Rivers", "Its sent date moves to today"] });
   // A press lost on the way: nothing went, and the sentence names this card's own button, Approve.
   w.fail.proposal_approve = { status: 502, body: {} };
   await pressUntil(page, "Approve", "I didn't hear back from that press.");
@@ -2132,7 +2169,8 @@ await scenario("AK", async (track) => {
     if (r.status !== 200 || !id) throw new Error(`"${text}" made no card: ${answers.at(-1) ?? JSON.stringify(r.body).slice(0, 300)}`);
     return w.proposals.get(id);
   };
-  const pressSend = (p) => w.handle({ action: "proposal_approve", id: p.id, hash: p.shown_hash, send: true });
+  // As the page's Approve presses it: send: true, and the To line the card drew (11-09).
+  const pressSend = (p) => w.handle({ action: "proposal_approve", id: p.id, hash: p.shown_hash, send: true, to: p.preview.to });
   const back = (iso, ms) => (typeof iso === "string" && Number.isFinite(Date.parse(iso)) ? new Date(Date.parse(iso) - ms).toISOString() : iso);
   /** Time passing, stood in: every date in a chat (its messages, and its cards' rows and results) moved back. */
   const ageChat = (chatId, ms) => {
@@ -2286,10 +2324,10 @@ await scenario("AM", async (track) => {
   ok("AM right above Approve: an email goes right away and can't be taken back", (await card(page).locator("[data-jack-send-final]").innerText()) === "Approve emails this to them right away. An email can't be taken back." && (shown.match(/can't be taken back/g) || []).length === 1);
   ok("AM the buttons: Approve, Open their record, Not now, and no Copy message or Copy subject", same(await buttonsOn(card(page)), ["Approve", "Open their record", "Not now"]), (await buttonsOn(card(page))).join(","));
   ok("AM Jack's own line says to press Approve to send the email", (await page.locator("body").innerText()).includes(agent.SENTENCES.onScreenSendEmail) && agent.SENTENCES.onScreenSendEmail.includes("press Approve to send the email"));
-  ok("AM nothing is sent before the press, and no address reached Claude or the card", c.sends.length === 0 && !reachedClaude(w).length && !holdsPrivate(shown) && !holdsPrivate(JSON.stringify([p.preview, p.payload])), reachedClaude(w).join(","));
-  await proof(page, "owner-email-ready", G.AM, "An email card from the owner, ready to send", "The card reads \"Email to Dale Rivers\" (Sedalia, MO), about the 12x24 Lofted Barn, estimate E-2041, with \"Subject: Your barn estimate\" and the email's words. It says \"Nothing has been sent from this card yet. Approve sends exactly these words.\", \"If you have an email signature, it's added under these words when Approve sends it.\", and names the rule opening this email can set off (\"If they open this email, that can set off your rule \"They opened it\" later...\"), and above the buttons says \"Approve emails this to them right away. An email can't be taken back.\" The buttons are Approve, Open their record and Not now, with no Copy.", { at: card(page), words: ["Subject: Your barn estimate", "Nothing has been sent from this card yet. Approve sends exactly these words."] });
+  ok("AM nothing is sent before the press, no address reached Claude, and the card shows only the address it emails (11-09)", c.sends.length === 0 && !reachedClaude(w).length && showsOnlyWhere(shown, p, "email"), reachedClaude(w).join(",") || shown.slice(0, 300));
+  await proof(page, "owner-email-ready", G.AM, "An email card from the owner, ready to send", "The card reads \"Email to Dale Rivers\" (Sedalia, MO) and \"To dale@example.test\", the address it emails, about the 12x24 Lofted Barn, estimate E-2041, with \"Subject: Your barn estimate\" and the email's words. It says \"Nothing has been sent from this card yet. Approve sends exactly these words.\", \"If you have an email signature, it's added under these words when Approve sends it.\", and names the rule opening this email can set off (\"If they open this email, that can set off your rule \"They opened it\" later...\"), and above the buttons says \"Approve emails this to them right away. An email can't be taken back.\" The buttons are Approve, Open their record and Not now, with no Copy.", { at: card(page), words: ["Subject: Your barn estimate", "Nothing has been sent from this card yet. Approve sends exactly these words."] });
   await press(page, "Approve", "applied");
-  ok("AM one crm_send_email with exactly the card's subject and body", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_email", body: { contactId: CID, shortCode: EST, subject: p.payload.subject, body: p.payload.body } }) && p.payload.subject === "Your barn estimate" && p.payload.body === EMAIL_BODY, JSON.stringify(c.sends));
+  ok("AM one crm_send_email with exactly the card's subject and body, and the address it showed as the route's check", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_email", body: { contactId: CID, shortCode: EST, to: MAIL, subject: p.payload.subject, body: p.payload.body } }) && p.payload.subject === "Your barn estimate" && p.payload.body === EMAIL_BODY, JSON.stringify(c.sends));
   ok("AM stamped with Jack, for the owner who pressed", same(w.stamps, [["email_sends", EMAIL_ROW, USER.id]]), JSON.stringify(w.stamps));
   const row = w.proposals.get(p.id);
   ok("AM the server's row: applied as an email, nothing to undo, counted as one message", row.status === "applied" && row.undo === null && row.result?.channel === "email" && row.result?.sent === 1 && w.audit.some((a) => a.a === "jack_approve" && a.n === 1 && a.note.includes("kind=reply_send")), JSON.stringify(row.result));
@@ -2312,7 +2350,8 @@ await scenario("AN", async (track) => {
   const carrier = { status: 400, data: { error: "The text could not be sent (carrier code 30007). Try again, or call them instead.", reason: "failed" } };
   const steps = [
     { what: "no consent to text on file now", slug: "no-consent-at-press", change: () => { c.sms.consented = false; }, undo: () => { c.sms.consented = true; },
-      want: "There's no consent to text on file for them now, so nothing was sent.", route: false,
+      // Where consent is recorded, in the record page's own words (11-09): never a setting to turn on.
+      want: SEND_SAID.noConsentNow, route: false,
       then: "Then the consent to text on their record was taken off, and Approve was pressed." },
     { what: "Do Not Disturb for everything now", slug: "dnd-all-at-press", change: () => { c.contact.dnd_all_at = now(); }, undo: () => { c.contact.dnd_all_at = null; },
       want: "They're on Do Not Disturb for everything now, so nothing was sent. That's set on their record.", route: false,
@@ -2674,7 +2713,7 @@ await scenario("AV", async (track) => {
   ok("AV each button can be pressed: nothing covers it, and it's at least 24 px each way (WCAG 2.5.8)", hits.length === 3 && hits.every((h) => h.ok && h.h >= 24 && h.w >= 24), JSON.stringify(hits));
   await proof(page, "phone-email-card", G.AV, "An email card on a phone (390 wide)", "On a 390-pixel-wide phone screen the email card fits with no sideways scroll; its three buttons (Approve, Open their record, Not now; a card that sends has no Copy) sit inside the card, and \"estimate E-2041\" stays on one line wherever it's named (checked: each \"E-2041\" sits on a single line, and each button is at least 24 px each way with nothing over it).", { at: card(page), alone: true, block: "end", words: ["Approve", "Not now"] });
   await press(page, "Approve", "applied");
-  ok("AV Approve pressed on the phone sends the email once, with the card's words", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_email", body: { contactId: CID, shortCode: EST, subject: "Your barn estimate", body: EMAIL_BODY } }), JSON.stringify(c.sends));
+  ok("AV Approve pressed on the phone sends the email once, with the card's words", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_email", body: { contactId: CID, shortCode: EST, to: MAIL, subject: "Your barn estimate", body: EMAIL_BODY } }), JSON.stringify(c.sends));
   const after = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   ok("AV and the sent card still has no sideways scroll", after <= 0 && same(await buttonsOn(card(page)), ["Open their record"]), String(after));
   await proof(page, "phone-email-sent", G.AV, "Sent from the phone", `The card on the phone says "${await statusOf(card(page))}" (US Central time) with only Open their record left (checked: the email route was called once, with the card's subject and words).`, { at: card(page), words: ["Sent at", "It's on their record."] });
@@ -3172,10 +3211,11 @@ await scenario("BH", async (track) => {
   w.clockMs = clockWhere(DIGITS, false);
   customer(w);
   const who = { contactId: CID, dealKey: EST, firstName: "Dale", fullName: "Dale Rivers", company: null, town: "Sedalia, MO", dealLabel: "12x24 Lofted Barn, estimate E-2041" };
-  const reply = (channel, subject, body, nonce) => ({ contactId: CID, dealKey: EST, channel, subject, body, oldQuoteDays: null, daysCard: null, nonce });
-  const text = await w.seed("reply_send", "ready", { title: "A reply by text", ...who, channel: "sms", subject: null, body: TEXT_BODY, factsUsed: [], notes: [], sendable: true, ruleNotes: [], quiet: null }, reply("sms", null, TEXT_BODY, "n-text"));
-  const mail = await w.seed("reply_send", "ready", { title: "A reply by email", ...who, channel: "email", subject: "Your barn estimate", body: EMAIL_BODY, factsUsed: [], notes: [], sendable: true, ruleNotes: [], quiet: null }, reply("email", "Your barn estimate", EMAIL_BODY, "n-mail"));
-  const est = await w.seed("estimate_resend", "ready", { title: "An estimate to send again", ...who, estimateNumber: "E-2041", total: "$8,450", lastSentOn: null, ageDays: 9, notes: [], ruleNotes: [] }, { contactId: CID, dealKey: EST, nonce: "n-est" });
+  // Cards as they're made since 11-09: each says where it goes (`to`), or it offers no Approve at all (BX).
+  const reply = (channel, subject, body, nonce) => ({ contactId: CID, dealKey: EST, channel, subject, body, to: channel === "sms" ? DIGITS : MAIL, oldQuoteDays: null, daysCard: null, nonce });
+  const text = await w.seed("reply_send", "ready", { title: "A reply by text", ...who, channel: "sms", subject: null, body: TEXT_BODY, to: PHONE, sameName: null, factsUsed: [], notes: [], sendable: true, ruleNotes: [], quiet: null }, reply("sms", null, TEXT_BODY, "n-text"));
+  const mail = await w.seed("reply_send", "ready", { title: "A reply by email", ...who, channel: "email", subject: "Your barn estimate", body: EMAIL_BODY, to: MAIL, sameName: null, factsUsed: [], notes: [], sendable: true, ruleNotes: [], quiet: null }, reply("email", "Your barn estimate", EMAIL_BODY, "n-mail"));
+  const est = await w.seed("estimate_resend", "ready", { title: "An estimate to send again", ...who, to: MAIL, sameName: null, estimateNumber: "E-2041", total: "$8,450", lastSentOn: null, ageDays: 9, notes: [], ruleNotes: [] }, { contactId: CID, dealKey: EST, to: MAIL, nonce: "n-est" });
   const co = await w.seed("changeorder_attrs", "ready", {
     title: "Change order for order #1042: roof", order: { no: 1042, building: "Lofted Barn 12x24", totalCents: 890000 },
     lines: [{ label: "Roof color", from: "Charcoal", to: "Weathered Wood" }], totals: { beforeCents: 890000, afterCents: 895000 },
@@ -3896,6 +3936,249 @@ await scenario("BU", async (track) => {
   ok("BU and it reads nothing of the order to get there", reads.length === readsBefore, reads.slice(readsBefore).join(","));
   await workShot(page, "bu-sends-off-change-order.png", { fullPage: true });
   ok("BU no page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+});
+
+// ── 11-09: where a send goes, two customers with one name, and a chat's lists carried along ─────────
+// Live 11-09: "reply test" after a conversations answer became a fresh name search, and Jack wrote to the
+// wrong one of two customers named test. The routes are AA's customer, plus a second, hand-added Dale
+// Rivers in Sedalia (another id, no texting consent, no email), whom crm_customer_facts finds by name.
+const TWIN = "10000000-0000-4000-8000-0000000000d2";
+const twinRow = (w) => ({
+  id: TWIN, name: "Dale Rivers", company: null, town: "Sedalia", source: "manual", createdAt: new Date(w.clock() - 3 * 86_400_000).toISOString(),
+  hasPhone: true, hasEmail: false, textsOff: false, textsOffReason: null, textsConsented: false, dndAll: false, emailOff: false, emailOffBy: null, callsOff: false,
+  lastInAt: null, lastInChannel: null, lastOutAt: null, lastOutChannel: null, deals: [],
+});
+/** The order of a card's lines: the title, who (company and town), where it goes, the same-name warning. */
+const linesOrder = (loc) => loc.evaluate((el) => {
+  const at = (sel) => { const x = el.querySelector(sel); return x ? [...el.querySelectorAll("*")].indexOf(x) : -1; };
+  return [at("[data-jack-send-who]"), at("[data-jack-send-to]"), at("[data-jack-same-name]"), at('[role="status"]')];
+});
+/** The carried note in a request Claude was sent (agent.ts carriedNote), as its lists. */
+const carriedLists = (body) => {
+  const note = (body.system || []).map((b) => String(b.text)).find((t) => t.startsWith(agent.CARRIED_HEAD));
+  return note ? note.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l)) : null;
+};
+
+// ── BV: a reply card says exactly where it goes, and warns when another customer has the name ─────
+// The look and the card each read the same-name check as the person. The card shows "To (816) 555-0199"
+// under who it's to, and the warning while it waits; Claude hears neither the number nor the whole name.
+// Then their number changes before the press: Approve sends nothing and says so. An email card says the
+// address and "Check the address"; its Approve still sends, once: the warning is a warning.
+await scenario("BV", async (track) => {
+  const answers = [];
+  const w = world({ script: [
+    toolUse("look_at_customer_for_reply", { list: null, ref: CID }),
+    (body) => { answers.push(toolAnswer(body)); return toolUse("propose_reply_draft", textIn()); },
+    saidAfter(answers, "It's on your screen. Another customer is also named Dale Rivers, so check the number on the card first."),
+    toolUse("propose_reply_draft", emailIn()), saidAfter(answers, "It's on your screen. Check the address on the card first."),
+  ] });
+  w.clockMs = clockWhere(DIGITS, false);
+  const c = customer(w);
+  c.others = [twinRow(w)];
+  const { ctx, page, errors } = await open(w, "/jack");
+  track(ctx);
+  await page.getByLabel("Message to Jack").waitFor({ timeout: 15000 });
+  await askForCard(page, "text Dale Rivers that his barn price still stands", answers);
+  const p = [...w.proposals.values()].at(-1);
+  const shown = await card(page).innerText();
+  const to = await card(page).locator("[data-jack-send-to]").innerText();
+  const warn = await card(page).locator("[data-jack-same-name]").innerText();
+  ok("BV the text card says where it goes, right under who: To (816) 555-0199", p.kind === "reply_send" && to === `To ${PHONE}` && showsOnlyWhere(shown, p, "sms"), shown.slice(0, 400));
+  ok("BV and warns that another customer has the name, saying to check the number", warn === "Another customer is also named Dale Rivers. Check the number before you approve.", warn);
+  const order = await linesOrder(card(page));
+  ok("BV in that order, near the title: who, where, the warning, then the card's status", order.every((n) => n > 0) && order[0] < order[1] && order[1] < order[2] && order[2] < order[3], JSON.stringify(order));
+  // What Claude heard: told to confirm which one, with what tells them apart, and no number or name.
+  const look = JSON.parse(answers[0]);
+  const made = JSON.parse(answers[1]);
+  ok("BV the look told Claude another customer has the name, to ask which one, and what tells them apart", look.sameName?.others === 1 && /ask them which one they mean/.test(look.sameName.note) && same(look.sameName.othersAre[0].slice(1), ["nothing from them yet", "no texting consent"]), answers[0].slice(0, 400));
+  ok("BV the draft's answer says the card warns, and to have the person check the number", made.sameName?.others === 1 && /check the number on the card/.test(made.sameName.note), answers[1].slice(0, 300));
+  ok("BV no number, address, street or the other one's id reached Claude", !reachedClaude(w).length && !w.toClaude.some((b) => b.includes(TWIN)), reachedClaude(w).join(","));
+  await workShot(page, "bv-text-to-and-same-name.png", { fullPage: true });
+
+  // Their number changes before the press: the route would text the new one, which the card never showed.
+  c.contact.phone = "(816) 555-0177";
+  c.contact.phone_digits = "8165550177";
+  const st = await pressTo(page, "Approve", "failed");
+  const after = await card(page).innerText();
+  ok("BV a number changed since the card: Approve sends nothing, and the card says why", st === "failed" && w.proposals.get(p.id).failure === SEND_SAID.toChanged("sms") && after.includes(SEND_SAID.toChanged("sms")) && c.sends.length === 0, `${st} | ${w.proposals.get(p.id).failure}`);
+  ok("BV and once it's done the warning is gone, and only their record is left", (await card(page).locator("[data-jack-same-name]").count()) === 0 && same(await buttonsOn(card(page)), ["Open their record"]), (await buttonsOn(card(page))).join(","));
+  c.contact.phone = PHONE;
+  c.contact.phone_digits = DIGITS;
+
+  // An email card: the address, and "Check the address". Its Approve sends, once.
+  await askForCard(page, "email him instead", answers);
+  const e = [...w.proposals.values()].at(-1);
+  const eShown = await card(page).innerText();
+  ok("BV the email card says the address it goes to, and to check the address", e.kind === "reply_send" && showsOnlyWhere(eShown, e, "email") && (await card(page).locator("[data-jack-send-to]").innerText()) === `To ${MAIL}` && (await card(page).locator("[data-jack-same-name]").innerText()) === "Another customer is also named Dale Rivers. Check the address before you approve.", eShown.slice(0, 400));
+  await press(page, "Approve", "applied");
+  ok("BV that email went once, to Dale, with the card's words", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_email", body: { contactId: CID, shortCode: EST, to: MAIL, subject: e.payload.subject, body: e.payload.body } }), JSON.stringify(c.sends));
+  ok("BV no page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+});
+
+// ── BW: a conversations answer, then "reply Dale Rivers" reaches that same customer by the carried list ──
+// The first message's answer lists who's waiting (find_conversations, a list card now, each row with a
+// ref). The second, "reply Dale Rivers", gets only the chat's words from before plus the carried note
+// naming that list: Claude (scripted to read the note it was sent) uses the list and the row's ref. The
+// look and the card are for the Dale who texted, never the hand-added one, and the card warns of the name.
+await scenario("BW", async (track) => {
+  const answers = [];
+  const ref = {};
+  const w = world({ script: [
+    toolUse("find_conversations", { name: "", channel: "all", waiting: "any", mine: false, from: "", to: "" }),
+    saidAfter(answers, "Dale Rivers texted you yesterday and is waiting on you. Corner Rivers has your last email."),
+    (body) => {
+      const lists = carriedLists(body);
+      ref.lists = lists;
+      const conv = (lists || []).find((l) => l.was === "conversations");
+      const row = conv?.rows.find((r) => r.name === "Dale Rivers");
+      Object.assign(ref, { list: conv?.list ?? null, ref: row?.ref ?? "" });
+      return toolUse("look_at_customer_for_reply", { list: ref.list, ref: ref.ref });
+    },
+    (body) => { answers.push(toolAnswer(body)); return toolUse("propose_reply_draft", { list: ref.list, ref: ref.ref, dealKey: EST, channel: "sms", subject: null, body: TEXT_BODY, oldQuoteDays: null }); },
+    saidAfter(answers, "It's on your screen. Another customer is also named Dale Rivers, so check the number on the card first."),
+  ] });
+  w.clockMs = clockWhere(DIGITS, false);
+  const c = customer(w);
+  c.others = [twinRow(w)];
+  // Every search by name this run makes, as the route was asked.
+  const byName = [];
+  const facts = w.extra.crm_customer_facts;
+  w.extra.crm_customer_facts = async (b) => { byName.push(clone(b)); return facts(b); };
+  const ago = (days) => new Date(w.clock() - days * 86_400_000).toISOString();
+  const CORNER = "10000000-0000-4000-8000-0000000000d3";
+  const inbox = [];
+  w.extra.crm_inbox = async (b) => {
+    inbox.push(clone(b));
+    return { status: 200, data: { ok: true, cursor: null, seesCalls: true, smsReady: true, hasTexts: true, hasCalls: true, threads: [
+      { contactId: CID, name: "Dale Rivers", channel: "sms", direction: "in", preview: "Is that barn price still good?", at: ago(1), awaitingReply: true },
+      { contactId: CORNER, name: "Corner Rivers", channel: "email", direction: "out", preview: "Your estimate", at: ago(2), awaitingReply: false },
+    ] } };
+  };
+  const { ctx, page, errors } = await open(w, "/jack");
+  track(ctx);
+  await page.getByLabel("Message to Jack").waitFor({ timeout: 15000 });
+  await askForCard(page, "can you see which customers are not sent reply?", answers);
+  const listCard = [...w.proposals.values()].at(-1);
+  const listShown = await card(page).innerText();
+  ok("BW the conversations answer is a list card: who's waiting, with their words, for the person only", listCard.kind === "lookup" && listCard.payload.look === "conversations" && listShown.includes("Conversations") && listShown.includes("Dale Rivers") && listShown.includes("waiting on you") && listShown.includes("Is that barn price still good?") && listShown.includes("Corner Rivers"), listShown.slice(0, 400));
+  ok("BW and the rows Claude saw carry refs, never an id", answers[0] && JSON.parse(answers[0]).rows.map((r) => r.ref).join(",") === "c1,c2" && !answers[0].includes(CID) && !answers[0].includes(CORNER), String(answers[0]).slice(0, 300));
+
+  // The next message: Claude has the chat's words, and the note naming the list.
+  await askForCard(page, "reply Dale Rivers", answers);
+  ok("BW the next message carried the list: its id, and each row's ref, name and short line, no words or ids", same(ref.lists, [{ list: listCard.id, was: "conversations", made: "today", rows: [
+    { ref: "c1", name: "Dale Rivers", about: "text · waiting on you · yesterday" }, { ref: "c2", name: "Corner Rivers", about: "email · you wrote last · 2 days ago" },
+  ] }]), JSON.stringify(ref.lists));
+  const carriedReq = w.toClaude.find((b) => b.includes(agent.CARRIED_HEAD)) ?? "";
+  ok("BW and the note itself holds no number, address, message words or id", !!carriedReq && !holdsPrivate(carriedReq) && !/barn price still good/.test(JSON.parse(carriedReq).system.map((b) => b.text).join("\n")) && ![CID, CORNER, TWIN].some((x) => JSON.parse(carriedReq).system.map((b) => b.text).join("\n").includes(x)), "");
+  const p = [...w.proposals.values()].at(-1);
+  const shown = await card(page).innerText();
+  ok("BW it reached the same Dale: the look and the card read only his record, by the list and its ref", same([ref.list, ref.ref], [listCard.id, "c1"]) && c.reads.length > 0 && c.reads.every((r) => r.kind === "contact" && r.id === CID) && p.kind === "reply_send" && p.payload.contactId === CID, JSON.stringify(c.reads));
+  ok("BW no new search by name picked anyone: the only ones are the same-name checks, by his name, after the ref named him", byName.length === 2 && byName.every((b) => same(b, { nameLike: "Dale Rivers" })), JSON.stringify(byName));
+  ok("BW the card says where it goes and warns of the other Dale Rivers", showsOnlyWhere(shown, p, "sms") && (await card(page).locator("[data-jack-same-name]").innerText()) === "Another customer is also named Dale Rivers. Check the number before you approve.", shown.slice(0, 400));
+  ok("BW nothing private or the other Dale's id reached Claude", !reachedClaude(w).length && !w.toClaude.some((b) => b.includes(TWIN)), reachedClaude(w).join(","));
+  await workShot(page, "bw-carried-list-reply.png", { fullPage: true });
+  await press(page, "Approve", "applied");
+  ok("BW Approve sends one text, to the Dale who texted, with the card's words", c.sends.length === 1 && same(c.sends[0], { action: "crm_send_sms", body: { contactId: CID, shortCode: EST, body: TEXT_BODY } }), JSON.stringify(c.sends));
+  ok("BW no page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+});
+
+// ── BX: a page from before the To line, and send cards that never said where they go (11-09 review) ──
+// BEFORE_TO is this branch's base (origin/beta's tree, live on 11-09): what a tab left open, or a cached
+// bundle, still runs. It has the send cards but draws no To line, and its Approve posts { hash, send: true }
+// as it always did, so the server can't tell it showed where the card goes: it sends nothing. Reloaded
+// onto this build, the card says "To ..." and its Approve posts exactly that back. Then two cards made
+// before 11-09, with no `to` at all: they can't be sent, so they offer no Approve and say to ask again.
+const BEFORE_TO = "f74c9857";
+const NO_WHERE = "This card doesn't show where it goes, so it can't be sent. Ask me again and I'll make a fresh card.";
+await scenario("BX", async (track) => {
+  const answers = [];
+  const w = world({ script: [
+    toolUse("propose_reply_draft", textIn()), saidAfter(answers, "It's on your screen."),
+    toolUse("propose_estimate_resend", resendIn()), saidAfter(answers, "It's on your screen."),
+    toolUse("propose_reply_draft", textIn()), saidAfter(answers, "It's on your screen."),
+    toolUse("propose_estimate_resend", resendIn()), saidAfter(answers, "It's on your screen."),
+  ] });
+  w.clockMs = clockWhere(DIGITS, false);
+  const c = customer(w);
+  const approves = (from) => w.posts.slice(from).filter((b) => b.action === "proposal_approve");
+  /** Asks Jack as the page does (the same handler), and answers the card it made. */
+  const ask = async (text) => {
+    const r = await w.handle({ action: "send", text });
+    const id = r.body?.proposals?.at(-1)?.id;
+    if (r.status !== 200 || !id) throw new Error(`"${text}" made no card: ${answers.at(-1) ?? JSON.stringify(r.body).slice(0, 300)}`);
+    return w.proposals.get(id);
+  };
+  let before = null;
+  try {
+    const show = (f) => execFileSync("git", ["show", `${BEFORE_TO}:${f}`], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 }).toString("utf8");
+    before = { html: show("portal.html"), js: show("portal.app.compiled.js"), from: `git ${BEFORE_TO}` };
+  } catch (e) { console.log(`NOTE  BX the page from before 11-09 couldn't be read (${String(e?.message ?? e).split("\n")[0].slice(0, 200)}); its press is made on the server only.`); }
+
+  let p;
+  if (before) {
+    const NEW_JS = readFileSync(join(ROOT, "portal.app.compiled.js"), "utf8");
+    ok(`BX the old page is the portal from before 11-09 (${before.from}): send cards, but no To line; this build draws one`, before.js.includes("sends exactly these words") && !before.js.includes("data-jack-send-to") && NEW_JS.includes("data-jack-send-to"));
+    const old = await open(w, "/jack", { old: before });
+    track(old.ctx);
+    await old.page.getByLabel("Message to Jack").waitFor({ timeout: 15000 });
+    await askForCard(old.page, "text Dale that his barn price still stands", answers);
+    p = [...w.proposals.values()].at(-1);
+    const shown = await card(old.page).innerText();
+    ok("BX the server's text card has a To line, and the old page draws it with its words and Approve, but no To line", p.kind === "reply_send" && p.preview.to === PHONE && shown.includes(TEXT_BODY) && !shown.includes(PHONE) && (await card(old.page).locator("[data-jack-send-to]").count()) === 0 && (await card(old.page).getByRole("button", { name: "Approve", exact: true }).count()) === 1, shown.slice(0, 400));
+    const from = w.posts.length;
+    await card(old.page).getByRole("button", { name: "Approve", exact: true }).click();
+    try { await until(old.page, (s) => ([...document.querySelectorAll("[data-jack-card]")].at(-1)?.innerText || "").includes(s), agent.SENTENCES.reloadToSend); }
+    catch { throw new Error(`the old page's Approve never showed the reload sentence: ${(await card(old.page).innerText()).replace(/\s+/g, " ").slice(0, 300)}`); }
+    const posted = approves(from);
+    const row = w.proposals.get(p.id);
+    ok("BX the old page's Approve posts send: true and no To line, so nothing is sent: the card says to reload, and stays ready", posted.length === 1 && posted[0].send === true && !("to" in posted[0]) && c.sends.length === 0 && w.stamps.length === 0 && row.status === "ready" && row.approved_by === null && row.shown_hash === p.shown_hash, JSON.stringify(posted));
+    await workShot(old.page, "bx-old-page-no-to-line.png", { fullPage: true });
+    ok("BX the old page threw no errors", old.errors.length === 0, old.errors.join(" | ").slice(0, 300));
+  } else {
+    p = await ask("text Dale that his barn price still stands");
+    const r = await w.handle({ action: "proposal_approve", id: p.id, hash: p.shown_hash, send: true });
+    ok("BX a press with send: true and no To line (an old page's) sends nothing, and the card stays ready", r.status === 409 && r.body.error === agent.SENTENCES.reloadToSend && c.sends.length === 0 && w.proposals.get(p.id).status === "ready", `${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+  }
+
+  // Reloaded onto this build: the same card says where it goes, and its Approve posts exactly that.
+  const fresh = await open(w, "/jack");
+  track(fresh.ctx);
+  await cardById(fresh.page, p.id).waitFor({ timeout: 15000 });
+  const to = await cardById(fresh.page, p.id).locator("[data-jack-send-to]").innerText();
+  ok("BX reloaded onto this build, the same card says where it goes", to === `To ${PHONE}`, to);
+  let from = w.posts.length;
+  await press(fresh.page, "Approve", "applied");
+  let posted = approves(from);
+  ok("BX its Approve posts exactly the To line it drew, and the text goes once", posted.length === 1 && posted[0].send === true && posted[0].to === PHONE && c.sends.length === 1 && same(c.sends[0], { action: "crm_send_sms", body: { contactId: CID, shortCode: EST, body: TEXT_BODY } }), JSON.stringify(posted));
+  // An estimate card on this build: its Approve posts the address it drew, and emails once.
+  await askForCard(fresh.page, "send Dale his barn estimate again", answers);
+  const e = [...w.proposals.values()].at(-1);
+  from = w.posts.length;
+  await press(fresh.page, "Approve", "applied");
+  posted = approves(from);
+  ok("BX an estimate card's Approve posts the address it drew, and the estimate goes once", e.kind === "estimate_resend" && posted.length === 1 && posted[0].to === MAIL && c.sends.length === 2 && same(c.sends[1], { action: "resend_quote_email", body: { shortCode: EST } }), JSON.stringify(posted));
+  ok("BX no page errors after the reload", fresh.errors.length === 0, fresh.errors.join(" | ").slice(0, 300));
+
+  // Two cards made before 11-09: neither holds a `to`, on the card or in what Approve would run.
+  await w.handle({ action: "new" });
+  const t = await ask("text Dale that his barn price still stands");
+  const est = await ask("send Dale his barn estimate again");
+  for (const x of [t, est]) { delete x.preview.to; delete x.payload.to; }
+  const sendsBefore = c.sends.length;
+  const later = await open(w, "/jack");
+  track(later.ctx);
+  await cardById(later.page, est.id).waitFor({ timeout: 15000 });
+  for (const [what, x] of [["text", t], ["estimate", est]]) {
+    const loc = cardById(later.page, x.id);
+    const shown = await loc.innerText();
+    ok(`BX the ${what} card made before 11-09 offers no Approve and no line about what Approve does, and says to ask again`, x.status === "ready" && (await loc.getByRole("button", { name: "Approve", exact: true }).count()) === 0 && (await loc.locator("[data-jack-send-final]").count()) === 0 && (await loc.locator("[data-jack-send-to]").count()) === 0 && shown.includes(`Nothing has been sent from this card yet. ${NO_WHERE}`), shown.slice(0, 400));
+    ok(`BX the ${what} card's buttons are Open their record and Not now`, same(await buttonsOn(loc), ["Open their record", "Not now"]), (await buttonsOn(loc)).join(","));
+  }
+  await workShot(later.page, "bx-cards-with-no-to.png", { fullPage: true });
+  // A press on one anyway (an old page still shows its Approve): the server refuses it, and nothing goes.
+  const r = await w.handle({ action: "proposal_approve", id: t.id, hash: t.shown_hash, send: true });
+  ok("BX a press on one anyway sends nothing: the press itself says the card doesn't show where it goes", c.sends.length === sendsBefore && w.proposals.get(t.id).status === "failed" && w.proposals.get(t.id).failure === SEND_SAID.noTo, `${r.status} ${w.proposals.get(t.id).status} ${w.proposals.get(t.id).failure}`);
+  ok("BX no page errors on the cards with no To line", later.errors.length === 0, later.errors.join(" | ").slice(0, 300));
 });
 
 writeManifest();

@@ -2,7 +2,7 @@
 // column the table doesn't have answers 42703, as live does) and answers at most 1000 rows a request.
 // No network, no registry imports.
 
-import { atLocationSince, handleJackRead, type JackReadCtx, MAX_CONTACTS, orderMoney, cleanTerm } from "./jackReads.ts";
+import { atLocationSince, handleJackRead, type JackReadCtx, MAX_CONTACTS, NAME_READ, orderMoney, cleanTerm } from "./jackReads.ts";
 
 function assert(ok: unknown, message = "expected a true value"): asserts ok {
   if (!ok) throw new Error(message);
@@ -273,6 +273,25 @@ Deno.test("facts: a name search looks for every word, takes no grammar, and refu
   assertEquals((await run(ctx(db, "crm_customer_facts", { contactIds: ["not-an-id"] }))).status, 400);
   const byId = await run(ctx(db, "crm_customer_facts", { contactIds: [id(2)] }));
   assertEquals(byId.body.contacts.map((c: R) => c.id), [id(2)]);
+});
+
+Deno.test("facts: a name search says when its read by name came back full before the scope, so a namesake may sit past it", async () => {
+  // 60 customers named like "Dale", the newest first. A rep who sees only their own sees two, and the one
+  // updated longest ago is past the 50 read by name: the answer says capped, never "these are all".
+  const dales = Array.from({ length: NAME_READ + 10 }, (_, i) => ({ id: id(2000 + i), name: `Dale ${i}`, created_at: "2026-10-01T00:00:00Z", updated_at: new Date(Date.parse("2026-11-01T00:00:00Z") - i * 60_000).toISOString() }));
+  const own = new Set([id(2000), id(2000 + NAME_READ + 5)]);
+  const scoped = { visibleContactIds: (ids: (string | null | undefined)[]) => Promise.resolve(new Set(ids.filter((x) => x && own.has(x)) as string[])) };
+  const capped = await run(ctx(makeDb({ crm_contacts: dales }), "crm_customer_facts", { nameLike: "dale" }, scoped));
+  assertEquals([capped.body.contacts.map((c: R) => c.id), capped.body.capped], [[id(2000)], true]);
+  // Under the read's limit: not capped.
+  const few = await run(ctx(makeDb({ crm_contacts: dales.slice(0, 3) }), "crm_customer_facts", { nameLike: "dale" }, scoped));
+  assertEquals([few.body.contacts.length, few.body.capped], [1, false]);
+  // Nothing found at all still says it.
+  assertEquals((await run(ctx(makeDb({ crm_contacts: dales }), "crm_customer_facts", { nameLike: "dale" }, { visibleContactIds: () => Promise.resolve(new Set<string>()) }))).body.capped, true);
+  // Not a name search: no such key.
+  const byIds = await run(ctx(makeDb({ crm_contacts: dales }), "crm_customer_facts", { contactIds: [id(2000)] }));
+  assert(!("capped" in byIds.body), JSON.stringify(Object.keys(byIds.body)));
+  assert(!("capped" in (await run(ctx(crmWorld(), "crm_customer_facts"))).body));
 });
 
 // ── orders_overview ─────────────────────────────────────────────────────────────────────────────
