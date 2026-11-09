@@ -815,7 +815,7 @@ export async function runTurn(deps: Deps, s: TurnState, apiKey: string, model: s
     }
     if (!res.ok) {
       const retryable = res.why !== "http" || res.status === 408 || res.status === 429 || res.status === 529 || (res.status ?? 0) >= 500;
-      await deps.log({ code: res.why === "timeout" ? "jack_timeout" : "jack_failed", severity: retryable ? "warn" : "error", clientId: s.who.clientId, message: res.why === "http" ? `Claude answered HTTP ${res.status}.` : `Claude call failed: ${res.why}.`, context: { round } });
+      await deps.log({ code: res.why === "timeout" ? "jack_timeout" : "jack_failed", severity: retryable ? "warn" : "error", clientId: s.who.clientId, message: res.why === "http" ? `Claude answered HTTP ${res.status}.` : `Claude call failed: ${res.why}.`, context: { round, ...(res.detail ? { detail: res.detail } : {}) } });
       return done(res.why === "timeout" ? SENTENCES.timeout : SENTENCES.failed, res.why === "timeout" ? "timeout" : "error");
     }
     const b = res.body;

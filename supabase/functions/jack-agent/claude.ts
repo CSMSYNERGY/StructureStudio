@@ -48,7 +48,26 @@ export function addUsage(t: Totals, usage: unknown, model: string): Totals {
 
 export type Block = { type?: string; text?: string; id?: string; name?: string; input?: unknown };
 export interface ClaudeBody { stop_reason?: string; content?: Block[]; usage?: unknown; model?: string; stop_details?: { category?: string | null } | null }
-export type Ask = { ok: true; body: ClaudeBody } | { ok: false; why: "timeout" | "unreachable" | "http" | "limit" | "parse"; status?: number; retryAfterSec?: number };
+export type Ask = { ok: true; body: ClaudeBody } | { ok: false; why: "timeout" | "unreachable" | "http" | "limit" | "parse"; status?: number; retryAfterSec?: number; detail?: string };
+
+/** The API's own reason for a refused request (`error.type: error.message`), for the log only. A 4xx
+ *  describes the REQUEST (a field, a schema, a limit), which is what makes a 400 fixable; the first real
+ *  call on beta (11-09) failed with nothing to go on. Anything shaped like an email or a long number is
+ *  masked, control characters go, and it's capped, so a message that ever echoed a customer's words
+ *  still can't carry their details into app_errors. Never shown to the person. */
+export function apiReason(text: string): string {
+  let t = "";
+  try {
+    const e = (JSON.parse(text) as { error?: { type?: unknown; message?: unknown } })?.error;
+    t = [typeof e?.type === "string" ? e.type : "", typeof e?.message === "string" ? e.message : ""].filter(Boolean).join(": ");
+  } catch {
+    return "";
+  }
+  return Array.from(t, (c) => (c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127 ? " " : c)).join("")
+    .replace(/[^\s@<>()"',;:]+@[^\s@<>()"',;:]+/g, "[email]")
+    .replace(/\+?\d[\d\s().-]{8,}\d/g, "[number]")
+    .replace(/\s+/g, " ").trim().slice(0, 300);
+}
 export type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
 
 const RETRY_DELAYS_MS = [1500, 4000];
@@ -90,12 +109,13 @@ async function askOnce(f: Fetcher, apiKey: string, body: Record<string, unknown>
       signal: ac.signal,
     });
     if (!res.ok) {
-      // A console spend limit answers 400 "You have reached your specified ... API usage limits". Read
-      // only to tell that apart; the text is never logged or shown.
+      // A console spend limit answers 400 "You have reached your specified ... API usage limits": told
+      // apart here. Any other 4xx keeps the API's reason, masked (apiReason), for the log only.
       const text = await res.text().catch(() => "");
       if (res.status === 400 && /API usage limits/i.test(text)) return { ok: false, why: "limit", status: 400 };
       const after = Number(res.headers.get("retry-after"));
-      return { ok: false, why: "http", status: res.status, ...(Number.isFinite(after) && after > 0 ? { retryAfterSec: after } : {}) };
+      const detail = res.status >= 400 && res.status < 500 ? apiReason(text) : "";
+      return { ok: false, why: "http", status: res.status, ...(Number.isFinite(after) && after > 0 ? { retryAfterSec: after } : {}), ...(detail ? { detail } : {}) };
     }
     try {
       return { ok: true, body: await res.json() as ClaudeBody };
