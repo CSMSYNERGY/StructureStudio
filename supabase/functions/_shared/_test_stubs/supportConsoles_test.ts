@@ -93,13 +93,13 @@ function shell(w: World) {
   const tenant = { role: w.role, access: OWN_MAP };
   const isAdmin = w.role === "owner" || w.role === "admin";
   const f = new Function(
-    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn", "sub", "shedsOn",
+    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn", "sub", "shedsOn", "jackClampOn",
     [SUPPORT_VIEW, WEARING, CONSOLES_BARRED, CAN_ADMIN_FOR_URL, RESOLVED_TAB, GATES_RESOLVED, CAN_ADMIN, ACTIVE_TAB].join("\n") +
       `\nreturn { supportView, consolesBarred, resolvedTab, gatesResolved, canAdmin, activeTab, adminNav: !!(${NAV![1]}), adminMount: !!(${MOUNT![1]}) };`,
   );
   return f(ssClampTab, w.isOperator, w.isSupportOp, w.viewing, tenant, w.canProjects, w.tab, isAdmin, OWN_MAP,
     w.entitlement === undefined ? { status: "active" } : w.entitlement, true, w.advancedClampOn === true, w.sub ?? null,
-    w.shedsOn !== false) as {
+    w.shedsOn !== false, false) as {
       supportView: unknown; consolesBarred: unknown; resolvedTab: string; gatesResolved: boolean; canAdmin: boolean;
       activeTab: string; adminNav: boolean; adminMount: boolean;
     };

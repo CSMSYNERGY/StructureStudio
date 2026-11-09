@@ -55,21 +55,26 @@ export const TEXT_METERS = ["sms_segment", "sms_in"] as const;
 /** The two sales-tax meters (179): a Verify press and the invoice-time check (2026-10-21, their own
  *  chip, so a builder can see what tax lookups cost without reading every "Other" line). */
 export const TAX_METERS = ["tax_lookup", "tax_invoice"] as const;
+/** Jack, the AI agent (migration 376, jack-agent/billing.ts): one line per answer and per price list
+ *  read, at the AI's cost times the meter's markup. Its own chip, so a builder can see what Jack has
+ *  cost them (plan section 9, "a spending report"). */
+export const JACK_METER = "jack_ai";
+export const JACK_METERS = [JACK_METER] as const;
 /** Money in or out that is not usage. `debit` is the only kind left over (128's check). */
 export const FUNDS_KINDS = ["topup", "refund", "grant", "adjustment", "reversal"] as const;
 const USAGE_METERS: readonly string[] = [...CALL_METERS, ...TEXT_METERS];
 /** Every meter that has a chip of its own. The meter wins over the kind for all of them. */
-const CHIP_METERS: readonly string[] = [...USAGE_METERS, ...TAX_METERS];
+const CHIP_METERS: readonly string[] = [...USAGE_METERS, ...TAX_METERS, ...JACK_METERS];
 
-export type LedgerFilter = "all" | "calls" | "texts" | "tax" | "funds" | "other";
+export type LedgerFilter = "all" | "calls" | "texts" | "tax" | "jack" | "funds" | "other";
 export type LedgerCategory = Exclude<LedgerFilter, "all">;
-export const LEDGER_FILTERS: readonly LedgerFilter[] = ["all", "calls", "texts", "tax", "funds", "other"];
+export const LEDGER_FILTERS: readonly LedgerFilter[] = ["all", "calls", "texts", "tax", "jack", "funds", "other"];
 
 /**
- * Which chip a line belongs to. EXACTLY ONE, which is what makes the five chips add up to All:
+ * Which chip a line belongs to. EXACTLY ONE, which is what makes the six chips add up to All:
  * the meter wins over the kind, so a refund of a call (should one ever be posted) sits with the
  * calls it corrects rather than being counted under both Calls and Funds, and a reversal of a tax
- * charge sits under Tax.
+ * charge sits under Tax, and of a Jack charge under Jack.
  * applyLedgerFilter below is the same rule written for PostgREST, and walletLedger.test.ts
  * proves the two agree on every kind × meter pair.
  */
@@ -78,6 +83,7 @@ export function ledgerCategory(t: { kind?: string | null; meter_kind?: string | 
   if ((CALL_METERS as readonly string[]).includes(m)) return "calls";
   if ((TEXT_METERS as readonly string[]).includes(m)) return "texts";
   if ((TAX_METERS as readonly string[]).includes(m)) return "tax";
+  if ((JACK_METERS as readonly string[]).includes(m)) return "jack";
   if ((FUNDS_KINDS as readonly string[]).includes(t.kind ?? "")) return "funds";
   return "other";
 }
@@ -92,6 +98,7 @@ export function applyLedgerFilter(q: Query, filter: LedgerFilter): Query {
     case "calls": return q.in("meter_kind", [...CALL_METERS]);
     case "texts": return q.in("meter_kind", [...TEXT_METERS]);
     case "tax": return q.in("meter_kind", [...TAX_METERS]);
+    case "jack": return q.in("meter_kind", [...JACK_METERS]);
     case "funds": return q.in("kind", [...FUNDS_KINDS]).or(NOT_USAGE);
     case "other": return q.not("kind", "in", pgList(FUNDS_KINDS)).or(NOT_USAGE);
     default: return q;
@@ -124,17 +131,25 @@ const METER_LABELS: Record<string, string> = {
   tax_invoice: "Invoice tax check",
   // Migration 312's meter. Missing here until 2026-10-21, so its lines read "Usage".
   photo_background_change: "Photo background change",
+  // Jack (376). jack-agent/billing.ts writes "Jack · answer" or "Jack · price list read" as the memo.
+  jack_ai: "Jack",
 };
 // Meters whose memo is the better description, because the poster wrote one per line (the
 // number dialled, the minutes, the month a line fee covers). The tax meters since 2026-10-21:
 // taxMeter.ts taxChargeMemo writes "Tax verification · SST-5021 · Minnesota" (the meter's name,
-// the quote or invoice, the state), which is the line a builder can match to a document.
-const MEMO_METERS = new Set([...USAGE_METERS, ...TAX_METERS, "phone_line_monthly", "voicemail_transcription"]);
+// the quote or invoice, the state), which is the line a builder can match to a document. Jack's
+// since 376: the memo says whether it was an answer or a price list read, and nothing more.
+const MEMO_METERS = new Set([...USAGE_METERS, ...TAX_METERS, ...JACK_METERS, "phone_line_monthly", "voicemail_transcription"]);
+
+/** The memo on Jack's one-time $50 grant (jack-agent/billing.ts ensureWelcomeCredit, key
+ *  `jack_welcome`). The one grant memo shown by name: any other grant's memo is an operator's note
+ *  and stays "Credit from CSM Synergy". */
+export const JACK_WELCOME_MEMO = "Jack welcome credit";
 
 export function walletLineLabel(t: { kind?: string | null; meter_kind?: string | null; memo?: string | null }): string {
   const memo = typeof t.memo === "string" ? t.memo.trim() : "";
   if (t.kind === "topup") return memo === "Automatic top-up" ? "Added funds · automatic top-up" : "Added funds";
-  if (t.kind === "grant") return "Credit from CSM Synergy";
+  if (t.kind === "grant") return memo === JACK_WELCOME_MEMO ? "Jack welcome credit from CSM Synergy" : "Credit from CSM Synergy";
   if (t.kind === "adjustment") return memo ? `Adjustment — ${memo}` : "Adjustment";
   if (t.kind === "refund") return "Refund";
   if (t.kind === "reversal") return memo ? `Reversal — ${memo}` : "Reversal";
@@ -151,9 +166,21 @@ export function walletLineLabel(t: { kind?: string | null; meter_kind?: string |
 export function costPlusNote(kind: string, unitLabel?: string | null): string {
   if ((CALL_METERS as readonly string[]).includes(kind)) return "Billed per call minute";
   if ((TEXT_METERS as readonly string[]).includes(kind)) return "Billed per text";
+  if ((JACK_METERS as readonly string[]).includes(kind)) return "Billed per answer and per price list read";
   if (unitLabel === "minute") return "Billed per minute";
   if (unitLabel === "segment") return "Billed per text";
   return "Billed per use";
+}
+
+/**
+ * The wallet card's meter list for one builder: Jack's meter only where Jack is on for them
+ * (client_settings.jack_on), the door meter's rule. Once jack_ai is armed it is an active meter,
+ * and without this every builder's card would list a price for a thing their portal doesn't offer.
+ * portal-billing passes `jackOn` true only on a read that worked and said true, so a failed read
+ * hides it.
+ */
+export function onlyIfJackOn<T extends { kind?: unknown }>(rows: T[], jackOn: boolean): T[] {
+  return jackOn === true ? rows : rows.filter((r) => r.kind !== JACK_METER);
 }
 
 // ── The request ────────────────────────────────────────────────────────────────────────────
@@ -186,7 +213,7 @@ export function parseLedgerQuery(p: Record<string, unknown> | null | undefined):
   | { ok: false; error: string } {
   const body = p ?? {};
   const filter = (body.filter ?? "all") as LedgerFilter;
-  if (!LEDGER_FILTERS.includes(filter)) return { ok: false, error: "Choose All, Calls, Texts, Tax, Funds or Other." };
+  if (!LEDGER_FILTERS.includes(filter)) return { ok: false, error: "Choose All, Calls, Texts, Tax, Jack, Funds or Other." };
 
   let limit = LEDGER_PAGE_MAX;
   if (body.limit != null) {

@@ -75,6 +75,7 @@
 # /admin/ and /my-quotes/ do (every other page answers /<slug>/ through its /<slug>/* rule).
 /login                         /portal.html   200
 /login/                        /login         301
+/jack                          /portal.html   200
 /designer                      /portal.html   200
 /advanced                      /portal.html   200
 /contacts                      /portal.html   200
@@ -123,6 +124,7 @@
 # ── DYNAMIC RULES: nothing static below this line ────────────────────────────────────────
 # The booking page's short form: /book/<client>/<host> (see the MEETINGS block above).
 /book/*                        /book.html     200
+/jack/*                        /portal.html   200
 /designer/*                    /portal.html   200
 /advanced/*                    /portal.html   200
 /contacts/*                    /portal.html   200

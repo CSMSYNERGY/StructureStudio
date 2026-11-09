@@ -18,8 +18,8 @@ import {
   FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS, monthlyPlansRefused,
 } from "../_shared/foundingPricing.ts";
 import {
-  applyLedgerFilter, costPlusNote, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_MAX_ROWS, LEDGER_CSV_PAGE,
-  LEDGER_STATES, ledgerCsv, parseLedgerQuery, toLedgerRow, walletLineLabel,
+  applyLedgerFilter, costPlusNote, JACK_METER, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_MAX_ROWS, LEDGER_CSV_PAGE,
+  LEDGER_STATES, ledgerCsv, onlyIfJackOn, parseLedgerQuery, toLedgerRow, walletLineLabel,
 } from "../_shared/walletLedger.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
@@ -895,6 +895,15 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           const { data: doorRow, error: doorErr } = await admin.from("client_settings").select("door_looks_beta").eq("client_id", clientId).maybeSingle();
           if (doorErr) console.warn("door_looks_beta read failed; hiding the door-look meter:", doorErr.message);
           if (doorErr || doorRow?.door_looks_beta !== true) meterRows = meterRows.filter((p) => p.kind !== DOOR_METER);
+        }
+        // Jack's meter (376, jack-agent/billing.ts) prices Jack's answers and price list reads, which only
+        // a builder with client_settings.jack_on can use. The door meter's rule: read only when the meter
+        // is in the list (it ships inactive, so not until it is armed), shown only where Jack is on, and a
+        // failed read hides it. Its own read, so a problem with it never touches the door meter's.
+        if (meterRows.some((p) => p.kind === JACK_METER)) {
+          const { data: jackRow, error: jackErr } = await admin.from("client_settings").select("jack_on").eq("client_id", clientId).maybeSingle();
+          if (jackErr) console.warn("jack_on read failed; hiding the Jack meter:", jackErr.message);
+          meterRows = onlyIfJackOn(meterRows, !jackErr && jackRow?.jack_on === true);
         }
         // A COST-PLUS meter (calls and texts, 259) has no price to show: what a builder pays is
         // Twilio's real cost times the markup, per call or text. Its price_cents is 0, which this

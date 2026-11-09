@@ -363,7 +363,7 @@ Deno.test("accessMetadata HIDES internal-only areas by default", () => {
   const ours = accessMetadata({ internal: true }).areas.map((a) => a.key);
   assert(ours.includes("projects"), "our own tenant must be offered it");
   assertEquals(ours.length, AREAS.length, "nothing else is filtered");
-  assertEquals(shown.length, AREAS.length - 1, "exactly one area is internal-only today");
+  assertEquals(shown.length, AREAS.length - 2, "exactly two areas are internal-only today (Projects, and Jack while it's dark)");
 
   // The filter is presentation, not resolution: the area still exists for everyone, which is
   // what lets the server resolve a stored grant regardless of who asked for the grid.

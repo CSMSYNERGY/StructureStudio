@@ -105,7 +105,7 @@ Deno.test("buildCrmFeed: email rows carry the label in meta, and Delivered/Bounc
   const asked: string[] = [];
   const feed = await buildCrmFeed(stubAdmin(ROWS, asked), "demo-tenant", { codes: ["SS-DEMO2345"], contactId: CONTACT });
   assertEquals(asked.length, 1);
-  for (const col of ["opened_at", "open_count", "complained_at", "delivered_at", "bounced_at", "body_text"]) {
+  for (const col of ["opened_at", "open_count", "complained_at", "delivered_at", "bounced_at", "body_text", "sent_by", "sent_with"]) {
     assert(asked[0].includes(col), `email_sends is read with ${col}: ${asked[0]}`);
   }
   const byId = (id: string) => feed.find((e) => e.id === `e:${id}`)!;
@@ -121,8 +121,9 @@ Deno.test("buildCrmFeed ahead of migration 262: asked again without the open col
   const asked: string[] = [];
   const rows = ROWS.map(({ opened_at: _o, open_count: _c, complained_at: _p, ...r }) => r);
   const feed = await buildCrmFeed(stubAdmin(rows, asked, /\bopened_at\b/), "demo-tenant", { codes: [], contactId: CONTACT });
-  assertEquals(asked.length, 2, "with 262's columns, then without them");
-  assert(asked[1].includes("body_text") && !asked[1].includes("opened_at") && !asked[1].includes("complained_at"), `the retry keeps body_text: ${asked[1]}`);
+  // Three asks since migration 378: with 378's sent_with (and 262's columns), with 262's, then without them.
+  assertEquals(asked.length, 3, "with 378's and 262's columns, with 262's, then without them");
+  assert(asked[2].includes("body_text") && !asked[2].includes("opened_at") && !asked[2].includes("complained_at"), `the retry keeps body_text: ${asked[2]}`);
   const e1 = feed.find((e) => e.id === "e:e1")!;
   assertEquals([e1.body, e1.meta?.delivery], ["Hi Cam", "Delivered"]);
 });

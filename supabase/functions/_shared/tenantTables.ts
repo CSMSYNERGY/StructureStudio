@@ -116,6 +116,11 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   // Migration 340. The support assistant's chats with this builder's team, and their turns.
   support_conversations: { fate: "wipe", why: "Support assistant chats (support_messages cascades)." },
   support_messages: { fate: "cascade", parent: "support_conversations", why: "The turns of a support chat." },
+  // Migration 361. Jack's chats with this builder's team, and what it proposed and did.
+  jack_conversations: { fate: "wipe", why: "Jack's chats (jack_messages cascades)." },
+  jack_messages: { fate: "cascade", parent: "jack_conversations", why: "The turns of a Jack chat." },
+  jack_proposals: { fate: "wipe", why: "What Jack proposed for this builder and what was approved: their prices and settings, and on look-up lists and reply drafts their customers' names and words." },
+  jack_memory: { fate: "wipe", why: "What this builder told Jack once (when a quote counts as quiet, and so on)." },
   fixture_items: { fate: "wipe", why: "Door and window catalog." },
   client_library: { fate: "wipe", why: "The builder's own library of claddings, doors and windows (migration 339): named copies of StructureStudio templates. Style and fixture rows point at it with SET NULL." },
   library_requests: { fate: "wipe", why: "Requests for a cladding, door or window not in the library (migration 339). The money is in wallet_transactions, which is kept." },

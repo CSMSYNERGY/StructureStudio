@@ -6956,6 +6956,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, whiteSpace: e.type === "email" || e.type === "sms" ? "pre-wrap" : undefined }}>
                         {e.type === "activity" && e.meta && !e.meta.done && e.meta.dueAt ? `Due ${fmtDate(e.meta.dueAt)}` : e.body}
                       </div>}
+                      {/* SENT WITH JACK (migration 378): someone pressed Approve on a Jack card. One quiet line
+                          under our own text or email, and only those (crmFeed sets via on nothing else).
+                          byOperator: a StructureStudio operator in view-as (app_operators says so). byName:
+                          the teammate, or "a former team member". Neither: nobody can be named (no sender
+                          recorded, or the roster couldn't be read), so the line names nobody. */}
+                      {(e.type === "email" || e.type === "sms") && e.via === "jack" && (
+                        <div data-ss-crm-sent-with="jack" style={{ fontSize: 11, color: "#64748B", marginTop: 2 }}>
+                          {e.byOperator ? "Sent by the Structure Studio team with Jack" : e.byName ? `Sent by ${e.byName} with Jack` : "Sent with Jack"}
+                        </div>
+                      )}
                       {/* MY SYNERGY PHONE: the voicemail itself, played from the phone-api Worker
                           (GET /voicemails/:id/audio). Only for someone the Worker will serve —
                           phone access, calling on, not an operator in view-as (their token is

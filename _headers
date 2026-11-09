@@ -53,6 +53,10 @@
 # >>> app pages (one pair per page, mirrors _redirects)
 /login
   X-Frame-Options: DENY
+/jack
+  X-Frame-Options: DENY
+/jack/*
+  X-Frame-Options: DENY
 /designer
   X-Frame-Options: DENY
 /designer/*

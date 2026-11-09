@@ -1230,7 +1230,9 @@ function csvEscape(v) {
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 function toCSV(headers, rows) { return [headers, ...rows].map((r) => r.map(csvEscape).join(",")).join("\r\n"); }
-function parseCSV(text) {
+function parseCSV(text) { return parseCSVRows(text).filter((r) => r.some((c) => String(c).trim() !== "")); }
+// With its blank lines kept, so a row's number is its line in the file. Jack names rows to the person.
+function parseCSVRows(text) {
   const rows = []; let row = [], field = "", inQ = false;
   text = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   for (let i = 0; i < text.length; i++) {
@@ -1242,7 +1244,7 @@ function parseCSV(text) {
     else field += c;
   }
   if (field.length || row.length) { row.push(field); rows.push(row); }
-  return rows.filter((r) => r.some((c) => String(c).trim() !== ""));
+  return rows;
 }
 function downloadFile(name, text) {
   const b = new Blob([text], { type: "text/csv;charset=utf-8" });
@@ -1319,8 +1321,10 @@ async function readXlsxMatrix(file, ExcelJS) {
 // Exists for the Real-Time Pricing workbook, whose meaning is spread across sheets
 // (Materials + one sheet per style + Overhead) — readXlsxMatrix's first-sheet-only shape
 // silently drops all but one of them. Blank rows are KEPT here (as []), because the style
-// sheets use blank rows as block separators and dropping them would merge size blocks.
-async function readXlsxWorkbook(file, ExcelJS) {
+// sheets use blank rows as block separators and dropping them would merge size blocks. `state` is
+// ExcelJS's visible, hidden or veryHidden, for whoever cares. `cellText` lets a caller read a cell its own
+// way; the Real-Time Pricing importer doesn't pass one.
+async function readXlsxWorkbook(file, ExcelJS, cellText = xlsxCellText) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(await file.arrayBuffer());
   if (!wb.worksheets.length) throw new Error("The spreadsheet has no sheets.");
@@ -1330,10 +1334,10 @@ async function readXlsxWorkbook(file, ExcelJS) {
     for (let r = 1; r < sv.length; r++) {
       const row = sv[r];
       const arr = [];
-      if (row) for (let c = 1; c < row.length; c++) arr[c - 1] = xlsxCellText(row[c]);
+      if (row) for (let c = 1; c < row.length; c++) arr[c - 1] = cellText(row[c]);
       matrix.push(arr);
     }
-    return { name: String(ws.name || ""), matrix };
+    return { name: String(ws.name || ""), state: ws.state, matrix };
   });
 }
 
@@ -1406,7 +1410,7 @@ const FOUNDING_ANNUAL_ONLY = true;
 // INLINE STYLES ONLY, like every component here (there is no component stylesheet), so the phone
 // layout is chosen by measuring the card rather than by a media query: under WALLET_TX_NARROW_PX
 // each line becomes two rows, description over date on the left, amount over balance on the right.
-const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["tax", "Tax"], ["funds", "Funds"], ["other", "Other"]];
+const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["tax", "Tax"], ["jack", "Jack"], ["funds", "Funds"], ["other", "Other"]];
 const WALLET_TX_NARROW_PX = 560;
 // Narrower still (a 320 px phone with the settings rail beside it leaves a ~230 px card), two date
 // fields side by side clip their own dates, so they stack.
@@ -1439,8 +1443,11 @@ async function walletTxCall(body) {
 // `recent` is status's ten-line list. It is shown ONLY when the full list cannot load, so a
 // portal that ships ahead of portal-billing (an older function answers "Unrecognised action")
 // still shows the latest activity instead of losing it.
-function WalletTransactions({ reloadKey, recent = [] }) {
+// `jackChip`: the Jack chip shows only where the wallet card lists Jack's meter (portal-billing sends it
+// only once jack_ai is armed and only where Jack is on), so a builder without Jack never sees the name.
+function WalletTransactions({ reloadKey, recent = [], jackChip = false }) {
   const [filter, setFilter] = useState("all");
+  useEffect(() => { if (!jackChip && filter === "jack") setFilter("all"); }, [jackChip, filter]);
   const [fromDay, setFromDay] = useState("");   // yyyy-mm-dd, local
   const [toDay, setToDay] = useState("");
   const [rows, setRows] = useState(null);       // null = first page loading
@@ -1585,7 +1592,7 @@ function WalletTransactions({ reloadKey, recent = [] }) {
           width for a date field, which pushed a 390 px phone's card 10 px past its edge). */}
       <div style={{ display: "flex", flexDirection: narrow ? "column" : "row", gap: narrow ? 10 : 14, flexWrap: narrow ? "nowrap" : "wrap", alignItems: narrow ? "stretch" : "flex-end", marginBottom: 12 }}>
         <div role="group" aria-label="Show" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {WALLET_TX_FILTERS.map(([k, label]) => {
+          {WALLET_TX_FILTERS.filter(([k]) => k !== "jack" || jackChip).map(([k, label]) => {
             const on = filter === k;
             return (
               <button key={k} type="button" aria-pressed={on} onClick={() => setFilter(k)} data-wallet-tx-filter={k}
@@ -2697,7 +2704,8 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {/* TRANSACTIONS — the whole ledger, GHL-style. Mounted only where the wallet card is, so
           it inherits the same audience (status's `mine` filter: owners, granted admins,
           operators with can_bill). Reloads whenever `status` does, so a top-up shows at once. */}
-      {data && data.wallet && <WalletTransactions reloadKey={data} recent={data.wallet.transactions || []} />}
+      {data && data.wallet && <WalletTransactions reloadKey={data} recent={data.wallet.transactions || []}
+        jackChip={(data.wallet.meters || []).some((m) => m && m.kind === "jack_ai")} />}
 
       </>)}
       {showSub && (<>

@@ -115,6 +115,11 @@ verify_jwt = true
 [functions.support-agent]
 verify_jwt = true
 
+# Jack, the AI agent behind the Jack tab (migration 375). The same shape as support-agent, and
+# resolveTenant is the real gate here too.
+[functions.jack-agent]
+verify_jwt = true
+
 [functions.portal-commissions]
 # JWT-authenticated: the function resolves the real user via auth.getUser() and maps them
 # through client_users to their tenant + role. The confidential commission_members table is

@@ -33,7 +33,7 @@ for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView",
 }
 
 type Access = Record<string, string>;
-type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean, canProjects?: boolean, advancedOn?: boolean, sub?: string | null) => string;
+type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean, canProjects?: boolean, advancedOn?: boolean, sub?: string | null, shedsOn?: boolean, jackOn?: boolean) => string;
 
 // `window` is injected because ssIsBetaHost reads `window.location.hostname`. Pinned to a
 // NON-beta host so the coming-soon routes behave as they do in production — that branch runs
@@ -63,6 +63,33 @@ const OWNER_MAP: Access = {
   // Forced off for support by resolveTenant — see migration 176.
   settings_billing: "none",
 };
+
+// Jack (migration 367). The 10th argument is the builder's switch, as the shell works it out; the 9th
+// is shedsOn (migration 364).
+const jackClamp = (access: Access | null, canAdmin: boolean, jackOn: boolean, isOperator = false, shedsOn = true) =>
+  ssClampTab("jack", isOperator, canAdmin, access, false, isOperator, false, null, shedsOn, jackOn);
+
+Deno.test("Jack: switched off, the page doesn't exist, for owners and operators too", () => {
+  assertEquals(jackClamp(OWNER_MAP, true, false), "designer");
+  assertEquals(jackClamp(OWNER_MAP, true, false, true), "designer");
+  // Every caller that doesn't say is a no.
+  assertEquals(ssClampTab("jack", false, true, OWNER_MAP), "designer");
+});
+
+Deno.test("Jack: switched off for a builder without the shed product, it doesn't land on a Designer they don't have", () => {
+  const landed = jackClamp(OWNER_MAP, true, false, false, false);
+  assert(landed !== "jack" && landed !== "designer", landed);
+  // Switched on, Jack is there whether or not they sell sheds.
+  assertEquals(jackClamp(OWNER_MAP, true, true, false, false), "jack");
+});
+
+Deno.test("Jack: switched on, it needs the area, and an owner or operator always has it", () => {
+  assertEquals(jackClamp(OWNER_MAP, true, true), "jack");
+  assertEquals(jackClamp(OWNER_MAP, true, true, true), "jack");
+  assert(jackClamp({ ...OWNER_MAP, jack: "none" }, false, true) !== "jack");
+  assert(jackClamp(OWNER_MAP, false, true) !== "jack");
+  assertEquals(jackClamp({ ...OWNER_MAP, jack: "edit" }, false, true), "jack");
+});
 
 Deno.test("a platform operator keeps both consoles", () => {
   for (const tab of ["accounts", "admin", "workbench"]) {

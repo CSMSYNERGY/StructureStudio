@@ -874,6 +874,2535 @@ function SupportChat({ onClose, onTicket, onNavigate }) {
   );
 }
 
+// ── JACK (migration 375) ────────────────────────────────────────────────────────────────────────
+// The AI agent's tab. Support tells a builder what to do; Jack does the work, and a person presses
+// Approve first. Everything that decides anything is on the server (supabase/functions/jack-agent):
+// this draws what it answers and sends the presses. The card's Approve sends back the hash of what was
+// drawn, so a preview that changed since can't be approved by accident.
+
+// null while the question is out, then whether this person may use Jack on this builder. A failure isn't
+// a no: it asks twice more. With no real answer by the end, or after 8 seconds, it reads as off, so /jack
+// never sits on "Checking…" for good, and a late yes still wins.
+function useJackOn(clientId) {
+  const [answer, setAnswer] = useState(null);   // { clientId, on }
+  useEffect(() => {
+    if (!clientId || SS_POPOUT) return undefined;
+    let dead = false;
+    const timers = [];
+    const giveUp = () => { if (!dead) setAnswer((a) => (a && a.clientId === clientId ? a : { clientId, on: false })); };
+    const ask = async (waits) => {
+      let on = null;
+      try {
+        const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "enabled" } });
+        if (!error && data && typeof data.on === "boolean") on = data.on;
+      } catch (_e) { /* no answer */ }
+      if (dead) return;
+      if (on !== null) setAnswer({ clientId, on });
+      else if (waits.length) timers.push(setTimeout(() => ask(waits.slice(1)), waits[0]));
+      else giveUp();
+    };
+    timers.push(setTimeout(giveUp, 8000));
+    ask([2000, 5000]);
+    return () => { dead = true; timers.forEach(clearTimeout); };
+  }, [clientId]);
+  return answer && answer.clientId === clientId ? answer.on : null;
+}
+
+const JACK_FLAGS = {
+  below_smaller: "Cheaper than a smaller size",
+  above_bigger: "Costs more than a bigger size",
+  far_from_neighbors: "Far from the sizes around it",
+  zero: "Free in the designer",
+  not_offered: "Won't be offered",
+  same_size_twice: "On the sheet twice: the later row wins wherever it has a value",
+  reversed_size: "Looks reversed: check width and length",
+  goes_on_sale: "Had no price, so this puts it on sale",
+  // preview.ts BIG_CHANGE_SHARE: a price a sentence moved by more than a quarter either way. A flag, never a stop.
+  big_change: "Changes the price by more than 25%",
+};
+// The sizes table's own formatter, so the card draws the digits Approve writes.
+const jackMoney = (n) => (n === null || n === undefined ? "none" : ssPgFmtPrice(n));
+const jackPlural = (n, one, many) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+const JACK_ERR = "That didn't go through. Please try again.";
+
+// A price list file → what the server reads. Spreadsheets are read here, so the digits the server gets
+// are the digits in the cells; a PDF or a photo goes as it is, and a big photo is shrunk first.
+async function jackReadFile(file) {
+  const name = String(file.name || "price list");
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (ext === "xlsx") {
+    const ExcelJS = await loadExcelJS();
+    // A date cell is usually a size Excel "helped" with. Named, it reaches the list of what was skipped.
+    const book = await readXlsxWorkbook(file, ExcelJS, (v) => (v instanceof Date ? "date " + v.toISOString().slice(0, 10) : xlsxCellText(v)));
+    // A hidden sheet is usually last year's prices. It isn't read, and the card says so.
+    const seen = book.filter((s) => !s.state || s.state === "visible");
+    return {
+      fileName: name,
+      hiddenSheets: book.filter((s) => !seen.includes(s)).map((s) => s.name),
+      sheets: seen.map((s) => ({ name: s.name, rows: s.matrix.map((r) => Array.from(r, (c) => (c === null || c === undefined ? "" : String(c)))) })),
+    };
+  }
+  if (ext === "csv") {
+    const text = await file.text();
+    const rows = parseCSVRows(text);
+    // $4,200 with no quotes splits into two cells, and an inch mark swallows the lines after it. Either
+    // one would be a wrong number on the card, so it's refused here, before any paid read: an odd number
+    // of quote marks, a row wider than the header, an unquoted $ amount with a thousands comma (that
+    // still fits under a header with a spare column), or a cell holding a line break (two inch marks on
+    // different lines pair up and swallow every line between). Trailing blanks don't count: a stray comma
+    // at the end of a row loses nothing.
+    const filled = (r) => { let n = r.length; while (n && !String(r[n - 1]).trim()) n--; return n; };
+    const head = rows.find((r) => r.length >= 2);
+    if ((text.match(/"/g) || []).length % 2 || (head && rows.some((r) => filled(r) > head.length))
+        || /(^|,)\s*\$\d{1,3},\d{3}\b/m.test(text) || rows.some((r) => r.some((c) => /[\r\n]/.test(String(c))))) {
+      throw new Error("Some rows in that file don't line up, often from a price like $4,200 without quotation marks or an inch mark. In Excel, save it as .xlsx and send me that one.");
+    }
+    return { fileName: name, sheets: [{ name, rows }] };
+  }
+  if (ext === "xls") throw new Error("That's the old Excel format. In Excel, choose Save As, pick .xlsx, and send me that one.");
+  const toBase64 = (blob) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(",")[1] || "");
+    r.onerror = () => rej(new Error("I couldn't read that file."));
+    r.readAsDataURL(blob);
+  });
+  if (ext === "pdf" || file.type === "application/pdf") {
+    if (file.size > 20_000_000) throw new Error("That PDF is too big for me. Please send one under 20 MB.");
+    return { fileName: name, file: { mediaType: "application/pdf", base64: await toBase64(file) } };
+  }
+  if (/^image\/(png|jpeg|webp)$/.test(file.type) || /^(png|jpe?g|webp)$/.test(ext)) {
+    // Claude takes an image up to about 5 MB. 2600 px keeps a phone photo of a price sheet readable.
+    const fitted = await ssFitImageForUpload(file, 3_500_000, 2600);
+    return { fileName: name, file: { mediaType: fitted.type || file.type || "image/jpeg", base64: await toBase64(fitted) } };
+  }
+  throw new Error("I can read Excel (.xlsx), CSV, PDF or a photo.");
+}
+
+function JackPreviewTable({ preview }) {
+  const styles = preview.styles || [];
+  // Held by id: an answer can reorder the list, and the table shouldn't jump to another style.
+  const [tabId, setTabId] = useState(null);
+  const style = styles.find((s) => s.id === tabId) || styles[0];
+  if (!style) return null;
+  const columns = preview.columns || [];
+  const th = { textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#64748B", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap", background: "#F8FAFC" };
+  const td = { padding: "6px 10px", fontSize: 13, borderBottom: "1px solid #F1F5F9", verticalAlign: "top", whiteSpace: "nowrap" };
+  const change = (from, to, fmt) => (
+    <span><b style={{ color: "#1E293B" }}>{fmt(to)}</b>{from !== undefined && <span style={{ color: "#94A3B8", textDecoration: "line-through", marginLeft: 6 }}>{fmt(from)}</span>}</span>
+  );
+  return (
+    <div style={{ marginTop: 10 }}>
+      {/* One style still says which, so a hidden one is never a surprise. */}
+      {styles.length === 1 && <div style={{ fontSize: 12, fontWeight: 600, color: "#475569", marginBottom: 6 }}>{style.label}</div>}
+      {styles.length > 1 && (
+        <div role="tablist" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+          {styles.map((s) => (
+            <button key={s.id} type="button" role="tab" aria-selected={s.id === style.id} onClick={() => setTabId(s.id)}
+              style={{ border: "1px solid " + (s.id === style.id ? ACCENT : "#CBD5E1"), background: s.id === style.id ? ACCENT : "#FFF", color: s.id === style.id ? "#FFF" : "#334155", borderRadius: 999, padding: "4px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              {s.label} ({s.rows.length})
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ overflowX: "auto", border: "1px solid #E2E8F0", borderRadius: 8, maxHeight: 420, overflowY: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead><tr>
+            <th style={th}>Size</th><th style={th}>Price</th>
+            {columns.map((c) => <th key={c.key} style={th}>{c.label}</th>)}
+            <th style={th}>Check</th>
+          </tr></thead>
+          <tbody>
+            {style.rows.map((r) => (
+              <tr key={r.sizeId}>
+                <td style={td}>{r.label}{r.isNew && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#0F766E", background: "#CCFBF1", borderRadius: 4, padding: "1px 5px" }}>NEW</span>}</td>
+                <td style={td}>{r.price ? change(r.isNew ? undefined : r.price.from, r.price.to, jackMoney) : <span style={{ color: "#CBD5E1" }}>no change</span>}</td>
+                {columns.map((c) => (
+                  <td key={c.key} style={td}>{r.cells && r.cells[c.key] ? change(r.isNew ? undefined : r.cells[c.key].from, r.cells[c.key].to, (n) => String(n)) : ""}</td>
+                ))}
+                <td style={{ ...td, whiteSpace: "normal", minWidth: 140 }}>
+                  {(r.flags || []).map((f) => <div key={f} style={{ color: f === "not_offered" || f === "goes_on_sale" ? "#64748B" : "#B45309", fontSize: 12 }}>{JACK_FLAGS[f] || f}</div>)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function JackCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      // Jack's saves run server to server, so nothing in this browser saw them. An open designer reads
+      // its prices again on this. On every answer, because a dropped connection can follow a real save,
+      // and when nothing changed the designer finds the same config and says nothing.
+      if (action === "proposal_approve" || action === "proposal_undo") ssSettingsSaved(ssResolvedClientId || null);
+      // A refusal comes back on error's context; its sentence is on the body when there is one.
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) onChanged(said.proposal);
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (said && said.proposal && action !== "proposal_answer" && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(JACK_ERR);
+    }
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const c = pv.counts;
+  const open = p.status === "ready" || p.status === "needs_answers";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const line = c ? [
+    c.changed ? `${jackPlural(c.changed, "size", "sizes")} changing` : null,
+    c.added ? `${jackPlural(c.added, "new size", "new sizes")}` : null,
+    c.same ? `${jackPlural(c.same, "already matches", "already match")}` : null,
+    c.flagged ? `${jackPlural(c.flagged, "to check", "to check")}` : null,
+    c.skipped ? `${c.skipped.toLocaleString("en-US")} left out, listed below` : null,
+  ].filter(Boolean).join(" · ") : "";
+  const res = p.result || {};
+  const undoInfo = res.undo || null;
+  const undoReports = (undoInfo && undoInfo.reports) || [];
+  const reports = (undoReports.length ? undoReports : res.reports) || [];
+  const reportTotal = undoReports.length ? undoReports.length : (res.reportCount ?? reports.length);
+  const undoBack = undoInfo ? (undoInfo.restored || 0) + (undoInfo.removed || 0) : 0;
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const nothing = c && !c.changed && !c.added;
+  const skippedList = pv.skipped || [], leftList = pv.leftAlone || [];
+  return (
+    <div data-jack-card={p.id} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      <div role="status">
+        {p.status === "reading" && <div style={{ fontSize: 13, color: "#64748B", marginTop: 6 }}>Reading it now. A big sheet can take a couple of minutes, and you can keep working in the meantime.</div>}
+        {p.status === "failed" && <div style={{ fontSize: 13, color: "#B91C1C", marginTop: 6 }}>{p.failure || "That didn't work. Please try again."}</div>}
+        {p.status === "expired" && <div style={{ fontSize: 13, color: "#64748B", marginTop: 6 }}>This approval expired after 24 hours and nothing changed. Ask again and I'll redo it against your current numbers.</div>}
+        {p.status === "cancelled" && <div style={{ fontSize: 13, color: "#64748B", marginTop: 6 }}>Cancelled. Nothing changed.</div>}
+        {p.status === "applying" && <div style={{ fontSize: 13, color: "#64748B", marginTop: 6 }}>Saving…</div>}
+        {p.status === "undoing" && <div style={{ fontSize: 13, color: "#64748B", marginTop: 6 }}>Putting it back…</div>}
+      </div>
+      {p.status === "failed" && p.canRetry && (
+        <button type="button" disabled={!!busy} onClick={() => call("proposal_answer", { answers: {} })} style={{ ...btn("#FFF", "#334155", "#CBD5E1"), marginTop: 8 }}>{busy === "proposal_answer" ? "Trying…" : "Try again"}</button>
+      )}
+
+      {pv.fixture && p.status !== "failed" && (
+        <div style={{ fontSize: 13, color: "#334155", marginTop: 6 }}>A new door in Settings &gt; Doors: <b>{pv.fixture.name}</b>, {pv.fixture.widthIn} by {pv.fixture.heightIn} inches, {jackMoney(pv.fixture.price)}.{pv.fixture.swingOut ? " It swings out, with a right hinge." : ""}</div>
+      )}
+      {line && open && <div style={{ fontSize: 13, color: "#475569", marginTop: 6 }}>{line}</div>}
+      {p.kind === "price_sheet" && open && <div style={{ fontSize: 12, color: "#64748B", marginTop: 4 }}>I only read building prices and what comes with each size. Add-on prices, delivery and notes on the sheet aren't read, so those stay as they are.</div>}
+
+      {p.status === "needs_answers" && (pv.questions || []).map((q) => (
+        <div key={q.id} style={{ marginTop: 10, padding: 10, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8 }}>
+          <div style={{ fontSize: 13, color: "#78350F", marginBottom: 8 }}>{q.text}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {q.options.map((o) => (
+              <button key={o.value} type="button" disabled={!!busy}
+                onClick={() => call("proposal_answer", { answers: q.kind === "zero" ? { zero: o.value } : { styles: { [q.id.replace(/^style:/, "")]: o.value } } })}
+                style={{ ...btn(o.value === q.suggestion ? ACCENT : "#FFF", o.value === q.suggestion ? "#FFF" : "#334155", o.value === q.suggestion ? null : "#CBD5E1"), fontSize: 12, padding: "6px 10px" }}>{o.label}</button>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {open && <JackPreviewTable preview={pv} />}
+
+      {(open || done) && (leftList.length > 0 || skippedList.length > 0) && (
+        <details open={!!(c && c.skipped)} style={{ marginTop: 8, fontSize: 12, color: "#475569" }}>
+          <summary style={{ cursor: "pointer" }}>What I left alone ({(c ? c.leftAlone + c.skipped : 0).toLocaleString("en-US")})</summary>
+          {skippedList.map((s, i) => <div key={"s" + i} style={{ marginTop: 4, overflowWrap: "anywhere" }}>{s.where}: {s.text} ({s.why})</div>)}
+          {c && c.skipped > skippedList.length && <div style={{ marginTop: 4 }}>and {(c.skipped - skippedList.length).toLocaleString("en-US")} more.</div>}
+          {leftList.length > 0 && <div style={{ marginTop: 6 }}>Nothing new on the sheet for these, so unchanged: {leftList.map((x) => `${x.style} ${x.label}`).join(", ")}{c && c.leftAlone > leftList.length ? `, and ${(c.leftAlone - leftList.length).toLocaleString("en-US")} more` : ""}</div>}
+        </details>
+      )}
+
+      {p.status === "ready" && !nothing && viewingName && <div style={{ fontSize: 12, color: "#B45309", marginTop: 10 }}>These are <b>{viewingName}</b>'s numbers. Your name goes on the record.</div>}
+      {p.status === "ready" && nothing && !pv.fixture && <div style={{ fontSize: 13, color: "#64748B", marginTop: 8 }}>Nothing would change, so there's nothing to approve.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+
+      {open && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+          {p.status === "ready" && !nothing && (
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>
+          )}
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>
+          {/* After a style is added or renamed in Settings: works the stored rows out again, with no new read. */}
+          {p.kind === "price_sheet" && (
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_answer", { answers: {} })} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_answer" ? "Checking…" : "Check again"}</button>
+          )}
+        </div>
+      )}
+
+      <div role="status">
+        {done && (p.kind !== "new_fixture" || p.status === "applied") && (
+          <div style={{ fontSize: 13, color: p.status === "applied" ? "#047857" : "#B45309", marginTop: 8 }}>
+            {p.kind === "new_fixture" ? "Added." : `Saved ${jackPlural(res.saved || 0, "size", "sizes")}${res.created ? `, ${res.created} of them new` : ""}.`}
+          </div>
+        )}
+        {done && undoInfo && undoInfo.failed > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>That didn't all go back. Press Undo to try again.</div>}
+        {p.status === "undone" && (
+          <div style={{ fontSize: 13, color: undoReports.length ? "#B45309" : "#047857", marginTop: 8 }}>
+            {!undoReports.length ? "Put back." : undoBack ? "Put back, except what's listed here." : "That stayed as it is:"}
+          </div>
+        )}
+      </div>
+      {reports.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309" }}>
+          {reportTotal > 1 && <div style={{ fontWeight: 600, marginBottom: 2 }}>{reportTotal.toLocaleString("en-US")} of these need a look:</div>}
+          <div style={{ maxHeight: 240, overflowY: "auto" }}>
+            {reports.map((r, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{r.label}: {r.reason}</div>)}
+          </div>
+          {reportTotal > reports.length && <div style={{ marginTop: 2 }}>and {(reportTotal - reports.length).toLocaleString("en-US")} more. Upload or ask again to see what's still different.</div>}
+        </div>
+      )}
+      {p.canUndo && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? "Putting it back…" : "Undo"}</button>
+          {p.kind !== "new_fixture" && <button type="button" onClick={() => onNavigate && onNavigate("settings", "sheds")} style={btn("#FFF", "#334155", "#CBD5E1")}>Open my settings</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The cards a new reply or estimate card can replace (jack-agent replaceOlder).
+const JACK_REPLY_KINDS = ["reply_send", "reply_draft", "estimate_resend"];
+// What Jack did on this account: who asked, who approved and when, what happened, and what changed.
+// A card that's shown rather than approved reads as what it is on the activity list. A send card's
+// button is Approve like every other card's, so it waits for approval and is approved by someone.
+const JACK_KIND_WORDS = {
+  reply_draft: { ready: "Drafted", cancelled: "Put away", expired: "Expired" },
+  reply_send: { ready: "Waiting for approval", applying: "Sending", applied: "Sent", partly_applied: "Couldn't tell whether it went", failed: "Not sent", cancelled: "Put away", expired: "Expired" },
+  estimate_resend: { ready: "Waiting for approval", applying: "Sending", applied: "Sent again", partly_applied: "Couldn't tell whether it went", failed: "Not sent", cancelled: "Put away", expired: "Expired" },
+  lookup: { applied: "Shown" },
+  setup_guide: { applied: "Shown" },
+  memory: { ready: "Asked", applied: "Answered" },
+};
+function JackActivity({ onBack }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState("");
+  const [opened, setOpened] = useState({});   // id → the card's whole preview, "loading" or "failed"
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "activity" } });
+      if (dead) return;
+      if (error || !data || !data.activity) setErr("I couldn't load that. Please try again.");
+      else setRows(data.activity);
+    })();
+    return () => { dead = true; };
+  }, []);
+  const see = async (id) => {
+    setOpened((o) => ({ ...o, [id]: "loading" }));
+    const { data } = await sb.functions.invoke("jack-agent", { body: { action: "proposal_get", id } });
+    setOpened((o) => ({ ...o, [id]: data && data.proposal && data.proposal.preview ? data.proposal.preview : "failed" }));
+  };
+  const words = { reading: "Reading", needs_answers: "Waiting on an answer", ready: "Waiting for approval", applying: "Saving", applied: "Done", partly_applied: "Partly done", undoing: "Putting back", undone: "Put back", cancelled: "Cancelled", expired: "Expired", failed: "Failed" };
+  const when = (t) => new Date(t).toLocaleString();
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>What Jack did</div>
+        <button type="button" onClick={onBack} style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "6px 12px" }}>Back to chat</button>
+      </div>
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C" }}>{err}</div>}
+      {rows === null && !err && <div style={{ fontSize: 13, color: "#64748B" }}>Loading…</div>}
+      {rows && !rows.length && <div style={{ fontSize: 13, color: "#64748B" }}>Nothing yet.</div>}
+      {rows && rows.map((r) => {
+        const res = r.result || {};
+        const undoLines = (res.undo && res.undo.reports) || [];
+        const lines = (undoLines.length ? undoLines : res.reports) || [];
+        const c = r.preview && r.preview.counts;
+        const left = (r.preview && r.preview.skipped) || [];
+        const view = opened[r.id];
+        const nothingBack = r.status === "undone" && res.undo && !(res.undo.restored || res.undo.removed) && undoLines.length > 0;
+        const landed = r.status === "applied" || r.status === "partly_applied" || r.status === "undone";
+        return (
+          <div key={r.id} style={{ padding: "10px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
+            <div style={{ fontWeight: 600, color: "#1E293B", overflowWrap: "anywhere" }}>{r.title}</div>
+            <div style={{ color: "#64748B", fontSize: 12, marginTop: 2 }}>
+              {when(r.createdAt)} · {nothingBack ? "Couldn't put back" : (JACK_KIND_WORDS[r.kind] || {})[r.status] || words[r.status] || r.status}
+              {r.askedBy ? ` · asked by ${r.askedBy}` : ""}
+              {r.approvedBy ? ` · approved by ${r.approvedBy}` : ""}{r.approvedAt ? ` on ${when(r.approvedAt)}` : ""}
+              {r.undoneAt ? ` · ${nothingBack ? "Undo pressed" : "put back"}${r.undoneBy ? ` by ${r.undoneBy}` : ""} on ${when(r.undoneAt)}` : ""}
+              {r.kind === "new_fixture"
+                ? (res.saved ? " · door added" : "")
+                : r.kind === "price_sheet" || r.kind === "size_rule"
+                ? (res.saved || res.created ? ` · ${jackPlural(res.saved || 0, "size", "sizes")} saved` : "")
+                : ""}
+              {r.private ? " · only the person who asked can open it" : ""}
+            </div>
+            {r.failure && <div style={{ color: "#B91C1C", fontSize: 12, marginTop: 2 }}>{r.failure}</div>}
+            {lines.length > 0 && (
+              <div style={{ color: "#B45309", fontSize: 12, marginTop: 2, maxHeight: 160, overflowY: "auto" }}>
+                {lines.map((x, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{x.label}: {x.reason}</div>)}
+              </div>
+            )}
+            {left.length > 0 && (
+              <details style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
+                <summary style={{ cursor: "pointer" }}>Not updated ({((c && c.skipped) || left.length).toLocaleString("en-US")})</summary>
+                {left.map((s, i) => <div key={i} style={{ marginTop: 2, overflowWrap: "anywhere" }}>{s.where}: {s.text} ({s.why})</div>)}
+              </details>
+            )}
+            {c && (c.changed > 0 || c.added > 0) && !view && (
+              <button type="button" onClick={() => see(r.id)} style={{ background: "none", border: "none", padding: "4px 0", color: ACCENT, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>{landed ? "See what changed" : "See what it proposed"}</button>
+            )}
+            {view === "loading" && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>Loading…</div>}
+            {view === "failed" && <div style={{ fontSize: 12, color: "#B91C1C", marginTop: 2 }}>I couldn't load that one.</div>}
+            {view && view !== "loading" && view !== "failed" && <JackPreviewTable preview={view} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Which card draws which kind. The price list, sentence and door cards are JackCard; each piece of Jack
+// brings its own; anything without one gets the plain card, which still shows the title, the state, the
+// buttons the server allows and what happened.
+function JackAnyCard(props) {
+  const k = props.proposal.kind;
+  if (props.proposal.private) return (
+    <div data-jack-card={props.proposal.id} data-status={props.proposal.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere" }}>{props.proposal.title}</div>
+      <div style={{ fontSize: 13, color: "#64748B", marginTop: 4 }}>Your access doesn't open this one any more.</div>
+    </div>
+  );
+  if (k === "price_sheet" || k === "size_rule" || k === "new_fixture") return <JackCard {...props} />;
+  if (k === "memory") return <JackMemoryCard {...props} />;
+  const Own = JACK_CARDS[k];
+  return Own ? <Own {...props} /> : <JackPlainCard {...props} />;
+}
+// Filled in below by each piece's card (kind -> component).
+const JACK_CARDS = {};
+
+// The card for a kind with nothing of its own: title, where it stands, preview lines when it has them
+// ({label, from, to}), and the presses the server offers.
+function JackPlainCard({ proposal, onChanged }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+    let said = data;
+    if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+    if (said && said.proposal) onChanged(said.proposal);
+    if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const res = p.result || {};
+  const reports = ((res.undo && res.undo.reports && res.undo.reports.length) ? res.undo.reports : res.reports) || [];
+  const words = { ready: "", applying: "Saving…", applied: "Done.", partly_applied: "Partly done. See below.", undoing: "Putting it back…", undone: "Put back.", cancelled: "Cancelled. Nothing changed.", expired: "This expired after 24 hours and nothing changed.", failed: p.failure || "That didn't work." };
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  return (
+    <div data-jack-card={p.id} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere" }}>{p.title}</div>
+      <div role="status" style={{ fontSize: 13, color: "#64748B", marginTop: 4 }}>{words[p.status] || ""}</div>
+      {Array.isArray(pv.lines) && pv.lines.length > 0 && (
+        <div style={{ marginTop: 8, fontSize: 13 }}>
+          {pv.lines.map((l, i) => (
+            <div key={i} style={{ padding: "3px 0", borderTop: i ? "1px solid #F1F5F9" : "none", overflowWrap: "anywhere" }}>
+              <b>{l.label}</b>{l.to !== undefined && <>: <span>{String(l.to)}</span></>}{l.from !== undefined && l.from !== null && l.from !== "" && <span style={{ color: "#94A3B8", textDecoration: "line-through", marginLeft: 6 }}>{String(l.from)}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+      {Array.isArray(pv.notes) && pv.notes.map((n, i) => <div key={i} style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>{n}</div>)}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+      {reports.length > 0 && <div style={{ marginTop: 6, fontSize: 12, color: "#B45309", maxHeight: 200, overflowY: "auto" }}>{reports.map((r, i) => <div key={i}>{r.label}: {r.reason}</div>)}</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+        {p.status === "ready" && p.hash && <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={btn(ACCENT, "#FFF")}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>}
+        {(p.status === "ready" || p.status === "needs_answers") && <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>}
+        {p.canUndo && <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? "Putting it back…" : "Undo"}</button>}
+      </div>
+    </div>
+  );
+}
+
+// "I want to make sure I understand": a question with options to press. The press is the answer, and it
+// goes on as the person's next message. An owner's or admin's answer is kept for the whole builder.
+function JackMemoryCard({ proposal, onChanged, onSay, busy: tabBusy }) {
+  const p = proposal;
+  const pv = p.preview || {};
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [other, setOther] = useState("");
+  const pick = async (value) => {
+    if (busy || tabBusy) return;
+    setBusy(true); setErr("");
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "memory_pick", id: p.id, value } });
+    let said = data;
+    if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+    setBusy(false);
+    if (said && said.proposal) onChanged(said.proposal);
+    if (error || !said || !said.ok) { setErr((said && said.error) || JACK_ERR); return; }
+    if (onSay && said.say) onSay(said.say);
+  };
+  const r = p.result || {};
+  const btn = { ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "6px 12px", fontSize: 13 };
+  return (
+    <div data-jack-card={p.id} data-status={p.status} style={{ border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 10, padding: 12, marginTop: 8, maxWidth: "100%" }}>
+      <div style={{ fontSize: 13, color: "#78350F" }}>{pv.ask || p.title}</div>
+      {p.status === "ready" && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, alignItems: "center" }}>
+          {(pv.options || []).map((o) => (
+            <button key={String(o.value)} type="button" disabled={busy || tabBusy} onClick={() => pick(o.value)} style={btn}>{o.label}</button>
+          ))}
+          {pv.kind === "days" && (
+            <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+              <input type="number" min={pv.min || 1} max={pv.max || 3650} value={other} onChange={(e) => setOther(e.target.value)} aria-label="Something else, in days"
+                placeholder="Other" style={{ width: 80, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 13 }} />
+              <button type="button" disabled={busy || tabBusy || !other} onClick={() => pick(Number(other))} style={btn}>Use</button>
+            </span>
+          )}
+        </div>
+      )}
+      {p.status === "applied" && (
+        <div role="status" style={{ fontSize: 12, color: "#475569", marginTop: 6 }}>
+          {r.label}. {r.remembered ? "I'll use that for your team from now on. Change it under What Jack remembers." : r.notKeptWhy === "role" ? "I'll use it this time. An owner or admin can make it stick." : "I'll use it this time."}
+        </div>
+      )}
+      {p.status === "expired" && <div style={{ fontSize: 12, color: "#64748B", marginTop: 6 }}>This question expired. Ask again whenever you like.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 6 }}>{err}</div>}
+    </div>
+  );
+}
+
+// What Jack remembers for this builder: every answer it keeps, who set it, and Change or Forget for an
+// owner or admin.
+function JackMemoryPanel({ canManage, onBack }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState("");
+  const [edit, setEdit] = useState({});
+  const [busy, setBusy] = useState("");
+  const load = async () => {
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "status" } });
+    if (error || !data || !Array.isArray(data.memory)) { setErr("I couldn't load that. Please try again."); return; }
+    setRows(data.memory);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  const save = async (row, action, value) => {
+    setBusy(row.key); setErr("");
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, key: row.key, value, basedOn: row.updatedAt } });
+    let said = data;
+    if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+    setBusy("");
+    if (said && Array.isArray(said.memory)) setRows(said.memory);
+    const refused = error || !said || !said.ok;
+    if (refused) setErr((said && said.error) || JACK_ERR);
+    // Saved, or refused because someone changed it since (the answer then holds the list as it is now):
+    // the box shows what's stored, so a second press can't put this screen's old number over theirs
+    // without typing it again. A refusal with no list (a dropped answer) keeps what was typed.
+    if (!refused || (said && Array.isArray(said.memory))) setEdit((e) => ({ ...e, [row.key]: undefined }));
+  };
+  const show = (r) => (r.value === null ? "Not set. I'll ask the first time it comes up." : r.kind === "yesno" ? (r.value ? "Yes" : "No") : `${r.value} days`);
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>What Jack remembers</div>
+        <button type="button" onClick={onBack} style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "6px 12px" }}>Back to chat</button>
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>These answers are for your whole team.{canManage ? "" : " An owner or admin can change them."}</div>
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C" }}>{err}</div>}
+      {rows === null && !err && <div style={{ fontSize: 13, color: "#64748B" }}>Loading…</div>}
+      {rows && rows.map((r) => (
+        <div key={r.key} style={{ padding: "8px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
+          <div style={{ color: "#1E293B" }}>{r.label}: <b>{show(r)}</b></div>
+          {r.setBy && <div style={{ fontSize: 12, color: "#94A3B8" }}>Set by {r.setBy}{r.updatedAt ? ` on ${new Date(r.updatedAt).toLocaleDateString()}` : ""}</div>}
+          {canManage && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6, alignItems: "center" }}>
+              {r.kind === "yesno"
+                ? [true, false].map((v) => <button key={String(v)} type="button" disabled={!!busy || r.value === v} onClick={() => save(r, "memory_set", v)} style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "4px 10px", fontSize: 12 }}>{v ? "Yes" : "No"}</button>)
+                : (<>
+                    <input type="number" min={r.min || 1} max={r.max || 3650} aria-label={r.label} value={edit[r.key] ?? (r.value ?? "")} onChange={(e) => setEdit((x) => ({ ...x, [r.key]: e.target.value }))}
+                      style={{ width: 80, border: "1px solid #CBD5E1", borderRadius: 6, padding: "4px 8px", fontSize: 12 }} />
+                    <button type="button" disabled={!!busy || edit[r.key] === undefined || edit[r.key] === ""} onClick={() => save(r, "memory_set", Number(edit[r.key]))} style={{ ...S.btn(ACCENT, "#FFF"), padding: "4px 10px", fontSize: 12 }}>Save</button>
+                  </>)}
+              {r.value !== null && <button type="button" disabled={!!busy} onClick={() => save(r, "memory_forget")} style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FCA5A5", padding: "4px 10px", fontSize: 12 }}>Forget</button>}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Jack's setup cards (jack-agent/setup.ts): business details and branding, how quotes and invoices go out,
+// building styles, a window or a ramp, sales lots and the serial start, a step ticked by hand, and the
+// "where to set it" guide. One card draws all seven kinds. The server decides which buttons it may show.
+// Place it AFTER `const JACK_CARDS = {};`.
+function JackSetupCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      // The save ran server to server, so an open designer reads its settings again, as JackCard does.
+      if ((action === "proposal_approve" || action === "proposal_undo") && typeof ssSettingsSaved === "function") {
+        ssSettingsSaved(typeof ssResolvedClientId !== "undefined" ? (ssResolvedClientId || null) : null);
+      }
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) onChanged(said.proposal);
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (said && said.proposal && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(JACK_ERR);
+    }
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const res = p.result || {};
+  const undoInfo = res.undo || null;
+  const undoReports = (undoInfo && undoInfo.reports) || [];
+  const reports = (undoReports.length ? undoReports : res.reports) || [];
+  const undoBack = undoInfo ? (undoInfo.restored || 0) + (undoInfo.removed || 0) : 0;
+  const lines = Array.isArray(pv.lines) ? pv.lines : [];
+  const notes = Array.isArray(pv.notes) ? pv.notes : [];
+  const ticks = Array.isArray(pv.ticks) ? pv.ticks : [];
+  const ticked = Array.isArray(res.ticked) ? res.ticked : [];
+  const tickNotes = Array.isArray(res.tickNotes) ? res.tickNotes : [];
+  const route = pv.route && pv.route.page ? pv.route : null;
+  const guide = p.kind === "setup_guide";
+  const isTick = p.kind === "setup_tick";
+  const open = p.status === "ready";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const hasOld = lines.some((l) => l.from !== undefined && l.from !== null && l.from !== "");
+  const quoted = (list) => list.map((x) => `"${x}"`).join(" and ");
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const th = { textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#64748B", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 13, borderBottom: "1px solid #F1F5F9", verticalAlign: "top", overflowWrap: "anywhere" };
+  const stateLine = {
+    applying: "Saving…",
+    undoing: "Putting it back…",
+    expired: "This expired after 24 hours and nothing changed. Ask me again and I'll start from what's there now.",
+    cancelled: "Cancelled. Nothing changed.",
+    failed: p.failure || "That didn't work. Nothing changed.",
+  }[p.status];
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      <div role="status">
+        {stateLine && <div style={{ fontSize: 13, color: p.status === "failed" ? "#B91C1C" : "#64748B", marginTop: 6 }}>{stateLine}</div>}
+      </div>
+
+      {guide && (
+        <div style={{ fontSize: 13, color: "#334155", marginTop: 6 }}>
+          {pv.say}{pv.where ? <span style={{ color: "#64748B" }}> It's on {pv.where}.</span> : null}
+        </div>
+      )}
+
+      {!guide && lines.length > 0 && p.status !== "failed" && (
+        <div style={{ marginTop: 10, overflowX: "auto", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr>
+              <th style={th}>What</th>
+              {hasOld && <th style={th}>Now</th>}
+              <th style={th}>New</th>
+            </tr></thead>
+            <tbody>
+              {lines.map((l, i) => (
+                <tr key={i}>
+                  <td style={{ ...td, fontWeight: 600, color: "#334155" }}>{l.label}</td>
+                  {hasOld && (
+                    <td style={{ ...td, color: "#94A3B8" }}>
+                      {l.from ? <span style={{ textDecoration: open ? "line-through" : "none" }}>{String(l.from)}</span> : <span style={{ color: "#CBD5E1" }}>blank</span>}
+                    </td>
+                  )}
+                  <td style={{ ...td, color: "#1E293B", fontWeight: 600 }}>{String(l.to ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {open && !isTick && ticks.length > 0 && (
+        <div style={{ fontSize: 13, color: "#0F766E", marginTop: 8 }}>Approving this also ticks {quoted(ticks)} on your setup checklist.</div>
+      )}
+      {open && isTick && <div style={{ fontSize: 13, color: "#0F766E", marginTop: 8 }}>Approving this ticks the step on your setup checklist. Nothing else changes.</div>}
+      {(open || done) && notes.map((n, i) => <div key={i} style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>{n}</div>)}
+      {open && !guide && viewingName && <div style={{ fontSize: 12, color: "#B45309", marginTop: 10 }}>These are <b>{viewingName}</b>'s settings. Your name goes on the record.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+
+      <div role="status">
+        {done && !guide && (
+          <div style={{ fontSize: 13, color: p.status === "applied" ? "#047857" : "#B45309", marginTop: 8 }}>
+            {p.status === "applied" ? (isTick ? "Ticked." : "Saved.") : "Some of it didn't save. It's listed here."}
+            {!isTick && ticked.length > 0 ? ` Ticked ${quoted(ticked)} on your setup checklist.` : ""}
+          </div>
+        )}
+        {done && tickNotes.map((n, i) => <div key={i} style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>{n}</div>)}
+        {done && undoInfo && undoInfo.failed > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>That didn't all go back. Press Undo to try again.</div>}
+        {p.status === "undone" && (
+          <div style={{ fontSize: 13, color: undoReports.length ? "#B45309" : "#047857", marginTop: 8 }}>
+            {!undoReports.length ? "Put back." : undoBack ? "Put back, except what's listed here." : "That stayed as it is:"}
+          </div>
+        )}
+      </div>
+      {reports.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309", maxHeight: 200, overflowY: "auto" }}>
+          {reports.map((r, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{r.label}: {r.reason}</div>)}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+        {open && !guide && p.hash && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>
+        )}
+        {open && !guide && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>
+        )}
+        {p.canUndo && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? "Putting it back…" : "Undo"}</button>
+        )}
+        {route && (guide || !open) && (
+          <button type="button" onClick={() => onNavigate && onNavigate(route.page, route.sub || null)}
+            style={guide ? btn("#EEF2FF", ACCENT) : btn("#FFF", "#334155", "#CBD5E1")}>
+            {guide ? "Take me there →" : `Open ${pv.where || "the page"}`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+Object.assign(JACK_CARDS, {
+  setup_company: JackSetupCard, setup_paperwork: JackSetupCard, setup_styles: JackSetupCard, setup_fixture: JackSetupCard,
+  setup_locations: JackSetupCard, setup_tick: JackSetupCard, setup_guide: JackSetupCard,
+});
+
+// Jack's when/then rule cards (jack-agent/rules.ts): a new rule (automation_rule) and a pause or turn-on
+// (automation_pause). The rule reads the way Carolyn's Automations list says it, every step shows the full
+// words it sends, and her own warning sits on any rule that messages customers.
+const JACK_RULE_OUTBOUND = "This rule messages the customer by itself, with nobody reading it first. Texts skip anyone who has opted out, and wait for the morning if it is night where the customer lives. Try it on one card before you leave it running.";
+
+function JackRuleCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) onChanged(said.proposal);
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+      if (said && said.proposal && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(JACK_ERR);
+    }
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const isPause = p.kind === "automation_pause";
+  const r = (isPause ? pv.pause : pv.rule) || {};
+  const turnsOn = isPause && r.on === true;
+  const steps = r.steps || [];
+  const res = p.result || {};
+  const undoInfo = res.undo || null;
+  const undoLines = (undoInfo && undoInfo.reports) || [];
+  const lines = (undoLines.length ? undoLines : res.reports) || [];
+  const open = p.status === "ready";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const warn = r.outbound && (!isPause || turnsOn) && (open || done);
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const small = { fontSize: 12, color: "#64748B", marginTop: 6 };
+  const pill = { display: "inline-block", fontSize: 11, fontWeight: 700, color: "#334155", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 999, padding: "2px 8px" };
+  const amber = { fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 8, lineHeight: 1.45 };
+  const undoneWords = undoLines.length ? ""
+    : isPause ? (turnsOn ? "Paused again." : "Turned back on.")
+    : undoInfo && undoInfo.removed && !undoInfo.restored ? "It isn't in Automations any more, so there was nothing to pause."
+    : "Paused. It won't run again unless someone turns it on in Automations, and a message it was holding, like a text for the morning, won't go out. What it already sent stays sent.";
+  return (
+    <div data-jack-card={p.id} data-status={p.status} data-kind={p.kind} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      <div role="status">
+        {p.status === "applying" && <div style={small}>Saving…</div>}
+        {p.status === "undoing" && <div style={small}>{isPause ? "Putting it back…" : "Pausing it…"}</div>}
+        {p.status === "expired" && <div style={small}>This expired after 24 hours and nothing changed. Ask again and I'll redo it against your rules as they are now.</div>}
+        {p.status === "cancelled" && <div style={small}>Cancelled. Nothing changed.</div>}
+        {p.status === "failed" && <div style={{ fontSize: 13, color: "#B91C1C", marginTop: 6 }}>{p.failure || "That didn't save. Nothing changed."}</div>}
+      </div>
+
+      {r.sentence && <div style={{ fontSize: 13, color: "#334155", marginTop: 6, overflowWrap: "anywhere" }}>{r.sentence}</div>}
+      {(r.whoFor || r.once) && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 6 }}>
+          {r.whoFor && <span data-jack-rule-who="" style={pill}>{r.whoFor}</span>}
+          {r.once && <span style={{ fontSize: 12, color: "#64748B" }}>{r.once}</span>}
+        </div>
+      )}
+      {(r.onlyIf || []).length > 0 && (
+        <div style={{ fontSize: 12, color: "#475569", marginTop: 6 }}>
+          <div style={{ fontWeight: 600 }}>Only if:</div>
+          {r.onlyIf.map((c, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{c}</div>)}
+        </div>
+      )}
+      {steps.length > 0 && (
+        <ol style={{ margin: "8px 0 0", paddingLeft: 20, fontSize: 13, color: "#1E293B" }}>
+          {steps.map((a, i) => (
+            <li key={i} style={{ marginTop: i ? 8 : 0 }}>
+              <div style={{ fontWeight: 600 }}>{a.says}</div>
+              {a.subject && <div style={{ fontSize: 12, color: "#475569", marginTop: 2, overflowWrap: "anywhere" }}>{a.kind === "create_task" ? "Task: " : a.kind === "create_card" ? "Card: " : "Subject: "}{a.subject}</div>}
+              {a.text && <div style={{ fontSize: 12.5, color: "#334155", marginTop: 4, whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px" }}>{a.text}</div>}
+            </li>
+          ))}
+        </ol>
+      )}
+      {warn && <div data-jack-rule-outbound="" style={amber}>{JACK_RULE_OUTBOUND}</div>}
+      {open && !isPause && <div style={small}>It starts with what happens from now on. It won't act on anything that already happened.</div>}
+      {open && !isPause && (pv.runsAfter || []).length > 0 && <div style={small}>Rules run top to bottom, so this one runs after {pv.runsAfter.join(", ")}, which start on the same thing.</div>}
+      {open && !isPause && <div style={small}>Undo pauses it. It can't unsend what already went.</div>}
+      {open && isPause && !turnsOn && <div style={small}>Pausing stops new runs, and a message it was holding, like a text for the morning, won't go out.</div>}
+      {open && isPause && !turnsOn && (pv.notes || []).map((n, i) => <div key={"n" + i} data-jack-rule-note="" style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>{n}</div>)}
+      {open && turnsOn && <div style={small}>It picks up from now.{r.catchesUp ? " A days-after rule also catches up the cards that came due while it was paused." : ""}</div>}
+      {open && viewingName && <div style={{ fontSize: 12, color: "#B45309", marginTop: 8 }}>These are <b>{viewingName}</b>'s rules. Your name goes on the record.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+
+      {open && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+          {p.hash && <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>}
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>
+        </div>
+      )}
+
+      <div role="status">
+        {p.status === "applied" && (
+          <div style={{ fontSize: 13, color: "#047857", marginTop: 8 }}>
+            {isPause ? (turnsOn ? "Turned on. It runs by itself from now on." : "Paused. A message it was holding won't go out.") : "Saved. It's in Settings > Customer Hub > Automations, and it runs by itself from now on."}
+          </div>
+        )}
+        {done && undoInfo && undoInfo.failed > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>That didn't go through. Press Undo to try again.</div>}
+        {p.status === "undone" && undoneWords && <div style={{ fontSize: 13, color: "#047857", marginTop: 8 }}>{undoneWords}</div>}
+        {p.status === "undone" && undoLines.length > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>I left it as it is:</div>}
+      </div>
+      {lines.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309" }}>
+          {lines.map((x, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{x.reason}</div>)}
+        </div>
+      )}
+      {(done || p.status === "undone") && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+          {p.canUndo && <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? (isPause ? "Putting it back…" : "Pausing…") : isPause ? "Undo" : "Undo (pause it)"}</button>}
+          <button type="button" onClick={() => onNavigate && onNavigate("settings", "automations")} style={btn("#FFF", "#334155", "#CBD5E1")}>Open Automations</button>
+        </div>
+      )}
+    </div>
+  );
+}
+JACK_CARDS.automation_rule = JackRuleCard;
+JACK_CARDS.automation_pause = JackRuleCard;
+
+// A look-up's whole list, for the person who asked (the card is private: a teammate sees only that it was
+// asked). Each row opens that customer's record, the order, or Inventory. Nothing here changes anything.
+function JackLookupCard({ proposal, onNavigate }) {
+  const p = proposal;
+  const pv = p.preview || {};
+  const groups = Array.isArray(pv.groups) ? pv.groups : [];
+  const d = pv.detail || null;
+  const first = groups.find((x) => x.count > 0) || groups[0] || null;
+  const [tab, setTab] = useState(first ? first.key : null);
+  const g = groups.find((x) => x.key === tab) || first;
+  const go = (link) => { if (link && onNavigate) onNavigate(link.page, link.sub || null); };
+  const money = (c) => jackMoney(Math.round(Number(c) || 0) / 100);
+  const ago = (n) => (n === 0 ? "today" : `${jackPlural(n, "day", "days")} ago`);
+  const days = (n, word) => {
+    if (n === null || n === undefined) return "";
+    if (word === "ago") return ago(n);
+    return n === 0 ? `under a day ${word || ""}`.trim() : `${jackPlural(n, "day", "days")}${word ? " " + word : ""}`;
+  };
+  const box = { border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" };
+  const chip = { display: "inline-block", fontSize: 11, fontWeight: 600, color: "#475569", background: "#F1F5F9", borderRadius: 4, padding: "1px 6px", marginRight: 4, marginTop: 4 };
+  const quote = { marginTop: 4, padding: "4px 8px", background: "#F8FAFC", borderLeft: "3px solid #CBD5E1", color: "#334155", fontSize: 12, overflowWrap: "anywhere", whiteSpace: "pre-wrap" };
+  const linkBtn = { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 700, fontSize: 13, cursor: "pointer", textAlign: "left", overflowWrap: "anywhere" };
+  const stageWord = { lead: "New lead", quoted: "Estimate out", accepted: "Accepted, not sold yet", sold: "Sold", lost: "Lost", open: "Open" };
+  const titleOf = (link) => (link && link.page === "orders" ? "Open the order" : link && link.page === "inventory" ? "Open Inventory" : "Open their record");
+
+  // Cleared 30 days after it was made (jack-agent PRIVATE_KEEP_DAYS): only the title is left.
+  if (pv.cleared === true) {
+    return (
+      <div data-jack-card={p.id} data-status={p.status} data-cleared="1" style={box}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere" }}>{p.title}</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginTop: 4 }}>This list was cleared after 30 days. Ask me again for a fresh one.</div>
+      </div>
+    );
+  }
+
+  if (!groups.length && !d) {
+    return (
+      <div data-jack-card={p.id} data-status={p.status} style={box}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere" }}>{p.title}</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginTop: 4 }}>{p.private ? "Only the person who asked can see this list." : "Nothing to show."}</div>
+      </div>
+    );
+  }
+
+  const person = d && groups[0] && groups[0].rows && groups[0].rows[0] ? groups[0].rows[0] : null;
+  return (
+    <div data-jack-card={p.id} data-status={p.status} style={box}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere" }}>{p.title}</div>
+      {pv.heading && <div style={{ fontSize: 13, color: "#334155", marginTop: 4, overflowWrap: "anywhere" }}>{pv.heading}</div>}
+      {(pv.asked || []).length > 0 && <div style={{ fontSize: 12, color: "#64748B", marginTop: 4 }}>{pv.asked.join(" ")}</div>}
+
+      {d && (
+        <div style={{ marginTop: 8, fontSize: 13, color: "#334155" }}>
+          {(d.company || d.town) && <div style={{ color: "#64748B" }}>{[d.company, d.town].filter(Boolean).join(" · ")}</div>}
+          {d.reach && <div style={{ marginTop: 4 }}>Texts: {d.reach.text}. Email: {d.reach.email}.</div>}
+          <div style={{ marginTop: 4, fontSize: 12, color: "#475569" }}>
+            {d.lastFromThem ? `Last from them ${ago(d.lastFromThem.daysAgo)}${d.lastFromThem.by ? ` by ${d.lastFromThem.by}` : ""}. ` : "Nothing from them yet. "}
+            {d.lastFromYou ? `Last from you ${ago(d.lastFromYou.daysAgo)}${d.lastFromYou.by ? ` by ${d.lastFromYou.by}` : ""}.` : "Nothing from you yet."}
+            {d.nextAppointment ? ` Next appointment ${new Date(d.nextAppointment).toLocaleString()}.` : ""}
+          </div>
+          {(d.deals || []).map((x, i) => (
+            <div key={"d" + i} style={{ marginTop: 6, overflowWrap: "anywhere" }}>
+              <b>{x.building || x.status || "Deal"}</b> · {stageWord[x.stage] || x.status || "Open"}
+              {x.value ? ` · ${x.value}` : ""}
+              {x.quoteSentDaysAgo !== undefined && x.quoteSentDaysAgo !== null ? ` · estimate out ${jackPlural(x.quoteSentDaysAgo, "day", "days")}` : ""}
+              {x.invoiceOutNotSigned ? " · invoice out, not signed" : ""}
+              {x.lostReason ? ` · ${x.lostReason}` : ""}
+            </div>
+          ))}
+          {(d.orders || []).map((o, i) => (
+            <div key={"o" + i} style={{ marginTop: 6, overflowWrap: "anywhere" }}>
+              Order {o.order || ""}: {o.total}{o.owed && o.owed !== "$0" ? `, ${o.owed} owed` : ""}{o.clearing ? ` (${o.clearing} still clearing)` : ""}
+              {o.build ? `. Build: ${o.build}` : ""}{o.delivery ? `. Delivery: ${o.delivery}` : ""}.
+            </div>
+          ))}
+          {d.ordersNote && <div style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>{d.ordersNote}</div>}
+          {(d.cantSee || []).length > 0 && <div style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>Your access doesn't show {d.cantSee.join(", ")}.</div>}
+          {person && person.link && (
+            <button type="button" onClick={() => go(person.link)} style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "8px 14px", marginTop: 10 }}>Open their record</button>
+          )}
+        </div>
+      )}
+
+      {!d && groups.length > 1 && (
+        <div role="tablist" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+          {groups.map((x) => {
+            const on = !!g && x.key === g.key;
+            return (
+              <button key={x.key} type="button" role="tab" aria-selected={on} onClick={() => setTab(x.key)}
+                style={{ border: "1px solid " + (on ? ACCENT : "#CBD5E1"), background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", borderRadius: 999, padding: "4px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                {x.label} ({Number(x.count || 0).toLocaleString("en-US")})
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {!d && g && (
+        <div style={{ marginTop: 8 }}>
+          {(g.cents || g.note) && <div style={{ fontSize: 12, color: "#475569", marginBottom: 6 }}>{g.cents ? `${money(g.cents)} in total. ` : ""}{g.note || ""}</div>}
+          {!(g.rows || []).length && <div style={{ fontSize: 13, color: "#64748B" }}>Nobody here.</div>}
+          {(g.rows || []).length > 0 && (
+            <div style={{ border: "1px solid #E2E8F0", borderRadius: 8, maxHeight: 420, overflowY: "auto" }}>
+              {g.rows.map((r, i) => (
+                <div key={r.ref || i} style={{ padding: "8px 10px", borderTop: i ? "1px solid #F1F5F9" : "none", fontSize: 13 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                    {r.link
+                      ? <button type="button" onClick={() => go(r.link)} title={titleOf(r.link)} style={linkBtn}>{r.name || "No name saved"}</button>
+                      : <b style={{ color: "#1E293B" }}>{r.name || "No name saved"}</b>}
+                    <span style={{ color: "#475569", fontSize: 12 }}>
+                      {[days(r.days, r.daysWord), r.cents !== null && r.cents !== undefined ? `${money(r.cents)}${r.centsWord ? " " + r.centsWord : ""}` : ""].filter(Boolean).join(" · ")}
+                    </span>
+                  </div>
+                  {r.line && <div style={{ color: "#64748B", fontSize: 12, marginTop: 2, overflowWrap: "anywhere" }}>{r.line}</div>}
+                  {(r.flags || []).length > 0 && <div>{r.flags.map((f, j) => <span key={j} style={chip}>{f}</span>)}</div>}
+                  {(r.words || []).map((w, j) => <div key={"w" + j} style={quote}>{w}</div>)}
+                </div>
+              ))}
+            </div>
+          )}
+          {g.more > 0 && <div style={{ fontSize: 12, color: "#64748B", marginTop: 4 }}>and {Number(g.more).toLocaleString("en-US")} more not shown here.</div>}
+        </div>
+      )}
+
+      {(pv.leftOut || []).length > 0 && (
+        <div style={{ fontSize: 12, color: "#475569", marginTop: 8 }}>Left out: {pv.leftOut.map((x) => `${x.label} (${Number(x.count || 0).toLocaleString("en-US")})`).join(" · ")}</div>
+      )}
+      {(pv.notes || []).map((n, i) => <div key={"n" + i} style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>{n}</div>)}
+    </div>
+  );
+}
+JACK_CARDS.lookup = JackLookupCard;
+
+// Jack's reply cards (jack-agent drafts.ts and sends.ts): words for one customer. Every amount and date on
+// one was checked against the record before it was shown.
+//   reply_draft (version 1, and whenever this person may not send from here): nothing is sent from the
+//     card. Open their record (the deal picked, their texts or emails showing), Copy, and Not now.
+//   reply_send: Approve, which sends it, Open their record, and Not now. The press is the approval: the
+//     server reads the customer again, checks it all again, and sends exactly these words once, through
+//     the route the record's own Send uses. Nothing to undo once it goes. The Structure Studio team in
+//     view-as never sends a text (the record page hides texting there, and the server refuses the press).
+//     No Copy on a card that sends: words copied and sent by hand, then Approved, would reach the customer
+//     twice. Only a draft that can't send offers Copy (the same for estimate_resend and a change order).
+// preview = { contactId, dealKey, channel, subject, body, firstName, fullName, company, town, dealLabel,
+//   factsUsed, notes, sendable, ruleNotes: string[], quiet: { sentence, opensAt } | null }. fullName, company
+//   and town say exactly who a press sends to (a record with no name gets no card that sends).
+// Approve posts send: true: the server runs a send card only from a page that shows its words.
+// result (reply_send): sent { sent: 1, channel, at, ledgerId } on "applied"; waiting { waiting: { reason,
+//   sentence, retryAt } } back on "ready" with nothing sent; refused is "failed" with the sentence in
+//   failure; unclear is "partly_applied" with the sentence in reports[].reason (a stalled press may have
+//   no `sent` key, so the report is what's read).
+const JACK_SEND_UNSURE = "I couldn't tell whether it went. Check their record before sending it again.";   // sends.ts SEND_SAID.unsure
+// A press whose answer never came back: it may have gone, so this never says to try again. It names the
+// card's own button, Approve.
+const JACK_SEND_LOST = "I didn't hear back from that press. Check their record before pressing Approve again.";
+/** "3:42 PM", or "3:42 PM on Nov 7" on another day, on this person's own clock. */
+function jackAt(iso) {
+  const d = new Date(iso || "");
+  if (!Number.isFinite(d.getTime())) return "";
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time : `${time} on ${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+}
+/** The press on a send card (Approve), and Not now. Approve runs once on the server whatever happens
+ *  here (the claim is the guard). A press whose answer is lost reads the card again, so Approve never
+ *  stays up on a card that may have gone; the poller takes over while it's still sending. */
+function useJackSend(p, onChanged, titleRef) {
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const reread = async () => {
+    try {
+      const { data } = await sb.functions.invoke("jack-agent", { body: { action: "proposal_get", id: p.id } });
+      if (data && data.proposal) onChanged(data.proposal);
+    } catch (_e) { /* the card stays as it was, and the server still refuses a second send */ }
+  };
+  const call = async (action, body) => {
+    if (busy) return;
+    setBusy(action); setErr("");
+    const sending = action === "proposal_approve";
+    // An Approve press that brings no card back (a refusal before the claim, a fault, or an answer that was
+    // lost) reads the card again: it may be sending, or sent, by now.
+    let cardBack = false;
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) { onChanged(said.proposal); cardBack = true; }
+      // A refusal comes back with its sentence; no sentence means the answer was lost.
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || (sending ? JACK_SEND_LOST : JACK_ERR));
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (cardBack && titleRef && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(sending ? JACK_SEND_LOST : JACK_ERR);
+    }
+    if (sending && !cardBack) await reread();
+    setBusy("");
+  };
+  // A lost press may have sent it, so while that sentence shows the card never also says nothing went.
+  const lost = !!err && err === JACK_SEND_LOST;
+  return { busy, err, setErr, call, lost };
+}
+/** Dimmed while a press is with the server, like Approve, since every button waits then. */
+const jackWaitLook = (style, busy) => ({ ...style, opacity: busy ? 0.6 : 1 });
+// An estimate's number stays on one line ("estimate E-2041"): on a phone's narrow card it broke at its
+// hyphen, leaving "E-" at the end of one line. Only a short number with a digit is held together.
+const JACK_ESTIMATE_NO = /(\bestimate [A-Za-z]{0,6}-?\d[A-Za-z0-9-]{0,15}(?![A-Za-z0-9-]))/i;
+function jackKeepNumbers(text) {
+  const parts = String(text == null ? "" : text).split(JACK_ESTIMATE_NO);
+  return parts.length === 1 ? parts[0] : parts.map((x, i) => (i % 2 ? <span key={i} style={{ whiteSpace: "nowrap" }}>{x}</span> : x));
+}
+// drafts.ts adds this note to a view-as text draft. The new card's own line already says it, so the note
+// shows only on a page from before that line (it would say the same thing twice here).
+const JACK_NO_TEXT_NOTE = "Texting from their record isn't available while you're viewing another account.";
+/** Where a send card stands once it's past ready: { text, tone }, or null while it waits for a press.
+ *  `what`: "reply" or "estimate". */
+function jackSendSays(p, what, sending) {
+  const res = p.result || {};
+  if (sending || p.status === "applying") return { text: "Sending…", tone: "#64748B" };
+  if (p.status === "applied") {
+    const at = jackAt(res.at || p.appliedAt);
+    return { text: `${at ? `Sent at ${at}.` : "Sent."} It's on their record.${what === "estimate" ? " Its sent date moved to today." : ""}`, tone: "#047857" };
+  }
+  if (p.status === "partly_applied") {
+    const why = [...new Set((Array.isArray(res.reports) ? res.reports : []).map((r) => r && r.reason).filter(Boolean))];
+    return { text: why.length ? why.join(" ") : JACK_SEND_UNSURE, tone: "#B45309" };
+  }
+  if (p.status === "failed") return { text: p.failure || "That didn't go through. Nothing was sent.", tone: "#B91C1C" };
+  if (p.status === "cancelled") return { text: jackPutAway(p), tone: "#64748B" };
+  if (p.status === "expired") {
+    return { text: what === "estimate"
+      ? "This card is more than a day old, so I put it away. Nothing was sent. Ask me again and I'll look at the estimate fresh."
+      : "This draft is more than a day old, so I put it away. Nothing was sent. Ask me again and I'll read their record fresh.", tone: "#64748B" };
+  }
+  return null;
+}
+/** Why a card was put away: the server's sentence (a newer card replaced it, or an older one was being
+ *  sent when it was made), else Not now. Nothing was sent either way. */
+function jackPutAway(p) {
+  const f = typeof p.failure === "string" ? p.failure.trim() : "";
+  if (!f) return "Put away. Nothing was sent.";
+  return /Nothing was sent\.$/.test(f) ? f : `${f} Nothing was sent.`;
+}
+/** A send card refused because the customer was merged into another record (sends.ts atPress): the
+ *  record at its id is gone from the hub (contact reads skip merged_into), so the card offers no
+ *  Open their record, and its sentence says to look them up again. */
+const jackMergedAway = (p) => p.status === "failed" && /was merged into another record/.test(String(p.failure || ""));
+/** Who a send card goes to, for its title: the record's whole name. */
+const jackWho = (pv) => pv.fullName || pv.firstName || "this customer";
+/** The line under the title: their company and town, so two people with one name can be told apart. */
+const jackWhere = (pv) => [pv.company, pv.town].filter((x) => typeof x === "string" && x.trim()).join(" · ");
+const jackRuleBox = { fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 8, lineHeight: 1.45 };
+
+function JackDraftCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const pv = p.preview || {};
+  const sends = p.kind === "reply_send";
+  const titleRef = useRef(null);
+  const { busy, err, setErr, call, lost } = useJackSend(p, onChanged, titleRef);
+  const [copied, setCopied] = useState("");
+  const timer = useRef(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const isText = pv.channel === "sms";
+  const body = String(pv.body || "");
+  const subject = String(pv.subject || "");
+  const facts = Array.isArray(pv.factsUsed) ? pv.factsUsed : [];
+  const allNotes = Array.isArray(pv.notes) ? pv.notes : [];
+  const live = p.status === "ready";
+  const sending = busy === "proposal_approve";
+  const res = p.result || {};
+  const waiting = sends && live && res.waiting && typeof res.waiting === "object" ? res.waiting : null;
+  // The team in view-as can't text from here: the record page hides texting, and the server refuses it.
+  const noTextHere = sends && isText && !!viewingName;
+  const canSend = sends && live && !!p.hash && !noTextHere;
+  // What can't be undone is said once, right above Approve, in words that match the button. drafts.ts
+  // OLD_PAGE_NOTE ("Reload the page...", for a page from before round 2) is left out here.
+  const backNote = sends ? allNotes.find((n) => /can't be taken back/i.test(String(n))) : undefined;
+  // A view-as text draft says texting isn't available in its own line, once.
+  const viewAsDraft = !sends && isText && !!viewingName && live;
+  const notes = allNotes.filter((n) => n !== backNote && !(viewAsDraft && n === JACK_NO_TEXT_NOTE));
+  const ruleNotes = sends && Array.isArray(pv.ruleNotes) ? pv.ruleNotes : [];
+  // Quiet where they live when the card was made; gone once texting hours have opened, and never said to
+  // someone who can't send it from here anyway.
+  const quiet = canSend && isText && !waiting && pv.quiet && pv.quiet.sentence && !(Date.parse(pv.quiet.opensAt) <= Date.now()) ? pv.quiet : null;
+  // A press again works only inside the card's 24 hours, so a time after that is never offered.
+  const insideCard = (iso) => Date.parse(iso) < Date.parse(p.expiresAt || "");
+  // Until texting hours open there, a press sends nothing: the line above Approve says so.
+  const opensAt = canSend && isText ? (waiting && waiting.retryAt && insideCard(waiting.retryAt) && Date.parse(waiting.retryAt) > Date.now() ? waiting.retryAt : quiet ? quiet.opensAt : null) : null;
+  const after = sends ? jackSendSays(p, "reply", sending) : null;
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const copy = async (what, words) => {
+    setErr("");
+    const done = () => {
+      setCopied(what);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setCopied(""), 1600);
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(words); done(); return; }
+    } catch (_e) { /* the prompt below */ }
+    window.prompt("Copy this:", words);
+  };
+  // The same route Conversations uses: the deal comes picked, the Messages or Emails chip is open, and
+  // Back returns here. Ids only: no words of the draft go into the address or the history.
+  const openRecord = () => {
+    if (!onNavigate || !pv.contactId) return;
+    onNavigate("contacts", "c-" + pv.contactId, false, { deal: pv.dealKey || null, chip: isText ? "messages" : "emails", from: { page: "jack" } });
+  };
+  // Cleared 30 days after it was made (jack-agent PRIVATE_KEEP_DAYS): no words, no buttons. The title
+  // never names the customer, so it stays.
+  if (pv.cleared === true) {
+    const at = jackAt(res.at || p.appliedAt);
+    return (
+      <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} data-cleared="1" style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere" }}>{p.title}</div>
+        <div role="status" style={{ fontSize: 13, color: "#64748B", marginTop: 6 }}>
+          {sends && p.status === "applied" ? `${at ? `Sent at ${at}.` : "Sent."} Its words were cleared from here after 30 days, and it's still on their record.` : "This draft was cleared after 30 days."}
+        </div>
+      </div>
+    );
+  }
+  // "From this card": their record may hold an earlier send of the same thing. And while a lost press's
+  // sentence shows (it may have gone), the card doesn't also say nothing went.
+  const nothingYet = lost ? "" : "Nothing has been sent from this card yet.";
+  const waitSaid = waiting ? String(waiting.sentence || "Nothing was sent.") : "";
+  const readyLine = !sends
+    ? (isText && viewingName
+      ? "Nothing has been sent. Texting isn't available while you're viewing another account: copy it for the builder to send, or ask me for an email instead."
+      : "Nothing has been sent. Read it, change anything you like, and send it from their record.")
+    : waiting
+    ? `${lost ? waitSaid.replace(/^Nothing was sent\.\s*/, "") : waitSaid}${waiting.retryAt && canSend && insideCard(waiting.retryAt) ? ` You can press Approve again from ${jackAt(waiting.retryAt)} your time.` : ""}`.trim()
+    : noTextHere
+    ? nothingYet
+    : `${nothingYet} Approve sends exactly these words. To change a word, ask me to write it again.`.trim();
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{isText ? "Text" : "Email"} to {jackWho(pv)}</div>
+      {jackWhere(pv) && <div data-jack-send-who="" style={{ fontSize: 12, color: "#64748B", marginTop: 2, overflowWrap: "anywhere" }}>{jackWhere(pv)}</div>}
+      {pv.dealLabel && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, overflowWrap: "anywhere" }}>About {jackKeepNumbers(pv.dealLabel)}</div>}
+      {viewingName && live && <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>This is <b>{viewingName}</b>'s customer.</div>}
+      <div role="status" style={{ fontSize: 13, color: after ? after.tone : waiting ? "#B45309" : "#64748B", marginTop: 6 }}>
+        {after ? after.text : live ? readyLine : null}
+        {!sends && p.status === "expired" && "This draft is more than a day old, so I put it away. Ask me again and I'll read their record fresh."}
+        {!sends && p.status === "cancelled" && jackPutAway(p)}
+      </div>
+      <div style={{ marginTop: 8, padding: 10, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, opacity: live || sending || p.status === "applying" || p.status === "applied" ? 1 : 0.6 }}>
+        {!isText && <div style={{ fontSize: 13, color: "#334155", marginBottom: 6, overflowWrap: "anywhere" }}><b>Subject:</b> {subject}</div>}
+        <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.5, maxHeight: 320, overflowY: "auto" }}>{body}</div>
+        {isText && <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>{body.length.toLocaleString("en-US")} of 1,600 characters</div>}
+      </div>
+      {facts.length > 0 && (
+        <div style={{ fontSize: 12, color: "#475569", marginTop: 8 }}>
+          <div style={{ fontWeight: 600 }}>Checked against their record ({jackPlural(facts.length, "item", "items")}):</div>
+          {facts.map((f, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{jackKeepNumbers(f)}</div>)}
+        </div>
+      )}
+      {(!sends || live) && notes.map((n, i) => <div key={i} style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>{n}</div>)}
+      {live && ruleNotes.map((n, i) => <div key={i} data-jack-send-rules="" style={jackRuleBox}>{n}</div>)}
+      {quiet && <div data-jack-quiet="" style={jackRuleBox}>{quiet.sentence} You can approve it from {jackAt(quiet.opensAt)} your time.</div>}
+      {noTextHere && live && <div style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>Texting isn't available while you're viewing another account, so this text can't be sent from here.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+      {/* A text's quiet hours are checked again at the press (the card was made at another hour), so a
+          text card never promises "right away". An email has no quiet hours. */}
+      {canSend && <div data-jack-send-final="" style={{ fontSize: 12.5, color: "#334155", fontWeight: 600, marginTop: 10 }}>{opensAt
+        ? `Approve sends nothing before ${jackAt(opensAt)} your time. A text can't be taken back.`
+        : isText
+        ? "Approve sends this text now if it's texting hours where they live. A text can't be taken back."
+        : "Approve emails this to them right away. An email can't be taken back."}</div>}
+      {live && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: canSend ? 6 : 10, alignItems: "center" }}>
+          {canSend && (
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash, send: true })} style={jackWaitLook(btn(ACCENT, "#FFF"), busy)}>{sending ? "Sending…" : "Approve"}</button>
+          )}
+          {pv.contactId && onNavigate && (
+            <button type="button" disabled={!!busy} onClick={openRecord} style={jackWaitLook(sends ? btn("#FFF", "#334155", "#CBD5E1") : btn(ACCENT, "#FFF"), busy)}>Open their record</button>
+          )}
+          {/* Copy only on a draft: words copied from a card that sends could go once by hand and once on Approve. */}
+          {!sends && (
+            <button type="button" disabled={!!busy} onClick={() => copy("message", body)} style={jackWaitLook(btn("#FFF", "#334155", "#CBD5E1"), busy)}>{isText ? "Copy" : "Copy message"}</button>
+          )}
+          {!sends && !isText && subject && (
+            <button type="button" disabled={!!busy} onClick={() => copy("subject", subject)} style={jackWaitLook(btn("#FFF", "#334155", "#CBD5E1"), busy)}>Copy subject</button>
+          )}
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={jackWaitLook(btn("#FFF", "#334155", "#CBD5E1"), busy)}>{busy === "proposal_cancel" ? "Putting it away…" : "Not now"}</button>
+          {!sends && <span role="status" aria-live="polite" style={{ fontSize: 12, color: "#047857" }}>{copied ? `Copied the ${copied}.` : ""}</span>}
+        </div>
+      )}
+      {sends && !live && !sending && (p.status === "applied" || p.status === "partly_applied" || p.status === "failed") && !jackMergedAway(p) && pv.contactId && onNavigate && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+          <button type="button" onClick={openRecord} style={btn("#FFF", "#334155", "#CBD5E1")}>Open their record</button>
+        </div>
+      )}
+    </div>
+  );
+}
+JACK_CARDS.reply_draft = JackDraftCard;
+JACK_CARDS.reply_send = JackDraftCard;
+
+// renders: estimate_resend (register: JACK_CARDS.estimate_resend = JackEstimateResendCard;)
+// props: { proposal, viewingName, onChanged, onNavigate }, the props JackAnyCard already passes (onSay and busy are ignored).
+// preview = { contactId, dealKey (the design's code), firstName, fullName, company, town, dealLabel, estimateNumber,
+//   total ("$8,450" or null), lastSentOn (ISO, or null when it can't be told: no row), ageDays (from when it was made),
+//   notes: string[], ruleNotes: string[] }.
+// result: as a reply_send card's (sent, refused, unclear). Never "waiting": an email has no quiet hours.
+// One of a customer's Structure Studio estimates, emailed to them again (jack-agent sends.ts) on Approve, once,
+// through the Orders screen's own route, to the address saved on the estimate. Nothing to undo once it goes.
+// Place it AFTER `const JACK_CARDS = {};`.
+function JackEstimateResendCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const pv = p.preview || {};
+  const titleRef = useRef(null);
+  const { busy, err, call, lost } = useJackSend(p, onChanged, titleRef);
+  const live = p.status === "ready";
+  const sending = busy === "proposal_approve";
+  const res = p.result || {};
+  const number = String(pv.estimateNumber || "");
+  const label = String(pv.dealLabel || "");
+  // dealLabel ends with the estimate's own number, which has its own row here.
+  const tail = number ? `, estimate ${number}` : "";
+  const building = tail && label.endsWith(tail) ? label.slice(0, -tail.length) : label;
+  const allNotes = Array.isArray(pv.notes) ? pv.notes : [];
+  // sends.ts's OLD_PAGE_NOTE is for a page from before round 2: this card says what Approve does itself.
+  const backNote = allNotes.find((n) => /can't be taken back/i.test(String(n)));
+  const notes = allNotes.filter((n) => n !== backNote);
+  const ruleNotes = Array.isArray(pv.ruleNotes) ? pv.ruleNotes : [];
+  const canSend = live && !!p.hash;
+  const after = jackSendSays(p, "estimate", sending);
+  const days = typeof pv.ageDays === "number" && pv.ageDays >= 0 ? pv.ageDays : null;
+  // Once it has gone again, Last sent is that send, so the row never keeps the old date beside "Its sent
+  // date moved to today". (No time on the answer is no row.)
+  const sentOn = p.status === "applied" ? new Date(res.at || p.appliedAt || "") : pv.lastSentOn ? new Date(pv.lastSentOn) : null;
+  const rows = [
+    ["Building", building || null],
+    ["Total", typeof pv.total === "string" && pv.total ? pv.total : null],
+    // No date is no row: the date comes from their record's recent history, which can leave an older
+    // send out, so a missing one never says "not sent".
+    ["Last sent", sentOn && Number.isFinite(sentOn.getTime()) ? sentOn.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : null],
+    ["Age", days === null ? null : `${jackPlural(days, "day", "days")}, from when it was made`],
+  ].filter((r) => r[1]);
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const openRecord = () => {
+    if (!onNavigate || !pv.contactId) return;
+    onNavigate("contacts", "c-" + pv.contactId, false, { deal: pv.dealKey || null, chip: "emails", from: { page: "jack" } });
+  };
+  if (pv.cleared === true) {
+    const at = jackAt(res.at || p.appliedAt);
+    return (
+      <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} data-cleared="1" style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere" }}>{p.title}</div>
+        <div role="status" style={{ fontSize: 13, color: "#64748B", marginTop: 6 }}>
+          {p.status === "applied" ? `${at ? `Sent at ${at}.` : "Sent."} Its details were cleared from here after 30 days, and it's still on their record.` : "This card was cleared after 30 days."}
+        </div>
+      </div>
+    );
+  }
+  const td = { padding: "4px 10px 4px 0", fontSize: 13, verticalAlign: "top", overflowWrap: "anywhere" };
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{number ? <>Estimate <span style={{ whiteSpace: "nowrap" }}>{number}</span></> : "An estimate"} for {jackWho(pv)}</div>
+      {jackWhere(pv) && <div data-jack-send-who="" style={{ fontSize: 12, color: "#64748B", marginTop: 2, overflowWrap: "anywhere" }}>{jackWhere(pv)}</div>}
+      {viewingName && live && <div style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>This is <b>{viewingName}</b>'s customer.</div>}
+      <div role="status" style={{ fontSize: 13, color: after ? after.tone : "#64748B", marginTop: 6 }}>
+        {/* "From this card": their record shows when it last went. Not said beside a lost press's sentence. */}
+        {after ? after.text : live && !lost ? "Nothing has been sent from this card yet." : null}
+      </div>
+      {rows.length > 0 && (
+        <table style={{ borderCollapse: "collapse", marginTop: 8, opacity: live || sending || p.status === "applying" || p.status === "applied" ? 1 : 0.6 }}>
+          <tbody>
+            {rows.map(([k, v]) => (
+              <tr key={k}><td style={{ ...td, fontWeight: 600, color: "#475569", whiteSpace: "nowrap" }}>{k}</td><td style={{ ...td, color: "#1E293B" }}>{v}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {live && notes.map((n, i) => <div key={i} style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>{n}</div>)}
+      {live && ruleNotes.map((n, i) => <div key={i} data-jack-send-rules="" style={jackRuleBox}>{n}</div>)}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+      {canSend && <div data-jack-send-final="" style={{ fontSize: 12.5, color: "#334155", fontWeight: 600, marginTop: 10 }}>Approve emails the estimate right away to the address saved on it. An email can't be taken back.</div>}
+      {live && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: canSend ? 6 : 10, alignItems: "center" }}>
+          {canSend && (
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash, send: true })} style={jackWaitLook(btn(ACCENT, "#FFF"), busy)}>{sending ? "Sending…" : "Approve"}</button>
+          )}
+          {pv.contactId && onNavigate && <button type="button" disabled={!!busy} onClick={openRecord} style={jackWaitLook(btn("#FFF", "#334155", "#CBD5E1"), busy)}>Open their record</button>}
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={jackWaitLook(btn("#FFF", "#334155", "#CBD5E1"), busy)}>{busy === "proposal_cancel" ? "Putting it away…" : "Not now"}</button>
+        </div>
+      )}
+      {!live && !sending && (p.status === "applied" || p.status === "partly_applied" || p.status === "failed") && !jackMergedAway(p) && pv.contactId && onNavigate && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+          <button type="button" onClick={openRecord} style={btn("#FFF", "#334155", "#CBD5E1")}>Open their record</button>
+        </div>
+      )}
+    </div>
+  );
+}
+JACK_CARDS.estimate_resend = JackEstimateResendCard;
+
+// JACK'S BALANCE LINE, under the composer (plan section 9: "a balance line under the chat"). It reads
+// portal-billing's own `status` with this person's token (sb.functions.invoke adds the view-as tenant), so a
+// figure shows only where the Billing card would show it: portal-billing's `mine`, which is Billing access
+// and, for the team, can_bill. jack-agent never sends a money figure. Jack's meter is listed among the
+// wallet's meters only once it is armed and Jack is on here (portal-billing onlyIfJackOn), so nothing about
+// money shows before then. `refreshKey`: JackTab bumps it after a billed reply, a wallet refusal, or a price
+// list card that finished reading.
+const JACK_LOW_CENTS = 1000;   // jack-agent/billing.ts LOW_CENTS
+const JACK_EMPTY_CENTS = 100;  // jack-agent/billing.ts FLOOR_CENTS.chat
+function jackCents(c) {
+  const n = Math.round(Number(c) || 0);
+  return (n < 0 ? "-$" : "$") + (Math.abs(n) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function JackBalanceLine({ refreshKey, onNavigate }) {
+  // undefined: not read yet, or the read failed (then nothing shows rather than a wrong line).
+  const [said, setSaid] = useState(undefined);
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const { data, error } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
+        if (!dead) setSaid(!error && data && typeof data === "object" && !data.error ? data : undefined);
+      } catch (_e) {
+        if (!dead) setSaid(undefined);
+      }
+    })();
+    return () => { dead = true; };
+  }, [refreshKey]);
+  if (!said) return null;
+  const line = { fontSize: 12, color: "#64748B", marginTop: 8, lineHeight: 1.5, display: "flex", flexWrap: "wrap", gap: "2px 10px", alignItems: "baseline" };
+  const link = { background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" };
+  const go = () => { if (onNavigate) onNavigate("settings", "wallet"); };
+  const w = said.wallet && typeof said.wallet === "object" ? said.wallet : null;
+  // No wallet in the answer (an admin without Billing, or a team member without can_bill): nothing, since
+  // whether Jack's meter is even armed can't be told from here, and money talk before then would be wrong.
+  if (!w) return null;
+  // Exempt for Jack is metered_exempt (wallet.exempt) or billing_exempt (entitlement.exempt).
+  if (w.exempt || (said.entitlement && said.entitlement.exempt)) return <div data-jack-balance="exempt" style={line}>Jack isn't charged on this account.</div>;
+  const armed = Array.isArray(w.meters) && w.meters.some((m) => m && m.kind === "jack_ai");
+  if (!armed) return null;
+  const balance = Number(w.balanceCents) || 0;
+  const held = Number(w.heldCents) || 0;
+  const avail = balance - held;
+  const auto = w.autoTopup || {};
+  const state = avail < JACK_EMPTY_CENTS ? "Empty" : avail < JACK_LOW_CENTS ? "Low" : null;
+  const red = "#B91C1C", amber = "#B45309";
+  return (
+    <div data-jack-balance={state ? state.toLowerCase() : "ok"} style={line}>
+      <span>
+        Wallet <b style={{ color: state === "Empty" ? red : "#334155" }}>{jackCents(balance)}</b>
+        {held > 0 ? ` (${jackCents(held)} set aside)` : ""}
+        {state ? <span style={{ color: state === "Empty" ? red : amber, fontWeight: 700 }}>{" · " + state}</span> : null}
+        {auto.enabled ? " · automatic top-up on" : ""}
+      </span>
+      {!auto.enabled && (
+        <span>{auto.disabledReason ? "Automatic top-up switched itself off. Billing says why." : "Turn on automatic top-up so Jack doesn't stop when your credit runs out."}</span>
+      )}
+      <button type="button" onClick={go} style={link} data-jack-balance-link="">{auto.enabled ? "See what Jack has cost" : "Open Billing"}</button>
+    </div>
+  );
+}
+
+// ── Jack v2: record-change cards (jack-agent inventory.ts, changeorders.ts, buildschedule.ts, delivery.ts, commissions.ts) ──
+// renders: inventory_price, inventory_listing, inventory_photos (register: JACK_CARDS.inventory_price = JackInventoryCard; JACK_CARDS.inventory_listing = JackInventoryCard; JACK_CARDS.inventory_photos = JackInventoryCard;)
+// props: { proposal, viewingName, onChanged, onNavigate }, the props JackAnyCard already passes (onSay and busy are ignored).
+// proposal is proposalView: id, kind, status, title, preview, hash, result, failure, canUndo.
+// preview = { unit: { label, lot, status, sold, listed }, lines: [{ label, from, to, long? }], notes: string[],
+//   where: "Inventory", route: { page: "inventory", sub: null }, photos?: { from: [{ url, aiEdited }], to: [{ url, aiEdited }] } }.
+// result = { saved, created, reports: [{ label, status, reason }], undo?: { restored, removed, failed, reports } }.
+// Jack's lot-building cards (jack-agent/inventory.ts): a new asking price or lot, an Online Shop listing, and
+// the photo order or cover. The card shows the building, each change with what it is now, the photos before
+// and after, and the notes that say what goes public. The server decides which buttons it may show.
+// Place it AFTER `const JACK_CARDS = {};`.
+function JackInventoryCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) onChanged(said.proposal);
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (said && said.proposal && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(JACK_ERR);
+    }
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const unit = pv.unit || {};
+  const lines = Array.isArray(pv.lines) ? pv.lines : [];
+  const notes = Array.isArray(pv.notes) ? pv.notes : [];
+  const photos = pv.photos && Array.isArray(pv.photos.from) && Array.isArray(pv.photos.to) ? pv.photos : null;
+  const route = pv.route && pv.route.page ? pv.route : null;
+  const res = p.result || {};
+  const undoInfo = res.undo || null;
+  const undoReports = (undoInfo && undoInfo.reports) || [];
+  const reports = (undoReports.length ? undoReports : res.reports) || [];
+  const undoBack = undoInfo ? (undoInfo.restored || 0) + (undoInfo.removed || 0) : 0;
+  const open = p.status === "ready";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const hasOld = lines.some((l) => l.from !== undefined && l.from !== null && l.from !== "");
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const th = { textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#64748B", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 13, borderBottom: "1px solid #F1F5F9", verticalAlign: "top", overflowWrap: "anywhere" };
+  const longText = { whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto", display: "block" };
+  const amber = { fontSize: 12, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 6, lineHeight: 1.45 };
+  const badge = (bg, fg) => ({ position: "absolute", top: 3, fontSize: 10, fontWeight: 700, color: fg, background: bg, borderRadius: 4, padding: "0 4px", lineHeight: "15px" });
+  const stateLine = {
+    applying: "Saving…",
+    undoing: "Putting it back…",
+    expired: "This expired after 24 hours and nothing changed. Ask me again and I'll start from what's there now.",
+    cancelled: "Cancelled. Nothing changed.",
+    failed: p.failure || "That didn't save. Nothing changed.",
+  }[p.status];
+  const strip = (list, label) => (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", marginBottom: 4 }}>{label}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {list.map((ph, i) => (
+          <div key={i} style={{ position: "relative", width: 72, height: 54, borderRadius: 6, overflow: "hidden", border: i === 0 ? "2px solid " + ACCENT : "1px solid #E2E8F0", background: "#F1F5F9" }}>
+            {ph.url ? <img src={ph.url} alt={`Photo ${i + 1}`} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} /> : null}
+            {i === 0 && <span style={{ ...badge(ACCENT, "#FFF"), left: 3 }}>Cover</span>}
+            {ph.aiEdited && <span style={{ ...badge("rgba(255,255,255,.92)", "#334155"), right: 3 }}>AI</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      {(unit.lot || unit.status) && (
+        <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>
+          {[unit.lot, unit.status, unit.sold ? "Sold" : null, unit.listed ? "On your Online Shop" : null].filter(Boolean).join(" · ")}
+        </div>
+      )}
+      <div role="status">
+        {stateLine && <div style={{ fontSize: 13, color: p.status === "failed" ? "#B91C1C" : "#64748B", marginTop: 6 }}>{stateLine}</div>}
+      </div>
+
+      {lines.length > 0 && p.status !== "failed" && (
+        <div style={{ marginTop: 10, overflowX: "auto", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr>
+              <th style={th}>What</th>
+              {hasOld && <th style={th}>Now</th>}
+              <th style={th}>New</th>
+            </tr></thead>
+            <tbody>
+              {lines.map((l, i) => (
+                <tr key={i}>
+                  <td style={{ ...td, fontWeight: 600, color: "#334155", whiteSpace: "nowrap" }}>{l.label}</td>
+                  {hasOld && (
+                    <td style={{ ...td, color: "#94A3B8" }}>
+                      {l.from
+                        ? <span style={{ ...(l.long ? longText : {}), textDecoration: open && !l.long ? "line-through" : "none" }}>{String(l.from)}</span>
+                        : <span style={{ color: "#CBD5E1" }}>blank</span>}
+                    </td>
+                  )}
+                  <td style={{ ...td, color: "#1E293B", fontWeight: 600 }}>
+                    {l.to ? <span style={l.long ? { ...longText, fontWeight: 400 } : {}}>{String(l.to)}</span> : <span style={{ color: "#CBD5E1", fontWeight: 400 }}>blank</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {photos && p.status !== "failed" && (
+        <div>
+          {strip(photos.from, open ? "Now" : "Before")}
+          {strip(photos.to, open ? "New order" : "After")}
+          <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>The first photo is the cover. Nothing is added or removed.</div>
+        </div>
+      )}
+
+      {(open || done) && notes.map((n, i) => <div key={i} style={amber}>{n}</div>)}
+      {open && viewingName && <div style={{ fontSize: 12, color: "#B45309", marginTop: 10 }}>This is <b>{viewingName}</b>'s inventory. Your name goes on the record.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+
+      <div role="status">
+        {done && (
+          <div style={{ fontSize: 13, color: p.status === "applied" ? "#047857" : "#B45309", marginTop: 8 }}>
+            {p.status === "applied" ? "Saved." : "Some of it didn't save. It's listed here."}
+          </div>
+        )}
+        {done && undoInfo && undoInfo.failed > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>That didn't all go back. Press Undo to try again.</div>}
+        {p.status === "undone" && (
+          <div style={{ fontSize: 13, color: undoReports.length ? "#B45309" : "#047857", marginTop: 8 }}>
+            {!undoReports.length ? "Put back." : undoBack ? "Put back, except what's listed here." : "That stayed as it is:"}
+          </div>
+        )}
+      </div>
+      {reports.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309", maxHeight: 200, overflowY: "auto" }}>
+          {reports.map((r, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{r.label}: {r.reason}</div>)}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+        {open && p.hash && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>
+        )}
+        {open && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>
+        )}
+        {p.canUndo && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? "Putting it back…" : "Undo"}</button>
+        )}
+        {route && !open && (
+          <button type="button" onClick={() => onNavigate && onNavigate(route.page, route.sub || null)} style={btn("#FFF", "#334155", "#CBD5E1")}>
+            {`Open ${pv.where || "Inventory"}`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+JACK_CARDS.inventory_price = JackInventoryCard;
+JACK_CARDS.inventory_listing = JackInventoryCard;
+JACK_CARDS.inventory_photos = JackInventoryCard;
+
+// renders: changeorder_attrs, changeorder_unlock (register: JACK_CARDS.changeorder_attrs = JackChangeOrderCard; JACK_CARDS.changeorder_unlock = JackChangeOrderCard;)
+// props: { proposal, viewingName, onChanged, onNavigate }, the props JackAnyCard already passes (onSay and busy are ignored).
+// proposal is proposalView: id, kind, status, title, preview, hash, result, failure, canUndo.
+// preview (changeorder_attrs) = { order: { no, building, totalCents }, lines: [{ label, from, to }], totals: { beforeCents, afterCents },
+//   description (the exact words the customer signs), fee: { cents, taxable, label } | null, feeSay?, notes: string[],
+//   rules: string[], rulesSay: string | null, link: { page: "orders", sub: "o-<id>" }, where }.
+// preview (changeorder_unlock) = { order, reason, notes: string[], link, where }.
+// result = { changeOrders, coNo, emailed, reports: [{ label, status, reason }], undo?: { restored, removed, failed, reports } }.
+// Jack's change-order cards (jack-agent/changeorders.ts): a roof, cladding or paint change on a signed order, staged and
+// emailed to the customer on Approve, and a request to unlock a locked order. Money is in cents (jackMoney(cents / 100)).
+// changeorder_attrs is a send card (changeorders.ts sends: true): its Approve posts { hash, send: true }, like a reply's
+// or an estimate's, because this page shows the words the customer signs. The line right above it says it emails the
+// customer and that an email can't be taken back, and the card has no Copy. changeorder_unlock posts { hash } only.
+// An Approve whose answer never came back reads the card again, and never says to try again: it may have gone.
+// Place it AFTER `const JACK_CARDS = {};`.
+const JACK_CO_LOST = "I didn't hear back from that press. Check the order before pressing it again.";
+function JackChangeOrderCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const reread = async () => {
+    try {
+      const { data } = await sb.functions.invoke("jack-agent", { body: { action: "proposal_get", id: p.id } });
+      if (data && data.proposal) onChanged(data.proposal);
+    } catch (_e) { /* the card stays as it was, and the server still refuses a second press */ }
+  };
+  const call = async (action, body) => {
+    if (busy) return;
+    setBusy(action); setErr("");
+    const approving = action === "proposal_approve";
+    // An Approve that brings no card back (a refusal before the claim, a fault, or a lost answer) reads the
+    // card again: it may be staging, or emailed, by now.
+    let cardBack = false;
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) { onChanged(said.proposal); cardBack = true; }
+      // A refusal comes back with its sentence; no sentence means the answer was lost.
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || (approving ? JACK_CO_LOST : JACK_ERR));
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (cardBack && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(approving ? JACK_CO_LOST : JACK_ERR);
+    }
+    if (approving && !cardBack) await reread();
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const isUnlock = p.kind === "changeorder_unlock";
+  const order = pv.order || {};
+  const lines = Array.isArray(pv.lines) ? pv.lines : [];
+  const allNotes = Array.isArray(pv.notes) ? pv.notes : [];
+  // What Approve does is said once, right above it, with what can't be taken back (as a reply's and an
+  // estimate's card say it): the server's own "Approve stages it..." note moves there.
+  const approveNote = isUnlock ? undefined : allNotes.find((n) => /^Approve /.test(String(n)));
+  const notes = allNotes.filter((n) => n !== approveNote);
+  const canSend = !isUnlock && p.status === "ready" && !!p.hash;
+  const finalLine = `${approveNote || "Approve stages it and emails it to the customer to sign."} An email can't be taken back.`;
+  const totals = pv.totals || null;
+  const res = p.result || {};
+  const undoInfo = res.undo || null;
+  const undoReports = (undoInfo && undoInfo.reports) || [];
+  // Once it's undone, what Approve said ("... Undo discards it.") is over: only Undo's own lines show.
+  const reports = (p.status === "undone" || undoReports.length ? undoReports : res.reports) || [];
+  // "moved": the void put the building back but the customer answered first, so it wasn't left alone.
+  const undoMoved = undoReports.some((r) => r && r.status === "moved");
+  const open = p.status === "ready";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const money = (c) => jackMoney(Math.round(Number(c) || 0) / 100);
+  const coName = res.coNo ? `CO-${res.coNo}` : "The change order";
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const small = { fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.45 };
+  const amber = { fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 8, lineHeight: 1.45 };
+  const th = { textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#64748B", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 13, borderBottom: "1px solid #F1F5F9", verticalAlign: "top", overflowWrap: "anywhere" };
+  const stateLine = {
+    applying: isUnlock ? "Sending the request…" : "Staging it and emailing the customer…",
+    undoing: "Discarding it…",
+    expired: "This expired after 24 hours and nothing changed. Ask me again and I'll start from the order as it is now.",
+    cancelled: "Cancelled. Nothing changed.",
+    failed: p.failure || "That didn't go through. Nothing changed.",
+  }[p.status];
+  const change = totals ? totals.afterCents - totals.beforeCents : 0;
+  const link = pv.link && pv.link.page ? pv.link : null;
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      {(order.no || order.building) && (
+        <div style={{ fontSize: 12, color: "#64748B", marginTop: 4 }}>
+          {[order.no ? `Order #${order.no}` : null, order.building || null].filter(Boolean).join(" · ")}
+        </div>
+      )}
+      <div role="status">
+        {stateLine && <div style={{ fontSize: 13, color: p.status === "failed" ? "#B91C1C" : "#64748B", marginTop: 6 }}>{stateLine}</div>}
+      </div>
+
+      {!isUnlock && lines.length > 0 && p.status !== "failed" && (
+        <div style={{ marginTop: 10, overflowX: "auto", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr><th style={th}>What</th><th style={th}>Now</th><th style={th}>New</th></tr></thead>
+            <tbody>
+              {lines.map((l, i) => (
+                <tr key={i}>
+                  <td style={{ ...td, fontWeight: 600, color: "#334155" }}>{l.label}</td>
+                  <td style={{ ...td, color: "#94A3B8" }}><span style={{ textDecoration: open ? "line-through" : "none" }}>{String(l.from || "none")}</span></td>
+                  <td style={{ ...td, color: "#1E293B", fontWeight: 600 }}>{String(l.to || "none")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!isUnlock && totals && p.status !== "failed" && (
+        <div style={{ fontSize: 13, color: "#1E293B", marginTop: 8, fontVariantNumeric: "tabular-nums" }}>
+          Order total {money(totals.beforeCents)} → <b>{money(totals.afterCents)}</b>
+          <span style={{ color: "#64748B" }}> ({change >= 0 ? "+" : "-"}{money(Math.abs(change))})</span>
+        </div>
+      )}
+      {!isUnlock && pv.feeSay && (open || done) && <div style={{ fontSize: 12.5, color: "#334155", marginTop: 4 }}>{pv.feeSay}</div>}
+      {!isUnlock && pv.description && (open || done) && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#475569" }}>What the customer signs:</div>
+          <div style={{ fontSize: 12.5, color: "#334155", marginTop: 4, whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px" }}>{pv.description}</div>
+        </div>
+      )}
+
+      {isUnlock && pv.reason && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#475569" }}>What needs changing, for whoever unlocks it:</div>
+          <div style={{ fontSize: 12.5, color: "#334155", marginTop: 4, whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px" }}>{pv.reason}</div>
+        </div>
+      )}
+
+      {open && notes.map((n, i) => (
+        <div key={i} data-jack-co-rules={n === pv.rulesSay ? "" : undefined} style={n === pv.rulesSay ? amber : small}>{n}</div>
+      ))}
+      {open && viewingName && <div style={{ fontSize: 12, color: "#B45309", marginTop: 8 }}>This is <b>{viewingName}</b>'s order. Your name goes on the record.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+      {canSend && <div data-jack-send-final="" style={{ fontSize: 12.5, color: "#334155", fontWeight: 600, marginTop: 10 }}>{finalLine}</div>}
+
+      <div role="status">
+        {p.status === "applied" && !isUnlock && (
+          <div style={{ fontSize: 13, color: "#047857", marginTop: 8 }}>
+            {coName} is staged and emailed to the customer to sign.
+            <div style={{ ...small, marginTop: 4 }}>An email can't be taken back, so there's no Undo. If it shouldn't stand, a person voids it under Change orders on the order and speaks to the customer.</div>
+          </div>
+        )}
+        {p.status === "applied" && isUnlock && (
+          <div style={{ fontSize: 13, color: "#047857", marginTop: 8 }}>Asked. Whoever approves changes sees it on the order and decides it.</div>
+        )}
+        {p.status === "partly_applied" && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>Not all of it went through:</div>}
+        {done && undoInfo && undoInfo.failed > 0 && !undoReports.length && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>That didn't go through. Press Undo to try again.</div>}
+        {p.status === "undone" && (
+          <div style={{ fontSize: 13, color: undoReports.length ? "#B45309" : "#047857", marginTop: 8 }}>
+            {undoMoved ? "Check the order now:"
+              : undoReports.length ? "I left it as it is:"
+              : `Discarded. The building is back to what it was, and Jack never emailed it to the customer.${pv.rulesSay ? " Anything one of your rules sent when it was staged stays sent." : ""}`}
+          </div>
+        )}
+      </div>
+      {reports.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309" }}>
+          {reports.map((r, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{r.reason}</div>)}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: canSend ? 6 : 10 }}>
+        {open && p.hash && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", isUnlock ? { hash: p.hash } : { hash: p.hash, send: true })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
+            {busy === "proposal_approve" ? (isUnlock ? "Sending…" : "Staging…") : isUnlock ? "Approve and ask" : "Approve and send"}
+          </button>
+        )}
+        {open && <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>}
+        {p.canUndo && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? "Discarding…" : "Undo (discard it)"}</button>
+        )}
+        {link && !open && (
+          <button type="button" onClick={() => onNavigate && onNavigate(link.page, link.sub || null)} style={btn("#FFF", "#334155", "#CBD5E1")}>Open the order</button>
+        )}
+      </div>
+      {p.canUndo && <div style={small}>Undo only if nobody has emailed it to the customer since.</div>}
+    </div>
+  );
+}
+JACK_CARDS.changeorder_attrs = JackChangeOrderCard;
+JACK_CARDS.changeorder_unlock = JackChangeOrderCard;
+
+// renders: build_job_add, build_job_change, build_job_built (register: JACK_CARDS.build_job_add = JackBuildScheduleCard; JACK_CARDS.build_job_change = JackBuildScheduleCard; JACK_CARDS.build_job_built = JackBuildScheduleCard;)
+// props: { proposal, viewingName, onChanged, onNavigate }, the props JackAnyCard already passes (onSay and busy are ignored).
+// proposal is proposalView: id, kind, status, title, preview, hash, result, failure, canUndo.
+// preview = { action: "add" | "change" | "built", job: { building, customer, serial, what, column, buildDate, crew, repairWords? },
+//   lines: [{ label, from, to }], notes: string[] (warnings, the rule sentence among them), keeps: string[] (what Undo can't
+//   take back), where: "Build Schedule", route: { page: "build-schedule", sub: null } }.
+// result = { saved, created, reports: [{ label, status, reason }], notes?: string[], undo?: { restored, removed, failed, reports } }.
+// Jack's build schedule cards (jack-agent/buildschedule.ts): a building put on the schedule, a build date, crew or card note
+// changed, and a job marked built. The card shows the job as the board has it, each change with what it is now, and what
+// Undo can't take back. A job Jack adds has no Undo, and the card says how a person removes it. The server decides which
+// buttons it may show. Place it AFTER `const JACK_CARDS = {};`.
+function JackBuildScheduleCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) onChanged(said.proposal);
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (said && said.proposal && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(JACK_ERR);
+    }
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const act = pv.action || (p.kind === "build_job_add" ? "add" : p.kind === "build_job_built" ? "built" : "change");
+  const job = pv.job || {};
+  const lines = Array.isArray(pv.lines) ? pv.lines : [];
+  const notes = Array.isArray(pv.notes) ? pv.notes : [];
+  const keeps = Array.isArray(pv.keeps) ? pv.keeps : [];
+  const route = pv.route && pv.route.page ? pv.route : { page: "build-schedule", sub: null };
+  const res = p.result || {};
+  const resNotes = Array.isArray(res.notes) ? res.notes : [];
+  const undoInfo = res.undo || null;
+  const undoReports = (undoInfo && undoInfo.reports) || [];
+  const reports = (undoReports.length ? undoReports : res.reports) || [];
+  const undoBack = undoInfo ? (undoInfo.restored || 0) + (undoInfo.removed || 0) : 0;
+  const open = p.status === "ready";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const hasOld = lines.some((l) => l.from !== undefined && l.from !== null && l.from !== "");
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const th = { textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#64748B", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 13, borderBottom: "1px solid #F1F5F9", verticalAlign: "top", overflowWrap: "anywhere", whiteSpace: "pre-wrap" };
+  const amber = { fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 8, lineHeight: 1.45 };
+  const small = { fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.45 };
+  const stateLine = {
+    applying: "Saving…",
+    undoing: "Putting it back…",
+    expired: "This expired after 24 hours and nothing changed. Ask me again and I'll start from the board as it is now.",
+    cancelled: "Cancelled. Nothing changed.",
+    failed: p.failure || "That didn't work. Nothing changed.",
+  }[p.status];
+  const doneWords = act === "add"
+    ? "Added to the build schedule. There's no Undo for this: if it shouldn't be there, press Remove on the job."
+    : act === "built" ? "Marked built." : "Saved.";
+  const head = [job.building, job.serial].filter(Boolean).join(" ");
+  const facts = [job.what, act !== "add" && job.column, act !== "add" && job.buildDate && `build date ${job.buildDate}`, act !== "add" && job.crew].filter(Boolean);
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      <div role="status">
+        {stateLine && <div style={{ fontSize: 13, color: p.status === "failed" ? "#B91C1C" : "#64748B", marginTop: 6 }}>{stateLine}</div>}
+      </div>
+
+      {(head || job.customer || facts.length > 0) && (
+        <div data-jack-build-job="" style={{ marginTop: 8, padding: "8px 10px", border: "1px solid #E2E8F0", borderRadius: 8, background: "#F8FAFC" }}>
+          {(head || job.customer) && (
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B", overflowWrap: "anywhere" }}>
+              {head}{head && job.customer ? " · " : ""}{job.customer || ""}
+            </div>
+          )}
+          {facts.length > 0 && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, overflowWrap: "anywhere" }}>{facts.join(" · ")}</div>}
+          {job.repairWords && <div style={{ fontSize: 12, color: "#475569", marginTop: 4, overflowWrap: "anywhere" }}>{job.repairWords}</div>}
+        </div>
+      )}
+
+      {lines.length > 0 && p.status !== "failed" && (
+        <div style={{ marginTop: 10, overflowX: "auto", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr>
+              <th style={th}>What</th>
+              {hasOld && <th style={th}>Now</th>}
+              <th style={th}>{act === "add" ? "On the schedule" : "New"}</th>
+            </tr></thead>
+            <tbody>
+              {lines.map((l, i) => (
+                <tr key={i}>
+                  <td style={{ ...td, fontWeight: 600, color: "#334155", whiteSpace: "nowrap" }}>{l.label}</td>
+                  {hasOld && (
+                    <td style={{ ...td, color: "#94A3B8" }}>
+                      {l.from ? <span style={{ textDecoration: open ? "line-through" : "none" }}>{String(l.from)}</span> : <span style={{ color: "#CBD5E1" }}>none</span>}
+                    </td>
+                  )}
+                  <td style={{ ...td, color: "#1E293B", fontWeight: 600 }}>{l.to ? String(l.to) : <span style={{ color: "#CBD5E1", fontWeight: 400 }}>none</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {(open || done) && notes.map((n, i) => <div key={i} data-jack-build-note="" style={amber}>{n}</div>)}
+      {open && keeps.map((k, i) => <div key={i} style={small}>{k}</div>)}
+      {open && act === "change" && <div style={small}>Undo puts each change back, unless someone changes it first.</div>}
+      {open && viewingName && <div style={{ fontSize: 12, color: "#B45309", marginTop: 10 }}>This is <b>{viewingName}</b>'s build schedule. Your name goes on the record.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+
+      <div role="status">
+        {done && (
+          <div style={{ fontSize: 13, color: p.status === "applied" ? "#047857" : "#B45309", marginTop: 8 }}>
+            {p.status === "applied" ? doneWords : "I couldn't tell if all of it saved. It's listed here."}
+          </div>
+        )}
+        {done && resNotes.map((n, i) => <div key={i} style={{ fontSize: 12, color: "#B45309", marginTop: 4 }}>{n}</div>)}
+        {done && undoInfo && undoInfo.failed > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>That didn't all go back. Press Undo to try again.</div>}
+        {p.status === "undone" && (
+          <div style={{ fontSize: 13, color: undoReports.length ? "#B45309" : "#047857", marginTop: 8 }}>
+            {!undoReports.length
+              ? (act === "built" ? "Put back in its column. Its building serial and anything a rule already sent stay." : "Put back.")
+              : undoBack ? "Put back, except what's listed here." : "That stayed as it is:"}
+          </div>
+        )}
+      </div>
+      {reports.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309", maxHeight: 200, overflowY: "auto" }}>
+          {reports.map((r, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{r.label}: {r.reason}</div>)}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+        {open && p.hash && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>
+        )}
+        {open && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>
+        )}
+        {p.canUndo && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? "Putting it back…" : "Undo"}</button>
+        )}
+        {!open && (
+          <button type="button" onClick={() => onNavigate && onNavigate(route.page, route.sub || null)} style={btn("#FFF", "#334155", "#CBD5E1")}>Open the Build Schedule</button>
+        )}
+      </div>
+    </div>
+  );
+}
+JACK_CARDS.build_job_add = JackBuildScheduleCard;
+JACK_CARDS.build_job_change = JackBuildScheduleCard;
+JACK_CARDS.build_job_built = JackBuildScheduleCard;
+
+// renders: delivery_load_create, delivery_stop_add, delivery_stop_reorder, delivery_load_out, delivery_stop_delivered, delivery_load_delivered (register: JACK_CARDS.<kind> = JackDeliveryCard for each, at the end of this file)
+// props: { proposal, viewingName, onChanged, onNavigate }, the props JackAnyCard already passes (onSay and busy are ignored).
+// proposal is proposalView: id, kind, status, title, preview, hash, result, failure, canUndo.
+// preview = { action, load?: { no, line, status }, lines?: [{ label, from, to }], stops?: [{ n, text, done? }],
+//   order?: { from: string[], to: [{ text, was }] }, notes: string[], undo: string, ruleNames?: string[],
+//   where: "Delivery Schedule", route: { page: "delivery-schedule", sub: null } }.
+// result = { saved, reports: [{ label, status, reason }], loadNo?, stopNumber?, loadDone?, undo?: { restored, removed, failed, reports } }.
+// Jack's delivery cards (jack-agent/delivery.ts): a new load on a day, a stop added to a load, a load's stops
+// in a new order, a load marked out, and a stop or a whole load marked delivered. The card shows the load,
+// what changes, the stops involved, what it sets off (rules, a permit, an estimate moving to Delivered) and
+// what Undo can and can't do, before Approve. The server decides which buttons it may show.
+// Place it AFTER `const JACK_CARDS = {};`.
+function JackDeliveryCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) onChanged(said.proposal);
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (said && said.proposal && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(JACK_ERR);
+    }
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const res = p.result || {};
+  const undoInfo = res.undo || null;
+  const undoReports = (undoInfo && undoInfo.reports) || [];
+  const reports = (undoReports.length ? undoReports : res.reports) || [];
+  const undoBack = undoInfo ? (undoInfo.restored || 0) + (undoInfo.removed || 0) : 0;
+  const action = pv.action || "";
+  const load = pv.load || null;
+  const loadName = load && load.no ? `Load ${load.no}` : (res.loadNo ? `Load ${res.loadNo}` : "The load");
+  const lines = Array.isArray(pv.lines) ? pv.lines : [];
+  const stops = Array.isArray(pv.stops) ? pv.stops : [];
+  const order = pv.order && Array.isArray(pv.order.to) ? pv.order : null;
+  const notes = Array.isArray(pv.notes) ? pv.notes : [];
+  const route = pv.route && pv.route.page ? pv.route : null;
+  const open = p.status === "ready";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const hasOld = lines.some((l) => l.from !== undefined && l.from !== null && l.from !== "");
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const small = { fontSize: 12, color: "#64748B", marginTop: 6 };
+  const amber = { fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 8, lineHeight: 1.45 };
+  const th = { textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#64748B", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 13, borderBottom: "1px solid #F1F5F9", verticalAlign: "top", overflowWrap: "anywhere" };
+  const num = (n) => (
+    <span style={{ width: 20, height: 20, borderRadius: "50%", background: "#F1F5F9", color: "#475569", fontSize: 10.5, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}>{n}</span>
+  );
+  const stateLine = {
+    applying: "Saving…",
+    undoing: "Putting it back…",
+    expired: "This expired after 24 hours and nothing changed. Ask me again and I'll start from the board as it is now.",
+    cancelled: "Cancelled. Nothing changed.",
+    failed: p.failure || "That didn't go through. Nothing changed.",
+  }[p.status];
+  const appliedWords = {
+    create_load: `Made ${res.loadNo ? `Load ${res.loadNo}` : "the load"}. It has no driver or stops yet.`,
+    add_stop: `Added${res.stopNumber ? ` as stop ${res.stopNumber}` : ""} on ${loadName}.`,
+    reorder_stops: `The stops on ${loadName} are in the new order.`,
+    mark_load_out: `${loadName} is out.`,
+    mark_stop_delivered: `Marked delivered.${res.loadDone ? ` ${loadName} is delivered too.` : ""}`,
+    mark_load_delivered: `${loadName} is delivered.`,
+  }[action] || "Done.";
+  const undoneWords = undoReports.length
+    ? (undoBack ? "Put back, except what's listed here." : "I left it as it is:")
+    : action === "add_stop" ? `Taken off ${loadName}. A message a rule already sent stays sent.`
+    : action === "reorder_stops" ? "The old order is back."
+    : "Put back.";
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      {load && load.line && <div data-jack-delivery-load="" style={{ fontSize: 12, color: "#64748B", fontWeight: 600, marginTop: 2, overflowWrap: "anywhere" }}>{load.line}</div>}
+      <div role="status">
+        {stateLine && <div style={{ fontSize: 13, color: p.status === "failed" ? "#B91C1C" : "#64748B", marginTop: 6 }}>{stateLine}</div>}
+      </div>
+
+      {lines.length > 0 && p.status !== "failed" && (
+        <div style={{ marginTop: 10, overflowX: "auto", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr>
+              <th style={th}>What</th>
+              {hasOld && <th style={th}>Now</th>}
+              <th style={th}>New</th>
+            </tr></thead>
+            <tbody>
+              {lines.map((l, i) => (
+                <tr key={i}>
+                  <td style={{ ...td, fontWeight: 600, color: "#334155", whiteSpace: "nowrap" }}>{l.label}</td>
+                  {hasOld && (
+                    <td style={{ ...td, color: "#94A3B8" }}>
+                      {l.from ? <span style={{ textDecoration: open ? "line-through" : "none" }}>{String(l.from)}</span> : <span style={{ color: "#CBD5E1" }}>blank</span>}
+                    </td>
+                  )}
+                  <td style={{ ...td, color: "#1E293B", fontWeight: 600 }}>{String(l.to ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {order && p.status !== "failed" && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.3 }}>{p.status === "undone" ? "Was going to be" : open ? "New order" : "Order"}</div>
+          {order.to.map((s, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, fontSize: 13, color: "#1E293B" }}>
+              {num(i + 1)}
+              <span style={{ overflowWrap: "anywhere", flex: 1 }}>{s.text}</span>
+              {s.was && s.was !== i + 1 && <span style={{ fontSize: 11.5, color: "#94A3B8", whiteSpace: "nowrap" }}>was {s.was}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {stops.length > 0 && p.status !== "failed" && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.3 }}>{stops.length === 1 ? "The stop" : "Stops"}</div>
+          {stops.map((s, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, fontSize: 13, color: s.done ? "#94A3B8" : "#1E293B" }}>
+              {num(s.n)}
+              <span style={{ overflowWrap: "anywhere", flex: 1 }}>{s.text}</span>
+              {s.done && <span style={{ fontSize: 11.5, color: "#15803D", fontWeight: 700, whiteSpace: "nowrap" }}>already delivered</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(open || done) && notes.map((n, i) => <div key={i} data-jack-delivery-note="" style={amber}>{n}</div>)}
+      {open && pv.undo && <div style={small}>{pv.undo}</div>}
+      {open && viewingName && <div style={{ fontSize: 12, color: "#B45309", marginTop: 10 }}>This is <b>{viewingName}</b>'s delivery schedule. Your name goes on the record.</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+
+      <div role="status">
+        {done && (
+          <div style={{ fontSize: 13, color: p.status === "applied" ? "#047857" : "#B45309", marginTop: 8 }}>
+            {p.status === "applied" ? appliedWords : "I couldn't tell if all of it went through. It's listed here."}
+          </div>
+        )}
+        {done && undoInfo && undoInfo.failed > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>That didn't go through. Press Undo to try again.</div>}
+        {p.status === "undone" && (
+          <div style={{ fontSize: 13, color: undoReports.length ? "#B45309" : "#047857", marginTop: 8 }}>{undoneWords}</div>
+        )}
+      </div>
+      {reports.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309", maxHeight: 200, overflowY: "auto" }}>
+          {reports.map((r, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{r.label}: {r.reason}</div>)}
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+        {open && p.hash && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>
+        )}
+        {open && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>
+        )}
+        {p.canUndo && (
+          <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>
+            {busy === "proposal_undo" ? "Putting it back…" : action === "add_stop" ? "Undo (take it off)" : "Undo"}
+          </button>
+        )}
+        {route && !open && (
+          <button type="button" onClick={() => onNavigate && onNavigate(route.page, route.sub || null)} style={btn("#FFF", "#334155", "#CBD5E1")}>Open the Delivery Schedule</button>
+        )}
+      </div>
+    </div>
+  );
+}
+JACK_CARDS.delivery_load_create = JackDeliveryCard;
+JACK_CARDS.delivery_stop_add = JackDeliveryCard;
+JACK_CARDS.delivery_stop_reorder = JackDeliveryCard;
+JACK_CARDS.delivery_load_out = JackDeliveryCard;
+JACK_CARDS.delivery_stop_delivered = JackDeliveryCard;
+JACK_CARDS.delivery_load_delivered = JackDeliveryCard;
+
+// renders: commission_rate (register: JACK_CARDS.commission_rate = JackCommissionCard;)
+// props: { proposal, viewingName, onChanged, onNavigate }, the same props JackAnyCard passes to JackCard. proposal is proposalView: id, kind, status, title, preview, hash, result, failure, canUndo.
+// preview: member {name, deactivated}, rate {from, to, fromWords, toWords, note}, ledger {lines, say} or null, notes[] (no figures), where, route {page, sub}.
+// For the Structure Studio team (viewingName set), agent.ts takes preview.rate and preview.ledger off the card, so it
+// says a rate is changing and for whom, and never the figures. The server refuses an operator's Approve and Undo,
+// and this card shows them no buttons.
+// Jack's commission rate card (jack-agent/commissions.ts): one team member's standing rate, the Commission % box on
+// Settings > Company > Team. Place it AFTER `const JACK_CARDS = {};`.
+function JackCommissionCard({ proposal, viewingName, onChanged, onNavigate }) {
+  const p = proposal;
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const titleRef = useRef(null);
+  // A sentence about the card as it was doesn't outlive that state.
+  useEffect(() => { setErr(""); }, [p.status]);
+  const call = async (action, body) => {
+    setBusy(action); setErr("");
+    try {
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action, id: p.id, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.proposal) onChanged(said.proposal);
+      if (error || (said && said.ok === false && !said.proposal)) setErr((said && said.error) || JACK_ERR);
+      // The pressed button is about to go, and focus shouldn't fall to the page.
+      if (said && said.proposal && titleRef.current) titleRef.current.focus();
+    } catch (_e) {
+      setErr(JACK_ERR);
+    }
+    setBusy("");
+  };
+  const pv = p.preview || {};
+  const member = pv.member || {};
+  const rate = pv.rate || null;
+  const ledger = pv.ledger || null;
+  const notes = Array.isArray(pv.notes) ? pv.notes : [];
+  const route = pv.route && pv.route.page ? pv.route : { page: "settings", sub: "team" };
+  const where = pv.where || "Settings > Company > Team";
+  const res = p.result || {};
+  const undoInfo = res.undo || null;
+  const undoReports = (undoInfo && undoInfo.reports) || [];
+  const reports = (undoReports.length ? undoReports : res.reports) || [];
+  const open = p.status === "ready";
+  const done = p.status === "applied" || p.status === "partly_applied";
+  const operator = !!viewingName;
+  // A private card keeps its contents 30 days (jack-agent clearedIfOld): then only the title, state and Undo
+  // record are left, and the preview reads { cleared: true }.
+  const cleared = pv.cleared === true;
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "8px 14px", ...(border ? { border: "1px solid " + border } : {}) });
+  const small = { fontSize: 12, color: "#64748B", marginTop: 6 };
+  const amber = { fontSize: 12, fontWeight: 600, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "6px 8px", marginTop: 8, lineHeight: 1.45 };
+  const th = { textAlign: "left", padding: "6px 10px", fontSize: 11, fontWeight: 700, color: "#64748B", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 13, borderBottom: "1px solid #F1F5F9", verticalAlign: "top", overflowWrap: "anywhere" };
+  const stateLine = {
+    applying: "Saving…",
+    undoing: "Putting it back…",
+    expired: "This expired after 24 hours and nothing changed. Ask me again and I'll start from the rate as it is now.",
+    cancelled: "Cancelled. Nothing changed.",
+    failed: p.failure || "That didn't save. Nothing changed.",
+  }[p.status];
+  return (
+    <div data-jack-card={p.id} data-kind={p.kind} data-status={p.status} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: 14, background: "#FFF", marginTop: 8, maxWidth: "100%" }}>
+      <div ref={titleRef} tabIndex={-1} style={{ fontSize: 14, fontWeight: 700, color: "#1E293B", overflowWrap: "anywhere", outline: "none" }}>{p.title}</div>
+      <div role="status">
+        {stateLine && <div style={{ fontSize: 13, color: p.status === "failed" ? "#B91C1C" : "#64748B", marginTop: 6 }}>{stateLine}</div>}
+      </div>
+
+      {member.name && (
+        <div style={{ fontSize: 13, color: "#334155", marginTop: 6, overflowWrap: "anywhere" }}>
+          For <b>{member.name}</b>{member.deactivated ? <span style={{ color: "#94A3B8" }}> (login switched off)</span> : null}
+        </div>
+      )}
+
+      {rate && p.status !== "failed" && (
+        <div style={{ marginTop: 10, overflowX: "auto", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead><tr>
+              <th style={th}>What</th>
+              <th style={th}>{done || p.status === "undone" ? "Was" : "Now"}</th>
+              <th style={th}>New</th>
+            </tr></thead>
+            <tbody>
+              <tr>
+                <td style={{ ...td, fontWeight: 600, color: "#334155" }}>Commission rate</td>
+                <td style={{ ...td, color: "#94A3B8" }}><span data-jack-rate-from="" style={{ textDecoration: open ? "line-through" : "none" }}>{rate.fromWords}</span></td>
+                <td style={{ ...td, color: "#1E293B", fontWeight: 600 }}><span data-jack-rate-to="">{rate.toWords}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      {cleared && <div style={small}>The details on this card were cleared after 30 days. {where} shows the rate as it is now.</div>}
+      {!rate && !cleared && operator && (open || done) && (
+        <div style={small}>The rates on this card are only shown to <b>{viewingName}</b>'s own team.</div>
+      )}
+      {rate && rate.note && (open || done) && <div data-jack-rate-note="" style={amber}>{rate.note}</div>}
+      {ledger && ledger.say && open && <div data-jack-rate-ledger="" style={{ fontSize: 12.5, color: "#334155", marginTop: 8 }}>{ledger.say}</div>}
+      {(open || done) && notes.map((n, i) => <div key={i} style={i === 0 ? amber : { fontSize: 12, color: "#B45309", marginTop: 6 }}>{n}</div>)}
+      {open && !operator && <div style={small}>Undo puts the old rate back, if nobody has changed it since. Lines approved or paid in the meantime keep their new amount.</div>}
+      {operator && (open || done) && (
+        <div style={{ fontSize: 12, color: "#B45309", marginTop: 8 }}>The Structure Studio team can't change commission rates. Only the person on <b>{viewingName}</b>'s team who asked can approve or undo this.</div>
+      )}
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+
+      <div role="status">
+        {p.status === "applied" && <div style={{ fontSize: 13, color: "#047857", marginTop: 8 }}>Saved. The new rate is on {where}.</div>}
+        {p.status === "partly_applied" && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>I'm not sure this saved.</div>}
+        {done && undoInfo && undoInfo.failed > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>It didn't go back yet.</div>}
+        {p.status === "undone" && (
+          <div style={{ fontSize: 13, color: undoReports.length ? "#B45309" : "#047857", marginTop: 8 }}>
+            {undoReports.length ? "I left it as it is:" : "Put back. The old rate is on again."}
+          </div>
+        )}
+      </div>
+      {reports.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#B45309" }}>
+          {reports.map((r, i) => <div key={i} style={{ overflowWrap: "anywhere" }}>{r.reason}</div>)}
+        </div>
+      )}
+
+      {!operator && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+          {open && p.hash && (
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_approve", { hash: p.hash })} style={{ ...btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy === "proposal_approve" ? "Saving…" : "Approve"}</button>
+          )}
+          {open && (
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_cancel", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>Cancel</button>
+          )}
+          {p.canUndo && (
+            <button type="button" disabled={!!busy} onClick={() => call("proposal_undo", {})} style={btn("#FFF", "#334155", "#CBD5E1")}>{busy === "proposal_undo" ? "Putting it back…" : "Undo"}</button>
+          )}
+          {!open && (
+            <button type="button" onClick={() => onNavigate && onNavigate(route.page, route.sub || null)} style={btn("#FFF", "#334155", "#CBD5E1")}>Open Team</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+JACK_CARDS.commission_rate = JackCommissionCard;
+
+function JackTab({ viewingName, onNavigate, active }) {
+  const [status, setStatus] = useState(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [loadDenied, setLoadDenied] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [proposals, setProposals] = useState({});
+  const [chatId, setChatId] = useState(null);
+  const [chats, setChats] = useState([]);
+  const [off, setOff] = useState([]);
+  const [savingOff, setSavingOff] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [view, setView] = useState("chat");
+  // Bumped after a billed answer, a wallet refusal, or a price list that finished reading: the balance
+  // line under the composer reads Billing again.
+  const [billTick, setBillTick] = useState(0);
+  const listRef = useRef(null);
+  const fileRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const addProposals = (list) => {
+    if (!list || !list.length) return;
+    setProposals((prev) => { const next = { ...prev }; list.forEach((x) => { next[x.id] = x; }); return next; });
+  };
+  const showChat = (chat) => {
+    setChatId(chat ? chat.id : null);
+    setMessages(chat ? chat.messages || [] : []);
+    if (chat) addProposals(chat.proposals);
+  };
+  const load = async () => {
+    setLoadErr(""); setLoadDenied(false);
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "status" } });
+    if (error || !data || !data.ok) {
+      // Trying again can't fix a refusal, so it doesn't offer to.
+      const denied = !!error && error.ssStatus === 403;
+      setLoadDenied(denied);
+      setLoadErr(denied ? "Your access doesn't include Jack. Ask an owner or admin." : "I couldn't open Jack just now. Please try again.");
+      return;
+    }
+    setStatus(data);
+    setChats(data.chats || []);
+    setOff(data.off || []);
+    showChat(data.chat);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  // `active`: while the tab is hidden the list has no height, so a reply that landed meanwhile scrolls
+  // into view on the way back.
+  useEffect(() => { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight; }, [messages, view, active]);
+
+  // A sheet being read answers later, and a save someone else is watching finishes later. Ask after any
+  // card still at it, and stop when none is. A card whose check keeps failing stops being asked after a
+  // minute (at once on a refusal) and says so. That mark is only on this screen: a reload shows the
+  // truth. A save that finishes here tells an open designer, as a press does.
+  const workingIds = Object.values(proposals).filter((p) => p.status === "reading" || p.status === "applying" || p.status === "undoing").map((p) => p.id).join(",");
+  useEffect(() => {
+    if (!workingIds) return undefined;
+    let dead = false, running = false;
+    const fails = {};
+    const timer = setInterval(async () => {
+      if (running) return;
+      running = true;
+      for (const id of workingIds.split(",")) {
+        const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "proposal_get", id } });
+        if (dead) return;
+        if (data && data.proposal) {
+          fails[id] = 0;
+          // Only a save ends in these, and only a card that was saving or putting back gets here with one.
+          const s = data.proposal.status;
+          if (s === "applied" || s === "partly_applied" || s === "undone") ssSettingsSaved(ssResolvedClientId || null);
+          // A read that finished is billed; a save or an Undo isn't, so they don't re-read the wallet.
+          if (data.proposal.kind === "price_sheet" && !["reading", "applying", "undoing"].includes(s)) setBillTick((n) => n + 1);
+          addProposals([data.proposal]);
+          continue;
+        }
+        const st = error && error.ssStatus;
+        if (st === 403 || st === 404 || (fails[id] = (fails[id] || 0) + 1) >= 20) {
+          setProposals((prev) => ({ ...prev, [id]: { ...prev[id], status: "failed", canRetry: false, failure: "I can't check on that right now. Reload the page to see where it got to." } }));
+        }
+      }
+      running = false;
+    }, 3000);
+    return () => { dead = true; clearInterval(timer); };
+  }, [workingIds]);
+
+  // A new reply or estimate card cancels an older one for the same customer still waiting in this chat
+  // (jack-agent replaceOlder, "Replaced by a newer draft."). The chat's other waiting ones are read again,
+  // so a replaced card loses its Approve now rather than on a reload.
+  const rereadReplaced = (made) => {
+    if (!Array.isArray(made) || !made.some((x) => x && JACK_REPLY_KINDS.includes(x.kind))) return;
+    const fresh = new Set(made.map((x) => x.id));
+    const ids = [...new Set(messages.flatMap((m) => m.proposal_ids || []))]
+      .filter((id) => !fresh.has(id) && proposals[id] && proposals[id].status === "ready" && JACK_REPLY_KINDS.includes(proposals[id].kind));
+    ids.forEach(async (id) => {
+      try {
+        const { data } = await sb.functions.invoke("jack-agent", { body: { action: "proposal_get", id } });
+        if (data && data.proposal) addProposals([data.proposal]);
+      } catch (_e) { /* the card stays; the server refuses a press on a replaced one */ }
+    });
+  };
+  // `said`: words to send without the box, from a press on a question card ("7 days"). The box keeps
+  // whatever the person was typing.
+  const send = async (e, said) => {
+    if (e) e.preventDefault();
+    const fromBox = typeof said !== "string";
+    const text = fromBox ? draft.trim() : said.trim();
+    if (!text || busy) return;
+    setBusy(true); setErr(""); if (fromBox) setDraft("");
+    setMessages((m) => [...m, { id: "local", role: "user", body: text, proposal_ids: [] }]);
+    // The person's own time zone: "today" and a job marked built are their day, not UTC's.
+    let tz = null;
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_e) { tz = null; }
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "send", text, chatId, tz } });
+    if (error || !data) {
+      setMessages((m) => m.filter((x) => x.id !== "local"));
+      if (fromBox) setDraft(text);
+      // A 4xx is the server's own sentence, written for the person. Anything else is a generic fault.
+      setErr(error && error.ssStatus >= 400 && error.ssStatus < 500 && !/non-2xx/i.test(error.message || "") ? error.message : JACK_ERR);
+    } else if (data.capped) {
+      if (data.capped === "wallet") setBillTick((n) => n + 1);
+      if (Array.isArray(data.messages)) {
+        // The count taken after the message went in: the server kept it and the refusal (jack-agent
+        // handleSend), so the chat shows what it stored and the box doesn't offer it again.
+        setChatId(data.chatId);
+        setMessages((m) => [...m.filter((x) => x.id !== "local"), ...data.messages]);
+        if (!chatId) refreshChats();
+      } else {
+        // The first check stores nothing: what was typed stays in the box.
+        if (fromBox) setDraft(text);
+        setMessages((m) => [...m.filter((x) => x.id !== "local"), { id: "cap" + Date.now(), role: "assistant", body: data.reply.body, proposal_ids: [] }]);
+      }
+    } else {
+      if (data.billed) setBillTick((n) => n + 1);
+      setChatId(data.chatId);
+      addProposals(data.proposals);
+      setMessages((m) => [...m.filter((x) => x.id !== "local"), ...data.messages]);
+      if (!chatId) refreshChats();
+      rereadReplaced(data.proposals);
+    }
+    setBusy(false);
+    if (inputRef.current) inputRef.current.focus();
+  };
+  const refreshChats = async () => {
+    const { data } = await sb.functions.invoke("jack-agent", { body: { action: "status" } });
+    if (data && data.chats) setChats(data.chats);
+  };
+  const upload = async (file) => {
+    if (!file || busy) return;
+    setBusy(true); setErr("");
+    try {
+      const body = await jackReadFile(file);
+      const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "sheet_start", chatId, ...body } });
+      let said = data;
+      if (error && error.context && typeof error.context.json === "function") said = await error.context.json().catch(() => null);
+      if (said && said.capped) {
+        if (said.capped === "wallet") setBillTick((n) => n + 1);
+        if (Array.isArray(said.messages)) {
+          // The second count stopped it: the server kept "Uploaded a price list" and the refusal.
+          setChatId(said.chatId);
+          setMessages((m) => [...m, ...said.messages]);
+          if (!chatId) refreshChats();
+        } else setMessages((m) => [...m, { id: "cap" + Date.now(), role: "assistant", body: said.reply.body, proposal_ids: [] }]);
+      }
+      else if (error || !said || !said.ok) setErr((said && said.error) || "I couldn't take that file. Please try again.");
+      else {
+        setChatId(said.chatId);
+        addProposals(said.proposals);
+        setMessages((m) => [...m, ...said.messages]);
+        if (!chatId) refreshChats();
+      }
+    } catch (e2) {
+      setErr((e2 && e2.message) || "I couldn't read that file.");
+    }
+    setBusy(false);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+  // Neither of these runs during a turn: its reply would land in whichever chat is on screen by then.
+  const newChat = async () => {
+    if (busy) return;
+    setView("chat");
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "new" } });
+    // If the server still has the old chat open, the screen doesn't pretend otherwise.
+    if (error || !data || !data.ok) { setErr(JACK_ERR); return; }
+    showChat(null);
+    setErr("");
+    if (inputRef.current) inputRef.current.focus();
+  };
+  const openChat = async (id) => {
+    if (busy) return;
+    const { data } = await sb.functions.invoke("jack-agent", { body: { action: "chat", chatId: id } });
+    setView("chat");
+    if (data && data.chat) { showChat(data.chat); setErr(""); }
+    else setErr("I couldn't open that chat. Please try again.");
+  };
+  // One switch per press, merged on the server into the list as it's stored, and one save at a time. The
+  // screen then shows the server's list, so someone else's change since is shown, not undone.
+  const toggle = async (key) => {
+    const on = off.includes(key);
+    setOff(on ? off.filter((k) => k !== key) : [...off, key]);
+    setSavingOff(true);
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "set_switches", key, on } });
+    setSavingOff(false);
+    if (error || !data || !data.ok) { setOff(off); setErr("That didn't save. Please try again."); }
+    else setOff(data.off || []);
+  };
+
+  if (loadErr) return <div style={S.card}><div role="alert" style={{ fontSize: 14, color: "#B91C1C", marginBottom: 10 }}>{loadErr}</div>{!loadDenied && <button type="button" onClick={load} style={S.btn(ACCENT, "#FFF")}>Try again</button>}</div>;
+  if (!status) return <div style={{ color: "#64748B", fontSize: 14, padding: 20 }}>Loading…</div>;
+
+  const linkBtn = { background: "none", border: "none", padding: "6px 0", color: ACCENT, fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "left", display: "block" };
+  const lastSaid = [...messages].reverse().find((m) => m.role === "assistant");
+  // wrap-reverse so that on a phone, where the two columns stack, the chat is on top and the chat list
+  // below it. flex-end is the top of the line in that direction.
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap-reverse", gap: 16, alignItems: "flex-end" }}>
+      <div style={{ flex: "1 1 220px", minWidth: 0, maxWidth: "100%" }}>
+        <div style={{ ...S.card, marginBottom: 12 }}>
+          <button type="button" onClick={newChat} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy ? 0.6 : 1 }}>New chat</button>
+          <div style={{ marginTop: 10, maxHeight: 240, overflowY: "auto" }}>
+            {chats.map((c) => (
+              <button key={c.id} type="button" onClick={() => openChat(c.id)} disabled={busy} aria-current={c.id === chatId ? "true" : undefined}
+                style={{ display: "block", width: "100%", textAlign: "left", background: c.id === chatId ? "#EEF2FF" : "transparent", border: "none", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#334155", cursor: busy ? "default" : "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {c.title || "Chat"}
+              </button>
+            ))}
+            {!chats.length && <div style={{ fontSize: 12, color: "#94A3B8" }}>Your chats will show here.</div>}
+          </div>
+        </div>
+        <div style={{ ...S.card, marginBottom: 12 }}>
+          <button type="button" style={linkBtn} onClick={() => setView("activity")}>What Jack did</button>
+          <button type="button" style={linkBtn} onClick={() => setView("remembers")}>What Jack remembers</button>
+          <button type="button" style={linkBtn} onClick={() => setView(view === "switches" ? "chat" : "switches")}>What Jack can do</button>
+          {view === "switches" && (status.switches || []).map((s) => (
+            <label key={s.key} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, color: "#334155", marginTop: 8 }}>
+              <input type="checkbox" checked={!off.includes(s.key)} disabled={!status.canManage || savingOff} onChange={() => toggle(s.key)} style={{ marginTop: 2 }} />
+              <span>{s.label}</span>
+            </label>
+          ))}
+          {view === "switches" && !status.canManage && <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 8 }}>An owner or admin can change these.</div>}
+        </div>
+      </div>
+
+      <div style={{ flex: "999 1 480px", minWidth: 0, maxWidth: "100%" }}>
+        {view === "activity" ? <JackActivity onBack={() => setView("chat")} /> : view === "remembers" ? <JackMemoryPanel canManage={!!status.canManage} onBack={() => setView("chat")} /> : (
+          <div style={{ ...S.card, display: "flex", flexDirection: "column", minHeight: 460 }}>
+            {/* For a screen reader: a short line, not the whole list with its tables. */}
+            <div role="status" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" }}>
+              {busy ? "Jack is on it…" : lastSaid ? String(lastSaid.body).slice(0, 500) : ""}
+            </div>
+            <div ref={listRef} style={{ flex: 1, overflowY: "auto", maxHeight: "62vh", paddingRight: 4 }}>
+              {!messages.length && (
+                <div style={{ fontSize: 14, color: "#475569", lineHeight: 1.6 }}>
+                  <b>I'm Jack.</b> Send me your price list and I'll fill in your table, or tell me what you need, like "every 8 and 10 wide comes with one single door." You'll see every number before anything changes.
+                </div>
+              )}
+              {messages.map((m) => (
+                <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 10 }}>
+                  <div style={{ maxWidth: "85%", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 14, lineHeight: 1.5, padding: "8px 12px", borderRadius: 10, background: m.role === "user" ? ACCENT : "#F1F5F9", color: m.role === "user" ? "#FFF" : "#1E293B" }}>{m.body}</div>
+                  {(m.proposal_ids || []).map((id) => proposals[id] && (
+                    <div key={id} style={{ width: "100%" }}>
+                      <JackAnyCard proposal={proposals[id]} viewingName={viewingName} onChanged={(x) => addProposals([x])} onNavigate={onNavigate}
+                        onSay={(words) => send(null, words)} busy={busy} />
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {busy && <div style={{ fontSize: 13, color: "#64748B", marginBottom: 8 }}>Jack is on it…</div>}
+            </div>
+            {status.unavailable && <div role="alert" style={{ fontSize: 13, color: "#B45309", marginTop: 8 }}>{status.unavailable}</div>}
+            {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginTop: 8 }}>{err}</div>}
+            <form onSubmit={send} style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "flex-end" }}>
+              <input ref={fileRef} type="file" accept=".xlsx,.csv,.pdf,image/png,image/jpeg,image/webp" style={{ display: "none" }} aria-label="Upload a price list" onChange={(e) => upload(e.target.files && e.target.files[0])} />
+              <button type="button" title="Upload a price list" aria-label="Upload a price list" disabled={busy || !status.available} onClick={() => fileRef.current && fileRef.current.click()}
+                style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #CBD5E1", padding: "9px 11px", opacity: busy || !status.available ? 0.5 : 1 }}>📎</button>
+              <textarea ref={inputRef} value={draft} rows={2} aria-label="Message to Jack" placeholder="Tell Jack what you need" disabled={!status.available}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                style={{ flex: 1, minWidth: 0, resize: "vertical", border: "1px solid #CBD5E1", borderRadius: 8, padding: "8px 10px", fontSize: 14, fontFamily: "inherit" }} />
+              <button type="submit" disabled={busy || !draft.trim() || !status.available} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !draft.trim() || !status.available ? 0.6 : 1 }}>Send</button>
+            </form>
+            <JackBalanceLine refreshKey={billTick} onNavigate={onNavigate} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // THE SUPPORT BUTTON, in the top bar (Carolyn, 10-26 call, modelled on the Support menu in her GHL
 // dashboard). Chat icon + "Support" (icon only on a phone). The menu: Ask the assistant, Report a
 // problem, Request a feature, Submit a ticket, My requests, What's new — Ahsan 10-27. A "Live
@@ -1346,7 +3875,7 @@ function SetupChecklist({ items, counts, canEdit, onPatch, onReload, onNavigate,
                 )}
                 {isDone && (
                   <div style={{ fontSize: 11.5, color: "#0E9F6E", fontWeight: 700, marginTop: 4 }}>
-                    Done{it.completed_by_name ? ` · ${it.completed_by_kind === "team" ? "by " + it.completed_by_name + " (Structure Studio)" : it.completed_by_name}` : ""} · {fmtDate(it.completed_at)}
+                    Done{it.completed_by_name ? ` · ${it.completed_by_kind === "team" ? "by " + it.completed_by_name + " (Structure Studio)" : it.completed_by_name}` : ""}{it.completed_via === "jack" ? " with Jack" : ""} · {fmtDate(it.completed_at)}
                   </div>
                 )}
               </div>
@@ -1464,7 +3993,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin, suppor
     setSetupData((cur) => {
       if (!cur) return cur;
       const items = cur.items.map((x) => x.id === id
-        ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
+        ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null, completed_via: null }
         : x);
       const c = items.filter((i) => !i.locked);
       return { ...cur, items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };

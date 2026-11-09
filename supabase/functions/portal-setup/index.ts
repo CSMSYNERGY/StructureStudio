@@ -59,9 +59,29 @@ import { setupStepFits, shedsOnOrOpen } from "../_shared/setupShape.ts";
 // NULL) is always visible and never gated. Those are bespoke instructions written for one
 // builder who is already in the conversation.
 //
+// ── JACK (the AI agent's setup piece, jack-agent/setup.ts; migration 376) ──────────
+// Two additions, and neither lets a body decide who did anything:
+//
+//   key            setup_template_items.jack_key, read through template_item_id like the two
+//                  flags above, and sent with each row. It names a step for Jack ("business",
+//                  "paperwork", ...) so Jack never matches on a title an operator can reword.
+//                  A bespoke row (no template) and an unkeyed template row send null.
+//   viaProposal    on `toggle`. Jack ticks a step only on a person's Approve, and it says which
+//                  card. A tick is stamped completed_via='jack' only when that card is THIS
+//                  builder's, is being saved right now (status 'applying'), was approved by the
+//                  person making this call, and lists this step in payload.ticks. Anything else
+//                  is refused with one sentence. An untick that names a card clears the step
+//                  only when that card made the tick, so Jack's Undo never takes back a tick a
+//                  person made. A step a person already ticked is left as it is.
+//
+// Both reads TOLERATE a database without that migration (42703, unknown column): the list
+// answers with key null and completed_via null, the way it did before, because this list is on
+// every builder's Support page and a deploy ahead of the migration must not take it down. A
+// tick that names a card on such a database is refused rather than recorded without its marker.
+//
 // Actions:
-//   { action: "list" }                  → the tenant's items, in order, gated
-//   { action: "toggle", id, done }      → tick/untick, stamping who and when
+//   { action: "list" }                            → the tenant's items, in order, gated
+//   { action: "toggle", id, done, viaProposal? }  → tick/untick, stamping who and when
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -74,12 +94,22 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 }
 
-type Gate = { requires: string | null; visible: boolean; audience: string };
+type Gate = { requires: string | null; visible: boolean; audience: string; key: string | null };
+
+/** PostgREST's answer for a column the database doesn't have yet (a deploy ahead of the Jack setup migration). */
+// deno-lint-ignore no-explicit-any
+const unknownColumn = (e: any) => String(e?.code ?? "") === "42703";
+
+/** The kinds of Jack card that may tick a step (jack-agent/setup.ts). */
+const JACK_TICK_KINDS = new Set(["setup_company", "setup_paperwork", "setup_locations", "setup_tick"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NOT_THIS_STEP = "That approval doesn't match this step.";
 
 /** The template flags for a set of tenant rows, keyed by template_item_id.
  *
  *  FAILS CLOSED (throws) — see the posture note in the header. A row whose template says
- *  "not built yet" must not become visible because a query blipped. */
+ *  "not built yet" must not become visible because a query blipped. Only a missing jack_key
+ *  column (before that migration) is read again without it. */
 async function templateGate(
   // deno-lint-ignore no-explicit-any
   admin: any,
@@ -89,14 +119,40 @@ async function templateGate(
   const ids = [...new Set((rows ?? []).map((r) => r.template_item_id).filter(Boolean))];
   const out = new Map<string, Gate>();
   if (!ids.length) return out;
-  const { data, error } = await admin.from("setup_template_items")
-    .select("id, requires_feature, builder_visible, account_type").in("id", ids);
+  let { data, error } = await admin.from("setup_template_items")
+    .select("id, requires_feature, builder_visible, account_type, jack_key").in("id", ids);
+  // Before Jack's migration (376) there is no jack_key: the same read without it.
+  if (error && unknownColumn(error)) {
+    ({ data, error } = await admin.from("setup_template_items")
+      .select("id, requires_feature, builder_visible, account_type").in("id", ids));
+  }
   if (error) throw error;
   // deno-lint-ignore no-explicit-any
   for (const t of (data ?? []) as any[]) {
-    out.set(t.id, { requires: t.requires_feature || null, visible: t.builder_visible !== false, audience: t.account_type || "all" });
+    out.set(t.id, {
+      requires: t.requires_feature || null, visible: t.builder_visible !== false, audience: t.account_type || "all",
+      key: typeof t.jack_key === "string" && t.jack_key ? t.jack_key : null,
+    });
   }
   return out;
+}
+
+/** True when this Jack card is the one ticking this step right now (see the header). */
+async function jackCardTicks(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  clientId: string,
+  userId: string,
+  proposalId: string,
+  stepId: string,
+): Promise<boolean> {
+  const { data, error } = await admin.from("jack_proposals")
+    .select("id, kind, status, approved_by, payload").eq("id", proposalId).eq("client_id", clientId).maybeSingle();
+  if (error) throw error;
+  if (!data || !JACK_TICK_KINDS.has(String(data.kind)) || data.status !== "applying" || data.approved_by !== userId) return false;
+  const ticks = data.payload && Array.isArray(data.payload.ticks) ? data.payload.ticks : [];
+  // deno-lint-ignore no-explicit-any
+  return ticks.some((t: any) => t && String(t.id) === stepId);
 }
 
 /** Which of these features the tenant may use, failing OPEN. See the header. */
@@ -148,9 +204,13 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
 
   switch (action) {
     case "list": {
-      const { data: rows, error } = await admin.from("tenant_setup_items")
-        .select("id, template_item_id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
-        .eq("client_id", clientId).order("position");
+      const LIST_COLUMNS = "id, template_item_id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name";
+      // A select built from a string has no row type, so the rows are read as plain objects.
+      // deno-lint-ignore no-explicit-any
+      const readList = (cols: string): PromiseLike<{ data: any[] | null; error: any }> =>
+        admin.from("tenant_setup_items").select(cols).eq("client_id", clientId).order("position");
+      let { data: rows, error } = await readList(`${LIST_COLUMNS}, completed_via`);
+      if (error && unknownColumn(error)) ({ data: rows, error } = await readList(LIST_COLUMNS));
       if (error) throw error;
 
       const gate = await templateGate(admin, rows);
@@ -171,8 +231,10 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
         const locked = !!(g && g.requires) && !usable.has(g.requires!) && !r.completed_at;
         // template_item_id is internal plumbing; the browser has no use for it and it
         // names a row in a table the tenant cannot read.
-        const { template_item_id: _tpl, ...rest } = r;
-        items.push({ ...rest, locked, requiresFeature: locked ? g!.requires : null });
+        const { template_item_id: _tpl, completed_via: via, ...rest } = r;
+        // `key` and `completed_via` are Jack's (see the header): which step this is, and whether
+        // the tick came from a Jack card a person approved. Both null before that migration.
+        items.push({ ...rest, key: g?.key ?? null, completed_via: via === "jack" ? "jack" : null, locked, requiresFeature: locked ? g!.requires : null });
       }
 
       // Counts cover only what they can actually do — a padlocked step is not homework.
@@ -195,10 +257,24 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
     case "toggle": {
       const id = String(p.id ?? "").slice(0, 40);
       const done = p.done === true;
+      // Jack's card, when Jack is the one asking (see the header). Absent is a person's own press.
+      const hasVia = p.viaProposal !== undefined && p.viaProposal !== null && p.viaProposal !== "";
+      const viaProposal = hasVia ? String(p.viaProposal) : null;
+      if (hasVia && !UUID_RE.test(viaProposal!)) return json({ error: NOT_THIS_STEP }, 400);
 
       // Scoped to the resolved tenant, so an id from another account matches nothing.
-      const { data: row } = await admin.from("tenant_setup_items")
-        .select("id, title, template_item_id, completed_at").eq("id", id).eq("client_id", clientId).maybeSingle();
+      // deno-lint-ignore no-explicit-any
+      const readRow = (cols: string): PromiseLike<{ data: any; error: any }> =>
+        admin.from("tenant_setup_items").select(cols).eq("id", id).eq("client_id", clientId).maybeSingle();
+      let { data: row, error: rowErr } = await readRow("id, title, template_item_id, completed_at, completed_proposal_id");
+      // Before the Jack setup migration there is nowhere to record Jack's marker: a person's own
+      // tick still works, and Jack's is refused rather than stamped as theirs.
+      const viaColumns = !(rowErr && unknownColumn(rowErr));
+      if (!viaColumns) {
+        if (hasVia) return json({ error: "Ticking a step from Jack isn't switched on yet." }, 409);
+        ({ data: row, error: rowErr } = await readRow("id, title, template_item_id, completed_at"));
+      }
+      if (rowErr) throw rowErr;
       if (!row) return json({ error: "That setup step is not on your list." }, 404);
 
       // Re-derived here, not trusted from the browser: an id for a step that has since
@@ -220,9 +296,25 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
         }
       }
 
+      // Jack's tick: only for the card being saved right now, and never over a person's tick.
+      if (hasVia && done) {
+        if (!(await jackCardTicks(admin, clientId, userId, viaProposal!, row.id))) return json({ error: NOT_THIS_STEP }, 403);
+        if (row.completed_at) return json({ ok: true, already: true, item: row });
+      }
+      // Jack's Undo: it takes back only the tick its own card made.
+      if (hasVia && !done) {
+        if (!row.completed_at) return json({ ok: true, item: row });
+        if (row.completed_proposal_id !== viaProposal) {
+          return json({ error: "Someone ticked that step themselves, so it stays ticked.", kept: true }, 409);
+        }
+      }
+
+      // The marker travels with every write once the columns exist: a person's own tick or untick
+      // clears it, so "with Jack" is only ever said of a tick Jack's card made.
+      const via = viaColumns ? { completed_via: hasVia && done ? "jack" : null, completed_proposal_id: hasVia && done ? viaProposal : null } : {};
       let patch: Record<string, unknown>;
       if (!done) {
-        patch = { completed_at: null, completed_by_kind: null, completed_by_name: null };
+        patch = { completed_at: null, completed_by_kind: null, completed_by_name: null, ...via };
       } else {
         // WHO gets recorded is decided here, from the resolved caller — an operator in
         // view-as is us doing it for them ("we set this up on the call"), and the builder
@@ -241,6 +333,7 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
           completed_at: new Date().toISOString(),
           completed_by_kind: operator ? "team" : "client",
           completed_by_name: name.slice(0, 120),
+          ...via,
         };
       }
 

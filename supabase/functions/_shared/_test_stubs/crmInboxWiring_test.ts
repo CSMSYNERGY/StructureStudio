@@ -57,14 +57,16 @@ const WORDS = "Hi it's Pat, please call me back about the gambrel";
 // ─── One in-memory database ────────────────────────────────────────────────────────────────────
 type Row = Record<string, any>;
 
+// sent_with on both send tables is migration 378's (Jack's "Sent by Mike with Jack"); the rest is as read.
 const COLUMNS: Record<string, string[]> = {
   sms_messages: ["id", "client_id", "contact_id", "short_code", "direction", "from_number", "to_number", "body", "status", "error_code",
-    "provider", "provider_sid", "num_segments", "sent_by", "delivered_at", "created_at", "updated_at", "client_temp_id", "sent_via", "num_media"],
+    "provider", "provider_sid", "num_segments", "sent_by", "delivered_at", "created_at", "updated_at", "client_temp_id", "sent_via", "num_media",
+    "sent_with"],
   email_inbound: ["id", "client_id", "contact_id", "short_code", "from_email", "from_name", "to_email", "subject", "body_text", "body_html",
     "message_id", "in_reply_to", "references_raw", "provider", "spam_verdict", "received_at", "created_at"],
   email_sends: ["id", "client_id", "short_code", "kind", "to_email", "intended_email", "from_email", "subject", "status", "error",
     "postmark_message_id", "delivered_at", "bounced_at", "bounce_reason", "created_at", "updated_at", "provider_message_id", "contact_id",
-    "body_text", "sent_by", "client_temp_id"],
+    "body_text", "sent_by", "client_temp_id", "sent_with"],
   phone_calls: ["id", "client_id", "number_id", "contact_id", "direction", "from_e164", "to_e164", "twilio_call_sid", "client_call_sid",
     "placed_by", "answered_by", "rang_user_ids", "transferred_from", "transfer_state", "status", "started_at", "answered_at", "ended_at",
     "duration_s", "cost_cents", "error_code", "is_emergency", "handoff_state", "handoff_to", "handoff_key", "handoff_at", "handoff_sid", "handoff_from_sid"],

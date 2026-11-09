@@ -11,6 +11,9 @@
 // the router uses, so a tab without an entry renders its label with no icon rather than
 // throwing.
 const ICONS = {
+  // A robot head: Jack is the AI agent (Ahsan, 11-07). Not the speech bubble it had: the
+  // Feedback button already uses one, and a bubble reads as messages, not an assistant.
+  jack: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>,
   admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
   designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
   // Stacked layers — every control, one on top of another. Not the view-3d cube: the two pages
@@ -761,6 +764,10 @@ function Dashboard({ session }) {
   // ssAdvancedOn, so latching on the raw tab here can never mount it for a tenant without it.
   const [advancedOpened, setAdvancedOpened] = useState(false);
   useEffect(() => { if (tab === "advanced") setAdvancedOpened(true); }, [tab]);
+  // Jack stays mounted once opened too: a turn can run for two minutes, and its reply shouldn't be lost
+  // because someone clicked Contacts while they waited.
+  const [jackOpened, setJackOpened] = useState(false);
+  useEffect(() => { if (tab === "jack") setJackOpened(true); }, [tab]);
   // Does the Advanced page hold a building that is not saved, or a save still going? The page
   // reports it (AdvancedTab's onDirty), and openAccount / exitAccount ask before throwing it away
   // (the page is remounted per account). A ref: nothing renders from it.
@@ -1110,6 +1117,11 @@ function Dashboard({ session }) {
   // what the tenant has PAID for is a separate question, answered by gateEnt below for every
   // operator alike since 2026-09-15.
   const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  // JACK (migration 375): the builder's own switch, asked about the tenant on screen. A hook, so up
+  // here above the early returns. Null while the question is out: a cold /jack is held, not rewritten
+  // to /designer and back, and the nav item and the page both wait for a real yes.
+  const jackOn = useJackOn(viewing ? viewing.clientId : (tenant && tenant !== "none" ? tenant.clientId : null));
+  const jackClampOn = jackOn === true || (tab === "jack" && jackOn === null);
   // ── ADVANCED (2026-09-28): one rule, ssAdvancedOn (01-core), asked about the tenant ON SCREEN.
   // Derived inline HERE, not from gateEnt: that is declared below the early returns, and read up
   // here it would be a var-hoisted `undefined` (the placement note above). Same shape as gateEnt:
@@ -1149,7 +1161,7 @@ function Dashboard({ session }) {
   // projects branches, so passing it here refuses those two routes to a support account on
   // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub, shedsOn);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -1198,8 +1210,9 @@ function Dashboard({ session }) {
   // the raw tab — so without this line the page under /designer is blank. Leaving `tab`
   // alone is deliberate: an operator's cold /advanced?view=<ours> is refused for a moment
   // (their own entitlement answers before ?view= arms) and then resolves, and the URL follows.
+  // A refused /jack works the same way.
   useEffect(() => {
-    if (tab === "advanced" && resolvedTab === "designer") setDesignerOpened(true);
+    if ((tab === "advanced" || tab === "jack") && resolvedTab === "designer") setDesignerOpened(true);
   }, [tab, resolvedTab]);
   // The hold's time limit (see advancedHoldOver). Started afresh each time the route is held, and
   // lifted the moment a real answer lands or the builder goes elsewhere. A late "yes" still wins:
@@ -2602,10 +2615,11 @@ function Dashboard({ session }) {
   // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub, shedsOn);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn);
   // The Advanced route while it is HELD (see advancedClampOn): nobody has been given the page yet,
   // so the topbar must not name it either — for a builder without Advanced that was a flash of it.
   const advancedHeld = activeTab === "advanced" && !advancedOn;
+  const jackHeld = activeTab === "jack" && jackOn !== true;
   // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
   // an effect, and deliberately: it must already be correct on the very first render in which
   // the Settings rail appears, and an effect runs after that render has painted. Idempotent
@@ -3045,6 +3059,9 @@ function Dashboard({ session }) {
         <div className="ss-ws-nav">
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
+          {/* Jack sits first, above the Shed Designer (Ahsan, 11-03), and only on a real yes from the
+              builder's switch. A builder without the shed product still has it at the top. */}
+          {jackOn === true && navItem("jack", "Jack")}
           {/* THE SHED PRODUCT (migration 364). Carolyn 2026-11-05: "we don't need Shed Designer
               on the side we don't need inventory orders build schedule delivery schedule repairs
               commissions so those should all just go away." Every unbought page normally STAYS
@@ -3274,9 +3291,9 @@ function Dashboard({ session }) {
               same thing again over a caption line saying it a third time. Accounts and Admin
               are in the Settings rail but are ordinary pages, so they keep TAB_META. */}
           <div className="ttl">
-            {settingsActive ? settingsActive[1] : advancedHeld ? "One moment" : (TAB_META[activeTab] || [activeTab])[0]}
+            {settingsActive ? settingsActive[1] : (advancedHeld || jackHeld) ? "One moment" : (TAB_META[activeTab] || [activeTab])[0]}
             {/* "their designs" is the shed product's; a builder without it has none (migration 364). */}
-            <span>{settingsActive ? settingsActive[2] : advancedHeld ? "" : (activeTab === "contacts" && !shedsOn) ? "Everyone who has enquired, and your pipelines" : (TAB_META[activeTab] || [])[1]}</span>
+            <span>{settingsActive ? settingsActive[2] : (advancedHeld || jackHeld) ? "" : (activeTab === "contacts" && !shedsOn) ? "Everyone who has enquired, and your pipelines" : (TAB_META[activeTab] || [])[1]}</span>
           </div>
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
@@ -4110,6 +4127,16 @@ function Dashboard({ session }) {
                 own ledger under the viewed builder's banner (audit 2026-08-20). A screen
                 that quietly does something other than what it says is worse than one
                 that is absent. */}
+            {/* Mounted on first open and then kept, so a turn in progress survives a trip to another page.
+                The key still gives each tenant its own. A cold ?view= holds a slug in `viewing`, so the
+                name comes from what the shell has read about the tenant on screen. */}
+            {jackOpened && jackOn === true && !gateLocked && (
+              <div style={{ display: activeTab === "jack" ? "block" : "none" }}>
+                <JackTab key={"jack-" + effClientId} active={activeTab === "jack"} onNavigate={navigate}
+                  viewingName={viewing ? ((viewedCtx && viewedCtx.clientId === viewing.clientId && viewedCtx.companyName) || shownBusiness) : null} />
+              </div>
+            )}
+            {!gateLocked && activeTab === "jack" && jackOn !== true && <div style={{ color: "#64748B", fontSize: 14, padding: 20 }}>Checking…</div>}
             {!gateLocked && activeTab === "commissions" && (
               viewing ? (
                 <div style={{ ...S.card, maxWidth: 860, color: "#64748B", fontSize: 13, lineHeight: 1.6 }}>

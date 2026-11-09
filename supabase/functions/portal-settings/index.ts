@@ -246,6 +246,8 @@ import { AI_NOTICE_VERSION, currentAnswer, parseAiAnswer } from "../_shared/aiCo
 import { AI_TRANSCRIPTS_NOT_READY, AI_TRANSCRIPTS_VIEW_AS, readAiTranscripts, saveAiTranscripts } from "./aiTranscripts.ts";
 // Settings → Customer Hub → Forms + Email Templates (migration 325): every action in ./leadForms.ts.
 import { handleLeadFormAction } from "./leadForms.ts";
+// Jack's look-ups (migration 368): crm_customer_facts and orders_overview, read only, in ./jackReads.ts.
+import { atLocationSince, handleJackRead } from "./jackReads.ts";
 import { handleCrmFieldAction, readBuiltinOverrides, readCustomFields } from "./crmFields.ts";
 // The library of claddings, doors and windows (migration 339): its actions, the catalog's share, and
 // the rule for a library entry named on a cladding or door/window save, in ./library.ts.
@@ -784,6 +786,11 @@ const GATES: GateTable = {
   // The designs behind the orders on screen. Exists because the Orders tab shipped to
   // TENANTS (2026-09-01) and its designs read had been direct-RLS — see the action below.
   orders_designs: { area: "orders", level: "view" },
+  // Jack's look-ups (./jackReads.ts), read only. Customers sit on contacts like crm_deals_list (the
+  // crm_ prefix brings the Customer Hub check), orders on orders like orders_designs; both narrow
+  // row by row in the module the same way.
+  crm_customer_facts: { area: "contacts", level: "view" },
+  orders_overview:    { area: "orders", level: "view" },
   // Changing roof/cladding/paint on an order — reprices from the catalog and raises the
   // change order. It reads like ordinary editing and is not: on a signed order these
   // dropdowns ARE how a change order gets raised, so it sits with the others.
@@ -9153,6 +9160,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         roofType: sel.roofType ?? null, roofColor: sel.roofColor ?? null,
         bodyColor: paint.body ?? null, trimColor: paint.trim ?? null,
         createdAt: u.created_at, updatedAt: u.updated_at,
+        // When it reached the lot it's on: its latest delivered HAUL stop, never the sale stop (Jack).
+        atLocationSince: atLocationSince(u.sold_design_short_code ?? null, stops),
         estimates: estsByUnit.get(u.id) ?? [],
         // ── The Online Shop listing (migration 310) ──
         listed: !!u.listed, showPriceOnline: u.show_price_online !== false,
@@ -15260,10 +15269,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // re-stamp's own wording only; resend_quote_email answers with `sent` and `reason` as before.
   // `sender` is whoever set the send off, for the reply copy (replyCopy above): a customer who
   // answers the estimate reaches the record, and that person's inbox if they switched copies on.
+  // `id` is the email_sends row sendTenantEmail claimed for this send, when it claimed one (sent, or
+  // failed after the claim): jack-agent marks that row "with Jack" after a resend it ran.
   const sendQuoteEmail = async (
     shortCode: string,
     sender: ReplySender,
-  ): Promise<{ refused: Response } | { sent: boolean; reason: string | null; noEmail?: true }> => {
+  ): Promise<{ refused: Response } | { sent: boolean; reason: string | null; noEmail?: true; id?: string }> => {
     const { data: d, error: dErr } = await admin
       .from("designs")
       .select("short_code, contact, selections, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines")
@@ -15329,7 +15340,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .update({ ss_quote_sent_at: new Date().toISOString() })
         .eq("client_id", clientId).eq("short_code", shortCode);
     }
-    return { sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") };
+    return { sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed"), ...(outcome.id ? { id: outcome.id } : {}) };
   };
 
   if (action === "resend_quote_email") {
@@ -15343,7 +15354,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const out = await sendQuoteEmail(shortCode, signedIn);
     if ("refused" in out) return out.refused;
-    return json({ ok: true, sent: out.sent, reason: out.reason });
+    // `id` (the email_sends row) only when a row was claimed; the answer is otherwise as it always was.
+    return json({ ok: true, sent: out.sent, reason: out.reason, ...(out.id ? { id: out.id } : {}) });
   }
 
   // ── Re-pricing an issued quote's tax (2026-09-17) ───────────────────────────────────
@@ -16758,6 +16770,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // handed a second that says something different.
     const outcome = await emailChangeOrder(co);
     return json({ ok: true, sent: outcome.sent, reason: outcome.reason });
+  }
+
+  // Jack's look-ups (./jackReads.ts). After the CRM entitlement guard; NAMED here so preflight's
+  // GATES ⇄ branch check sees them.
+  if (action === "crm_customer_facts" || action === "orders_overview") {
+    return await handleJackRead({
+      admin, req, clientId, action, payload: (payload ?? {}) as Record<string, unknown>, json, dbFail, canRead,
+      meetingsOwnOnly: ownMeetingsOnly(access), phoneOwnOnly: ownPhoneOnly(access), selfUserId: selfUserId ?? null,
+      visibleContactIds, visibleDesignRows,
+    });
   }
 
   // ── order_paperwork: everything the invoice-style order document needs (migration 127) ──

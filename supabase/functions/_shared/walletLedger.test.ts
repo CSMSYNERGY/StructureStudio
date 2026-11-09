@@ -9,7 +9,7 @@
 // `usage`, or a `*` ever reaches one of its wallet_transactions selects. The handler itself, with
 // what it actually puts on the wire, is driven in _test_stubs/walletTransactions_test.ts.
 //
-// The rest pin the rules a builder sees: the five chips partition the ledger (so All is their
+// The rest pin the rules a builder sees: the six chips partition the ledger (so All is their
 // sum), the labels the wallet card already showed did not change, amounts to four places, and
 // the CSV export cannot carry a spreadsheet formula.
 //
@@ -18,9 +18,9 @@
 
 import {
   applyLedgerFilter, CALL_METERS, centsToDecimal, costPlusNote, csvCell, exactBalance, FORBIDDEN_LEDGER_COLUMNS, FUNDS_KINDS,
-  isTimeZone, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_HEADER, LEDGER_FILTERS, LEDGER_PAGE_MAX, ledgerCategory,
-  ledgerCsv, ledgerDate, type LedgerFilter, type LedgerRaw, microsToDecimal, parseLedgerQuery, TAX_METERS, TEXT_METERS, toLedgerRow,
-  walletLineLabel,
+  isTimeZone, JACK_METER, JACK_METERS, JACK_WELCOME_MEMO, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_HEADER, LEDGER_FILTERS,
+  LEDGER_PAGE_MAX, ledgerCategory, ledgerCsv, ledgerDate, type LedgerFilter, type LedgerRaw, microsToDecimal, onlyIfJackOn,
+  parseLedgerQuery, TAX_METERS, TEXT_METERS, toLedgerRow, walletLineLabel,
 } from "./walletLedger.ts";
 
 function assert(cond: unknown, msg: string) {
@@ -146,7 +146,7 @@ function splitTop(expr: string): string[] {
 }
 
 const KINDS = ["topup", "debit", "refund", "grant", "adjustment", "reversal"];
-const METERS = [null, ...CALL_METERS, ...TEXT_METERS, ...TAX_METERS, "video_3d_generation", "photo_background_change", "phone_line_monthly", "sms_number_monthly"];
+const METERS = [null, ...CALL_METERS, ...TEXT_METERS, ...TAX_METERS, ...JACK_METERS, "video_3d_generation", "photo_background_change", "phone_line_monthly", "sms_number_monthly"];
 
 Deno.test("every kind × meter lands under exactly one chip, and it is the one ledgerCategory names", () => {
   const filters = LEDGER_FILTERS.filter((f) => f !== "all");
@@ -179,6 +179,10 @@ Deno.test("the chips mean what the Billing tab says they mean", () => {
   eq(ledgerCategory({ kind: "debit", meter_kind: "video_3d_generation" }), "other", "a 3D generation");
   eq(ledgerCategory({ kind: "debit", meter_kind: "phone_line_monthly" }), "other", "the line fee");
   eq(ledgerCategory({ kind: "debit", meter_kind: null }), "other", "an unlabelled debit");
+  eq(ledgerCategory({ kind: "debit", meter_kind: "jack_ai" }), "jack", "a Jack answer or price list read");
+  eq(ledgerCategory({ kind: "refund", meter_kind: "jack_ai" }), "jack", "a refunded Jack charge stays with Jack");
+  eq(ledgerCategory({ kind: "grant", meter_kind: null, memo: JACK_WELCOME_MEMO } as { kind: string; meter_kind: null }), "funds", "the $50 welcome credit is money in, under Funds");
+  eq([JACK_METER, JACK_METERS], ["jack_ai", ["jack_ai"]], "376's meter");
 });
 
 // ── 3. Labels ──────────────────────────────────────────────────────────────────────────────
@@ -193,6 +197,18 @@ Deno.test("the labels the wallet card already showed are unchanged", () => {
   eq(walletLineLabel({ kind: "debit", meter_kind: "tax_invoice" }), "Invoice tax check", "invoice tax");
   eq(walletLineLabel({ kind: "debit", meter_kind: null }), "Usage", "an unknown debit");
   eq(walletLineLabel({ kind: "debit", meter_kind: "photo_background_change" }), "Photo background change", "312's meter has a name, not Usage");
+});
+
+Deno.test("a Jack line reads the memo jack-agent writes, and the welcome credit says what it is", () => {
+  eq(walletLineLabel({ kind: "debit", meter_kind: "jack_ai", memo: "Jack · answer" }), "Jack · answer", "an answer");
+  eq(walletLineLabel({ kind: "debit", meter_kind: "jack_ai", memo: "Jack · price list read" }), "Jack · price list read", "a price list read");
+  eq(walletLineLabel({ kind: "debit", meter_kind: "jack_ai", memo: null }), "Jack", "no memo: the meter's name, never Usage");
+  eq(walletLineLabel({ kind: "grant", memo: JACK_WELCOME_MEMO }), "Jack welcome credit from CSM Synergy", "the $50");
+  eq(JACK_WELCOME_MEMO, "Jack welcome credit", "the memo billing.ts grants under");
+  // Any other grant memo is an operator's note, never shown.
+  eq(walletLineLabel({ kind: "grant", memo: "Jack welcome credit, and a goodwill top-up for the outage" }), "Credit from CSM Synergy", "only the exact memo");
+  const row = toLedgerRow(raw({ id: 21, meter_kind: "jack_ai", memo: "Jack · answer", amount_cents: -1, amount_exact_micros: -6_225, balance_after_cents: 4999, balance_after_exact_micros: 49_993_775 }));
+  eq([row.category, row.description, row.precise], ["jack", "Jack · answer", true], "a Jack line: Jack chip, its memo, four places");
 });
 
 Deno.test("a tax line reads the memo taxMeter.ts writes: the meter, the document and the state", () => {
@@ -225,6 +241,32 @@ Deno.test("cost-plus meters are described, not priced", () => {
   eq(costPlusNote("sms_in"), "Billed per text", "texts in");
   eq(costPlusNote("something_new", "minute"), "Billed per minute", "an unknown minute meter");
   eq(costPlusNote("something_new", "generation"), "Billed per use", "anything else");
+  eq(costPlusNote("jack_ai", "answer"), "Billed per answer and per price list read", "Jack");
+});
+
+// Jack ships dark, and its meter would list on every builder's wallet card once it is armed.
+Deno.test("Jack's meter is on the card only where Jack is on", () => {
+  const rows = [{ kind: "voice_minute" }, { kind: "jack_ai" }, { kind: "door_look_generation" }];
+  eq(onlyIfJackOn(rows, true).map((r) => r.kind), ["voice_minute", "jack_ai", "door_look_generation"], "on");
+  eq(onlyIfJackOn(rows, false).map((r) => r.kind), ["voice_minute", "door_look_generation"], "off");
+  // A value that isn't exactly true (an unread flag passed through by mistake) hides it.
+  eq(onlyIfJackOn(rows, "yes" as unknown as boolean).map((r) => r.kind), ["voice_minute", "door_look_generation"], "not exactly true");
+  eq(onlyIfJackOn([], false), [], "an empty list");
+});
+
+Deno.test({
+  name: "portal-billing's status hides Jack's meter unless a jack_on read worked and said true",
+  ignore: !canRead(BILLING),
+  fn: async () => {
+    const src = codeOnly(await read(BILLING));
+    const at = src.indexOf("meterRows.some((p) => p.kind === JACK_METER)");
+    assert(at > 0, "portal-billing no longer asks whether Jack's meter is in the list — re-point this pin");
+    const block = src.slice(at, at + 600);
+    assert(block.includes('.from("client_settings").select("jack_on").eq("client_id", clientId)'), "the jack_on read is not the caller's own tenant row");
+    assert(block.includes("meterRows = onlyIfJackOn(meterRows, !jackErr && jackRow?.jack_on === true);"), "the filter is not fail-closed on the read");
+    // It runs before the list is turned into the card's meters.
+    assert(at < src.indexOf("const meters = meterRows.map("), "the Jack filter runs after the card's meters are built");
+  },
 });
 
 // ── 4. The request ─────────────────────────────────────────────────────────────────────────
@@ -253,7 +295,7 @@ Deno.test("limits, cursors, dates and formats are validated, and the page size i
   for (const f of LEDGER_FILTERS) eq(ok({ filter: f }).filter, f, `filter ${f}`);
   bad({ filter: "everything" });
   const refusal = parseLedgerQuery({ filter: "everything" });
-  eq(refusal.ok ? null : refusal.error, "Choose All, Calls, Texts, Tax, Funds or Other.", "the refusal names every chip");
+  eq(refusal.ok ? null : refusal.error, "Choose All, Calls, Texts, Tax, Jack, Funds or Other.", "the refusal names every chip");
   const q = ok({ from: "2026-10-01T05:00:00.000Z", to: "2026-11-01T05:00:00.000Z" });
   eq([q.from, q.to], ["2026-10-01T05:00:00.000Z", "2026-11-01T05:00:00.000Z"], "dates pass through as instants");
   bad({ from: "next tuesday" });
@@ -386,9 +428,9 @@ Deno.test("dates fall back to UTC when the zone cannot be used", () => {
 
 // Keep the filter type honest: a chip added to the list without a category would make All more
 // than the sum of the chips.
-Deno.test("the chip list is All plus exactly the five categories", () => {
+Deno.test("the chip list is All plus exactly the six categories", () => {
   const chips: LedgerFilter[] = [...LEDGER_FILTERS];
-  eq(chips, ["all", "calls", "texts", "tax", "funds", "other"], "chips");
+  eq(chips, ["all", "calls", "texts", "tax", "jack", "funds", "other"], "chips");
 });
 
 // The Billing tab's chips are authored in portal/03-catalog.jsx (WALLET_TX_FILTERS). A chip the
@@ -404,5 +446,20 @@ Deno.test({
     assert(m, "WALLET_TX_FILTERS not found in portal/03-catalog.jsx");
     const keys = [...m![1].matchAll(/\["([a-z]+)", "/g)].map((x) => x[1]);
     eq(keys, [...LEDGER_FILTERS], "portal chips");
+  },
+});
+
+// Jack ships dark. Its chip is drawn only where the wallet card lists Jack's meter, which portal-billing
+// sends only once jack_ai is armed and only where jack_on is true, so a builder without Jack never sees
+// the name on their Transactions card.
+Deno.test({
+  name: "the Jack chip shows only where the wallet card lists Jack's meter",
+  ignore: !canRead(CATALOG),
+  fn: async () => {
+    const src = codeOnly(await read(CATALOG));
+    assert(src.includes("function WalletTransactions({ reloadKey, recent = [], jackChip = false })"), "WalletTransactions no longer takes jackChip, defaulting to hidden");
+    assert(src.includes('WALLET_TX_FILTERS.filter(([k]) => k !== "jack" || jackChip).map('), "the chips are drawn without the Jack check");
+    eq((src.match(/WALLET_TX_FILTERS\.(?:filter|map)\(/g) ?? []).length, 1, "the chips are drawn in one place");
+    assert(/<WalletTransactions [^>]*jackChip=\{\(data\.wallet\.meters \|\| \[\]\)\.some\(\(m\) => m && m\.kind === "jack_ai"\)\}/.test(src), "the mount doesn't take the chip from the meter list");
   },
 });

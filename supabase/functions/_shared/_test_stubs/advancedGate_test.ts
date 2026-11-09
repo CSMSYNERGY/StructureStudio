@@ -239,7 +239,8 @@ Deno.test("the nav item and the page mount both ask advancedOn, never the held c
 });
 
 Deno.test("both route clamps are handed the gate", () => {
-  // …and since migration 364 both are handed `shedsOn` after `sub`, the clamp's ninth argument.
-  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
-  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn\);/.test(SHELL), "the render clamp must pass advancedClampOn");
+  // …and since migration 364 both are handed `shedsOn` after `sub`, the clamp's ninth argument, and
+  // Jack's `jackClampOn` after that, the tenth.
+  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn, jackClampOn\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
+  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn, jackClampOn\);/.test(SHELL), "the render clamp must pass advancedClampOn");
 });

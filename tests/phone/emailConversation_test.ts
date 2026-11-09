@@ -89,9 +89,10 @@ Deno.test("crmFeed before migration 261: no body_text column still shows every s
     storage: { from: () => ({ createSignedUrls: () => Promise.resolve({ data: [] }) }) },
   };
   const feed = await buildCrmFeed(admin, "demo-tenant", { codes: ["SS-DEMO2345"], contactId: CONTACT });
-  // Three asks since migration 262: with 262's open columns, without them, then without body_text.
-  assertEquals(asked.length, 3, "asked with body_text (and 262's columns), then with fewer until it is left out");
-  assert(!/\bbody_text\b/.test(asked[2]), `the last retry leaves body_text out: ${asked[2]}`);
+  // Four asks since migration 378: with 378's sent_with, without it, without 262's open columns, then
+  // without body_text.
+  assertEquals(asked.length, 4, "asked with body_text (and 262's and 378's columns), then with fewer until it is left out");
+  assert(!/\bbody_text\b/.test(asked[3]), `the last retry leaves body_text out: ${asked[3]}`);
   const byId = (id: string) => feed.find((e) => e.id === `e:${id}`);
   assertEquals([byId("e1")?.title, byId("e1")?.body], ["Your shed", "Emailed to cam@example.test"], "an email with no words keeps its old line");
   assertEquals(byId("e2")?.title, "Quote emailed to cam@example.test", "document mail is still there");

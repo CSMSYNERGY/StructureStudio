@@ -35,6 +35,16 @@ export type FeedEvent = {
    *  the customer sent. Present only on document events; the browser opens it in the pop-up
    *  viewer. Signed and short-lived for anything in a private bucket. */
   url?: string | null;
+  /** "jack" on our own text or email that a person sent by pressing Approve on a Jack card (migration
+   *  378's sent_with). Absent on every other event. */
+  via?: "jack";
+  /** With `via` only: whoever pressed Approve on the Jack card. Their name on this builder's team ("a team member" when no
+   *  name is set), or "a former team member" for someone no longer on it. null when nobody can be named:
+   *  no sender recorded, a StructureStudio operator (byOperator), or the people couldn't be read. */
+  byName?: string | null;
+  /** With `via` only: true when a StructureStudio operator pressed Approve in view-as (app_operators says
+   *  so). The record page then says "the Structure Studio team". Absent otherwise. */
+  byOperator?: true;
 };
 
 // The chip vocabulary, shared with the browser. The chip row and this filter read the SAME
@@ -201,7 +211,9 @@ export async function buildCrmFeed(
     // vanish from every record page with nothing logged. On that one error the read is tried
     // again with fewer columns, newest migration first: without 262's opened_at / open_count /
     // complained_at (the email shows no "Opened" or "Marked as spam"), then without 261's body_text too (no words, so the
-    // "Emailed to …" line below). delivered_at and bounced_at are 107's and always there.
+    // "Emailed to …" line below). delivered_at and bounced_at are 107's and always there. The newest is
+    // 378's sent_with (with 261's sent_by, which it needs): ahead of 378 the first ask is refused and the
+    // second is the read this always made, so nothing is lost but the "with Jack" line nobody has yet.
     (codes.length || opts.contactId)
       ? (async () => {
           const read = (cols: string) => admin.from("email_sends")
@@ -214,7 +226,7 @@ export async function buildCrmFeed(
             .order("created_at", { ascending: false }).limit(80);
           const BASE = "id, short_code, contact_id, kind, to_email, subject, status, created_at, delivered_at, bounced_at";
           let r: any = null;
-          for (const cols of [`${BASE}, body_text, opened_at, open_count, complained_at`, `${BASE}, body_text`, BASE]) {
+          for (const cols of [`${BASE}, body_text, opened_at, open_count, complained_at, sent_by, sent_with`, `${BASE}, body_text, opened_at, open_count, complained_at`, `${BASE}, body_text`, BASE]) {
             r = await read(cols);
             if (!(r?.error && ["42703", "PGRST204"].includes(String(r.error.code)))) break;
           }
@@ -259,15 +271,29 @@ export async function buildCrmFeed(
     // design record carries the code, one that is simply a reply to the person carries only
     // the contact, and an `or` keeps the 80-row cap over the merged history rather than
     // applying it twice.
+    //
+    // ⚠️ NOT q() alone, for the reason the email_sends read above gives: sent_with is migration 378's,
+    // and before it is applied the database refuses a read that names it (42703). q() would turn that
+    // into [] and blank every record page's texting history. On that one refusal the read is tried
+    // again with the columns it always had (sent_by is 150's; it is only needed with sent_with).
     (codes.length || opts.contactId)
-      ? q(admin.from("sms_messages")
-          .select("id, direction, short_code, contact_id, from_number, to_number, body, status, error_code, created_at")
-          .eq("client_id", clientId)
-          .or([
-            codes.length ? `short_code.in.(${codes.join(",")})` : null,
-            opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
-          ].filter(Boolean).join(","))
-          .order("created_at", { ascending: false }).limit(80))
+      ? (async () => {
+          const read = (cols: string) => admin.from("sms_messages")
+            .select(cols)
+            .eq("client_id", clientId)
+            .or([
+              codes.length ? `short_code.in.(${codes.join(",")})` : null,
+              opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
+            ].filter(Boolean).join(","))
+            .order("created_at", { ascending: false }).limit(80);
+          const BASE = "id, direction, short_code, contact_id, from_number, to_number, body, status, error_code, created_at";
+          let r: any = null;
+          for (const cols of [`${BASE}, sent_by, sent_with`, BASE]) {
+            r = await read(cols);
+            if (!(r?.error && ["42703", "PGRST204"].includes(String(r.error.code)))) break;
+          }
+          return r?.data ?? [];
+        })().catch(() => [])
       : Promise.resolve([]),
     // FIELD EDITS (migration 141). Contact-scoped only: a field change is a change to the
     // PERSON, and it belongs on their record whichever design you arrived from. A design
@@ -392,6 +418,18 @@ export async function buildCrmFeed(
     }
   }
 
+  // SENT WITH JACK (migration 378). Our own text or email whose row says sent_with = 'jack' carries
+  // via: "jack" and the name of whoever pressed Approve (byName, filled in below from the one client_users
+  // read, once the names are known). Every other event is left exactly as it was.
+  const jackSent: { ev: FeedEvent; by: string | null }[] = [];
+  const markJack = (ev: FeedEvent, row: any): FeedEvent => {
+    if (row?.sent_with !== "jack") return ev;
+    ev.via = "jack";
+    ev.byName = null;
+    jackSent.push({ ev, by: typeof row.sent_by === "string" && row.sent_by ? row.sent_by : null });
+    return ev;
+  };
+
   // email_sends is the table that makes the Emails chip REAL. Nothing in the portal reads
   // it today, so every quote and invoice email we have ever sent is invisible in the UI.
   for (const e of emails as any[]) {
@@ -412,9 +450,9 @@ export async function buildCrmFeed(
     // status moves up to the title, so a send that failed still says so: a failed email that
     // reads like a sent one is the builder finding out from the customer.
     const words = typeof e.body_text === "string" && e.body_text.trim() ? e.body_text : null;
-    push(e.kind === "conversation"
+    push(markJack(e.kind === "conversation"
       ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${e.subject || "(no subject)"}${words ? st : ""}`, body: words ?? `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email", meta }
-      : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email", meta });
+      : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email", meta }, e));
   }
   // Estimates are ACCEPTED, never signed (Carolyn 2026-10-17: "I don't want ANY signatures on
   // estimates… the customer signs the invoice"). Only invoices and change orders read "signed".
@@ -522,7 +560,7 @@ export async function buildCrmFeed(
     const suffix = out && st && st !== "sent" && st !== "delivered"
       ? ` — ${st}${t.error_code ? ` (carrier code ${t.error_code})` : ""}`
       : "";
-    push({
+    const ev: FeedEvent = {
       id: `sm:${t.id}`,
       type: out ? "sms" : "sms_in",
       at: iso(t.created_at),
@@ -534,7 +572,8 @@ export async function buildCrmFeed(
       code: t.short_code,
       icon: out ? "sms" : "sms_in",
       meta: { direction: t.direction, status: st || null },
-    });
+    };
+    push(out ? markJack(ev, t) : ev);
   }
   // FIELD EDITS — the half of "everything that they did with that lead was logged" that had
   // nothing to log until there was an editor (migration 141).
@@ -558,21 +597,58 @@ export async function buildCrmFeed(
   const callRows = scopeCallRows(calls as any[], opts.phone);
   const knownUsers = new Set<string>();
   const nameByUser = new Map<string, string>();
+  // Who is on THIS builder's team (client_users.client_id), for "Sent by … with Jack" only. The read
+  // below is not narrowed by tenant, so without this an operator who is also a member of some other
+  // account would be named on this builder's timeline.
+  const onThisTeam = new Set<string>();
   // ONE read of client_users for every person this feed names: owners on either side of an
-  // owner change, and whoever placed or answered a call. Made only when there is someone to
-  // resolve, so a record with neither costs nothing extra.
+  // owner change, whoever placed or answered a call, and whoever pressed Approve on a Jack card. Made
+  // only when there is someone to resolve, so a record with none of those costs nothing extra.
   const peopleIds = Array.from(new Set(
     [
       ...ownerRows.flatMap((f) => [f.old_value, f.new_value]),
       ...callRows.flatMap((c) => [c.placed_by, c.answered_by]),
+      ...jackSent.map((j) => j.by),
     ].filter((v: unknown): v is string => typeof v === "string" && !!v),
   ));
+  // The name this builder's team knows them by (a member of two accounts may carry two).
+  const teamName = new Map<string, string>();
+  // Whether the people read answered. q() turns a failure into no rows, which the owner lines have
+  // always read as "a former team member"; a Jack line names nobody instead.
+  let peopleRead = true;
   if (peopleIds.length) {
-    const users = await q(admin.from("client_users").select("user_id, full_name").in("user_id", peopleIds));
-    for (const u of users as any[]) {
+    const users = await admin.from("client_users").select("user_id, full_name, client_id").in("user_id", peopleIds)
+      .then((r: any) => r, () => ({ data: null, error: { message: "threw" } }));
+    if (users?.error) peopleRead = false;
+    for (const u of (users?.data ?? []) as any[]) {
       knownUsers.add(u.user_id);
       if (u.full_name) nameByUser.set(u.user_id, u.full_name);
+      if (u.client_id === clientId) {
+        onThisTeam.add(u.user_id);
+        if (u.full_name) teamName.set(u.user_id, u.full_name);
+      }
     }
+  }
+  // Who pressed Approve on a Jack card: a teammate by name ("a team member" with no name set, the owner
+  // line's words); a StructureStudio operator only when app_operators says so (one read, of the ids
+  // that aren't on this team, made only when there are any); anyone else is someone who has left this
+  // team, "a former team member" as the owner line says it. When a read failed, or no sender is
+  // recorded, nobody is named: a builder's own rep is never credited to the platform, nor the platform
+  // to a rep.
+  const offTeam = Array.from(new Set(jackSent.map((j) => j.by).filter((v): v is string => !!v && !onThisTeam.has(v))));
+  let operators: Set<string> | null = new Set();
+  if (peopleRead && offTeam.length) {
+    const ops = await admin.from("app_operators").select("user_id").in("user_id", offTeam)
+      .then((r: any) => r, () => ({ data: null, error: { message: "threw" } }));
+    operators = ops?.error ? null : new Set(((ops?.data ?? []) as any[]).map((o) => String(o.user_id)));
+  }
+  for (const j of jackSent) {
+    j.ev.byName = null;
+    if (!j.by || !peopleRead) continue;
+    if (onThisTeam.has(j.by)) j.ev.byName = teamName.get(j.by) ?? "a team member";
+    else if (operators === null) continue;
+    else if (operators.has(j.by)) j.ev.byOperator = true;
+    else j.ev.byName = "a former team member";
   }
   const whoIs = (v: string | null): string =>
     !v ? "Unassigned"

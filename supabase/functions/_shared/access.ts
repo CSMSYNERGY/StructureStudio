@@ -152,7 +152,14 @@ export const AREAS: Area[] = [
   // ⚠️ access.ts is bundled per function: every function that bundles it must be redeployed with
   // this change, or its copy drops `price_override` from a saved Team grant as an unknown key.
   { key: "price_override",    label: "Override prices",    group: "workspace", hint: "Change a line's price in the Designer", levels: ["none", "edit"] },
-  { key: "designs",           label: "Designs",            group: "workspace", hint: "Customer designs and quotes",         levels: RVE },
+  // JACK (migration 375): the AI agent's tab. Two levels, like Override prices: you either may ask it
+  // to do work or you may not. Admins by preset, every other title omits it, so an owner or admin ticks
+  // it on for the people they choose. Pressing Approve still needs the area the change touches
+  // (settings_structures for prices), because Jack saves through the same routes a person's screen uses.
+  // internalOnly while structure-studio is the only account with it, so no other builder's Team screen
+  // shows a switch for a tab they don't have. Take it off when Jack goes to the first outside builder.
+  { key: "jack",              label: "Jack",               group: "workspace", hint: "Ask the AI agent to do the work",      levels: ["none", "edit"], internalOnly: true },
+  { key: "designs",           label: "Designs",          group: "workspace", hint: "Customer designs and quotes",         levels: RVE },
   // 'own' = see only the customers you are ASSIGNED TO or FOLLOWING — and, because a quote
   // belongs to a customer and not to a rep, only those customers' designs and browsing leads.
   //
@@ -379,6 +386,8 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     // Override prices (migration 277): admins by preset, like Approve Changes. Every title below
     // OMITS it — omission is how a preset denies, and it is what keeps it off every rep on day one.
     price_override: "edit",
+    // Jack (migration 375): the same shape, for the same reason.
+    jack: "edit",
     change_orders: "edit", change_order_approve: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
     meetings: "edit",

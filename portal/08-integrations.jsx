@@ -2073,6 +2073,7 @@ function ssLevelLabel(areaKey, lv) {
   // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
   // edited. Two levels, so this row renders two buttons rather than three.
   if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
+  if (areaKey === "jack") return ({ none: "No", edit: "Can use Jack" })[lv] || lv;
   // Override prices (migration 277) is a yes/no as well: may this person type a line's price in
   // the Designer. "Edit" would read as editing something else.
   if (areaKey === "price_override") return ({ none: "No", edit: "Can change prices" })[lv] || lv;

@@ -321,7 +321,7 @@ let ssTargetUserId = null;
 // support-agent joined on 2026-10-27 (migration 340) for the OPPOSITE reason: so a view-as call
 // reaches the server AS one, which then refuses it. The assistant answers for the signed-in builder
 // only; without the injection a stray call would quietly answer for the operator's own account.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings", "support-agent"];
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments", "portal-meetings", "support-agent", "jack-agent"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
@@ -677,6 +677,11 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 // operators still have a password-only way into the console.)
 
 const TAB_META = {
+  // The AI agent (migration 375). Ships dark: the tab exists only where useJackOn says so.
+  // Every card's button is Approve, a send card's too (jack-agent sends.ts), but cards also have Not now,
+  // Undo and answers, so the line names no button. Short, so it isn't cut off beside the view-as banner at 1280 wide (the header doesn't
+  // wrap), and the box below already says "Tell Jack what you need".
+  jack: ["Jack", "Nothing happens until you press a button on a card."],
   designer: ["Shed Designer", "Design a building and build an estimate"],
   // Our own account, and a builder who switched Advanced mode on in Settings — see ssAdvancedOn below.
   advanced: ["Advanced", "Design a building from scratch with every shape control"],
@@ -1052,6 +1057,7 @@ const NONADMIN_TABS = ["designer", "contacts", "conversations", "orders", "suppo
 // person's own submissions, and the
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
+  jack: "jack",
   designer: "designer",
   // The same area as the Designer: it IS the designer, one building at a time. Whether the page
   // exists at all for this tenant is ssAdvancedOn's question, asked by ssClampTab, not this map's.
@@ -2551,7 +2557,7 @@ function ssFallbackTab(access) {
 // The shell's two route clamps pass it; every other caller asks about a non-settings tab and
 // leaves it null, which changes nothing for them.
 function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator,
-  advancedOn = false, sub = null, shedsOn = true) {
+  advancedOn = false, sub = null, shedsOn = true, jackOn = false) {
   // NO SHED PRODUCT (migration 364). FIRST — above the advanced branch, which recurses into
   // "designer": with sheds off that target is barred too, so letting it recurse would land
   // someone on a page the rail does not offer. Above the canAdmin bypass for the same reason
@@ -2561,6 +2567,9 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
+  // Jack the same way: where the builder's switch is off (the Jack migration), the page doesn't exist.
+  // shedsOn goes along, so a builder without the shed product isn't sent to a Designer they don't have.
+  if (tab === "jack" && !jackOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects, false, sub, shedsOn);
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
   // role branches on purpose: an admin bookmark to /reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.
@@ -3706,6 +3715,7 @@ const SS_NAV_WARM = {
   "delivery-schedule": ["portal-schedule"],
   repairs: ["portal-schedule"],
   commissions: ["portal-commissions"],
+  jack: ["jack-agent"],
   calls: ["portal-settings"],                           // phone_calls_report
   settings: ["portal-settings"],                        // Structures' catalog read
   support: ["portal-setup"],                            // the setup checklist
