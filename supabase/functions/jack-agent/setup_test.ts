@@ -1052,6 +1052,22 @@ Deno.test("guide: every Settings > Options tab has its own guide, and insulation
   assert(GUIDES.addons.sub === "interior" && !/insulation|spray/i.test(GUIDES.addons.say), GUIDES.addons.say);
 });
 
+// Carolyn, 11-10: "port this number from my GHL account" got a carrier port's account number and PIN.
+Deno.test("guide: bringing a number points at the Bring your number card and hands Claude the real process", async () => {
+  const w = new World();
+  const { deps, s } = turn(w);
+  const out = JSON.parse((await tool(deps, s, "point_to_step", { key: "bring_number" })).content);
+  assertEquals([out.shown, lastCard(w).preview.route], [true, { page: "settings", sub: "phone" }]);
+  assert(/Bring a number you already have/.test(lastCard(w).preview.say) && /PIN/.test(lastCard(w).preview.say));
+  // A GoHighLevel move is a HighLevel ticket: no account number or PIN, one or two business days.
+  assert(/GoHighLevel number is not a carrier port/.test(out.how) && /no account number or PIN is needed/.test(out.how), out.how);
+  assert(/Never ask for a PIN/.test(out.how) && /SMS - A2P/.test(out.how) && /how/.test(out.note), out.how);
+  // The plain phone guide carries no process, and the tool tells Claude to use bring_number for a port.
+  assertEquals(GUIDES.phone.how, undefined);
+  const point = setupPiece.tools.find((t) => t.def.name === "point_to_step")!;
+  assert(/bring_number/.test(point.def.description));
+});
+
 Deno.test("guide: every page a guide names is a real settings tab, and every guide is short and plain", () => {
   const subs = new Set(["company", "branding", "team", "commissions", "locations", "crews", "drivers", "tax", "payments", "sheds", "options", "colors", "designer", "connection", "quickbooks", "doors", "windows", "ramps", "interior", "email", "sms", "phone", "wallet", "vents", "cladding", "interior-walls", "electrical", "insulation", "delivery", "foundation"]);
   for (const [key, g] of Object.entries(GUIDES)) {

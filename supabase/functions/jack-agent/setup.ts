@@ -63,10 +63,25 @@ const EMPTY = { type: "object", additionalProperties: false, required: [], prope
 // Company, settings/options opens Wall heights, locations left Team, structures is an alias due to go),
 // so a step's route is decided here, never read from the row.
 
-export interface Guide { title: string; where: string; page: string | null; sub: string | null; area: string | null; say: string }
+// `how` is for Claude only (the card shows `say`): the facts of a process Jack can't run, so it explains
+// the real steps instead of guessing them.
+export interface Guide { title: string; where: string; page: string | null; sub: string | null; area: string | null; say: string; how?: string }
 
-const guide = (title: string, where: string, sub: string | null, area: string | null, say: string, page: string | null = "settings"): Guide =>
-  ({ title, where, page: sub ? page : null, sub, area, say });
+const guide = (title: string, where: string, sub: string | null, area: string | null, say: string, page: string | null = "settings", how?: string): Guide =>
+  ({ title, where, page: sub ? page : null, sub, area, say, ...(how ? { how } : {}) });
+
+// Moving a number a builder already has (workers/phone-api/PORTING.md, the portal's Bring your number card).
+// Carolyn, 11-10: "I want to port this number from my GHL account" got generic carrier-port advice (account
+// number, PIN), which a GoHighLevel number doesn't need.
+const BRING_NUMBER_HOW = [
+  "They don't move the number themselves and you can't start it: they send a request on the Bring your number card (press \"Bring a number you already have\") and the Structure Studio team does the move.",
+  "The card asks for the number or numbers, the phone company it's with now, whether it's a GoHighLevel (LC Phone) number, who can approve the move (the account holder's name and email) and, optionally, when it can move. Then \"Send to Structure Studio\". Its status reads Sent to Structure Studio, then Being moved, then Moved.",
+  "Never ask for a PIN, password, account number or bill, in the chat or on the card, and tell them not to send one. The card refuses them. The team asks for what the move needs by phone when it's booked and never stores it.",
+  "A GoHighLevel number is not a carrier port: the team asks HighLevel to move it, usually within one or two business days, and no account number or PIN is needed. Keep the GoHighLevel account and the number active until it has moved.",
+  "A number from another phone company takes at least a week. The team calls the account holder for that carrier's account number (and the port-out PIN for a mobile number). The account holder then gets the transfer to sign by email and has 30 days to sign it. The name and service address must match that carrier's bill exactly, or the move is rejected. Keep that account active until it's done.",
+  "Texting doesn't move with a number. If they text from it, they should submit Settings > Customer Hub > SMS - A2P before the move: calls work as soon as the number lands, but texts from it stop until its new registration clears (a few days to three weeks).",
+  "Only someone who can change the phone setup sees the card. Anyone else asks an owner or admin.",
+].join(" ");
 
 export const GUIDES: Record<string, Guide> = {
   password: guide("Set your password", "the email we sent you", null, null, "Use the sign-in link in the email we sent, then set a password you'll remember."),
@@ -101,8 +116,11 @@ export const GUIDES: Record<string, Guide> = {
   paperwork: guide("How estimates and invoices go out", "Settings > GHL Connection", "connection", "settings_crm", "Through your CRM, or issued by Structure Studio, with your starting numbers."),
   sales_tax: guide("Sales tax", "Settings > Company > Sales Tax", "tax", "settings_crm", "Set your sales tax rate there. Enter 0% if you don't collect sales tax. I can't change tax settings."),
   email_domain: guide("Email from your own domain", "Settings > Customer Hub > Email Settings", "email", "settings_email", "Add the records shown there at your DNS host, so estimates come from your own address."),
-  texting: guide("Text messaging", "Settings > Customer Hub > Text Messaging", "sms", "settings_billing", "Texting from your own number, once the carriers approve your business."),
+  texting: guide("Text messaging", "Settings > Customer Hub > SMS - A2P", "sms", "settings_billing", "Texting from your own number, once the carriers approve your business."),
   phone: guide("Phone", "Settings > Customer Hub > Phone", "phone", "phone", "Who answers your business number, and the phone apps."),
+  bring_number: guide("Bring your number", "Settings > Customer Hub > Phone, the Bring your number card", "phone", "phone",
+    "Press \"Bring a number you already have\", fill in the number, the company it's with, whether it's GoHighLevel, and who can approve the move. Leave out any PIN or account number. Structure Studio calls to book it.",
+    "settings", BRING_NUMBER_HOW),
   team: guide("Team and access", "Settings > Company > Team", "team", "settings_team", "Add each person with their email and job title. The access grid decides what each one can see and change."),
   locations: guide("Sales lots", "Settings > Company > Locations", "locations", "settings_team", "Your sales lots, and each lot's own tax rate."),
   commissions: guide("Commissions", "Settings > Company > Commissions", "commissions", "commissions", "How reps earn. An owner sets this up."),
@@ -1052,7 +1070,7 @@ async function applyTick(deps: Deps, p: ProposalRow): Promise<ApplyOutcome> {
 const pointTool: ToolSpec = {
   def: {
     name: "point_to_step",
-    description: "Show the person where to do something you can't fill in for them, with a Take me there button: adding or renaming colors and add-on items, an item's first price or how it's charged, the logo, sales tax, team and access, email from their own domain, texting, phone, QuickBooks, commissions, crews and drivers, 3D, Real-Time Pricing, sharing their link, a test estimate, automatic top-up, every Settings > Options tab (wall heights, doors, windows, vents, ramps, cladding, interior items, interior walls, electrical, insulation, delivery, foundation), and the rest. Pick the key for the exact tab: insulation is not interior items. It changes nothing.",
+    description: "Show the person where to do something you can't fill in for them, with a Take me there button: adding or renaming colors and add-on items, an item's first price or how it's charged, the logo, sales tax, team and access, email from their own domain, texting, phone, moving (porting) a number they already have to Structure Studio (bring_number, from GoHighLevel or any phone company: use it, not phone, and explain with its how), QuickBooks, commissions, crews and drivers, 3D, Real-Time Pricing, sharing their link, a test estimate, automatic top-up, every Settings > Options tab (wall heights, doors, windows, vents, ramps, cladding, interior items, interior walls, electrical, insulation, delivery, foundation), and the rest. Pick the key for the exact tab: insulation is not interior items. It changes nothing.",
     strict: true,
     input_schema: { type: "object", additionalProperties: false, required: ["key"], properties: { key: { type: "string", enum: Object.keys(GUIDES) } } },
   },
@@ -1061,10 +1079,13 @@ const pointTool: ToolSpec = {
     const key = String((input as Any)?.key ?? "");
     const g = GUIDES[key];
     if (!g) return err("I don't know that step.");
-    if (g.area && !deps.canRead(g.area)) return ok({ shown: false, where: g.where, note: "That page isn't part of this person's access. Tell them an owner or admin does this step, and don't send them there." });
+    const how = g.how ? { how: g.how } : {};
+    if (g.area && !deps.canRead(g.area)) return ok({ shown: false, where: g.where, ...how, note: "That page isn't part of this person's access. Tell them an owner or admin does this step, and don't send them there." });
     if (!g.page) return ok({ shown: false, say: g.say, note: "Tell them this in a sentence. There's no page for it." });
     await putCard(deps, s, { kind: "setup_guide", title: `Where to set: ${g.title}`, status: "applied", hashed: false, preview: { key, title: g.title, where: g.where, say: g.say, route: { page: g.page, sub: g.sub } } });
-    return ok({ shown: true, where: g.where, say: g.say, note: "A card with a Take me there button is on their screen. Tell them where it is in a sentence." });
+    return ok({ shown: true, where: g.where, say: g.say, ...how, note: g.how
+      ? "A card with a Take me there button is on their screen. Tell them where it is, then what happens, from how: only what fits their case, in a few plain sentences. Add nothing how doesn't say."
+      : "A card with a Take me there button is on their screen. Tell them where it is in a sentence." });
   },
 };
 
