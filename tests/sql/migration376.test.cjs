@@ -350,6 +350,28 @@ async function refused(db, sql, params) {
   check("a re-apply of 378 changes nothing", v3again && before378 === after378, v3again ? "the schema or the data moved" : "the re-apply failed");
   check("and leaves one sent_with check per table", (await one("select count(*)::int as n from pg_constraint where conname like '%sent_with%'")).n === 2);
 
+  // ── 379: the insulation price kind, on top of 378 ──
+  check("before 379, an insulation card is refused", await refused(db, "insert into public.jack_proposals (client_id, user_id, kind, status, title) values ('a', $1, 'insulation_price', 'ready', 'ins')", [U]));
+  const cardsBefore379 = (await one("select count(*)::int as n from public.jack_proposals")).n;
+  let v379 = true;
+  try { await db.exec(MIG("379_jack_insulation.sql")); } catch (e) { v379 = false; console.log(String(e && e.message)); }
+  check("379 applies after 378, and its proof passes", v379);
+  const list379 = (() => {
+    const s = MIG("379_jack_insulation.sql");
+    const a = s.indexOf("add constraint jack_proposals_kind_check check (kind in (");
+    return [...s.slice(a, s.indexOf("));", a)).replace(/--.*$/gm, "").matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  })();
+  check("379 lists every 378 kind and insulation_price", list379.length === 33 && list379.includes("insulation_price") && list379.includes("estimate_resend"), String(list379.length));
+  for (const k of list379) {
+    check(`after 379, kind ${k} is accepted`, !(await refused(db, "insert into public.jack_proposals (client_id, user_id, kind, status, title) values ('a', $1, $2, 'ready', '379')", [U, k])));
+  }
+  check("after 379, a made-up kind is still refused", await refused(db, "insert into public.jack_proposals (client_id, user_id, kind, status, title) values ('a', $1, 'insulation', 'ready', 'x')", [U]));
+  check("379 keeps every card that was there", (await one("select count(*)::int as n from public.jack_proposals where title <> '379'")).n === cardsBefore379);
+  check("after 379, the sweep still never clears an insulation card", (await one("select pg_get_functiondef('public.jack_clear_old_private(text, timestamptz)'::regprocedure) as d")).d.indexOf("insulation_price") < 0);
+  let v379again = true;
+  try { await db.exec(MIG("379_jack_insulation.sql")); } catch (e) { v379again = false; console.log(String(e && e.message)); }
+  check("a re-apply of 379 changes nothing", v379again && (await one("select count(*)::int as n from pg_constraint where conname = 'jack_proposals_kind_check'")).n === 1);
+
   await db.close();
   console.log(failed ? `\n${failed} CHECK(S) FAILED` : "\nALL CHECKS PASSED");
   process.exitCode = failed ? 1 : 0;

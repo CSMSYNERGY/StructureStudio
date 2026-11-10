@@ -1037,8 +1037,23 @@ Deno.test("guide: a card with the right page from Jack's own map; no card where 
   assertEquals(w.cards.size, 1);
 });
 
+// Carolyn, 11-09: spray foam was sent to Interior items. Every Options tab the portal draws has a guide that
+// lands on it, and no Options guide names a tab the portal doesn't have (portal/01-core.jsx ssOptionTabs).
+Deno.test("guide: every Settings > Options tab has its own guide, and insulation is its own tab", () => {
+  const core = Deno.readTextFileSync(new URL("../../../portal/01-core.jsx", import.meta.url));
+  const a = core.indexOf("function ssOptionTabs()");
+  const body = core.slice(a, core.indexOf("\n}", a));
+  const tabs = [...body.matchAll(/^\s*\["([a-z-]+)", "([^"]+)"/gm)].map((m) => m[1]);
+  assert(tabs.length >= 12 && tabs.includes("insulation"), tabs.join(","));
+  const optionGuides = Object.values(GUIDES).filter((g) => g.area === "settings_options" && g.page === "settings" && g.sub !== "colors");
+  for (const t of tabs) assert(optionGuides.some((g) => g.sub === t), `no guide lands on Settings > Options tab ${t}`);
+  for (const g of optionGuides) assert(tabs.includes(String(g.sub)), `${g.title} names ${g.sub}, which isn't an Options tab`);
+  assertEquals([GUIDES.insulation.sub, GUIDES.insulation.where], ["insulation", "Settings > Options > Insulation"]);
+  assert(GUIDES.addons.sub === "interior" && !/insulation|spray/i.test(GUIDES.addons.say), GUIDES.addons.say);
+});
+
 Deno.test("guide: every page a guide names is a real settings tab, and every guide is short and plain", () => {
-  const subs = new Set(["company", "branding", "team", "commissions", "locations", "crews", "drivers", "tax", "payments", "sheds", "options", "colors", "designer", "connection", "quickbooks", "doors", "windows", "ramps", "interior", "email", "sms", "phone", "wallet"]);
+  const subs = new Set(["company", "branding", "team", "commissions", "locations", "crews", "drivers", "tax", "payments", "sheds", "options", "colors", "designer", "connection", "quickbooks", "doors", "windows", "ramps", "interior", "email", "sms", "phone", "wallet", "vents", "cladding", "interior-walls", "electrical", "insulation", "delivery", "foundation"]);
   for (const [key, g] of Object.entries(GUIDES)) {
     if (g.sub) assert(subs.has(g.sub), `${key} -> ${g.sub}`);
     assert(!/[—–]/.test(g.say + g.where + g.title), `${key}: no long dashes`);

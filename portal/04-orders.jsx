@@ -1094,7 +1094,7 @@ function JackCard({ proposal, viewingName, onChanged, onNavigate }) {
       )}
 
       {pv.fixture && p.status !== "failed" && (
-        <div style={{ fontSize: 13, color: "#334155", marginTop: 6 }}>A new door in Settings &gt; Doors: <b>{pv.fixture.name}</b>, {pv.fixture.widthIn} by {pv.fixture.heightIn} inches, {jackMoney(pv.fixture.price)}.{pv.fixture.swingOut ? " It swings out, with a right hinge." : ""}</div>
+        <div style={{ fontSize: 13, color: "#334155", marginTop: 6 }}>A new door in Settings &gt; Doors: <b>{pv.fixture.name}</b>, {pv.fixture.widthIn} by {pv.fixture.heightIn} inches, {jackMoney(pv.fixture.price)}.{pv.fixture.wayLine ? " " + pv.fixture.wayLine : pv.fixture.swingOut ? " It swings out, with a right hinge." : ""}</div>
       )}
       {line && open && <div style={{ fontSize: 13, color: "#475569", marginTop: 6 }}>{line}</div>}
       {p.kind === "price_sheet" && open && <div style={{ fontSize: 12, color: "#64748B", marginTop: 4 }}>I only read building prices and what comes with each size. Add-on prices, delivery and notes on the sheet aren't read, so those stay as they are.</div>}
@@ -1174,6 +1174,54 @@ function JackCard({ proposal, viewingName, onChanged, onNavigate }) {
 
 // The cards a new reply or estimate card can replace (jack-agent replaceOlder).
 const JACK_REPLY_KINDS = ["reply_send", "reply_draft", "estimate_resend"];
+// The other cards a newer one of the same kind replaces in a chat (propose_new_door, propose_insulation_prices).
+const JACK_REPLACING_KINDS = ["new_fixture", "insulation_price"];
+
+// Revise (Carolyn and Ahsan, 11-09 call): on a card still waiting, say what to change and Jack makes the
+// card again. The new card replaces this one (jack-agent handleSend `revise`); with no new card, this one
+// stays as it is. Only where the server says the card can be revised (proposalView canRevise).
+function JackRevise({ proposal, busy, onRevise }) {
+  const [open, setOpen] = useState(false);
+  const [words, setWords] = useState("");
+  const [sending, setSending] = useState(false);
+  const boxRef = useRef(null);
+  useEffect(() => { if (open && boxRef.current) boxRef.current.focus(); }, [open]);
+  const go = async (e) => {
+    if (e) e.preventDefault();
+    const t = words.trim();
+    if (!t || busy || sending) return;
+    setSending(true);
+    const done = await onRevise(t);
+    setSending(false);
+    // A refused press keeps the words, so nothing typed is lost.
+    if (done) { setWords(""); setOpen(false); }
+  };
+  const btn = (bg, fg, border) => ({ ...S.btn(bg, fg), padding: "6px 12px", fontSize: 13, ...(border ? { border: "1px solid " + border } : {}) });
+  if (!open) {
+    return (
+      <button type="button" data-jack-revise={proposal.id} disabled={!!busy} onClick={() => setOpen(true)}
+        title="Tell Jack what to change, and he'll make this card again"
+        style={{ ...btn("#FFF", "#334155", "#CBD5E1"), marginTop: 6, opacity: busy ? 0.6 : 1 }}>Revise</button>
+    );
+  }
+  return (
+    <form onSubmit={go} data-jack-revise-box={proposal.id} style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6, alignItems: "center", maxWidth: "100%" }}>
+      <input ref={boxRef} value={words} maxLength={4000} onChange={(e) => setWords(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Escape") { setOpen(false); setWords(""); } }}
+        placeholder="What should change? For example: it swings in"
+        aria-label={`What should change on ${proposal.title}`}
+        style={{ flex: "1 1 220px", minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 8, padding: "7px 10px", fontSize: 13, fontFamily: "inherit" }} />
+      <button type="submit" disabled={!words.trim() || !!busy || sending} style={{ ...btn(ACCENT, "#FFF"), opacity: !words.trim() || busy || sending ? 0.6 : 1 }}>{sending ? "Sending…" : "Send"}</button>
+      <button type="button" disabled={sending} onClick={() => { setOpen(false); setWords(""); }} style={btn("#FFF", "#334155", "#CBD5E1")}>Never mind</button>
+    </form>
+  );
+}
+/** Under a card a corrected or revised one replaced: the server's sentence (reply cards say it themselves). */
+function JackReplacedLine({ proposal }) {
+  const f = typeof proposal.failure === "string" ? proposal.failure : "";
+  if (proposal.status !== "cancelled" || !/^Replaced by/.test(f) || JACK_REPLY_KINDS.includes(proposal.kind)) return null;
+  return <div data-jack-replaced={proposal.id} style={{ fontSize: 12, color: "#64748B", marginTop: 4 }}>{f}</div>;
+}
 // What Jack did on this account: who asked, who approved and when, what happened, and what changed.
 // A card that's shown rather than approved reads as what it is on the activity list. A send card's
 // button is Approve like every other card's, so it waits for approval and is approved by someone.
@@ -1585,6 +1633,8 @@ function JackSetupCard({ proposal, viewingName, onChanged, onNavigate }) {
 Object.assign(JACK_CARDS, {
   setup_company: JackSetupCard, setup_paperwork: JackSetupCard, setup_styles: JackSetupCard, setup_fixture: JackSetupCard,
   setup_locations: JackSetupCard, setup_tick: JackSetupCard, setup_guide: JackSetupCard,
+  // Insulation rates (jack-agent/insulation.ts): the same now and new lines, notes and Open button.
+  insulation_price: JackSetupCard,
 });
 
 // Jack's when/then rule cards (jack-agent/rules.ts): a new rule (automation_rule) and a pause or turn-on
@@ -3227,11 +3277,14 @@ function JackTab({ viewingName, onNavigate, active }) {
   // A new reply or estimate card cancels an older one for the same customer still waiting in this chat
   // (jack-agent replaceOlder, "Replaced by a newer draft."). The chat's other waiting ones are read again,
   // so a replaced card loses its Approve now rather than on a reload.
+  // A corrected door or insulation card does the same for the older one of its kind (11-09).
   const rereadReplaced = (made) => {
-    if (!Array.isArray(made) || !made.some((x) => x && JACK_REPLY_KINDS.includes(x.kind))) return;
+    const groupOf = (k) => (JACK_REPLY_KINDS.includes(k) ? "reply" : JACK_REPLACING_KINDS.includes(k) ? k : null);
+    const groups = new Set((Array.isArray(made) ? made : []).map((x) => x && groupOf(x.kind)).filter(Boolean));
+    if (!groups.size) return;
     const fresh = new Set(made.map((x) => x.id));
     const ids = [...new Set(messages.flatMap((m) => m.proposal_ids || []))]
-      .filter((id) => !fresh.has(id) && proposals[id] && proposals[id].status === "ready" && JACK_REPLY_KINDS.includes(proposals[id].kind));
+      .filter((id) => !fresh.has(id) && proposals[id] && proposals[id].status === "ready" && groups.has(groupOf(proposals[id].kind)));
     ids.forEach(async (id) => {
       try {
         const { data } = await sb.functions.invoke("jack-agent", { body: { action: "proposal_get", id } });
@@ -3240,23 +3293,33 @@ function JackTab({ viewingName, onNavigate, active }) {
     });
   };
   // `said`: words to send without the box, from a press on a question card ("7 days"). The box keeps
-  // whatever the person was typing.
-  const send = async (e, said) => {
+  // whatever the person was typing. `reviseId`: the words say what to change on that card (JackRevise).
+  // Answers whether the words went in, so the Revise box keeps them when they didn't.
+  const send = async (e, said, reviseId) => {
     if (e) e.preventDefault();
     const fromBox = typeof said !== "string";
     const text = fromBox ? draft.trim() : said.trim();
-    if (!text || busy) return;
+    if (!text || busy) return false;
     setBusy(true); setErr(""); if (fromBox) setDraft("");
-    setMessages((m) => [...m, { id: "local", role: "user", body: text, proposal_ids: [] }]);
+    const revising = reviseId && proposals[reviseId] ? proposals[reviseId] : null;
+    setMessages((m) => [...m, { id: "local", role: "user", body: revising ? `Revise "${revising.title}": ${text}` : text, proposal_ids: [] }]);
     // The person's own time zone: "today" and a job marked built are their day, not UTC's.
     let tz = null;
     try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_e) { tz = null; }
-    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "send", text, chatId, tz } });
+    const { data, error } = await sb.functions.invoke("jack-agent", { body: { action: "send", text, chatId, tz, ...(revising ? { revise: reviseId } : {}) } });
+    let went = false;
     if (error || !data) {
       setMessages((m) => m.filter((x) => x.id !== "local"));
       if (fromBox) setDraft(text);
       // A 4xx is the server's own sentence, written for the person. Anything else is a generic fault.
       setErr(error && error.ssStatus >= 400 && error.ssStatus < 500 && !/non-2xx/i.test(error.message || "") ? error.message : JACK_ERR);
+      // A card that moved on (approved, cancelled, expired) shows where it is now, without its Revise.
+      if (revising) {
+        try {
+          const { data: again } = await sb.functions.invoke("jack-agent", { body: { action: "proposal_get", id: reviseId } });
+          if (again && again.proposal) addProposals([again.proposal]);
+        } catch (_e) { /* the card stays as drawn; a second press gets the same sentence */ }
+      }
     } else if (data.capped) {
       if (data.capped === "wallet") setBillTick((n) => n + 1);
       if (Array.isArray(data.messages)) {
@@ -3271,6 +3334,7 @@ function JackTab({ viewingName, onNavigate, active }) {
         setMessages((m) => [...m.filter((x) => x.id !== "local"), { id: "cap" + Date.now(), role: "assistant", body: data.reply.body, proposal_ids: [] }]);
       }
     } else {
+      went = true;
       if (data.billed) setBillTick((n) => n + 1);
       setChatId(data.chatId);
       addProposals(data.proposals);
@@ -3279,7 +3343,8 @@ function JackTab({ viewingName, onNavigate, active }) {
       rereadReplaced(data.proposals);
     }
     setBusy(false);
-    if (inputRef.current) inputRef.current.focus();
+    if (inputRef.current && !revising) inputRef.current.focus();
+    return went;
   };
   const refreshChats = async () => {
     const { data } = await sb.functions.invoke("jack-agent", { body: { action: "status" } });
@@ -3401,6 +3466,8 @@ function JackTab({ viewingName, onNavigate, active }) {
                     <div key={id} style={{ width: "100%" }}>
                       <JackAnyCard proposal={proposals[id]} viewingName={viewingName} onChanged={(x) => addProposals([x])} onNavigate={onNavigate}
                         onSay={(words) => send(null, words)} busy={busy} />
+                      <JackReplacedLine proposal={proposals[id]} />
+                      {proposals[id].canRevise && <JackRevise proposal={proposals[id]} busy={busy} onRevise={(words) => send(null, words, id)} />}
                     </div>
                   ))}
                 </div>

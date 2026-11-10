@@ -3515,14 +3515,14 @@ await scenario("BN", async (track) => {
 });
 
 // ── BO: a new door, and the doors Jack won't make ─────────────────────────────────────────────────────
-// The card names the door, its size, its price and how it starts out; Approve sends one save_fixture with
+// The card names the door, its size, its price and how it opens (a double door, 11-09: swing and operation); Approve sends one save_fixture with
 // exactly the card's door, Undo one delete_fixture. A size or price no door could have, a door they already
 // have, and a door list that can't be read each get the tool's sentence, and no card.
 await scenario("BO", async (track) => {
   const answers = [], saved = [], deleted = [];
   const FID = "c0ffee00-dddd-4ddd-8ddd-000000000001";
   const w = world({ script: [
-    toolUse("propose_new_door", { name: "Double door", widthInches: 72, heightInches: 80, price: 650 }), said("A 72 by 80 double door at $650 is on your screen. Press Approve when it looks right."),
+    toolUse("propose_new_door", { name: "Double door", widthInches: 72, heightInches: 80, price: 650, swing: "out", operation: "double" }), said("A 72 by 80 double door at $650 is on your screen. Press Approve when it looks right."),
     toolUse("propose_new_door", { name: "Barn door", widthInches: 5000, heightInches: 80, price: 650 }), relay(answers),
     toolUse("propose_new_door", { name: "Barn door", widthInches: 96, heightInches: 84, price: 2_000_000 }), relay(answers),
     toolUse("propose_new_door", { name: "single door", widthInches: 36, heightInches: 80, price: 400 }), relay(answers),
@@ -3536,11 +3536,11 @@ await scenario("BO", async (track) => {
   await askForCard(page, "add a double door, 72 wide and 80 tall, for $650", answers);
   const p = [...w.proposals.values()].at(-1);
   const shown = await card(page).innerText();
-  ok("BO the door card names the door, its size, its price and how it starts out", p.kind === "new_fixture" && shown.includes("A new door in Settings > Doors: Double door, 72 by 80 inches, $650") && shown.includes("It swings out, with a right hinge."), shown.slice(0, 300));
+  ok("BO the door card names the door, its size, its price and how it starts out", p.kind === "new_fixture" && shown.includes("A new door in Settings > Doors: Double door, 72 by 80 inches, $650") && shown.includes("It swings out, as a double door."), shown.slice(0, 300));
   await workShot(page, "bo-new-door.png");
   ok("BO with Approve and Cancel, and nothing saved before the press", same(await buttonsOn(card(page)), ["Approve", "Cancel"]) && saved.length === 0 && w.fixtures.length === 0, (await buttonsOn(card(page))).join(","));
   await press(page, "Approve", "applied");
-  ok("BO Approve sends one save_fixture with exactly the card's door", saved.length === 1 && same(saved[0], { category: "door", name: "Double door", widthIn: 72, heightIn: 80, price: 650, swingOut: true, opRight: true }), JSON.stringify(saved));
+  ok("BO Approve sends one save_fixture with exactly the card's door", saved.length === 1 && same(saved[0], { category: "door", name: "Double door", widthIn: 72, heightIn: 80, price: 650, swingOut: true, swingIn: false, opRight: false, opLeft: false, opDouble: true, opSlideUp: false }), JSON.stringify(saved));
   ok("BO and the card says Added", (await card(page).innerText()).includes("Added."));
   await press(page, "Undo", "undone");
   ok("BO Undo sends one delete_fixture for that door, and it's gone", deleted.length === 1 && same(deleted[0], { id: FID }) && w.fixtures.length === 0 && (await card(page).innerText()).includes("Put back."), JSON.stringify(deleted));
@@ -4179,6 +4179,112 @@ await scenario("BX", async (track) => {
   const r = await w.handle({ action: "proposal_approve", id: t.id, hash: t.shown_hash, send: true });
   ok("BX a press on one anyway sends nothing: the press itself says the card doesn't show where it goes", c.sends.length === sendsBefore && w.proposals.get(t.id).status === "failed" && w.proposals.get(t.id).failure === SEND_SAID.noTo, `${r.status} ${w.proposals.get(t.id).status} ${w.proposals.get(t.id).failure}`);
   ok("BX no page errors on the cards with no To line", later.errors.length === 0, later.errors.join(" | ").slice(0, 300));
+});
+
+// ── BY: Carolyn's 11-09 call. A garage door slides up, Revise makes the card again, insulation prices ──
+await scenario("BY", async (track) => {
+  const garage = { name: "Garage Door 8x6'3\"", widthInches: 96, heightInches: 75, price: 752 };
+  const w = world({ script: [
+    toolUse("propose_new_door", { ...garage, swing: "out", operation: "right" }), said("The door is on your screen."),
+    toolUse("propose_new_door", { ...garage, swing: "out", operation: "slide_up" }), said("Redone: it slides up, no hinge."),
+    toolUse("propose_insulation_prices", { changes: [{ type: "spray_foam", area: "roof", ratePerSqFt: 2.8 }] }), said("Spray foam on the roof, $2.50 to $2.80. Press Approve."),
+  ] });
+  // The insulation grid as structure-studio had it on the call, and save_insulation as portal-settings runs it.
+  let ins = [
+    { ins_type: "spray_foam", area: "floor", rate_per_sqft: "1.5", taxable: true, active: true, internal_only: false },
+    { ins_type: "spray_foam", area: "walls", rate_per_sqft: "1.5", taxable: true, active: true, internal_only: false },
+    { ins_type: "spray_foam", area: "roof", rate_per_sqft: "2.5", taxable: true, active: true, internal_only: false },
+  ];
+  const insSaves = [];
+  w.extra.catalog = async () => ({ status: 200, data: { ok: true, styles: [], sizes: [], items: [], fixtures: [{ id: "door-single", name: "Single door", category: "door", width_in: 36, height_in: 80 }], insulation: ins.map((r) => ({ ...r })), insulationEnabled: true } });
+  w.extra.save_insulation = async (body) => {
+    insSaves.push(JSON.parse(JSON.stringify(body)));
+    for (const r of body.rows) {
+      ins = ins.filter((x) => !(x.ins_type === r.type && x.area === r.area));
+      if (r.ratePerSqft !== "") ins.push({ ins_type: r.type, area: r.area, rate_per_sqft: String(r.ratePerSqft), taxable: r.taxable !== false, active: r.active !== false, internal_only: r.internalOnly === true });
+    }
+    return { status: 200, data: { ok: true, saved: body.rows.length, cleared: 0, skipped: [] } };
+  };
+  const { ctx, page, errors } = await open(w, "/jack");
+  track(ctx);
+  await page.getByLabel("Message to Jack").waitFor({ timeout: 15000 });
+  await page.getByLabel("Message to Jack").fill("Add a garage door 6'3\" tall by 8' wide, 752");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await card(page).waitFor({ timeout: 15000 });
+  const first = [...w.proposals.values()][0];
+  const firstCard = cardById(page, first.id);
+  ok("BY the door card says how it opens", (await firstCard.innerText()).includes("It swings out, with a right hinge."), (await firstCard.innerText()).slice(0, 300));
+  const revise = page.locator(`[data-jack-revise="${first.id}"]`);
+  ok("BY a card still waiting has a Revise button under it", (await revise.count()) === 1 && (await revise.isVisible()));
+  await workShot(page, "by-1-door-card-with-revise.png");
+  // Revise opens a box; Never mind closes it with nothing sent.
+  await revise.click();
+  const box = page.locator(`[data-jack-revise-box="${first.id}"]`);
+  await box.waitFor({ timeout: 5000 });
+  ok("BY Revise opens a box that asks what should change, with the cursor in it", await box.getByLabel(`What should change on ${first.title}`).evaluate((el) => document.activeElement === el));
+  await box.getByRole("button", { name: "Never mind" }).click();
+  ok("BY Never mind closes it and sends nothing", (await box.count()) === 0 && !w.posts.some((p) => p.revise));
+  await revise.click();
+  await box.getByLabel(`What should change on ${first.title}`).fill("it's a slide up door, no hinge");
+  await workShot(page, "by-2-revise-box.png");
+  await box.getByRole("button", { name: "Send", exact: true }).click();
+  await until(page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "cancelled", first.id);
+  const made = [...w.proposals.values()].find((p) => p.id !== first.id && p.kind === "new_fixture");
+  await cardById(page, made.id).waitFor({ timeout: 15000 });
+  const post = w.posts.find((p) => p.action === "send" && p.revise);
+  ok("BY the press sends the words with the card it's about", post && post.revise === first.id && post.text === "it's a slide up door, no hinge", JSON.stringify(post));
+  ok("BY Jack is told which card and what's on it", w.toClaude[2].includes("pressed Revise on a card you made") && w.toClaude[2].includes("96 by 75 inches, $752"), w.toClaude[2].slice(0, 200));
+  ok("BY the chat shows what was asked about which card", (await page.getByText(`Revise "Add a door: ${garage.name}": it's a slide up door, no hinge`, { exact: true }).count()) === 1);
+  const newText = await cardById(page, made.id).innerText();
+  ok("BY the new card slides up, with no swing or hinge", newText.includes("It slides up, with no swing or hinge.") && made.payload.row.opSlideUp === true && made.payload.row.swingOut === false, newText.slice(0, 300));
+  ok("BY the old card is put away: no Approve, no Revise, and it says what replaced it", (await firstCard.getByRole("button", { name: "Approve" }).count()) === 0 && (await revise.count()) === 0 && (await page.locator(`[data-jack-replaced="${first.id}"]`).innerText()) === "Replaced by your newer card for this door.");
+  await workShot(page, "by-3-revised-door.png", { fullPage: true });
+  await cardById(page, made.id).getByRole("button", { name: "Approve" }).click();
+  await until(page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "applied", made.id);
+  const saved = w.fixtures.at(-1);
+  ok("BY Approve saves it slide up, no swing, through the Doors screen's route", saved && saved.opSlideUp === true && saved.swingOut === false && saved.swingIn === false && saved.opRight === false && saved.name === garage.name, JSON.stringify(saved));
+  ok("BY an approved card has no Revise", (await page.locator(`[data-jack-revise="${made.id}"]`).count()) === 0);
+
+  // Insulation: "change my price of spray foam to 2.80" lands on its own card, on the Insulation tab.
+  await page.getByLabel("Message to Jack").fill("change my price of spray foam on the roof to 2.80");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const insCard = () => [...w.proposals.values()].find((p) => p.kind === "insulation_price");
+  await until(page, () => !!document.querySelector('[data-kind="insulation_price"]'));
+  const ic = cardById(page, insCard().id);
+  const icText = await ic.innerText();
+  ok("BY the insulation card shows the roof going from $2.50 to $2.80 a sq ft", icText.includes("Spray foam, roof") && icText.includes("$2.50 a sq ft") && icText.includes("$2.80 a sq ft"), icText.slice(0, 300));
+  ok("BY and nothing is saved before the press", insSaves.length === 0);
+  await workShot(page, "by-4-insulation-card.png");
+  await ic.getByRole("button", { name: "Approve" }).click();
+  await until(page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "applied", insCard().id);
+  ok("BY Approve saves the one cell, keeping its tax and on/off, and never the switch", insSaves.length === 1 && JSON.stringify(insSaves[0]) === JSON.stringify({ rows: [{ type: "spray_foam", area: "roof", ratePerSqft: "2.8", taxable: true, active: true, internalOnly: false }] }), JSON.stringify(insSaves));
+  ok("BY and the card opens the Insulation tab", (await ic.getByRole("button", { name: "Open Settings > Options > Insulation" }).count()) === 1);
+  await ic.getByRole("button", { name: "Undo" }).click();
+  await until(page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "undone", insCard().id);
+  ok("BY Undo puts $2.50 back", ins.find((x) => x.area === "roof").rate_per_sqft === "2.5" && insSaves.length === 2);
+  ok("BY no page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+
+  // A card approved elsewhere while the Revise box was open: the press says so, keeps the words, and the
+  // card shows where it is now.
+  const w2 = world({ script: [toolUse("propose_new_door", { name: "Walk door", widthInches: 36, heightInches: 80, price: 300, swing: "in", operation: "left" }), said("On your screen.")] });
+  const two = await open(w2, "/jack", { viewport: { width: 375, height: 800 } });
+  track(two.ctx);
+  await two.page.getByLabel("Message to Jack").fill("add a walk door 36 by 80, 300, swings in, left hinge");
+  await two.page.getByRole("button", { name: "Send", exact: true }).click();
+  await card(two.page).waitFor({ timeout: 15000 });
+  const p2 = [...w2.proposals.values()][0];
+  ok("BY a phone: the card reads swings in, left hinge", (await cardById(two.page, p2.id).innerText()).includes("It swings in, with a left hinge."));
+  await two.page.locator(`[data-jack-revise="${p2.id}"]`).click();
+  const box2 = two.page.locator(`[data-jack-revise-box="${p2.id}"]`);
+  await box2.getByLabel(`What should change on ${p2.title}`).fill("make it 320");
+  ok("BY on a phone the Revise box fits the screen", await two.page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
+  await workShot(two.page, "by-5-revise-on-a-phone.png");
+  await w2.handle({ action: "proposal_approve", id: p2.id, hash: p2.shown_hash });
+  const asked = w2.claudeCalls;
+  await box2.getByRole("button", { name: "Send", exact: true }).click();
+  await until(two.page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "applied", p2.id);
+  ok("BY a press on a card approved meanwhile says why, asks Jack nothing, and the card loses its Revise", w2.claudeCalls === asked && (await two.page.getByRole("alert").filter({ hasText: "That card can't be changed any more" }).count()) === 1 && (await box2.count()) === 0);
+  ok("BY no page errors on the phone", two.errors.length === 0, two.errors.join(" | ").slice(0, 300));
 });
 
 writeManifest();

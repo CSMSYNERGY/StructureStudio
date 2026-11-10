@@ -261,7 +261,7 @@ Deno.test("a new door: the press saves through the door screen's route, and undo
   await handleSend(deps, who, { text: "add a 36 inch walk door at 185" });
   const [p] = [...state.proposals.values()];
   await handleProposalApprove(deps, who, { id: p.id, hash: p.shown_hash });
-  assertEquals(portalCalls.at(-1), { action: "save_fixture", body: { category: "door", name: "36 walk door", widthIn: 36, heightIn: 80, price: 185, swingOut: true, opRight: true } });
+  assertEquals(portalCalls.at(-1), { action: "save_fixture", body: { category: "door", name: "36 walk door", widthIn: 36, heightIn: 80, price: 185, swingOut: true, swingIn: false, opRight: true, opLeft: false, opDouble: false, opSlideUp: false } });
   assertEquals(state.proposals.get(p.id)?.status, "applied");
   await handleProposalUndo(deps, who, { id: p.id });
   assertEquals(portalCalls.at(-1), { action: "delete_fixture", body: { id: "fx1" } });

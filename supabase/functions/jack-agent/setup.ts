@@ -85,6 +85,16 @@ export const GUIDES: Record<string, Guide> = {
   windows: guide("Windows", "Settings > Options > Windows", "windows", "settings_options", "The windows a customer can place, and their colors."),
   ramps: guide("Ramps", "Settings > Options > Ramps", "ramps", "settings_options", "One simple ramp, or your own list of ramps."),
   addons: guide("Add-on items", "Settings > Options > Interior items", "interior", "settings_options", "Lofts, workbenches, shelving and their prices. I can't change add-on prices yet, so set them there."),
+  // The rest of the Options tabs (portal ssOptionTabs), so a "take me there" for any of them lands on its
+  // own tab. Carolyn, 11-09: spray foam was sent to Interior items; it's on Insulation.
+  wall_heights: guide("Wall heights", "Settings > Options > Wall heights", "options", "settings_options", "Taller walls, priced per building style."),
+  vents: guide("Vents", "Settings > Options > Vents", "vents", "settings_options", "Gable and ridge vents, and what each one adds."),
+  cladding: guide("Cladding", "Settings > Options > Cladding", "cladding", "settings_options", "Which sidings you offer on each style, and how each is priced."),
+  interior_walls: guide("Interior walls", "Settings > Options > Interior walls", "interior-walls", "settings_options", "Interior wall framing, its price, coverings, and what can go in or on a wall."),
+  electrical: guide("Electrical", "Settings > Options > Electrical", "electrical", "settings_options", "Outlets, switches, lights and panels, and what each one adds."),
+  insulation: guide("Insulation", "Settings > Options > Insulation", "insulation", "settings_options", "Batt, spray foam and rigid foam, priced per square foot on the floor, walls and roof, and whether customers are offered insulation at all."),
+  delivery_pricing: guide("Delivery pricing", "Settings > Options > Delivery", "delivery", "settings_options", "How delivery is priced from your lot to the customer."),
+  foundation: guide("Foundation", "Settings > Options > Foundation", "foundation", "settings_options", "Gravel pads, fence removal, piers and slabs."),
   colors: guide("Colors", "Settings > Colors", "colors", "settings_options", "Paint, shingle and metal colors, with the names your customers know. I can't save colors yet, so set them there."),
   crm: guide("Connect your CRM", "Settings > GHL Connection", "connection", "settings_crm", "Paste your Location ID and API key there. Skip it if Structure Studio sends your paperwork."),
   paperwork: guide("How estimates and invoices go out", "Settings > GHL Connection", "connection", "settings_crm", "Through your CRM, or issued by Structure Studio, with your starting numbers."),
@@ -108,6 +118,7 @@ const FILLS: Record<string, string> = {
   styles: "propose_styles for styles; look_at_my_catalog and propose_size_changes for sizes",
   prices: "a price list through the paperclip, or propose_size_changes",
   catalog_items: "propose_new_door for doors, propose_catalog_item for windows and ramps; add-on prices are guide only",
+  insulation: "propose_insulation_prices (the rates); the switch that offers insulation is guide only",
   locations: "propose_locations",
   // The live template's own serial step (11-06): propose_locations sets it, with the lots list empty.
   serial: "propose_locations (serialStart, with the lots list empty when they only gave the number)",
@@ -1040,7 +1051,7 @@ async function applyTick(deps: Deps, p: ProposalRow): Promise<ApplyOutcome> {
 const pointTool: ToolSpec = {
   def: {
     name: "point_to_step",
-    description: "Show the person where to do a setup step you can't fill in for them, with a Take me there button: colors, add-on prices, the logo, sales tax, team and access, email from their own domain, texting, phone, QuickBooks, commissions, crews and drivers, 3D, Real-Time Pricing, sharing their link, a test estimate, automatic top-up, and the rest. It changes nothing.",
+    description: "Show the person where to do something you can't fill in for them, with a Take me there button: colors, add-on prices, the logo, sales tax, team and access, email from their own domain, texting, phone, QuickBooks, commissions, crews and drivers, 3D, Real-Time Pricing, sharing their link, a test estimate, automatic top-up, every Settings > Options tab (wall heights, doors, windows, vents, ramps, cladding, interior items, interior walls, electrical, insulation, delivery, foundation), and the rest. Pick the key for the exact tab: insulation is not interior items. It changes nothing.",
     strict: true,
     input_schema: { type: "object", additionalProperties: false, required: ["key"], properties: { key: { type: "string", enum: Object.keys(GUIDES) } } },
   },

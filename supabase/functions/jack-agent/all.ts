@@ -13,6 +13,7 @@ import { inventoryPiece } from "./inventory.ts";
 import { buildSchedulePiece } from "./buildschedule.ts";
 import { deliveryPiece } from "./delivery.ts";
 import { commissionsPiece } from "./commissions.ts";
+import { insulationPiece } from "./insulation.ts";
 
 // Look-ups before drafts: drafts resolves a look-up list's rows through lookups.ts. Sends after drafts:
 // a reply card that sends is made by drafts.ts and run by sends.ts.
@@ -20,4 +21,5 @@ import { commissionsPiece } from "./commissions.ts";
 export const ALL_PIECES: Piece[] = [
   memoryPiece, setupPiece, rulesPiece, lookupsPiece, draftsPiece, sendsPiece,
   readsPiece, changeOrdersPiece, inventoryPiece, buildSchedulePiece, deliveryPiece, commissionsPiece,
+  insulationPiece,
 ];
