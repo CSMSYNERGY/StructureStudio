@@ -80,6 +80,7 @@ const BRING_NUMBER_HOW = [
   "A GoHighLevel number is not a carrier port: the team asks HighLevel to move it, usually within one or two business days, and no account number or PIN is needed. Keep the GoHighLevel account and the number active until it has moved.",
   "A number from another phone company takes at least a week. The team calls the account holder for that carrier's account number (and the port-out PIN for a mobile number). The account holder then gets the transfer to sign by email and has 30 days to sign it. The name and service address must match that carrier's bill exactly, or the move is rejected. Keep that account active until it's done.",
   "Texting doesn't move with a number. If they text from it, they should submit Settings > Customer Hub > SMS - A2P before the move: calls work as soon as the number lands, but texts from it stop until its new registration clears (a few days to three weeks).",
+  "When the card reads Moved, the number is on their account and takes calls in Structure Studio: they set who answers it in the same Phone tab (who rings, and voicemail). It bills monthly like any business number from the day it lands.",
   "Only someone who can change the phone setup sees the card. Anyone else asks an owner or admin.",
 ].join(" ");
 

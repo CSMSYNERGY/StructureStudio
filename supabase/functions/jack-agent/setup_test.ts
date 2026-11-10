@@ -1062,6 +1062,8 @@ Deno.test("guide: bringing a number points at the Bring your number card and han
   // A GoHighLevel move is a HighLevel ticket: no account number or PIN, one or two business days.
   assert(/GoHighLevel number is not a carrier port/.test(out.how) && /no account number or PIN is needed/.test(out.how), out.how);
   assert(/Never ask for a PIN/.test(out.how) && /SMS - A2P/.test(out.how) && /how/.test(out.note), out.how);
+  // Both kinds of number, and what to do in Structure Studio once it reads Moved.
+  assert(/another phone company takes at least a week/.test(out.how) && /reads Moved/.test(out.how) && /who answers/.test(out.how), out.how);
   // The plain phone guide carries no process, and the tool tells Claude to use bring_number for a port.
   assertEquals(GUIDES.phone.how, undefined);
   const point = setupPiece.tools.find((t) => t.def.name === "point_to_step")!;
