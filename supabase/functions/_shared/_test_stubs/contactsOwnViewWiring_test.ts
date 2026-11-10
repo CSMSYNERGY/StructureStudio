@@ -48,6 +48,9 @@ const SETTINGS_WRITES = [
   // Sales pipelines (migration 301): a lead and its deal are customer-record writes, so a
   // view-only person adds and moves nothing.
   "crm_create_lead", "crm_deal_create", "crm_deal_update", "crm_deal_move", "crm_deal_archive",
+  // Migration 381: importing a spreadsheet of leads makes and fills in customer records by the
+  // page, so "view only" imports nothing.
+  "crm_import_leads",
   // Migration 353: calling a deal lost, and reopening it, are the same altitude as moving it —
   // they change what that customer's record says happened, so "view only" does neither.
   "crm_deal_mark_lost", "crm_deal_reopen",

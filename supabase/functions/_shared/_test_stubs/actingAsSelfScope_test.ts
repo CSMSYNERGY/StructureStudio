@@ -127,10 +127,10 @@ Deno.test("portal-settings answers every me about the person whose screen it is"
   for (const needle of needles) {
     assert(SETTINGS_C.includes(needle), `a self-scoped read lost selfUserId: ${needle}`);
   }
-  // Three `const me = String(selfUserId...)` sites: crm_create_lead, crm_create_contact, the
-  // Calls report's MY default.
+  // Four `const me = String(selfUserId...)` sites: crm_create_lead, crm_import_leads (381: what a
+  // narrowed importer creates is theirs), crm_create_contact, the Calls report's MY default.
   const mes = SETTINGS_C.match(/const me = String\(selfUserId \?\? ""\)\.toLowerCase\(\);/g) ?? [];
-  assert(mes.length === 3, `expected 3 selfUserId "me" locals in portal-settings, found ${mes.length}`);
+  assert(mes.length === 4, `expected 4 selfUserId "me" locals in portal-settings, found ${mes.length}`);
   assert(
     !/const me = String\(userId \?\? ""\)\.toLowerCase\(\);/.test(SETTINGS_C),
     "a me local is back on userId",

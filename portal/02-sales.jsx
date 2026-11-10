@@ -7422,6 +7422,678 @@ function SsAddLeadDialog({ pipelines, defaultPipelineId, team, ownOnly, me, onCl
   );
 }
 
+// ══ IMPORT LEADS FROM A SPREADSHEET (migration 381) ═══════════════════════════════════════
+// Carolyn 2026-11-06: "We need to have a way to import leads into Structure Studio." Her reps'
+// cold-call lists (a company, often no person) and a builder's customer list exported from
+// GoHighLevel or another CRM (a person) both come in here: pick a file, check which column is which,
+// see what it would do (a dry run), then import. Beside "+ Add lead" on every pipeline, her pick.
+//
+// The block between the markers is a plain-JS COPY of the browser half of
+// supabase/functions/_shared/leadImport.ts (the portal has no bundler, so it cannot import it).
+// _test_stubs/leadImportParity_test.ts runs both over the same sheets and fails when one moves alone:
+// change them together. It uses no name from outside itself.
+// ⟦lead-import:start⟧
+const SS_LEAD_PAGE_MAX = 200;
+const SS_LEAD_MAX_ROWS = 5000;
+const SS_LEAD_CAPS = { name: 200, company: 200, phone: 40, email: 320, street: 200, city: 100, state: 100, zip: 20, note: 8000, title: 200, label: 60, labels: 25 };
+const SS_LEAD_FIELDS = [
+  { id: "name", label: "Full name", group: "Contact" },
+  { id: "first_name", label: "First name", group: "Contact" },
+  { id: "last_name", label: "Last name", group: "Contact" },
+  { id: "company", label: "Company", group: "Contact" },
+  { id: "phone", label: "Phone", group: "Contact" },
+  { id: "email", label: "Email", group: "Contact" },
+  { id: "street", label: "Street address", group: "Contact" },
+  { id: "city", label: "City", group: "Contact" },
+  { id: "state", label: "State", group: "Contact" },
+  { id: "zip", label: "ZIP code", group: "Contact" },
+  { id: "labels", label: "Tags", group: "Contact" },
+  { id: "owner", label: "Owner (a team member's name)", group: "Contact" },
+  { id: "note", label: "Note", group: "Contact" },
+  { id: "added_at", label: "Date added", group: "Contact" },
+  { id: "do_not_text", label: "Do not text (opted out)", group: "Contact" },
+  { id: "stage", label: "Stage", group: "Deal" },
+  { id: "title", label: "Deal name", group: "Deal" },
+  { id: "value", label: "Deal value", group: "Deal" },
+  { id: "expected_close", label: "Expected close date", group: "Deal" },
+];
+const SS_LEAD_ALIASES = (() => {
+  const t = {};
+  const add = (field, names) => { for (const n of names) t[n] = field; };
+  add("name", ["name", "full name", "fullname", "contact name", "contact", "customer", "customer name", "lead name", "person", "client", "client name"]);
+  add("first_name", ["first name", "firstname", "first", "given name", "fname"]);
+  add("last_name", ["last name", "lastname", "last", "surname", "family name", "lname"]);
+  add("company", ["company", "company name", "business", "business name", "organization", "organisation", "organization name", "account", "account name", "manufacturer", "dealer", "dealership"]);
+  add("phone", ["phone", "phone number", "phone no", "mobile", "mobile phone", "mobile number", "cell", "cell phone", "telephone", "tel", "primary phone", "phone 1", "phone1", "work phone", "contact phone", "business phone"]);
+  add("email", ["email", "e mail", "email address", "e mail address", "primary email", "contact email", "work email", "business email", "email 1", "email1"]);
+  add("street", ["street", "address", "address 1", "address1", "address line 1", "street address", "mailing address", "street 1"]);
+  add("city", ["city", "town"]);
+  add("state", ["state", "province", "state province", "region", "state region"]);
+  add("zip", ["zip", "zip code", "zipcode", "postal code", "postalcode", "postcode", "post code", "postal"]);
+  add("labels", ["tags", "tag", "labels", "label", "categories", "category", "segments", "segment"]);
+  add("owner", ["owner", "assigned to", "assigned", "assigned user", "assignee", "sales rep", "rep", "salesperson", "account owner", "contact owner", "lead owner"]);
+  add("note", ["notes", "note", "comments", "comment", "description", "remarks"]);
+  add("added_at", ["created", "created at", "created on", "date added", "date created", "added", "added on", "created date"]);
+  add("do_not_text", ["dnd", "do not disturb", "sms opt out", "opted out", "do not text", "sms dnd", "unsubscribed"]);
+  add("stage", ["stage", "pipeline stage", "stage name", "deal stage", "opportunity stage"]);
+  add("title", ["deal", "deal name", "deal title", "opportunity", "opportunity name", "opportunity title"]);
+  add("value", ["value", "deal value", "amount", "opportunity value", "monetary value", "lead value", "estimated value", "deal amount"]);
+  add("expected_close", ["expected close", "expected close date", "close date", "closing date", "expected closing date", "est close date"]);
+  add("skip", [
+    "contact id", "id", "record id", "opportunity id", "country", "website", "url", "source", "lead source", "type",
+    "status", "opportunity status", "pipeline", "pipeline name", "last activity", "last activity date", "updated",
+    "updated at", "date updated", "additional emails", "additional phones", "date of birth", "dob", "birthday",
+    "timezone", "time zone",
+  ]);
+  return t;
+})();
+const SS_LEAD_CUSTOM_KEY = /^[a-z][a-z0-9_]{0,38}$/;
+const SS_LEAD_EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const ssLeadHeader = (h) => String(h == null ? "" : h).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+// crmPipelines.ts parseMoneyCents and phoneKey.ts phoneKey, the two rules the shared module imports.
+function ssLeadMoneyCents(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === "") return null;
+  const s = typeof v === "number" ? String(v) : String(v).replace(/[$,\s]/g, "");
+  if (!/^\d+(\.\d{1,2})?$/.test(s)) return "bad";
+  const cents = Math.round(Number(s) * 100);
+  return Number.isSafeInteger(cents) ? cents : "bad";
+}
+function ssLeadPhoneKey(value) {
+  const digits = String(value == null ? "" : value).replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+}
+function ssLeadDetect(header, customDefs) {
+  const n = ssLeadHeader(header);
+  if (!n) return "skip";
+  const ours = SS_LEAD_ALIASES[n];
+  if (ours && ours !== "skip") return ours;
+  for (const entity of ["contact", "deal"]) {
+    const hit = (customDefs || []).find((d) => d.entity === entity && (ssLeadHeader(d.label) === n || ssLeadHeader(d.key) === n));
+    if (hit) return "custom:" + entity + ":" + hit.key;
+  }
+  return "skip";
+}
+function ssLeadAutoMap(headers, customDefs) {
+  const used = new Set();
+  return headers.map((h) => {
+    const t = ssLeadDetect(h, customDefs);
+    if (t === "skip" || used.has(t)) return "skip";
+    used.add(t);
+    return t;
+  });
+}
+function ssLeadMappingRefusal(mapping) {
+  const has = (f) => mapping.includes(f);
+  const named = has("name") || has("first_name") || has("last_name") || has("company");
+  const reachable = has("phone") || has("email");
+  if (!named && !reachable) return "Pick which column holds the name or the company, and which holds the phone or the email.";
+  if (!named) return "Pick which column holds the name or the company.";
+  if (!reachable) return "Pick which column holds the phone or the email, so the people you import can be reached.";
+  const dup = mapping.filter((t) => t !== "skip").find((t, i, a) => a.indexOf(t) !== i);
+  if (dup) return "Two columns are going to the same field. Pick a different field for one of them, or Skip it.";
+  return null;
+}
+const ssLeadCut = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+const ssLeadCutLines = (v, max) => String(v == null ? "" : v).replace(/\r\n?/g, "\n").trim().slice(0, max);
+const ssLeadNameKey = (v) => String(v == null ? "" : v).toLowerCase().replace(/\s+/g, " ").trim();
+function ssLeadSplitLabels(v) {
+  const out = [];
+  const seen = new Set();
+  for (const part of String(v == null ? "" : v).split(/[,;]/)) {
+    const s = ssLeadCut(part, SS_LEAD_CAPS.label);
+    if (!s || seen.has(s.toLowerCase())) continue;
+    seen.add(s.toLowerCase());
+    out.push(s);
+    if (out.length >= SS_LEAD_CAPS.labels) break;
+  }
+  return out;
+}
+function ssLeadRealDay(y, m, d) {
+  if (!(y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
+  const t = new Date(Date.UTC(y, m - 1, d));
+  if (t.getUTCMonth() !== m - 1 || t.getUTCDate() !== d) return null;
+  return y + "-" + (m < 10 ? "0" : "") + m + "-" + (d < 10 ? "0" : "") + d;
+}
+function ssLeadSheetDay(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return null;
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:$|[T\s])/.exec(s);
+  if (m) return ssLeadRealDay(Number(m[1]), Number(m[2]), Number(m[3]));
+  m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})(?:$|\s)/.exec(s);
+  if (m) {
+    const y = m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3]);
+    return ssLeadRealDay(y, Number(m[1]), Number(m[2]));
+  }
+  return null;
+}
+const ssLeadTruthy = (v) => /^(y|yes|true|t|x|1|on|dnd|opted out|opt out|opted-out|unsubscribed)$/i.test(String(v == null ? "" : v).trim());
+const ssLeadHeaderIndex = (matrix) => matrix.findIndex((r) => Array.isArray(r) && r.some((c) => String(c == null ? "" : c).trim() !== ""));
+const SS_LEAD_FILL_KEYS = ["name", "company", "phone", "email", "street", "city", "state", "zip", "owner", "note", "added_at", "stage", "title", "value_cents", "expected_close_date"];
+function ssLeadMergeInto(first, later) {
+  for (const k of SS_LEAD_FILL_KEYS) if ((first[k] === undefined || first[k] === "") && later[k] !== undefined) first[k] = later[k];
+  if (later.labels && later.labels.length) {
+    const have = new Set((first.labels || []).map((x) => x.toLowerCase()));
+    const out = (first.labels || []).slice();
+    for (const x of later.labels) {
+      if (out.length >= SS_LEAD_CAPS.labels) break;
+      if (!have.has(x.toLowerCase())) { have.add(x.toLowerCase()); out.push(x); }
+    }
+    first.labels = out;
+  }
+  if (later.do_not_text) first.do_not_text = true;
+  for (const bag of ["contact_custom", "deal_custom"]) {
+    const lb = later[bag];
+    if (!lb) continue;
+    if (!first[bag]) first[bag] = {};
+    for (const k of Object.keys(lb)) if (first[bag][k] === undefined) first[bag][k] = lb[k];
+  }
+}
+// A sheet → { rows, refused, warnings, headerRow, dataRows }. The rules are leadImport.ts
+// planLeadImport's, line for line: read its comment.
+function ssLeadPlan(matrix, mapping, ctx) {
+  const rows = [];
+  const refused = [];
+  const warnings = [];
+  const h = ssLeadHeaderIndex(matrix);
+  if (h < 0) return { rows, refused, warnings, headerRow: 0, dataRows: 0 };
+  const C = {};
+  for (const f of SS_LEAD_FIELDS) C[f.id] = mapping.indexOf(f.id);
+  const customCols = [];
+  mapping.forEach((t, i) => {
+    const m = /^custom:(contact|deal):(.+)$/.exec(String(t));
+    if (m && SS_LEAD_CUSTOM_KEY.test(m[2])) customCols.push({ i, entity: m[1], key: m[2] });
+  });
+  const withDeals = Array.isArray(ctx.stages);
+  const stageByName = new Map();
+  for (const s of ctx.stages || []) {
+    const k = ssLeadNameKey(s.name);
+    stageByName.set(k, stageByName.has(k) ? null : String(s.id).toLowerCase());
+  }
+  const ownerByName = new Map();
+  for (const m of ctx.team || []) {
+    const k = ssLeadNameKey(m.name);
+    if (!k) continue;
+    ownerByName.set(k, ownerByName.has(k) ? null : String(m.userId).toLowerCase());
+  }
+  const byPhone = new Map();
+  const byEmail = new Map();
+  let dataRows = 0;
+  for (let li = h + 1; li < matrix.length; li++) {
+    const line = Array.isArray(matrix[li]) ? matrix[li] : [];
+    if (!line.some((c) => String(c == null ? "" : c).trim() !== "")) continue;
+    dataRows++;
+    const rowNo = li + 1;
+    const cell = (f) => (C[f] >= 0 ? line[C[f]] : undefined);
+    const r = { row: rowNo };
+    const warn = (code) => warnings.push({ row: rowNo, code });
+
+    const full = ssLeadCut(cell("name"), SS_LEAD_CAPS.name);
+    const joined = ssLeadCut([ssLeadCut(cell("first_name"), 100), ssLeadCut(cell("last_name"), 100)].filter(Boolean).join(" "), SS_LEAD_CAPS.name);
+    const name = full || joined;
+    if (name) r.name = name;
+    const company = ssLeadCut(cell("company"), SS_LEAD_CAPS.company);
+    if (company) r.company = company;
+
+    const rawPhone = ssLeadCut(cell("phone"), SS_LEAD_CAPS.phone);
+    const rawEmail = ssLeadCut(cell("email"), SS_LEAD_CAPS.email);
+    const phoneOk = !!rawPhone && rawPhone.replace(/\D/g, "").length >= 7;
+    const emailOk = !!rawEmail && SS_LEAD_EMAIL.test(rawEmail);
+    const seenAbove = (phoneOk && byPhone.has(ssLeadPhoneKey(rawPhone))) || (emailOk && byEmail.has(rawEmail.toLowerCase()));
+    if (!r.name && !r.company && !seenAbove) { refused.push({ row: rowNo, code: "no_name" }); continue; }
+    if (!phoneOk && !emailOk) {
+      refused.push({ row: rowNo, code: rawPhone && rawEmail ? "bad_both" : rawPhone ? "bad_phone" : rawEmail ? "bad_email" : "no_identity" });
+      continue;
+    }
+    if (phoneOk) r.phone = rawPhone; else if (rawPhone) warn("phone_dropped");
+    if (emailOk) r.email = rawEmail; else if (rawEmail) warn("email_dropped");
+
+    for (const f of ["street", "city", "state", "zip"]) {
+      const v = ssLeadCut(cell(f), SS_LEAD_CAPS[f]);
+      if (v) r[f] = v;
+    }
+    const labels = ssLeadSplitLabels(cell("labels"));
+    if (labels.length) r.labels = labels;
+    const note = ssLeadCutLines(cell("note"), SS_LEAD_CAPS.note);
+    if (note) r.note = note;
+    if (C.added_at >= 0 && ssLeadCut(cell("added_at"), 60)) {
+      const d = ssLeadSheetDay(cell("added_at"));
+      if (d) r.added_at = d; else warn("date_dropped");
+    }
+    if (ssLeadTruthy(cell("do_not_text"))) r.do_not_text = true;
+
+    if (!ctx.ownOnly && C.owner >= 0) {
+      const o = ssLeadNameKey(cell("owner"));
+      if (o) {
+        const id = ownerByName.get(o);
+        if (id) r.owner = id; else warn("owner_unknown");
+      }
+    }
+
+    if (withDeals) {
+      const st = ssLeadNameKey(cell("stage"));
+      if (st) {
+        const id = stageByName.get(st);
+        if (id) r.stage = id; else warn("stage_unknown");
+      }
+      const title = ssLeadCut(cell("title"), SS_LEAD_CAPS.title);
+      if (title) r.title = title;
+      const rawValue = ssLeadCut(cell("value"), 40);
+      if (rawValue) {
+        const cents = ssLeadMoneyCents(rawValue);
+        if (typeof cents === "number") r.value_cents = cents; else warn("value_dropped");
+      }
+      if (C.expected_close >= 0 && ssLeadCut(cell("expected_close"), 60)) {
+        const d = ssLeadSheetDay(cell("expected_close"));
+        if (d) r.expected_close_date = d; else warn("date_dropped");
+      }
+    }
+
+    for (const cc of customCols) {
+      if (cc.entity === "deal" && !withDeals) continue;
+      const v = ssLeadCutLines(line[cc.i], 4000);
+      if (!v) continue;
+      const bagKey = cc.entity === "contact" ? "contact_custom" : "deal_custom";
+      if (!r[bagKey]) r[bagKey] = {};
+      r[bagKey][cc.key] = v;
+    }
+
+    const pk = r.phone ? ssLeadPhoneKey(r.phone) : "";
+    const ek = r.email ? r.email.toLowerCase() : "";
+    const at = (pk && byPhone.has(pk)) ? byPhone.get(pk) : (ek && byEmail.has(ek)) ? byEmail.get(ek) : -1;
+    if (at >= 0) {
+      const first = rows[at];
+      const fpk = first.phone ? ssLeadPhoneKey(first.phone) : "";
+      const fek = first.email ? first.email.toLowerCase() : "";
+      const differs = (pk && fpk && pk !== fpk) || (ek && fek && ek !== fek);
+      if (differs) {
+        warnings.push({ row: rowNo, code: "repeat_other_channel", into: first.row });
+        rows.push(r);
+        if (pk && !byPhone.has(pk)) byPhone.set(pk, rows.length - 1);
+        if (ek && !byEmail.has(ek)) byEmail.set(ek, rows.length - 1);
+        continue;
+      }
+      ssLeadMergeInto(first, r);
+      warnings.push({ row: rowNo, code: "repeat_in_file", into: first.row });
+      if (pk) byPhone.set(pk, at);
+      if (ek) byEmail.set(ek, at);
+      continue;
+    }
+    rows.push(r);
+    if (pk) byPhone.set(pk, rows.length - 1);
+    if (ek) byEmail.set(ek, rows.length - 1);
+  }
+  return { rows, refused, warnings, headerRow: h + 1, dataRows };
+}
+function ssLeadPages(rows, size) {
+  const n = Math.max(1, Math.floor(size || SS_LEAD_PAGE_MAX));
+  const out = [];
+  for (let i = 0; i < rows.length; i += n) out.push(rows.slice(i, i + n));
+  return out;
+}
+const SS_LEAD_COUNT_KEYS = ["rows", "contacts_created", "contacts_matched", "matched_skipped", "deals_created", "already_in_pipeline",
+  "not_yours", "no_identity", "no_name", "conflicts", "notes_added", "labelled", "people_added", "opted_out"];
+function ssLeadZero() {
+  const c = { refused: [], warnings: [] };
+  for (const k of SS_LEAD_COUNT_KEYS) c[k] = 0;
+  return c;
+}
+function ssLeadSum(pages) {
+  const out = ssLeadZero();
+  for (const p of pages) {
+    const o = p && typeof p === "object" ? p : {};
+    for (const k of SS_LEAD_COUNT_KEYS) {
+      const n = Number(o[k]);
+      if (Number.isFinite(n)) out[k] += n;
+    }
+    for (const list of ["refused", "warnings"]) {
+      const arr = Array.isArray(o[list]) ? o[list] : [];
+      for (const it of arr) {
+        const i = it || {};
+        const row = Number(i.row);
+        if (Number.isInteger(row) && typeof i.code === "string") out[list].push({ row, code: i.code });
+      }
+    }
+  }
+  return out;
+}
+const SS_LEAD_REASONS = {
+  no_name: "It has no name and no company.",
+  no_identity: "It has no phone number or email, so nobody could reach them.",
+  bad_phone: "Its phone number is too short to dial, and it has no email.",
+  bad_email: "Its email isn't an email address, and it has no phone number.",
+  bad_both: "Its phone number is too short to dial and its email isn't an email address.",
+  phone_dropped: "Its phone number is too short to dial, so it was left off.",
+  email_dropped: "Its email isn't an email address, so it was left off.",
+  value_dropped: "Its deal value isn't an amount, so it was left off.",
+  date_dropped: "A date on it isn't one we can read, so it was left off.",
+  stage_unknown: "Its stage isn't one of this pipeline's stages, so it gets the default stage.",
+  owner_unknown: "Its owner isn't exactly one person on your team, so it gets the default owner.",
+  repeat_in_file: "It's the same person as an earlier row, so the two were combined.",
+  repeat_other_channel: "It shares a phone or email with an earlier row but has another one too, so that one is added to the same contact.",
+  custom_dropped: "One of its custom field values doesn't fit that field, so it was left off.",
+  stage_missing: "Its stage was removed after the preview. Run the file again.",
+  not_yours: "They're already a contact you aren't assigned to, so they were left alone.",
+  conflict: "Another contact took that phone number or email at the same moment. Run the file again.",
+};
+const ssLeadReason = (code) => SS_LEAD_REASONS[code] || "It couldn't be imported.";
+function ssLeadSummary(c, o) {
+  const plural = (n, one, many) => n.toLocaleString("en-US") + " " + (n === 1 ? one : many);
+  const out = [];
+  const created = c.contacts_created;
+  const matched = c.contacts_matched + c.matched_skipped;
+  const left = (o.refusedInFile || 0) + c.refused.length;
+  if (o.dryRun) {
+    out.push("Nothing has been saved yet.");
+    out.push("This file would add " + plural(created, "new contact", "new contacts") + ".");
+    if (matched) {
+      out.push(plural(matched, "person is", "people are") + " already in Contacts" + (o.onMatch === "skip" ? " and would be left as they are" : ", and their blank details would be filled in") + ".");
+    }
+    if (o.withDeals) {
+      out.push(plural(c.deals_created, "deal", "deals") + " would go on the pipeline" + (c.already_in_pipeline ? "; " + plural(c.already_in_pipeline, "person is", "people are") + " already on it" : "") + ".");
+    }
+    if (left) out.push(plural(left, "row", "rows") + " can't be imported.");
+  } else {
+    out.push("Done. " + plural(created, "new contact was", "new contacts were") + " added.");
+    if (matched) {
+      out.push(plural(matched, "person was", "people were") + " already in Contacts" + (o.onMatch === "skip" ? " and left as they were" : ", and their blank details were filled in") + ".");
+    }
+    if (o.withDeals) {
+      out.push(plural(c.deals_created, "deal was", "deals were") + " added to the pipeline" + (c.already_in_pipeline ? "; " + plural(c.already_in_pipeline, "person was", "people were") + " already on it" : "") + ".");
+    }
+    if (left) out.push(plural(left, "row wasn't", "rows weren't") + " imported.");
+  }
+  return out.join(" ");
+}
+// ⟦lead-import:end⟧
+
+// An Excel date cell is the calendar day it shows, never a local time that can fall on the day
+// before (ExcelJS hands a Date at UTC midnight; String() of it in a US zone is the previous evening).
+const ssLeadCellText = (v) => {
+  if (v instanceof Date) return Number.isFinite(v.getTime()) ? v.toISOString().slice(0, 10) : "";
+  if (v && typeof v === "object" && v.result instanceof Date) return v.result.toISOString().slice(0, 10);
+  return xlsxCellText(v);
+};
+
+// The Import dialog: file → which column is which → what it would do (a dry run, page by page) →
+// import (the same pages for real) → what it did. Nothing is written before the last step, and a
+// re-run of the same file matches everyone it already brought in rather than adding them twice.
+function SsImportLeadsDialog({ pipelines, defaultPipelineId, team, ownOnly, onClose, onDone }) {
+  const [step, setStep] = useState("file");          // file | map | preview | done
+  const [fileName, setFileName] = useState("");
+  const [matrix, setMatrix] = useState(null);
+  const [mapping, setMapping] = useState([]);
+  const [customDefs, setCustomDefs] = useState(null); // null = loading; [] when the list can't be read
+  const [pipelineId, setPipelineId] = useState(defaultPipelineId || "");
+  const [stageId, setStageId] = useState("");
+  const [ownerUserId, setOwnerUserId] = useState("");
+  const [onMatch, setOnMatch] = useState("attach");
+  const [plan, setPlan] = useState(null);
+  const [result, setResult] = useState(null);        // summed counts of the last dry run or import
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const [err, setErr] = useState(null);
+
+  // The builder's own fields, so a column called like one of them maps itself. A rep who may not
+  // read Settings → Fields gets none, which only means those columns start as Skip.
+  useEffect(() => {
+    let live = true;
+    ssPipeCall("crm_fields_list").then((d) => {
+      if (!live) return;
+      const pick = (entity) => (((d && d[entity]) || {}).custom || []).map((f) => ({ entity, key: String(f.key), label: String(f.label) }));
+      setCustomDefs([...pick("contact"), ...pick("deal")]);
+    }, () => { if (live) setCustomDefs([]); });
+    return () => { live = false; };
+  }, []);
+
+  const pipe = pipelines.find((p) => p.id === pipelineId) || null;
+  const stages = pipe ? pipe.stages || [] : [];
+  const stage = stageId && stages.some((s) => s.id === stageId) ? stageId : (stages[0] && stages[0].id) || "";
+  const headerAt = matrix ? ssLeadHeaderIndex(matrix) : -1;
+  const headers = headerAt >= 0 ? matrix[headerAt] : [];
+  const refusal = matrix ? ssLeadMappingRefusal(mapping) : null;
+
+  const readFile = async (file) => {
+    setErr(null); setPlan(null); setResult(null);
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { setErr("That file is bigger than 5 MB. Split it into smaller files."); return; }
+    setBusy(true);
+    try {
+      let m;
+      if (/\.xlsx$/i.test(file.name)) {
+        const sheets = await readXlsxWorkbook(file, await loadExcelJS(), ssLeadCellText);
+        const filled = (s) => s.matrix.some((r) => Array.isArray(r) && r.some((c) => String(c == null ? "" : c).trim() !== ""));
+        const sheet = sheets.find((s) => s.state !== "hidden" && s.state !== "veryHidden" && filled(s)) || sheets.find(filled);
+        m = sheet ? sheet.matrix : [];
+      } else if (/\.csv$/i.test(file.name)) {
+        m = parseCSVRows((await file.text()).replace(/^﻿/, ""));
+      } else {
+        setErr("Choose a .csv or .xlsx file. In Excel or Google Sheets, use Save as or Download as CSV.");
+        return;
+      }
+      const h = ssLeadHeaderIndex(m);
+      if (h < 0) { setErr("That file is empty."); return; }
+      const lines = m.slice(h + 1).filter((r) => Array.isArray(r) && r.some((c) => String(c == null ? "" : c).trim() !== "")).length;
+      if (!lines) { setErr("That file has column names but no rows under them."); return; }
+      if (lines > SS_LEAD_MAX_ROWS) { setErr(`That file has ${lines.toLocaleString("en-US")} rows. Import at most ${SS_LEAD_MAX_ROWS.toLocaleString("en-US")} at a time: split it into smaller files.`); return; }
+      setMatrix(m);
+      setFileName(file.name);
+      setMapping(ssLeadAutoMap(m[h], customDefs || []));
+      setStep("map");
+    } catch (e) {
+      setErr(e && e.message ? e.message : "That file couldn't be read.");
+    } finally { setBusy(false); }
+  };
+
+  const planNow = () => ssLeadPlan(matrix, mapping, { stages: pipe ? stages : null, team: team || [], ownOnly: !!ownOnly, customDefs: customDefs || [] });
+
+  // Every page, in order, through portal-settings. Stops at the first page that fails and says how far it got.
+  const runPages = async (rows, dryRun) => {
+    const pages = ssLeadPages(rows, SS_LEAD_PAGE_MAX);
+    const answers = [];
+    let sent = 0;
+    for (let i = 0; i < pages.length; i++) {
+      setProgress({ from: sent + 1, to: sent + pages[i].length, total: rows.length, dryRun });
+      try {
+        answers.push(await ssPipeCall("crm_import_leads", {
+          dryRun, pipelineId: pipe ? pipe.id : null, defaultStageId: pipe ? stage || null : null, onMatch,
+          defaultOwnerUserId: ownOnly ? null : ownerUserId || null, rows: pages[i], page: i + 1, pages: pages.length,
+        }));
+      } catch (e) {
+        return { answers, failedAt: pages[i][0].row, error: e.message, saved: sent };
+      }
+      sent += pages[i].length;
+    }
+    return { answers, failedAt: null, error: null, saved: sent };
+  };
+
+  const check = async () => {
+    setErr(null); setResult(null);
+    const p = planNow();
+    setPlan(p);
+    if (!p.rows.length) { setStep("preview"); setErr("No row in this file can be imported. The reasons are listed below."); return; }
+    setBusy(true);
+    try {
+      const out = await runPages(p.rows, true);
+      if (out.error) { setErr(out.error); setStep("preview"); return; }
+      setResult(ssLeadSum(out.answers));
+      setStep("preview");
+    } finally { setBusy(false); setProgress(null); }
+  };
+
+  const importNow = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const p = planNow();
+      setPlan(p);
+      const out = await runPages(p.rows, false);
+      setResult(ssLeadSum(out.answers));
+      if (out.error) {
+        setErr(out.saved
+          ? `${out.saved.toLocaleString("en-US")} rows were saved. The import stopped at row ${out.failedAt}: ${out.error} Run the same file again: the rows already saved are matched, not added twice.`
+          : out.error);
+      }
+      setStep("done");
+    } finally { setBusy(false); setProgress(null); }
+  };
+
+  const samples = (i) => {
+    const out = [];
+    for (let li = headerAt + 1; li < matrix.length && out.length < 2; li++) {
+      const v = String(((matrix[li] || [])[i]) == null ? "" : matrix[li][i]).trim();
+      if (v) out.push(v.length > 32 ? v.slice(0, 31) + "…" : v);
+    }
+    return out.join(" · ");
+  };
+  const issueList = (title, list, tone) => {
+    if (!list.length) return null;
+    const sorted = list.slice().sort((a, b) => a.row - b.row);
+    return (
+      <div style={{ border: `1px solid ${tone === "bad" ? "#FECACA" : "#E2E8F0"}`, background: tone === "bad" ? "#FEF2F2" : "#F8FAFC", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: tone === "bad" ? "#B91C1C" : "#334155", marginBottom: 4 }}>{title} ({list.length.toLocaleString("en-US")})</div>
+        {sorted.slice(0, 30).map((it, k) => (
+          <div key={k} style={{ fontSize: 12, color: "#334155", lineHeight: 1.5 }}>Row {it.row}: {ssLeadReason(it.code)}{it.into ? ` (row ${it.into})` : ""}</div>
+        ))}
+        {sorted.length > 30 && <div style={{ fontSize: 12, color: "#64748B" }}>…and {(sorted.length - 30).toLocaleString("en-US")} more.</div>}
+      </div>
+    );
+  };
+  const ghostBtn = { ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" };
+  const refusedAll = plan ? plan.refused.concat(result ? result.refused : []) : [];
+  const warningsAll = plan ? plan.warnings.concat(result ? result.warnings : []) : [];
+  const summaryOpts = { withDeals: !!pipe, onMatch, refusedInFile: plan ? plan.refused.length : 0 };
+  const customOptions = (entity) => (customDefs || []).filter((d) => d.entity === entity);
+
+  return (
+    <SsPipeModal title="Import leads" onClose={busy ? () => {} : onClose} width={760}>
+      {step === "file" && (
+        <div>
+          <p style={{ fontSize: 13, color: "#475569", margin: "0 0 12px", lineHeight: 1.5 }}>
+            Choose a spreadsheet of leads: a .csv or .xlsx file with column names in its first row. An export from
+            GoHighLevel or another CRM works as it is. Each row becomes a contact, and you can put them on a pipeline too.
+            You'll see what the file would do before anything is saved.
+          </p>
+          <input type="file" accept=".csv,.xlsx" disabled={busy || customDefs === null}
+            onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; readFile(f); }} />
+          {(busy || customDefs === null) && <div style={{ fontSize: 12, color: "#64748B", marginTop: 8 }}>{busy ? "Reading the file…" : "Getting ready…"}</div>}
+        </div>
+      )}
+
+      {step === "map" && matrix && (
+        <div>
+          <div style={{ fontSize: 13, color: "#475569", marginBottom: 10 }}>
+            <b>{fileName}</b>: {(matrix.length - headerAt - 1).toLocaleString("en-US")} lines under the column names. Check where each column goes.
+          </div>
+          <div style={{ overflowX: "auto", marginBottom: 12 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr><th style={S.th}>Column</th><th style={S.th}>Example</th><th style={S.th}>Goes to</th></tr></thead>
+              <tbody>
+                {headers.map((hdr, i) => (
+                  <tr key={i}>
+                    <td style={{ ...S.td, fontWeight: 700 }}>{String(hdr == null ? "" : hdr).trim() || `Column ${i + 1}`}</td>
+                    <td style={{ ...S.td, color: "#64748B", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{samples(i)}</td>
+                    <td style={S.td}>
+                      <select style={{ ...S.input, minWidth: 190 }} value={mapping[i] || "skip"}
+                        onChange={(e) => { const v = e.target.value; setMapping((m) => m.map((x, j) => (j === i ? v : x))); }}>
+                        <option value="skip">Skip this column</option>
+                        <optgroup label="Contact">
+                          {SS_LEAD_FIELDS.filter((f) => f.group === "Contact" && !(ownOnly && f.id === "owner")).map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+                        </optgroup>
+                        <optgroup label={pipe ? "Deal" : "Deal (pick a pipeline below to use these)"}>
+                          {SS_LEAD_FIELDS.filter((f) => f.group === "Deal").map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+                        </optgroup>
+                        {customOptions("contact").length > 0 && (
+                          <optgroup label="Your contact fields">
+                            {customOptions("contact").map((d) => <option key={d.key} value={`custom:contact:${d.key}`}>{d.label}</option>)}
+                          </optgroup>
+                        )}
+                        {customOptions("deal").length > 0 && (
+                          <optgroup label="Your deal fields">
+                            {customOptions("deal").map((d) => <option key={d.key} value={`custom:deal:${d.key}`}>{d.label}</option>)}
+                          </optgroup>
+                        )}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10, marginBottom: 10 }}>
+            <label><span style={S.lbl}>Pipeline</span>
+              <select style={S.input} value={pipelineId} onChange={(e) => { setPipelineId(e.target.value); setStageId(""); }}>
+                <option value="">Don't add them to a pipeline</option>
+                {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </label>
+            {pipe && (
+              <label><span style={S.lbl}>Stage (when a row names none)</span>
+                <select style={S.input} value={stage} onChange={(e) => setStageId(e.target.value)}>
+                  {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+            )}
+            {!ownOnly && (
+              <label><span style={S.lbl}>Owner (when a row names none)</span>
+                <select style={S.input} value={ownerUserId} onChange={(e) => setOwnerUserId(e.target.value)}>
+                  <option value="">Unassigned</option>
+                  {(team || []).map((m) => <option key={m.userId} value={m.userId}>{m.name || "Team member"}</option>)}
+                </select>
+              </label>
+            )}
+          </div>
+          {ownOnly && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>Everyone you import is assigned to you.</div>}
+          <div style={{ marginBottom: 10 }}>
+            <span style={S.lbl}>When a row is someone already in Contacts</span>
+            <label style={{ display: "block", fontSize: 13, color: "#334155", marginBottom: 4 }}>
+              <input type="radio" name="ss-lead-on-match" checked={onMatch === "attach"} onChange={() => setOnMatch("attach")} />{" "}
+              Fill in the details they're missing{pipe ? " and add them to the pipeline" : ""}
+            </label>
+            <label style={{ display: "block", fontSize: 13, color: "#334155" }}>
+              <input type="radio" name="ss-lead-on-match" checked={onMatch === "skip"} onChange={() => setOnMatch("skip")} />{" "}
+              Leave them as they are
+            </label>
+          </div>
+          <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "0 0 12px" }}>
+            Nothing already saved is overwritten, and nobody is added twice. Your Automations run for new contacts the way they do for any other.
+          </p>
+          {refusal && <div style={S.err}>{refusal}</div>}
+          {err && <div style={S.err}>{err}</div>}
+          {progress && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>Checking rows {progress.from.toLocaleString("en-US")}–{progress.to.toLocaleString("en-US")} of {progress.total.toLocaleString("en-US")}…</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" disabled={busy} onClick={() => { setStep("file"); setMatrix(null); setErr(null); }} style={ghostBtn}>Choose another file</button>
+            <button type="button" disabled={busy || !!refusal} onClick={check} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || refusal ? 0.6 : 1 }}>{busy ? "Checking…" : "Check the file"}</button>
+          </div>
+        </div>
+      )}
+
+      {(step === "preview" || step === "done") && plan && (
+        <div>
+          {/* An import that stopped partway says so in the red box, with how many rows were saved,
+              rather than opening with "Done." */}
+          {result && !(step === "done" && err) && <div style={step === "done" ? S.okMsg : { ...S.okMsg, background: "#F8FAFC", borderColor: "#E2E8F0", color: "#1E293B" }}>
+            {ssLeadSummary(result, { ...summaryOpts, dryRun: step === "preview" })}
+          </div>}
+          {err && <div style={S.err}>{err}</div>}
+          {issueList(step === "done" ? "Not imported" : "Won't be imported", refusedAll, "bad")}
+          {issueList(step === "done" ? "Imported with a change" : "Will be imported with a change", warningsAll, "note")}
+          {progress && <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>Saving rows {progress.from.toLocaleString("en-US")}–{progress.to.toLocaleString("en-US")} of {progress.total.toLocaleString("en-US")}…</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            {step === "preview" && <button type="button" disabled={busy} onClick={() => { setStep("map"); setErr(null); }} style={ghostBtn}>Back</button>}
+            {step === "preview" && result && plan.rows.length > 0 && !err && (
+              <button type="button" disabled={busy} onClick={importNow} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>{busy ? "Importing…" : "Import"}</button>
+            )}
+            {step === "done" && <button type="button" onClick={onDone} style={S.btn(ACCENT, "#FFF")}>Close</button>}
+          </div>
+        </div>
+      )}
+
+      {step === "file" && err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{err}</div>}
+    </SsPipeModal>
+  );
+}
+
 // Marking a deal lost asks why: the pipeline's own list first, then "Other". It used to be what a
 // drag into a Lost stage asked; since 353 it is what the Mark lost button asks, and the card stays
 // where it is. The dialog itself did not change.
@@ -9059,7 +9731,7 @@ function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = 
   const [viewEdit, setViewEdit] = useState(null);
   // (The board used to measure its own width with a ResizeObserver to decide how many stage columns
   // went across before wrapping. One row always, so the layout is CSS alone and nothing is measured.)
-  const [dialog, setDialog] = useState(null);  // "add" | "edit" | "new" | { lost: { deal } }
+  const [dialog, setDialog] = useState(null);  // "add" | "import" | "edit" | "new" | { lost: { deal } }
   const [dragId, setDragId] = useState(null);
   const [overStage, setOverStage] = useState(null);
   const [pickedLocal, setPickedLocal] = useState(null);
@@ -9213,6 +9885,7 @@ function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = 
                 moving a customer's deal is the builder's work, not set-up. */}
             {meta.canManage && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
             {meta.canManage && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
+            {canWrite && <button type="button" onClick={() => setDialog("import")} style={ghost}>Import</button>}
             {canWrite && pipe && <button type="button" onClick={() => setDialog("add")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px" }}>＋ Add lead</button>}
             {/* REFRESH ON EVERY BOARD (2026-10-13). It used to show only when not embedded, and the
                 board is only ever drawn embedded now (a Contacts hub tab), so there was no way to
@@ -9433,6 +10106,10 @@ function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = 
         <SsAddLeadDialog pipelines={pipelines} defaultPipelineId={pipeId} team={team} ownOnly={!!meta.ownOnly} me={meta.me}
           onClose={() => setDialog(null)} onOpenRecord={onOpenRecord ? (contactId) => onOpenRecord(null, contactId) : null}
           onAdded={(r) => { setDialog(null); loadDeals(); }} />
+      )}
+      {dialog === "import" && (
+        <SsImportLeadsDialog pipelines={pipelines} defaultPipelineId={pipeId} team={team} ownOnly={!!meta.ownOnly}
+          onClose={() => setDialog(null)} onDone={() => { setDialog(null); loadDeals(); }} />
       )}
       {dialog === "edit" && pipe && <SsPipelineEditor pipeline={pipe} shedsOn={shedsOn} onClose={() => { setDialog(null); loadMeta(); loadDeals(); }} />}
       {dialog === "new" && <SsPipelineEditor pipeline={null} onClose={() => setDialog(null)}

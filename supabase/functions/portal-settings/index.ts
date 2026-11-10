@@ -260,6 +260,7 @@ import {
 // ...and generating one from a photo (P4): the press, its money and its ledger, in ./doorGenerate.ts.
 import { doorAiEnabled, handleDoorLookRecover, handleGenerateDoorLook, wantsStreamedDoorDraft } from "./doorGenerate.ts";
 import { coerceFieldValue } from "../_shared/crmFields.ts";
+import { LEAD_COUNT_KEYS, parseLeadImportRequest } from "../_shared/leadImport.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
   DESIGN_FEED_STAYS, isUuidLike, LOST_REASON_MAX, LOST_REASON_REQUIRED, parseDealPatch, parseIdOrder, parseLead,
@@ -613,6 +614,9 @@ const GATES: GateTable = {
   crm_deals_list:        { area: "contacts", level: "view" },
   crm_contact_deals:     { area: "contacts", level: "view" },
   crm_create_lead:       { area: "contacts", level: "edit" },
+  // Migration 381: a spreadsheet of leads, one page per call. Contacts at edit like "+ Add lead",
+  // for the same reason: it creates contacts and deals. Narrowed in the branch (CONTACT_ROW_SCOPE).
+  crm_import_leads:      { area: "contacts", level: "edit" },
   crm_deal_create:       { area: "contacts", level: "edit" },
   crm_deal_update:       { area: "contacts", level: "edit" },
   crm_deal_move:         { area: "contacts", level: "edit" },
@@ -1649,6 +1653,10 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     // are narrowed (the `creates` promise); a match on an existing contact writes nothing and is
     // answered only when the caller may see that contact. The deal verbs find their deal's contact.
     crm_create_lead:       { creates: true },
+    // 381, the same two promises as crm_create_lead, kept inside the SQL for a whole page: a
+    // narrowed caller owns every contact the import creates (p_opts.force_owner), and a row that
+    // matches a contact they cannot see is refused as not_yours (p_opts.viewer), never attached.
+    crm_import_leads:      { creates: true },
     crm_deal_create:       { contactKeys: ["contactId"] },
     crm_deal_update:       { rowTable: "crm_deals", noCode: true },
     crm_deal_move:         { rowTable: "crm_deals", noCode: true },
@@ -11198,6 +11206,108 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!out.contactId) return dbFail(req, clientId, "add that lead", { message: "crm_create_lead returned no contact" });
     audit("crm_create_lead", 1, `contact=${out.contactId} deal=${out.dealId ?? "none"} owner=${owner ? "set" : "none"}`).catch(() => {});
     return json({ ok: true, contactId: out.contactId, dealId: out.dealId ?? null });
+  }
+
+  // ── Importing leads from a spreadsheet (migration 381) ──────────────────────────────────────
+  // Carolyn 2026-11-06: "a way to import leads into Structure Studio." The browser reads, maps and
+  // pages the sheet (portal/02-sales.jsx between the ⟦lead-import⟧ markers, the copy of
+  // _shared/leadImport.ts); this branch takes ONE page of at most IMPORT_PAGE_MAX rows and hands it
+  // to public.crm_import_leads in one call, so a big file never makes a database call per row.
+  // A dry run unless the request says `dryRun: false`.
+  //
+  // NARROWED CALLERS (contacts:'own', CONTACT_ROW_SCOPE `creates`): everything they import is theirs
+  // (force_owner, and every row's owner overwritten here), and a row matching a contact they cannot
+  // see is refused inside the SQL as not_yours (viewer), so nothing is written onto it.
+  //
+  // COUNTS ONLY. The answer is numbers plus [{row, code}]; the audit line is numbers; no value from a
+  // row is logged. A future Jack card would call this same action with the same rows.
+  if (action === "crm_import_leads") {
+    const parsed = parseLeadImportRequest((payload ?? {}) as Record<string, unknown>);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const me = String(selfUserId ?? "").toLowerCase();
+    if (ownContacts && !isUuidLike(me)) return json({ error: "Sign in again to import leads." }, 401);
+
+    // Custom values are checked against the builder's real fields, as the record page's save is
+    // (coerceFieldValue). One that doesn't fit is left off with a warning instead of refusing the
+    // page: one bad cell must not cost every other row. A key no live field has is dropped.
+    type FieldDef = { field_type?: unknown; choices?: unknown; label?: unknown };
+    const defs = { contact: new Map<string, FieldDef>(), deal: new Map<string, FieldDef>() };
+    for (const entity of ["contact", "deal"] as const) {
+      const bag = entity === "contact" ? "contact_custom" : "deal_custom";
+      if (!parsed.rows.some((r) => r[bag] && Object.keys(r[bag]!).length)) continue;
+      const got = await readCustomFields(admin, clientId, entity);
+      if ("dbError" in got) return dbFail(req, clientId, "load your fields", got.dbError);
+      for (const f of got.fields as FieldDef[] & { key?: unknown }[]) defs[entity].set(String((f as { key?: unknown }).key), f);
+    }
+    const warnings: { row: number; code: string }[] = [];
+    const rows = parsed.rows.map((r) => {
+      const out: Record<string, unknown> = { ...r };
+      for (const [bag, entity] of [["contact_custom", "contact"], ["deal_custom", "deal"]] as const) {
+        const raw = r[bag];
+        if (!raw) continue;
+        const clean: Record<string, unknown> = {};
+        let dropped = false;
+        for (const [k, v] of Object.entries(raw)) {
+          const f = defs[entity].get(k);
+          if (!f) continue;
+          const c = coerceFieldValue({
+            field_type: String(f.field_type), label: String(f.label),
+            choices: Array.isArray(f.choices) ? f.choices as string[] : null,
+          }, v);
+          if ("error" in c) { dropped = true; continue; }
+          if (c.value !== null) clean[k] = c.value;
+        }
+        if (dropped) warnings.push({ row: r.row, code: "custom_dropped" });
+        if (Object.keys(clean).length) out[bag] = clean; else delete out[bag];
+      }
+      if (ownContacts) out.owner = me;
+      return out;
+    });
+
+    const opts = {
+      pipeline: parsed.pipelineId,
+      default_stage: parsed.defaultStageId,
+      on_match: parsed.onMatch,
+      default_owner: ownContacts ? me : parsed.defaultOwnerUserId,
+      force_owner: ownContacts ? me : null,
+      viewer: ownContacts ? me : null,
+    };
+    const pageNote = parsed.page && parsed.pages ? ` page=${parsed.page}/${parsed.pages}` : "";
+    if (!parsed.dryRun) {
+      try { await auditStrict("crm_import_leads_page", null, `dry_run=false rows=${rows.length}${pageNote} pipeline=${parsed.pipelineId ? "set" : "none"} on_match=${parsed.onMatch}`); }
+      catch (e) { return dbFail(req, clientId, "record who started the import", e); }
+    }
+    const { data, error } = await admin.rpc("crm_import_leads", {
+      p_client_id: clientId, p_rows: rows, p_opts: opts,
+      p_actor: isUuidLike(me) ? me : null, p_dry_run: parsed.dryRun,
+    });
+    if (error) {
+      const code = String((error as { code?: string }).code ?? "");
+      // 381 not applied yet: the action says so and writes nothing, rather than reporting a fault.
+      if (code === "PGRST202" || code === "42883") {
+        const r = json({ error: "The lead import isn't installed on this server yet." }, 503);
+        r.headers.set(SS_REFUSAL_HEADER, "1");
+        r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+        return r;
+      }
+      if (/^pipeline not found$/i.test(String(error.message ?? ""))) {
+        return json({ error: "That pipeline no longer exists. Refresh and pick it again." }, 404);
+      }
+      return pipeRefusal(error) ?? dbFail(req, clientId, "import those leads", error);
+    }
+    const d = (data ?? {}) as Record<string, unknown>;
+    const counts: Record<string, number> = {};
+    for (const k of LEAD_COUNT_KEYS) counts[k] = Number.isFinite(Number(d[k])) ? Number(d[k]) : 0;
+    const refused = (Array.isArray(d.refused) ? d.refused : [])
+      .map((x) => (x ?? {}) as Record<string, unknown>)
+      .filter((x) => typeof x.code === "string")
+      .map((x) => ({ row: Number.isInteger(Number(x.row)) ? Number(x.row) : 0, code: String(x.code) }));
+    audit("crm_import_leads", counts.contacts_created,
+      `dry_run=${parsed.dryRun}${pageNote} rows=${counts.rows} created=${counts.contacts_created} matched=${counts.contacts_matched} `
+      + `skipped=${counts.matched_skipped} deals=${counts.deals_created} already=${counts.already_in_pipeline} `
+      + `not_yours=${counts.not_yours} refused=${refused.length} conflicts=${counts.conflicts} opted_out=${counts.opted_out}`,
+    ).catch(() => {});
+    return json({ ok: true, dryRun: parsed.dryRun, page: parsed.page, pages: parsed.pages, ...counts, refused, warnings });
   }
 
   if (action === "crm_deal_create") {
