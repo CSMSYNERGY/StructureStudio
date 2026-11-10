@@ -9870,22 +9870,15 @@ function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = 
     ? <p style={{ fontSize: 13, color: "#64748B" }}>Loading pipelines…</p>
     : <div style={S.card}><CardHead title="Leads" /><p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p></div>;
 
-  const toolbar = (
-          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+  // The board's own work on the left: the pipeline picker, "+ Add lead", Refresh.
+  const workButtons = (
+          <>
             {pipelines.length > 0 && !hosted && (
               <select aria-label="Pipeline" value={pipeId || ""} onChange={(e) => pick(e.target.value)}
                 style={{ ...S.input, width: "auto", padding: "6px 10px", fontWeight: 700 }}>
                 {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             )}
-            {/* Pipeline SET-UP is a settings change, and an operator in view-as makes those live like
-                every other Settings page ("Editing as operator — changes are live"): portal-settings
-                resolves the viewed tenant and refuses a read-only operator. Carolyn 2026-11-05: "we
-                should be able to edit pipelines and add more". The CARDS stay read-only above —
-                moving a customer's deal is the builder's work, not set-up. */}
-            {meta.canManage && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
-            {meta.canManage && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
-            {canWrite && <button type="button" onClick={() => setDialog("import")} style={ghost}>Import</button>}
             {canWrite && pipe && <button type="button" onClick={() => setDialog("add")} style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px" }}>＋ Add lead</button>}
             {/* REFRESH ON EVERY BOARD (2026-10-13). It used to show only when not embedded, and the
                 board is only ever drawn embedded now (a Contacts hub tab), so there was no way to
@@ -9893,6 +9886,26 @@ function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = 
                 reloads the pipelines (the hub's tab row follows through onPipelines) and this
                 board's cards. */}
             <button type="button" data-ss-board-refresh="" onClick={() => { loadMeta(); loadDeals(); }} style={ghost}>↻ Refresh</button>
+          </>
+  );
+  // At the FAR RIGHT, in this order, "+ Pipeline" last (Carolyn 2026-11-10: "+pipeline should be
+  // farthest right, then left of that is edit stages, then import to the left of that").
+  // Pipeline SET-UP is a settings change, and an operator in view-as makes those live like every
+  // other Settings page ("Editing as operator — changes are live"): portal-settings resolves the
+  // viewed tenant and refuses a read-only operator. Carolyn 2026-11-05: "we should be able to edit
+  // pipelines and add more". The CARDS stay read-only above — moving a customer's deal is the
+  // builder's work, not set-up. Import writes customers, so it follows canWrite like "+ Add lead".
+  const setupButtons = (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginLeft: "auto" }}>
+            {canWrite && <button type="button" onClick={() => setDialog("import")} style={ghost}>Import</button>}
+            {meta.canManage && pipe && <button type="button" onClick={() => setDialog("edit")} style={ghost}>Edit stages</button>}
+            {meta.canManage && <button type="button" onClick={() => setDialog("new")} style={ghost}>＋ Pipeline</button>}
+          </div>
+  );
+  const toolbar = (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            {workButtons}
+            {setupButtons}
           </div>
   );
   const count = deals ? (q || owner !== "all" || statusF.ids.length || (lostCount && !showLost) ? `${shown.length} of ${deals.length}` : deals.length) : null;
@@ -9902,8 +9915,9 @@ function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = 
     <div style={embedded ? undefined : S.card} data-ss-sales-pipelines="">
       {embedded
         ? <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-            {toolbar}
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>{workButtons}</div>
             {count !== null && <span style={{ fontSize: 12, fontWeight: 700, color: "#94A3B8" }}>{count} {count === 1 ? "card" : "cards"}</span>}
+            {setupButtons}
           </div>
         : <CardHead title="Leads" count={count} right={toolbar} />}
       {/* Search, then the STATUS filter beside it (Carolyn 2026-10-12: "a dropdown of the statuses
