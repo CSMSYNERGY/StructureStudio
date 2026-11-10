@@ -164,7 +164,7 @@ const lookTool: ToolSpec = {
       ? "now is null when an item has no price yet; untilPriced says what customers get meanwhile. Its first price and how it's charged are set on the tab (point_to_step addons). The unit is the item's own; a card can't change how an item is charged."
       : area === "colors"
       ? "A color's price is in its own unit (usually each, an upcharge for picking it). price door_price is the flat price a door painted that color adds. The same color name can be on two pages (paint and metal, say): ask which when it is."
-      : "with_package is the item's price when they take the electrical package, standalone is its price on its own. now null means it isn't offered that way. When they name only the item and both are set, ask which (or both). The package's own price is on the tab (point_to_step electrical).";
+      : "with_package is the item's price when they take the electrical package, standalone is its price on its own. now null means it isn't offered that way yet: a card can set it, and the card says customers will be offered it. When they name only the item and both are set, ask which (or both). The package's own price is on the tab (point_to_step electrical).";
     return ok({ area, prices: rows, note });
   },
 };
@@ -172,7 +172,7 @@ const lookTool: ToolSpec = {
 const proposeTool: ToolSpec = {
   def: {
     name: "propose_option_prices",
-    description: "Put a preview on the person's screen that changes prices that are already set on one area: interior (Interior items), colors (paint, shingle and metal colors, and their door price) or electrical (each item with the package, and on its own). It changes nothing: the person presses Approve. Read look_at_my_option_prices for the area first and pass each price's ref and price key, with the new amount in the item's own unit (dollars, or a percent for a percent item). It can't add or remove an item or a color, rename one, set a first price, or change how something is charged: point_to_step for those. To change a card you made, call this again: the new card replaces the old one for the same price.",
+    description: "Put a preview on the person's screen that changes prices on one area: interior (Interior items, prices already set), colors (paint, shingle and metal colors, and their door price) or electrical (each item with the package, and on its own; a blank one can be set, which starts offering the item that way). It changes nothing: the person presses Approve. Read look_at_my_option_prices for the area first and pass each price's ref and price key, with the new amount in the item's own unit (dollars, or a percent for a percent item). It can't add or remove an item or a color, rename one, set an interior item's first price, or change how something is charged: point_to_step for those. To change a card you made, call this again: the new card replaces the old one for the same price.",
     strict: true,
     input_schema: {
       type: "object", additionalProperties: false, required: ["area", "changes"],
@@ -398,7 +398,7 @@ export const optionsPiece: Piece = {
     "Read and change prices on Interior items, colors (paint, shingle, metal, and a color's door price) and Electrical items with look_at_my_option_prices and propose_option_prices.",
   ],
   rules: [
-    "Interior items, color prices and electrical item prices: read look_at_my_option_prices for the area, then propose_option_prices. A card changes prices already set, in the item's own unit. Adding or removing an item or a color, renaming, serial codes, how an item is charged, the electrical package's price, and an item's first price are set on the page: point_to_step.",
+    "Interior items, color prices and electrical item prices: read look_at_my_option_prices for the area, then propose_option_prices. A card changes prices already set, in the item's own unit. Adding or removing an item or a color, renaming, serial codes, how an item is charged, the electrical package's price, and an interior item's first price are set on the page: point_to_step. An electrical item not offered with the package or on its own yet can be given that price with a card.",
     "If they give a price in a different unit than the item's (per square foot for an item charged each, say), don't convert it: say how the item is charged now and ask, or point_to_step to change how it's charged.",
   ],
 };

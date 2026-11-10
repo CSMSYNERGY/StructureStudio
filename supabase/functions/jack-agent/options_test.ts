@@ -158,6 +158,18 @@ Deno.test("look: colors carry their page and a door price only when offered on d
   const e = await look(d, "electrical");
   assertEquals(e.prices.map((p: Any) => [p.name, p.price, p.now]), [["Outlet", "with_package", "$30 each"], ["Outlet", "standalone", "$75 each"], ["LED light", "with_package", "$45 each"], ["LED light", "standalone", null]]);
   assert(/ask which/.test(e.note), e.note);
+  // Live 11-10: with "first price" read as electrical too, Jack sent "sell the outlet on its own for $75" to
+  // the page. A blank electrical price is settable by card; only an interior item's first price isn't.
+  assert(/null means it isn't offered that way yet: a card can set it/.test(e.note), e.note);
+});
+
+Deno.test("Jack is told a blank electrical price can be set by card, and only an interior item's first price stays on the page", async () => {
+  const { optionsPiece } = await import("./options.ts");
+  const rules = (optionsPiece.rules ?? []).join(" ");
+  assert(/an interior item's first price are set on the page/.test(rules) && /can be given that price with a card/.test(rules), rules);
+  const d = makeDeps(makePortal().portal, makeStore().store);
+  const desc = toolsFor(d, turn()).find((t) => t.name === "propose_option_prices")!.description;
+  assert(/a blank one can be set/.test(desc) && /set an interior item's first price/.test(desc) && !/set a first price/.test(desc), desc);
 });
 
 Deno.test("\"workbench to $300\": one line on the Interior items tab, nothing saved yet", async () => {
