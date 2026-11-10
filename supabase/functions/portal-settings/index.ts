@@ -399,6 +399,9 @@ const GATES: GateTable = {
   save_insulation:                { area: "settings_options", level: "edit" },
   save_electrical:                { area: "settings_options", level: "edit" },
   save_electrical_items:          { area: "settings_options", level: "edit" },
+  // Price-only writes by id (Jack, 2026-11-10): the two catalogs above save as a whole list.
+  set_color_prices:               { area: "settings_options", level: "edit" },
+  set_electrical_prices:          { area: "settings_options", level: "edit" },
   // Interior walls (313): the Interior walls tab's two saves.
   save_interior_walls:            { area: "settings_options", level: "edit" },
   save_interior_wall_coverings:   { area: "settings_options", level: "edit" },
@@ -6789,6 +6792,79 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .not("id", "in", `(${keep.length ? keep.map((k) => `"${k}"`).join(",") : '"00000000-0000-0000-0000-000000000000"'})`);
     if (del.error) return dbFail(req, clientId, "tidy up your electrical items", del.error);
     return json({ ok: true, saved });
+  }
+
+  // ── PRICES ONLY, BY ID: set_color_prices, set_electrical_prices (Jack, 2026-11-10) ──────────────
+  // save_colors and save_electrical_items save a whole list: anything left out is DELETED, and most
+  // columns go back to their defaults unless sent. A caller that means to change one price would have to
+  // send the whole list back exactly as stored, and any slip loses a colour or an item. These two write
+  // only the price columns of the rows they name, by id, inside this tenant: nothing is inserted, nothing
+  // deleted, no other column moves. Jack's price cards use them (jack-agent options.ts), Approve and Undo.
+  //
+  // A row may say what it expects a price to be now (expect*). It is then written only if it still is
+  // (compare and set), so a change made on the page since is never overwritten; the row comes back in
+  // notSaved instead. Every row is checked before anything is written.
+  //
+  // Colours: rate (the colour's own price, in its pricing method) and doorRate (flat $ a door). Both are
+  // NOT NULL, so a blank is refused. Electrical items: priceWithPackage and priceStandalone, where a blank
+  // is NULL, "not offered that way" (save_electrical_items' own rule); zero is free, never the same thing.
+  if (action === "set_color_prices" || action === "set_electrical_prices") {
+    const isColor = action === "set_color_prices";
+    const table = isColor ? "colors" : "electrical_items";
+    const what = isColor ? "colour" : "electrical item";
+    // [request field, column, expect field, blank means NULL]
+    const FIELDS: [string, string, string, boolean][] = isColor
+      ? [["rate", "rate", "expectRate", false], ["doorRate", "door_rate", "expectDoorRate", false]]
+      : [["priceWithPackage", "price_with_package", "expectWithPackage", true], ["priceStandalone", "price_standalone", "expectStandalone", true]];
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const has = (o: unknown, k: string) => !!o && typeof o === "object" && Object.prototype.hasOwnProperty.call(o, k);
+    // A number of zero or more; a blank (or null) is NULL where that means "not offered", refused where
+    // it doesn't. undefined = refuse.
+    const priceOf = (v: unknown, blankIsNull: boolean): number | null | undefined => {
+      const t = v === null || v === undefined ? "" : String(v).trim();
+      if (t === "") return blankIsNull ? null : undefined;
+      const n = Number(t);
+      return Number.isFinite(n) && n >= 0 ? n : undefined;
+    };
+    const raw = Array.isArray(payload.rows) ? payload.rows as Record<string, unknown>[] : null;
+    if (!raw || !raw.length) return json({ error: "rows[] required" }, 400);
+    if (raw.length > 100) return json({ error: `That's more than 100 ${what}s in one save.` }, 400);
+    const plan: { id: string; patch: Record<string, number | null>; expect: [string, number | null][] }[] = [];
+    const seen = new Set<string>();
+    for (const r of raw) {
+      const id = String(r?.id ?? "").trim();
+      if (!UUID.test(id)) return json({ error: `Each row needs the id of one of your ${what}s.` }, 400);
+      if (seen.has(id)) return json({ error: `The same ${what} is in this save twice.` }, 400);
+      seen.add(id);
+      const patch: Record<string, number | null> = {};
+      const expect: [string, number | null][] = [];
+      for (const [field, col, exField, blankIsNull] of FIELDS) {
+        if (!has(r, field)) continue;
+        const v = priceOf(r[field], blankIsNull);
+        if (v === undefined) return json({ error: `A ${what} price has to be a dollar amount of zero or more${blankIsNull ? ", or blank if you don't offer it that way" : ""}.` }, 400);
+        patch[col] = v;
+        if (has(r, exField)) {
+          const e = priceOf(r[exField], true);
+          if (e === undefined) return json({ error: `What a ${what} price is expected to be has to be a number of zero or more, or blank.` }, 400);
+          expect.push([col, e]);
+        }
+      }
+      if (!Object.keys(patch).length) return json({ error: `Each row needs a price to set.` }, 400);
+      plan.push({ id, patch, expect });
+    }
+    const savedIds: string[] = [];
+    const notSaved: string[] = [];
+    for (const p of plan) {
+      // .eq("client_id") is what keeps an id from the request inside this tenant.
+      // deno-lint-ignore no-explicit-any
+      let q: any = admin.from(table).update({ ...p.patch, updated_at: new Date().toISOString() }).eq("client_id", clientId).eq("id", p.id);
+      for (const [col, e] of p.expect) q = e === null ? q.is(col, null) : q.eq(col, e);
+      const res = await q.select("id");
+      if (res.error) return dbFail(req, clientId, isColor ? "save your colour prices" : "save your electrical prices", res.error);
+      const n = Array.isArray(res.data) ? res.data.length : res.data ? 1 : 0;
+      (n ? savedIds : notSaved).push(p.id);
+    }
+    return json({ ok: true, saved: savedIds.length, savedIds, notSaved });
   }
 
   if (action === "save_electrical") {

@@ -686,8 +686,13 @@ Deno.test("an owner with every switch on stays inside the API's strict limits, a
   const c = strictCost(tools);
   assert(c.tools <= STRICT_LIMITS.tools && c.optional <= STRICT_LIMITS.optional && c.unions <= STRICT_LIMITS.unions, JSON.stringify(c));
   for (const t of tools) if (/^(look_|find_|what_)/.test(t.name)) assert(t.strict !== true, `${t.name} is strict`);
+  // Tools that change nothing (a Take me there card, a question card) leave the budget to the writers (11-10).
+  for (const n of ["point_to_step", "ask_to_be_sure"]) {
+    assert(tools.some((t) => t.name === n), `${n} isn't offered`);
+    assert(tools.every((t) => t.name !== n || t.strict !== true), `${n} is strict`);
+  }
   // The tools that write a card keep their schema guarantee.
-  for (const n of ["propose_size_changes", "propose_new_door", "propose_rule", "propose_reply_draft", "propose_estimate_resend", "propose_company_details"]) {
+  for (const n of ["propose_size_changes", "propose_new_door", "propose_rule", "propose_reply_draft", "propose_estimate_resend", "propose_company_details", "propose_insulation_prices", "propose_option_prices"]) {
     assert(tools.some((t) => t.name === n && t.strict === true), `${n} lost strict`);
   }
 });

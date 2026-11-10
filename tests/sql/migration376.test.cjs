@@ -372,6 +372,28 @@ async function refused(db, sql, params) {
   try { await db.exec(MIG("379_jack_insulation.sql")); } catch (e) { v379again = false; console.log(String(e && e.message)); }
   check("a re-apply of 379 changes nothing", v379again && (await one("select count(*)::int as n from pg_constraint where conname = 'jack_proposals_kind_check'")).n === 1);
 
+  // ── 380: the option price kind, on top of 379 ──
+  check("before 380, an option price card is refused", await refused(db, "insert into public.jack_proposals (client_id, user_id, kind, status, title) values ('a', $1, 'option_price', 'ready', 'opt')", [U]));
+  const cardsBefore380 = (await one("select count(*)::int as n from public.jack_proposals")).n;
+  let v380 = true;
+  try { await db.exec(MIG("380_jack_option_prices.sql")); } catch (e) { v380 = false; console.log(String(e && e.message)); }
+  check("380 applies after 379, and its proof passes", v380);
+  const list380 = (() => {
+    const s = MIG("380_jack_option_prices.sql");
+    const a = s.indexOf("add constraint jack_proposals_kind_check check (kind in (");
+    return [...s.slice(a, s.indexOf("));", a)).replace(/--.*$/gm, "").matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  })();
+  check("380 lists every 379 kind and option_price", list380.length === 34 && list380.includes("option_price") && list379.every((k) => list380.includes(k)), String(list380.length));
+  for (const k of list380) {
+    check(`after 380, kind ${k} is accepted`, !(await refused(db, "insert into public.jack_proposals (client_id, user_id, kind, status, title) values ('a', $1, $2, 'ready', '380')", [U, k])));
+  }
+  check("after 380, a made-up kind is still refused", await refused(db, "insert into public.jack_proposals (client_id, user_id, kind, status, title) values ('a', $1, 'option', 'ready', 'x')", [U]));
+  check("380 keeps every card that was there", (await one("select count(*)::int as n from public.jack_proposals where title <> '380'")).n === cardsBefore380);
+  check("after 380, the sweep still never clears an option price card", (await one("select pg_get_functiondef('public.jack_clear_old_private(text, timestamptz)'::regprocedure) as d")).d.indexOf("option_price") < 0);
+  let v380again = true;
+  try { await db.exec(MIG("380_jack_option_prices.sql")); } catch (e) { v380again = false; console.log(String(e && e.message)); }
+  check("a re-apply of 380 changes nothing", v380again && (await one("select count(*)::int as n from pg_constraint where conname = 'jack_proposals_kind_check'")).n === 1);
+
   await db.close();
   console.log(failed ? `\n${failed} CHECK(S) FAILED` : "\nALL CHECKS PASSED");
   process.exitCode = failed ? 1 : 0;

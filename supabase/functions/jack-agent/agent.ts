@@ -449,6 +449,11 @@ export function reviseNote(p: ProposalRow): string {
     facts.push(`It adds a ${String(p.payload?.category ?? "item")}: ${scrub(String(row.name ?? ""), 120)}, ${Number(row.widthIn)} by ${Number(row.heightIn)} inches, $${Number(row.price).toLocaleString("en-US", { maximumFractionDigits: 2 })}.`);
   } else if (p.kind === "insulation_price" && Array.isArray(p.payload?.cells)) {
     facts.push(`It sets insulation rates per square foot: ${(p.payload.cells as { type: string; area: string; from: number | null; to: number }[]).map((c) => `${c.type} ${c.area} from ${c.from === null ? "not offered" : `$${c.from}`} to $${c.to}`).join("; ")}.`);
+  } else if (p.kind === "option_price" && Array.isArray(p.payload?.changes)) {
+    // The refs and price keys, so the new card names the same prices without a guess (a color's name can
+    // be on two pages).
+    const ch = p.payload.changes as { ref: string; price: string; label: string; from: number | null; to: number }[];
+    facts.push(`It changes ${String(p.payload.area)} prices (propose_option_prices, area ${String(p.payload.area)}): ${ch.map((c) => `${scrub(String(c.label ?? ""), 120)} (ref ${String(c.ref).slice(0, 80)}, price ${c.price}) from ${c.from === null ? "not offered" : c.from} to ${c.to}`).join("; ")}. Amounts are in each item's own unit.`);
   } else if (REVISE_AS_CUSTOMER_WORDS.has(p.kind) && typeof p.payload?.contactId === "string") {
     // The customer by their id (a tool takes it as ref with list null), never a name to search again: two
     // customers can share a name (11-09). The words are Jack's own draft; the turn is locked as if a
@@ -734,6 +739,10 @@ export const STRICT_LIMITS = { tools: 20, optional: 24, unions: 16 } as const;
 /** Tools that only read. Their inputs are checked in code anyway, so they go without strict and leave
  *  the budget to the tools that write a card. */
 const READ_TOOL = /^(look_|find_|what_)/;
+/** Tools that change nothing either: a Take me there card and a question card. Each takes one key it looks
+ *  up in code (an unknown key is refused), so they go without strict too. 11-10: the option prices writer
+ *  was the 21st strict tool for an owner, one past the API's 20. */
+const NO_CHANGE_TOOL = new Set(["point_to_step", "ask_to_be_sure"]);
 const unstrict = (d: ToolDef): ToolDef => {
   const { strict: _strict, ...rest } = d;
   return rest as ToolDef;
@@ -780,7 +789,7 @@ const sendable = (defs: ToolDef[]): ToolDef[] => (strictOff ? defs.map(unstrict)
 /** Read tools never strict; and should the writers alone ever go past a limit, none is strict, so the
  *  turn still runs (each tool checks its own input). */
 export function withinStrictLimits(defs: ToolDef[]): ToolDef[] {
-  const out = defs.map((d) => (READ_TOOL.test(d.name) ? unstrict(d) : d));
+  const out = defs.map((d) => (READ_TOOL.test(d.name) || NO_CHANGE_TOOL.has(d.name) ? unstrict(d) : d));
   const c = strictCost(out);
   return c.tools > STRICT_LIMITS.tools || c.optional > STRICT_LIMITS.optional || c.unions > STRICT_LIMITS.unions ? out.map(unstrict) : out;
 }

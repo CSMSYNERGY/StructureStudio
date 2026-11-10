@@ -6,7 +6,7 @@ import { PRIVATE_KINDS } from "./common.ts";
 // The database's list of card kinds and the code's must be the same list: a kind the code writes that the
 // database refuses fails every card of it, and a kind the database allows that no code knows is a card
 // nobody can approve or undo. The newest migration that sets the constraint is the one that counts.
-const LATEST = "379_jack_insulation.sql";
+const LATEST = "380_jack_option_prices.sql";
 /** The newest migration that defines jack_clear_old_private (376 made it, 378 widened its kinds). */
 const SWEEP = "378_jack_sends.sql";
 const read = (f: string) => Deno.readTextFileSync(new URL(`../../migrations/${f}`, import.meta.url)).replace(/\r\n/g, "\n");

@@ -1174,8 +1174,9 @@ function JackCard({ proposal, viewingName, onChanged, onNavigate }) {
 
 // The cards a new reply or estimate card can replace (jack-agent replaceOlder).
 const JACK_REPLY_KINDS = ["reply_send", "reply_draft", "estimate_resend"];
-// The other cards a newer one of the same kind replaces in a chat (propose_new_door, propose_insulation_prices).
-const JACK_REPLACING_KINDS = ["new_fixture", "insulation_price"];
+// The other cards a newer one of the same kind replaces in a chat (propose_new_door, propose_insulation_prices,
+// propose_option_prices). The server decides which (the same door, cell or price); this only re-reads them.
+const JACK_REPLACING_KINDS = ["new_fixture", "insulation_price", "option_price"];
 
 // Revise (Carolyn and Ahsan, 11-09 call): on a card still waiting, say what to change and Jack makes the
 // card again. The new card replaces this one (jack-agent handleSend `revise`); with no new card, this one
@@ -1635,6 +1636,8 @@ Object.assign(JACK_CARDS, {
   setup_locations: JackSetupCard, setup_tick: JackSetupCard, setup_guide: JackSetupCard,
   // Insulation rates (jack-agent/insulation.ts): the same now and new lines, notes and Open button.
   insulation_price: JackSetupCard,
+  // Prices on Interior items, colors and Electrical items (jack-agent/options.ts, 11-10): the same lines.
+  option_price: JackSetupCard,
 });
 
 // Jack's when/then rule cards (jack-agent/rules.ts): a new rule (automation_rule) and a pause or turn-on

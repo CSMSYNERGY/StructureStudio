@@ -137,6 +137,10 @@
 //      11-09 (an open tab, a cached bundle) draws a text card with no To line, and its Approve sends nothing;
 //      reloaded, the card says "To ..." and its Approve posts exactly that, and sends once (an estimate too).
 //      A text card and an estimate card made before 11-09, with no `to`: no Approve, and a sentence to ask again.
+//   BY CAROLYN'S 11-09 CALL: a garage door slides up, Revise makes a card again, insulation prices Approve/Undo.
+//   BZ EVERY OPTION'S PRICE (11-10): an Interior items price through the tab's own save (key, method, rate), a
+//      typed correction for the same price puts the waiting card away, a metal color by id (set_color_prices,
+//      never the whole palette), an electrical price on a phone. No whole-list save is ever called.
 //   BL also covers a person cut from an area altogether: on a reload that area's card is its title only.
 //
 //   AA to AW also leave proof shots, pNN-slug.png (and pNN-slug.card.png for a tall card), with manifest.json
@@ -4285,6 +4289,91 @@ await scenario("BY", async (track) => {
   await until(two.page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "applied", p2.id);
   ok("BY a press on a card approved meanwhile says why, asks Jack nothing, and the card loses its Revise", w2.claudeCalls === asked && (await two.page.getByRole("alert").filter({ hasText: "That card can't be changed any more" }).count()) === 1 && (await box2.count()) === 0);
   ok("BY no page errors on the phone", two.errors.length === 0, two.errors.join(" | ").slice(0, 300));
+});
+
+// ── BZ: Carolyn's 11-09 "every option": prices on Interior items, colors and Electrical (11-10) ──
+await scenario("BZ", async (track) => {
+  const RED_METAL = "00000000-0000-4000-8000-0000000c0002";
+  const LIGHT = "00000000-0000-4000-8000-0000000e0002";
+  const w = world({ script: [
+    toolUse("propose_option_prices", { area: "interior", changes: [{ ref: "workbench", price: "price", to: 300 }] }), said("Workbench to $300 each. Press Approve."),
+    toolUse("propose_option_prices", { area: "interior", changes: [{ ref: "workbench", price: "price", to: 320 }] }), said("Redone at $320."),
+    toolUse("propose_option_prices", { area: "colors", changes: [{ ref: RED_METAL, price: "price", to: 40 }] }), said("Red on metal roofs to $40."),
+  ] });
+  let lp = [{ item_key: "workbench", pricing_method: "each", rate: "250", image_url: null }];
+  const colors = [{ id: RED_METAL, label: "Red", code: "RM", siding: false, trim: false, shingle: false, metal: true, door: false, door_rate: 0, rate: 0, pricing_method: "each", active: true }];
+  const saves = [];
+  w.extra.catalog = async () => ({ status: 200, data: { ok: true, styles: [], sizes: [], fixtures: [], insulation: [],
+    items: [{ key: "workbench", label: "Workbench", archived: false, internalOnly: false, paletteGroup: "interior" }],
+    layoutPricing: lp.map((r) => ({ ...r })), colors: colors.map((c) => ({ ...c })), electricalItems: [] } });
+  w.extra.save_layout_pricing = async (body) => {
+    saves.push({ action: "save_layout_pricing", body: JSON.parse(JSON.stringify(body)) });
+    for (const r of body.rows) lp = lp.map((x) => (x.item_key === r.item_key ? { ...x, pricing_method: r.pricing_method, rate: String(r.rate) } : x));
+    return { status: 200, data: { ok: true, saved: body.rows.length, skipped: [] } };
+  };
+  w.extra.set_color_prices = async (body) => {
+    saves.push({ action: "set_color_prices", body: JSON.parse(JSON.stringify(body)) });
+    const savedIds = [];
+    for (const r of body.rows) { const c = colors.find((x) => x.id === r.id); if (c && Number(c.rate) === Number(r.expectRate)) { c.rate = Number(r.rate); savedIds.push(r.id); } }
+    return { status: 200, data: { ok: true, saved: savedIds.length, savedIds, notSaved: body.rows.map((r) => r.id).filter((id) => !savedIds.includes(id)) } };
+  };
+  for (const a of ["save_colors", "save_electrical_items", "save_electrical"]) w.extra[a] = async (body) => { saves.push({ action: a, body }); return { status: 200, data: { ok: true } }; };
+  const { ctx, page, errors } = await open(w, "/jack");
+  track(ctx);
+  const ask = async (text) => {
+    await page.getByLabel("Message to Jack").fill(text);
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+  };
+  await page.getByLabel("Message to Jack").waitFor({ timeout: 15000 });
+  await ask("change the workbench price to 300");
+  await card(page).waitFor({ timeout: 15000 });
+  const first = [...w.proposals.values()][0];
+  const firstText = await cardById(page, first.id).innerText();
+  ok("BZ the interior card shows Workbench from $250 each to $300 each", firstText.includes("Workbench") && firstText.includes("$250 each") && firstText.includes("$300 each"), firstText.slice(0, 300));
+  ok("BZ and it can be revised", (await page.locator(`[data-jack-revise="${first.id}"]`).count()) === 1);
+  await ask("actually make it 320");
+  await until(page, () => document.querySelectorAll('[data-kind="option_price"]').length >= 2);
+  const second = [...w.proposals.values()][1];
+  await until(page, (id) => !!document.querySelector(`[data-jack-replaced="${id}"]`), first.id);
+  ok("BZ a typed correction for the same price puts the waiting card away", (await page.locator(`[data-jack-replaced="${first.id}"]`).innerText()) === "Replaced by your newer card for this price." && (await cardById(page, first.id).getByRole("button", { name: "Approve" }).count()) === 0);
+  ok("BZ nothing is saved before a press", saves.length === 0);
+  await workShot(page, "bz-1-interior-price-card.png", { fullPage: true });
+  await cardById(page, second.id).getByRole("button", { name: "Approve" }).click();
+  await until(page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "applied", second.id);
+  ok("BZ Approve sends the Interior items tab's own save: key, method and rate only", saves.length === 1 && JSON.stringify(saves[0]) === JSON.stringify({ action: "save_layout_pricing", body: { rows: [{ item_key: "workbench", pricing_method: "each", rate: 320 }] } }), JSON.stringify(saves));
+  ok("BZ and the card opens the Interior items tab", (await cardById(page, second.id).getByRole("button", { name: "Open Settings > Options > Interior items" }).count()) === 1);
+  await cardById(page, second.id).getByRole("button", { name: "Undo" }).click();
+  await until(page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "undone", second.id);
+  ok("BZ Undo puts $250 back", lp[0].rate === "250" && saves.length === 2);
+
+  await ask("make red on metal roofs 40");
+  await until(page, () => document.querySelectorAll('[data-kind="option_price"]').length >= 3);
+  const third = [...w.proposals.values()][2];
+  const cText = await cardById(page, third.id).innerText();
+  ok("BZ the color card names the page the color is on", cText.includes("Red (metal color)") && cText.includes("$40 each"), cText.slice(0, 300));
+  await cardById(page, third.id).getByRole("button", { name: "Approve" }).click();
+  await until(page, (id) => document.querySelector(`[data-jack-card="${id}"]`)?.dataset.status === "applied", third.id);
+  ok("BZ a color saves by id with what its price is now, never the whole palette", JSON.stringify(saves.at(-1)) === JSON.stringify({ action: "set_color_prices", body: { rows: [{ id: RED_METAL, rate: 40, expectRate: 0 }] } }) && colors[0].rate === 40, JSON.stringify(saves.at(-1)));
+  ok("BZ and its button opens the Metal colors page", (await cardById(page, third.id).getByRole("button", { name: "Open Settings > Colors > Metal" }).count()) === 1);
+  await workShot(page, "bz-2-color-price-card.png");
+  ok("BZ no whole-list save was ever called", !saves.some((s) => ["save_colors", "save_electrical_items", "save_electrical"].includes(s.action)), saves.map((s) => s.action).join(","));
+  ok("BZ no page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+
+  // Electrical on a phone: an item not offered on its own gets a price, and the card says customers will see it.
+  const w2 = world({ script: [toolUse("propose_option_prices", { area: "electrical", changes: [{ ref: LIGHT, price: "standalone", to: 95 }] }), said("On your screen.")] });
+  w2.extra.catalog = async () => ({ status: 200, data: { ok: true, styles: [], sizes: [], fixtures: [], insulation: [], items: [], layoutPricing: [], colors: [],
+    electricalItems: [{ id: LIGHT, name: "LED light", price_with_package: 45, price_standalone: null, active: true, internal_only: false }] } });
+  const two = await open(w2, "/jack", { viewport: { width: 375, height: 800 } });
+  track(two.ctx);
+  await two.page.getByLabel("Message to Jack").fill("sell the LED light on its own for 95");
+  await two.page.getByRole("button", { name: "Send", exact: true }).click();
+  await card(two.page).waitFor({ timeout: 15000 });
+  const e = [...w2.proposals.values()][0];
+  const eText = await cardById(two.page, e.id).innerText();
+  ok("BZ a phone: the electrical card reads on its own, $95 each, and that customers will be offered it", eText.includes("LED light, on its own") && eText.includes("$95 each") && eText.includes("Customers will be offered LED light, on its own"), eText.slice(0, 400));
+  ok("BZ on a phone the card fits the screen", await two.page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
+  await workShot(two.page, "bz-3-electrical-on-a-phone.png");
+  ok("BZ no page errors on the phone", two.errors.length === 0, two.errors.join(" | ").slice(0, 300));
 });
 
 writeManifest();

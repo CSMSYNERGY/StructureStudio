@@ -15,7 +15,8 @@
 //     the card says to ask again.
 //   - Undo puts a rate back only while it still holds what Jack saved. A cell Jack started offering is
 //     blanked again (not offered), as the page does with a cleared cell.
-//   - A correction is a new card: the older insulation card still waiting in this chat is put away.
+//   - A correction is a new card: an older insulation card still waiting in this chat for the SAME cell is put
+//     away. A card for other cells stays (11-10: "roof to $2.80", then "walls to $2" keeps both).
 
 import type { ApplyOutcome, Deps, KindSpec, Piece, ProposalRow, ToolSpec, UndoOutcome } from "./types.ts";
 import { err, ok, putCard, SAID, saidBy } from "./common.ts";
@@ -166,7 +167,9 @@ const proposeTool: ToolSpec = {
       },
       payload: { cells },
     });
-    const { replaced, replacedByNewer, yielded, unchecked } = await replaceOlder(deps, s, card, (p) => p.kind === INSULATION_KIND, INSULATION_REPLACED);
+    const mine = new Set(cells.map(key));
+    const sameCell = (p: ProposalRow) => p.kind === INSULATION_KIND && Array.isArray(p.payload?.cells) && (p.payload.cells as CardCell[]).some((c) => mine.has(key(c)));
+    const { replaced, replacedByNewer, yielded, unchecked } = await replaceOlder(deps, s, card, sameCell, INSULATION_REPLACED);
     if (replacedByNewer) return ok({ shown: true, putAway: true, note: "A newer insulation card, made at the same time, replaces this one. Tell them only about the newer card." });
     if (yielded || unchecked) {
       return ok({ shown: true, putAway: true, note: yielded

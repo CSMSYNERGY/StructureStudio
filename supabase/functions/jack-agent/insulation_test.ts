@@ -261,6 +261,16 @@ Deno.test("a corrected rate is a new card, and the older insulation card in the 
   assertEquals([first.status, first.failure, second.status], ["cancelled", INSULATION_REPLACED, "ready"]);
 });
 
+Deno.test("a card for other cells is not a correction: \"roof to $2.80\" then \"batt walls to $1\" keeps both (11-10)", async () => {
+  const { portal } = makePortal();
+  const { store, proposals } = makeStore();
+  const deps = makeDeps(portal, store);
+  const s = turn();
+  await propose(deps, s, [{ type: "spray_foam", area: "roof", ratePerSqFt: 2.8 }]);
+  await propose(deps, s, [{ type: "batt", area: "walls", ratePerSqFt: 1 }]);
+  assertEquals(only(proposals).map((p) => p.status), ["ready", "ready"]);
+});
+
 Deno.test("Jack is told insulation is its own tab, and point_to_step can send them there", () => {
   assertEquals([GUIDES.insulation.where, GUIDES.insulation.sub], [WHERE, "insulation"]);
   const d = makeDeps(makePortal().portal, makeStore().store);

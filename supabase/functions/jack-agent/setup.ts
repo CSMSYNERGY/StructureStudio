@@ -16,7 +16,8 @@
 //     nobody has touched since, a lot with no buildings on it.
 //   - An Approve that finishes a step also ticks it (Ahsan, 11-06), through portal-setup with the card's
 //     id, so the checklist says "with Jack" and Undo takes back only that tick. The card says so first.
-//   - Guide only in version 1: colors (the customer link's accent color too, Ahsan 11-06), add-on prices,
+//   - Guide only in version 1: adding, naming or coding colors and add-on items (their PRICES are options.ts
+//     since 11-10), the customer link's accent color (Ahsan 11-06),
 //     the logo, sales tax, team access, billing and automatic top-up, and Customer Hub's email, text and
 //     phone settings (Carolyn's; Jack only points).
 //   - Phone numbers, emails and street lines never go back to Claude. It hears "set" or "not set", and the
@@ -84,7 +85,7 @@ export const GUIDES: Record<string, Guide> = {
   doors: guide("Doors", "Settings > Options > Doors", "doors", "settings_options", "The doors a customer can place, and what each one adds."),
   windows: guide("Windows", "Settings > Options > Windows", "windows", "settings_options", "The windows a customer can place, and their colors."),
   ramps: guide("Ramps", "Settings > Options > Ramps", "ramps", "settings_options", "One simple ramp, or your own list of ramps."),
-  addons: guide("Add-on items", "Settings > Options > Interior items", "interior", "settings_options", "Lofts, workbenches, shelving and their prices. I can't change add-on prices yet, so set them there."),
+  addons: guide("Add-on items", "Settings > Options > Interior items", "interior", "settings_options", "Lofts, workbenches, shelving and their prices. I can change a price that's already set; adding an item, its first price and how it's charged are set there."),
   // The rest of the Options tabs (portal ssOptionTabs), so a "take me there" for any of them lands on its
   // own tab. Carolyn, 11-09: spray foam was sent to Interior items; it's on Insulation.
   wall_heights: guide("Wall heights", "Settings > Options > Wall heights", "options", "settings_options", "Taller walls, priced per building style."),
@@ -95,7 +96,7 @@ export const GUIDES: Record<string, Guide> = {
   insulation: guide("Insulation", "Settings > Options > Insulation", "insulation", "settings_options", "Batt, spray foam and rigid foam, priced per square foot on the floor, walls and roof, and whether customers are offered insulation at all."),
   delivery_pricing: guide("Delivery pricing", "Settings > Options > Delivery", "delivery", "settings_options", "How delivery is priced from your lot to the customer."),
   foundation: guide("Foundation", "Settings > Options > Foundation", "foundation", "settings_options", "Gravel pads, fence removal, piers and slabs."),
-  colors: guide("Colors", "Settings > Colors", "colors", "settings_options", "Paint, shingle and metal colors, with the names your customers know. I can't save colors yet, so set them there."),
+  colors: guide("Colors", "Settings > Colors", "colors", "settings_options", "Paint, shingle and metal colors, with the names your customers know. I can change a color's price; adding or renaming a color and its serial code are set there."),
   crm: guide("Connect your CRM", "Settings > GHL Connection", "connection", "settings_crm", "Paste your Location ID and API key there. Skip it if Structure Studio sends your paperwork."),
   paperwork: guide("How estimates and invoices go out", "Settings > GHL Connection", "connection", "settings_crm", "Through your CRM, or issued by Structure Studio, with your starting numbers."),
   sales_tax: guide("Sales tax", "Settings > Company > Sales Tax", "tax", "settings_crm", "Set your sales tax rate there. Enter 0% if you don't collect sales tax. I can't change tax settings."),
@@ -117,7 +118,7 @@ const FILLS: Record<string, string> = {
   paperwork: "propose_paperwork (needs a sales tax rate on file first)",
   styles: "propose_styles for styles; look_at_my_catalog and propose_size_changes for sizes",
   prices: "a price list through the paperclip, or propose_size_changes",
-  catalog_items: "propose_new_door for doors, propose_catalog_item for windows and ramps; add-on prices are guide only",
+  catalog_items: "propose_new_door for doors, propose_catalog_item for windows and ramps; prices already set on add-on items with propose_option_prices (interior)",
   insulation: "propose_insulation_prices (the rates); the switch that offers insulation is guide only",
   locations: "propose_locations",
   // The live template's own serial step (11-06): propose_locations sets it, with the lots list empty.
@@ -1051,7 +1052,7 @@ async function applyTick(deps: Deps, p: ProposalRow): Promise<ApplyOutcome> {
 const pointTool: ToolSpec = {
   def: {
     name: "point_to_step",
-    description: "Show the person where to do something you can't fill in for them, with a Take me there button: colors, add-on prices, the logo, sales tax, team and access, email from their own domain, texting, phone, QuickBooks, commissions, crews and drivers, 3D, Real-Time Pricing, sharing their link, a test estimate, automatic top-up, every Settings > Options tab (wall heights, doors, windows, vents, ramps, cladding, interior items, interior walls, electrical, insulation, delivery, foundation), and the rest. Pick the key for the exact tab: insulation is not interior items. It changes nothing.",
+    description: "Show the person where to do something you can't fill in for them, with a Take me there button: adding or renaming colors and add-on items, an item's first price or how it's charged, the logo, sales tax, team and access, email from their own domain, texting, phone, QuickBooks, commissions, crews and drivers, 3D, Real-Time Pricing, sharing their link, a test estimate, automatic top-up, every Settings > Options tab (wall heights, doors, windows, vents, ramps, cladding, interior items, interior walls, electrical, insulation, delivery, foundation), and the rest. Pick the key for the exact tab: insulation is not interior items. It changes nothing.",
     strict: true,
     input_schema: { type: "object", additionalProperties: false, required: ["key"], properties: { key: { type: "string", enum: Object.keys(GUIDES) } } },
   },
@@ -1207,7 +1208,7 @@ export const setupPiece: Piece = {
   ],
   rules: [
     "Setup: work through the open steps in order, one at a time, and say how many are done (\"8 of 17 done\"). Fill only with values the person gave you: never make up a business detail, a code, a starting number or a price.",
-    "Colors, add-on prices, the logo, sales tax, team access, billing and automatic top-up, and Customer Hub's email, text and phone settings are guide only. Use point_to_step for those. The customer link's accent color is guide only too, and it is on the Branding tab: point_to_step with branding, not colors (Settings > Colors is paint, shingle and metal).",
+    "Adding, removing or renaming colors and add-on items, the logo, sales tax, team access, billing and automatic top-up, and Customer Hub's email, text and phone settings are guide only. Use point_to_step for those. Prices already set on add-on items, colors and electrical items go through look_at_my_option_prices and propose_option_prices. The customer link's accent color is guide only too, and it is on the Branding tab: point_to_step with branding, not colors (Settings > Colors is paint, shingle and metal).",
     "A setup card that finishes its step ticks it too, and the card says so. Don't tick a step they haven't told you is finished.",
   ],
 };
