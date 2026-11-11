@@ -427,6 +427,23 @@ export function callBillability(call: Pick<UsageCall, "status" | "duration_s" | 
   return { billable: false, units: 0, why: `status ${call.status}` };
 }
 
+/**
+ * An unanswered call that cost us nothing posts no wallet line. With bill_unanswered_calls on,
+ * callBillability bills every missed, no-answer, busy or failed call at least one minute, but
+ * Twilio charges nothing for most of them: an outgoing call nobody picked up, a busy line or a
+ * failed dial leaves no connected leg (live rows, 2026-11-11: 17 outgoing no-answer and 3 failed,
+ * all $0). Each would post a "$0.00 · 1 min" line on the builder's list for an attempt that took
+ * nothing. Ahsan, 2026-11-11: "Fix first, then switch on". Such a call settles not_billable with its
+ * $0 cost recorded, like any free call. An unanswered call that DID cost something (an incoming
+ * one: Twilio bills the answered inbound leg even when nobody on the team picks up) is still billed,
+ * and talk time and voicemails are untouched.
+ */
+export function unansweredStillBillable(bill: Billability, costMicros: number): boolean {
+  if (!bill.billable) return false;
+  if (bill.why !== "unanswered (billed)") return true;
+  return costMicros > 0;
+}
+
 /** A sent or delivered text out, a received text in. Never a failed or undelivered one. */
 export function smsBillable(direction: "in" | "out", status: string): boolean {
   return direction === "out" ? status === "sent" || status === "delivered" : status === "received";
@@ -973,7 +990,7 @@ async function chargeCall(run: Run, row: ChargeRow, call: UsageCall | null, even
 
   const state = await decide(run, row, {
     ...priced,
-    billable: bill.billable,
+    billable: unansweredStillBillable(bill, priced.costMicros),
     units: bill.units,
     unit: "minute",
     meter: meterFor("call", call.direction),

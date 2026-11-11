@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   backoffMinutes, callBillability, chargeFor, DEFAULT_SETTINGS, displayNumber, idemFor, meterFor, MMS_IN_MICROS, recordingMemo,
-  runUsageCharges, settingsFrom, smsMemo, type ChargeRow,
+  runUsageCharges, settingsFrom, smsMemo, unansweredStillBillable, type ChargeRow,
 } from "../src/cron/usageCharge";
 import { PHONE_METERS, previewChargeMicros } from "../../../supabase/functions/_shared/phoneBillingAdmin.ts";
 import { fetchCallCost, listUsageDaily, priceMicros } from "../src/twilioRest";
@@ -706,6 +706,53 @@ describe("not billable: the cost is recorded, nothing is charged", () => {
     });
     await runIt();
     expect(debits(net2)[0]).toMatchObject({ p_cost_micros: 500, p_charge_micros: 1000, p_memo: "Outbound call to (555) 555-0142 · 1 min" });
+  });
+
+  // Ahsan, 2026-11-11: "Fix first, then switch on". With unanswered billing on, an attempt Twilio
+  // charged nothing for must not post a "$0.00 · 1 min" line on the builder's list.
+  it("unansweredStillBillable: only an unanswered call that cost nothing is dropped; talk and voicemail never are", () => {
+    const unanswered = { billable: true, units: 1, why: "unanswered (billed)" };
+    expect(unansweredStillBillable(unanswered, 0)).toBe(false);
+    expect(unansweredStillBillable(unanswered, -5)).toBe(false);
+    expect(unansweredStillBillable(unanswered, 1)).toBe(true);
+    expect(unansweredStillBillable(unanswered, 8500)).toBe(true);
+    // Talk time and voicemails are billed whatever their cost (a $0 one is not this rule's to drop).
+    expect(unansweredStillBillable({ billable: true, units: 1, why: "talk" }, 0)).toBe(true);
+    expect(unansweredStillBillable({ billable: true, units: 1, why: "voicemail" }, 0)).toBe(true);
+    // Not billable stays not billable.
+    expect(unansweredStillBillable({ billable: false, units: 0, why: "unanswered" }, 8500)).toBe(false);
+  });
+
+  it("unanswered billing on: an outgoing call nobody picked up, which cost $0, settles not_billable with NO wallet line", async () => {
+    const legsZero: Leg[] = [
+      { sid: CA(1), status: "no-answer", duration: 0, price: null, direction: "inbound", from: APP, to: CUSTOMER },
+      { sid: CA(2), parent: CA(1), status: "no-answer", duration: 0, price: null, direction: "outbound-dial", from: BUSINESS_NUMBER, to: CUSTOMER },
+    ];
+    for (const status of ["no_answer", "busy", "failed"]) {
+      const row = charge("call", CALL);
+      const net = world({
+        queue: [row], settings: { ...SETTINGS, bill_unanswered_calls: true },
+        calls: [callRow(CALL, { status, answered_at: null, duration_s: null, client_call_sid: CA(1) })], legs: legsZero,
+      });
+      expect(await runIt()).toMatchObject({ not_billable: 1, charged: 0 });
+      expect(rowPatch(net, row.id)).toMatchObject({ state: "not_billable", cost_micros: 0, charge_micros: null, markup: null });
+      expect(debits(net)).toEqual([]);
+    }
+  });
+
+  it("unanswered billing on: an incoming call nobody answered still costs its inbound leg, so it IS charged", async () => {
+    const missed = { direction: "in", from_e164: CUSTOMER, to_e164: BUSINESS_NUMBER, status: "missed", answered_at: null, duration_s: null, twilio_call_sid: CA(1), ended_at: ago(21) };
+    const row = charge("call", CALL, { direction: "in", attempts: 2 });
+    const net = world({
+      queue: [row], settings: { ...SETTINGS, bill_unanswered_calls: true },
+      calls: [callRow(CALL, missed)],
+      legs: [{ sid: CA(1), status: "completed", duration: 3, price: "-0.00850", direction: "inbound", from: CUSTOMER, to: BUSINESS_NUMBER }],
+    });
+    expect(await runIt()).toMatchObject({ charged: 1 });
+    expect(debits(net)[0]).toMatchObject({
+      p_meter_kind: "voice_minute_in", p_cost_micros: 8500, p_charge_micros: 17000, // x2, this file's markup
+      p_memo: "Missed call from (555) 555-0142 · 1 min",
+    });
   });
 
   it.each([["failed"], ["undelivered"]])("a %s text (Twilio's status wins over a stale 'sent' on our row)", async (status) => {
