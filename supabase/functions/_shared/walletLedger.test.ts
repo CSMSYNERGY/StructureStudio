@@ -17,7 +17,7 @@
 // need --allow-read on the repo (preflight passes it); without it they report ignored.
 
 import {
-  applyLedgerFilter, CALL_METERS, centsToDecimal, costPlusNote, csvCell, exactBalance, FORBIDDEN_LEDGER_COLUMNS, FUNDS_KINDS,
+  aboutMicrosPerMinute, applyLedgerFilter, CALL_EXTRA_METERS, CALL_METERS, centsToDecimal, COST_PER_MINUTE_MICROS, costPlusNote, csvCell, exactBalance, FORBIDDEN_LEDGER_COLUMNS, FUNDS_KINDS,
   isTimeZone, JACK_METER, JACK_METERS, JACK_WELCOME_MEMO, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_HEADER, LEDGER_FILTERS,
   LEDGER_PAGE_MAX, ledgerCategory, ledgerCsv, ledgerDate, type LedgerFilter, type LedgerRaw, microsToDecimal, onlyIfJackOn,
   parseLedgerQuery, TAX_METERS, TEXT_METERS, toLedgerRow, walletLineLabel,
@@ -146,7 +146,7 @@ function splitTop(expr: string): string[] {
 }
 
 const KINDS = ["topup", "debit", "refund", "grant", "adjustment", "reversal"];
-const METERS = [null, ...CALL_METERS, ...TEXT_METERS, ...TAX_METERS, ...JACK_METERS, "video_3d_generation", "photo_background_change", "phone_line_monthly", "sms_number_monthly"];
+const METERS = [null, ...CALL_METERS, ...CALL_EXTRA_METERS, ...TEXT_METERS, ...TAX_METERS, ...JACK_METERS, "video_3d_generation", "photo_background_change", "phone_line_monthly", "sms_number_monthly"];
 
 Deno.test("every kind × meter lands under exactly one chip, and it is the one ledgerCategory names", () => {
   const filters = LEDGER_FILTERS.filter((f) => f !== "all");
@@ -183,6 +183,33 @@ Deno.test("the chips mean what the Billing tab says they mean", () => {
   eq(ledgerCategory({ kind: "refund", meter_kind: "jack_ai" }), "jack", "a refunded Jack charge stays with Jack");
   eq(ledgerCategory({ kind: "grant", meter_kind: null, memo: JACK_WELCOME_MEMO } as { kind: string; meter_kind: null }), "funds", "the $50 welcome credit is money in, under Funds");
   eq([JACK_METER, JACK_METERS], ["jack_ai", ["jack_ai"]], "376's meter");
+});
+
+// 2026-11-11: call recording and transcripts started charging (Ahsan, "Go, switch both on"). Their
+// lines belong with the call they came from, under Calls, not Other, and read as what they are.
+Deno.test("a recorded call's own lines sit under Calls and read as what they are, not Usage", () => {
+  eq(CALL_EXTRA_METERS, ["call_recording", "call_transcription"], "263's two meters");
+  eq(ledgerCategory({ kind: "debit", meter_kind: "call_recording" }), "calls", "a recording");
+  eq(ledgerCategory({ kind: "debit", meter_kind: "call_transcription" }), "calls", "a transcript and summary");
+  eq(ledgerCategory({ kind: "refund", meter_kind: "call_recording" }), "calls", "a refunded recording stays with Calls");
+  eq(walletLineLabel({ kind: "debit", meter_kind: "call_transcription", memo: "Call transcript and summary, call to (816) 557-0902 · 1 min" }),
+    "Call transcript and summary, call to (816) 557-0902 · 1 min", "the Worker's memo, which names the call");
+  eq(walletLineLabel({ kind: "debit", meter_kind: "call_recording", memo: null }), "Call recording", "no memo: the meter's name");
+  eq(walletLineLabel({ kind: "debit", meter_kind: "call_transcription", memo: "" }), "Call transcript and summary", "an empty memo too");
+  // The wallet card's sentence for these stays per minute, not the call's "per call minute".
+  eq(costPlusNote("call_recording", "minute"), "Billed per minute", "recording");
+  eq(costPlusNote("call_transcription", "minute"), "Billed per minute", "transcript");
+});
+
+Deno.test("the 'about' figure: our cost a minute × the markup, rounded like a charge, nothing without a markup", () => {
+  eq(COST_PER_MINUTE_MICROS, { call_recording: 2500, call_transcription: 10400 }, "the Worker's estimates (pinned there too)");
+  eq(aboutMicrosPerMinute("call_recording", 1.25), 3125, "Twilio $0.0025 × 1.25");
+  eq(aboutMicrosPerMinute("call_transcription", 1.25), 13000, "$0.0104 × 1.25");
+  eq(aboutMicrosPerMinute("call_recording", 2), 5000, "a markup change moves it");
+  eq(aboutMicrosPerMinute("call_recording", 1.333), 3333, "half up, like chargeFor");
+  eq(aboutMicrosPerMinute("call_recording", null), null, "no markup: no figure");
+  eq(aboutMicrosPerMinute("call_recording", 0), null, "a zero markup is not a price");
+  eq(aboutMicrosPerMinute("voice_minute", 1.25), null, "only the two meters with a per-minute estimate");
 });
 
 // ── 3. Labels ──────────────────────────────────────────────────────────────────────────────

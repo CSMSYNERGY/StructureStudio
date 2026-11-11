@@ -310,17 +310,18 @@ Deno.test("spending: what texts cost last month, added from the exact amounts, w
   w.done();
 });
 
-Deno.test("spending: everything by kind, a 3D hold apart, call extras under other, and the typed note left out", async () => {
+Deno.test("spending: everything by kind, a 3D hold apart, call extras under calls, and the typed note left out", async () => {
   const w = billingWorld();
   const a = parse((await run(w, "look_at_billing", { what: "spending", filter: "all", ...LAST_MONTH })).content);
   assertEquals([a.lines, a.spent, a.credited, a.setAside], [10, "$0.3586", "$55", "$20"]);
   assertEquals(a.byKind, {
-    calls: { lines: 1, spent: "$0.0420" },
+    // The call ($0.0420) and its transcript ($0.06): the transcript sits with its call since 2026-11-11.
+    calls: { lines: 2, spent: "$0.1020" },
     texts: { lines: 3, spent: "$0.0332" },
     tax: { lines: 1, spent: "$0.10" },
     jack: { lines: 1, spent: "$0.1234" },
     funds: { lines: 2, spent: "$0", credited: "$55" },
-    other: { lines: 2, spent: "$0.06", setAside: "$20" },
+    other: { lines: 1, spent: "$0", setAside: "$20" },
   });
   assert(a.notes.includes(READS_SAID.callExtras) && a.notes.includes(READS_SAID.held));
   assert(a.newest.some((l: R) => l.what === "Call transcript and summary · 3 min" || l.what === "Usage"));

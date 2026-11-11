@@ -67,7 +67,8 @@ export const READS_SAID = {
   endFirst: "The end has to be after the start.",
   badFilter: "Choose all, calls, texts, tax, jack, funds or other.",
   tooManyLines: `That stretch has more wallet lines than I can add up in one go, so I won't give a total from part of it. Try a shorter stretch, or the Export on ${BILLING_WHERE}, Transactions.`,
-  callExtras: "Call recordings and call transcripts are counted under other, not calls.",
+  // Since 2026-11-11 the wallet's Calls chip holds them too (walletLedger.ts CALL_EXTRA_METERS).
+  callExtras: "Call recordings and call transcripts are counted under calls, with the call they belong to.",
   held: "Lines marked pending are money set aside for a 3D generation, not taken yet.",
   yearlyOnly: "Founding pricing is billed yearly only, so only the yearly plans can be started now. Monthly plans someone already has keep renewing.",
   comingSoon: "A plan marked comingSoon is on the page but can't be bought yet.",

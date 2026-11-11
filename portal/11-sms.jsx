@@ -941,16 +941,54 @@ function useSmsWalletFees(enabled, refreshKey) {
           if (!m) return null;
           return typeof m.priceCents === "number" && m.priceCents > 0 ? m.priceCents : null;
         };
+        // Call recording and transcripts (charged since 2026-11-11): an object only while their meter is
+        // on AND this account pays, so ssRecordingCostWords says nothing about a cost that isn't taken.
+        // aboutMicros is portal-billing's figure (our cost a minute × today's markup); null = charged,
+        // figure unknown, and the sentence then has no number rather than a made-up one.
+        const perMinute = (kind) => {
+          if (w.exempt) return null;
+          const m = w.meters.find((x) => x && x.kind === kind);
+          if (!m) return null;
+          return { aboutMicros: typeof m.aboutMicrosPerMinute === "number" ? m.aboutMicrosPerMinute : null };
+        };
         setFees({
           numberCents: fee("sms_number_monthly"),
           registrationCents: fee("sms_registration"),
           availableCents: Number(w.balanceCents || 0) - Number(w.heldCents || 0),
+          recording: perMinute("call_recording"),
+          transcripts: perMinute("call_transcription"),
         });
       })
       .catch(() => { if (live) setFees(null); });
     return () => { live = false; };
   }, [enabled, refreshKey]);
   return fees;
+}
+
+// WHAT CALL RECORDING AND TRANSCRIPTS COST (2026-11-11, Ahsan: "Yes, add both"). Both started
+// charging the builder's wallet that day, and nothing next to their switches said so. These are the
+// sentences the Call recording card (Settings › Phone) and My Profile's AI transcripts card show,
+// built from useSmsWalletFees: a sentence only for a meter that is on and charged here, with
+// portal-billing's "about" figure when it sent one. Never a hard-coded price: the figure is our cost
+// a minute (walletLedger.ts COST_PER_MINUTE_MICROS) × the markup, so it follows a markup change.
+function ssAboutPerMinute(micros) {
+  if (typeof micros !== "number" || !(micros > 0)) return null;
+  return micros < 10000 ? `$${(micros / 1e6).toFixed(3)}` : `${(micros / 10000).toFixed(1)} cents`;
+}
+function ssRecordingCostWords(fees) {
+  const rec = fees && fees.recording ? fees.recording : null;
+  const tr = fees && fees.transcripts ? fees.transcripts : null;
+  const a = rec ? ssAboutPerMinute(rec.aboutMicros) : null;
+  const t = tr ? ssAboutPerMinute(tr.aboutMicros) : null;
+  const what = rec && tr ? "recording, transcripts and summaries" : rec ? "call recording" : "transcripts and summaries";
+  const figures = [a ? `about ${a} a minute to record` : null, t ? `about ${t} a minute to transcribe` : null].filter(Boolean).join(", ");
+  return {
+    // The owner's card: "your wallet" is the business's.
+    recording: rec ? `Recording is charged to your wallet${a ? `, about ${a} a minute` : ""}.` : null,
+    transcripts: tr ? `Transcripts and summaries are charged to your wallet${t ? `, about ${t} a minute plus a little for each summary` : ""}.` : null,
+    // My Profile, read by everyone on the team: whose wallet it is.
+    business: rec || tr ? `Your business pays for ${what} from its wallet${figures ? ` (${figures})` : ""}.` : null,
+  };
 }
 
 function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
@@ -2302,6 +2340,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const numberFees = useSmsWalletFees(
     !!canEdit && !!data && !!data.canBuyNumber && !!data.numbersForSale,
     data ? phoneNumbersOf(data).length : 0);
+  // What call recording and transcripts take from the wallet, for the Call recording card's
+  // sentences (ssRecordingCostWords). null until read, and for an account that isn't charged.
+  const recFees = useSmsWalletFees(!!data && !!data.recording, 0);
   // Plan phase 6, caller ID (plan §14): what the last register / check said, and the Voice
   // Integrity answers an operator fills in (opened by its button).
   const [trustNote, setTrustNote] = useState(null);    // { ok } | { err }
@@ -3249,6 +3290,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const recLive = !!(rec && rec.on && rec.serverOn);
   const recEdit = !!data.canChangeRecording && canEdit && !!recForm;
   const recProblem = recForm ? phoneRecNoticeProblem(recForm.noticeText) : null;
+  const recCost = ssRecordingCostWords(recFees);
   const recDirty = !!(rec && recForm) && (recForm.on !== rec.on || recForm.transcribe !== rec.transcribe
     || recForm.notice !== (rec.notice !== false)
     || Number(recForm.retentionDays) !== Number(rec.retentionDays)
@@ -3263,9 +3305,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     const keepWords = PHONE_REC_KEEP_WORDS[keep] || `${keep} days`;
     const recWho = `The people who can see a call can play its recording${recForm.transcribe && rec.transcribeServerOn ? " and read its transcript and summary" : ""}.`;
     const how = recForm.notice ? "announced and then recorded" : "recorded without an announcement";
+    // What it costs, asked with the rest (2026-11-11): only for the meters that are charged here.
+    const recCostAsk = [recCost.recording, recForm.transcribe ? recCost.transcripts : null].filter(Boolean).map((t) => ` ${t}`).join("");
     if (recForm.on && (!rec.on || !rec.updatedAt) && !window.confirm(rec.serverOn
-      ? `Record calls? From your next call on, every call to and from your business number is ${how}. ${recWho}`
-      : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is ${how}. ${recWho}`)) return;
+      ? `Record calls? From your next call on, every call to and from your business number is ${how}. ${recWho}${recCostAsk}`
+      : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is ${how}. ${recWho}${recCostAsk}`)) return;
     if (keep < Number(rec.retentionDays) && !window.confirm(`Keep recordings for ${keepWords}? Recordings older than that, and their transcripts, are deleted at the next daily clean-up. Their summaries stay with the calls.`)) return;
     setBusy(true); setRecNote(null);
     try {
@@ -3329,6 +3373,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           teammate. Recordings play on the contact&rsquo;s page here and in My Synergy Phone,
           for the people who can see that call.
         </p>
+        {recCost.recording && (
+          <p data-ss-phone-recording-cost style={{ margin: "0 0 10px", fontSize: 12.5, color: "#334155", lineHeight: 1.5 }}>{recCost.recording}</p>
+        )}
         <div style={{ display: "grid", gap: 10 }}>
           {check(recForm.on, !recEdit, (e) => setRecForm((f) => ({ ...f, on: e.target.checked })), "Record calls", null, "on")}
           {check(recForm.notice, !recEdit, (e) => setRecNotice(e.target.checked), "Announce it to callers",
@@ -3355,6 +3402,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
                 <span data-ss-phone-recording-transcripts-waiting style={{ display: "block", marginTop: 3, color: "#92400E" }}>
                   Transcripts haven&rsquo;t started on this account yet. Your choice is saved and takes effect once they do.
                 </span>
+              )}
+              {recCost.transcripts && (
+                <span data-ss-phone-recording-transcripts-cost style={{ display: "block", marginTop: 3, color: "#334155" }}>{recCost.transcripts}</span>
               )}
             </>,
             "transcribe")}

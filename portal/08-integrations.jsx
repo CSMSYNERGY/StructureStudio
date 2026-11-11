@@ -3476,6 +3476,10 @@ function AiTranscriptsCard({ viewing = false, onOpenPhone = null }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);        // { ok } | { err } after a save
   const [open, setOpen] = useState(false);     // the notice opened by "Review…" (it is always open before a first answer)
+  // What recording and transcripts cost the business (charged since 2026-11-11): one line under the
+  // status lines, only for a meter that is on and charged (useSmsWalletFees / ssRecordingCostWords
+  // in 11-sms.jsx). Kept out of ssAiStatusLines, whose three lines are phone-core's word for word.
+  const costFees = useSmsWalletFees(true, 0);
   const load = useCallback(async () => {
     setLoadErr(null);
     try {
@@ -3547,6 +3551,14 @@ function AiTranscriptsCard({ viewing = false, onOpenPhone = null }) {
   return card(<>
     <div data-ss-ai-status>
       {ssAiStatusLines(data).map((t, i) => <p key={i} style={line}>{t}</p>)}
+      {(() => {
+        // Only what this business does: no transcript cost while its transcripts are off.
+        const words = ssRecordingCostWords(costFees && {
+          recording: data.callRecording ? costFees.recording : null,
+          transcripts: data.callRecording && data.businessTranscribes ? costFees.transcripts : null,
+        });
+        return words.business ? <p data-ss-ai-cost style={line}>{words.business}</p> : null;
+      })()}
     </div>
     {data.canChangeRecording && (
       <p data-ss-ai-owner style={{ ...line, color: "#334155" }}>

@@ -60,11 +60,41 @@ export const TAX_METERS = ["tax_lookup", "tax_invoice"] as const;
  *  cost them (plan section 9, "a spending report"). */
 export const JACK_METER = "jack_ai";
 export const JACK_METERS = [JACK_METER] as const;
+/** A recorded call's own lines (migration 263, charged since 2026-11-11 on Ahsan's "Go, switch both
+ *  on"): the recording, and its transcript and summary. They sit under the Calls chip with the call
+ *  they belong to, not under Other. Not in CALL_METERS: costPlusNote's "Billed per call minute" is
+ *  the call's wording, and these two are billed per recorded minute. */
+export const CALL_EXTRA_METERS = ["call_recording", "call_transcription"] as const;
+const CALL_CHIP_METERS: readonly string[] = [...CALL_METERS, ...CALL_EXTRA_METERS];
 /** Money in or out that is not usage. `debit` is the only kind left over (128's check). */
 export const FUNDS_KINDS = ["topup", "refund", "grant", "adjustment", "reversal"] as const;
-const USAGE_METERS: readonly string[] = [...CALL_METERS, ...TEXT_METERS];
+const USAGE_METERS: readonly string[] = [...CALL_CHIP_METERS, ...TEXT_METERS];
 /** Every meter that has a chip of its own. The meter wins over the kind for all of them. */
 const CHIP_METERS: readonly string[] = [...USAGE_METERS, ...TAX_METERS, ...JACK_METERS];
+
+/**
+ * What a recorded minute costs US, before the markup, for the "about … a minute" figure the Phone
+ * card and My Profile show next to the recording and transcript switches (portal-billing sends
+ * `aboutMicrosPerMinute` = this × phone_billing_settings.markup, so a markup change moves the
+ * figure with it). The phone-api Worker charges each recording and transcript at its own figures;
+ * these are copies of its estimates, and workers/phone-api/test/usageCharge.test.ts fails if
+ * either side changes without the other:
+ *   call_recording      usageCharge.ts RECORDING_MIN_MICROS (Twilio's published price a minute).
+ *   call_transcription  transcribe.ts NOVA3_MIN_MICROS × NOVA3_CHANNELS_BILLED (the transcript a
+ *                       minute). The summary adds a fraction of a cent a call on top, which is why
+ *                       the wording says "about".
+ */
+export const COST_PER_MINUTE_MICROS: Readonly<Record<string, number>> = {
+  call_recording: 2500,
+  call_transcription: 10400,
+};
+
+/** The "about" figure a builder sees for one of those meters: cost × markup, rounded like a charge. */
+export function aboutMicrosPerMinute(kind: string, markup: number | null | undefined): number | null {
+  const base = COST_PER_MINUTE_MICROS[kind];
+  if (typeof base !== "number" || typeof markup !== "number" || !Number.isFinite(markup) || markup <= 0) return null;
+  return Math.floor((base * Math.round(markup * 1000) + 500) / 1000);
+}
 
 export type LedgerFilter = "all" | "calls" | "texts" | "tax" | "jack" | "funds" | "other";
 export type LedgerCategory = Exclude<LedgerFilter, "all">;
@@ -80,7 +110,7 @@ export const LEDGER_FILTERS: readonly LedgerFilter[] = ["all", "calls", "texts",
  */
 export function ledgerCategory(t: { kind?: string | null; meter_kind?: string | null }): LedgerCategory {
   const m = t.meter_kind ?? "";
-  if ((CALL_METERS as readonly string[]).includes(m)) return "calls";
+  if (CALL_CHIP_METERS.includes(m)) return "calls";
   if ((TEXT_METERS as readonly string[]).includes(m)) return "texts";
   if ((TAX_METERS as readonly string[]).includes(m)) return "tax";
   if ((JACK_METERS as readonly string[]).includes(m)) return "jack";
@@ -95,7 +125,7 @@ const NOT_USAGE = `meter_kind.is.null,meter_kind.not.in.${pgList(CHIP_METERS)}`;
 /** Narrow a wallet_transactions query to one chip. `all` (or anything unknown) narrows nothing. */
 export function applyLedgerFilter(q: Query, filter: LedgerFilter): Query {
   switch (filter) {
-    case "calls": return q.in("meter_kind", [...CALL_METERS]);
+    case "calls": return q.in("meter_kind", [...CALL_CHIP_METERS]);
     case "texts": return q.in("meter_kind", [...TEXT_METERS]);
     case "tax": return q.in("meter_kind", [...TAX_METERS]);
     case "jack": return q.in("meter_kind", [...JACK_METERS]);
@@ -133,6 +163,11 @@ const METER_LABELS: Record<string, string> = {
   photo_background_change: "Photo background change",
   // Jack (376). jack-agent/billing.ts writes "Jack · answer" or "Jack · price list read" as the memo.
   jack_ai: "Jack",
+  // A recorded call's own lines (263). The Worker writes "Call recording, call to (555) … · 1 min"
+  // as the memo; without these two (and MEMO_METERS) they read "Usage" (found 2026-11-11, the day
+  // they started charging).
+  call_recording: "Call recording",
+  call_transcription: "Call transcript and summary",
 };
 // Meters whose memo is the better description, because the poster wrote one per line (the
 // number dialled, the minutes, the month a line fee covers). The tax meters since 2026-10-21:

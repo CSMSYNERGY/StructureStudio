@@ -19,7 +19,7 @@ import {
   FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS, monthlyPlansRefused,
 } from "../_shared/foundingPricing.ts";
 import {
-  applyLedgerFilter, costPlusNote, JACK_METER, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_MAX_ROWS, LEDGER_CSV_PAGE,
+  aboutMicrosPerMinute, applyLedgerFilter, COST_PER_MINUTE_MICROS, costPlusNote, JACK_METER, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_MAX_ROWS, LEDGER_CSV_PAGE,
   LEDGER_STATES, ledgerCsv, onlyIfJackOn, parseLedgerQuery, toLedgerRow, walletLineLabel,
 } from "../_shared/walletLedger.ts";
 
@@ -935,12 +935,25 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         // Twilio's real cost times the markup, per call or text. Its price_cents is 0, which this
         // card printed as "No charge" — the opposite of true. Send the sentence instead, and a
         // null price so the card's "balance covers N" count does not divide by a made-up number.
+        // CALL RECORDING AND TRANSCRIPTS (charged since 2026-11-11): the Phone card and My Profile say
+        // "about $0.003 a minute" next to their switches, so a builder sees a figure before the first
+        // charge. Our per-minute estimate × today's markup (walletLedger.ts COST_PER_MINUTE_MICROS),
+        // read here so a markup change moves the figure. Read only while one of the two is active; a
+        // failed read sends no figure, and the card then says "charged to your wallet" without one.
+        let markup: number | null = null;
+        if (meterRows.some((p: any) => typeof COST_PER_MINUTE_MICROS[p.kind] === "number")) {
+          const { data: pbs, error: pbsErr } = await admin.from("phone_billing_settings").select("markup").eq("id", true).maybeSingle();
+          if (pbsErr) console.warn("phone_billing_settings read failed; no 'about' figure:", pbsErr.message);
+          else markup = pbs && pbs.markup !== null && pbs.markup !== undefined ? Number(pbs.markup) : null;
+        }
         const meters = meterRows.map((p: any) => {
           const billedAs = p.pricing === "cost_plus" ? costPlusNote(p.kind, p.unit_label) : null;
+          const about = aboutMicrosPerMinute(p.kind, markup);
           return {
             kind: p.kind, label: p.label, unitLabel: p.unit_label,
             priceCents: billedAs || p.visible === false ? null : Number(p.price_cents),
             ...(billedAs ? { billedAs } : {}),
+            ...(about !== null ? { aboutMicrosPerMinute: about } : {}),
           };
         });
         wallet = {
