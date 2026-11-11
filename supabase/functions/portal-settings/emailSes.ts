@@ -60,7 +60,9 @@ export type EmailSesCtx = {
   clientId: string;
   action: string;
   payload: Record<string, unknown>;
-  /** Truthy when CSM Synergy staff are acting for this builder (view-as). */
+  /** True when the caller is CSM Synergy staff. For the two operator-only actions index.ts
+   *  answers this with callerIsOperator(): an operator in view-as, or a staff member with write
+   *  rights on their own (the internal) account. Nothing else here reads it. */
   operator: boolean;
   json: (body: unknown, status?: number) => Response;
   dbFail: (req: Request, clientId: string | null, where: string, err: unknown, status?: number) => Response;

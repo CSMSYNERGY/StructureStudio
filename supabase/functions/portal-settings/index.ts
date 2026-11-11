@@ -15086,8 +15086,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       action === "email_inbound_disconnect" ||
       action === "email_ses_prepare" ||
       action === "email_ses_cutover") {
+    // WHO COUNTS AS CSM SYNERGY STAFF for the two operator-only actions: callerIsOperator(), not
+    // `operator` alone. `operator` is set only in view-as, on ANOTHER builder's account. The
+    // first builder to move is our own internal account, whose owners are our staff acting on
+    // their OWN tenant, where `operator` is null, so the plain flag refused the very people the
+    // actions were written for (found 2026-11-11, before the first cutover). callerIsOperator()
+    // also accepts an app_operators member with can_write on their own tenant, the same rule the
+    // phone rollout uses. It reads app_operators only for these two actions.
+    const staffOnly = action === "email_ses_prepare" || action === "email_ses_cutover";
     const sesAnswer = await handleEmailSesAction({
-      admin, req, clientId, action, operator: Boolean(operator),
+      admin, req, clientId, action, operator: staffOnly ? await callerIsOperator() : Boolean(operator),
       payload: (payload ?? {}) as Record<string, unknown>, json, dbFail,
     });
     if (sesAnswer) return sesAnswer;

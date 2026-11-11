@@ -567,6 +567,12 @@ Deno.test("index.ts asks this file first for every email action, names each one,
     assert(src.includes(`  ${a}:`), `${a} has a GATES entry`);
   }
   assert(src.includes("if (sesAnswer) return sesAnswer;"), "null falls through to the Resend branch");
+  // The staff check for the two operator-only actions is callerIsOperator(), which also knows a
+  // staff member on their OWN tenant. `operator` alone is null there, and the internal account
+  // (the first builder to move) is exactly that case.
+  assert(src.includes(`const staffOnly = action === "email_ses_prepare" || action === "email_ses_cutover";`), "the two staff-only actions are named");
+  assert(src.includes("operator: staffOnly ? await callerIsOperator() : Boolean(operator),"), "and are judged by callerIsOperator()");
+  assert(src.indexOf("const callerIsOperator = (): Promise<boolean> => {") > 0 && src.indexOf("const callerIsOperator = (): Promise<boolean> => {") < dispatch, "which is defined before the dispatcher runs");
   for (const a of ["email_verify_domain", "email_tracking_check", "email_disconnect", "email_inbound_connect", "email_inbound_verify", "email_inbound_disconnect"]) {
     assert(dispatch < src.indexOf(`if (action === "${a}") {`), `the dispatcher runs before ${a}'s Resend branch`);
   }
