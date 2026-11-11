@@ -637,6 +637,12 @@ const GATES: GateTable = {
   // keeps the write gate it had (and its CONTACT_ROW_SCOPE row) so a portal tab from before 303
   // that still sends it is answered in words rather than with an unknown-action 404.
   crm_deal_set_status:   { area: "contacts", level: "edit" },
+  // 382: a Builders card ↔ the platform tenant it produced. INTERNAL ACCOUNT ONLY, refused with a
+  // sentence for everyone else inside the branch; the area gates say who on our team may do it.
+  crm_deal_account_summary: { area: "contacts", level: "view" },
+  crm_account_options:      { area: "contacts", level: "view" },
+  crm_deal_account_link:    { area: "contacts", level: "edit" },
+  crm_deal_account_unlink:  { area: "contacts", level: "edit" },
   crm_status_save:       { area: "settings_crm", level: "edit" },
   crm_statuses_reorder:  { area: "settings_crm", level: "edit" },
   // AUTOMATIONS (migrations 355 + 363): "when ‹this happens› → ‹do this›", one flat list per
@@ -1665,6 +1671,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     crm_deal_reopen:       { rowTable: "crm_deals", noCode: true },
     crm_deal_archive:      { rowTable: "crm_deals", noCode: true },
     crm_deal_set_status:   { rowTable: "crm_deals", noCode: true },
+    // 382: both name a card by id, like the other deal verbs.
+    crm_deal_account_link:   { rowTable: "crm_deals", noCode: true },
+    crm_deal_account_unlink: { rowTable: "crm_deals", noCode: true },
     // Reads a whole GoHighLevel location and writes the whole tenant's customer list.
     crm_import_ghl_contacts: { tenantWide: true },
     crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
@@ -9763,7 +9772,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (!mayReadContacts) return undefined;
         // lost_at rides along since 353: it is what says a card is lost (the reason alone cannot —
         // a reopened card keeps neither, and the record's Mark lost / Reopen keys on this).
-        const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_at, lost_reason, stage_entered_at, created_at, custom";
+        const dealCols = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, lost_at, lost_reason, stage_entered_at, created_at, custom, account_client_id";
         const safeCodes = codes.filter((c) => /^[A-Za-z0-9_-]{1,40}$/.test(String(c)));
         let dealsQ = admin.from("crm_deals").select(dealCols).eq("client_id", clientId).is("archived_at", null);
         if (kind === "contact") {
@@ -9773,6 +9782,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         } else {
           dealsQ = dealsQ.eq("short_code", designs[0].short_code);
         }
+        // 382: may this account link a card to a platform tenant? Ours only. A failed read says no.
+        let accountsLinkable = false;
+        try { accountsLinkable = await isInternalTenant(admin, clientId); } catch (_e) { accountsLinkable = false; }
         const [pRes, sRes, tRes, dRes] = await Promise.all([
           admin.from("crm_pipelines").select("id, name, position, lost_reasons")
             .eq("client_id", clientId).is("archived_at", null).order("position", { ascending: true }),
@@ -9796,6 +9808,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           })),
           statuses: (tRes.data ?? []).map((t: any) => ({ id: t.id, pipelineId: t.pipeline_id ?? null, name: t.name, color: t.color })),
           deals: dRes.data ?? [],
+          accountsLinkable,
         };
       })(),
       // THE BUILDER'S OWN FIELDS (migration 330), and their relabels of ours. Read HERE, in the
@@ -10911,7 +10924,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return iErr ?? null;
   };
 
-  const DEAL_COLS = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at, custom";
+  // account_client_id (382): the platform tenant a Builders card produced; null everywhere but our own account.
+  const DEAL_COLS = "id, pipeline_id, stage_id, status_id, contact_id, short_code, title, value_cents, expected_close_date, next_follow_up_at, lost_reason, source, stage_entered_at, won_at, lost_at, created_at, updated_at, custom, account_client_id";
 
   /**
    * Deals → the same deals with their contact attached, narrowed to what this caller may see.
@@ -11029,6 +11043,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "crm_pipelines_list") {
     const r = await readPipelines();
     if ("dbError" in r) return dbFail(req, clientId, "load your pipelines", r.dbError);
+    let accountsLinkable = false;
+    try { accountsLinkable = await isInternalTenant(admin, clientId); } catch (_e) { accountsLinkable = false; }
     // The roster for the owner picker and the cards' owner initials. client_users is unreadable to
     // a portal user (client_users_select_own), so names come from here — crm_record's reasoning.
     const { data: roster } = await admin.from("client_users")
@@ -11041,6 +11057,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       team: (roster ?? []).map((m: any) => ({ userId: m.user_id, name: m.full_name ?? null, title: m.title ?? null })),
       canManage: canEdit("settings_crm"),
       canWrite: canEdit("contacts"),
+      // 382: our own account's cards can be linked to the builder accounts they produced.
+      accountsLinkable,
       ownOnly: ownContacts,
       // selfUserId: the browser marks this row as "me" and defaults the owner picker to it.
       me: selfUserId ?? null,
@@ -11175,6 +11193,114 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: entity === "contact" ? "That contact no longer exists." : "That deal no longer exists." }, 404);
     }
     return json({ ok: true, values: patch });
+  }
+
+  // ── OUR BUILDERS' ACCOUNTS (migration 382) ──────────────────────────────────────────────
+  // A card on our own Builders pipeline and the platform tenant it produced. Carolyn, 2026-11-10:
+  // "how will the deal know there is an account?" The column is crm_deals.account_client_id, written
+  // only by crm_account_link/unlink (SQL), which refuse any account but the internal one; the four
+  // account statuses and their rule events follow from the link and from billing_subscriptions.
+  //
+  // The SUMMARY shows the tenant's own standing (plans, owner's last sign-in, setup progress). It
+  // never reads the builder's customers. INTERNAL ACCOUNT ONLY, and nobody else is told why.
+  if (action === "crm_deal_account_summary" || action === "crm_account_options"
+      || action === "crm_deal_account_link" || action === "crm_deal_account_unlink") {
+    let internal = false;
+    try { internal = await isInternalTenant(admin, clientId); }
+    catch (e) { return dbFail(req, clientId, "check whose account this is", { message: e instanceof Error ? e.message : String(e) }); }
+    if (!internal) return json({ error: "Only Structure Studio's own account links cards to builders." }, 403);
+
+    /** The tenant's standing, for the card's Account panel. Counts and dates; no customer data. */
+    const accountSummary = async (cid: string) => {
+      const [cfg, subs, users, setup] = await Promise.all([
+        admin.from("client_configs").select("client_id, company_name").eq("client_id", cid).maybeSingle(),
+        admin.from("billing_subscriptions").select("plan_id, status, current_period_end, canceled_at, created_at")
+          .eq("client_id", cid).order("created_at", { ascending: true }).limit(50),
+        admin.from("client_users").select("user_id, role, full_name").eq("client_id", cid).limit(50),
+        admin.from("tenant_setup_items").select("id, completed_at").eq("client_id", cid).limit(500),
+      ]);
+      if (cfg.error) throw cfg.error;
+      if (!cfg.data) return null;
+      const planIds = [...new Set((subs.data ?? []).map((r: any) => String(r.plan_id)))];
+      const plans = planIds.length
+        ? await admin.from("billing_plans").select("id, name, feature").in("id", planIds)
+        : { data: [], error: null };
+      const planName = new Map<string, string>((plans.data ?? []).map((p: any) => [String(p.id), String(p.name ?? p.feature ?? p.id)]));
+      // The OWNER's login: email and last sign-in from Auth, best-effort (a failed read is "unknown").
+      const owner = (users.data ?? []).find((u: any) => u.role === "owner") ?? (users.data ?? [])[0] ?? null;
+      let ownerEmail: string | null = null; let lastSignIn: string | null = null;
+      if (owner) {
+        try {
+          const got = await admin.auth.admin.getUserById(String(owner.user_id));
+          ownerEmail = got.data?.user?.email ?? null;
+          lastSignIn = got.data?.user?.last_sign_in_at ?? null;
+        } catch (_e) { /* unknown */ }
+      }
+      return {
+        clientId: cid,
+        companyName: cfg.data.company_name ?? cid,
+        subscriptions: (subs.data ?? []).map((r: any) => ({
+          plan: planName.get(String(r.plan_id)) ?? String(r.plan_id), status: String(r.status),
+          paidThrough: r.current_period_end ?? null, cancelledAt: r.canceled_at ?? null, since: r.created_at ?? null,
+        })),
+        owner: owner ? { name: owner.full_name ?? null, email: ownerEmail, lastSignIn } : null,
+        users: (users.data ?? []).length,
+        setup: setup.error ? null : { total: (setup.data ?? []).length, done: (setup.data ?? []).filter((x: any) => x.completed_at).length },
+      };
+    };
+
+    if (action === "crm_account_options") {
+      // Every tenant with no live linked card, for the "Link to an account" picker.
+      const [cfg, linked] = await Promise.all([
+        admin.from("client_configs").select("client_id, company_name").order("company_name", { ascending: true }).limit(1000),
+        admin.from("crm_deals").select("account_client_id").not("account_client_id", "is", null).is("archived_at", null).limit(2000),
+      ]);
+      if (cfg.error) return dbFail(req, clientId, "list the builders", cfg.error);
+      if (linked.error) return dbFail(req, clientId, "list the builders", linked.error);
+      const taken = new Set((linked.data ?? []).map((r: any) => String(r.account_client_id)));
+      return json({ ok: true, builders: (cfg.data ?? [])
+        .filter((c: any) => !taken.has(String(c.client_id)) && String(c.client_id) !== clientId)
+        .map((c: any) => ({ clientId: c.client_id, companyName: c.company_name ?? c.client_id })) });
+    }
+
+    const id = String(payload.id ?? "").toLowerCase();
+    if (!isUuidLike(id)) return json({ error: "That card wasn't found." }, 400);
+
+    if (action === "crm_deal_account_summary") {
+      const { data: deal, error } = await admin.from("crm_deals").select("id, account_client_id")
+        .eq("client_id", clientId).eq("id", id).maybeSingle();
+      if (error) return dbFail(req, clientId, "read that card", error);
+      if (!deal) return json({ error: "That card wasn't found." }, 404);
+      if (!deal.account_client_id) return json({ ok: true, account: null });
+      try {
+        return json({ ok: true, account: await accountSummary(String(deal.account_client_id)) });
+      } catch (e) { return dbFail(req, clientId, "read that builder's account", e); }
+    }
+
+    if (action === "crm_deal_account_link") {
+      const target = String(payload.clientId ?? "").trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9-]{0,80}$/.test(target)) return json({ error: "Pick a builder from the list." }, 400);
+      const { data, error } = await admin.rpc("crm_account_link", {
+        p_deal: id, p_client: target, p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+      });
+      if (error) {
+        // crm_account_link raises sentences meant for the screen; a Postgres fault gets dbFail.
+        const m = String(error.message ?? "");
+        if (/already linked|not found|no builder|Only our own|both needed/i.test(m)) return json({ error: m }, 409);
+        return dbFail(req, clientId, "link that card to the builder", error);
+      }
+      audit("crm_deal_account_link", 1, `deal=${id} builder=${target} changed=${(data as any)?.changed}`).catch(() => {});
+      return json({ ok: true, ...(data as Record<string, unknown>), account: await accountSummary(target).catch(() => null) });
+    }
+
+    if (action === "crm_deal_account_unlink") {
+      const { data, error } = await admin.rpc("crm_account_unlink", {
+        p_deal: id, p_actor: isUuidLike(String(userId ?? "")) ? userId : null,
+      });
+      if (error) return dbFail(req, clientId, "unlink that card", error);
+      audit("crm_deal_account_unlink", 1, `deal=${id} was=${(data as any)?.was ?? "none"}`).catch(() => {});
+      return json({ ok: true, ...(data as Record<string, unknown>) });
+    }
   }
 
   if (action === "crm_create_lead") {

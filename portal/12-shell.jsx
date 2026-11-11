@@ -2652,6 +2652,10 @@ function Dashboard({ session }) {
   // (Carolyn 2026-09-15). Before this, view-as read the OPERATOR's own entitlement — which
   // is why every gate carried a `!viewing` / `isOperator ||` escape hatch.
   const gateEnt = viewing ? (viewedCtx ? viewedCtx.entitlement : null) : entitlement;
+  // 382: is the account on screen OURS? The Customer Hub's status and rule editors read this to
+  // offer the four "builder account" facts, which fire for no other account. Set here, on every
+  // render, the way ssTargetClientId is: it follows the viewed account in view-as.
+  window.ssInternalAccount = !!(gateEnt && gateEnt.reason === "internal");
   // Billing gate. Locked = the required subscription isn't active. Nav stays fully
   // visible (locked items get a padlock) and the CONTENT area shows the gate whatever
   // they click — so they can see the whole product and always land on how to switch it

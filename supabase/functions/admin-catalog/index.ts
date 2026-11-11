@@ -238,6 +238,51 @@ async function callerIdSummary(sb: any, clientId: string): Promise<Array<Record<
 
 // Validate a client_id: DNS-safe slug AND must exist in client_configs — so a
 // write/upload can never land under a typo'd or malformed tenant prefix.
+/**
+ * The unlinked cards on OUR OWN account's Builders pipelines (migration 382): every live, unlinked
+ * card in an 'outreach'-seeded pipeline of a tenant with client_settings.internal_account, with its
+ * contact's name, company and email and its stage. `email` narrows to the contact with that address.
+ * Reads two tables by id lists rather than embedding (the composite FKs make embedding ambiguous).
+ */
+// deno-lint-ignore no-explicit-any
+async function unlinkedBuilderCards(sb: any, opts: { email?: string }): Promise<Array<{ id: string; hubClientId: string; stage: string | null; name: string | null; company: string | null; email: string | null; createdAt: string | null }>> {
+  const internal = await sb.from("client_settings").select("client_id").eq("internal_account", true).limit(20);
+  if (internal.error) throw internal.error;
+  const hubs = (internal.data ?? []).map((r: any) => String(r.client_id));
+  if (!hubs.length) return [];
+  const pipes = await sb.from("crm_pipelines").select("id, client_id").in("client_id", hubs).eq("seed_kind", "outreach").is("archived_at", null);
+  if (pipes.error) throw pipes.error;
+  const pipeIds = (pipes.data ?? []).map((r: any) => String(r.id));
+  if (!pipeIds.length) return [];
+  const deals = await sb.from("crm_deals").select("id, client_id, contact_id, stage_id, created_at")
+    .in("pipeline_id", pipeIds).is("account_client_id", null).is("archived_at", null).order("created_at", { ascending: false }).limit(500);
+  if (deals.error) throw deals.error;
+  const rows = (deals.data ?? []) as any[];
+  const cIds = [...new Set(rows.map((d) => d.contact_id).filter(Boolean))];
+  const sIds = [...new Set(rows.map((d) => d.stage_id).filter(Boolean))];
+  const [cs, st] = await Promise.all([
+    cIds.length ? sb.from("crm_contacts").select("id, name, company, email, email_lower, merged_into").in("id", cIds) : { data: [], error: null },
+    sIds.length ? sb.from("crm_pipeline_stages").select("id, name").in("id", sIds) : { data: [], error: null },
+  ]);
+  if (cs.error) throw cs.error;
+  if (st.error) throw st.error;
+  const contact = new Map<string, any>((cs.data ?? []).map((c: any) => [String(c.id), c]));
+  const stage = new Map<string, string>((st.data ?? []).map((x: any) => [String(x.id), String(x.name)]));
+  const want = opts.email ? opts.email.trim().toLowerCase() : null;
+  return rows
+    .map((d) => {
+      const c = contact.get(String(d.contact_id)) ?? null;
+      return {
+        id: String(d.id), hubClientId: String(d.client_id), stage: stage.get(String(d.stage_id)) ?? null,
+        name: c?.name ? String(c.name) : null, company: c?.company ? String(c.company) : null, email: c?.email ? String(c.email) : null,
+        emailLower: (c?.email_lower ? String(c.email_lower) : (c?.email ? String(c.email).toLowerCase() : null)) as string | null,
+        createdAt: d.created_at ? String(d.created_at) : null,
+      };
+    })
+    .filter((d) => !want || d.emailLower === want)
+    .map(({ emailLower: _e, ...d }) => d);
+}
+
 async function assertClient(sb: any, clientId: string) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("invalid client id");
   const { data, error } = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
@@ -418,6 +463,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // Admin → Support chats (Ahsan 10-30): the Studio Assistant's chats, read-only. Operator JWT only
     // (supportChats.ts refuses the password path), and every chat opened is audited.
     "support_chats_list", "support_chat_get",
+    // 382: the unlinked Builders-pipeline cards, for the "Link a deal" picker.
+    "deal_candidates",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -505,7 +552,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // (set_feature_grants REPLACES the set) revoked every other grant the tenant had. A
         // console that fails to load is recoverable; a confidently wrong one that saves is not.
         const { data: cs, error: csErr } = await sb.from("client_settings")
-          .select("client_id, billing_exempt, billing_exempt_until, discount_percent, discount_features");
+          .select("client_id, billing_exempt, billing_exempt_until, discount_percent, discount_features, internal_account");
         if (csErr) throw csErr;
         const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
         // The billable feature list, so the console can offer a per-feature discount
@@ -531,10 +578,39 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           arr.push({ feature: g.feature, expiresAt: g.expires_at ?? null });
           grantsById.set(g.client_id, arr);
         }
+        // 382: the Builders-pipeline card each tenant came from (our own account's card). Three
+        // reads rather than an embedded select: crm_deals carries two FKs to crm_pipeline_stages,
+        // which makes PostgREST's embedding ambiguous.
+        const dealById = new Map<string, any>();
+        try {
+          const dl = await sb.from("crm_deals").select("id, client_id, account_client_id, stage_id, status_id, won_at")
+            .not("account_client_id", "is", null).is("archived_at", null).limit(2000);
+          if (dl.error) throw dl.error;
+          const stIds = [...new Set((dl.data ?? []).map((d: any) => d.stage_id).filter(Boolean))];
+          const suIds = [...new Set((dl.data ?? []).map((d: any) => d.status_id).filter(Boolean))];
+          const [st, su] = await Promise.all([
+            stIds.length ? sb.from("crm_pipeline_stages").select("id, name").in("id", stIds) : { data: [], error: null },
+            suIds.length ? sb.from("crm_statuses").select("id, name, color").in("id", suIds) : { data: [], error: null },
+          ]);
+          const stName = new Map((st.data ?? []).map((x: any) => [x.id, x.name]));
+          const suRow = new Map((su.data ?? []).map((x: any) => [x.id, x]));
+          for (const d of (dl.data ?? []) as any[]) {
+            dealById.set(String(d.account_client_id), {
+              id: d.id, hubClientId: d.client_id, stage: stName.get(d.stage_id) ?? null,
+              status: suRow.get(d.status_id)?.name ?? null, statusColor: suRow.get(d.status_id)?.color ?? null, wonAt: d.won_at ?? null,
+            });
+          }
+        } catch (e) {
+          // A database without 382 has no column; the list still loads, with no Deal column.
+          if (!isMissingColumn(e)) console.error("list_clients: deal links unread:", e instanceof Error ? e.message : String(e));
+        }
         const clients = (data ?? []).map((c: any) => {
           const s = byId.get(c.client_id);
           return {
             ...c,
+            deal: dealById.get(c.client_id) ?? null,
+            // 382: our own account never gets a "Link a deal" offer; it is the one holding the cards.
+            internalAccount: Boolean(s?.internal_account),
             billingExempt: Boolean(s?.billing_exempt),
             discountPercent: Number(s?.discount_percent) || 0,
             discountFeatures: s?.discount_features ?? null,
@@ -1174,6 +1250,28 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Text Messaging tab), a purchase, a texting submit or the console card's Create finishes it
         // (ensureTwilioAccount resumes from the step it reached). Not on the money grant: see the
         // can_bill block above.
+        // ── The Builders card this account was created FROM (migration 382) ─────────────
+        // Carolyn 2026-11-10: the card must know the account exists. The console passes the card's
+        // id when the operator starts from "Create their account…"; crm_account_link writes the link,
+        // marks the card won and lands it on Account Created (or on the billing state, if any).
+        // Best-effort like the checklist: the tenant exists by now. A refusal is reported by its
+        // sentence so the operator can link by hand from the Builders list.
+        let dealLinked: boolean | null = null; let dealLinkError: string | null = null;
+        const dealId = typeof p.dealId === "string" && /^[0-9a-f-]{36}$/i.test(p.dealId.trim()) ? p.dealId.trim().toLowerCase() : null;
+        if (dealId) {
+          const lk = await sb.rpc("crm_account_link", { p_deal: dealId, p_client: clientId, p_actor: identity.via === "operator" ? identity.userId ?? null : null });
+          if (lk.error) { dealLinked = false; dealLinkError = String(lk.error.message ?? "could not link"); }
+          else dealLinked = true;
+          try {
+            await sb.from("admin_audit").insert({
+              action: "deal_link", target_client_id: clientId,
+              actor_email: identity.via === "operator" ? identity.email : null,
+              actor_user_id: identity.via === "operator" ? identity.userId : null,
+              note: `via=create_client deal=${dealId} ${dealLinked ? "linked" : "refused: " + dealLinkError}`.slice(0, 2000),
+            });
+          } catch (_e) { /* best-effort */ }
+        }
+
         const twilio = await provisionAtCreate(sb, clientId, {
           get: (k) => Deno.env.get(k),
           actor: identity.via === "operator" ? { via: "operator", email: identity.email, userId: identity.userId } : { via: identity.via },
@@ -1183,6 +1281,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         return json({
           ok: true, clientId, blank, cloned: clonedCounts, setupAssigned, electricalSeeded,
           accountType, ...(smartbuildPipeline === null ? {} : { smartbuildPipeline }),
+          ...(dealLinked === null ? {} : { dealLinked, dealLinkError }),
           twilio: twilio.outcome,
           ...(twilio.reason ? { twilioReason: twilio.reason } : {}),
           ...(twilio.code ? { twilioCode: twilio.step ? `${twilio.step}:${twilio.code}` : twilio.code } : {}),
@@ -2119,7 +2218,78 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           if (!gl.error) setupLink = gl.data?.properties?.action_link || null;
         } catch (_) { /* link is best-effort */ }
 
-        return json({ ok: true, userId: user.id, email, role, created, emailSent, setupLink });
+        // 5. (382) A tenant made WITHOUT its card: if exactly one unlinked card on our own Builders
+        //    pipelines has this owner's email, that is the sale that produced this account. Zero or
+        //    several → nothing happens; the Builders list shows "No deal linked" and the operator
+        //    links by hand. Best-effort: the login is linked whatever happens here.
+        let dealLinked: boolean | null = null; let dealMatches = 0;
+        try {
+          const already = await sb.from("crm_deals").select("id").eq("account_client_id", clientId).is("archived_at", null).limit(1);
+          if (already.error) throw already.error;
+          if (!(already.data ?? []).length) {
+            const found = await unlinkedBuilderCards(sb, { email });
+            dealMatches = found.length;
+            if (found.length === 1) {
+              const lk = await sb.rpc("crm_account_link", { p_deal: found[0].id, p_client: clientId, p_actor: identity.via === "operator" ? identity.userId ?? null : null });
+              dealLinked = !lk.error;
+              try {
+                await sb.from("admin_audit").insert({
+                  action: "deal_link", target_client_id: clientId,
+                  actor_email: identity.via === "operator" ? identity.email : null,
+                  actor_user_id: identity.via === "operator" ? identity.userId : null,
+                  note: `via=link_owner deal=${found[0].id} ${dealLinked ? "linked (owner email matched one card)" : "refused: " + String(lk.error?.message ?? "")}`.slice(0, 2000),
+                });
+              } catch (_e) { /* best-effort */ }
+            }
+          }
+        } catch (e) {
+          if (!isMissingColumn(e)) console.error("link_owner: deal match skipped:", e instanceof Error ? e.message : String(e));
+        }
+
+        return json({ ok: true, userId: user.id, email, role, created, emailSent, setupLink, dealLinked, dealMatches });
+      }
+
+      // ── A tenant's Builders card (migration 382) ──────────────────────────────────────
+      // deal_candidates: the unlinked cards on our own account's Builders pipelines, for the picker.
+      // link_deal / unlink_deal: the same SQL the Contacts page's Account panel uses; the SQL refuses
+      // a card that is not ours, a tenant already linked, and a card already linked.
+      case "deal_candidates": {
+        const cards = await unlinkedBuilderCards(sb, {});
+        return json({ ok: true, cards });
+      }
+      case "link_deal": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const dealId = reqStr(p.dealId, "dealId").toLowerCase();
+        if (!/^[0-9a-f-]{36}$/.test(dealId)) throw new Error("Pick a card from the list.");
+        const lk = await sb.rpc("crm_account_link", { p_deal: dealId, p_client: clientId, p_actor: identity.via === "operator" ? identity.userId ?? null : null });
+        if (lk.error) throw new Error(String(lk.error.message ?? "Could not link that card."));
+        try {
+          await sb.from("admin_audit").insert({
+            action: "deal_link", target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=link_deal deal=${dealId} linked`.slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort */ }
+        return json({ ok: true, ...(lk.data ?? {}) });
+      }
+      case "unlink_deal": {
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const cur = await sb.from("crm_deals").select("id").eq("account_client_id", clientId).is("archived_at", null).limit(1);
+        if (cur.error) throw cur.error;
+        const dealId = cur.data?.[0]?.id ?? null;
+        if (!dealId) return json({ ok: true, changed: false });
+        const ul = await sb.rpc("crm_account_unlink", { p_deal: dealId, p_actor: identity.via === "operator" ? identity.userId ?? null : null });
+        if (ul.error) throw new Error(String(ul.error.message ?? "Could not unlink that card."));
+        try {
+          await sb.from("admin_audit").insert({
+            action: "deal_unlink", target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=unlink_deal deal=${dealId}`.slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort */ }
+        return json({ ok: true, ...(ul.data ?? {}) });
       }
 
       // ── email sender: connect a Google account so auth emails send from it ──

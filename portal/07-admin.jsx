@@ -2907,9 +2907,48 @@ function AdmSupportChats({ onOpenBuilder, onFlash }) {
 // ── Clients (global) ─────────────────────────────────────────────────────────
 function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, onReload }) {
   const [q, setQ] = useState("");
-  const [openNew, setOpenNew] = useState(false);
-  const [id, setId] = useState("");
-  const [company, setCompany] = useState("");
+  // 382: the Builders-pipeline card this form was opened FROM (Contacts → a card → "Create their
+  // account…"). Read once from sessionStorage; the form opens itself prefilled; create_client gets
+  // the card id so the new account links back to it.
+  const [fromDeal, setFromDeal] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem("ss.admin.newBuilderFrom");
+      if (!raw) return null;
+      sessionStorage.removeItem("ss.admin.newBuilderFrom");
+      const v = JSON.parse(raw);
+      return v && v.dealId ? v : null;
+    } catch (_e) { return null; }
+  });
+  const [openNew, setOpenNew] = useState(() => !!fromDeal);
+  const [id, setId] = useState(() => (fromDeal ? slugify(fromDeal.company || fromDeal.name || "") : ""));
+  const [company, setCompany] = useState(() => (fromDeal ? (fromDeal.company || fromDeal.name || "") : ""));
+  // 382: the "Link a deal" picker — the tenant being linked, and the unlinked cards to choose from.
+  const [linkFor, setLinkFor] = useState(null);     // client row | null
+  const [cands, setCands] = useState(null);         // null = loading
+  const [candPick, setCandPick] = useState("");
+  const [linkBusy, setLinkBusy] = useState(false);
+  const openLink = async (c) => {
+    setLinkFor(c); setCands(null); setCandPick("");
+    try { const r = await adminApi("deal_candidates", {}); setCands(r.cards || []); }
+    catch (e) { onFlash({ err: e.message }); setCands([]); }
+  };
+  const linkDeal = async () => {
+    if (!linkFor || !candPick || linkBusy) return;
+    setLinkBusy(true);
+    try {
+      await adminApi("link_deal", { clientId: linkFor.client_id, dealId: candPick });
+      onFlash({ ok: `Linked ${linkFor.company_name || linkFor.client_id} to its Builders card. The card is marked won and its status follows their billing.` });
+      setLinkFor(null); await onReload();
+    } catch (e) { onFlash({ err: e.message }); }
+    setLinkBusy(false);
+  };
+  const unlinkDeal = async (c) => {
+    if (linkBusy || !window.confirm(`Unlink ${c.company_name || c.client_id} from its Builders card? The card keeps its stage, status and won date.`)) return;
+    setLinkBusy(true);
+    try { await adminApi("unlink_deal", { clientId: c.client_id }); onFlash({ ok: `Unlinked ${c.company_name || c.client_id}.` }); await onReload(); }
+    catch (e) { onFlash({ err: e.message }); }
+    setLinkBusy(false);
+  };
   const [tpl, setTpl] = useState("__none__");
   // "sheds" | "smartbuild" (Carolyn 2026-11-05) — see create_client's ACCOUNT TYPE in admin-catalog.
   const [acctType, setAcctType] = useState("sheds");
@@ -3018,7 +3057,12 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
         billingExempt: exempt, discountPercent: exempt ? 0 : pctNum,
         discountFeatures: allFeat ? [] : picked,
         accountType: acctType,
+        ...(fromDeal ? { dealId: fromDeal.dealId } : {}),
       });
+      // 382: the card's contact email waits for the Account tab's owner-login form.
+      if (fromDeal && fromDeal.email) { try { sessionStorage.setItem("ss.admin.ownerEmailHint", JSON.stringify({ clientId: slug, email: fromDeal.email })); } catch (_e) { /* private mode */ } }
+      if (fromDeal && made && made.dealLinked === false) onFlash({ err: `Created “${slug}”, but its Builders card was not linked: ${made.dealLinkError || "refused"}. Link it from the list below.` });
+      setFromDeal(null);
       await onReload();
       setOpenNew(false); setId(""); setCompany(""); setTpl("__none__"); setAcctType("sheds"); setIdTouched(false);
       setExempt(false); setDiscount("0"); setAllFeat(true); setPicked([]);
@@ -3075,6 +3119,19 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
             {c.client_id === sel && <AdmChip tone="on">Selected</AdmChip>}
             {c.billingExempt ? <AdmChip tone="good" title="Not billed — full access to every feature">Comped</AdmChip>
               : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
+            {/* 382: the Builders-pipeline card this account came from, with the card's stage and status. */}
+            {c.deal ? (
+              <>
+                <AdmChip tone="on" title={`Builders card: stage ${c.deal.stage || "—"} · status ${c.deal.status || "—"}${c.deal.wonAt ? ` · won ${fmtDate(c.deal.wonAt)}` : ""}`}>
+                  Deal · {c.deal.stage || "—"}{c.deal.status ? ` · ${c.deal.status}` : ""}
+                </AdmChip>
+                <button type="button" onClick={() => unlinkDeal(c)} disabled={linkBusy} title="Unlink this account from its Builders card"
+                  style={{ ...S.btn("#FFFFFF", "#64748B"), border: "1px solid #CBD5E1", padding: "6px 10px", fontSize: 12 }}>Unlink</button>
+              </>
+            ) : !c.internalAccount && (
+              <button type="button" onClick={() => openLink(c)} disabled={linkBusy} title="This account has no Builders card linked. Pick the card it came from."
+                style={{ ...S.btn("#FFFFFF", "#64748B"), border: "1px dashed #CBD5E1", padding: "6px 10px", fontSize: 12, whiteSpace: "nowrap" }}>No deal · Link…</button>
+            )}
             {can3D && (() => {
               const on = has3D(c);
               const saving = grantBusy === c.client_id;
@@ -3105,11 +3162,36 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
         {list.length > 0 && (
           <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={list.length} noun="builder" />
         )}
+        {linkFor && (
+          <div data-adm-link-deal={linkFor.client_id} style={{ marginTop: 12, padding: "10px 12px", background: "#F8FAFF", border: "1px solid #C7D2FE", borderRadius: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>Link {linkFor.company_name || linkFor.client_id} to its Builders card</div>
+            <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>The unlinked cards on our Builders pipeline. Linking marks the card won, sets Account Created, and then follows their billing.</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <select aria-label="Builders card" value={candPick} onChange={(e) => setCandPick(e.target.value)} disabled={linkBusy || cands === null}
+                style={{ ...S.input, flex: "1 1 320px", minWidth: 240 }}>
+                <option value="">{cands === null ? "Loading cards…" : cands.length === 0 ? "No unlinked cards" : "Pick the card"}</option>
+                {(cands || []).map((d) => (
+                  <option key={d.id} value={d.id}>{[d.company, d.name].filter(Boolean).join(" — ") || "Unnamed card"}{d.email ? ` · ${d.email}` : ""}{d.stage ? ` · ${d.stage}` : ""}</option>
+                ))}
+              </select>
+              <button type="button" onClick={linkDeal} disabled={linkBusy || !candPick} style={S.btn(ACCENT, "#FFF")}>{linkBusy ? "Linking…" : "Link"}</button>
+              <button type="button" onClick={() => setLinkFor(null)} disabled={linkBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {openNew && (
         <div style={S.card}>
           <CardHead title="Create a builder" desc="The builder id becomes their subdomain and can't be changed afterwards, so get it right here." />
+          {fromDeal && (
+            <div data-adm-from-deal={fromDeal.dealId} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 12, padding: "8px 10px", background: "#F8FAFF", border: "1px solid #C7D2FE", borderRadius: 8, fontSize: 12.5, color: "#334155" }}>
+              <AdmChip tone="on">From the Builders card</AdmChip>
+              <span><b>{fromDeal.company || fromDeal.name || "Unnamed card"}</b>{fromDeal.name && fromDeal.company ? ` · ${fromDeal.name}` : ""}{fromDeal.email ? ` · ${fromDeal.email}` : ""}</span>
+              <span style={{ color: "#64748B" }}>The new account links back to this card; the owner login form gets this email.</span>
+              <button type="button" onClick={() => setFromDeal(null)} style={{ ...S.btn("#FFFFFF", "#64748B"), border: "1px solid #CBD5E1", padding: "4px 9px", fontSize: 11.5, marginLeft: "auto" }}>Not this card</button>
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
             <div>
               <label style={S.lbl}>Company name</label>
@@ -3502,7 +3584,15 @@ Type ${clientId} to close it.`);
 }
 
 function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadClients, onDeleted }) {
-  const [email, setEmail] = useState("");
+  // 382: "Create their account…" on a Builders card leaves the contact's email here for the login
+  // form, so the operator types it once. Read once and cleared; a stale hint must not outlive its tab.
+  const [email, setEmail] = useState(() => {
+    try {
+      const hint = sessionStorage.getItem("ss.admin.ownerEmailHint");
+      if (hint) { sessionStorage.removeItem("ss.admin.ownerEmailHint"); const v = JSON.parse(hint); if (v && v.clientId === clientId && v.email) return String(v.email); }
+    } catch (_e) { /* private mode */ }
+    return "";
+  });
   const [role, setRole] = useState("owner");
   const [linkBusy, setLinkBusy] = useState(false);
   const [linkResult, setLinkResult] = useState(null);

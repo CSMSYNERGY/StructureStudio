@@ -5840,6 +5840,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                         Lost{deal.lost_reason ? `: ${deal.lost_reason}` : ""}
                       </div>
                     )}
+                    {/* 382: THE BUILDER ACCOUNT THIS CARD PRODUCED. Our own account only: the server
+                        says so (pipeline.accountsLinkable), and a card already linked always shows it. */}
+                    {deal && (deal.account_client_id || (pipe && pipe.accountsLinkable)) && (
+                      <CrmDealAccountPanel deal={deal} contact={data.contact} canEdit={canEdit} onChanged={load} />
+                    )}
                     {/* "Open in designer" on the left and, at the bottom right where Carolyn
                         bracketed it, the stage and the move (C37, C38). Wraps under itself in a
                         narrow column rather than squeezing the controls. */}
@@ -7299,6 +7304,136 @@ function SsLostPill({ reason = null, style = null }) {
   );
 }
 
+// 382: THE ACCOUNT A BUILDERS CARD PRODUCED. Our own Customer Hub only (crm_deals.account_client_id
+// is written for no other account). The pill names the tenant; the panel on the record shows the
+// tenant's standing — its plans, the owner's last sign-in, setup progress — and links or unlinks.
+function SsAccountPill({ clientId, style = null }) {
+  return (
+    <span data-ss-account-pill={clientId} title={`Structure Studio account: ${clientId}`}
+      style={{
+        display: "inline-block", boxSizing: "border-box", verticalAlign: "middle",
+        background: "#EEF2FF", color: "#3730A3", border: "1px solid #3730A355", borderRadius: 999,
+        padding: "1px 9px", fontSize: 10.5, fontWeight: 800, fontFamily: "inherit", lineHeight: "16px",
+        maxWidth: 170, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        ...(style || {}),
+      }}>
+      Account · {clientId}
+    </span>
+  );
+}
+// What "Create their account…" hands the Admin console's New builder form (sessionStorage, same
+// tab): the card id so create_client links it, and the contact's details to prefill. Read once by
+// AdmClients (07-admin) and cleared there.
+const SS_ADMIN_NEW_FROM_KEY = "ss.admin.newBuilderFrom";
+function CrmDealAccountPanel({ deal, contact, canEdit, onChanged }) {
+  const linked = deal.account_client_id || null;
+  const [sum, setSum] = useState(null);        // { account } | null = loading
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [options, setOptions] = useState(null); // null = picker closed; [] = loading; [...] = list
+  const [pick, setPick] = useState("");
+  useEffect(() => {
+    let gone = false;
+    setSum(null); setErr(null);
+    if (!linked) { setSum({ account: null }); return undefined; }
+    ssPipeCall("crm_deal_account_summary", { id: deal.id })
+      .then((r) => { if (!gone) setSum(r); })
+      .catch((e) => { if (!gone) { setErr(e.message || "Couldn't read that account."); setSum({ account: null }); } });
+    return () => { gone = true; };
+  }, [deal.id, linked]);
+  const openPicker = async () => {
+    setOptions([]); setErr(null);
+    try { const r = await ssPipeCall("crm_account_options", {}); setOptions(r.builders || []); }
+    catch (e) { setErr(e.message || "Couldn't list the builders."); setOptions(null); }
+  };
+  const link = async () => {
+    if (!pick || busy) return;
+    setBusy(true); setErr(null);
+    try { await ssPipeCall("crm_deal_account_link", { id: deal.id, clientId: pick }); setOptions(null); setPick(""); if (onChanged) await onChanged(); }
+    catch (e) { setErr(e.message || "That link did not save."); }
+    setBusy(false);
+  };
+  const unlink = async () => {
+    if (busy || !window.confirm(`Unlink this card from ${linked}? The card keeps its stage, status and won date.`)) return;
+    setBusy(true); setErr(null);
+    try { await ssPipeCall("crm_deal_account_unlink", { id: deal.id }); if (onChanged) await onChanged(); }
+    catch (e) { setErr(e.message || "That did not save."); }
+    setBusy(false);
+  };
+  const stash = (key, value) => { try { sessionStorage.setItem(key, JSON.stringify(value)); } catch (_e) { /* private mode */ } };
+  const c = contact || {};
+  const row = (label, node) => (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "2px 0" }}>
+      <div style={{ width: 96, flexShrink: 0, fontSize: 10.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
+      <div style={{ minWidth: 0, fontSize: 12.5, color: "#334155" }}>{node}</div>
+    </div>
+  );
+  const subTone = (st) => st === "active" ? "#059669" : st === "past_due" ? "#D97706" : st === "paused" ? "#2563EB" : "#64748B";
+  const subWord = (st) => st === "active" ? "Active" : st === "past_due" ? "Past due" : st === "paused" ? "Paused" : st === "cancelled" ? "Cancelled" : st;
+  const acct = sum && sum.account;
+  return (
+    <div data-ss-deal-account={linked || ""} style={{ marginTop: 8, padding: "8px 10px", background: "#F8FAFF", border: "1px solid #C7D2FE", borderRadius: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#3730A3" }}>Structure Studio account</span>
+        {linked && <SsAccountPill clientId={linked} />}
+        {!linked && <span style={{ fontSize: 12, color: "#64748B" }}>None linked yet.</span>}
+      </div>
+      {linked && sum === null && <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>Reading their account…</div>}
+      {linked && acct && (
+        <div style={{ marginTop: 6 }}>
+          {row("Builder", <span><b>{acct.companyName}</b> <span style={{ color: "#94A3B8" }}>· {acct.clientId}</span></span>)}
+          {row("Subscriptions", acct.subscriptions.length === 0 ? <span style={{ color: "#94A3B8" }}>None yet</span> : (
+            <div>
+              {acct.subscriptions.map((s, i) => (
+                <div key={i} style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 700 }}>{s.plan}</span>
+                  <span style={{ color: subTone(s.status), fontWeight: 800, fontSize: 11.5 }}>{subWord(s.status)}</span>
+                  {s.paidThrough && s.status !== "cancelled" && <span style={{ color: "#64748B", fontSize: 11.5 }}>paid through {fmtDate(s.paidThrough)}</span>}
+                  {s.cancelledAt && <span style={{ color: "#64748B", fontSize: 11.5 }}>cancelled {fmtDate(s.cancelledAt)}</span>}
+                </div>
+              ))}
+            </div>
+          ))}
+          {row("Owner", acct.owner
+            ? <span>{acct.owner.email || acct.owner.name || "—"}{acct.owner.lastSignIn ? <span style={{ color: "#64748B" }}> · last signed in {fmtDate(acct.owner.lastSignIn)}</span> : <span style={{ color: "#94A3B8" }}> · never signed in</span>}</span>
+            : <span style={{ color: "#D97706", fontWeight: 700 }}>No login yet — give the owner one in Admin → Account</span>)}
+          {acct.setup && row("Setup steps", `${acct.setup.done} of ${acct.setup.total} done`)}
+        </div>
+      )}
+      {err && <div style={{ fontSize: 12, color: "#DC2626", marginTop: 6 }}>{err}</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        {linked && (
+          <a href="/console/account" onClick={() => { try { sessionStorage.setItem("ss.admin.clientId", linked); } catch (_e) { /* private mode */ } }}
+            style={{ ...S.btn("#EFEFEF", "#1E293B"), padding: "5px 10px", fontSize: 12, textDecoration: "none", display: "inline-block" }}>Open in Admin</a>
+        )}
+        {linked && canEdit && (
+          <button type="button" disabled={busy} onClick={unlink} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Unlink</button>
+        )}
+        {!linked && canEdit && options === null && (
+          <>
+            <a href="/console/clients" data-ss-create-account={deal.id}
+              onClick={() => stash(SS_ADMIN_NEW_FROM_KEY, { dealId: deal.id, company: c.company || "", name: c.name || "", email: c.email || "" })}
+              title="Open Admin → Builders with this card's company and contact filled in. The new account links back to this card."
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 10px", fontSize: 12, textDecoration: "none", display: "inline-block" }}>Create their account…</a>
+            <button type="button" disabled={busy} onClick={openPicker} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Link to an existing account…</button>
+          </>
+        )}
+        {!linked && canEdit && options !== null && (
+          <>
+            <select aria-label="Builder account" value={pick} onChange={(e) => setPick(e.target.value)} disabled={busy}
+              style={{ ...S.input, flex: "1 1 220px", minWidth: 200, padding: "5px 8px" }}>
+              <option value="">{options.length === 0 ? "Loading builders…" : "Pick a builder account"}</option>
+              {options.map((b) => <option key={b.clientId} value={b.clientId}>{b.companyName} ({b.clientId})</option>)}
+            </select>
+            <button type="button" disabled={busy || !pick} onClick={link} style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 10px", fontSize: 12 }}>{busy ? "Linking…" : "Link"}</button>
+            <button type="button" disabled={busy} onClick={() => { setOptions(null); setPick(""); }} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 10px", fontSize: 12 }}>Cancel</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // An appointment on a card: "Tue 3:00p" in the chip, the whole thing in its tooltip. The booking's
 // own instant, drawn in the reader's zone — a rep in another state sees their own clock, which is
 // the one they will be at their desk by.
@@ -8243,7 +8378,14 @@ const SS_RULE_CONTACT_EVENTS = [
   ["email_bounced", "An email to them bounces"],
   ["shop_request", "They send a request from your online shop"],
   ["shop_purchase", "They buy from your online shop"],
+  // 382: OUR builders' accounts (the internal account's Builders pipeline). Offered on the internal
+  // account only — SS_RULE_ACCOUNT_EVENTS below — because they fire for nobody else.
+  ["account_created", "A builder's Structure Studio account is created"],
+  ["account_subscribed", "A builder has an active subscription"],
+  ["account_past_due", "A builder's subscription is past due"],
+  ["account_cancelled", "A builder's last subscription is cancelled"],
 ];
+const SS_RULE_ACCOUNT_EVENTS = ["account_created", "account_subscribed", "account_past_due", "account_cancelled"];
 // Which group of the "Which event" list each of those sits in (the eight status events head the
 // first group). Display only; the vocabulary is the list above.
 const SS_RULE_SALE_EVENTS = ["payment_received", "change_order_sent", "change_order_signed", "build_completed",
@@ -8405,7 +8547,7 @@ function ssRuleTriggerAllowed(triggerKind, scope, anchor, freq) {
   return triggerKind === "event";
 }
 function ssRuleEventLabel(k) {
-  return (SS_STATUS_EVENTS.find(([x]) => x === k) || SS_RULE_CONTACT_EVENTS.find(([x]) => x === k) || [null, null])[1];
+  return (SS_STATUS_EVENTS.find(([x]) => x === k) || SS_RULE_CONTACT_EVENTS.find(([x]) => x === k) || SS_ACCOUNT_STATUS_EVENTS.find(([x]) => x === k) || [null, null])[1];
 }
 function ssRuleClock12(at) {
   const parts = String(at || "09:00").split(":").map(Number);
@@ -9154,13 +9296,20 @@ function SsRuleEditor({ meta, rule, onSaved, onCancel, onTimeZone }) {
                 .map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </optgroup>
             <optgroup label="Customers, calls, texts and meetings">
-              {SS_RULE_CONTACT_EVENTS.filter(([k]) => SS_RULE_SALE_EVENTS.indexOf(k) < 0 && SS_RULE_EMAIL_SHOP_EVENTS.indexOf(k) < 0)
+              {SS_RULE_CONTACT_EVENTS.filter(([k]) => SS_RULE_SALE_EVENTS.indexOf(k) < 0 && SS_RULE_EMAIL_SHOP_EVENTS.indexOf(k) < 0 && SS_RULE_ACCOUNT_EVENTS.indexOf(k) < 0)
                 .map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </optgroup>
             <optgroup label="Email and your online shop">
               {SS_RULE_CONTACT_EVENTS.filter(([k]) => SS_RULE_EMAIL_SHOP_EVENTS.indexOf(k) >= 0)
                 .map(([k, label]) => <option key={k} value={k}>{label}</option>)}
             </optgroup>
+            {/* 382: ours only. A builder's account never raises these, so a builder never sees them. */}
+            {(window.ssInternalAccount || SS_RULE_ACCOUNT_EVENTS.indexOf(draft.triggerEvent) >= 0) && (
+              <optgroup label="Your builders' Structure Studio accounts">
+                {SS_RULE_CONTACT_EVENTS.filter(([k]) => SS_RULE_ACCOUNT_EVENTS.indexOf(k) >= 0)
+                  .map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              </optgroup>
+            )}
           </select>
         ) : (
           <>
@@ -9657,7 +9806,7 @@ function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onCh
               <select aria-label="Set automatically when" disabled={busy} value={t.triggerEvent || ""}
                 onChange={(e) => saveStatus(t, { triggerEvent: e.target.value })} style={{ ...S.input, flex: 1, padding: "5px 6px" }}>
                 <option value="">Nothing yet</option>
-                {SS_STATUS_EVENTS.map(([k, label]) => <option key={k} value={k} disabled={usedBy(k, t.id)}>{label}{usedBy(k, t.id) ? " (used)" : ""}</option>)}
+                {ssStatusEventList(t.triggerEvent).map(([k, label]) => <option key={k} value={k} disabled={usedBy(k, t.id)}>{label}{usedBy(k, t.id) ? " (used)" : ""}</option>)}
               </select>
             </label>
             <button type="button" title="Move up" disabled={busy || i === 0} onClick={() => moveStatus(i, -1)} style={small}>↑</button>
@@ -9685,7 +9834,7 @@ function SsPipelineEditor({ pipeline, pipelines = null, onClose, onCreated, onCh
         <select aria-label="New status is set automatically when" value={newEvent} onChange={(e) => setNewEvent(e.target.value)}
           style={{ ...S.input, flex: "1 1 200px", minWidth: 170, padding: "6px 8px" }}>
           <option value="">Nothing yet — set it later</option>
-          {SS_STATUS_EVENTS.filter(([k]) => !usedBy(k, null)).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+          {ssStatusEventList().filter(([k]) => !usedBy(k, null)).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
         </select>
         <button type="button" disabled={busy || !newStatus.trim()} style={S.btn(ACCENT, "#FFF")} onClick={addStatus}>Add status</button>
       </div>
@@ -10032,6 +10181,8 @@ function SalesPipelines({ clientId, shedsOn = true, viewing = false, embedded = 
                           {d.lost_at
                             ? <SsLostPill reason={d.lost_reason} />
                             : <SsStatusPill statuses={statuses} value={d.status_id} style={{ maxWidth: "100%" }} />}
+                          {/* 382: this card produced a builder account (our own Builders pipeline only). */}
+                          {d.account_client_id && <SsAccountPill clientId={d.account_client_id} />}
                           {closeEdit === d.id ? (
                             <input type="date" autoFocus defaultValue={closeIso || ""} aria-label="Expected close date"
                               onClick={(e) => e.stopPropagation()}
@@ -10160,6 +10311,20 @@ const SS_STATUS_EVENTS = [
   ["build_scheduled", "It is added to the build schedule"],
   ["delivered", "It is delivered"],
 ];
+// 382: the four facts about OUR builders' accounts, on the internal account's Builders pipeline.
+// Mirrors ACCOUNT_STATUS_EVENTS in _shared/crmPipelines.ts (preflight checkRuleMirror). Offered only
+// on the internal account (window.ssInternalAccount), and always listed for a status that already
+// carries one, so an existing rung never shows as "Nothing yet".
+const SS_ACCOUNT_STATUS_EVENTS = [
+  ["account_created", "Their Structure Studio account is created"],
+  ["account_subscribed", "They have an active subscription"],
+  ["account_past_due", "Their subscription is past due"],
+  ["account_cancelled", "Their last subscription is cancelled"],
+];
+function ssStatusEventList(current = null) {
+  if (window.ssInternalAccount || SS_ACCOUNT_STATUS_EVENTS.some(([k]) => k === current)) return SS_STATUS_EVENTS.concat(SS_ACCOUNT_STATUS_EVENTS);
+  return SS_STATUS_EVENTS;
+}
 function PipelineSettings({ viewing = false, shedsOn = true }) {
   const [meta, setMeta] = useState(null);
   const [err, setErr] = useState(null);

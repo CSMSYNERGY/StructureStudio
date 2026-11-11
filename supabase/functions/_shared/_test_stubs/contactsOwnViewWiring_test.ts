@@ -64,6 +64,10 @@ const SETTINGS_WRITES = [
   // Migration 366: a customer's Do Not Disturb boxes. Turning someone's texts or emails off (or
   // back on) is writing on their record, so "view only" switches nothing.
   "crm_contact_dnd",
+  // Migration 382: linking our own Builders card to the builder account it produced (and unlinking)
+  // writes on that card, so "view only" does neither. Internal account only; the branch refuses
+  // everyone else with a sentence, but the gate is the same altitude as moving the card.
+  "crm_deal_account_link", "crm_deal_account_unlink",
 ];
 
 Deno.test("portal-settings: every customer-record write is a contacts:'edit' gate, and own_view fails each one", () => {

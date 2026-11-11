@@ -246,6 +246,17 @@ export const STATUS_EVENTS: Record<string, string> = {
   build_scheduled: "It is added to the build schedule",
   delivered: "It is delivered",
 };
+/** The facts about one of OUR builders' accounts (migration 382): set on a Builders-pipeline card
+ *  linked to a platform tenant by crm_account_link and the billing_subscriptions trigger. Shown in
+ *  the "Set automatically when" list on the internal account only (window.ssInternalAccount); a
+ *  builder's own pipeline can carry one, but nothing ever fires it there. Mirrors the CHECK on
+ *  crm_statuses.trigger_event and SS_ACCOUNT_STATUS_EVENTS in the browser (preflight checkRuleMirror). */
+export const ACCOUNT_STATUS_EVENTS: Record<string, string> = {
+  account_created: "Their Structure Studio account is created",
+  account_subscribed: "They have an active subscription",
+  account_past_due: "Their subscription is past due",
+  account_cancelled: "Their last subscription is cancelled",
+};
 export const STATUS_NAME_MAX = 40;
 
 export type StatusIn = {
@@ -274,7 +285,7 @@ export function parseStatusSave(b: Record<string, unknown>): Parsed<StatusIn> {
   let triggerEvent: string | null | undefined = undefined;
   if (b.triggerEvent !== undefined) {
     triggerEvent = str(b.triggerEvent, 32);
-    if (triggerEvent && !(triggerEvent in STATUS_EVENTS)) return { ok: false, error: "Pick when it is set from the list." };
+    if (triggerEvent && !(triggerEvent in STATUS_EVENTS) && !(triggerEvent in ACCOUNT_STATUS_EVENTS)) return { ok: false, error: "Pick when it is set from the list." };
   }
   return { ok: true, id: id ? id.toLowerCase() : null, pipelineId: pipelineId ? pipelineId.toLowerCase() : null,
            name, color, triggerEvent, archive: b.archive === true };

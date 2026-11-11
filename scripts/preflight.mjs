@@ -1576,6 +1576,9 @@ function checkRuleMirror(files = {}, inject = null) {
     // `RULE_EVENTS = STATUS_EVENTS`), shared with the status ladder — so this arm also catches the
     // day somebody forks one of them for rules.
     ["trigger events", pairKeys(jsx, "SS_STATUS_EVENTS"), "SS_STATUS_EVENTS", recordKeys(pip, "STATUS_EVENTS"), "STATUS_EVENTS"],
+    // 382: the four facts about OUR builders' accounts, a list of their own on both sides so the
+    // eight a builder sees stay the eight (the browser shows these on the internal account only).
+    ["account events", pairKeys(jsx, "SS_ACCOUNT_STATUS_EVENTS"), "SS_ACCOUNT_STATUS_EVENTS", recordKeys(pip, "ACCOUNT_STATUS_EVENTS"), "ACCOUNT_STATUS_EVENTS"],
   ];
   for (const [what, a, aName, b, bName] of pairs) {
     if (!a || !a.length) {

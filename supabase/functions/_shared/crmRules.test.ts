@@ -45,7 +45,9 @@ Deno.test("the event vocabulary is the SAME eight a status uses", () => {
     "build_completed", "change_order_sent", "change_order_signed", "delivery_scheduled",
     "email_bounced", "email_opened", "email_received", "lot_sold", "payment_received",
     "repair_completed", "repair_requested", "shop_purchase", "shop_request",
-  ].sort(), "365 + 367 events");
+    // 382: our builders' accounts (fire on the internal account's Builders pipeline only)
+    "account_cancelled", "account_created", "account_past_due", "account_subscribed",
+  ].sort(), "365 + 367 + 382 events");
   eq([...RULE_SCHEDULE_FREQS], ["daily", "weekly", "monthly", "yearly", "date_field"], "schedule freqs");
 });
 

@@ -87,6 +87,13 @@ export const RULE_CONTACT_EVENTS: Record<string, string> = {
   email_bounced: "An email to them bounces",
   shop_request: "They send a request from your online shop",
   shop_purchase: "They buy from your online shop",
+  // 382: OUR builders' accounts, on the internal account's Builders pipeline. Raised by
+  // crm_account_event for the card linked to the tenant; a builder's own account never sees them
+  // fire, and the editor shows them only on the internal account (SS_RULE_ACCOUNT_EVENTS).
+  account_created: "A builder's Structure Studio account is created",
+  account_subscribed: "A builder has an active subscription",
+  account_past_due: "A builder's subscription is past due",
+  account_cancelled: "A builder's last subscription is cancelled",
 };
 const ruleEventLabel = (k: string): string | undefined => RULE_EVENTS[k] ?? RULE_CONTACT_EVENTS[k];
 
