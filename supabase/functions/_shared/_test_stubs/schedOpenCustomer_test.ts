@@ -66,12 +66,13 @@ type World = { crm?: boolean; isOperator?: boolean; canAdmin?: boolean; access?:
 function opener(w: World, fromPage = "build-schedule") {
   const did: { nav: unknown[][] } = { nav: [] };
   const make = new Function(
-    "crmUnlocked", "isOperator", "canAdmin", "myAccess", "supportView", "ssClampTab", "ssHubCan", "schedCustomerDest", "navigate", "shedsOn",
+    "crmUnlocked", "isOperator", "canAdmin", "myAccess", "supportView", "ssClampTab", "ssHubCan", "schedCustomerDest", "navigate", "shedsOn", "phoneOnly",
     `${OPENER_SRC}; return scheduleCustomerOpener;`,
   );
   const scheduleCustomerOpener = make(
     w.crm ?? true, w.isOperator ?? false, w.canAdmin ?? false, w.access ?? null, w.supportView ?? false, ssClampTab, ssHubCan, schedCustomerDest,
-    (...a: unknown[]) => did.nav.push(a), w.shedsOn ?? true,
+    // phoneOnly (migration 384): hubReach reads it too; schedules are never a phone-only account's.
+    (...a: unknown[]) => did.nav.push(a), w.shedsOn ?? true, false,
   );
   return { open: scheduleCustomerOpener(fromPage) as null | ((l: Link) => null | (() => void)), did };
 }

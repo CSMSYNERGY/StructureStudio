@@ -64,6 +64,7 @@ import {
 import { requestFlags } from "../_shared/numberRequestFlags.ts";
 // The StructureStudio library and the builders' library requests (migration 339): ./library.ts.
 import { handleAdminLibraryAction } from "./library.ts";
+import { ACCOUNT_TYPES, accountTypeOf } from "../_shared/accountShape.ts";
 import { handleSupportChatsAction } from "./supportChats.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
@@ -476,7 +477,10 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // the discount and the exemption that every later charge is computed from.
     if ((String(action ?? "") === "set_billing" || String(action ?? "") === "set_feature_grants"
          || String(action ?? "") === "wallet_credit" || String(action ?? "") === "wallet_adjust"
-         || String(action ?? "") === "wallet_set_limits")
+         || String(action ?? "") === "wallet_set_limits"
+         // 384: making an account phone-only lets it past the subscription gate (its wallet pays),
+         // the same class of change as the exemption set_billing writes.
+         || String(action ?? "") === "set_account_type")
         && !identity.canBill) {
       return json({ error: "This operator account cannot change billing." }, 403);
     }
@@ -605,10 +609,22 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           // A database without 382 has no column; the list still loads, with no Deal column.
           if (!isMissingColumn(e)) console.error("list_clients: deal links unread:", e instanceof Error ? e.message : String(e));
         }
+        // THE ACCOUNT TYPE (364 / 384), read on its own and FAIL-SOFT: a database without 384's column
+        // costs the console its Account type card (accountType null, which the card reads as "can't
+        // tell" and offers no switch), never the whole list.
+        const shapeById = new Map<string, string>();
+        {
+          const { data: shapes, error: shapeErr } = await sb.from("client_settings").select("client_id, sheds_enabled, phone_only");
+          if (shapeErr) console.warn("list_clients: account types unread:", shapeErr.message);
+          else for (const r of (shapes ?? []) as any[]) shapeById.set(r.client_id, accountTypeOf(r));
+        }
+        const shapesRead = shapeById.size > 0 || (cs ?? []).length === 0;
         const clients = (data ?? []).map((c: any) => {
           const s = byId.get(c.client_id);
           return {
             ...c,
+            // "sheds" | "smartbuild" | "phone"; a builder with no client_settings row is a shed builder.
+            accountType: shapesRead ? (shapeById.get(c.client_id) ?? "sheds") : null,
             deal: dealById.get(c.client_id) ?? null,
             // 382: our own account never gets a "Link a deal" offer; it is the one holding the cards.
             internalAccount: Boolean(s?.internal_account),
@@ -911,7 +927,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // A SmartBuild builder always starts blank: there is no shed catalog for them to use, and a
         // cloned one would sit in tables no page of theirs shows (accountType is validated below,
         // before the first write).
-        const blank = String(p.templateClientId || "").trim().toLowerCase() === "__none__" || p.accountType === "smartbuild";
+        const blank = String(p.templateClientId || "").trim().toLowerCase() === "__none__" || p.accountType === "smartbuild" || p.accountType === "phone";
         let contactFields: unknown, defaultSizes: unknown, options: unknown;
         let templateId: string | null = null;
         if (blank) {
@@ -942,12 +958,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // account until now, and the default — or "smartbuild": a builder who works leads in our
         // Customer Hub and prices in SmartBuild, with no shed designer (migration 364's shape).
         // Refused, not coerced, and BEFORE the config insert for the discount's reason above.
+        // "phone" (migration 384, Carolyn 2026-11-10): My Synergy Phone and the contact list only. No
+        // catalog, no pipeline, sheds_enabled false, phone_only true. The phone itself is switched on
+        // afterwards under Settings > Customer Hub > Phone, viewing the account, as for every builder.
         const accountType = p.accountType === undefined || p.accountType === null || p.accountType === ""
           ? "sheds" : String(p.accountType);
-        if (accountType !== "sheds" && accountType !== "smartbuild") {
-          throw new Error('accountType must be "sheds" or "smartbuild".');
+        if (!ACCOUNT_TYPES.includes(accountType)) {
+          throw new Error('accountType must be "sheds", "smartbuild" or "phone".');
         }
         const smartbuild = accountType === "smartbuild";
+        const phoneOnly = accountType === "phone";
 
         const opt = (v: unknown) => (typeof v === "string" && v.trim()) ? v.trim() : null;
         const ins = await sb.from("client_configs").insert({
@@ -966,13 +986,14 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // before anything unlocks.
         // A SmartBuild builder needs the row too: the shape lives on it. ramp_enabled off with it,
         // exactly as the first such account was set by hand — there is no designer to offer a ramp.
-        if (p.billingExempt === true || newDiscount > 0 || smartbuild) {
+        if (p.billingExempt === true || newDiscount > 0 || smartbuild || phoneOnly) {
           const bx = await sb.from("client_settings").upsert({
             client_id: clientId,
             billing_exempt: p.billingExempt === true,
             discount_percent: newDiscount,
             discount_features: newDiscountFeatures,
-            ...(smartbuild ? { sheds_enabled: false, ramp_enabled: false } : {}),
+            ...(smartbuild || phoneOnly ? { sheds_enabled: false, ramp_enabled: false } : {}),
+            ...(phoneOnly ? { phone_only: true } : {}),
             updated_at: new Date().toISOString(),
           }, { onConflict: "client_id" });
           if (bx.error) throw bx.error;
@@ -1824,6 +1845,43 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
             ? `Early access on for ${rows.length} feature(s). This is a comp — no subscription, no charge.`
             : "Early access cleared for this builder.",
         });
+      }
+      case "set_account_type": {
+        // THE ACCOUNT TYPE OF AN EXISTING BUILDER (migration 384): "sheds", "smartbuild" (no shed
+        // designer, 364) or "phone" (My Synergy Phone and the contact list only, 384). This is how a
+        // phone-only account is given more later — Carolyn 2026-11-10: "if they want to do more,
+        // later they can" — and it loses nothing: both columns hide and refuse, neither deletes.
+        // Contacts, calls, texts and settings are all still there after a switch, either way.
+        //
+        // It writes the two shape columns and nothing else. It does NOT seed a catalog or a pipeline
+        // (create_client does that for a new account), and it does not touch billing: a phone-only
+        // account switched to "sheds" now needs a subscription, or the gate holds it — the note says so.
+        const clientId = reqStr(p.clientId, "clientId");
+        const accountType = String(p.accountType ?? "");
+        if (!ACCOUNT_TYPES.includes(accountType)) throw new Error('accountType must be "sheds", "smartbuild" or "phone".');
+        const { data: exists } = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
+        if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+        const { data: prior, error: priorErr } = await sb.from("client_settings")
+          .select("sheds_enabled, phone_only").eq("client_id", clientId).maybeSingle();
+        if (priorErr) throw priorErr;
+        const was = prior ? accountTypeOf(prior) : "sheds";
+        const { error } = await sb.from("client_settings").upsert({
+          client_id: clientId,
+          sheds_enabled: accountType === "sheds",
+          phone_only: accountType === "phone",
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "client_id" });
+        if (error) throw error;
+        const { data: live } = await sb.from("billing_subscriptions")
+          .select("id").eq("client_id", clientId).neq("status", "cancelled").limit(1);
+        const hasLive = Boolean(live && live.length);
+        const note = was === accountType ? "Nothing changed."
+          : was === "phone" && !hasLive
+          ? "Saved. Their contacts, calls and texts are all still there. They have no subscription, so the portal now asks them to choose one under Settings > Billing, unless they are non-billable."
+          : accountType === "phone"
+          ? "Saved. They now see Customer Hub (contacts only), Calls, their phone settings, Business Details, Team, Billing and My Profile. Nothing was deleted; switching back brings everything back. Changes reach open portals within about a minute."
+          : "Saved. Nothing was deleted.";
+        return json({ ok: true, clientId, accountType, was, hasLiveSubscription: hasLive, note });
       }
       case "set_billing": {
         // Billing posture for an EXISTING tenant: the comp flag and the account discount.

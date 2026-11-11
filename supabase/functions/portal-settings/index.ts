@@ -127,6 +127,7 @@ import {
   type InboxContact, type InboxSource, type InboxTable,
 } from "../_shared/crmInbox.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
+import { PHONE_ONLY_CONTACT_ACTIONS, PHONE_ONLY_PORTAL_SETTINGS, phoneOnlyOf } from "../_shared/accountShape.ts";
 import { runAutoTopup } from "../_shared/walletAutoTopup.ts";
 // The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
 import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields, SELF_CHECK_MAX_ROUNDS } from "../_shared/styleD3.ts";
@@ -1448,7 +1449,9 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   // Everything below this block is unchanged and simply uses `clientId`.
   const admin = createClient(supabaseUrl, serviceKey, { global: { fetch: timedFetch(st) } });
   const authStart = performance.now();
-  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
+  // A phone-only account (migration 384) may call only PHONE_ONLY_PORTAL_SETTINGS here; everything
+  // else is refused inside resolveTenant (_shared/accountShape.ts).
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: PHONE_ONLY_PORTAL_SETTINGS });
   st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
   st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held
@@ -3148,6 +3151,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (crmGated || action === "crm_record") {
     try { crmPaid = await hasPaidFeature(admin, clientId, "crm"); }
     catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
+    // A PHONE-ONLY account (migration 384) has the CONTACT half of the Customer Hub without the
+    // subscription: the phone is what it pays for, and the contacts come with it (Carolyn
+    // 2026-11-09: "the phone in itself would just get them contacts ... and call logs"). Only the
+    // actions in PHONE_ONLY_CONTACT_ACTIONS, and resolveTenant has already refused every other
+    // crm_* action to such an account. Asked only when the subscription said no, so a paying
+    // builder pays no extra read; phoneOnlyOf fails to false, which keeps the contacts paywalled.
+    if (!crmPaid && PHONE_ONLY_CONTACT_ACTIONS.has(action)) crmPaid = await phoneOnlyOf(admin, clientId);
     if (crmGated && !crmPaid) return json({ error: "The Customer Hub is not part of your subscription - add it under Settings -> Billing." }, 403);
   }
 

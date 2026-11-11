@@ -286,6 +286,23 @@ Deno.test("the Suite still unlocks on its own", async () => {
   );
 });
 
+// A PHONE-ONLY account (migration 384) pays by its wallet and has no subscription to buy, so the
+// gate lets it in on the shape alone — and opens NOTHING paid: crm stays false (its contacts are
+// accountShape.ts's narrow grant in portal-settings, not the feature), and the shed half is off.
+Deno.test("a phone-only account with no subscription is let in (reason phone_only), with no paid feature", async () => {
+  assertEquals(await gate([], { phone_only: true }), { state: "active", locked: false, reason: "phone_only" });
+  const r = await drive({ action: "status" }, { subs: [], settings: { phone_only: true } });
+  const e = r.body.entitlement;
+  assertEquals([e.phoneOnly, e.shedsOn, e.features.crm, e.features.simple_layout], [true, false, false, false]);
+});
+
+Deno.test("…and only an explicit true does it: false, a missing row or a lost read is the ordinary gate", async () => {
+  assertEquals(await gate([], { phone_only: false }), { state: "locked", locked: true, reason: "never_paid" });
+  assertEquals(await gate([], { phone_only: "true" }), { state: "locked", locked: true, reason: "never_paid" });
+  const r = await drive({ action: "status" }, { subs: [], settings: null });
+  assertEquals([r.body.entitlement.phoneOnly, r.body.entitlement.shedsOn], [false, true]);
+});
+
 Deno.test("a non-billable account is exempt, with or without rows", async () => {
   const g = await gate([], { billing_exempt: true });
   assertEquals({ state: g.state, locked: g.locked }, { state: "exempt", locked: false });

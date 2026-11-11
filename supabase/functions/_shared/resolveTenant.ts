@@ -18,6 +18,7 @@
 // Response, so each function keeps its own CORS headers.
 
 import { verifyCaller } from "./verifyCaller.ts";
+import { PHONE_ONLY_REFUSAL, phoneOnlyAllows, type PhoneOnlyAllowed, phoneOnlyOf } from "./accountShape.ts";
 import {
   canEdit,
   canRead,
@@ -173,7 +174,24 @@ function makeAudit(admin: Admin, actor: { userId: string; email: string } | null
 export async function resolveTenant(
   req: Request,
   admin: Admin,
-  opts: {
+  opts: ResolveOpts,
+): Promise<Resolved> {
+  const r = await resolveTenantCore(req, admin, opts);
+  if (!r.ok) return r;
+  // ── THE PHONE-ONLY ACCOUNT (migration 384, _shared/accountShape.ts) ───────────────────────
+  // After everything in resolveTenantCore has said yes, and for BOTH of its paths (a builder's own
+  // call and an operator viewing them): a phone-only account may call only the actions its function
+  // lists in `phoneOnly`. Deny by default — a function that passes nothing refuses them every action —
+  // so a page the portal hides from them is not one they can reach with a hand-made request. The flag
+  // is read only when the action is NOT already allowed, so the phone's own calls pay nothing;
+  // phoneOnlyOf caches it per isolate and fails to "not phone-only", which refuses nothing.
+  if (!phoneOnlyAllows(opts.phoneOnly, r.ctx.action) && await phoneOnlyOf(admin, r.ctx.clientId)) {
+    return { ok: false, status: 403, body: { error: PHONE_ONLY_REFUSAL } };
+  }
+  return r;
+}
+
+type ResolveOpts = {
     /**
      * The function's action → required-access table (migration 100). When supplied it is
      * THE gate: it decides read-vs-write for the operator capability check, it enforces
@@ -214,7 +232,18 @@ export async function resolveTenant(
      * resolved tenant; this only says "role does not decide it".
      */
     staffActions?: Set<string>;
-  },
+    /**
+     * PHONE-ONLY ACCOUNTS (migration 384, _shared/accountShape.ts): the actions of this function a
+     * phone-only account may call — "all", or a set of names. Absent = none: a phone-only account is
+     * refused every action of a function that does not say otherwise.
+     */
+    phoneOnly?: PhoneOnlyAllowed;
+};
+
+async function resolveTenantCore(
+  req: Request,
+  admin: Admin,
+  opts: ResolveOpts,
 ): Promise<Resolved> {
   // 1. Who is calling — _shared/verifyCaller.ts: the token checked here plus resolve_caller's
   //    session check, or getUser() when that cannot decide. On the fast path the caller's

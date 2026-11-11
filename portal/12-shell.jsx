@@ -1145,6 +1145,9 @@ function Dashboard({ session }) {
   // the whole rail and then settles, which is the harmless direction. Nothing is held back while
   // the entitlement is out, and nothing flashes away for a shed builder.
   const shedsOn = ssShedsOn(advancedEnt);
+  // A PHONE-ONLY account (migration 384): the same entitlement, so view-as shows the viewed account's
+  // shape. ssPhoneOnly is strictly true, so a cold load shows the ordinary rail and then settles.
+  const phoneOnly = ssPhoneOnly(advancedEnt);
   // The entitlement arrives AFTER the tenant, so a cold /advanced first renders with no
   // answer. Refusing then would rewrite our own account's address bar to /designer and
   // mount the Designer, only to jump back when the answer lands. So while it is out the route is
@@ -1161,7 +1164,7 @@ function Dashboard({ session }) {
   // projects branches, so passing it here refuses those two routes to a support account on
   // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -2615,7 +2618,7 @@ function Dashboard({ session }) {
   // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly);
   // The Advanced route while it is HELD (see advancedClampOn): nobody has been given the page yet,
   // so the topbar must not name it either — for a builder without Advanced that was a flash of it.
   const advancedHeld = activeTab === "advanced" && !advancedOn;
@@ -2719,6 +2722,11 @@ function Dashboard({ session }) {
   // crm_* action in portal-settings re-checks the entitlement, so this is presentation
   // over a real gate rather than the only gate.
   const crmUnlocked = featureOn("crm");
+  // THE CONTACT LIST AND A CONTACT'S RECORD for a phone-only account (migration 384): theirs without
+  // the subscription, because the phone is what they pay for. ONLY those two mounts read this; the
+  // boards, Conversations, Settings > Customer Hub and My Profile keep crmUnlocked, so a surface this
+  // misses stays padlocked rather than opening (the server's half is accountShape.ts).
+  const contactsUnlocked = crmUnlocked || phoneOnly;
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
@@ -2762,7 +2770,8 @@ function Dashboard({ session }) {
   // into a record agree on who sees the contact list and who sees the Design list.
   // No Design list without the shed product (migration 364): it lists designs from the designer,
   // which this builder does not have. The hub snaps a typed /contacts/designs to a view he can open.
-  const hubReach = { people: ssHubCan("people", canAdmin, myAccess), designs: shedsOn && ssHubCan("designs", canAdmin, myAccess) };
+  // `pipes` (migration 384): no pipeline boards, and no padlocked Pipeline tab, for a phone-only account.
+  const hubReach = { people: ssHubCan("people", canAdmin, myAccess), designs: shedsOn && ssHubCan("designs", canAdmin, myAccess), pipes: !phoneOnly };
   // A CARD OR A DESIGN OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19, after
   // watching it: "this pipeline click is going to take you into the customer view where you can
   // see everything about that customer ... I don't want the two different views." The deal she
@@ -2964,7 +2973,7 @@ function Dashboard({ session }) {
   // Needed whenever we are ON a settings page (the topbar reads them) OR the rail is up (it
   // draws them) — which are no longer the same condition.
   const settingsTabs = (settingsPage || settingsMode)
-    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered, shedsOn })
+    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered, shedsOn, phoneOnly })
     : null;
   // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /settings, and
   // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
@@ -2981,7 +2990,7 @@ function Dashboard({ session }) {
   // must light COMPANY and /settings/shingles must light COLORS, rather than falling
   // through the clamp to Structures. Same lists the pages themselves render, same gates.
   const hubs = (settingsPage || settingsMode)
-    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked, phoneOffered, shedsOn })
+    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked, phoneOffered, shedsOn, phoneOnly })
     : null;
   // Which hub owns the slug in the URL, if any: [rail id, that tab's tuple].
   const hubHit = onSettingsPage
@@ -3065,7 +3074,7 @@ function Dashboard({ session }) {
         <nav className="ss-nav">
           {/* Jack sits first, above the Shed Designer (Ahsan, 11-03), and only on a real yes from the
               builder's switch. A builder without the shed product still has it at the top. */}
-          {jackOn === true && navItem("jack", "Jack")}
+          {jackOn === true && !phoneOnly && navItem("jack", "Jack")}
           {/* THE SHED PRODUCT (migration 364). Carolyn 2026-11-05: "we don't need Shed Designer
               on the side we don't need inventory orders build schedule delivery schedule repairs
               commissions so those should all just go away." Every unbought page normally STAYS
@@ -3091,7 +3100,8 @@ function Dashboard({ session }) {
               Customer Hub: the same people, seen by their latest message. Only with the CRM:
               unlike the hub, which stays in the rail to sell it, one locked item there is enough.
               A typed /conversations without it still lands on the CRM card below. */}
-          {crmUnlocked && navItem("conversations", "Conversations")}
+          {/* Not for a phone-only account (migration 384): Carolyn, "all they have access to is contacts". */}
+          {crmUnlocked && !phoneOnly && navItem("conversations", "Conversations")}
           {shedsOn && navItem("inventory", "Inventory")}
           {shedsOn && navItem("orders", "Orders")}
           {/* Scheduling suite — Carolyn 2026-08-04: under Orders, in this order. The In Dev
@@ -3099,7 +3109,7 @@ function Dashboard({ session }) {
           {shedsOn && navItem("build-schedule", "Build Schedule")}
           {shedsOn && navItem("delivery-schedule", "Delivery Schedule")}
           {shedsOn && navItem("repairs", "Repairs")}
-          {navItem("commissions", "Commissions")}
+          {!phoneOnly && navItem("commissions", "Commissions")}
           {/* My Synergy Phone's report. Only where calling is offered (ssPhoneOffered) — a Calls page
               on an account that cannot call is a list of zeros that reads as broken. The route
               itself still resolves for anyone with phone access, for old links. */}
@@ -3118,7 +3128,8 @@ function Dashboard({ session }) {
             Production tenants see finished work, not a list of promises; beta is where
             unreleased things are looked at. The routes clamp too (ssClampTab reads the
             same predicate) — hiding a nav item never removed its URL. */}
-        {ssIsBetaHost() && (<>
+        {/* A phone-only account (migration 384) is offered nothing it cannot open, teasers included. */}
+        {ssIsBetaHost() && !phoneOnly && (<>
         <div className="ss-navlabel">Coming Soon</div>
         <nav className="ss-nav">
           {/* RealTime Pricing left this group on 2026-08-28 (Carolyn 2026-08-27: "we maybe
@@ -3297,7 +3308,7 @@ function Dashboard({ session }) {
           <div className="ttl">
             {settingsActive ? settingsActive[1] : (advancedHeld || jackHeld) ? "One moment" : (TAB_META[activeTab] || [activeTab])[0]}
             {/* "their designs" is the shed product's; a builder without it has none (migration 364). */}
-            <span>{settingsActive ? settingsActive[2] : (advancedHeld || jackHeld) ? "" : (activeTab === "contacts" && !shedsOn) ? "Everyone who has enquired, and your pipelines" : (TAB_META[activeTab] || [])[1]}</span>
+            <span>{settingsActive ? settingsActive[2] : (advancedHeld || jackHeld) ? "" : (activeTab === "contacts" && phoneOnly) ? "Everyone who has called or texted you, and everyone you've added" : (activeTab === "contacts" && !shedsOn) ? "Everyone who has enquired, and your pipelines" : (TAB_META[activeTab] || [])[1]}</span>
           </div>
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
@@ -3451,7 +3462,7 @@ function Dashboard({ session }) {
                    across tab switches, and a real navigation would throw away whatever is
                    on the canvas. ssClampTab first, same as the record page's Orders link —
                    sending someone to a tab they cannot open is its own dead end. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn, false, phoneOnly) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null} />
             </div>
           )}
@@ -3562,7 +3573,7 @@ function Dashboard({ session }) {
                 is not — it is what opens from the free Design list, and its server branch
                 reads `designs` only. Same split the portal-settings gate makes, and the two
                 must agree or one of them produces a 403 the other never predicted. */}
-            {!gateLocked && activeTab === "contacts" && sub && /^c-/.test(sub) && !crmUnlocked ? (
+            {!gateLocked && activeTab === "contacts" && sub && /^c-/.test(sub) && !contactsUnlocked ? (
               <ComingSoon
                 title="Contacts"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
@@ -3602,8 +3613,10 @@ function Dashboard({ session }) {
                    Pipeline list opens and it has to keep working. Its READ is exempt from the
                    server's crm_ gate on purpose; every WRITE on the page is not, so the
                    record used to render with a live Notes box that 403'd on Save. Passing the
-                   entitlement lets CrmRecord grey what it cannot save instead. */
-                crmUnlocked={crmUnlocked}
+                   entitlement lets CrmRecord grey what it cannot save instead. A phone-only account
+                   (384) has its contacts' records without the subscription: contactsUnlocked. */
+                crmUnlocked={contactsUnlocked}
+                phoneOnly={phoneOnly}
                 /* Only when `sub` still names the record the deal was captured for — see
                    recordCtx's declaration. `key={sub}` remounts the record on every route,
                    so this is read fresh as initial state and never fights a later hand-pick.
@@ -3636,7 +3649,7 @@ function Dashboard({ session }) {
                    ssClampTab first, because a crew leader may hold the record and not
                    Orders -- and dumping them on a list they cannot read is the same trap
                    the onNavigate comment above documents. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn, false, phoneOnly) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null}
                 /* THE SALES TAX CARD (Avalara stage). Three separate questions, each the area
                    its server action gates on: moving a quote to another sales location is
@@ -3702,7 +3715,7 @@ function Dashboard({ session }) {
                 below), and the Design list is what the tab opens on (C14). */}
             {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
               <ContactsHub key={"h-" + effClientId} clientId={effClientId} sub={sub}
-                viewing={!!viewing} reach={hubReach} crmUnlocked={crmUnlocked} shedsOn={shedsOn}
+                viewing={!!viewing} reach={hubReach} crmUnlocked={contactsUnlocked} shedsOn={shedsOn}
                 /* On your own portal crmUnlocked reads false until portal-billing answers, so the
                    hub holds its loading body until then rather than painting the Design list and
                    snapping to the board. entitlementSettled ends the wait on a failure or a hang
@@ -3966,7 +3979,9 @@ function Dashboard({ session }) {
                 /* Migration 364: the SAME shedsOn the rail above is built from. Without it the
                    rail hid Sheds while the body, defaulting to sheds-on, still opened a bare
                    /settings on the Building styles editor (found on beta, Joe's account). */
-                shedsOn={shedsOn} />
+                shedsOn={shedsOn}
+                /* Migration 384, for the same reason: the rail and the body read one list. */
+                phoneOnly={phoneOnly} />
             )}
             {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real
                 feature lives in Settings → Structures. `available` because it HAS shipped:

@@ -372,8 +372,12 @@ function SsHubTabs({ lists, pipes, active, onPick, hrefFor }) {
 //   onOpenRecord(code, contactId, fromSub)  opens a card's customer or design, Back to `fromSub`
 function ContactsHub({ clientId, shedsOn = true, sub = null, viewing = false, reach, crmUnlocked = false, crmKnown = true, saved = null, refreshKey = 0,
   onRoute, onOpenRecord, people = null, designs = null, locked = null }) {
-  const canPipes = !!crmUnlocked && !!reach.people;
-  const { pipelines, error, replace } = useSsPipelineList(clientId, canPipes);
+  // reach.pipes false (a phone-only account, migration 384): no boards at all, so the hub resolves
+  // with an empty pipeline list and opens the contact list, never waiting on a list it never asks for.
+  const noPipes = reach.pipes === false;
+  const canPipes = !!crmUnlocked && !!reach.people && !noPipes;
+  const { pipelines: pipeList, error, replace } = useSsPipelineList(clientId, canPipes);
+  const pipelines = noPipes ? [] : pipeList;
   let remembered = null;
   try { remembered = localStorage.getItem(SS_PIPE_LAST + ":" + clientId); } catch (_e) { /* private mode */ }
   const r = ssHubResolve({ sub, saved, reach, crm: !!crmUnlocked, crmKnown, pipelines, remembered });
@@ -397,7 +401,7 @@ function ContactsHub({ clientId, shedsOn = true, sub = null, viewing = false, re
   // Without the CRM there are no boards to list, and one padlocked "Pipeline" tab stays to say
   // they exist, where the padlocked Pipeline button used to.
   const pipes = canPipes ? (pipelines || []).map((p) => ({ id: "p-" + p.id, label: p.name }))
-    : (reach.people && crmOff ? [{ id: SS_HUB_PIPELINE, label: "Pipeline", locked: true }] : []);
+    : (reach.people && crmOff && !noPipes ? [{ id: SS_HUB_PIPELINE, label: "Pipeline", locked: true }] : []);
   const active = r.view === "people" ? SS_HUB_PEOPLE
     : r.view === "designs" ? SS_HUB_DESIGNS
     : r.view === "pipe" ? "p-" + r.pipeId
@@ -2552,6 +2556,17 @@ function crmSsQuoteDesign(c) {
 // two have to agree (a card whose `when` can pass on a contact must list "contact"), and
 // crmCardOrder_test holds them to it: a card missing from `kinds` still renders, but it can't be
 // moved, so it would sit at the bottom of everyone's arranged column with no way up.
+// A PHONE-ONLY ACCOUNT'S RECORD (migration 384, Carolyn 2026-11-10: "all they have access to is
+// contacts"). It has no pipelines, designs, orders, schedules or meetings, so its record is the
+// person and their history: these cards, these composers and these History chips, and nothing that
+// would open a deal or call a function the account is refused (_shared/accountShape.ts). With no deal
+// to pick, everything it writes files against the customer alone (shortCode null), which every one
+// of those actions takes. Shed and SmartBuild builders are untouched: CrmRecord reads these only
+// when the shell passes phoneOnly.
+const CRM_PHONE_ONLY_SECTIONS = ["summary", "details", "overview"];
+const CRM_PHONE_ONLY_HIDDEN_TABS = ["scheduler", "invoice"];
+const CRM_PHONE_ONLY_HIDDEN_CHIPS = ["meetings", "deals", "invoices", "changelog"];
+
 const CRM_SECTIONS = [
   { key: "summary", title: "Summary", kinds: ["contact", "design"], when: () => true },
   { key: "details", title: "Details", kinds: ["contact", "design"], when: () => true },
@@ -5204,6 +5219,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // My Synergy Phone: the signed-in person (the extension refuses a call for anybody else), whether
   // their access includes calling, and whether calling is switched on for the account.
   userId = null, canCall = false, phoneOn = false,
+  // A phone-only account (migration 384): see CRM_PHONE_ONLY_SECTIONS.
+  phoneOnly = false,
   // Meetings (migration 326): whether this person's access lets them run a diary at all.
   // ssCanWrite, not a literal compare — `meetings:'own'` writes (OWN_WRITE_AREAS), and the
   // server narrows an own-only caller to their own host rather than refusing.
@@ -5447,7 +5464,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // texts, emails and uploads file against the customer alone (shortCode null, which every one of
   // those actions takes), so nothing can land on another deal's history.
   const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, canMeet, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
-    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode && !pickedLead,
+    // A phone-only account has no deals to pick (384), so nothing waits for one.
+    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode && !pickedLead && !phoneOnly,
     // My Synergy Phone. `viewing` is operator view-as (the shell passes viewingLabel only then), and
     // greys Call and Text first; see CRM_VIEWING_CALL_HINT.
     viewing: !!viewingLabel, canCall: !!canCall, phone: { on: !!phoneOn },
@@ -5468,10 +5486,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // stop. Clearing a pick, or picking a deal that is not accepted while Invoice is open, left
   // the old tab's panel live the same way. The tab's own predicate is the one answer.
   const tabOn = (key) => {
+    if (phoneOnly && CRM_PHONE_ONLY_HIDDEN_TABS.indexOf(key) !== -1) return false;
     const t = CRM_TABS.find((x) => x.key === key);
     return !!t && (!t.when || t.when(ctx)) && t.enabled(ctx);
   };
-  const chips = CRM_CHIPS.filter((c) => !c.when || c.when(ctx));
+  const chips = CRM_CHIPS.filter((c) => (!c.when || c.when(ctx)) && !(phoneOnly && CRM_PHONE_ONLY_HIDDEN_CHIPS.indexOf(c.key) !== -1));
   const active = chips.find((c) => c.key === chip) || chips[0];
   const feed = (data.feed || []).filter((e) => !active.types || active.types.indexOf(e.type) !== -1);
 
@@ -6723,7 +6742,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         <div style={{ flex: "1 1 260px", minWidth: 240, maxWidth: 360 }}>
           {/* In the reader's own order (My Profile). CrmRecordSkeleton doesn't follow it: its
               blocks are untitled placeholders, so there is nothing there to arrange. */}
-          {crmOrderSections(CRM_SECTIONS.filter((s) => s.when(ctx)), cardOrder && cardOrder[kind]).map((s) => (
+          {crmOrderSections(CRM_SECTIONS.filter((s) => s.when(ctx) && (!phoneOnly || CRM_PHONE_ONLY_SECTIONS.indexOf(s.key) !== -1)), cardOrder && cardOrder[kind]).map((s) => (
             <div key={s.key} data-ss-crm-section={s.key} style={{ ...S.card, marginBottom: 10 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 7 }}>{s.title}</div>
               {renderSection(s.key)}
@@ -6735,7 +6754,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         <div style={{ flex: "3 1 420px", minWidth: "min(320px, 100%)" }}>
           <div style={S.card}>
             <div style={{ display: "flex", gap: 3, flexWrap: "wrap", borderBottom: "1px solid #E2E8F0", paddingBottom: 7, marginBottom: 9 }}>
-              {CRM_TABS.filter((t) => !t.when || t.when(ctx)).map((t) => {
+              {CRM_TABS.filter((t) => (!t.when || t.when(ctx)) && !(phoneOnly && CRM_PHONE_ONLY_HIDDEN_TABS.indexOf(t.key) !== -1)).map((t) => {
                 const on = t.enabled(ctx);
                 return (
                   <button key={t.key} disabled={!on}
@@ -7166,8 +7185,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             {/* Meetings first, then the ticked-off activities: two lists in one section, each
                 in its own time order. One merged ordering would mean this component owning
                 the meetings too, and every action on one is a portal-meetings call. */}
-            <ContactPlannedMeetings contact={data.contact} viewing={!!viewingLabel}
-              rev={plannedRev} onCount={setPlannedMeetings} />
+            {/* No meetings on a phone-only account (384): portal-meetings refuses it. */}
+            {!phoneOnly && <ContactPlannedMeetings contact={data.contact} viewing={!!viewingLabel}
+              rev={plannedRev} onCount={setPlannedMeetings} />}
             {(data.focus || []).length === 0 ? (
               plannedMeetings === 0 ? (
                 <div style={{ fontSize: 12, color: "#94A3B8", marginBottom: 12 }}>

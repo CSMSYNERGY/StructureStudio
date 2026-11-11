@@ -99,7 +99,8 @@ Deno.test("the shell: routable, the contacts area, under Contacts only with the 
   assert(/const NONADMIN_TABS = \[[^\]]*"conversations"/.test(CORE), "the pre-100 access shape can't reach conversations");
   // The end landmark carries `shedsOn && ` since migration 364, so it is matched without its brace.
   const nav = slice(SHELL, '{navItem("contacts", "Customer Hub")}', 'navItem("inventory", "Inventory")}', "the nav under the Customer Hub");
-  assert(nav.includes('{crmUnlocked && navItem("conversations", "Conversations")}'), "the nav item is not right under the Customer Hub, behind the CRM");
+  // `!phoneOnly && ` since migration 384: a phone-only account has the contact list and no inbox.
+  assert(nav.includes('{crmUnlocked && !phoneOnly && navItem("conversations", "Conversations")}'), "the nav item is not right under the Customer Hub, behind the CRM");
   assert(/initialChip=\{recordCtx && recordCtx\.sub === sub \? \(recordCtx\.chip \|\| null\) : null\}/.test(SHELL), "the record mount does not pass the chip");
   // One navigate, carrying the chip for the row's channel and a Back to the filter left; it rides
   // in the history entry, so the browser's Back onto the record keeps both.

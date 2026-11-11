@@ -1008,6 +1008,46 @@ const SS_SHED_HUB_TABS = ["customer-login"];
 // Displays "are sheds so should not be shown for Smart Build Users".
 const SS_SHED_TABS = ["designer", "advanced", "view-3d", "inventory", "orders",
   "build-schedule", "delivery-schedule", "repairs", "rent-to-own-contracts", "self-serve-display-units"];
+
+// ══ A PHONE-ONLY ACCOUNT (migration 384, Carolyn 2026-11-09/10) ═══════════════════════════
+// "Somebody needs just a phone system. We want to track their calls and all of that stuff in here,
+// and the contacts. So they would have this list, just contacts." Then: "So it'll say customer hub,
+// but all they have access to is contacts. And then obviously if they want to do more, later they can."
+//
+// client_settings.phone_only, sent by portal-billing as entitlement.phoneOnly. Unlike the shed
+// switch above these are ALLOW-lists: a phone-only account is offered only what is named here, so a
+// page added to the product later stays away from them until somebody adds it. The server refuses
+// the rest on its own (_shared/accountShape.ts, enforced in resolveTenant), so this decides what is
+// OFFERED, the same split 364 has.
+//
+// STRICTLY `=== true` and so FAILING CLOSED on the shape, which here means "the ordinary portal": a
+// null entitlement, an older portal-billing or a failed read shows a phone-only owner the normal
+// rail with its padlocks, never a builder the phone-only one. portal-billing also sends shedsOn
+// false for them, so the shed half is hidden by 364's rules whatever this says.
+function ssPhoneOnly(entitlement) {
+  return !!entitlement && entitlement.phoneOnly === true;
+}
+// The workspace pages. Customer Hub (the contact list), Calls, Settings and Support; Accounts, Admin
+// and Workbench are operator consoles with gates of their own, listed so an operator viewing a
+// phone-only account keeps the switcher.
+const SS_PHONE_ONLY_TABS = ["contacts", "calls", "settings", "support", "accounts", "admin", "workbench"];
+// The Settings rail: Company (Business Details and Team), Billing, Customer Hub (Phone and SMS - A2P
+// only, below) and My Profile.
+const SS_PHONE_ONLY_SETTINGS = ["company", "billing", "pipelines", "myprofile"];
+// Inside Company: Business Details and Team. No branding, locations, crews, drivers, tax, payments
+// or commissions.
+const SS_PHONE_ONLY_COMPANY_TABS = ["company", "team"];
+// Inside Settings > Customer Hub: the phone and business texting. The rest of the hub (pipelines,
+// fields, meetings, automations, email, templates, forms, customer login) is the Customer Hub
+// subscription's, and its pages are untouched; this only leaves them out of the list.
+const SS_PHONE_ONLY_HUB_TABS = ["phone", "sms"];
+// Where a phone-only account lands when a page is refused: the contact list, else Calls, else
+// Support (never refused to anyone). Its own, because ssFallbackTab can name a page this shape bars.
+function ssPhoneOnlyFallback(access) {
+  if (ssCanSeeTab("contacts", access)) return "contacts";
+  if (ssCanSeeTab("calls", access)) return "calls";
+  return "support";
+}
 // The Team screen's access grid and job titles, filtered the same way (browser only — the server's
 // list is unchanged, and a hidden area's preset value is harmless because its pages are refused
 // above). Keys are _shared/access.ts AREAS and TITLES.
@@ -1960,7 +2000,7 @@ window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: 
 // have their own nav on the side" — they are top-level items, like Designer and Contacts are
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
 function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false,
-  shedsOn = true } = {}) {
+  shedsOn = true, phoneOnly = false } = {}) {
   return [
     ["sheds", "Sheds", "Shed styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
@@ -2070,6 +2110,8 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // reading this rail IS their own admin: anywhere lower and Joe would see every shed page.
     // ssShedsOn fails open, so this only ever fires on an explicit false.
     if (!shedsOn && SS_SHED_SETTINGS.indexOf(id) !== -1) return false;
+    // PHONE-ONLY (migration 384): an allow-list, and above the isAdmin bypass for the shed reason.
+    if (phoneOnly && SS_PHONE_ONLY_SETTINGS.indexOf(id) === -1) return false;
     if (isAdmin || !access) return true;
     // COMPANY gated itself above, as a hub over six areas. It must be exempt here or this
     // line silently undoes that: SETTINGS_TAB_AREA.company is settings_branding, so a
@@ -2092,7 +2134,12 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
   // Without the shed product Company holds only Business Details, Team and Commissions, so its
   // caption names those. Swapped here rather than written as a ternary in the tuple above, because
   // scripts/support-kb.mjs reads those tuples as plain strings and would lose the whole entry.
-  .map((t) => (shedsOn || t[0] !== "company") ? t : [t[0], t[1], "Your business details, team and commissions", t[3]]);
+  .map((t) => (shedsOn || t[0] !== "company") ? t : [t[0], t[1], "Your business details, team and commissions", t[3]])
+  // A phone-only account's Company is Business Details and Team, and its Customer Hub is the phone.
+  .map((t) => !phoneOnly ? t
+    : t[0] === "company" ? [t[0], t[1], "Your business details and team", t[3]]
+    : t[0] === "pipelines" ? [t[0], t[1], "Your business phone and texting", t[3]]
+    : t);
 }
 
 // ── Inside Company ───────────────────────────────────────────────────────────────────────
@@ -2311,7 +2358,7 @@ function ssOptionTabs() {
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
 // light nothing in the rail or fall back to Structures on a valid URL.
 function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false,
-  phoneOffered = false, shedsOn = true } = {}) {
+  phoneOffered = false, shedsOn = true, phoneOnly = false } = {}) {
   return {
     // The shed tabs are filtered HERE rather than inside each builder because this is their
     // only call site, so the rail highlight and SettingsShell's clamp read one list.
@@ -2319,6 +2366,7 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     // promising them (the card itself is CompanyShell's shedsOn).
     company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked })
       .filter(([id]) => shedsOn || SS_SHED_COMPANY_TABS.indexOf(id) === -1)
+      .filter(([id]) => !phoneOnly || SS_PHONE_ONLY_COMPANY_TABS.indexOf(id) !== -1)
       .map((t) => (shedsOn || t[0] !== "company") ? t : [t[0], t[1], "Your legal business details and address"]),
     // Options and Colors are shed-catalog hubs end to end (wall heights, doors, ramps, cladding,
     // paint, shingles...). The rail already drops their entries for a builder who sells no sheds;
@@ -2335,6 +2383,10 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     // product never sends, so it names the emails they do send (same .map as Business Details).
     pipelines: ssCustomerHubTabs({ isAdmin, access, phoneOffered })
       .filter(([id]) => shedsOn || SS_SHED_HUB_TABS.indexOf(id) === -1)
+      // A phone-only account's hub is the phone and texting (migration 384). An empty list (the phone
+      // not offered yet, and no texting area) leaves the rail entry with nowhere to open, which
+      // SettingsShell's clamp already handles for every hub.
+      .filter(([id]) => !phoneOnly || SS_PHONE_ONLY_HUB_TABS.indexOf(id) !== -1)
       .map((t) => (shedsOn || t[0] !== "email") ? t : [t[0], t[1], "Send the emails your customers get from your own email domain"]),
   };
 }
@@ -2557,7 +2609,12 @@ function ssFallbackTab(access) {
 // The shell's two route clamps pass it; every other caller asks about a non-settings tab and
 // leaves it null, which changes nothing for them.
 function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator,
-  advancedOn = false, sub = null, shedsOn = true, jackOn = false) {
+  advancedOn = false, sub = null, shedsOn = true, jackOn = false, phoneOnly = false) {
+  // PHONE-ONLY (migration 384). FIRST, for 364's reasons (the builder is their own admin, and the
+  // advanced/jack branches below recurse into pages this shape bars). An allow-list: anything not
+  // named in SS_PHONE_ONLY_TABS lands on the contact list. Defaults false, so every existing caller
+  // is unchanged. The operator consoles stay in the list and keep their own gates below.
+  if (phoneOnly && SS_PHONE_ONLY_TABS.indexOf(tab) === -1) return ssPhoneOnlyFallback(access);
   // NO SHED PRODUCT (migration 364). FIRST — above the advanced branch, which recurses into
   // "designer": with sheds off that target is barred too, so letting it recurse would land
   // someone on a page the rail does not offer. Above the canAdmin bypass for the same reason

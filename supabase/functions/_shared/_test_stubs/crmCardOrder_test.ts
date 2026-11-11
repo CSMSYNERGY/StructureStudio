@@ -178,11 +178,13 @@ Deno.test("CrmRecord draws its cards through crmOrderSections, with the order fo
   // The props, without pinning which one comes last: the next prop added would break that.
   const head = slice(SRC, "function CrmRecord(", "const [data, setData] = useState(null);", "CrmRecord's props");
   assert(/\bcardOrder = null[,\s}]/.test(head), "CrmRecord takes a cardOrder prop, null by default");
+  // A phone-only account's record (migration 384) narrows the same filter to CRM_PHONE_ONLY_SECTIONS.
+  const FILTER = "CRM_SECTIONS.filter((s) => s.when(ctx) && (!phoneOnly || CRM_PHONE_ONLY_SECTIONS.indexOf(s.key) !== -1))";
   assert(
-    SRC.includes("crmOrderSections(CRM_SECTIONS.filter((s) => s.when(ctx)), cardOrder && cardOrder[kind]).map((s) => ("),
+    SRC.includes(`crmOrderSections(${FILTER}, cardOrder && cardOrder[kind]).map((s) => (`),
     "the section column is ordered by the reader's saved list",
   );
-  assertEquals(SRC.split("CRM_SECTIONS.filter((s) => s.when(ctx))").length - 1, 1, "and nothing else draws the column");
+  assertEquals(SRC.split("CRM_SECTIONS.filter((s) => s.when(ctx)").length - 1, 1, "and nothing else draws the column");
 });
 
 Deno.test("the shell passes the signed-in person's order, and none in view-as", () => {

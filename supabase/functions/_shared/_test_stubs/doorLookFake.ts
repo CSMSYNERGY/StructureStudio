@@ -60,7 +60,9 @@ export class FakeDb {
   }
   rows(table: string): Row[] { return (this.tables[table] ??= []); }
   writesTo(table: string, verb?: string) { return this.writes.filter((w) => w.table === table && (!verb || w.verb === verb)); }
-  readsOf(table: string) { return this.reads.filter((r) => r.table === table); }
+  // Not resolveTenant's phone-only shape read (migration 384, _shared/accountShape.ts): it is the
+  // account's shape, asked before any handler runs, and never the feature read these tests count.
+  readsOf(table: string) { return this.reads.filter((r) => r.table === table && r.cols !== "phone_only"); }
   from(table: string) { return new Query(this, table); }
 }
 

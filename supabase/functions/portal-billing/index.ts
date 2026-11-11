@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { phoneOnlyOf } from "../_shared/accountShape.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { paidThroughOf, unusedCreditOf } from "../_shared/billingPeriods.ts";
@@ -181,6 +182,8 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     readActions: new Set(),
     defaultAction: "status",
     requireBilling: true,
+    // A phone-only account (migration 384) pays by its wallet and may buy more later: all of it.
+    phoneOnly: "all",
   });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, operator, payload, action, userEmail, userId, audit, auditStrict, canRead } = r.ctx;
@@ -438,8 +441,15 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // shed builder would look like the product had vanished, while showing a post-frame builder a
   // tab he does not need is cosmetic. Only an explicit `false` hides anything — here and in
   // 01-core's ssShedsOn.
-  const { data: shedRow, error: shedErr } = await admin
-    .from("client_settings").select("sheds_enabled").eq("client_id", clientId).maybeSingle();
+  // The PHONE-ONLY shape (migration 384) rides beside it, read on its own so a database without the
+  // column fails THIS read only and never the sheds_enabled one above (one select naming both would
+  // have turned a missing column into "sheds ON" for a builder who sells none). Fails to "not
+  // phone-only" (_shared/accountShape.ts), which grants nothing: the gate below then holds a
+  // phone-only account like any account with no subscription, and the contacts stay the CRM's.
+  const [{ data: shedRow, error: shedErr }, phoneOnly] = await Promise.all([
+    admin.from("client_settings").select("sheds_enabled").eq("client_id", clientId).maybeSingle(),
+    phoneOnlyOf(admin, clientId),
+  ]);
   if (shedErr) console.warn("sheds_enabled read failed; treating the shed product as ON:", shedErr.message);
   // A DATED free period (migration 059) — an existing customer moving from free to paid gets
   // a warned window instead of a wall. Unlike billing_exempt this is visible (countdown
@@ -712,6 +722,16 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
       : seen.includes("cancelled") ? "cancelled"
       : "never_paid";
   }
+  // A PHONE-ONLY account (migration 384) is not held at the gate for having no subscription: it has
+  // none to buy. It pays by its wallet — calls and texts at cost x the markup, the number fee and the
+  // texting setup fee, all charged by the phone-api Worker exactly as for every builder — so "has
+  // paid for something" is the wrong question for it. Only the LOCKED case, like the free period
+  // below: an active or in-grace subscription already speaks for itself. `features` is untouched, so
+  // this opens no paid add-on; what a phone-only account may do is _shared/accountShape.ts's lists.
+  if (entState === "locked" && phoneOnly) {
+    entState = "active";
+    reason = "phone_only";
+  }
   // A dated free period rescues an otherwise-locked account, and ONLY that case: an active
   // or in-grace subscription already speaks for itself, and a permanent exemption was
   // handled above. Ordering it here is what makes subscribing during the window end the
@@ -795,7 +815,12 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // and ssClampTab read it to decide what is OFFERED, and nothing anywhere reads it to decide
     // what is ALLOWED. 01-core.jsx ssShedsOn is the one reader. Strictly `=== false`, so a failed
     // read, a missing row and a database without the column all answer true — see the read above.
-    shedsOn: !(!shedErr && shedRow?.sheds_enabled === false),
+    // A phone-only account sells no sheds either, whatever its sheds_enabled says, so the shed half
+    // of the portal is hidden by 364's own rules too.
+    shedsOn: !phoneOnly && !(!shedErr && shedRow?.sheds_enabled === false),
+    // PHONE-ONLY (migration 384): My Synergy Phone and the contact list, nothing else. 01-core.jsx
+    // ssPhoneOnly is the one reader, strictly `=== true`; phoneOnlyOf fails to false.
+    phoneOnly,
   };
 
   if (action === "status") {

@@ -6,12 +6,18 @@
 // so a list copied before a step was tagged still filters itself, and switching an account's shape
 // back brings its steps back. Kept here, apart from the handler, so the rule has a test.
 
-export type SetupAudience = "all" | "sheds" | "smartbuild";
+export type SetupAudience = "all" | "sheds" | "smartbuild" | "phone";
 
 /** Does a step tagged `audience` belong on the list of an account whose shed product is `shedsOn`?
  *  'all' — and anything unknown or missing, which the table's check constraint rules out — is
- *  every account's, as every step was before 368. */
-export function setupStepFits(audience: string | null | undefined, shedsOn: boolean): boolean {
+ *  every account's, as every step was before 368.
+ *
+ *  PHONE-ONLY (migration 384) is the exception to 'all': such an account sees ONLY its own 'phone'
+ *  steps, because the shared ones include commissions, QuickBooks and a CSV import into a pipeline,
+ *  none of which it has. And a 'phone' step is nobody else's. */
+export function setupStepFits(audience: string | null | undefined, shedsOn: boolean, phoneOnly = false): boolean {
+  if (phoneOnly) return audience === "phone";
+  if (audience === "phone") return false;
   if (audience === "sheds") return shedsOn;
   if (audience === "smartbuild") return !shedsOn;
   return true;

@@ -65,6 +65,9 @@ function answer(world: World, trace: Trace, table: string, ops: any[][]) {
   }
   if (table === "client_settings") {
     const cols = String(arg("select") ?? "");
+    // resolveTenant's phone-only shape read (migration 384) is the account's shape, not this action's
+    // read of the payment settings: answered (not phone-only) and left out of the trace.
+    if (cols === "phone_only") return { data: { phone_only: false }, error: null };
     trace.reads.push(cols);
     if (world.readFails) return { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } };
     if (world.no296 && /\bcardpointe_env\b/.test(cols)) return { data: null, error: { code: "42703", message: "column client_settings.cardpointe_env does not exist" } };

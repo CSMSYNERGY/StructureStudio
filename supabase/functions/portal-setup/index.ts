@@ -4,6 +4,7 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { usableFeatureSet } from "../_shared/featureCheck.ts";
 import { setupStepFits, shedsOnOrOpen } from "../_shared/setupShape.ts";
+import { phoneOnlyOf } from "../_shared/accountShape.ts";
 
 // The builder's SETUP checklist (portal.html → What's New → "Getting set up").
 //
@@ -195,6 +196,8 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
   const r = await resolveTenant(req, admin, {
     readActions: new Set(["list"]),
     defaultAction: "list",
+    // A phone-only account (migration 384) has its own Getting set up list (setupShape.ts).
+    phoneOnly: "all",
   });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload, action, userId, userEmail, operator, role } = r.ctx;
@@ -216,15 +219,18 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
       const gate = await templateGate(admin, rows);
       const needed = [...new Set([...gate.values()].map((g) => g.requires).filter(Boolean))] as string[];
       const usable = await usableOrOpen(admin, clientId, needed);
-      // Only asked when some step is for one shape — an all-'all' list costs no extra read.
-      const shaped = [...gate.values()].some((g) => g.audience !== "all");
+      // Only asked when some step is for one shape — an all-'all' list costs no extra read. A
+      // phone-only account (384) is asked every time, because it is the one shape 'all' leaves out;
+      // phoneOnlyOf is cached per isolate, and resolveTenant never asked it for this function.
+      const phoneOnly = await phoneOnlyOf(admin, clientId);
+      const shaped = phoneOnly || [...gate.values()].some((g) => g.audience !== "all");
       const shedsOn = shaped ? await shedsOnOrOpen(admin, clientId) : true;
 
       const items = [];
       for (const r of rows ?? []) {
         const g = r.template_item_id ? gate.get(r.template_item_id) : null;
         if (g && !g.visible) continue;   // not built yet — never leaves the server
-        if (g && !setupStepFits(g.audience, shedsOn)) continue;   // the other shape's step (368)
+        if (g && !setupStepFits(g.audience, shedsOn, phoneOnly)) continue;   // the other shape's step (368, 384)
         // A step they ALREADY TICKED never re-locks. They plainly had the add-on when they
         // did it, so padlocking it back would rewrite their own history and shrink the
         // progress bar under them for work they did not undo.
@@ -284,7 +290,9 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
       // have not built yet must not be distinguishable from one that does not exist.
       if (tGate && !tGate.visible) return json({ error: "That setup step is not on your list." }, 404);
       // The same for a step the list hides from this account's shape (368): not on their list.
-      if (tGate && tGate.audience !== "all" && !setupStepFits(tGate.audience, await shedsOnOrOpen(admin, clientId))) {
+      // A phone-only account (384) is refused the shared 'all' steps too, so it is asked before the shortcut.
+      if (tGate && (tGate.audience !== "all" || await phoneOnlyOf(admin, clientId))
+        && !setupStepFits(tGate.audience, await shedsOnOrOpen(admin, clientId), await phoneOnlyOf(admin, clientId))) {
         return json({ error: "That setup step is not on your list." }, 404);
       }
       // Only TICKING is gated. Un-ticking can only reach an already-completed row, which

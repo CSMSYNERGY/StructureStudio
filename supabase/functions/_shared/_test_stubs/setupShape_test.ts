@@ -10,6 +10,13 @@ Deno.test("a shed builder sees 'all' and 'sheds'; a SmartBuild builder sees 'all
   assert(setupStepFits(null, false) && setupStepFits(undefined, true));
 });
 
+Deno.test("a phone-only account (384) sees ONLY 'phone' steps, and a 'phone' step is nobody else's", () => {
+  assertEquals(["all", "sheds", "smartbuild", "phone", null].map((a) => setupStepFits(a, false, true)),
+    [false, false, false, true, false]);
+  assertEquals([true, false].map((sheds) => setupStepFits("phone", sheds)), [false, false]);
+  assertEquals([true, false].map((sheds) => setupStepFits("phone", sheds, false)), [false, false]);
+});
+
 // deno-lint-ignore no-explicit-any
 const fakeAdmin = (answer: { data?: any; error?: any } | "throw") => ({
   from: () => ({
@@ -35,7 +42,8 @@ Deno.test("the shape reads only an explicit false as no sheds, and fails OPEN", 
 Deno.test("portal-setup asks the shape in the list AND before a tick", async () => {
   const src = await Deno.readTextFile(new URL("../../portal-setup/index.ts", import.meta.url));
   assert(src.includes('.select("id, requires_feature, builder_visible, account_type")'), "the template read carries account_type");
-  assert(src.includes("if (g && !setupStepFits(g.audience, shedsOn)) continue;"), "the list skips the other shape's steps");
-  assert(/tGate\.audience !== "all" && !setupStepFits\(tGate\.audience, await shedsOnOrOpen\(admin, clientId\)\)/.test(src),
+  assert(src.includes("if (g && !setupStepFits(g.audience, shedsOn, phoneOnly)) continue;"), "the list skips the other shape's steps");
+  assert(src.includes("const shaped = phoneOnly || "), "a phone-only account is asked even when every step is 'all'");
+  assert(/tGate && \(tGate\.audience !== "all" \|\| await phoneOnlyOf\(admin, clientId\)\)\s*&& !setupStepFits\(tGate\.audience, await shedsOnOrOpen\(admin, clientId\), await phoneOnlyOf\(admin, clientId\)\)/.test(src),
     "the tick refuses a step the list hides");
 });

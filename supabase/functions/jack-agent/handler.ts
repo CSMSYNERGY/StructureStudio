@@ -53,6 +53,8 @@ const JACK = { area: "jack", level: "edit" } as const;
 // A read-only operator can open the tab and read what happened; every write still answers 403 there.
 // `jack` has only none and edit, so for anyone else these are the same check.
 const JACK_READ = { area: "jack", level: "view" } as const;
+/** What a phone-only account (migration 384) may ask Jack: whether Jack is on. Nothing else. */
+const JACK_PHONE_ONLY: ReadonlySet<string> = new Set(["enabled"]);
 export const GATES: GateTable = {
   enabled: "open",
   status: JACK_READ,
@@ -351,7 +353,7 @@ export type Resolve = (
   req: Request,
   // deno-lint-ignore no-explicit-any
   admin: any,
-  opts: { gates: GateTable; readActions: Set<string>; defaultAction: string },
+  opts: { gates: GateTable; readActions: Set<string>; defaultAction: string; phoneOnly?: ReadonlySet<string> },
 ) => Promise<{ ok: true; ctx: CallerCtx } | { ok: false; status: number; body: Record<string, unknown> }>;
 /** What this file passes logEdgeError (../_shared/logError.ts EdgeErrorInput), the same way. */
 export interface EdgeLog { fn: string; req: Request; code: string; message: string; severity?: "error" | "warn" | "info"; clientId?: string | null; context?: Record<string, unknown> | null }
@@ -380,7 +382,10 @@ export function makeHandler(io: HandlerIO): (req: Request) => Promise<Response> 
     const url = io.env("SUPABASE_URL") ?? "";
     const admin = io.admin(url, io.env("SUPABASE_SERVICE_ROLE_KEY") ?? "");
 
-    const r = await io.resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
+    // A phone-only account (migration 384) has no Jack: only `enabled`, which the portal asks on every
+    // load and which answers off for them, so it isn't refused three times a page. resolveTenant refuses
+    // them everything else (_shared/accountShape.ts).
+    const r = await io.resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: JACK_PHONE_ONLY });
     if (!r.ok) return json(r.body, r.status);
     const { clientId, userId, selfUserId, operator, payload, action, canRead, canEdit, audit } = r.ctx;
     // deno-lint-ignore no-explicit-any

@@ -3053,7 +3053,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
     setBusy(true);
     try {
       const made = await adminApi("create_client", {
-        clientId: slug, companyName: company.trim(), templateClientId: acctType === "smartbuild" ? "__none__" : tpl,
+        clientId: slug, companyName: company.trim(), templateClientId: acctType !== "sheds" ? "__none__" : tpl,
         billingExempt: exempt, discountPercent: exempt ? 0 : pctNum,
         discountFeatures: allFeat ? [] : picked,
         accountType: acctType,
@@ -3068,7 +3068,9 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
       setExempt(false); setDiscount("0"); setAllFeat(true); setPicked([]);
       // The pipeline step is best-effort on the server, and the one failure worth saying out loud:
       // the first board open of an account with no pipeline seeds the SHED board instead.
-      onFlash(acctType !== "smartbuild"
+      onFlash(acctType === "phone"
+        ? { ok: `Created “${slug}” as a phone-only account. Next: give the owner a login on the Account tab, then view the account and switch the phone on under Settings → Customer Hub → Phone.` }
+        : acctType !== "smartbuild"
         ? { ok: `Created “${slug}”. Next: give the owner a login on the Account tab, then styles, items and pricing.` }
         : made && made.smartbuildPipeline === false
           ? { err: `Created “${slug}” as a SmartBuild builder, but its SmartBuild Jobs pipeline was not made. Add it from Settings → Customer Hub → Pipelines (New pipeline → the SmartBuild template) before anyone opens the board.` }
@@ -3215,22 +3217,26 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
               <select value={acctType} onChange={(e) => setAcctType(e.target.value)} style={S.input}>
                 <option value="sheds">Shed builder</option>
                 <option value="smartbuild">SmartBuild builder (no shed designer)</option>
+                {/* Migration 384 (Carolyn 2026-11-10): "all they have access to is contacts". */}
+                <option value="phone">Phone only (phone + contacts)</option>
               </select>
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
-                {acctType === "smartbuild"
+                {acctType === "phone"
+                  ? "My Synergy Phone and the contact list, nothing else. No subscription: calls, texts and the number are paid from their wallet. Switch it to another type later to give them more."
+                  : acctType === "smartbuild"
                   ? "Customer Hub without the designer, catalog, lots or schedules. Starts with the SmartBuild Jobs pipeline and the SmartBuild setup list."
                   : "The shed designer and everything that goes with it."}
               </div>
             </div>
-            <div style={{ opacity: acctType === "smartbuild" ? 0.5 : 1, pointerEvents: acctType === "smartbuild" ? "none" : "auto" }}>
+            <div style={{ opacity: acctType !== "sheds" ? 0.5 : 1, pointerEvents: acctType !== "sheds" ? "none" : "auto" }}>
               <label style={S.lbl}>Copy catalog from</label>
-              <select value={acctType === "smartbuild" ? "__none__" : tpl} onChange={(e) => setTpl(e.target.value)} style={S.input}
-                disabled={acctType === "smartbuild"}>
+              <select value={acctType !== "sheds" ? "__none__" : tpl} onChange={(e) => setTpl(e.target.value)} style={S.input}
+                disabled={acctType !== "sheds"}>
                 <option value="__none__">Start empty</option>
                 {(clients || []).map((c) => <option key={c.client_id} value={c.client_id}>{c.company_name || c.client_id}</option>)}
               </select>
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
-                {acctType === "smartbuild" ? "A SmartBuild builder has no shed catalog, so it always starts empty." : "Copies styles, sizes and items — not designs or settings."}
+                {acctType !== "sheds" ? "This account type has no shed catalog, so it always starts empty." : "Copies styles, sizes and items — not designs or settings."}
               </div>
             </div>
           </div>
@@ -3606,6 +3612,27 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
   const [picked, setPicked] = useState(scoped);
   const [until, setUntil] = useState(clientRow && clientRow.exemptUntil ? String(clientRow.exemptUntil).slice(0, 10) : "");
   const [billBusy, setBillBusy] = useState(false);
+  // ACCOUNT TYPE (migration 384): "sheds" | "smartbuild" | "phone", or null when list_clients could
+  // not read it (the card then offers no switch rather than a guess).
+  const shapeNow = clientRow && clientRow.accountType ? clientRow.accountType : null;
+  const [shape, setShape] = useState(shapeNow || "sheds");
+  const [shapeBusy, setShapeBusy] = useState(false);
+  const saveShape = async () => {
+    if (!shapeNow || shape === shapeNow || shapeBusy) return;
+    if (shape === "phone" && !window.confirm(
+      `Make ${label} a phone-only account?
+
+`
+      + `They will see only Customer Hub (their contacts), Calls, their phone settings, Business Details, Team, Billing and My Profile. `
+      + `Every other page is hidden and refused. Nothing is deleted, and switching back brings it all back.`)) return;
+    setShapeBusy(true);
+    try {
+      const r = await adminApi("set_account_type", { clientId, accountType: shape });
+      await onReloadClients();
+      onFlash({ ok: `Account type saved for ${label}. ${(r && r.note) || ""}`.trim() });
+    } catch (e) { onFlash({ err: e.message }); }
+    setShapeBusy(false);
+  };
 
   // Early access (migration 109): features comped to THIS builder before they go on sale.
   const grantable = (features || []).filter((f) => f.operatorGrantable);
@@ -3789,6 +3816,32 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
               </div>
             )}
           </div>
+        )}
+      </div>
+
+      <div style={S.card} data-ss-account-type="">
+        <CardHead title="Account type" desc="What this builder's portal holds. Switching hides or brings back pages; it never deletes anything." />
+        {shapeNow ? (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div style={{ minWidth: 240 }}>
+              <select value={shape} onChange={(e) => setShape(e.target.value)} style={S.input} disabled={shapeBusy}>
+                <option value="sheds">Shed builder</option>
+                <option value="smartbuild">SmartBuild builder (no shed designer)</option>
+                <option value="phone">Phone only (phone + contacts)</option>
+              </select>
+            </div>
+            <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), opacity: shape === shapeNow || shapeBusy ? 0.5 : 1 }}
+              disabled={shape === shapeNow || shapeBusy} onClick={saveShape}>{shapeBusy ? "Saving…" : "Save"}</button>
+            <div style={{ fontSize: 11.5, color: "#64748B", flexBasis: "100%" }}>
+              {shape === "phone"
+                ? "My Synergy Phone and the contact list only. No subscription needed: their wallet pays for calls, texts and the number."
+                : shapeNow === "phone"
+                ? "Gives them the rest of the portal back. Without a subscription (or Non-billable) the portal then asks them to choose one."
+                : shape === "smartbuild" ? "Customer Hub without the designer, catalog, lots or schedules." : "The shed designer and everything that goes with it."}
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12.5, color: "#94A3B8" }}>Couldn't read this account's type. Reload the page to try again.</div>
         )}
       </div>
 

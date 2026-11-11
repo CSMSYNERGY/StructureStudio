@@ -97,7 +97,10 @@ const eqOf = (ops: any[][], col: string) => (ops.find((o) => o[0] === "eq" && o[
 /** client_settings' columns these two actions may name (rtp_enabled: 152). The fake refuses any
  *  other, as PostgREST does (42703), so a misspelled column fails here instead of turning every
  *  size_table call into a 500 live. */
-const SETTINGS_COLS = new Set(["client_id", "rtp_enabled"]);
+// phone_only: resolveTenant's account-shape read (migration 384), asked before either action runs.
+const SETTINGS_COLS = new Set(["client_id", "rtp_enabled", "phone_only"]);
+/** The reads these actions make, without resolveTenant's phone-only shape read (384). */
+const ownReads = (reads: any[][][]) => reads.filter((ops) => (ops.find((o) => o[0] === "select") ?? [])[1] !== "phone_only");
 function settingsAnswer(ops: any[][], settings: Record<string, unknown> | null | undefined) {
   const named = [
     ...ops.filter((o) => o[0] === "select").flatMap((o) => String(o[1] ?? "*").split(",").map((c) => c.trim())),
@@ -214,7 +217,7 @@ Deno.test("an owner reads the whole table, with clientId, counts and Real-Time P
   assertEquals(r.ins, [], "no read carries a list of ids");
   // The settings fake refuses any column client_settings lacks; here, the one read names rtp_enabled
   // and filters on client_id = the tenant the token resolved to.
-  assertEquals(r.trace.settingsReads.map((ops) => [(ops.find((o) => o[0] === "select") ?? [])[1], eqOf(ops, "client_id")]), [["rtp_enabled", OWN]]);
+  assertEquals(ownReads(r.trace.settingsReads).map((ops) => [(ops.find((o) => o[0] === "select") ?? [])[1], eqOf(ops, "client_id")]), [["rtp_enabled", OWN]]);
   assertEquals(settingsAnswer([["select", "rtp_enable"], ["eq", "client_id", OWN]], { rtp_enabled: true }).error?.code, "42703", "(the fake refuses a misspelled column)");
 });
 
@@ -262,7 +265,7 @@ Deno.test("an operator's view-as reaches the viewed builder, and the save is aud
   const read = await drive({ action: "size_table", targetClientId: OTHER }, { operator: { can_write: false } });
   assertEquals(read.status, 200, "a read-only operator can read");
   assertEquals([read.body.clientId, read.body.sizes.map((z: any) => z.id)], [OTHER, [uid(21)]]);
-  assertEquals(read.trace.settingsReads.map((ops) => eqOf(ops, "client_id")), [OTHER], "...and Real-Time Pricing is read for the viewed builder");
+  assertEquals(ownReads(read.trace.settingsReads).map((ops) => eqOf(ops, "client_id")), [OTHER], "...and Real-Time Pricing is read for the viewed builder");
   assertEquals([read.body.used, read.trace.inUse], [[uid(21)], [{ p_client_id: OTHER }]], "...and the sizes its saved designs use");
   const ro = await drive({ ...SAVE, targetClientId: OTHER }, { operator: { can_write: false } });
   assertEquals([ro.status, ro.trace.rpc.length], [403, 0], "a read-only operator cannot save");

@@ -170,7 +170,8 @@ Deno.serve(withErrorLog(FN, async (req: Request) => {
 
   const admin = createClient(Deno.env.get("SUPABASE_URL") ?? "", Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "", { auth: { persistSession: false } });
 
-  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
+  // The support assistant answers anyone, a phone-only account (migration 384) included.
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: "all" });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, userId, operator, payload, action, access } = r.ctx;
 
