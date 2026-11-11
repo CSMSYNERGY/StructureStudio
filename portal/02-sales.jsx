@@ -1220,7 +1220,7 @@ function buildContactTimeline(act) {
 // whole import would otherwise sit above every real customer. Page size and columns are
 // _shared/contactListPage.ts's, which the operator path reads with; its test fails on drift.
 const SS_CONTACT_LIST_PAGE = 500;
-const SS_CONTACT_LIST_COLS = "id, name, company, phone, email, source, first_seen_at, created_at";
+const SS_CONTACT_LIST_COLS = "id, name, company, phone, email, source, first_seen_at, created_at, labels";
 // THE COMPANY (Carolyn, 2026-10-14). A lead she entered with a company was listed under the
 // person's name alone, as "Added by hand": "It should show" the company. Every row now carries the
 // company of the contact its name opens, from crm_contacts (301; editable since 308) and nowhere
@@ -1236,7 +1236,8 @@ const SS_CONTACT_LIST_COLS = "id, name, company, phone, email, source, first_see
 // without a company: a design's row shows its contact's details from the record (LeadsTable's
 // paint), and a contact on a page not read yet would otherwise keep the design's old ones until
 // "Show more" happened to bring it in, changing the row under the user's eyes.
-const SS_CONTACT_COMPANY_COLS = "id, name, company, phone, email";
+// And their tags (2026-11-11), which every row shows under the name and the Tag filter reads.
+const SS_CONTACT_COMPANY_COLS = "id, name, company, phone, email, labels";
 const SS_CONTACT_COMPANY_CHUNK = 100;     // ids per request: they ride in the URL
 const SS_CONTACT_COMPANY_LANES = 4;       // requests in flight at once
 const SS_CONTACT_COMPANY_MAX_IDS = 5000;  // per load, the newest rows' first; the same on both paths
@@ -1284,7 +1285,38 @@ function ssContactRowHead(g) {
 // (LeadsTable's contactHintRef), so a row whose contact's own row is not read yet shows the same
 // company and details until that read answers, instead of dropping back to the design's.
 function ssContactRowHint(g) {
-  return { company: g.company || "", name: g.name || "", email: g.email || "", phone: g.phone || "" };
+  return { company: g.company || "", name: g.name || "", email: g.email || "", phone: g.phone || "", labels: g.labels || [] };
+}
+// A contact's tags (crm_contacts.labels) as a list of real ones: anything not a non-blank string is
+// dropped, [] for none. _shared/contactTags.ts storedTags is the server's twin.
+function ssTagList(v) {
+  return Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim() !== "") : [];
+}
+// A row of tag chips: the Contacts list's (onPick filters the list to that tag, `max` of them then
+// "+N") and the record's (onRemove puts an × on each).
+function SsTagChips({ tags, max = 0, onPick = null, onRemove = null, busy = false }) {
+  const shown = max > 0 ? tags.slice(0, max) : tags;
+  const rest = tags.length - shown.length;
+  const chip = { display: "inline-flex", alignItems: "center", gap: 4, background: "#EEF2FF", color: "#3730A3", border: "1px solid #E0E7FF",
+    borderRadius: 999, padding: "1px 8px", fontSize: 11.5, fontWeight: 600, lineHeight: 1.6, fontFamily: "inherit", maxWidth: 220 };
+  const text = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+  return (
+    <span data-ss-tags="" style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+      {shown.map((t) => onPick ? (
+        <button key={t} type="button" data-ss-tag={t} title={`Show everyone tagged “${t}”`} onClick={() => onPick(t)}
+          style={{ ...chip, cursor: "pointer" }}><span style={text}>{t}</span></button>
+      ) : (
+        <span key={t} data-ss-tag={t} style={chip}>
+          <span style={text}>{t}</span>
+          {onRemove && (
+            <button type="button" aria-label={`Remove the tag ${t}`} title="Remove this tag" disabled={busy} onClick={() => onRemove(t)}
+              style={{ background: "none", border: "none", padding: 0, margin: 0, cursor: busy ? "default" : "pointer", color: "#6366F1", fontSize: 13, lineHeight: 1, fontFamily: "inherit" }}>×</button>
+          )}
+        </span>
+      ))}
+      {rest > 0 && <span title={tags.slice(shown.length).join(", ")} style={{ ...chip, background: "#F8FAFC", color: "#64748B", borderColor: "#E2E8F0" }}>+{rest}</span>}
+    </span>
+  );
 }
 // "Show more" keeps reading pages until it has this many new rows to show, so a press never
 // comes back empty because the next page held only people who already have a design. Bounded,
@@ -1537,6 +1569,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       // Every design and browsing row so far, by the contact id its name opens. Rows with no
       // contact id (a design saved before its contact existed) have no company.
       groups.forEach((g) => { g.company = companyOf(g.contactId); });
+      // THE TAGS (2026-11-11), from the same record, for the chips under the name and the Tag filter.
+      // The search walks the row, so a tag finds its rows too.
+      groups.forEach((g) => { g.labels = ssTagList(known(g.contactId, "labels")); });
       // THE PERSON'S DETAILS, from that same record (2026-10-15). A design row took its name, email and
       // phone from the newest design's contact blob, so once someone edited the contact, or sent a
       // design under another email, the list said what the record no longer did. The record wins
@@ -1607,6 +1642,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           key: "contact-" + c.id, contactOnly: true, source: c.source || "",
           contactId: c.id,
           name: c.name || "", company: companyOf(c.id), email: c.email || "", phone: c.phone || "",
+          labels: ssTagList(c.labels),
           count: 0, firstSeen: seen, lastActivity: seen,
           latestCode: null, topStatus: "contact",
           search: " " + ssContactSourceLabel(c.source) + " no design yet",
@@ -1762,8 +1798,29 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   const [fFrom, setFFrom] = useState("");
   const [fTo, setFTo] = useState("");
   const [fContact, setFContact] = useState("all");
-  const hasFacets = !!fFrom || !!fTo || fContact !== "all";
-  const clearFacets = () => { setFFrom(""); setFTo(""); setFContact("all"); };
+  // TAG (2026-11-11): the customers carrying one tag, compared without case, the way every writer
+  // of tags compares them. The value is the tag in lower case.
+  const [fTag, setFTag] = useState("all");
+  const hasFacets = !!fFrom || !!fTo || fContact !== "all" || fTag !== "all";
+  const clearFacets = () => { setFFrom(""); setFTo(""); setFContact("all"); setFTag("all"); };
+  // The tags on the rows in hand, once each, A to Z, with how many customers carry each. Offered only
+  // when there is one. A tag picked that is no longer on any row stays listed (0), so the box never
+  // reads "All" while the list is still filtered.
+  const tagOptions = useMemo(() => {
+    const seen = new Map();
+    (rows || []).forEach((g) => {
+      const mine = new Set();
+      (g.labels || []).forEach((l) => {
+        const k = l.toLowerCase();
+        if (mine.has(k)) return;
+        mine.add(k);
+        const t = seen.get(k);
+        if (t) t.n += 1; else seen.set(k, { value: k, tag: l, n: 1 });
+      });
+    });
+    if (fTag !== "all" && !seen.has(fTag)) seen.set(fTag, { value: fTag, tag: fTag, n: 0 });
+    return [...seen.values()].sort((a, b) => a.tag.localeCompare(b.tag)).map((t) => ({ value: t.value, label: `${t.tag} (${t.n})` }));
+  }, [rows, fTag]);
 
   // Chip filter first, then facets, then the free-text search over what survives.
   const byStatus = statusFilter === "all" ? (rows || []) : (rows || []).filter((g) => g.topStatus === statusFilter);
@@ -1772,6 +1829,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     const has = !!(g.email || g.phone);
     if (fContact === "has" && !has) return false;
     if (fContact === "missing" && has) return false;
+    if (fTag !== "all" && !(g.labels || []).some((l) => l.toLowerCase() === fTag)) return false;
     return true;
   });
   const filtered = byFacets.filter((g) => {
@@ -1802,7 +1860,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   const [page, setPage] = useState(1);
   // Any change to what is being listed sends you back to page 1 — staying on page 7 of a
   // search that now returns four contacts shows an empty table and reads as a broken page.
-  useEffect(() => { setPage(1); }, [query, statusFilter, fFrom, fTo, fContact]);
+  useEffect(() => { setPage(1); }, [query, statusFilter, fFrom, fTo, fContact, fTag]);
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
   const curPage = Math.min(page, pageCount);
   const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
@@ -1886,6 +1944,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
             <DateRange label="Last activity" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
             <FacetSelect label="Contact info" value={fContact} onChange={setFContact}
               options={[{ value: "has", label: "Has email or phone" }, { value: "missing", label: "No contact info" }]} allLabel="All" />
+            {tagOptions.length > 0 && <FacetSelect label="Tag" value={fTag} onChange={setFTag} options={tagOptions} allLabel="Any tag" />}
           </FilterBar>
           <div style={{ ...FCTRL, flex: "1 1 320px", minWidth: 260 }}>
             <span style={FLBL_SPACER} aria-hidden="true">Search</span>
@@ -1980,6 +2039,8 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                           ? <span style={{ display: "inline-block", verticalAlign: "top" }}>{ssContactRowHead(g)}{person}</span>
                           : (ssContactRowHead(g) || "—");
                       })()}
+                      {/* THE TAGS (2026-11-11), under the name. A tag filters the list to it. */}
+                      {g.labels && g.labels.length > 0 && <SsTagChips tags={g.labels} max={4} onPick={(t) => setFTag(t.toLowerCase())} />}
                     </td>
                     <td style={S.td}>
                       <div>{g.email || ""}</div>
@@ -5666,6 +5727,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 <CrmCustomValue field={f} value={(data.contact.custom || {})[f.key]} />
               </div>
             ))}
+            {/* The customer's tags (2026-11-11): shown, added and taken off right here. */}
+            <CrmTagsPanel contactId={data.contact.id} labels={data.contact.labels} canEdit={canEditContact}
+              clientId={clientId} viewing={!!viewingLabel} onChanged={load} />
             {/* The baked-in maps links (migration 332). Each draws only when its address has a
                 street, and each honours its own Hide and relabel from the Fields tab. */}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 4 }}>
@@ -8271,6 +8335,87 @@ function SsLostReasonDialog({ reasons, onCancel, onPick }) {
 //
 // Calls and inbound are SHOWN, and saved, but the phone system reads them in a coming update —
 // said on the row rather than leaving a box that looks like it works.
+// ── TAGS ON THE RECORD (2026-11-11) ─────────────────────────────────────────────────────────────
+// Carolyn imported a file with a Tags column and asked "now where can I see tags": the import and the
+// automations wrote crm_contacts.labels and no screen showed it. The record lists them here, and
+// someone who may edit the customer adds tags (typed, split on commas like the import) and takes them
+// off, through portal-settings crm_contact_tag. A tag added here runs any automation that starts
+// when that tag is added, which is why the hint says so.
+// The suggestions are this account's tags, read on first focus with the person's own session, so RLS
+// offers a rep narrowed to their own customers only the tags on those. Not read in view-as: the
+// browser's session there is the operator's own account, whose tags are not this builder's.
+function CrmTagsPanel({ contactId, labels, canEdit, clientId = null, viewing = false, onChanged = null }) {
+  const [list, setList] = useState(() => ssTagList(labels));
+  const labelsKey = ssTagList(labels).join("\u0001");
+  useEffect(() => { setList(ssTagList(labels)); }, [contactId, labelsKey]);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [known, setKnown] = useState(null);
+  if (!list.length && !canEdit) return null;
+  const send = (tag, on) => {
+    setBusy(true); setErr(null);
+    return ssPipeCall("crm_contact_tag", { id: contactId, tag, on })
+      .then((d) => {
+        setBusy(false);
+        if (Array.isArray(d.labels)) setList(ssTagList(d.labels));
+        if (d.changed && onChanged) onChanged();
+        return true;
+      })
+      .catch((e) => { setBusy(false); setErr(e.message); return false; });
+  };
+  const add = () => {
+    if (!draft.trim() || busy) return;
+    send(draft, true).then((ok) => { if (ok) { setDraft(""); setAdding(false); } });
+  };
+  const loadKnown = () => {
+    if (known || viewing || !clientId) return;
+    setKnown([]);
+    sb.from("crm_contacts").select("labels").eq("client_id", clientId).is("merged_into", null).neq("labels", "{}").limit(2000)
+      .then(({ data }) => {
+        const m = new Map();
+        (data || []).forEach((c) => ssTagList(c.labels).forEach((l) => { const k = l.toLowerCase(); if (!m.has(k)) m.set(k, l); }));
+        setKnown([...m.values()].sort((a, b) => a.localeCompare(b)));
+      }, () => {});
+  };
+  const have = new Set(list.map((l) => l.toLowerCase()));
+  const offer = (known || []).filter((l) => !have.has(l.toLowerCase()));
+  const listId = "ss-contact-tags-" + contactId;
+  const link = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: ACCENT };
+  return (
+    <div data-ss-tags-panel="" style={{ marginTop: 6 }}>
+      {list.length > 0
+        ? <SsTagChips tags={list} onRemove={canEdit ? (t) => send(t, false) : null} busy={busy} />
+        : <div style={{ fontSize: 12.5, color: "#94A3B8" }}>No tags</div>}
+      {canEdit && (adding ? (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <input aria-label="New tag" autoFocus value={draft} maxLength={400} list={offer.length ? listId : undefined}
+              placeholder="Tag, or several with commas" disabled={busy} onFocus={loadKnown}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } else if (e.key === "Escape") { setAdding(false); setDraft(""); setErr(null); } }}
+              style={{ ...S.input, padding: "5px 8px", fontSize: 12.5, flex: "1 1 180px", minWidth: 0 }} />
+            <button type="button" disabled={busy || !draft.trim()} onClick={add}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 11px", fontSize: 12.5, opacity: busy || !draft.trim() ? 0.6 : 1 }}>{busy ? "Saving…" : "Add"}</button>
+            <button type="button" disabled={busy} onClick={() => { setAdding(false); setDraft(""); setErr(null); }}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 11px", fontSize: 12.5 }}>Cancel</button>
+          </div>
+          {offer.length > 0 && <datalist id={listId}>{offer.map((l) => <option key={l} value={l} />)}</datalist>}
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4, lineHeight: 1.5 }}>
+            Adding a tag runs any automation that starts when that tag is added.
+          </div>
+        </div>
+      ) : (
+        <button type="button" onClick={() => { setAdding(true); setErr(null); }} title="Add a tag to this customer" style={{ ...link, marginTop: 4 }}>
+          ＋ Tag
+        </button>
+      ))}
+      {err && <div style={{ ...S.err, marginTop: 4, marginBottom: 4 }}>{err}</div>}
+    </div>
+  );
+}
+
 function CrmDndPanel({ contact, sms, canEdit, onChanged }) {
   const [busy, setBusy] = useState(null);
   const [err, setErr] = useState(null);

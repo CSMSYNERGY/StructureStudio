@@ -31,9 +31,10 @@ export const CONTACT_LIST_PAGE = 500;
 
 /**
  * What a contact-only row shows: who (the company first when there is one, migration 301), how to
- * reach them, where they came from, and when.
+ * reach them, where they came from, and when. And their tags (2026-11-11), which the list shows
+ * under the name and filters on.
  */
-export const CONTACT_LIST_COLS = "id, name, company, phone, email, source, first_seen_at, created_at";
+export const CONTACT_LIST_COLS = "id, name, company, phone, email, source, first_seen_at, created_at, labels";
 
 /**
  * The company a design's or a browsing visit's row leads with (2026-10-15) is its contact's, and
@@ -48,7 +49,7 @@ export const CONTACT_LIST_COLS = "id, name, company, phone, email, source, first
  * whether or not it has a company. Without them a row whose contact is on a later page kept the
  * design's old details until "Show more" brought the contact in, and then changed on screen.
  */
-export const CONTACT_COMPANY_COLS = "id, name, company, phone, email";
+export const CONTACT_COMPANY_COLS = "id, name, company, phone, email, labels";
 
 /** Contact ids per request: the ids ride in the URL (`id=in.(...)`), so a long list is chunked. */
 export const CONTACT_COMPANY_CHUNK = 100;
@@ -75,6 +76,7 @@ export interface ContactListRow {
   source: string | null;
   first_seen_at: string | null;
   created_at: string | null;
+  labels: string[] | null;
 }
 
 /**
@@ -131,6 +133,8 @@ export interface ContactCompany {
   company: string;
   phone: string | null;
   email: string | null;
+  /** The contact's tags, only the non-blank strings, [] for none. */
+  labels: string[];
 }
 
 /**
@@ -151,7 +155,7 @@ export function contactIdsNeedingCompany(linked: Iterable<unknown>, have: { has(
 }
 
 /**
- * Each live contact in `ids`, as { id, name, company, phone, email }: CONTACT_COMPANY_CHUNK ids a
+ * Each live contact in `ids`, as { id, name, company, phone, email, labels }: CONTACT_COMPANY_CHUNK ids a
  * request, CONTACT_COMPANY_LANES requests at a time, nothing read for no ids. The company is trimmed
  * and "" when there is none (a company of only spaces is no company); the details are as stored. An
  * id that is merged, gone or another tenant's is not answered. Throws on a database error (no
@@ -179,7 +183,8 @@ export async function readContactCompanies(admin: Client, clientId: string, ids:
       for (const r of (data || []) as Array<Record<string, unknown>>) {
         if (typeof r.id !== "string" || !r.id) continue;
         const company = typeof r.company === "string" ? r.company.trim() : "";
-        out.push({ id: r.id, name: text(r.name), company, phone: text(r.phone), email: text(r.email) });
+        const labels = Array.isArray(r.labels) ? r.labels.filter((l): l is string => typeof l === "string" && l.trim() !== "") : [];
+        out.push({ id: r.id, name: text(r.name), company, phone: text(r.phone), email: text(r.email), labels });
       }
     }
   };

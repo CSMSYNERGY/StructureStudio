@@ -265,6 +265,7 @@ import {
 import { doorAiEnabled, handleDoorLookRecover, handleGenerateDoorLook, wantsStreamedDoorDraft } from "./doorGenerate.ts";
 import { coerceFieldValue } from "../_shared/crmFields.ts";
 import { LEAD_COUNT_KEYS, parseLeadImportRequest } from "../_shared/leadImport.ts";
+import { changeTags, storedTags, tagsFromInput, tagsText, TAGS_PER_CONTACT_MAX } from "../_shared/contactTags.ts";
 // Sales pipelines (migration 301): the request shapes. Gates, scope and database live below.
 import {
   DESIGN_FEED_STAYS, isUuidLike, LOST_REASON_MAX, LOST_REASON_REQUIRED, parseDealPatch, parseIdOrder, parseLead,
@@ -668,6 +669,8 @@ const GATES: GateTable = {
   crm_rules_time_zone:   { area: "settings_crm", level: "edit" },
   // 366: the Do Not Disturb panel on a customer — the same altitude as editing the customer.
   crm_contact_dnd:       { area: "contacts", level: "edit" },
+  // 2026-11-11: a tag added to or taken off a customer on their record. Writing on that customer.
+  crm_contact_tag:       { area: "contacts", level: "edit" },
   crm_rule_save:         { area: "settings_crm", level: "edit" },
   crm_rules_reorder:     { area: "settings_crm", level: "edit" },
   crm_rule_log:          { area: "settings_crm", level: "view" },
@@ -1659,6 +1662,8 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
     crm_save_contact:      { contactKeys: ["id"] },
     // 366: names its customer outright, like crm_save_contact.
     crm_contact_dnd:       { contactKeys: ["id"] },
+    // The tags on a customer's record name their customer outright too.
+    crm_contact_tag:       { contactKeys: ["id"] },
     // Migration 330. The contact one names its contact outright; the deal one names a deal, so it
     // finds the deal's contact the way the other three deal verbs do.
     crm_contact_custom_save: { contactKeys: ["id"] },
@@ -12021,6 +12026,64 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     audit("crm_contact_dnd", 1, `contact=${id} channel=${channel} on=${on}`).catch(() => {});
     return json({ ok: true });
+  }
+
+  if (action === "crm_contact_tag") {
+    // ── TAGS ON THE RECORD (2026-11-11) ─────────────────────────────────────────────────────
+    // Carolyn imported a file with a Tags column and asked "now where can I see tags": the import
+    // (381) and the automations (370) wrote crm_contacts.labels and nothing showed it. The record
+    // now lists a customer's tags and adds or removes them through here, by the rules every other
+    // writer follows (_shared/contactTags.ts).
+    //
+    // "TAG ADDED" AUTOMATIONS RUN FOR A HAND-ADDED TAG, on purpose: 365's trigger on
+    // crm_contacts.labels queues one fact per tag that is new, whoever wrote it. A tag already on
+    // the customer is not written again, so it queues nothing.
+    //
+    // THE ROW IS WRITTEN ONLY IF IT IS STILL THE ONE READ. Two people (or a person and an
+    // automation) changing one customer's tags at once would otherwise each write their own list
+    // over the other's. updated_at is the check: 370's add_label / remove_label stamp it, as does
+    // every other writer of this row, so a list changed in between no longer matches and this
+    // reads again, once, before saying so.
+    const id = String(payload?.id ?? "").toLowerCase();
+    const on = payload?.on === true;
+    if (!isUuidLike(id)) return json({ error: "That customer wasn't found." }, 400);
+    // Adding takes what was typed, split the import's way; removing names one stored tag exactly.
+    const named = on ? tagsFromInput(payload?.tag) : [String(payload?.tag ?? "")];
+    let change: ReturnType<typeof changeTags> | null = null;
+    let before: string[] = [];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { data: c, error: cErr } = await admin.from("crm_contacts").select("id, labels, updated_at")
+        .eq("client_id", clientId).eq("id", id).is("merged_into", null).maybeSingle();
+      if (cErr) return dbFail(req, clientId, "find that customer", cErr);
+      if (!c) return json({ error: "That customer wasn't found." }, 404);
+      before = storedTags(c.labels);
+      change = changeTags(before, named, on);
+      if (!change.ok) {
+        return json({ error: change.code === "too_many"
+          ? `A customer can carry at most ${TAGS_PER_CONTACT_MAX} tags. Take one off first.`
+          : "Type the tag first." }, 400);
+      }
+      // Nothing to change: answer the list as it is, write nothing, run no automation.
+      if (!change.added.length && !change.removed.length) return json({ ok: true, labels: change.labels, changed: false });
+      const q = admin.from("crm_contacts").update({ labels: change.labels, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("id", id).is("merged_into", null);
+      const { data: wrote, error: uErr } = await (c.updated_at ? q.eq("updated_at", c.updated_at) : q.is("updated_at", null)).select("id");
+      if (uErr) return dbFail(req, clientId, "save that tag", uErr);
+      if (wrote && wrote.length) break;
+      change = null;
+    }
+    if (!change || !change.ok) {
+      return json({ error: "Someone else changed this customer's tags just now. Refresh and try again." }, 409);
+    }
+    // The Changelog's generic line, "Tags changed: "a, b" → "a, b, c"". Best-effort: a missing
+    // line never undoes a saved tag.
+    await admin.from("crm_field_changes").insert({
+      client_id: clientId, contact_id: id, field: "tags",
+      old_value: tagsText(before), new_value: tagsText(change.labels), changed_by: userId ?? null,
+    }).then(() => {}, () => {});
+    // Counts only: a tag is whatever the builder typed, and the audit names nothing.
+    audit("crm_contact_tag", 1, `contact=${id} on=${on} added=${change.added.length} removed=${change.removed.length}`).catch(() => {});
+    return json({ ok: true, labels: change.labels, changed: true });
   }
 
   if (action === "crm_rules_time_zone") {

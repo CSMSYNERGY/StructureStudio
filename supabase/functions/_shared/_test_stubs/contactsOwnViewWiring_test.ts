@@ -64,6 +64,9 @@ const SETTINGS_WRITES = [
   // Migration 366: a customer's Do Not Disturb boxes. Turning someone's texts or emails off (or
   // back on) is writing on their record, so "view only" switches nothing.
   "crm_contact_dnd",
+  // 2026-11-11: a tag added to or taken off a customer on their record is writing on that record,
+  // so "view only" tags nobody.
+  "crm_contact_tag",
   // Migration 382: linking our own Builders card to the builder account it produced (and unlinking)
   // writes on that card, so "view only" does neither. Internal account only; the branch refuses
   // everyone else with a sentence, but the gate is the same altitude as moving the card.

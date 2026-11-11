@@ -68,7 +68,7 @@ function fakeIdAdmin(answer: (q: Query) => { data?: unknown; error?: unknown }) 
 const idsOf = (q: Query) => ((q.find(([m]) => m === "in")?.[1][1] ?? []) as string[]);
 // crm_contacts as far as the linked-contact read goes: the asked-for rows that exist (a key in
 // `companies`), with their company and the person's details (`people`, else a name of their own).
-type Person = { name?: string | null; phone?: string | null; email?: string | null };
+type Person = { name?: string | null; phone?: string | null; email?: string | null; labels?: unknown };
 const answering = (companies: Record<string, string | null>, people: Record<string, Person> = {}) => (q: Query) => ({
   data: idsOf(q).filter((id) => id in companies).map((id) => ({
     id, name: `Person ${id}`, phone: null, email: null, ...people[id], company: companies[id],
@@ -93,7 +93,7 @@ Deno.test("parseContactsFrom: a malformed offset is refused, never read as the f
 });
 
 Deno.test("readContactListPage: live contacts of ONE tenant, newest first, one bounded page with a total", async () => {
-  const rows = [{ id: "c2", name: "Acme Sheds lead", company: "Example Barn Co.", phone: null, email: "lead@example.test", source: "ghl_import", first_seen_at: "2026-09-01T00:00:00Z", created_at: "2026-10-06T00:00:00Z" }];
+  const rows = [{ id: "c2", name: "Acme Sheds lead", company: "Example Barn Co.", phone: null, email: "lead@example.test", source: "ghl_import", first_seen_at: "2026-09-01T00:00:00Z", created_at: "2026-10-06T00:00:00Z", labels: ["Wave 1"] }];
   const { admin, calls } = fakeAdmin({ data: rows, count: 1234 });
   const out = await readContactListPage(admin, "acme-sheds", 500);
   assertEquals(out, { rows, total: 1234 });
@@ -168,17 +168,18 @@ Deno.test("readContactCompanies: THOSE contacts only, live, of ONE tenant, compa
   const { admin, calls } = fakeIdAdmin(answering({
     c1: "Example Barn Co.", c2: "  Sample Shed Works  ", c3: "   ", c4: null,
   }, {
-    c1: { name: "Pat Example", phone: "+15125550101", email: "pat@example.test" },
-    c4: { name: null, phone: "+15125550104", email: null },
+    // Tags (2026-11-11): only the non-blank strings come back, [] for a contact with none.
+    c1: { name: "Pat Example", phone: "+15125550101", email: "pat@example.test", labels: ["Wave 1", "  ", 3, "VIP"] },
+    c4: { name: null, phone: "+15125550104", email: null, labels: null },
   }));
   const out = await readContactCompanies(admin, "acme-sheds", ["c1", "c2", "c3", "c4", "gone"]);
   // A company of only spaces is no company. A contact with none is still answered: its row shows the
   // record's name, phone and email (2026-10-15). One that is not there (gone) is not.
   assertEquals(out, [
-    { id: "c1", name: "Pat Example", company: "Example Barn Co.", phone: "+15125550101", email: "pat@example.test" },
-    { id: "c2", name: "Person c2", company: "Sample Shed Works", phone: null, email: null },
-    { id: "c3", name: "Person c3", company: "", phone: null, email: null },
-    { id: "c4", name: null, company: "", phone: "+15125550104", email: null },
+    { id: "c1", name: "Pat Example", company: "Example Barn Co.", phone: "+15125550101", email: "pat@example.test", labels: ["Wave 1", "VIP"] },
+    { id: "c2", name: "Person c2", company: "Sample Shed Works", phone: null, email: null, labels: [] },
+    { id: "c3", name: "Person c3", company: "", phone: null, email: null, labels: [] },
+    { id: "c4", name: null, company: "", phone: "+15125550104", email: null, labels: [] },
   ]);
   assertEquals(calls, [[
     ["from", ["crm_contacts"]],
@@ -190,7 +191,7 @@ Deno.test("readContactCompanies: THOSE contacts only, live, of ONE tenant, compa
     // The ids asked for, and nothing else: never every contact that has a company.
     ["in", ["id", ["c1", "c2", "c3", "c4", "gone"]]],
   ]]);
-  assertEquals(CONTACT_COMPANY_COLS, "id, name, company, phone, email");
+  assertEquals(CONTACT_COMPANY_COLS, "id, name, company, phone, email, labels");
 });
 
 Deno.test("readContactCompanies: an imported call list does not make it read the whole table", async () => {
@@ -294,7 +295,7 @@ Deno.test("portal/02-sales.jsx reads the linked contacts with the same query, ch
   const ids = many(CONTACT_COMPANY_CHUNK * 3 + 5);
   // Every other one exists (the rest are merged or gone), and of those every third has a company.
   const companies = Object.fromEntries(ids.filter((_, i) => i % 2 === 0).map((id, i) => [id, i % 3 === 0 ? ` Barn ${id} ` : null]));
-  const people = Object.fromEntries(ids.map((id, i) => [id, { phone: i % 4 === 0 ? "+15125550100" : null, email: `${id}@example.test` }]));
+  const people = Object.fromEntries(ids.map((id, i) => [id, { phone: i % 4 === 0 ? "+15125550100" : null, email: `${id}@example.test`, labels: i % 5 === 0 ? ["Wave 1"] : [] }]));
   const server = fakeIdAdmin(answering(companies, people));
   const browser = fakeIdAdmin(answering(companies, people));
   const fromServer = await readContactCompanies(server.admin, "acme-sheds", ids);
@@ -309,6 +310,7 @@ Deno.test("portal/02-sales.jsx reads the linked contacts with the same query, ch
   const norm = (c: Record<string, unknown>) => ({
     id: c.id, name: c.name ?? null, company: typeof c.company === "string" ? c.company.trim() : "",
     phone: c.phone ?? null, email: c.email ?? null,
+    labels: Array.isArray(c.labels) ? c.labels.filter((l) => typeof l === "string" && l.trim() !== "") : [],
   });
   const had = [...fromBrowser.values()].filter((c): c is Record<string, unknown> => !!c).map(norm);
   assertEquals(had, fromServer);
