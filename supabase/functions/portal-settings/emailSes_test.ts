@@ -12,7 +12,7 @@
 // function. Run from supabase/functions:
 //   deno test --allow-env --allow-read --node-modules-dir=none portal-settings/emailSes_test.ts
 
-import { emailOnSes, emailSesConnect, handleEmailSesAction, lookupMxHosts, SES_DKIM_SELECTOR, type EmailSesCtx } from "./emailSes.ts";
+import { emailOnSes, emailSesConnect, handleEmailSesAction, lookupMxHosts, SES_DKIM_SELECTOR, sesOpensStatus, type EmailSesCtx } from "./emailSes.ts";
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(`Assertion failed: ${msg}`);
@@ -93,7 +93,7 @@ const identity = (dkim: string, verified = dkim === "SUCCESS") => ({
 
 const SES = "https://email.us-east-2.amazonaws.com/v2/email/identities";
 const MX = "inbound-smtp.us-east-2.amazonaws.com";
-const ENV = ["SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY", "SES_REGION", "SES_DKIM_MODE", "EMAIL_DEFAULT_TRANSPORT", "RESEND_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
+const ENV = ["SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY", "SES_REGION", "SES_DKIM_MODE", "SES_OPEN_TRACKING", "EMAIL_DEFAULT_TRANSPORT", "RESEND_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"];
 
 function setup(defaultSes = true) {
   for (const k of ENV) Deno.env.delete(k);
@@ -372,6 +372,56 @@ Deno.test("opens are refused with a plain sentence on SES; nothing is written an
     assert(String((await body(res)).error).includes("isn't available"), "says so");
     assertEquals([db.writes.length, calls.length], [0, 0]);
   } finally { teardown(); }
+});
+
+Deno.test("with opens switched on at the provider, the same button answers 'on': no write, no AWS call, the rows untouched", async () => {
+  setup();
+  Deno.env.set("SES_OPEN_TRACKING", "on");
+  const calls = stubFetch(() => j({}));
+  try {
+    const rows = [{ ...DKIM_ROW, verified: true }];
+    const db = fakeDb({ state: { ...ON_SES, email_domain_status: "verified", email_dns_records: rows } });
+    const res = await handleEmailSesAction(ctx(db, "email_tracking_check"));
+    assertEquals(res?.status, 200);
+    assertEquals(await body(res), { ok: true, openTracking: "on", dnsRecords: rows });
+    assertEquals([db.writes.length, calls.length], [0, 0]);
+  } finally { teardown(); }
+});
+
+Deno.test("verify reports opens as the provider has them: 'off' until the setting says on", async () => {
+  for (const [setting, want] of [[null, "off"], ["off", "off"], ["on", "on"]] as const) {
+    setup();
+    if (setting) Deno.env.set("SES_OPEN_TRACKING", setting);
+    stubFetch(() => j(identity("SUCCESS")));
+    try {
+      const out = await body(await handleEmailSesAction(ctx(fakeDb({ state: ON_SES }), "email_verify_domain")));
+      assertEquals(out.openTracking, want, String(setting));
+    } finally { teardown(); }
+  }
+});
+
+Deno.test("what the screen is told about opens: a Resend builder as always, an SES builder 'on' or no card at all", () => {
+  setup();
+  try {
+    // Not on SES: the card is driven by Resend's tracking record, whatever the SES setting says.
+    assertEquals(sesOpensStatus(false), { opensAvailable: true });
+    // On SES with opens not counted: the card is left out rather than offer a switch that does nothing.
+    assertEquals(sesOpensStatus(true), { opensAvailable: false });
+    Deno.env.set("SES_OPEN_TRACKING", "on");
+    assertEquals(sesOpensStatus(true), { opensAvailable: true, opensOn: true });
+    assertEquals(sesOpensStatus(false), { opensAvailable: true }, "the setting never reaches a Resend builder");
+  } finally { teardown(); }
+});
+
+Deno.test("the opens answer reaches the screen: email_status spreads it, and the card reads 'on' from it before any DNS row", async () => {
+  const src = (await Deno.readTextFile(new URL("./index.ts", import.meta.url))).replace(/\r\n/g, "\n");
+  const status = src.slice(src.indexOf("const onSesP = emailOnSes(admin, clientId);"));
+  assert(status.includes("...sesOpensStatus(await onSesP),"), "email_status answers with sesOpensStatus");
+  assert(!status.slice(0, status.indexOf("existingDmarc,")).includes("opensAvailable:"), "and nothing beside it sets opensAvailable by hand");
+  const jsx = (await Deno.readTextFile(new URL("../../../portal/08-integrations.jsx", import.meta.url))).replace(/\r\n/g, "\n");
+  assert(jsx.includes(`const trackSt = status.opensOn === true ? "on"`), "the server's 'on' wins");
+  assert(jsx.includes(`: trackRows.length === 0 ? "off" : trackRows.every((r) => r.verified) ? "on" : "waiting";`), "and without it the tracking record decides, as before");
+  assert(jsx.includes("const opensAvailable = status.opensAvailable !== false;"), "only an explicit false hides the card");
 });
 
 Deno.test("disconnect deletes the identity and resets everything, pin included; a stuck provider does not trap the builder", async () => {

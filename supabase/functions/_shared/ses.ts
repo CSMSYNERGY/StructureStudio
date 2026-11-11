@@ -35,6 +35,14 @@
  *     non-ASCII business name into RFC 2047 encoded-words.
  *   - A suppressed address is ACCEPTED and then not delivered: SendEmail returns an id and the
  *     event feed reports a bounce with subtype OnAccountSuppressionList (postmark-events).
+ *   - OPENS ARE A PROPERTY OF THE CONFIGURATION SET, NOT OF AN EMAIL. A set whose event feed
+ *     includes OPEN makes SES add its invisible tracking image to EVERY html email sent through
+ *     it; there is no per-email switch (read off real emails, 2026-11-11). So "which emails
+ *     carry the image" is "which set they go through": the default set counts opens for a
+ *     builder's emails, and the platform's own emails (login codes, receipts) go through a
+ *     second set without OPEN when SES_PLATFORM_CONFIGURATION_SET names one. The IAM policy
+ *     lists the sets the key may send through, so a new set needs its line there too, which is
+ *     why a refused set falls back to the default one (sesSendEmail).
  *
  * THE VERDICT RULE (inherited from resend.ts): every failure says whether a retry is pointless.
  * `permanent` is claimed only on positive evidence that an identical request fails identically:
@@ -85,11 +93,38 @@ export function sesRegion(): string {
   return /^[a-z]{2}(-[a-z]+)+-\d$/.test(r) ? r : "us-east-2";
 }
 
-/** The configuration set every send goes through: it is what publishes bounce, complaint and
- *  delivery events, so a send outside it is a send whose fate is never reported. */
+/** What SES accepts as a configuration set's name. */
+const SET_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** The configuration set a send goes through unless the caller names another: it is what
+ *  publishes bounce, complaint and delivery events, so a send outside any set is a send whose
+ *  fate is never reported. */
 function configurationSet(): string {
   const c = (Deno.env.get("SES_CONFIGURATION_SET") ?? "").trim();
-  return /^[A-Za-z0-9_-]{1,64}$/.test(c) ? c : "ss-default";
+  return SET_NAME_RE.test(c) ? c : "ss-default";
+}
+
+/**
+ * The configuration set for the PLATFORM'S OWN emails (login codes, receipts, team notices), or
+ * null when no second set is named, which is "send them through the default set like everything
+ * else". It exists to keep the open-tracking image off emails nobody reads opens for: the
+ * default set counts opens, this one does not (see the header). Unset, misspelt, or the same
+ * name as the default all mean null. Changing the setting needs no deploy.
+ */
+export function sesPlatformConfigurationSet(): string | null {
+  const c = (Deno.env.get("SES_PLATFORM_CONFIGURATION_SET") ?? "").trim();
+  return SET_NAME_RE.test(c) && c !== configurationSet() ? c : null;
+}
+
+/**
+ * Is Amazon counting opens for a builder's emails? Only AWS knows (it is the default set's event
+ * feed), and asking it on every screen load would cost a call and a permission the key does not
+ * have. So the person who switches opens on at AWS also sets SES_OPEN_TRACKING=on here, and the
+ * Email Settings screen shows its opens card from that. It changes NOTHING about sending: with
+ * the setting off and the feed on, opens are still recorded, and the card simply stays hidden.
+ */
+export function sesOpensOn(): boolean {
+  return (Deno.env.get("SES_OPEN_TRACKING") ?? "").trim().toLowerCase() === "on";
 }
 
 /** The ONE test for "may the SES path run at all": both halves of the key. */
@@ -359,6 +394,10 @@ export type SesSendInput = {
   /** Custom headers (the List-Unsubscribe pair). `Message-ID` and the others SES refuses are
    *  dropped: see sesHeaders. */
   headers?: Record<string, string>;
+  /** Send through THIS configuration set instead of the default one (mailTransport.ts passes
+   *  the platform set for the platform's own emails). A name SES would not accept is ignored,
+   *  and a set SES refuses is retried once on the default set: see sesSendEmail. */
+  configurationSet?: string;
 };
 
 /** Header names SES refuses as custom headers on a Simple message (its developer guide's list,
@@ -444,6 +483,15 @@ function replyToList(v: string | string[] | undefined): string[] {
  * ONE TRY, ALWAYS, like rsSendEmail. And unlike Resend there is no key that makes a second try
  * safe, so a caller that retries after a timeout must first find out whether this one went.
  *
+ * ⚠️ THE ONE EXCEPTION, AND WHY IT IS SAFE. When the caller named a configuration set of its own
+ * (`input.configurationSet`) and SES answers 403 or 404, the same email is sent once more through
+ * the default set. Those two answers are SES REFUSING the request (the key's policy does not
+ * list that set, or the set does not exist), so nothing went and a second request cannot be a
+ * second email. It exists because the named set is a nicety (no tracking image on a login
+ * code) and must never cost the email: a set renamed at AWS, or a policy line not added yet,
+ * degrades to "the image is there" rather than "the code never arrived". A timeout, a throttle
+ * or a 5xx is NOT retried here, exactly as before. One console line says the fallback happened.
+ *
  * `opts` is for tests (a short timeout) and nothing else.
  */
 export async function sesSendEmail(
@@ -462,7 +510,10 @@ export async function sesSendEmail(
     ContentDisposition: "ATTACHMENT",
     ContentTransferEncoding: "BASE64",
   }));
-  const raw = await sesFetch("POST", "/v2/email/outbound-emails", {
+  const defaultSet = configurationSet();
+  const named = typeof input.configurationSet === "string" && SET_NAME_RE.test(input.configurationSet)
+    ? input.configurationSet : defaultSet;
+  const send = (set: string) => sesFetch("POST", "/v2/email/outbound-emails", {
     FromEmailAddress: encodeFrom(input.from),
     Destination: { ToAddresses: [input.to] },
     ...(replyTo.length ? { ReplyToAddresses: replyTo } : {}),
@@ -477,9 +528,19 @@ export async function sesSendEmail(
         ...(attachments.length ? { Attachments: attachments } : {}),
       },
     },
-    ConfigurationSetName: configurationSet(),
+    ConfigurationSetName: set,
     ...(tags.length ? { EmailTags: tags } : {}),
   }, opts.timeoutMs ?? SES_TIMEOUT_MS);
+  let raw: unknown;
+  try {
+    raw = await send(named);
+  } catch (e) {
+    // See the header: a refused set of the caller's own choosing, and only that.
+    const refused = e instanceof SesApiError && (e.status === 403 || e.status === 404);
+    if (named === defaultSet || !refused) throw e;
+    console.warn(`ses: configuration set ${named} was refused (${e.status} ${e.name_}); sent through ${defaultSet} instead`);
+    raw = await send(defaultSet);
+  }
   const id = (raw as { MessageId?: unknown } | null)?.MessageId;
   return { id: typeof id === "string" ? id : "" };
 }

@@ -24,7 +24,7 @@
  */
 
 import { rsSendEmail, resendConfigured, ResendApiError, type RsSendInput } from "./resend.ts";
-import { sesSendEmail, sesConfigured, SesApiError } from "./ses.ts";
+import { sesSendEmail, sesConfigured, sesPlatformConfigurationSet, SesApiError } from "./ses.ts";
 
 export type MailTransport = "resend" | "ses";
 
@@ -95,9 +95,24 @@ export function platformMailConfigured(): boolean {
   return transportConfigured(defaultTransport());
 }
 
-/** Send one email from the platform's own address on the platform default wire. */
+/**
+ * Send one email from the platform's own address on the platform default wire.
+ *
+ * ON AMAZON SES THESE GO THROUGH THE PLATFORM CONFIGURATION SET when one is named
+ * (SES_PLATFORM_CONFIGURATION_SET, 2026-11-11). SES adds its open-tracking image to every email
+ * sent through a set that counts opens, with no per-email switch, and a login code or a receipt
+ * is nobody's "did they open it". So the platform's own emails take a second set that does not
+ * count opens, while a builder's emails (sendMail above, from emailSend.ts) stay on the default
+ * set that does. With the setting absent this is sendMail exactly as it was, and a set SES
+ * refuses is sent through the default one instead (ses.ts): the email always goes.
+ */
 export function sendPlatformMail(input: MailInput): Promise<{ id: string }> {
-  return sendMail(defaultTransport(), input);
+  const t = defaultTransport();
+  const set = t === "ses" ? sesPlatformConfigurationSet() : null;
+  if (!set) return sendMail(t, input);
+  // The same hand-off sendMail makes to SES (the Resend-only key stays behind), plus the set.
+  const { idempotencyKey: _unused, ...rest } = input;
+  return sesSendEmail({ ...rest, configurationSet: set });
 }
 
 /** Was this thrown by one of the two wires (as opposed to our own code)? */

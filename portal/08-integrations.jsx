@@ -975,10 +975,14 @@ function EmailSendingView({ clientId, viewingLabel = null, shedsOn = true }) {
   // so, and the verified screen gives it a card of its own. No tracking row at all means open
   // tracking was never switched on (a domain verified before it existed).
   const trackRows = dns.filter((r) => r.tracking);
-  const trackSt = trackRows.length === 0 ? "off" : trackRows.every((r) => r.verified) ? "on" : "waiting";
-  // The server says when opens can't be offered (a builder on the newer email setup, until opens
-  // return there). Only an explicit false hides the card: an older server sends nothing, and the
-  // card shows as it always has.
+  // On the newer email setup opens need no record at all: the server says they are on
+  // (`opensOn: true`) and the card reads "On". Anything else, including an older server that
+  // sends nothing, is read off the tracking record exactly as before.
+  const trackSt = status.opensOn === true ? "on"
+    : trackRows.length === 0 ? "off" : trackRows.every((r) => r.verified) ? "on" : "waiting";
+  // The server says when opens can't be offered (a builder on the newer email setup while opens
+  // are not counted there). Only an explicit false hides the card: an older server sends
+  // nothing, and the card shows as it always has.
   const opensAvailable = status.opensAvailable !== false;
 
   // ── "Email this to my webmaster" (Carolyn, 2026-08-25) ──────────────────────────────

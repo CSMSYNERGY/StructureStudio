@@ -520,6 +520,11 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
     // nothing" — never "clean".
     spam_verdict: String(m.spam_verdict ?? m.spamVerdict ?? "").slice(0, 40) ||
       senderVerdict(headers) || null,
+    // Which provider handed us this email. The column defaults to 'resend' (migration 135) and
+    // nothing reads it yet, so only the Amazon path names itself: the Resend insert is sent
+    // exactly as it was. Found 2026-11-11, when the first emails received through Amazon were
+    // stored reading 'resend'.
+    ...(viaSes ? { provider: "ses" } : {}),
   });
 
   // 23505 is the idempotency index doing its job on a provider retry — a success, not a

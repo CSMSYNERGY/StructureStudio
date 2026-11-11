@@ -33,6 +33,8 @@ import {
   sesInboundRecord,
   sesMessageIdOf,
   SesNotConfigured,
+  sesOpensOn,
+  sesPlatformConfigurationSet,
   sesRegion,
   sesSendEmail,
   signV4,
@@ -78,7 +80,7 @@ function json(body: unknown, status = 200, headers: Record<string, string> = {})
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 }
 
-const ENV = ["SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY", "SES_SESSION_TOKEN", "SES_REGION", "SES_CONFIGURATION_SET", "SES_INBOUND_BUCKET", "SES_INBOUND_PREFIX"];
+const ENV = ["SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY", "SES_SESSION_TOKEN", "SES_REGION", "SES_CONFIGURATION_SET", "SES_INBOUND_BUCKET", "SES_INBOUND_PREFIX", "SES_PLATFORM_CONFIGURATION_SET", "SES_OPEN_TRACKING"];
 function setup() {
   for (const k of ENV) Deno.env.delete(k);
   Deno.env.set("SES_ACCESS_KEY_ID", "AKIDEXAMPLE");
@@ -268,6 +270,92 @@ Deno.test("the configuration set comes from the setting when it is well-formed",
   try {
     await sesSendEmail({ from: "a@example.com", to: "b@example.org", subject: "s", html: "h" });
     assertEquals(JSON.parse(calls[0].body).ConfigurationSetName, "other-set");
+  } finally { teardown(); }
+});
+
+// ── A second configuration set (the platform's own emails carry no tracking image) ─────
+
+const MAIL = { from: "a@example.com", to: "b@example.org", subject: "s", html: "h" };
+const setOf = (c: Call) => JSON.parse(c.body).ConfigurationSetName;
+
+Deno.test("a send that names its own configuration set goes through it; a name SES would refuse is ignored", async () => {
+  setup();
+  const calls = stub(() => json({ MessageId: "id" }));
+  try {
+    await sesSendEmail({ ...MAIL, configurationSet: "ss-platform" });
+    await sesSendEmail({ ...MAIL, configurationSet: "has spaces" });
+    await sesSendEmail({ ...MAIL, configurationSet: "" });
+    assertEquals(calls.map(setOf), ["ss-platform", "ss-default", "ss-default"]);
+    // Nothing else about the request changes: the set is one field.
+    const a = JSON.parse(calls[0].body), b = JSON.parse(calls[1].body);
+    delete a.ConfigurationSetName; delete b.ConfigurationSetName;
+    assertEquals(a, b);
+  } finally { teardown(); }
+});
+
+Deno.test("a named set SES REFUSES (403 or 404) is sent once more through the default set, and the email goes", async () => {
+  setup();
+  const warn = console.warn;
+  const said: string[] = [];
+  console.warn = (...a: unknown[]) => { said.push(a.join(" ")); };
+  try {
+    for (const [status, type] of [[403, "AccessDeniedException"], [404, "NotFoundException"]] as const) {
+      const calls = stub((c) => setOf(c) === "ss-platform" ? awsError(status, type, "Configuration set <ss-platform> does not exist.") : json({ MessageId: "went" }));
+      const out = await sesSendEmail({ ...MAIL, configurationSet: "ss-platform" });
+      assertEquals(out, { id: "went" }, type);
+      assertEquals(calls.map(setOf), ["ss-platform", "ss-default"], type);
+    }
+    assertEquals(said.length, 2, "one console line per fallback");
+    assert(said[0].includes("ss-platform") && said[0].includes("403 AccessDeniedException") && said[0].includes("ss-default"), "it names both sets and the refusal");
+    assert(!said.join(" ").includes("@"), "and never an address");
+  } finally { console.warn = warn; teardown(); }
+});
+
+Deno.test("NO second try for anything that might have been sent, or when the refused set IS the default", async () => {
+  setup();
+  try {
+    // A throttle, a rejected message, a 5xx: one request, and the error is the caller's.
+    for (const [status, type] of [[429, "TooManyRequestsException"], [400, "MessageRejected"], [400, "BadRequestException"], [500, "InternalFailure"], [503, "ServiceUnavailable"]] as const) {
+      const calls = stub(() => awsError(status, type));
+      const e = await expectApiError(() => sesSendEmail({ ...MAIL, configurationSet: "ss-platform" }), type);
+      assertEquals([e.status, calls.length], [status, 1], type);
+    }
+    // A network failure: SES may have the email. One request.
+    let n = 0;
+    globalThis.fetch = (() => { n++; return Promise.reject(new TypeError("connection reset")); }) as typeof fetch;
+    const net = await expectApiError(() => sesSendEmail({ ...MAIL, configurationSet: "ss-platform" }), "network");
+    assertEquals([net.status, n], [0, 1]);
+    // The default set refused (no set named, or the same name): nothing to fall back to.
+    for (const named of [undefined, "ss-default"]) {
+      const calls = stub(() => awsError(403, "AccessDeniedException"));
+      await expectApiError(() => sesSendEmail({ ...MAIL, ...(named ? { configurationSet: named } : {}) }), "default refused");
+      assertEquals(calls.length, 1, String(named));
+    }
+    // The fallback's own failure is thrown as it is, after exactly two requests.
+    const both = stub(() => awsError(403, "AccessDeniedException"));
+    const e2 = await expectApiError(() => sesSendEmail({ ...MAIL, configurationSet: "ss-platform" }), "both refused");
+    assertEquals([e2.status, both.length], [403, 2]);
+  } finally { teardown(); }
+});
+
+Deno.test("the platform set and the opens switch are plain settings, and absent means 'as before'", () => {
+  setup();
+  try {
+    assertEquals([sesPlatformConfigurationSet(), sesOpensOn()], [null, false]);
+    Deno.env.set("SES_PLATFORM_CONFIGURATION_SET", " ss-platform ");
+    assertEquals(sesPlatformConfigurationSet(), "ss-platform");
+    for (const bad of ["two words", "x".repeat(65), "", "ss-default"]) {
+      Deno.env.set("SES_PLATFORM_CONFIGURATION_SET", bad);
+      assertEquals(sesPlatformConfigurationSet(), null, `"${bad.slice(0, 12)}" is not a second set`);
+    }
+    // The same name as a RE-NAMED default is not a second set either.
+    Deno.env.set("SES_CONFIGURATION_SET", "other-set");
+    Deno.env.set("SES_PLATFORM_CONFIGURATION_SET", "other-set");
+    assertEquals(sesPlatformConfigurationSet(), null);
+    for (const [v, want] of [["on", true], [" ON ", true], ["true", false], ["1", false], ["off", false], ["", false]] as const) {
+      Deno.env.set("SES_OPEN_TRACKING", v);
+      assertEquals(sesOpensOn(), want, `"${v}"`);
+    }
   } finally { teardown(); }
 });
 

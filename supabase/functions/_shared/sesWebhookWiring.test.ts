@@ -98,3 +98,12 @@ Deno.test("postmark-events: a row is adopted by its tag only when the id matched
   assert(!/from\("email_sends"\)/.test(EVENTS), "no direct table write anywhere in the file");
   assert(fn.includes(`const res = json({ ok: false, error: "update failed" }, 500);`), "a database error is a 500, so SNS delivers the event again");
 });
+
+Deno.test("email-inbound: an email received through Amazon is stored as 'ses', and Resend's insert is untouched", () => {
+  // The column defaults to 'resend'. Until 2026-11-11 nothing set it, so the first emails Amazon
+  // handed us were stored reading 'resend'.
+  const insert = INBOUND.slice(at(INBOUND, `await admin.from("email_inbound").insert({`, "the insert"));
+  const row = insert.slice(0, insert.indexOf("\n  });"));
+  assert(row.includes(`...(viaSes ? { provider: "ses" } : {}),`), "the Amazon path names itself");
+  assert(!/^\s*provider:/m.test(row), "and no unconditional provider key: Resend's row is sent as before");
+});

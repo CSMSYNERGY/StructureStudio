@@ -41,7 +41,7 @@
 import {
   sesConfigured, sesCreateIdentity, sesDeleteIdentity, sesDisableFeedbackForwarding, sesDkimRecords,
   sesGenerateDkimKey, sesGetIdentity, sesIdentityGivenUp, sesIdentityVerified, sesInboundMxHost,
-  sesInboundRecord, SesApiError, SesNotConfigured, type SesIdentity,
+  sesInboundRecord, sesOpensOn, SesApiError, SesNotConfigured, type SesIdentity,
 } from "../_shared/ses.ts";
 import { rsDeleteDomain } from "../_shared/resend.ts";
 import { defaultTransport, mailErrCode } from "../_shared/mailTransport.ts";
@@ -111,8 +111,27 @@ async function readState(ctx: EmailSesCtx, where: string): Promise<State | "pre_
 const onSes = (s: State): boolean => s.email_transport === "ses" && !!s.ses_identity;
 
 /**
- * Is this builder's sending domain at SES? For email_status, which tells the screen whether the
- * "see when emails are opened" card has anything to offer (not on SES yet). A question that must
+ * What email_status tells the Email Settings screen about "see when emails are opened", given
+ * whether this builder's sending domain is at SES (emailOnSes). Pure; exported for the tests.
+ *
+ *   • Not on SES: `opensAvailable: true` and nothing else. The card is driven by the Resend
+ *     tracking record in the DNS rows, exactly as before SES existed.
+ *   • On SES, opens counted there (ses.ts sesOpensOn): `opensAvailable: true, opensOn: true`.
+ *     The card reads "On" with no record to add and no button: on SES opens need nothing from
+ *     the builder.
+ *   • On SES, opens not counted: `opensAvailable: false`, and the screen leaves the card out
+ *     rather than offer a switch that does nothing.
+ *
+ * `opensOn` is only ever `true` or absent, so a screen older than it shows what it always did.
+ */
+export function sesOpensStatus(onSesNow: boolean): { opensAvailable: boolean; opensOn?: true } {
+  if (!onSesNow) return { opensAvailable: true };
+  return sesOpensOn() ? { opensAvailable: true, opensOn: true } : { opensAvailable: false };
+}
+
+/**
+ * Is this builder's sending domain at SES? For email_status, which tells the screen what the
+ * "see when emails are opened" card has to offer (sesOpensStatus). A question that must
  * never cost the screen: any failure, including a database with no SES columns, answers false,
  * which shows the screen exactly as it always was.
  */
@@ -424,14 +443,19 @@ export async function handleEmailSesAction(ctx: EmailSesCtx): Promise<Response |
     }).eq("client_id", ctx.clientId);
     if (upErr) return ctx.dbFail(ctx.req, ctx.clientId, "save your domain's verification state", upErr);
     return ctx.json({
-      ok: true, verified, domainStatus, providerStatus: identity.dkim.status, dnsRecords, openTracking: "off",
+      ok: true, verified, domainStatus, providerStatus: identity.dkim.status, dnsRecords, openTracking: sesOpensOn() ? "on" : "off",
       ...(inboundPatch.inbound_status ? { inboundStatus: "active" } : {}),
     });
   }
 
   if (action === "email_tracking_check") {
-    // Out of the first SES version (2026-11-10). It returns through one tracking address on our
-    // own domain, so a builder will have nothing to add to their DNS for it.
+    // On Amazon SES a builder has nothing to switch on and no record to add: opens are counted
+    // for every builder's emails once they are on at the provider (SES_OPEN_TRACKING, see
+    // ses.ts sesOpensOn). The card then reads "On" and has no button, so with opens on this is
+    // reached only by a screen loaded before the switch, and it gets the same answer the screen
+    // would show after a reload. The rows go back untouched: SES has no tracking record.
+    if (sesOpensOn()) return ctx.json({ ok: true, openTracking: "on", dnsRecords: rowsOf(s.email_dns_records) });
+    // Not switched on yet (the first SES version, 2026-11-10, shipped without it).
     return ctx.json({ error: "Seeing when emails are opened isn't available on your email setup yet. It's coming back soon, and you won't need to add anything to your DNS for it." }, 409);
   }
 

@@ -20,7 +20,7 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 // Amazon SES (2026-11-10): the same Email screen for a builder whose email goes out through SES.
 // ./emailSes.ts answers for them and returns null for a builder on Resend, whose code is below.
 import { anyTransportConfigured } from "../_shared/mailTransport.ts";
-import { emailOnSes, emailSesConnect, handleEmailSesAction } from "./emailSes.ts";
+import { emailOnSes, emailSesConnect, handleEmailSesAction, sesOpensStatus } from "./emailSes.ts";
 // Email Settings asks public DNS whether the sending domain already has a DMARC record before
 // it advises one (2026-10-05).
 import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
@@ -14912,9 +14912,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       lastError: s?.email_last_error ?? null,
       active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
-      // false only for a builder on Amazon SES, where "see when emails are opened" is not
-      // available yet. The screen hides that card on an explicit false and on nothing else.
-      opensAvailable: !(await onSesP),
+      // The opens card. `opensAvailable` is false only for a builder on Amazon SES while opens
+      // are not counted there, and the screen hides the card on an explicit false and on nothing
+      // else. `opensOn: true` rides along for a builder on SES once they are: the card then
+      // reads "On" with no record to add (emailSes.ts sesOpensStatus).
+      ...sesOpensStatus(await onSesP),
       // { present, policy, count, host } or null (no records yet, or DNS couldn't say). The
       // screen shows its DMARC advisory row only for present: false at _dmarc.<the DKIM host's
       // domain>, says "leave it as it is" for one record, and warns about two or more.
