@@ -6,6 +6,8 @@ import {
   envelopeRecipients, parseThreadMessageId, UNATTRIBUTED_CLIENT_ID, senderVerdict,
 } from "../_shared/emailInbound.ts";
 import { rsGetReceivedEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
+import { sesMessageIdOf } from "../_shared/ses.ts";
+import { readSesInbound } from "../_shared/sesInbound.ts";
 import { attachmentNote, type ContactLink, followMerged } from "../_shared/inboundFiling.ts";
 
 // Inbound email → the CRM conversation. The return leg that makes a conversation two-way.
@@ -56,11 +58,36 @@ import { attachmentNote, type ContactLink, followMerged } from "../_shared/inbou
 // Never echo the payload back in a response or an error — inbound mail is customer content,
 // and webhook responses are visible in the provider's dashboard.
 //
-// Required secrets: EMAIL_INBOUND_SECRET (+ the platform SUPABASE_* pair).
+// TWO WAYS IN SINCE 2026-11-10: Resend's webhook, and Amazon SES by way of Amazon SNS. Email is
+// moving from Resend to SES one builder at a time, so both arrive here, at the same URL with the
+// same ?key=. An SNS delivery announces itself with the `x-amz-sns-message-type` header:
+// _shared/sesInbound.ts proves it is SNS's and from our topic (the signature is verified, after
+// the key), answers the one-time subscription handshake, reads the raw email from our bucket and
+// parses it into the same `m` the Resend path builds. FROM THERE DOWN IT IS ONE CODE PATH: the
+// same Stage A and Stage B, the same insert. What differs for SES:
+//   • Stage A reads `receipt.recipients` from the SIGNED notice: the true SMTP envelope, which is
+//     better evidence than the header-parsed field Resend gives (envelopeRecipients' docstring).
+//   • there is no second call for the body. The email was read from the bucket before any of
+//     this ran, and the bucket keeps it for 30 days, so a failed read is never the last chance.
+//   • "ALWAYS 200" above is Resend's rule. SNS tries again on a 5xx and gives up on a 2xx or 4xx,
+//     so on the SES path a failure a second try could fix (the bucket, the database) answers 503
+//     on purpose, and SNS brings the same notice back. The (client_id, message_id) index makes a
+//     repeat harmless.
+//   • threading has one more signal, step B2b: SES replaces our Message-ID with its own, and that
+//     id is the one email_sends.provider_message_id already holds.
+//
+// Required secrets: EMAIL_INBOUND_SECRET (+ the platform SUPABASE_* pair). For SES also the SES
+// key, SES_INBOUND_BUCKET and SES_INBOUND_TOPIC_ARN (settings, never in this public source: both
+// carry the AWS account number).
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
+
+/** Responses whose app_errors row was written at the return site, with its own code and context,
+ *  so withErrorLog does not add a second, vaguer row for the same answer (customer-auth's
+ *  pattern). Only the SES path answers 5xx on purpose, so only it adds to this. */
+const filedAtReturnSite = new WeakSet<Response>();
 
 Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -68,10 +95,35 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   const secret = Deno.env.get("EMAIL_INBOUND_SECRET") ?? "";
   const key = new URL(req.url).searchParams.get("key") ?? "";
   // Unset secret ⇒ refuse everything. Deliberately inert, never open.
-  if (!secret || !timingSafeEqual(key, secret)) return json({ error: "unauthorized" }, 401);
+  // Amazon SNS posts with a key of its own, SES_WEBHOOK_SECRET (2026-11-10). It opens ONLY the
+  // SNS path, where the message's signature is verified as well; it is not accepted for a
+  // Resend-shaped post, which has no signature to check. The key above opens both, as it always
+  // did. (A second key rather than the first one re-used: EMAIL_INBOUND_SECRET's value lives only
+  // in Supabase and in Resend's webhook URL, and nobody can read it back to give it to SNS.)
+  const viaSes = Boolean(req.headers.get("x-amz-sns-message-type"));
+  const sesSecret = Deno.env.get("SES_WEBHOOK_SECRET") ?? "";
+  const keyOk = (!!secret && timingSafeEqual(key, secret)) || (viaSes && !!sesSecret && timingSafeEqual(key, sesSecret));
+  if (!keyOk) return json({ error: "unauthorized" }, 401);
 
   let payload: any;
-  try { payload = await req.json(); } catch { return json({ ok: true, ignored: "unparseable" }); }
+  // ── Amazon SES, by way of Amazon SNS ───────────────────────────────────────────────
+  // After the key, before the body is read as JSON: SNS's signature is over the raw text.
+  // readSesInbound either answers SNS itself (a refused notice, the subscription handshake, a
+  // bucket that did not answer) or hands back the email in the shape the code below reads.
+  let sesObjectKey = "";
+  if (viaSes) {
+    const read = await readSesInbound(await req.text());
+    if (read.log) await logEdgeError({ fn: "email-inbound", req, clientId: null, ...read.log });
+    if (read.kind === "answer") {
+      const res = json(read.body, read.status);
+      if (read.log) filedAtReturnSite.add(res);
+      return res;
+    }
+    payload = read.payload;
+    sesObjectKey = read.objectKey;
+  } else {
+    try { payload = await req.json(); } catch { return json({ ok: true, ignored: "unparseable" }); }
+  }
 
   // ⚠️ ONLY `email.received` IS AN INBOUND EMAIL. A Resend webhook posts every event it is
   // subscribed to to ONE url, and the delivery events (email.delivered / opened / bounced /
@@ -113,8 +165,10 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   // identically, so a permanent refusal is not retried — that is a configuration fault for a
   // human, not a wobble to ride out.
   const looksMetadataOnly = !m.text && !m.html && !m.body_plain && !m.body_html && !m.plain;
-  const receivedId = typeof m.email_id === "string" ? m.email_id : "";
-  if (looksMetadataOnly && receivedId && resendConfigured()) {
+  // On the SES path this is the email's key in our bucket: there is nothing to fetch (it was read
+  // before this point), and it is what the repair tickets below name instead of a Resend id.
+  const receivedId = viaSes ? sesObjectKey : (typeof m.email_id === "string" ? m.email_id : "");
+  if (!viaSes && looksMetadataOnly && receivedId && resendConfigured()) {
     let full: Awaited<ReturnType<typeof rsGetReceivedEmail>> | null = null;
     let failure: unknown = null;
     let retried = false;
@@ -382,6 +436,41 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
     }
   }
 
+  // B2b. (Amazon SES) The id SES gave an email WE sent, echoed back in In-Reply-To/References.
+  //      SES replaces our Message-ID with `<its id>@<region>.amazonses.com`, and that id is what
+  //      email_sends.provider_message_id stores, so on SES the ledger join B2's comment calls
+  //      impossible is exactly the one that works. Scoped to the tenant Stage A proved, like
+  //      everything in Stage B: an id is attacker-visible (every recipient of the email holds
+  //      it), so it may pick a row WITHIN this tenant and never a tenant. The reply's own
+  //      In-Reply-To is tried before the older ids in References.
+  if (!shortCode && !contactId && clientId) {
+    const sesIds = [...messageIds(inReplyTo), ...messageIds(referencesRaw)]
+      .map((id) => sesMessageIdOf(id)).filter((id): id is string => !!id);
+    if (sesIds.length) {
+      const { data: sentRows } = await admin.from("email_sends")
+        .select("provider_message_id, short_code, contact_id")
+        .eq("client_id", clientId).in("provider_message_id", [...new Set(sesIds)]).limit(20);
+      type SentRow = { provider_message_id: string | null; short_code: string | null; contact_id: string | null };
+      const byId = new Map<string, SentRow>(
+        ((sentRows ?? []) as SentRow[]).map((r) => [String(r.provider_message_id), r]),
+      );
+      for (const id of sesIds) {
+        const sent = byId.get(id);
+        if (!sent) continue;
+        if (sent.short_code) {
+          const { data: d } = await admin.from("designs")
+            .select("contact_id, short_code")
+            .eq("short_code", sent.short_code).eq("client_id", clientId).maybeSingle();
+          if (d) { shortCode = d.short_code ?? sent.short_code; contactId = d.contact_id ?? null; break; }
+        }
+        if (sent.contact_id) {
+          const c = await liveContact(String(sent.contact_id));
+          if (c) { contactId = c; break; }
+        }
+      }
+    }
+  }
+
   // B3. The sender's address. Weakest — it cannot know WHICH design — but it still lands the
   //     message on the right person, which is most of the value. Scoped to the tenant, so the
   //     old cross-tenant ambiguity cannot arise: two builders may both know this address, and
@@ -447,6 +536,14 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
         unattributed: !clientId,
       },
     });
+    // SNS tries again on a 5xx, and the email is still in the bucket: a database blip costs the
+    // reply nothing on the SES path. (Resend does not come back after any answer we would give,
+    // so its path keeps the 200.) The row above is this failure's one ticket.
+    if (viaSes) {
+      const res = json({ ok: false, stored: false }, 503);
+      filedAtReturnSite.add(res);
+      return res;
+    }
     return json({ ok: true, stored: false });
   }
 
@@ -467,4 +564,4 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
     ok: true, stored: true,
     matched: !clientId ? "none" : (contactId ? "contact" : (shortCode ? "design" : "tenant")),
   });
-}));
+}, { alreadyFiled: (res) => filedAtReturnSite.has(res) }));

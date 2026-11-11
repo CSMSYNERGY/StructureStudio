@@ -14,7 +14,7 @@
 // notices (PLATFORM_EMAIL_DOMAIN_READY + RESEND_API_KEY). Not ledgered in email_sends, which is the
 // tenant's own business mail (customer-auth's reasoning for its sign-in codes).
 
-import { rsSendEmail, resendConfigured, ResendApiError } from "./resend.ts";
+import { sendPlatformMail, platformMailConfigured, mailErrCode } from "./mailTransport.ts";
 import { logEdgeError } from "./logError.ts";
 import { cofMoney } from "./cofConsent.ts";
 
@@ -78,7 +78,7 @@ export async function ownerEmails(admin: Admin, clientId: string): Promise<strin
   return [...new Set(emails.filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)))].slice(0, MAX_RECIPIENTS);
 }
 
-export type ReceiptDeps = { send?: typeof rsSendEmail; configured?: () => boolean; log?: typeof logEdgeError; fn?: string };
+export type ReceiptDeps = { send?: typeof sendPlatformMail; configured?: () => boolean; log?: typeof logEdgeError; fn?: string };
 
 /** Send the receipt to the tenant's owners and record the outcome on the attempt row. */
 export async function sendTopupReceipt(
@@ -89,8 +89,8 @@ export async function sendTopupReceipt(
   req: Request | null = null,
   deps: ReceiptDeps = {},
 ): Promise<{ sent: number; error: string | null }> {
-  const send = deps.send ?? rsSendEmail;
-  const configured = deps.configured ?? (() => resendConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true");
+  const send = deps.send ?? sendPlatformMail;
+  const configured = deps.configured ?? (() => platformMailConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true");
   const log = deps.log ?? logEdgeError;
   let outcome: { sent: number; error: string | null } = { sent: 0, error: "not attempted" };
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -108,7 +108,7 @@ export async function sendTopupReceipt(
         const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
         if (!failed.length) return { sent: to.length, error: null };
         // Resend's message can echo the recipient, so only its status/name travels.
-        const why = [...new Set(failed.map((r) => r.reason instanceof ResendApiError ? `resend ${r.reason.status}/${r.reason.name_ || "unknown"}` : "send failed"))];
+        const why = [...new Set(failed.map((r) => mailErrCode(r.reason) ?? "send failed"))];
         return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent: ${why.join(", ")}` };
       })(),
       new Promise<{ sent: number; error: string }>((resolve) => {

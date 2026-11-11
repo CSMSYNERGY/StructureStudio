@@ -120,6 +120,15 @@ Deno.test("dmarcDomainOf: the domain in the DKIM host Resend returned, then its 
   assertEquals(dmarcDomainOf([{ host: "resend._domainkey.localhost" }]), null, "a single label is not a domain");
 });
 
+Deno.test("dmarcDomainOf reads an Amazon SES DKIM host too: our selector, or one of AWS's tokens", () => {
+  const mx = { type: "MX", host: "reply.acmesheds.test", value: "inbound-smtp.example.test", verified: false, priority: 10 };
+  assertEquals(dmarcDomainOf([{ type: "TXT", host: "ss1._domainkey.acmesheds.test", value: "p=MIGf" }, mx]), "acmesheds.test");
+  assertEquals(dmarcDomainOf([{ type: "CNAME", host: "abc123token._domainkey.mail.acmesheds.test", value: "abc123token.dkim.example.test" }]), "mail.acmesheds.test");
+  assertEquals(dmarcDomainOf([mx]), null, "the reply MX alone names the reply subdomain, not the sending domain");
+  assertEquals(dmarcDomainOf([{ host: "a.b._domainkey.acmesheds.test" }]), null, "a selector is one label");
+  assertEquals(dmarcDomainOf([{ host: "ss1._domainkey.localhost" }]), null, "a single label is not a domain");
+});
+
 Deno.test("dmarcNamesFor: the domain, then each parent above the TLD, at most five", () => {
   assertEquals(dmarcNamesFor("acmesheds.test"), ["acmesheds.test"], "an apex asks once; _dmarc.<tld> is never asked");
   assertEquals(dmarcNamesFor("mail.acmesheds.test"), ["mail.acmesheds.test", "acmesheds.test"]);

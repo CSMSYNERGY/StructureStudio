@@ -74,6 +74,14 @@ export function dmarcDomainOf(rows: unknown): string | null {
     const d = h.slice(prefix.length);
     if (d.length <= 253 && HOSTNAME.test(d)) return d;
   }
+  // Amazon SES (2026-11-10) names its DKIM host by a selector of ours (ss1._domainkey.<domain>)
+  // or by its own tokens (<token>._domainkey.<domain>). Either way the domain is what follows
+  // the one `_domainkey` label, so any DKIM host says it. Resend's two spellings are tried first
+  // so nothing about a Resend builder's answer changes.
+  for (const h of hosts) {
+    const m = /^[a-z0-9-]{1,63}\._domainkey\.(.+)$/.exec(h);
+    if (m && m[1].length <= 253 && HOSTNAME.test(m[1])) return m[1];
+  }
   return null;
 }
 

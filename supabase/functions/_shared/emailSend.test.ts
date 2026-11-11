@@ -93,6 +93,11 @@ type StubOpts = {
   insertThrows?: boolean;
   /** Force every email_sends update to fail. */
   updateError?: { message: string } | null;
+  /** Decide per read of client_settings, from the columns asked for: a database from before a
+   *  migration refuses the whole read when it names a column that is not there yet. */
+  settingsErrorFor?: (cols: string) => { message: string; code?: string } | null;
+  /** What a read of email_sends finds (the SES retry check looks for an earlier try that went). */
+  priorSend?: Record<string, unknown> | null;
 };
 
 function stubAdmin(opts: StubOpts = {}) {
@@ -100,7 +105,7 @@ function stubAdmin(opts: StubOpts = {}) {
   const admin = {
     from(table: string) {
       return {
-        select(_cols: string) {
+        select(cols: string) {
           const call: DbCall = { table, op: "select", filters: {} };
           calls.push(call);
           const builder = {
@@ -108,11 +113,22 @@ function stubAdmin(opts: StubOpts = {}) {
               call.filters[col] = val;
               return builder;
             },
+            in(col: string, vals: unknown) {
+              call.filters[col] = vals;
+              return builder;
+            },
+            order(_col: string, _o?: unknown) {
+              return builder;
+            },
+            limit(_n: number) {
+              return builder;
+            },
             maybeSingle() {
-              return Promise.resolve({
-                data: table === "client_settings" ? (opts.settings ?? null) : null,
-                error: null,
-              });
+              if (table === "client_settings") {
+                const error = opts.settingsErrorFor?.(cols) ?? null;
+                return Promise.resolve(error ? { data: null, error } : { data: opts.settings ?? null, error: null });
+              }
+              return Promise.resolve({ data: table === "email_sends" ? (opts.priorSend ?? null) : null, error: null });
             },
           };
           return builder;
@@ -184,7 +200,12 @@ const PENDING = { ...VERIFIED, email_domain_status: "pending" };
 /** A tenant whose inbound subdomain is connected AND verified. */
 const INBOUND_ON = { ...VERIFIED, inbound_domain: "reply.example.com", inbound_status: "active" };
 
+/** Everything the two wires read, cleared before and after every test so one test's SES key or
+ *  platform default can never leak into the next. */
+const WIRE_ENV = ["EMAIL_DEFAULT_TRANSPORT", "SES_ACCESS_KEY_ID", "SES_SECRET_ACCESS_KEY", "SES_SESSION_TOKEN", "SES_REGION", "SES_CONFIGURATION_SET"];
+
 function setup() {
+  for (const k of WIRE_ENV) Deno.env.delete(k);
   Deno.env.set("RESEND_API_KEY", "test-resend-key");
   // logEdgeError only writes when these are set; deleting them keeps the fallback a
   // deterministic no-op (zero fetches) on every machine, not just ones without a local
@@ -195,6 +216,7 @@ function setup() {
 }
 function teardown() {
   globalThis.fetch = realFetch;
+  for (const k of WIRE_ENV) Deno.env.delete(k);
   Deno.env.delete("RESEND_API_KEY");
   Deno.env.delete("PLATFORM_EMAIL_DOMAIN_READY");
 }
@@ -1208,6 +1230,263 @@ Deno.test("a 403 is NOT permanent here: it is the account or the domain, which a
     stubFetch(() => jsonResponse({ statusCode: 400, name: "validation_error", message: "bad" }, 400));
     const bad = await sendTenantEmail(stubAdmin({ settings: VERIFIED }).admin, CLIENT_ID, CONVO_KEYED);
     assert(!bad.sent && bad.permanent === true, "a malformed request is still permanent");
+  } finally {
+    teardown();
+  }
+});
+
+// ── Two wires (2026-11-10): Resend or Amazon SES, chosen per builder ─────────────────────────
+//
+// The Resend tests above all run with no pin and no platform default, which is "Resend, exactly
+// as before". These pin what is new: who goes out on SES, what an SES send must and must not
+// carry, and how a keyed retry is kept from sending twice without a provider key to lean on.
+
+const SES_URL = "https://email.us-east-2.amazonaws.com/v2/email/outbound-emails";
+const RESEND_URL = "https://api.resend.com/emails";
+const SES_ID = "010f01a1c6ab6244-97c93344-1283-410a-bb48-6ec62d26202b-000000";
+const ON_SES = { ...VERIFIED, email_transport: "ses", ses_identity: "mail.example.com" };
+
+function sesKey() {
+  Deno.env.set("SES_ACCESS_KEY_ID", "AKIDEXAMPLE");
+  Deno.env.set("SES_SECRET_ACCESS_KEY", "test-ses-secret");
+}
+
+Deno.test("a builder pinned to SES sends through SES: no Message-ID of ours, the ledger row's id as a tag, SES's id on the row", async () => {
+  setup();
+  sesKey();
+  try {
+    const fetches = stubFetch(() => jsonResponse({ MessageId: SES_ID }));
+    const db = stubAdmin({ settings: { ...ON_SES, inbound_domain: "reply.mail.example.com", inbound_status: "active" } });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, headers: { "List-Unsubscribe": "<https://example.com/u>" } });
+    assert(res.sent && res.messageId === SES_ID, "sent, with SES's id");
+    assertEquals(fetches.length, 1);
+    assertEquals(fetches[0].url, SES_URL);
+    assert((fetches[0].headers.get("authorization") ?? "").startsWith("AWS4-HMAC-SHA256 "), "signed, not a bearer key");
+    const body = JSON.parse(fetches[0].body ?? "{}");
+    assertEquals(body.FromEmailAddress, '"Example Barns" <quotes@mail.example.com>');
+    assertArrayEquals(body.ReplyToAddresses, ["d.ss-test123456@reply.mail.example.com"], "the routing address still rides");
+    assertArrayEquals(body.Content.Simple.Headers, [{ Name: "List-Unsubscribe", Value: "<https://example.com/u>" }],
+      "the caller's header goes; no Message-ID is built on SES (it would be refused)");
+    assertArrayEquals(body.EmailTags, [
+      { Name: "client_id", Value: "tenant-1" }, { Name: "kind", Value: "estimate" },
+      { Name: "short_code", Value: "SS-TEST123456" }, { Name: "ss_send", Value: "es-row-1" },
+    ]);
+    const ins = inserts(db.calls);
+    assertEquals(ins.length, 1);
+    assert(!("idem_key" in (ins[0].payload ?? {})), "a send a person makes carries no key, on the row either");
+    const upd = updates(db.calls);
+    assertEquals(upd[0].payload?.status, "sent");
+    assertEquals(upd[0].payload?.provider_message_id, SES_ID, "the id a reply's In-Reply-To will carry");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("holding a Resend domain pins a builder to Resend, whatever the platform default says", async () => {
+  setup();
+  sesKey();
+  Deno.env.set("EMAIL_DEFAULT_TRANSPORT", "ses");
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: { ...VERIFIED, resend_domain_id: "rs-dom-1" } });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(res.sent, "sent");
+    assertEquals(fetches[0].url, RESEND_URL, "their domain is verified at Resend, not at SES");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a builder with no pin follows the platform default, and the default is SES only when SES can send", async () => {
+  setup();
+  Deno.env.set("PLATFORM_EMAIL_DOMAIN_READY", "true");
+  Deno.env.set("EMAIL_DEFAULT_TRANSPORT", "ses");
+  try {
+    // The setting says ses, but there is no SES key: the default stays on Resend.
+    let fetches = stubFetch(() => jsonResponse(OK_SEND));
+    let db = stubAdmin({ settings: { ...PENDING, invoice_in_ghl: false } });
+    assert((await sendTenantEmail(db.admin, CLIENT_ID, MAIL)).sent, "sent on Resend");
+    assertEquals(fetches[0].url, RESEND_URL);
+
+    sesKey();
+    fetches = stubFetch(() => jsonResponse({ MessageId: SES_ID }));
+    db = stubAdmin({ settings: { ...PENDING, invoice_in_ghl: false } });
+    assert((await sendTenantEmail(db.admin, CLIENT_ID, MAIL)).sent, "sent on SES");
+    assertEquals(fetches[0].url, SES_URL);
+    assertEquals(JSON.parse(fetches[0].body ?? "{}").FromEmailAddress, '"Example Barns LLC" <no-reply@mail.structurestudiosuite.com>');
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("pinned to SES with no SES key: not_active, zero fetches, no ledger row", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: ON_SES });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!res.sent && res.reason === "not_active", "dark, so the caller's own fallback takes it");
+    assertEquals(fetches.length, 0, "and never out through Resend, where this domain is not verified");
+    assertEquals(inserts(db.calls).length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("only an SES key on the deployment: a Resend builder is not_active, an SES builder sends", async () => {
+  setup();
+  Deno.env.delete("RESEND_API_KEY");
+  sesKey();
+  try {
+    let fetches = stubFetch(() => jsonResponse({ MessageId: SES_ID }));
+    let db = stubAdmin({ settings: { ...VERIFIED, resend_domain_id: "rs-dom-1" } });
+    const dark = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!dark.sent && dark.reason === "not_active", "Resend is gone from this deployment");
+    assertEquals(fetches.length, 0);
+    fetches = stubFetch(() => jsonResponse({ MessageId: SES_ID }));
+    db = stubAdmin({ settings: ON_SES });
+    assert((await sendTenantEmail(db.admin, CLIENT_ID, MAIL)).sent, "the SES builder is unaffected");
+    assertEquals(fetches.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a database from before the pin's migration: the settings read is tried again without the new columns, and email still goes", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const asked: string[] = [];
+    const db = stubAdmin({
+      settings: VERIFIED,
+      settingsErrorFor: (cols) => {
+        asked.push(cols);
+        return cols.includes("email_transport") ? { message: "column client_settings.email_transport does not exist", code: "42703" } : null;
+      },
+    });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(res.sent, "one missing column must not turn every tenant's email off");
+    assertEquals(asked.length, 2);
+    assert(!asked[1].includes("email_transport") && !asked[1].includes("ses_identity"), "the second read names neither new column");
+    assert(asked[1].includes("resend_domain_id"), "and still reads the Resend domain id, which pins a builder without the column");
+    assertEquals(fetches[0].url, RESEND_URL);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("SES, a keyed send: the key is remembered on the ledger row, since SES has nowhere to put it", async () => {
+  setup();
+  sesKey();
+  try {
+    const fetches = stubFetch(() => jsonResponse({ MessageId: SES_ID }));
+    const db = stubAdmin({ settings: ON_SES });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, idempotencyKey: "crm-outbox/row-1" });
+    assert(res.sent, "sent");
+    assertEquals(fetches.length, 1);
+    assert(!fetches[0].headers.has("idempotency-key"), "no key header goes to SES");
+    const key = String(inserts(db.calls)[0].payload?.idem_key ?? "");
+    assert(/^crm-outbox\/row-1\/[0-9a-f]{16}$/.test(key), `the caller's key plus the email's fingerprint, got ${key}`);
+    // The check that ran before the claim asked for exactly this key, in this tenant, among rows that went.
+    const lookup = db.calls.find((c) => c.table === "email_sends" && c.op === "select");
+    assertEquals(lookup?.filters.client_id, CLIENT_ID);
+    assertEquals(lookup?.filters.idem_key, key);
+    assertArrayEquals(lookup?.filters.status, ["sent", "delivered", "bounced"]);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("SES, a keyed retry of an email that already went: answered from the ledger, nothing sent, no new row", async () => {
+  setup();
+  sesKey();
+  try {
+    const fetches = stubFetch(() => jsonResponse({ MessageId: "a-second-copy" }));
+    const db = stubAdmin({ settings: ON_SES, priorSend: { id: "es-row-first", provider_message_id: SES_ID, status: "delivered" } });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, idempotencyKey: "crm-outbox/row-1" });
+    assert(res.sent, "the caller hears sent: the customer has this email");
+    assert(res.sent && res.id === "es-row-first" && res.messageId === SES_ID, "and is given the row that carried it");
+    assertEquals(fetches.length, 0, "the customer must not get a second copy");
+    assertEquals(inserts(db.calls).length, 0, "and the ledger gets no row for a send that did not happen");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("SES, an unkeyed send never asks the ledger: a person pressing Send again means to send again", async () => {
+  setup();
+  sesKey();
+  try {
+    const fetches = stubFetch(() => jsonResponse({ MessageId: SES_ID }));
+    const db = stubAdmin({ settings: ON_SES, priorSend: { id: "es-row-first", provider_message_id: SES_ID, status: "sent" } });
+    assert((await sendTenantEmail(db.admin, CLIENT_ID, MAIL)).sent, "sent");
+    assertEquals(fetches.length, 1);
+    assertEquals(db.calls.filter((c) => c.table === "email_sends" && c.op === "select").length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("SES, a database from before idem_key: the claim is tried again without it and the email goes", async () => {
+  setup();
+  sesKey();
+  try {
+    const fetches = stubFetch(() => jsonResponse({ MessageId: SES_ID }));
+    const db = stubAdmin({
+      settings: ON_SES,
+      insertErrorFor: (row) => ("idem_key" in row ? { message: "Could not find the 'idem_key' column", code: "PGRST204" } : null),
+    });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, idempotencyKey: "crm-outbox/row-1" });
+    assert(res.sent, "sent");
+    const ins = inserts(db.calls);
+    assertEquals(ins.length, 2, "one refused claim, one accepted");
+    assert(!("idem_key" in (ins[1].payload ?? {})), "the second claim leaves the key off");
+    assertEquals(fetches.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("Resend rows never carry idem_key: a keyed Resend send writes the row it always wrote", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: VERIFIED });
+    assert((await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, idempotencyKey: "crm-outbox/row-1" })).sent, "sent");
+    assert(!("idem_key" in (inserts(db.calls)[0].payload ?? {})), "Resend keeps the key itself");
+    assert(/^crm-outbox\/row-1\/[0-9a-f]{16}$/.test(fetches[0].headers.get("idempotency-key") ?? ""), "and still gets it as a header");
+    assertEquals(db.calls.filter((c) => c.table === "email_sends" && c.op === "select").length, 0, "no ledger question on Resend");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("an SES refusal is recorded as `ses <status>/<name>`, never AWS's words; only a malformed request is permanent", async () => {
+  setup();
+  sesKey();
+  try {
+    const refuse = (status: number, type: string) => () =>
+      new Response(JSON.stringify({ message: "Email address is not verified: lead@example.net" }), {
+        status, headers: { "x-amzn-errortype": `${type}:http://internal.amazon.com/` },
+      });
+    stubFetch(refuse(400, "MessageRejected"));
+    let db = stubAdmin({ settings: ON_SES });
+    let res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!res.sent && res.reason === "failed", "failed");
+    assert(!res.sent && res.error === "ses 400/MessageRejected", `got ${!res.sent && res.error}`);
+    assert(!res.sent && res.permanent !== true, "MessageRejected covers a domain that lost its DNS for an afternoon: retry");
+    assertEquals(updates(db.calls)[0].payload?.error, "ses 400/MessageRejected");
+    assert(!JSON.stringify(db.calls).includes("is not verified"), "AWS's message names the customer's address and is never stored");
+
+    stubFetch(refuse(400, "BadRequestException"));
+    db = stubAdmin({ settings: ON_SES });
+    res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!res.sent && res.permanent === true, "a malformed request fails the same way every time");
+
+    stubFetch(refuse(403, "AccessDeniedException"));
+    db = stubAdmin({ settings: ON_SES });
+    res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!res.sent && res.permanent !== true, "a key problem is a person's to fix; the retries wait for them");
   } finally {
     teardown();
   }

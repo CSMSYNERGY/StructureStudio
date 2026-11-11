@@ -34,6 +34,7 @@ import {
 import { buildTenantExport, ExportTooLarge, sweepOldExports, type ExportResult } from "../_shared/tenantExport.ts";
 import { sweepPrefix } from "../_shared/storageTree.ts";
 import { rsDeleteDomain } from "../_shared/resend.ts";
+import { sesDeleteIdentity } from "../_shared/ses.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 // Workstream 2, phase 9: the operator console's card for a builder's own Twilio sub-account (get,
 // create, suspend, close), and delete_client closing that sub-account first.
@@ -2828,6 +2829,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const connections = await sb.from("client_settings")
           .select("resend_domain_id, resend_inbound_domain_id, qbo_realm_id, qbo_connected_at, qbo_refresh_token")
           .eq("client_id", clientId).maybeSingle();
+        // The builder's sending domain at Amazon SES (migration 383), read apart from the line
+        // above on purpose: on a database from before that migration this read fails by itself
+        // and the one above still answers. No answer means nothing at SES to remove.
+        const sesHeld = await sb.from("client_settings").select("ses_identity").eq("client_id", clientId).maybeSingle();
+        const sesIdentity = !sesHeld.error && typeof sesHeld.data?.ses_identity === "string" ? sesHeld.data.ses_identity.trim().toLowerCase() : "";
         let parentNumbers: string[] = [];
         let parentA2p: { brandSid: string | null; campaignSid: string | null } | null = null;
         if (!twilioClosed) {
@@ -2919,6 +2925,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           } catch (e) {
             failed.push(key);
             logEdgeError({ fn: "admin-catalog", req, clientId, code: `delete_client_${key}`, message: `provider domain delete failed (id ${domainId}): ${String((e as Error)?.message ?? e)}` }).catch(() => {});
+          }
+        }
+        // The same for their identity at Amazon SES: removed unless another builder's settings
+        // name it too. A name of the wrong shape goes to the operator rather than into a URL.
+        if (sesIdentity) {
+          if (!/^(?!-)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(sesIdentity)) byHand.push("ses_identity");
+          else {
+            const shared = await sb.from("client_settings").select("client_id", { count: "exact", head: true }).eq("ses_identity", sesIdentity);
+            if (shared.error) failed.push("ses_identity");
+            else if (!shared.count) {
+              try {
+                await sesDeleteIdentity(sesIdentity);
+                done.push("ses_identity");
+              } catch (e) {
+                failed.push("ses_identity");
+                logEdgeError({ fn: "admin-catalog", req, clientId, code: "delete_client_ses_identity", message: `provider identity delete failed: ${String((e as Error)?.message ?? e)}` }).catch(() => {});
+              }
+            }
           }
         }
         if (conn?.qbo_realm_id && conn?.qbo_connected_at) {

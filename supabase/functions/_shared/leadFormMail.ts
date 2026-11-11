@@ -13,7 +13,7 @@
 // call ever throws to its caller. Never an email address in a log line.
 
 import { cleanDesign, EMAIL_STARTERS, fillText, renderEmailDesign, type EmailDesign, type Tokens } from "./emailBlocks.ts";
-import { rsSendEmail, resendConfigured, ResendApiError } from "./resend.ts";
+import { sendPlatformMail, platformMailConfigured, mailErrCode } from "./mailTransport.ts";
 import { sendTenantEmail } from "./emailSend.ts";
 
 export const PLATFORM_NOTIFY_FROM = "StructureStudio <no-reply@mail.structurestudiosuite.com>";
@@ -82,19 +82,19 @@ function bounded<T>(work: Promise<T>, onTimeout: T): Promise<T> {
 
 export async function sendLeadAlert(clientId: string, to: string[], tpl: Tpl, tokens: Tokens, replyTo?: string): Promise<{ sent: number; error: string | null }> {
   try {
-    if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
+    if (!platformMailConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
     if (!to.length) return { sent: 0, error: "no recipient" };
     const r = renderEmailDesign(tpl.design, tokens, tpl.preheader);
     const subject = fillText(tpl.subject, tokens).replace(/[\r\n]+/g, " ").slice(0, 200) || "New website lead";
     return await bounded((async () => {
-      const results = await Promise.allSettled(to.map((addr) => rsSendEmail({
+      const results = await Promise.allSettled(to.map((addr) => sendPlatformMail({
         from: PLATFORM_NOTIFY_FROM, to: addr, subject, html: r.html, text: r.text,
         ...(replyTo && EMAIL.test(replyTo) ? { replyTo } : {}),
         tags: [{ name: "kind", value: "form_notification" }, { name: "client_id", value: clientId }],
       })));
       const failed = results.filter((x): x is PromiseRejectedResult => x.status === "rejected");
       if (!failed.length) return { sent: to.length, error: null };
-      const why = [...new Set(failed.map((x) => x.reason instanceof ResendApiError ? `resend ${x.reason.status}` : "send failed"))];
+      const why = [...new Set(failed.map((x) => mailErrCode(x.reason) ?? "send failed"))];
       return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent: ${why.join(", ")}` };
     })(), { sent: 0, error: "timed out waiting for the email provider" });
   } catch {
@@ -115,7 +115,7 @@ export async function sendLeadAlert(clientId: string, to: string[], tpl: Tpl, to
  */
 export async function sendTeamNote(clientId: string, to: string[], subject: string, text: string, key?: string | null): Promise<{ sent: number; error: string | null }> {
   try {
-    if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
+    if (!platformMailConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
     if (!to.length) return { sent: 0, error: "no recipient" };
     // Escaped, not interpolated: the merge values are customers' names.
     const html = `<div style="font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#1E293B">${
@@ -124,7 +124,7 @@ export async function sendTeamNote(clientId: string, to: string[], subject: stri
     const base = typeof key === "string" ? key.trim() : "";
     const words = base ? await hex(`${subj}\u0000${text}`, 16) : "";
     return await bounded((async () => {
-      const results = await Promise.allSettled(to.map(async (addr) => rsSendEmail({
+      const results = await Promise.allSettled(to.map(async (addr) => sendPlatformMail({
         from: PLATFORM_NOTIFY_FROM, to: addr, subject: subj, html, text,
         tags: [{ name: "kind", value: "team_note" }, { name: "client_id", value: clientId }],
         ...(base ? { idempotencyKey: `${base}/${await hex(addr, 12)}/${words}` } : {}),

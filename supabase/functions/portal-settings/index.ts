@@ -17,6 +17,10 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+// Amazon SES (2026-11-10): the same Email screen for a builder whose email goes out through SES.
+// ./emailSes.ts answers for them and returns null for a builder on Resend, whose code is below.
+import { anyTransportConfigured } from "../_shared/mailTransport.ts";
+import { emailOnSes, emailSesConnect, handleEmailSesAction } from "./emailSes.ts";
 // Email Settings asks public DNS whether the sending domain already has a DMARC record before
 // it advises one (2026-10-05).
 import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
@@ -556,6 +560,11 @@ const GATES: GateTable = {
   // verified sending domain and checks its tracking record. Same area: it changes every email the
   // business sends (each carries the tracking image once it is on).
   email_tracking_check:     { area: "settings_email", level: "edit" },
+  // Moving a builder who is on Resend to Amazon SES (./emailSes.ts): prepare creates their SES
+  // identity beside the Resend one, cut over flips them once AWS has verified it. Both refuse
+  // anyone but CSM Synergy staff, whatever this grant says.
+  email_ses_prepare:        { area: "settings_email", level: "edit" },
+  email_ses_cutover:        { area: "settings_email", level: "edit" },
 
   // ── Workspace ────────────────────────────────────────────────────────────
   contact_activity: { area: "contacts", level: "view" },
@@ -14805,6 +14814,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // which the screen reads as "say nothing about DMARC". No records yet, no lookup.
     const dmarcDomain = dmarcDomainOf(s?.email_dns_records);
     const existingDmarcP = dmarcDomain ? lookupExistingDmarc(dmarcDomain) : Promise.resolve(null);
+    // Asked alongside, and never able to fail the screen (./emailSes.ts): is this builder's
+    // domain at Amazon SES? Opens are not offered there yet, so the screen leaves that card out.
+    const onSesP = emailOnSes(admin, clientId);
     // opened_at and complained_at are migration 262's (B4). Read with them, and once more without
     // them on "no such column", so a deploy ahead of 262 still shows this screen instead of failing
     // it whole — crmFeed's rule for body_text.
@@ -14824,7 +14836,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
     return json({
       clientId, // operator view-as tripwire (the qbo_status pattern)
-      platformReady: resendConfigured(),
+      // Either wire: a builder on Amazon SES is ready on a deployment whose Resend key is gone.
+      platformReady: anyTransportConfigured(),
       // So the Email Sending screen prefills the wording boxes without a second round trip.
       templateCopy: s?.email_template_copy ?? null,
       domainStatus: s?.email_domain_status ?? "not_configured",
@@ -14836,6 +14849,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       lastError: s?.email_last_error ?? null,
       active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
+      // false only for a builder on Amazon SES, where "see when emails are opened" is not
+      // available yet. The screen hides that card on an explicit false and on nothing else.
+      opensAvailable: !(await onSesP),
       // { present, policy, count, host } or null (no records yet, or DNS couldn't say). The
       // screen shows its DMARC advisory row only for present: false at _dmarc.<the DKIM host's
       // domain>, says "leave it as it is" for one record, and warns about two or more.
@@ -14993,6 +15009,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, clientId, kind: k, subject: content.subject, html: content.html, photo });
   }
 
+  // ── Amazon SES first (2026-11-10) ───────────────────────────────────────────────────
+  // A builder whose email goes out through SES gets every action below answered by
+  // ./emailSes.ts, with the same response fields. It returns null for a builder on Resend (and
+  // for a database that has no SES columns yet), and then the Resend branch runs untouched.
+  // email_connect_domain is not in this list: its hook is INSIDE its branch, after the checks
+  // both providers share. Every action is NAMED, so preflight's GATES ⇄ branch check sees them.
+  if (action === "email_verify_domain" ||
+      action === "email_tracking_check" ||
+      action === "email_disconnect" ||
+      action === "email_inbound_connect" ||
+      action === "email_inbound_verify" ||
+      action === "email_inbound_disconnect" ||
+      action === "email_ses_prepare" ||
+      action === "email_ses_cutover") {
+    const sesAnswer = await handleEmailSesAction({
+      admin, req, clientId, action, operator: Boolean(operator),
+      payload: (payload ?? {}) as Record<string, unknown>, json, dbFail,
+    });
+    if (sesAnswer) return sesAnswer;
+  }
+
   if (action === "email_connect_domain") {
     // Normalize what people actually paste: a URL ("https://mybarn.com/contact"), a full
     // address, a trailing dot, uppercase. What's left must LOOK like a registrable host,
@@ -15072,6 +15109,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                "contact support and we'll release it.",
       }, 409);
     }
+
+    // Amazon SES (2026-11-10): a builder with nothing at Resend connects at SES once that is
+    // the platform default (./emailSes.ts says exactly when). Placed here so every check above
+    // is written once for both providers. null means "this connect is Resend's".
+    const sesConnect = await emailSesConnect(
+      { admin, req, clientId, action, operator: Boolean(operator), payload: (payload ?? {}) as Record<string, unknown>, json, dbFail },
+      { domain, fromLocal, fromName },
+    );
+    if (sesConnect) return sesConnect;
 
     let d: RsDomain;
     try {

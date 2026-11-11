@@ -13,7 +13,7 @@
 // mail). No builder name, no operator name, no amounts: a plain note with the one link. The link
 // is built by the caller (customerPortalUrl.ts portalWalletUrl) so this module knows no hosts.
 
-import { rsSendEmail, resendConfigured, ResendApiError } from "./resend.ts";
+import { sendPlatformMail, platformMailConfigured, mailErrCode } from "./mailTransport.ts";
 import { logEdgeError } from "./logError.ts";
 import { ownerEmails } from "./walletReceipt.ts";
 
@@ -52,7 +52,7 @@ export function cardRequestEmail(i: CardRequestInput): { subject: string; text: 
 // deno-lint-ignore no-explicit-any
 type Admin = any;
 
-export type CardRequestDeps = { send?: typeof rsSendEmail; configured?: () => boolean; log?: typeof logEdgeError; fn?: string };
+export type CardRequestDeps = { send?: typeof sendPlatformMail; configured?: () => boolean; log?: typeof logEdgeError; fn?: string };
 
 /** Send the note to the tenant's owners. Resolves with how many got it; never throws. */
 export async function sendCardRequestEmail(
@@ -62,8 +62,8 @@ export async function sendCardRequestEmail(
   req: Request | null = null,
   deps: CardRequestDeps = {},
 ): Promise<{ sent: number; error: string | null }> {
-  const send = deps.send ?? rsSendEmail;
-  const configured = deps.configured ?? (() => resendConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true");
+  const send = deps.send ?? sendPlatformMail;
+  const configured = deps.configured ?? (() => platformMailConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true");
   const log = deps.log ?? logEdgeError;
   let outcome: { sent: number; error: string | null } = { sent: 0, error: "not attempted" };
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -81,7 +81,7 @@ export async function sendCardRequestEmail(
         const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
         if (!failed.length) return { sent: to.length, error: null };
         // Resend's message can echo the recipient, so only its status/name travels.
-        const why = [...new Set(failed.map((r) => r.reason instanceof ResendApiError ? `resend ${r.reason.status}/${r.reason.name_ || "unknown"}` : "send failed"))];
+        const why = [...new Set(failed.map((r) => mailErrCode(r.reason) ?? "send failed"))];
         return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent: ${why.join(", ")}` };
       })(),
       new Promise<{ sent: number; error: string }>((resolve) => {

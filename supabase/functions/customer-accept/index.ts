@@ -10,7 +10,7 @@ import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { repReplyTo, type ReplyCopy } from "../_shared/repReplyTo.ts";
-import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
+import { sendPlatformMail, platformMailConfigured, mailErrCode } from "../_shared/mailTransport.ts";
 import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
 import { consentSentence, consentSentenceChangeOrder, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 // The accept race (2026-09-17): the total the customer SAW, checked against the one about to freeze.
@@ -266,7 +266,7 @@ async function raiseInvoiceRequest(admin: any, req: Request, a: InvoiceRequestAr
  *  in words that never carry an address (Resend's errors can echo the recipient). */
 // deno-lint-ignore no-explicit-any
 async function notifyInvoiceRequest(admin: any, req: Request, a: InvoiceRequestArgs): Promise<{ sent: number; error: string | null }> {
-  if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
+  if (!platformMailConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
     return { sent: 0, error: "platform email is not configured" };
   }
   const { data: users, error: uErr } = await admin.from("client_users")
@@ -306,7 +306,7 @@ async function notifyInvoiceRequest(admin: any, req: Request, a: InvoiceRequestA
   });
   // One message per person, not one message to all of them: a bounced address fails alone,
   // and nobody's address is shown to anybody else.
-  const results = await Promise.allSettled(to.map((addr) => rsSendEmail({
+  const results = await Promise.allSettled(to.map((addr) => sendPlatformMail({
     from: PLATFORM_NOTIFY_FROM,
     to: addr,
     subject: content.subject,
@@ -317,7 +317,7 @@ async function notifyInvoiceRequest(admin: any, req: Request, a: InvoiceRequestA
   const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
   if (!failed.length) return { sent: to.length, error: null };
   const why = [...new Set(failed.map((r) =>
-    r.reason instanceof ResendApiError ? `resend ${r.reason.status}/${r.reason.name_ || "unknown"}` : "send failed"))];
+    mailErrCode(r.reason) ?? "send failed"))];
   return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent: ${why.join(", ")}` };
 }
 

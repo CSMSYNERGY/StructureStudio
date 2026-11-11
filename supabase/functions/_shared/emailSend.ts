@@ -41,10 +41,24 @@
  * `resend <status>/<name>` (Resend's message field echoes recipient addresses — its
  * testing-mode 403 names the address you may send to; see resend.ts), and app_errors
  * context sticks to shapes, codes and the short code.
+ *
+ * TWO WIRES SINCE 2026-11-10 (Resend -> Amazon SES, one builder at a time). Which one a send
+ * goes out on is mailTransport.ts's decision: the builder's own pin
+ * (client_settings.email_transport) or, with no pin, the platform default. Everything above
+ * still holds on both. Three things differ on SES, each marked where it happens below:
+ *   • no Message-ID of ours (SES replaces it, and refuses one as a custom header), so a reply is
+ *     threaded by the id SES returns, which is the id already stored in provider_message_id;
+ *   • no Idempotency-Key (SES has none), so a keyed retry first asks the LEDGER whether an
+ *     earlier try of the same email went, instead of asking the provider;
+ *   • the ledger row's id rides on the email as a tag, so the event feed can name the row even
+ *     when our send call timed out before SES's answer (and its id) reached us.
  */
 
 // deno-lint-ignore-file no-explicit-any
-import { rsSendEmail, resendConfigured, ResendApiError, type RsSendInput } from "./resend.ts";
+import {
+  anyTransportConfigured, mailErrText, mailErrorPermanent, pinOf, sendMail, transportConfigured,
+  transportFor, type MailInput,
+} from "./mailTransport.ts";
 import { logEdgeError } from "./logError.ts";
 import { buildThreadMessageId, buildReplyAddress } from "./emailInbound.ts";
 // The type only: emailSend.ts still runs no code of repReplyTo's.
@@ -188,8 +202,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const CLIENT_TEMP_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** email_sends_body_text_chk's limit, counted the way Postgres counts it: code points. */
 const BODY_TEXT_MAX = 20000;
-/** The claim-row keys that exist only once migration 261 is applied (contact_id is older). */
-const LEDGER_261_KEYS = ["body_text", "sent_by", "client_temp_id"];
+/** The claim-row keys that exist only once a later migration is applied: 261's three, and
+ *  `idem_key` (the SES retry check below). contact_id is older and always stays. */
+const LEDGER_261_KEYS = ["body_text", "sent_by", "client_temp_id", "idem_key"];
+/** The statuses that mean an email LEFT: accepted by the provider, delivered, or bounced on the
+ *  way. A retry of the same email must not send it again after any of them. */
+const WENT_STATUSES = ["sent", "delivered", "bounced"];
+/** The longest key a provider takes (Resend's limit), and the longest the ledger keeps. */
+const IDEM_KEY_MAX = 256;
 /** The PostgREST / Postgres codes for "that column does not exist (yet)" (sms-inbound's set). */
 const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
 
@@ -332,10 +352,8 @@ export function humanReplyTo(replyTo: unknown, routing: string | null): string |
  *  `name_` is "" when the body carried no name we trust, which is why the slash form is kept
  *  rather than interpolating a bare empty string. */
 function errText(e: unknown): string {
-  const msg = e instanceof ResendApiError
-    ? `resend ${e.status}/${e.name_ || "unknown"}`
-    : String((e as Error)?.message || e || "email send failed");
-  return msg.slice(0, 300);
+  // mailTransport owns the two providers' spellings (`resend 403/…`, `ses 400/…`).
+  return mailErrText(e).slice(0, 300);
 }
 
 /**
@@ -352,23 +370,33 @@ export async function sendTenantEmail(
   let rowId: string | undefined;
   try {
     // ── Dark guards (zero network, zero ledger) ─────────────────────────────────────
-    // Secrets first: an unconfigured deployment skips even the settings read.
-    if (!resendConfigured()) return { sent: false, reason: "not_active" };
+    // Secrets first: an unconfigured deployment (neither wire has its key) skips even the
+    // settings read.
+    if (!anyTransportConfigured()) return { sent: false, reason: "not_active" };
 
     // The one settings read. A missing row or a read error both land on `!s` and go
     // dark — without settings we cannot know the tenant opted in, and dark degrades to
     // the caller's GHL fallback rather than to a dropped email.
-    const { data: s } = await admin.from("client_settings")
-      .select(
-        "email_provider, email_domain_status, email_domain, email_from_local, " +
-          "email_from_name, business_name, beta_mode, beta_email, " +
-          // For the routing Reply-To below. Read here rather than by the caller so all twelve
-          // send paths get it from one place instead of one of them getting it by hand.
-          "inbound_domain, inbound_status, " +
-          // Who issues the paperwork — see the guard below.
-          "invoice_in_ghl",
-      )
-      .eq("client_id", clientId).maybeSingle();
+    const SETTINGS_COLS =
+      "email_provider, email_domain_status, email_domain, email_from_local, " +
+      "email_from_name, business_name, beta_mode, beta_email, " +
+      // For the routing Reply-To below. Read here rather than by the caller so all twelve
+      // send paths get it from one place instead of one of them getting it by hand.
+      "inbound_domain, inbound_status, " +
+      // Who issues the paperwork — see the guard below.
+      "invoice_in_ghl, " +
+      // Holding a domain at Resend pins a builder to Resend (mailTransport.ts pinOf).
+      "resend_domain_id";
+    const readSettings = (cols: string) =>
+      admin.from("client_settings").select(cols).eq("client_id", clientId).maybeSingle();
+    // `email_transport` is the builder's pin and `ses_identity` their domain at SES (see the
+    // header). ⚠️ A DEPLOY AHEAD OF THEIR MIGRATION MUST NOT TURN EVERY EMAIL OFF: PostgREST
+    // refuses the whole read when one name is a column it cannot find, `s` would be null, and
+    // every tenant would go dark at once. So that one error reads again without the two columns;
+    // a builder with a Resend domain is then still pinned to Resend by its id, and everyone else
+    // follows the platform default.
+    let { data: s, error: sErr } = await readSettings(`${SETTINGS_COLS}, email_transport, ses_identity`);
+    if (sErr && MISSING_COLUMN.has(String(sErr.code ?? ""))) ({ data: s } = await readSettings(SETTINGS_COLS));
     if (!s) return { sent: false, reason: "not_active" };
     // THE PROVIDER GUARD, with one deliberate opening (Carolyn 2026-09-02). `email_provider`
     // flips to 'resend' only through email_activate, which refuses until the tenant's own
@@ -379,8 +407,21 @@ export async function sendTenantEmail(
     // received. So a paperwork-mode tenant is treated as opted in — there is no other sender
     // for their documents — and sends from the platform address until their domain verifies.
     // CRM-mode tenants are unchanged: still dark until they activate their own domain.
+    // (`email_provider` keeps its 2026-08 spelling: 'resend' means "StructureStudio sends this
+    // builder's email", on whichever wire. It was never renamed because six other readers
+    // compare against that word.)
     const paperworkMode = s.invoice_in_ghl === false;
     if (s.email_provider !== "resend" && !paperworkMode) return { sent: false, reason: "not_active" };
+
+    // ── Which wire ──────────────────────────────────────────────────────────────────
+    // The builder's pin, or the platform default. A wire whose key is missing on this deployment
+    // is dark exactly like an unconfigured Resend always was: not_active, no ledger row, and the
+    // caller's GHL fallback takes it. (`email_domain_status` below is the verdict of whichever
+    // provider the builder is pinned to; the operator's cutover changes the pin and that status
+    // in one write.)
+    const transport = transportFor(pinOf(s));
+    if (!transportConfigured(transport)) return { sent: false, reason: "not_active" };
+    const onSes = transport === "ses";
 
     // ── From resolution ─────────────────────────────────────────────────────────────
     const businessName = typeof s.business_name === "string" ? s.business_name : "";
@@ -412,67 +453,6 @@ export async function sendTenantEmail(
     const redirected = betaTo !== null;
     const to = betaTo ?? mail.to;
 
-    // ── Ledger first: claim the send before touching the provider ───────────────────
-    // The contact, the words, the writer and the app's bubble id ride on the CLAIM (migration
-    // 261), not on a later update: the row is right from its first moment, whether the send
-    // then succeeds or fails, and whichever address it went to. They used to be stamped on
-    // afterwards by matching the newest row to the same address, which missed every failed
-    // send and every send the beta redirect re-addressed. ledgerExtras keeps any of them from
-    // failing the insert.
-    const extras = ledgerExtras(mail);
-    const claim = (more: Record<string, unknown>) => admin.from("email_sends").insert({
-      client_id: clientId,
-      short_code: mail.shortCode ?? null,
-      kind: mail.kind,
-      to_email: to,
-      ...(redirected ? { intended_email: mail.to } : {}),
-      from_email: fromEmail,
-      subject: mail.subject,
-      status: "claimed",
-      ...more,
-    }).select("id").single();
-    let { data: row, error: insErr } = await claim(extras);
-
-    // ⚠️ A DEPLOY AHEAD OF MIGRATION 261 MUST NOT STOP THE EMAIL. PostgREST refuses the WHOLE
-    // insert when one key names a column it cannot find (PGRST204), so without this every
-    // conversation and test email would be refused at the claim, and not sent, until a human
-    // applied the migration. On that error the claim is tried once more without the 261 keys
-    // (contact_id is older and stays, so the email still lands on the contact), and one info row
-    // names the migration. That costs only the stored words, the writer and the bubble id. A
-    // second failure is the ledger really being down, and refuses exactly as before.
-    const later = Object.keys(extras).filter((k) => LEDGER_261_KEYS.includes(k));
-    if (insErr && MISSING_COLUMN.has(String(insErr.code ?? "")) && later.length) {
-      await logEdgeError({
-        fn: "email-send",
-        clientId,
-        code: "email_ledger_261_columns_missing",
-        severity: "info",
-        message: `email_sends claim row refused ${later.join(", ")} - retrying without them; `
-          + `migration 261 may not be applied: ${insErr.message ?? insErr.code}`,
-        context: { kind: mail.kind, shortCode: mail.shortCode ?? null, redirected },
-      });
-      ({ data: row, error: insErr } = await claim(
-        Object.fromEntries(Object.entries(extras).filter(([k]) => !LEDGER_261_KEYS.includes(k))),
-      ));
-    }
-
-    if (insErr || !row?.id) {
-      // No claim row → no send. The raw Postgres message can echo row values (which
-      // include addresses), so it goes to app_errors — service-role triage — and the
-      // caller gets an authored sentence.
-      await logEdgeError({
-        fn: "email-send",
-        clientId,
-        code: "email_ledger_insert_failed",
-        message: `email_sends claim row could not be written: ${
-          insErr?.message ?? "insert returned no id"
-        }`,
-        context: { kind: mail.kind, shortCode: mail.shortCode ?? null, redirected },
-      });
-      return { sent: false, reason: "failed", error: "email ledger write failed" };
-    }
-    rowId = String(row.id);
-
     // ── Threading id ────────────────────────────────────────────────────────────────
     // An RFC 5322 Message-ID we generate ourselves, encoding the tenant and what the mail
     // is about, so a reply's In-Reply-To routes straight back to this design or contact.
@@ -487,8 +467,14 @@ export async function sendTenantEmail(
     // pieces are missing — a send with no threading id behaves exactly as it did before.
     // A caller's stable key (an automation's retries) fixes the random part, so every try of one
     // message carries the same Message-ID; otherwise it stays random, as before.
+    //
+    // ⚠️ RESEND ONLY. Amazon SES replaces the Message-ID with its own and refuses one as a
+    // custom header, so on SES none is built. A reply is threaded there by the id SES returns:
+    // that id IS the delivered Message-ID's local part, and it is what provider_message_id
+    // stores below, so on SES the join this comment calls impossible is the one that works
+    // (email-inbound, step B2).
     const callerKey = typeof mail.idempotencyKey === "string" ? mail.idempotencyKey.trim() : "";
-    const threadId = buildThreadMessageId(
+    const threadId = onSes ? null : buildThreadMessageId(
       clientId,
       fromEmail.split("@")[1] ?? "",
       { shortCode: mail.shortCode, contactId: mail.contactId },
@@ -552,41 +538,141 @@ export async function sendTenantEmail(
     );
     const replyTo = combineReplyTo(routing, humanReplyTo(mail.replyTo, routing));
 
+    // ── The email as it goes on the wire ────────────────────────────────────────────
+    // Built BEFORE the ledger claim (it was built after it until 2026-11-10) because the SES
+    // retry check just below needs its fingerprint, and that check must run before a row is
+    // claimed for a send that will not happen. Nothing here touches the network or the database.
+    const wire: MailInput = {
+      from,
+      to,
+      subject: mail.subject,
+      html: mail.html,
+      ...(mail.text ? { text: mail.text } : {}),
+      ...(replyTo.length ? { replyTo } : {}),
+      ...(threadId || (mail.headers && Object.keys(mail.headers).length)
+        ? { headers: { ...(mail.headers ?? {}), ...(threadId ? { "Message-ID": threadId } : {}) } } : {}),
+      ...(mail.attachments && mail.attachments.length ? { attachments: mail.attachments } : {}),
+      // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
+      // them to Resend's charset so a dotted tenant slug degrades the TAG rather than
+      // failing the whole send.
+      tags: [
+        { name: "client_id", value: clientId },
+        { name: "kind", value: mail.kind },
+        ...(mail.shortCode ? [{ name: "short_code", value: mail.shortCode }] : []),
+      ],
+    };
+    // The Idempotency-Key. With a caller key: that key plus a fingerprint of exactly what is
+    // being sent, so a retry of the same email matches the first try, while an email that
+    // CHANGED between tries (a meeting moved, a builder renamed their business) gets a key of
+    // its own and goes out, rather than being refused for reusing a key with a new body.
+    // Without one: no key, the wire exactly as it was before keys existed.
+    const idemKey = callerKey ? `${callerKey}/${await sha256Hex(JSON.stringify(wire), 16)}` : "";
+    // Kept on the ledger row only when it fits; a longer one is simply not remembered, exactly
+    // as resend.ts leaves an over-long key off its header.
+    const ledgerKey = idemKey.length >= 1 && idemKey.length <= IDEM_KEY_MAX ? idemKey : "";
+
+    // ── SES: has an earlier try of THIS email already gone? ─────────────────────────
+    // On Resend the key above is the provider's to honour: a second request with it gets the
+    // first one's answer and no second email. SES has no such key, so the same question is put to
+    // our own ledger. A row with this key that reached the provider (sent), or is known delivered
+    // or bounced, means the customer has had this email or never will: answer with that row and
+    // send nothing.
+    //
+    // It also covers the try that TIMED OUT but went. That row says 'failed', and it is the event
+    // feed that corrects it: every SES send carries its ledger row's id as a tag (below), so the
+    // delivery event names the row even though SES's answer never reached us (postmark-events).
+    // The ticks wait minutes between tries and the event arrives in seconds.
+    //
+    // A read that fails, or a database from before the column existed, sends: an occasional
+    // second copy is the cheaper mistake against an automation that never goes out.
+    if (onSes && ledgerKey) {
+      const { data: prior } = await admin.from("email_sends")
+        .select("id, provider_message_id, status")
+        .eq("client_id", clientId).eq("idem_key", ledgerKey).in("status", WENT_STATUSES)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (prior?.id) {
+        return { sent: true, messageId: String(prior.provider_message_id ?? ""), to, redirected, id: String(prior.id) };
+      }
+    }
+
+    // ── Ledger first: claim the send before touching the provider ───────────────────
+    // The contact, the words, the writer and the app's bubble id ride on the CLAIM (migration
+    // 261), not on a later update: the row is right from its first moment, whether the send
+    // then succeeds or fails, and whichever address it went to. They used to be stamped on
+    // afterwards by matching the newest row to the same address, which missed every failed
+    // send and every send the beta redirect re-addressed. ledgerExtras keeps any of them from
+    // failing the insert.
+    // `idem_key` joins them on a keyed SES send only, so every Resend row is written exactly as
+    // it was before the column existed.
+    const extras = { ...ledgerExtras(mail), ...(onSes && ledgerKey ? { idem_key: ledgerKey } : {}) };
+    const claim = (more: Record<string, unknown>) => admin.from("email_sends").insert({
+      client_id: clientId,
+      short_code: mail.shortCode ?? null,
+      kind: mail.kind,
+      to_email: to,
+      ...(redirected ? { intended_email: mail.to } : {}),
+      from_email: fromEmail,
+      subject: mail.subject,
+      status: "claimed",
+      ...more,
+    }).select("id").single();
+    let { data: row, error: insErr } = await claim(extras);
+
+    // ⚠️ A DEPLOY AHEAD OF MIGRATION 261 MUST NOT STOP THE EMAIL. PostgREST refuses the WHOLE
+    // insert when one key names a column it cannot find (PGRST204), so without this every
+    // conversation and test email would be refused at the claim, and not sent, until a human
+    // applied the migration. On that error the claim is tried once more without the 261 keys
+    // (contact_id is older and stays, so the email still lands on the contact), and one info row
+    // names the migration. That costs only the stored words, the writer and the bubble id. A
+    // second failure is the ledger really being down, and refuses exactly as before.
+    const later = Object.keys(extras).filter((k) => LEDGER_261_KEYS.includes(k));
+    if (insErr && MISSING_COLUMN.has(String(insErr.code ?? "")) && later.length) {
+      await logEdgeError({
+        fn: "email-send",
+        clientId,
+        code: "email_ledger_261_columns_missing",
+        severity: "info",
+        message: `email_sends claim row refused ${later.join(", ")} - retrying without them; `
+          + `migration 261 (or the one that adds idem_key) may not be applied: ${insErr.message ?? insErr.code}`,
+        context: { kind: mail.kind, shortCode: mail.shortCode ?? null, redirected },
+      });
+      ({ data: row, error: insErr } = await claim(
+        Object.fromEntries(Object.entries(extras).filter(([k]) => !LEDGER_261_KEYS.includes(k))),
+      ));
+    }
+
+    if (insErr || !row?.id) {
+      // No claim row → no send. The raw Postgres message can echo row values (which
+      // include addresses), so it goes to app_errors — service-role triage — and the
+      // caller gets an authored sentence.
+      await logEdgeError({
+        fn: "email-send",
+        clientId,
+        code: "email_ledger_insert_failed",
+        message: `email_sends claim row could not be written: ${
+          insErr?.message ?? "insert returned no id"
+        }`,
+        context: { kind: mail.kind, shortCode: mail.shortCode ?? null, redirected },
+      });
+      return { sent: false, reason: "failed", error: "email ledger write failed" };
+    }
+    rowId = String(row.id);
+
     // ── Send, then record the outcome on the claimed row ────────────────────────────
     let messageId: string;
     try {
-      const wire: RsSendInput = {
-        from,
-        to,
-        subject: mail.subject,
-        html: mail.html,
-        ...(mail.text ? { text: mail.text } : {}),
-        ...(replyTo.length ? { replyTo } : {}),
-        ...(threadId || (mail.headers && Object.keys(mail.headers).length)
-          ? { headers: { ...(mail.headers ?? {}), ...(threadId ? { "Message-ID": threadId } : {}) } } : {}),
-        ...(mail.attachments && mail.attachments.length ? { attachments: mail.attachments } : {}),
-        // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
-        // them to Resend's charset so a dotted tenant slug degrades the TAG rather than
-        // failing the whole send.
-        tags: [
-          { name: "client_id", value: clientId },
-          { name: "kind", value: mail.kind },
-          ...(mail.shortCode ? [{ name: "short_code", value: mail.shortCode }] : []),
-        ],
-      };
-      // The Idempotency-Key. With a caller key: that key plus a fingerprint of exactly what is
-      // being sent, so a retry of the same email matches the first try, while an email that
-      // CHANGED between tries (a meeting moved, a builder renamed their business) gets a key of
-      // its own and goes out, rather than being refused for reusing a key with a new body.
-      // Without one: no key, the wire exactly as it was before keys existed.
-      const out = await rsSendEmail(callerKey
-        ? { ...wire, idempotencyKey: `${callerKey}/${await sha256Hex(JSON.stringify(wire), 16)}` }
-        : wire);
+      const out = await sendMail(transport, onSes
+        // SES: the ledger row's id rides along as a tag (see the retry check above for what the
+        // event feed does with it). The fingerprint was taken before this tag was added, on
+        // purpose: the row id is new on every try, and the key must not be.
+        ? { ...wire, tags: [...(wire.tags ?? []), { name: "ss_send", value: rowId }] }
+        // Resend: the wire and the key exactly as they were before SES existed.
+        : (idemKey ? { ...wire, idempotencyKey: idemKey } : wire));
       messageId = out.id;
     } catch (e) {
       const err = errText(e);
       // About this email, not the account: see SendOutcome for why a 403 is left retryable.
-      const permanent = e instanceof ResendApiError && e.permanent && e.status !== 403;
+      const permanent = mailErrorPermanent(e);
       const { error: updErr } = await admin.from("email_sends").update({
         status: "failed",
         error: err,

@@ -1265,7 +1265,8 @@ Deno.test("the email senders' words: a refusal is only said before the provider 
   const at = emailSrc.indexOf("export async function sendTenantEmail(");
   assert(at >= 0, "sendTenantEmail isn't in emailSend.ts any more");
   const send = emailSrc.slice(at);
-  const e = aroundCall(send, "await rsSendEmail(");
+  // sendMail is the one provider call since 2026-11-10 (mailTransport.ts: Resend or Amazon SES).
+  const e = aroundCall(send, "await sendMail(");
   // classifyEmail's 503 and classifyResend's not_active are refusals because not_active never follows the call.
   assert(reasons(e.before).has("not_active"), "not_active is gone from before the provider call");
   assert(!reasons(e.after).has("not_active"), "emailSend.ts now answers not_active after the provider call, where it may have gone");

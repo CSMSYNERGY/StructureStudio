@@ -31,7 +31,7 @@ import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
 import { shopRequestEmail } from "../_shared/emailTemplates.ts";
-import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
+import { sendPlatformMail, platformMailConfigured, mailErrCode } from "../_shared/mailTransport.ts";
 import { portalInventoryUrl, portalOrderUrl } from "../_shared/customerPortalUrl.ts";
 import { dueNow } from "../_shared/shopPricing.ts";
 import { genShortCode, includedLines, purchaseSentence, purchaseSnapshot } from "../_shared/shopPurchase.ts";
@@ -342,7 +342,7 @@ async function notifyBuilder(admin: any, req: Request, clientId: string, input: 
   try {
     outcome = await Promise.race([
       (async () => {
-        if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
+        if (!platformMailConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
         const { data: users } = await admin.from("client_users").select("user_id, role, created_at")
           .eq("client_id", clientId).in("role", ["owner", "admin"]).order("created_at", { ascending: true });
         // deno-lint-ignore no-explicit-any
@@ -353,13 +353,13 @@ async function notifyBuilder(admin: any, req: Request, clientId: string, input: 
         const to = [...new Set(emails.filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)))].slice(0, MAX_RECIPIENTS);
         if (!to.length) return { sent: 0, error: "no owner or admin email on file" };
         const content = shopRequestEmail(input);
-        const results = await Promise.allSettled(to.map((addr) => rsSendEmail({
+        const results = await Promise.allSettled(to.map((addr) => sendPlatformMail({
           from: PLATFORM_NOTIFY_FROM, to: addr, subject: content.subject, html: content.html, text: content.text,
           tags: [{ name: "kind", value: input.paidCents != null ? "shop_purchase" : "shop_request" }, { name: "client_id", value: clientId }],
         })));
         const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
         if (!failed.length) return { sent: to.length, error: null };
-        const why = [...new Set(failed.map((r) => r.reason instanceof ResendApiError ? `resend ${r.reason.status}/${r.reason.name_ || "unknown"}` : "send failed"))];
+        const why = [...new Set(failed.map((r) => mailErrCode(r.reason) ?? "send failed"))];
         return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent: ${why.join(", ")}` };
       })(),
       new Promise<{ sent: number; error: string }>((resolve) => { timer = setTimeout(() => resolve({ sent: 0, error: "timed out waiting for the email provider" }), NOTIFY_MS); }),

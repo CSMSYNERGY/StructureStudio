@@ -909,6 +909,11 @@ function EmailSendingView({ clientId, viewingLabel = null, shedsOn = true }) {
     if (dkim) return String(dkim.host).replace(/^resend\._domainkey\./, "");
     const send = dns.find((r) => String(r.host || "").startsWith("send."));
     if (send) return String(send.host).replace(/^send\./, "");
+    // A builder on the newer email setup (2026-11-10) has a DKIM host named by another selector
+    // (ss1._domainkey.<domain>). The domain is whatever follows the one `_domainkey` label, the
+    // same rule the server's DMARC lookup uses (_shared/dmarcLookup.ts dmarcDomainOf).
+    const anyDkim = dns.map((r) => /^[a-z0-9-]+\._domainkey\.(.+)$/i.exec(String(r.host || ""))).find(Boolean);
+    if (anyDkim) return anyDkim[1].toLowerCase();
     return String(status.domain || "").replace(/^www\./, "");
   })();
   // ── Is there a DMARC record already? (2026-10-05) ──
@@ -971,6 +976,10 @@ function EmailSendingView({ clientId, viewingLabel = null, shedsOn = true }) {
   // tracking was never switched on (a domain verified before it existed).
   const trackRows = dns.filter((r) => r.tracking);
   const trackSt = trackRows.length === 0 ? "off" : trackRows.every((r) => r.verified) ? "on" : "waiting";
+  // The server says when opens can't be offered (a builder on the newer email setup, until opens
+  // return there). Only an explicit false hides the card: an older server sends nothing, and the
+  // card shows as it always has.
+  const opensAvailable = status.opensAvailable !== false;
 
   // ── "Email this to my webmaster" (Carolyn, 2026-08-25) ──────────────────────────────
   // Her words: "so many people are going to be like, I don't know anything about this."
@@ -1457,7 +1466,9 @@ function EmailSendingView({ clientId, viewingLabel = null, shedsOn = true }) {
           {/* ── See when emails are opened (B4) ──────────────────────────────────────────
               Carolyn, 2026-10-01: a prospective client "asked to be able to see if an email is
               read or not." Only rendered once sending is verified: the tracking record lives on
-              the sending domain, so there is nothing to offer before that. */}
+              the sending domain, so there is nothing to offer before that. Left out altogether
+              when the server says opens aren't available for this builder (opensAvailable). */}
+          {opensAvailable && (
           <div style={S.card}>
             <div style={S.h2}>See when emails are opened</div>
             {trackSt === "off" && (
@@ -1546,6 +1557,7 @@ function EmailSendingView({ clientId, viewingLabel = null, shedsOn = true }) {
               Opens are approximate: some mail apps block the tracking image, and some open emails automatically.
             </p>
           </div>
+          )}
 
           <div style={S.card}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>

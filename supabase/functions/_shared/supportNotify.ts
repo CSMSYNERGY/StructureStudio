@@ -15,7 +15,7 @@
 // NO CONSOLE LINKS. The full-chat link of a ticket lives on its Projects item only; this email says
 // where it is. Reply-To is the builder, and a reply must not carry an operator-only address to them.
 
-import { rsSendEmail, resendConfigured } from "./resend.ts";
+import { sendPlatformMail, platformMailConfigured } from "./mailTransport.ts";
 import { PLATFORM_NOTIFY_FROM } from "./leadFormMail.ts";
 import { esc } from "./emailTemplates.ts";
 
@@ -78,10 +78,10 @@ export async function sendSupportAlert(a: SupportAlert, env: (k: string) => stri
   try {
     const to = supportRecipients(env("SUPPORT_NOTIFY_TO"));
     if (!to.length) return { sent: 0, error: "SUPPORT_NOTIFY_TO is not set" };
-    if (!resendConfigured() || env("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
+    if (!platformMailConfigured() || env("PLATFORM_EMAIL_DOMAIN_READY") !== "true") return { sent: 0, error: "platform email is not configured" };
     const c = supportAlertContent(a);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const work = Promise.allSettled(to.map((addr) => rsSendEmail({
+    const work = Promise.allSettled(to.map((addr) => sendPlatformMail({
       from: PLATFORM_NOTIFY_FROM, to: addr, subject: c.subject, html: c.html, text: c.text,
       ...(a.submitterEmail && EMAIL.test(a.submitterEmail) ? { replyTo: a.submitterEmail } : {}),
       tags: [{ name: "kind", value: "support_alert" }, { name: "client_id", value: a.clientId }],

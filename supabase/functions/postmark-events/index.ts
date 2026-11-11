@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
+import { readSesEvent } from "../_shared/sesEvents.ts";
 
 // Provider events → email_sends ledger: the delivery/open/bounce return leg.
 //
@@ -68,7 +69,23 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 // email addresses and message details, and webhook responses are visible in the provider's
 // UI.
 //
-// Required secrets: EMAIL_EVENTS_SECRET (+ the platform SUPABASE_* pair).
+// AMAZON SES POSTS HERE TOO (2026-11-10), through Amazon SNS. Email is moving from Resend to SES
+// one builder at a time, so for a while both providers report here: the same URL, the same
+// ?key=, the same record_email_event. An SNS delivery announces itself with the
+// `x-amz-sns-message-type` header and is handled by sesEvent() below; everything else is Resend's
+// webhook, exactly as before. Three things differ for SES, all in _shared/sesEvents.ts:
+//   • the URL key is not the only proof. SNS signs every message, and the signature is VERIFIED
+//     (the topic must also be ours, SES_EVENTS_TOPIC_ARN). The key still comes first, so a
+//     stranger without it never makes us fetch a certificate.
+//   • the idempotency key is the SNS MessageId, the same on every redelivery.
+//   • a 5xx is useful: SNS tries again for about an hour, so a database blip costs nothing.
+// One extra step exists only for SES: an event whose id matches no row is tried once more by the
+// ledger row's own id, which rides on every SES email as a tag (adopt_email_send, migration 383).
+// That is how a send whose call timed out, but which went, stops reading "failed".
+//
+// Required secrets: EMAIL_EVENTS_SECRET (+ the platform SUPABASE_* pair). For SES also
+// SES_EVENTS_TOPIC_ARN (the topic's ARN; it carries the AWS account number, so it is a setting
+// and never in this public source).
 // One-time setup on the provider side: a webhook SEPARATE from the inbound one (each Resend
 // webhook has one URL; adding these events to the email.received webhook would post them to
 // email-inbound) at <project>/functions/v1/postmark-events?key=<EMAIL_EVENTS_SECRET>, subscribed
@@ -216,6 +233,81 @@ export function eventKey(svixId: string | null, body: unknown, mapped: MappedEve
   return `derived:${mapped.event}:${mapped.messageId}:${created}`.slice(0, 200);
 }
 
+/** Responses whose app_errors row was written here, with its own code and context, so
+ *  withErrorLog does not add a second, vaguer row for the same answer (customer-auth's pattern). */
+const filedAtReturnSite = new WeakSet<Response>();
+
+/** "No such function": the database is from before migration 383. Both spellings PostgREST and
+ *  Postgres use for it. */
+const NO_SUCH_FUNCTION = new Set(["PGRST202", "42883"]);
+
+/**
+ * One Amazon SES event, delivered by Amazon SNS. The request is already past the URL key.
+ * _shared/sesEvents.ts proves the message is SNS's and from our topic and maps it; this writes it
+ * through the same record_email_event the Resend path uses.
+ */
+async function sesEvent(req: Request): Promise<Response> {
+  const read = await readSesEvent(await req.text());
+  if (read.kind === "answer") {
+    const res = json(read.body, read.status);
+    if (read.log) {
+      await logEdgeError({ fn: "postmark-events", req, ...read.log });
+      filedAtReturnSite.add(res);
+    }
+    return res;
+  }
+  const { event, eventId } = read;
+  const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  const record = () => admin.rpc("record_email_event", {
+    p_provider_message_id: event.messageId,
+    p_event: event.event,
+    p_at: event.at,
+    p_reason: event.reason,
+    p_event_id: eventId,
+  });
+
+  let { data, error } = await record();
+  // No row holds this id. If the email carried its ledger row's id (every SES send does), the
+  // row is one whose send call lost SES's answer: give it the id, then record the event.
+  if (!error && data === "unknown" && event.sendId) {
+    const adopt = await admin.rpc("adopt_email_send", { p_send_id: event.sendId, p_provider_message_id: event.messageId });
+    if (adopt.error && !NO_SUCH_FUNCTION.has(String((adopt.error as { code?: string }).code ?? ""))) {
+      error = adopt.error;
+    } else if (adopt.data === true) {
+      ({ data, error } = await record());
+    }
+  }
+
+  if (error) {
+    // Same posture as the Resend path below: specifics to app_errors, a generic answer to the
+    // provider. A 500 here is deliberate: SNS delivers the event again.
+    await logEdgeError({
+      fn: "postmark-events",
+      message: String(error.message ?? "record_email_event failed"),
+      code: "email_event_record_failed",
+      req,
+      context: { event: event.event, provider: "ses", pgCode: (error as { code?: string }).code ?? null },
+    });
+    const res = json({ ok: false, error: "update failed" }, 500);
+    filedAtReturnSite.add(res);
+    return res;
+  }
+
+  const result = typeof data === "string" ? data : "";
+  // THE COMPLAINT WATCH. Every builder sends from the one AWS account, and AWS reviews an
+  // account at a complaint rate of 0.1% (one in a thousand), so a single builder drawing
+  // complaints is everyone's problem. One warn row per real complaint, with the builder it was
+  // sent for, makes that visible here before AWS says it. No address, no message.
+  if (event.event === "complained" && result === "recorded") {
+    await logEdgeError({
+      fn: "postmark-events", req, clientId: event.clientId, code: "email_complaint", severity: "warn",
+      message: "a recipient marked an email as spam (Amazon SES complaint)",
+    });
+  }
+  if (result === "duplicate") return json({ ok: true, duplicate: true, updated: 0 });
+  return json({ ok: true, updated: result === "recorded" ? 1 : 0 });
+}
+
 async function handler(req: Request): Promise<Response> {
   if (req.method === "GET") return json({ ok: true, service: "postmark-events" });
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
@@ -225,9 +317,19 @@ async function handler(req: Request): Promise<Response> {
   // still refuses — no fail-open when configuration is missing.
   const secret = Deno.env.get("EMAIL_EVENTS_SECRET") || Deno.env.get("POSTMARK_WEBHOOK_SECRET") || "";
   const key = new URL(req.url).searchParams.get("key") || "";
-  if (!secret || !timingSafeEqual(key, secret)) {
+  // Amazon SNS posts with a key of its own, SES_WEBHOOK_SECRET (2026-11-10), which opens ONLY
+  // the SNS path below, where the message's signature is verified as well. The key above opens
+  // both, as before. (email-inbound's key check says why a second key exists.)
+  const viaSns = Boolean(req.headers.get("x-amz-sns-message-type"));
+  const sesSecret = Deno.env.get("SES_WEBHOOK_SECRET") || "";
+  const keyOk = (!!secret && timingSafeEqual(key, secret)) || (viaSns && !!sesSecret && timingSafeEqual(key, sesSecret));
+  if (!keyOk) {
     return new Response("Unauthorized", { status: 401 });
   }
+
+  // Amazon SES, by way of Amazon SNS: see the header. After the key, before the body is read
+  // (the signature is over the raw text, which req.json() would destroy).
+  if (viaSns) return await sesEvent(req);
 
   let body: unknown;
   try {
@@ -269,4 +371,4 @@ async function handler(req: Request): Promise<Response> {
   return json({ ok: true, updated: result === "recorded" ? 1 : 0 });
 }
 
-Deno.serve(withErrorLog("postmark-events", handler));
+Deno.serve(withErrorLog("postmark-events", handler, { alreadyFiled: (res) => filedAtReturnSite.has(res) }));

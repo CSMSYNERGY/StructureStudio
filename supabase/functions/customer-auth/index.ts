@@ -20,7 +20,7 @@ import {
   type ProvenIdentity,
   revokeSession,
 } from "../_shared/customerSession.ts";
-import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
+import { sendPlatformMail, platformMailConfigured, mailErrCode } from "../_shared/mailTransport.ts";
 import {
   isPlausibleEmail, normalizeEmail, issueEmailOtp, verifyEmailOtp, emailOtpBody,
   EmailOtpNotConfigured, EMAIL_OTP_MAX_ATTEMPTS,
@@ -512,7 +512,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   if (action === "login_options") {
     const channels: string[] = [];
     if (twilioConfigured()) channels.push("sms");
-    if (resendConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true") channels.push("email");
+    if (platformMailConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true") channels.push("email");
     let defaultChannel: string | null = channels[0] ?? null;
     // Read only when there is a choice to make. A failed read — including the column not existing
     // yet, before 231 is applied — silently keeps the rule above: logging it would write a row on
@@ -939,7 +939,7 @@ async function handleEmailChannel(
     // recipient there would put an address in a tenant-visible ledger for a message they did
     // not send. (migration 167 still adds the 'login_code' kind — harmless, and it keeps the
     // constraint honest if this is ever revisited.)
-    if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
+    if (!platformMailConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
       return refusal({ error: MSG_EMAIL_NOT_CONFIGURED });
     }
     // ── Claim the three send slots, THEN send ──────────────────────────────────────────
@@ -958,7 +958,7 @@ async function handleEmailChannel(
 
     const mail = emailOtpBody(brand, issued.code);
     try {
-      await rsSendEmail({
+      await sendPlatformMail({
         from: PLATFORM_LOGIN_FROM,
         to: email,
         subject: mail.subject,
@@ -970,7 +970,7 @@ async function handleEmailChannel(
       // ⚠️ Resend's message can echo the recipient (its testing-mode 403 names the address you
       // may send to), so only the enum-ish status/name travels — the same rule emailSend's
       // errText follows.
-      const detail = e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : "send failed";
+      const detail = mailErrCode(e) ?? "send failed";
       await logEdgeError({
         fn: "customer-auth", req, clientId, code: "email_otp_send",
         message: `email sign-in code failed to send: ${detail}`,
