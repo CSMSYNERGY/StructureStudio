@@ -1351,7 +1351,11 @@ function ssContactSourceLabel(source) {
 // `userId` are exactly what the contact record's Call tab is given, and the row's Call button asks
 // that tab's own enabled/hint functions, so the list and the record cannot disagree.
 function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesign = null, onOpenRecord = null,
-  callOffered = false, viewing = false, canCall = false, phoneOn = false, userId = null }) {
+  callOffered = false, viewing = false, canCall = false, phoneOn = false, userId = null,
+  // An account with no shed designer (migration 364's no-sheds builders, and 384's phone-only ones):
+  // no designs to count or wait for, so no Designs column, no "No design yet" and no designer
+  // wording (Ahsan 2026-11-11, "Yes, fix both"). Shed builders pass nothing and see no change.
+  designsOn = true }) {
   // Cache-seeded so returning to Contacts paints the grouped list at once and refreshes
   // behind it (see ssTabCache in 01-core). Operator view-as reads through a different path
   // and is left uncached — those rows are service-role and audit-logged.
@@ -1928,7 +1932,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       <CardHead
         title="Contacts"
         count={rows ? ((query || statusFilter !== "all" || hasFacets) ? `${filtered.length} of ${rows.length}` : rows.length) : null}
-        desc="Everyone who submitted a design, browsed your designer or is in your contacts, grouped by person — repeat visitors collapse into one lead. Read-only."
+        desc={designsOn
+          ? "Everyone who submitted a design, browsed your designer or is in your contacts, grouped by person — repeat visitors collapse into one lead. Read-only."
+          : "Everyone in your contacts, one row per person. Open a name to see their calls, texts and notes."}
         right={<button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
       >
         {/* The status dots keep their own semantic colours — green/amber/red mean the same
@@ -1970,14 +1976,16 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
-              {["Customer", "Contact", "Designs", "First seen", "Last activity", "Status", "Actions"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+              {["Customer", "Contact", "Designs", "First seen", "Last activity", "Status", "Actions"].filter((h) => designsOn || h !== "Designs").map((h) => <th key={h} style={S.th}>{h}</th>)}
             </tr></thead>
-            <tbody><SkelRows cols={7} rows={6} /></tbody>
+            <tbody><SkelRows cols={designsOn ? 7 : 6} rows={6} /></tbody>
           </table>
         </div>
       )}
       {rows && rows.length === 0 && !error && (
-        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No contacts yet. Share your customer link — everyone who submits a design shows up here.</p>
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>{designsOn
+          ? "No contacts yet. Share your customer link — everyone who submits a design shows up here."
+          : "No contacts yet. People who call or text you, or fill in your forms, show up here."}</p>
       )}
       {rows && rows.length > 0 && filtered.length === 0 && (
         <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>
@@ -1994,7 +2002,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
             <thead><tr>
               <SortTh label="Customer" col="customer" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Contact" col="contact" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-              <SortTh label="Designs" col="designs" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              {designsOn && <SortTh label="Designs" col="designs" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />}
               <SortTh label="First seen" col="firstSeen" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Last activity" col="lastActivity" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Status" col="status" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -2050,13 +2058,13 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                       <div>{g.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{g.phoneShown || (g.contactOnly && g.phone ? phoneDisplay(g.phone) : (g.phone || ""))}</div>
                     </td>
-                    <td style={S.td}>{g.browsing || g.contactOnly ? "—" : g.count}</td>
+                    {designsOn && <td style={S.td}>{g.browsing || g.contactOnly ? "—" : g.count}</td>}
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.firstSeen)}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(g.lastActivity)}</td>
                     <td style={S.td}><span title={g.browsing && g.source === "details" ? "Filled in their contact info and viewed estimate details" : g.browsing ? "Entered name and phone at the designer gate" : g.contactOnly ? "In your contacts, with no design or designer visit yet. Click their name to open their record." : undefined}
                       style={{ background: sc.bg, color: sc.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{g.browsing ? (g.source === "details" ? "Browsing · saw pricing" : "Browsing") : g.contactOnly ? ssContactSourceLabel(g.source) : STATUS_LABELS[g.topStatus]}</span></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                      {(g.browsing || g.contactOnly) && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
+                      {designsOn && (g.browsing || g.contactOnly) && <span style={{ color: "#94A3B8", fontSize: 12.5 }}>No design yet</span>}
                       {/* In-portal open — same rule as DesignsTable: never the public page. */}
                       {!g.browsing && !g.contactOnly && <a href={ssDesignHref(g.latestCode)} onClick={ssNavClick(() => onOpenDesign && onOpenDesign(g.latestCode))} data-ss-open-design="1"
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700, textDecoration: "none" }}>Open latest</a>}

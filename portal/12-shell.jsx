@@ -3749,6 +3749,8 @@ function Dashboard({ session }) {
                        below, so the row and the record answer the same way. callOffered is the
                        one ssPhoneOffered rule: no Call column where calling is not offered. */
                     callOffered={phoneOffered}
+                    /* No designs on an account without the shed product (364/384): no Designs column. */
+                    designsOn={shedsOn}
                     viewing={!!viewing}
                     userId={session.user ? session.user.id : null}
                     canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}

@@ -149,6 +149,14 @@ try {
   const tabs = await hubTabs(p);
   ok("A: the hub offers Contacts and no Pipeline or Design list", !!tabs && tabs.includes("Contacts") && !tabs.some((t) => /Pipeline|Design list/.test(t)), JSON.stringify(tabs));
   ok("A: Pat Caller is on the list", (await p.evaluate(() => document.body.innerText)).includes("Pat Caller"));
+  // The list speaks contacts, not designs (Ahsan 2026-11-11, "Yes, fix both").
+  const list = await p.evaluate(() => {
+    const t = [...document.querySelectorAll("table")].find((x) => /first seen/i.test(x.tHead ? x.tHead.textContent : ""));
+    return { heads: t ? [...t.tHead.querySelectorAll("th")].map((h) => h.textContent.replace(/[▲▼\s]+/g, " ").trim()) : null, text: document.body.innerText };
+  });
+  ok("A: the list has no Designs column", !!list.heads && !list.heads.some((h) => /^Designs/.test(h)), JSON.stringify(list.heads));
+  ok("A: …no \"No design yet\" and no designer wording", !/No design yet|browsed your designer/.test(list.text));
+  ok("A: …and says what it is", /Everyone in your contacts, one row per person/.test(list.text));
   const r = await rail(p);
   ok("A: the rail says Customer Hub", r.all.includes("Customer Hub"), r.all.join(" | "));
   ok("A: the rail offers Calls", r.all.includes("Calls"), r.all.join(" | "));
@@ -233,6 +241,13 @@ try {
   const rb = await rail(B.page);
   ok("B: a normal builder's rail still has the Shed Designer, Conversations and Commissions",
     ["Shed Designer", "Conversations", "Commissions"].every((l) => rb.all.includes(l)), rb.all.join(" | "));
+  await B.page.waitForFunction(() => !!document.querySelector('[data-ss-hub-view="people"] table'), null, { timeout: 15000 }).catch(() => {});
+  const bList = await B.page.evaluate(() => {
+    const t = [...document.querySelectorAll("table")].find((x) => /first seen/i.test(x.tHead ? x.tHead.textContent : ""));
+    return { heads: t ? [...t.tHead.querySelectorAll("th")].map((h) => h.textContent.replace(/[▲▼\s]+/g, " ").trim()) : null, text: document.body.innerText };
+  });
+  ok("B: …and its contact list keeps the Designs column and its own wording",
+    !!bList.heads && bList.heads.some((h) => /^Designs/.test(h)) && /browsed your designer/.test(bList.text), JSON.stringify(bList.heads));
   const inv = await settle(B.page, "/inventory");
   ok("B: …and its /inventory opens", inv === "/inventory", inv);
   await settle(B.page, "/settings/billing");
