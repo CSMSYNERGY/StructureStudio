@@ -108,7 +108,8 @@ const GATES: GateTable = {
   overview:        { area: "meetings", level: "view" },
   // The meetings list. Narrowed to the caller's own host for an own-only reader.
   list:            { area: "meetings", level: "view" },
-  // Open slots for a host + type. Feeds the CRM tab's "next times open".
+  // Open slots for a host + type, and with withCalendar the other busy times too. Feeds the
+  // CRM record's Meeting scheduler calendar.
   availability:    { area: "meetings", level: "view" },
   // One contact's meetings, for the Meeting scheduler tab. ALSO needs contacts:view —
   // declared `all` so holding one area is not enough.
@@ -602,7 +603,40 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
         toDate,
         now: new Date(),
       });
-      return json({ ok: true, timeZone: host.time_zone, accepting: host.accepting, days });
+
+      // THE FULL CALENDAR (Carolyn 2026-11-10: "Really we need to be able to see full
+      // calendar"). The Meeting scheduler tab draws this person's whole week or month, and a
+      // gap in it has to say WHY nothing is offered there. This account's own bookings come
+      // from `list`, customers and all. This is everything ELSE loadBusy counts, as TIMES ONLY:
+      //   * the blocks their Google / Outlook sync cached. meeting_busy holds no titles, and our
+      //     own bookings are already dropped from it (meetingCalendar.ts), so nothing is drawn
+      //     twice;
+      //   * their bookings on ANOTHER account. loadBusy finds those by host_user_id; `list` is
+      //     scoped to this account and cannot, and a customer's name from another business is
+      //     not this business's to see.
+      // Unwidened: a buffer is not something the person has on. Asked for, never sent unasked,
+      // so nothing changes for a caller that only wants the open times.
+      let busyOut: { startsAt: string; endsAt: string }[] | null = null;
+      if (p.withCalendar === true) {
+        const [{ data: ext, error: xe }, { data: away, error: ae }] = await Promise.all([
+          admin.from("meeting_busy").select("starts_at, ends_at")
+            .eq("host_id", hostId).lt("starts_at", toIso).gt("ends_at", fromIso)
+            .order("starts_at").limit(1000),
+          admin.from("meetings").select("starts_at, ends_at")
+            .eq("host_user_id", host.user_id).eq("status", "booked").neq("client_id", clientId)
+            .lt("starts_at", toIso).gt("ends_at", fromIso)
+            .order("starts_at").limit(500),
+        ]);
+        if (xe) throw xe;
+        if (ae) throw ae;
+        // deno-lint-ignore no-explicit-any
+        busyOut = ([...(ext ?? []), ...(away ?? [])] as any[])
+          .map((b) => ({ startsAt: b.starts_at, endsAt: b.ends_at }));
+      }
+      return json({
+        ok: true, timeZone: host.time_zone, accepting: host.accepting, days,
+        ...(busyOut ? { busy: busyOut } : {}),
+      });
     }
 
     case "contact_meetings": {

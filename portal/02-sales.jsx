@@ -4034,7 +4034,7 @@ function CrmRecordSkeleton({ kind, onBack }) {
             </div>
           ))}
         </div>
-        <div style={{ flex: "3 1 420px", minWidth: 320 }}>
+        <div style={{ flex: "3 1 420px", minWidth: "min(320px, 100%)" }}>
           <div style={S.card}>
             {/* The action bar. Six blocks because every record has at least that many tabs
                 after CRM_TABS' `when` filters run, and the widths vary the way real labels
@@ -4355,7 +4355,8 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
   const [over, setOver] = useState(null);
   const [hostId, setHostId] = useState(null);
   const [typeId, setTypeId] = useState(null);
-  const [avail, setAvail] = useState(null);
+  // Bumped after a booking, or a failed one, so the calendar reads the diary again.
+  const [rev, setRev] = useState(0);
   const [slot, setSlot] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -4395,27 +4396,9 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
     return () => { live = false; };
   }, [call, clientId]);
 
-  // ── Open times ──────────────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    let live = true;
-    if (!hostId || !typeId) { setAvail(null); return undefined; }
-    setAvail(null);
-    setSlot(null);
-    (async () => {
-      try {
-        const today = new Date();
-        const to = new Date(today.getTime() + 21 * 86400000);
-        const d = await call("availability", {
-          hostId, typeId,
-          fromDate: today.toISOString().slice(0, 10),
-          toDate: to.toISOString().slice(0, 10),
-        });
-        if (!live) return;
-        setAvail(d);
-      } catch (e) { if (live) { setMsg({ err: e.message }); setAvail({ days: [] }); } }
-    })();
-    return () => { live = false; };
-  }, [call, hostId, typeId]);
+  // A picked time belongs to one person and one meeting type; changing either drops it. The
+  // times themselves are MeetingCalendar's to read now.
+  useEffect(() => { setSlot(null); }, [hostId, typeId]);
 
   if (msg && msg.err && !over) return <div style={S.err}>{msg.err}</div>;
   if (!over) return <div style={{ fontSize: 13, color: "#94A3B8", padding: 8 }}>Loading the scheduler…</div>;
@@ -4426,18 +4409,8 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
   const type = offered.find((t) => t.id === typeId) || null;
   const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
 
-  // The first handful of open times, flattened across days — a rep on the phone wants "how
-  // about Thursday at 2?", not a month to navigate. The full calendar is the customer's job
-  // on the public page.
-  const flat = [];
-  for (const d of ((avail && avail.days) || [])) {
-    for (const s of d.slots) {
-      if (flat.length < 12) flat.push({ date: d.date, startsAt: s.startsAt });
-    }
-    if (flat.length >= 12) break;
-  }
-
-  const tz = (avail && avail.timeZone) || (host && host.timeZone) || "UTC";
+  // Every time on this tab is the HOST's, as the calendar draws them and as the booking page names them.
+  const tz = (host && host.timeZone) || "UTC";
   const fmtT = (iso) => {
     try { return new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(iso)); }
     catch (_e) { return iso; }
@@ -4497,17 +4470,13 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
       });
     } catch (e) {
       // A slot that went while the rep was talking is the one failure with a next step, so
-      // reload the times rather than leaving a dead button.
+      // reload the calendar rather than leaving a dead button.
       setSlot(null);
-      const d = await call("availability", {
-        hostId: host.id, typeId: type.id,
-        fromDate: new Date().toISOString().slice(0, 10),
-        toDate: new Date(Date.now() + 21 * 86400000).toISOString().slice(0, 10),
-      }).catch(() => null);
-      if (d) setAvail(d);
+      setRev((n) => n + 1);
       throw e;
     }
     setSlot(null);
+    setRev((n) => n + 1);
     setNotes("");
     setManual(false);
     setMDate(""); setMTime("");
@@ -4557,7 +4526,7 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
 
           {host && !host.accepting && (
             <div style={{ ...sub, marginBottom: 10, color: "#92400E" }}>
-              {host.publicName} has booking switched off at the moment, so there are no times to offer.
+              {host.publicName} has booking switched off at the moment, so the calendar shows no open times. “Pick a different time” still books them.
             </div>
           )}
           {host && !offered.length && (
@@ -4568,41 +4537,18 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
 
           {host && !!offered.length && (
             <>
-              {host.accepting && (<>
-              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#334155", marginBottom: 6 }}>
-                Next times open{type ? ` · ${type.durationMinutes} min` : ""}
-                <span style={{ fontWeight: 600, color: "#94A3B8" }}>{` · ${String(tz).replace(/_/g, " ")}`}</span>
-              </div>
-              {!avail && <div style={{ ...sub, marginBottom: 10 }}>Checking the calendar…</div>}
-              {avail && !flat.length && (
-                <div style={{ ...sub, marginBottom: 10 }}>
-                  Nothing open in the next three weeks. Their hours and days off are in their My Profile → My meetings.
-                </div>
-              )}
-              {!!flat.length && (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-                  {flat.map((s) => {
-                    const on = slot && slot.startsAt === s.startsAt;
-                    return (
-                      <button key={s.startsAt} type="button" onClick={() => setSlot(on ? null : s)}
-                        style={{
-                          background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#92400E",
-                          border: `1.5px solid ${on ? ACCENT : "#FCD34D"}`, borderRadius: 8,
-                          padding: "6px 10px", cursor: "pointer", textAlign: "center", lineHeight: 1.25,
-                        }}>
-                        <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, opacity: 0.8 }}>{fmtDay(s.date)}</span>
-                        <span style={{ display: "block", fontSize: 12.5, fontWeight: 800 }}>{fmtT(s.startsAt)}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              </>)}
+              {/* THE FULL CALENDAR (Carolyn 2026-11-10), where the first twelve open times
+                  used to be. Drawn for someone who is away too: no open times then, but their
+                  meetings still show, and "Pick a different time" below still books them. */}
+              <MeetingCalendar call={call} hostId={host.id} typeId={type ? type.id : null} tz={tz}
+                maxDaysAhead={type ? type.maxDaysAhead : null} accepting={!!host.accepting}
+                hostName={host.publicName} weeklyHours={host.weeklyHours || {}}
+                picked={manual ? null : slot} rev={rev}
+                onPick={(s) => { if (s) setManual(false); setSlot(s); }} />
 
               {/* ── A TIME OF YOUR OWN ───────────────────────────────────────────────────
-                  The chips above are what this person's hours, days off and lead time
-                  OFFER. These two boxes are the person whose calendar it is saying "no,
+                  The open times on the calendar are what this person's hours, days off and
+                  lead time OFFER. These two boxes are the person whose calendar it is saying "no,
                   Saturday at seven". It is deliberately not a slot picker: the whole point
                   is that the time being asked for is one the rules do not produce. */}
               <div style={{ marginBottom: 10 }}>
@@ -4686,6 +4632,387 @@ function MeetingSchedulerPanel({ clientId, contact, shortCode, viewing, onBooked
   );
 }
 
+
+// ── THE FULL CALENDAR (Carolyn 2026-11-10) ───────────────────────────────────────────────
+// "The Meeting times we can see inside Customer Hub must be expanded to be able to see more
+// days and more times... Really we need to be able to see full calendar." The tab used to offer
+// the first twelve open times across three weeks, on the reasoning that a rep on the phone wants
+// "how about Thursday at 2?" and not a month to navigate. Carolyn overruled that: having the
+// conversation at all needs the whole diary in front of you.
+//
+// So this draws one person's week, or month, the way a calendar does, in THEIR zone:
+//   * every open time the booking rules produce, each one a button that picks it;
+//   * this account's meetings with that person, in their type's colour (`list`);
+//   * everything else that blocks them, as "Busy" with no title: their Google / Outlook blocks
+//     and their bookings on another account (`availability` with withCalendar).
+// A gap always has its reason on screen, which is what makes a full calendar worth reading.
+//
+// Days are `yyyy-mm-dd` strings in the person's zone, only ever turned into a Date at UTC
+// midnight for arithmetic and naming (meetingAvailability.ts's rule). Weeks start on Sunday, as
+// /book's month grid and the WHEN filter's do.
+const ssCalDay = (y, m, d) => new Date(Date.UTC(y, m - 1, d)).toISOString().slice(0, 10);
+function ssCalAdd(day, n) {
+  const p = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || "");
+  return p ? ssCalDay(+p[1], +p[2], +p[3] + n) : day;
+}
+const ssCalWeekStart = (day) => ssCalAdd(day, -new Date(day + "T00:00:00Z").getUTCDay());
+const ssCalMonthFirst = (day, n = 0) => ssCalDay(+day.slice(0, 4), +day.slice(5, 7) + n, 1);
+const SS_CAL_FMT = new Map();
+// An instant as the person's own calendar day and minute of that day.
+function ssCalZoned(iso, tz) {
+  let f = SS_CAL_FMT.get(tz);
+  if (!f) {
+    const opts = { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
+    try { f = new Intl.DateTimeFormat("en-US", { ...opts, timeZone: tz }); }
+    catch (_e) { f = new Intl.DateTimeFormat("en-US", { ...opts, timeZone: "UTC" }); }
+    SS_CAL_FMT.set(tz, f);
+  }
+  const t = {};
+  for (const x of f.formatToParts(new Date(iso))) t[x.type] = x.value;
+  return { date: `${t.year}-${t.month}-${t.day}`, mins: ((+t.hour) % 24) * 60 + (+t.minute) };
+}
+// A minute of the day as the reader writes a time. Pinned in UTC because only the clock is read.
+function ssCalClock(mins) {
+  try {
+    return new Intl.DateTimeFormat(undefined, { timeZone: "UTC", hour: "numeric", minute: "2-digit" })
+      .format(new Date(Date.UTC(2000, 0, 1, Math.floor(mins / 60), mins % 60)));
+  } catch (_e) { return `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, "0")}`; }
+}
+// "10:00–10:30 AM" rather than "10:00 AM–10:30 AM", which a day column has no room for.
+function ssCalSpan(a, b) {
+  const s = ssCalClock(a), e = ssCalClock(b);
+  const m = /\s*([AP]\.?M\.?)$/i.exec(s);
+  return m && e.endsWith(m[1]) ? `${s.slice(0, m.index)}–${e}` : `${s}–${e}`;
+}
+function ssCalName(day, opts) {
+  try { return new Intl.DateTimeFormat(undefined, { timeZone: "UTC", ...opts }).format(new Date(day + "T00:00:00Z")); }
+  catch (_e) { return day; }
+}
+// A block cut at each of the person's midnights, so one that runs overnight, or an all-day event
+// (which Google reports as midnight to midnight), lands on every day it covers.
+function ssCalSegments(startsAt, endsAt, tz) {
+  const s = ssCalZoned(startsAt, tz), e = ssCalZoned(endsAt, tz);
+  const out = [];
+  let day = s.date;
+  for (let i = 0; i < 62 && day <= e.date; i++) {
+    const from = day === s.date ? s.mins : 0;
+    const to = day === e.date ? e.mins : 1440;
+    if (to > from) out.push({ date: day, start: from, end: to });
+    day = ssCalAdd(day, 1);
+  }
+  return out;
+}
+const ssCalHex = (c) => (/^#[0-9a-f]{6}$/i.test(c || "") ? c : "#64748B");
+const SS_CAL_BUSY_BG = "repeating-linear-gradient(45deg, #F1F5F9, #F1F5F9 6px, #E2E8F0 6px, #E2E8F0 12px)";
+
+function MeetingCalendar({ call, hostId, typeId, tz, maxDaysAhead, accepting, hostName, weeklyHours, picked, onPick, rev = 0 }) {
+  const today = ssCalZoned(new Date().toISOString(), tz).date;
+  const [view, setView] = useState("week");
+  const [anchor, setAnchor] = useState(today);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [full, setFull] = useState(false);
+
+  // The days on screen: Sunday to Saturday, or every whole week the month touches (at most 42
+  // days, inside availability's 62-day cap).
+  const from = view === "month" ? ssCalWeekStart(ssCalMonthFirst(anchor)) : ssCalWeekStart(anchor);
+  const to = view === "month" ? ssCalAdd(ssCalWeekStart(ssCalAdd(ssCalMonthFirst(anchor, 1), -1)), 6) : ssCalAdd(from, 6);
+  const key = `${hostId}|${typeId}|${from}|${to}|${rev}`;
+
+  useEffect(() => {
+    let live = true;
+    if (!hostId || !typeId) return undefined;
+    setErr(null);
+    (async () => {
+      try {
+        // A day either side in instants, so a late meeting in a zone behind UTC is not lost at
+        // the edge. Anything outside the days on screen is dropped below, by its own day.
+        const fromIso = new Date(Date.parse(from + "T00:00:00Z") - 86400000).toISOString();
+        const toIso = new Date(Date.parse(to + "T00:00:00Z") + 2 * 86400000).toISOString();
+        const [a, l] = await Promise.all([
+          call("availability", { hostId, typeId, fromDate: from, toDate: to, withCalendar: true }),
+          call("list", { hostId, from: fromIso, to: toIso }).catch((e) => ({ failed: e.message })),
+        ]);
+        if (!live) return;
+        setData({ key, days: a.days || [], busy: a.busy || [], meetings: l.failed ? [] : (l.meetings || []), meetingsErr: l.failed || null });
+      } catch (e) { if (live) setErr(e.message); }
+    })();
+    return () => { live = false; };
+  }, [call, key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!full) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setFull(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [full]);
+
+  // ── Everything on each day, in the person's zone ────────────────────────────────────────
+  const shown = data || { days: [], busy: [], meetings: [] };
+  const dayList = [];
+  for (let d = from; d <= to && dayList.length < 42; d = ssCalAdd(d, 1)) dayList.push(d);
+  const byDay = new Map(dayList.map((d) => [d, { slots: [], items: [], allDay: false }]));
+  // A person who is away offers nothing, whatever the rules would produce: the slots stay off
+  // the calendar, and their meetings and busy times stay on it.
+  if (accepting) {
+    for (const d of shown.days) {
+      const b = byDay.get(d.date);
+      if (b) for (const s of d.slots || []) b.slots.push({ date: d.date, startsAt: s.startsAt, mins: ssCalZoned(s.startsAt, tz).mins });
+    }
+  }
+  for (const m of shown.meetings) {
+    if (m.status === "cancelled") continue;
+    const s = ssCalZoned(m.startsAt, tz);
+    const b = byDay.get(s.date);
+    if (!b) continue;
+    const e = ssCalZoned(m.endsAt || m.startsAt, tz);
+    b.items.push({ kind: "meeting", start: s.mins, end: e.date === s.date ? Math.max(e.mins, s.mins + 1) : 1440, m });
+  }
+  const busyByDay = new Map();
+  for (const x of shown.busy) {
+    for (const seg of ssCalSegments(x.startsAt, x.endsAt, tz)) {
+      if (!byDay.has(seg.date)) continue;
+      if (seg.start === 0 && seg.end >= 1440) { byDay.get(seg.date).allDay = true; continue; }
+      if (!busyByDay.has(seg.date)) busyByDay.set(seg.date, []);
+      busyByDay.get(seg.date).push(seg);
+    }
+  }
+  // Overlapping calendar blocks read as one stretch of busy, not a stack of them.
+  for (const [d, segs] of busyByDay) {
+    segs.sort((p, q) => p.start - q.start);
+    const merged = [];
+    for (const s of segs) {
+      const last = merged[merged.length - 1];
+      if (last && s.start <= last.end) last.end = Math.max(last.end, s.end);
+      else merged.push({ ...s });
+    }
+    for (const s of merged) byDay.get(d).items.push({ kind: "busy", start: s.start, end: s.end });
+  }
+  for (const b of byDay.values()) b.items.sort((p, q) => p.start - q.start);
+
+  const latestDay = maxDaysAhead ? ssCalZoned(new Date(Date.now() + maxDaysAhead * 86400000).toISOString(), tz).date : null;
+  const loading = !data || data.key !== key;
+  const zoneLabel = String(tz).replace(/_/g, " ");
+  const dayOff = (d) => {
+    const k = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][new Date(d + "T00:00:00Z").getUTCDay()];
+    return !((weeklyHours && weeklyHours[k]) || []).length;
+  };
+
+  const atStart = view === "month" ? ssCalMonthFirst(anchor) <= ssCalMonthFirst(today) : from <= ssCalWeekStart(today);
+  const atEnd = from > ssCalAdd(today, 365);
+  const move = (n) => setAnchor((a) => (view === "month" ? ssCalMonthFirst(a, n) : ssCalAdd(a, 7 * n)));
+  const pick = (s) => { onPick(s); if (full && s) setFull(false); };
+  const label = view === "month"
+    ? ssCalName(ssCalMonthFirst(anchor), { month: "long", year: "numeric" })
+    : `${ssCalName(from, { month: "short", day: "numeric" })} – ${ssCalName(to, { month: "short", day: "numeric", year: "numeric" })}`;
+
+  const navBtn = (disabled) => ({
+    background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 7, padding: "5px 10px", fontSize: 13, fontWeight: 800,
+    color: disabled ? "#CBD5E1" : "#334155", cursor: disabled ? "default" : "pointer", fontFamily: "inherit", lineHeight: 1.2,
+  });
+  const segBtn = (on) => ({
+    background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", border: "none", padding: "5px 11px",
+    fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+  });
+  const sub = { fontSize: 12, color: "#64748B", lineHeight: 1.5 };
+  const stickyLeft = { position: "sticky", left: 0, zIndex: 1, background: "#FFF", borderBottom: "1px solid #F1F5F9", borderRight: "1px solid #E2E8F0", textAlign: "right", whiteSpace: "nowrap" };
+
+  // ── The week: one row for every minute something starts at, one column per day ─────────
+  const weekGrid = () => {
+    const rowSet = new Set();
+    for (const d of dayList) {
+      const b = byDay.get(d);
+      for (const s of b.slots) rowSet.add(s.mins);
+      for (const it of b.items) rowSet.add(it.start);
+    }
+    const rows = [...rowSet].sort((p, q) => p - q);
+    const anyAllDay = dayList.some((d) => byDay.get(d).allDay);
+    if (!rows.length && !anyAllDay) {
+      return (
+        <div data-ss-cal-empty="" style={{ ...sub, border: "1px dashed #CBD5E1", borderRadius: 10, padding: "18px 14px", textAlign: "center" }}>
+          {loading ? "Checking the calendar…" : `Nothing on ${hostName}'s calendar this week${accepting ? ", and no open times" : ""}. Try the next week.`}
+        </div>
+      );
+    }
+    const cellBase = { borderBottom: "1px solid #F1F5F9", borderLeft: "1px solid #F1F5F9", padding: 3, minHeight: 30, boxSizing: "border-box" };
+    return (
+      <div data-ss-cal-week="" style={{ overflow: "auto", maxHeight: full ? "calc(100vh - 190px)" : 480, border: "1px solid #E2E8F0", borderRadius: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "60px repeat(7, minmax(96px, 1fr))", minWidth: 60 + 7 * 96 }}>
+          <div style={{ position: "sticky", top: 0, left: 0, zIndex: 3, background: "#F8FAFC", borderBottom: "1px solid #E2E8F0", borderRight: "1px solid #E2E8F0" }} />
+          {dayList.map((d) => {
+            const b = byDay.get(d);
+            const isToday = d === today;
+            const note = b.allDay ? "Busy all day" : b.slots.length ? `${b.slots.length} open` : d < today ? "" : dayOff(d) ? "Day off" : "Nothing open";
+            return (
+              <div key={d} data-ss-cal-head={d} style={{
+                position: "sticky", top: 0, zIndex: 2, background: isToday ? "#EDE9FE" : "#F8FAFC", textAlign: "center",
+                borderBottom: "1px solid #E2E8F0", borderLeft: "1px solid #E2E8F0", padding: "6px 4px", opacity: d < today ? 0.55 : 1,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: isToday ? ACCENT : "#64748B", textTransform: "uppercase", letterSpacing: 0.4 }}>{ssCalName(d, { weekday: "short" })}</div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B" }}>{ssCalName(d, { month: "short", day: "numeric" })}</div>
+                <div style={{ fontSize: 10.5, fontWeight: 700, color: b.slots.length ? "#92400E" : "#94A3B8", minHeight: 14 }}>{note}</div>
+              </div>
+            );
+          })}
+          {anyAllDay && (
+            <>
+              <div style={{ ...stickyLeft, fontSize: 10.5, color: "#64748B", padding: "6px 6px" }}>All day</div>
+              {dayList.map((d) => (
+                <div key={d} style={cellBase}>
+                  {byDay.get(d).allDay && (
+                    <div data-ss-cal-busy="all-day" style={{ background: SS_CAL_BUSY_BG, borderRadius: 6, padding: "3px 6px", fontSize: 11.5, fontWeight: 700, color: "#475569" }}>Busy</div>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+          {rows.map((r) => (
+            <React.Fragment key={r}>
+              <div style={{ ...stickyLeft, fontSize: 11, fontWeight: 600, color: "#64748B", padding: "8px 6px 0" }}>{ssCalClock(r)}</div>
+              {dayList.map((d) => {
+                const b = byDay.get(d);
+                const here = b.items.filter((it) => it.start === r);
+                const slot = b.slots.find((s) => s.mins === r);
+                // A row inside a meeting or a busy stretch is shaded, so a long one reads as long.
+                const under = b.items.find((it) => it.start < r && r < it.end);
+                const bg = under ? (under.kind === "meeting" ? ssCalHex(under.m.color) + "14" : "#F8FAFC") : (d < today ? "#FCFCFD" : "#FFF");
+                return (
+                  <div key={d} style={{ ...cellBase, background: bg }}>
+                    {here.map((it) => it.kind === "meeting" ? (
+                      <div key={it.m.id} data-ss-cal-meeting={it.m.id}
+                        title={`${ssCalClock(it.start)}–${ssCalClock(it.end)} · ${it.m.customerName || "Customer"} · ${it.m.typeName || "Meeting"}`}
+                        style={{
+                          background: ssCalHex(it.m.color) + "26", borderLeft: `3px solid ${ssCalHex(it.m.color)}`, borderRadius: 6,
+                          padding: "3px 6px", fontSize: 11.5, lineHeight: 1.3, color: "#1E293B", marginBottom: 2, opacity: it.m.status === "booked" ? 1 : 0.6,
+                        }}>
+                        <div style={{ fontWeight: 800 }}>{ssCalSpan(it.start, it.end)}</div>
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.m.customerName || "Customer"}</div>
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#64748B" }}>{it.m.typeName || "Meeting"}</div>
+                      </div>
+                    ) : (
+                      <div key={`b${it.start}`} data-ss-cal-busy="" title={`Busy ${ssCalClock(it.start)}–${ssCalClock(it.end)}`}
+                        style={{ background: SS_CAL_BUSY_BG, borderRadius: 6, padding: "3px 6px", fontSize: 11.5, lineHeight: 1.3, color: "#475569", marginBottom: 2 }}>
+                        <div style={{ fontWeight: 800 }}>Busy</div>
+                        <div>{ssCalSpan(it.start, it.end)}</div>
+                      </div>
+                    ))}
+                    {slot && (() => {
+                      const on = !!picked && picked.startsAt === slot.startsAt;
+                      return (
+                        <button type="button" data-ss-cal-slot={slot.startsAt} aria-pressed={on}
+                          aria-label={`${ssCalName(d, { weekday: "long", month: "long", day: "numeric" })} at ${ssCalClock(r)}`}
+                          onClick={() => pick(on ? null : slot)}
+                          style={{
+                            width: "100%", background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#92400E",
+                            border: `1.5px solid ${on ? ACCENT : "#FCD34D"}`, borderRadius: 7, padding: "4px 2px",
+                            fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit",
+                          }}>
+                          {ssCalClock(r)}
+                        </button>
+                      );
+                    })()}
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ── The month: how much is open and booked on each day; a day opens its week ───────────
+  const monthGrid = () => {
+    const month = ssCalMonthFirst(anchor).slice(0, 7);
+    return (
+      <div data-ss-cal-month="" style={{ overflowX: "auto" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(44px, 1fr))", gap: 4, minWidth: 7 * 48 }}>
+          {dayList.slice(0, 7).map((d) => (
+            <div key={d} style={{ fontSize: 11, fontWeight: 800, color: "#64748B", textAlign: "center", textTransform: "uppercase", letterSpacing: 0.4 }}>
+              {ssCalName(d, { weekday: "short" })}
+            </div>
+          ))}
+          {dayList.map((d) => {
+            const b = byDay.get(d);
+            const booked = b.items.filter((it) => it.kind === "meeting").length;
+            const inMonth = d.slice(0, 7) === month;
+            const isToday = d === today;
+            return (
+              <button key={d} type="button" data-ss-cal-day={d}
+                aria-label={`${ssCalName(d, { weekday: "long", month: "long", day: "numeric" })}: ${b.slots.length} open, ${booked} booked. Opens that week`}
+                onClick={() => { setAnchor(d); setView("week"); }}
+                style={{
+                  minHeight: 70, textAlign: "left", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3,
+                  border: isToday ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 8, padding: 5,
+                  background: inMonth ? "#FFF" : "#F8FAFC", opacity: inMonth ? (d < today ? 0.6 : 1) : 0.45,
+                  cursor: "pointer", fontFamily: "inherit", minWidth: 0,
+                }}>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: isToday ? ACCENT : "#1E293B" }}>{+d.slice(8, 10)}</span>
+                {!!b.slots.length && <span style={{ fontSize: 10.5, fontWeight: 800, color: "#92400E", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 999, padding: "0 6px", whiteSpace: "nowrap" }}>{b.slots.length} open</span>}
+                {!!booked && <span style={{ fontSize: 10.5, fontWeight: 800, color: ACCENT, background: "#EDE9FE", borderRadius: 999, padding: "0 6px", whiteSpace: "nowrap" }}>{booked} booked</span>}
+                {b.allDay && <span style={{ fontSize: 10.5, fontWeight: 700, color: "#475569", background: SS_CAL_BUSY_BG, borderRadius: 999, padding: "0 6px", whiteSpace: "nowrap" }}>Busy</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const body = (
+    <div data-ss-meeting-calendar="">
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <div style={{ display: "flex", gap: 4 }}>
+          <button type="button" aria-label={view === "month" ? "Previous month" : "Previous week"} disabled={atStart} onClick={() => move(-1)} style={navBtn(atStart)}>‹</button>
+          <button type="button" onClick={() => setAnchor(today)} style={{ ...navBtn(false), fontSize: 12 }}>Today</button>
+          <button type="button" aria-label={view === "month" ? "Next month" : "Next week"} disabled={atEnd} onClick={() => move(1)} style={navBtn(atEnd)}>›</button>
+        </div>
+        <div data-ss-cal-label="" style={{ fontSize: 14, fontWeight: 800, color: "#1E293B", flex: "1 1 auto" }}>
+          {label}{loading && data ? <span style={{ fontSize: 11.5, fontWeight: 600, color: "#94A3B8" }}> · loading…</span> : null}
+        </div>
+        <div style={{ display: "inline-flex", border: "1px solid #CBD5E1", borderRadius: 8, overflow: "hidden" }}>
+          <button type="button" aria-pressed={view === "week"} onClick={() => setView("week")} style={segBtn(view === "week")}>Week</button>
+          <button type="button" aria-pressed={view === "month"} onClick={() => setView("month")} style={segBtn(view === "month")}>Month</button>
+        </div>
+        <button type="button" onClick={() => setFull(!full)} style={{ ...navBtn(false), fontSize: 12 }}>
+          {full ? "Close full screen" : "Full screen"}
+        </button>
+      </div>
+      <div style={{ ...sub, marginBottom: 8, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontWeight: 700, color: "#334155" }}>{`${hostName}'s time · ${zoneLabel}`}</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 3, border: "1.5px solid #FCD34D", background: "#FFF", boxSizing: "border-box" }} />Open, pick one
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 3, background: "#EDE9FE", borderLeft: `3px solid ${ACCENT}`, boxSizing: "border-box" }} />Booked, in its type's colour
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 3, background: SS_CAL_BUSY_BG }} />Busy on their own calendar
+        </span>
+      </div>
+      {err && <div style={S.err}>{err}</div>}
+      {data && data.meetingsErr && <div style={{ ...sub, color: "#B91C1C", marginBottom: 6 }}>{`The meetings already booked didn't load: ${data.meetingsErr}`}</div>}
+      {latestDay && to > latestDay && accepting && (
+        <div data-ss-cal-window="" style={{ ...sub, marginBottom: 8, color: "#92400E" }}>
+          {`This meeting type can be booked up to ${maxDaysAhead} days ahead, so no open times show after ${ssCalName(latestDay, { weekday: "short", month: "short", day: "numeric" })}. To book further out, use “Pick a different time” below.`}
+        </div>
+      )}
+      {!data && !err
+        ? <div style={{ ...sub, marginBottom: 10 }}>Checking the calendar…</div>
+        : <div style={{ opacity: loading ? 0.55 : 1, transition: "opacity 120ms" }}>{view === "month" ? monthGrid() : weekGrid()}</div>}
+    </div>
+  );
+
+  if (!full) return <div style={{ marginBottom: 10 }}>{body}</div>;
+  // FULL SCREEN: the same calendar over the whole window, for a week that doesn't fit beside the
+  // record. Picking a time closes it, because the booking form it fills is on the record.
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`${hostName}'s calendar`}
+      style={{ position: "fixed", inset: 0, zIndex: 1150, background: "#FFF", padding: 16, overflow: "auto", boxSizing: "border-box" }}>
+      {body}
+    </div>
+  );
+}
 
 // ─── What is PLANNED with this customer: the meetings ────────────────────────────────────
 // Carolyn 2026-10-26, pointing at a "Meetings with this customer" block sitting above Focus:
@@ -6404,7 +6731,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           ))}
         </div>
 
-        <div style={{ flex: "3 1 420px", minWidth: 320 }}>
+        {/* Never wider than the page: a flat 320 pushed a phone-width record 10px sideways (2026-11-10). */}
+        <div style={{ flex: "3 1 420px", minWidth: "min(320px, 100%)" }}>
           <div style={S.card}>
             <div style={{ display: "flex", gap: 3, flexWrap: "wrap", borderBottom: "1px solid #E2E8F0", paddingBottom: 7, marginBottom: 9 }}>
               {CRM_TABS.filter((t) => !t.when || t.when(ctx)).map((t) => {
