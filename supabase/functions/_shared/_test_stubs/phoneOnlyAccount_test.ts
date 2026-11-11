@@ -20,6 +20,7 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import {
   accountTypeOf,
+  PHONE_ONLY_BILLING_ACTIONS,
   PHONE_ONLY_CONTACT_ACTIONS,
   PHONE_ONLY_PORTAL_SETTINGS,
   PHONE_ONLY_REFUSAL,
@@ -80,11 +81,20 @@ Deno.test("the lists name real portal-settings actions, and the contact half is 
   }
 });
 
+Deno.test("Billing is the wallet: every portal-billing action but subscribe, and each one real", async () => {
+  const src = await read("../../portal-billing/index.ts");
+  const gates = src.slice(src.indexOf("const GATES: GateTable = {"), src.indexOf("\n};\n", src.indexOf("const GATES: GateTable = {")));
+  const all = [...gates.matchAll(/\n  ([a-z_]+):/g)].map((m) => m[1]);
+  assert(all.length >= 9, `GATES moved? found ${all.join(", ")}`);
+  assertEquals(all.filter((a) => !PHONE_ONLY_BILLING_ACTIONS.has(a)), ["subscribe"], "a phone-only account can't buy a plan; everything else of its wallet works");
+  assertEquals([...PHONE_ONLY_BILLING_ACTIONS].filter((a) => !all.includes(a)), [], "no typo in the list");
+});
+
 Deno.test("every function that resolves its tenant says what a phone-only account may call, or nothing", async () => {
   // "all" where the whole function is part of the account; a set for portal-settings; absent (refuse
   // all) for the rest. Pinned so a new resolveTenant caller is a decision, not an accident.
   const want: Record<string, string | null> = {
-    "portal-billing": 'phoneOnly: "all"', "portal-setup": 'phoneOnly: "all"', "portal-sms": 'phoneOnly: "all"',
+    "portal-billing": "phoneOnly: PHONE_ONLY_BILLING_ACTIONS", "portal-setup": 'phoneOnly: "all"', "portal-sms": 'phoneOnly: "all"',
     "support-agent": 'phoneOnly: "all"', "portal-settings": "phoneOnly: PHONE_ONLY_PORTAL_SETTINGS",
     "portal-meetings": null, "portal-payments": null, "portal-schedule": null, "qbo-oauth-connect": null, "sync-design-status": null,
   };

@@ -303,6 +303,19 @@ Deno.test("…and only an explicit true does it: false, a missing row or a lost 
   assertEquals([r.body.entitlement.phoneOnly, r.body.entitlement.shedsOn], [false, true]);
 });
 
+Deno.test("a phone-only account cannot buy a plan: subscribe is refused before the gateway (384)", async () => {
+  const r = await drive(
+    { action: "subscribe", planIds: ["crm_annual"], confirmChargeCents: price("crm_annual"), paymentToken: "harness-token", consent: { version: COF_CONSENT_VERSION, accepted: true } },
+    { vault: null, gateway: "ok", settings: { phone_only: true } },
+  );
+  assertEquals(r.status, 403, JSON.stringify(r.body));
+  assert(/This isn't part of your account/.test(String(r.body?.error ?? "")), JSON.stringify(r.body));
+  assertEquals([r.trace.gateway.length, r.trace.writes.length], [0, 0], "nothing charged, nothing written");
+  // …and its wallet still answers.
+  const s = await drive({ action: "status" }, { settings: { phone_only: true } });
+  assertEquals(s.status, 200, JSON.stringify(s.body));
+});
+
 Deno.test("a non-billable account is exempt, with or without rows", async () => {
   const g = await gate([], { billing_exempt: true });
   assertEquals({ state: g.state, locked: g.locked }, { state: "exempt", locked: false });

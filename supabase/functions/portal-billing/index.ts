@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
-import { phoneOnlyOf } from "../_shared/accountShape.ts";
+import { PHONE_ONLY_BILLING_ACTIONS, phoneOnlyOf } from "../_shared/accountShape.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { paidThroughOf, unusedCreditOf } from "../_shared/billingPeriods.ts";
@@ -182,8 +182,9 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     readActions: new Set(),
     defaultAction: "status",
     requireBilling: true,
-    // A phone-only account (migration 384) pays by its wallet and may buy more later: all of it.
-    phoneOnly: "all",
+    // A phone-only account (migration 384) pays by its wallet: everything but `subscribe`
+    // (_shared/accountShape.ts says why). It gets more by an operator switching its account type.
+    phoneOnly: PHONE_ONLY_BILLING_ACTIONS,
   });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, operator, payload, action, userEmail, userId, audit, auditStrict, canRead } = r.ctx;

@@ -2139,6 +2139,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
   .map((t) => !phoneOnly ? t
     : t[0] === "company" ? [t[0], t[1], "Your business details and team", t[3]]
     : t[0] === "pipelines" ? [t[0], t[1], "Your business phone and texting", t[3]]
+    : t[0] === "billing" ? [t[0], t[1], "The wallet that pays for your calls, texts and number", t[3]]
     : t);
 }
 
@@ -2373,7 +2374,10 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     // emptying the hubs too is what stops a typed /settings/doors or /settings/shingles from
     // still rendering, since a slug any hub knows is a page (migration 364).
     colors: shedsOn ? ssColorTabs() : [],
-    billing: ssBillingTabs(),
+    // A phone-only account's Billing is its Wallet (migration 384): no plans to choose from, because
+    // a plan bought while phone-only would unlock nothing (portal-billing refuses `subscribe` too).
+    // The rail's id stays `billing`; SettingsShell lands a hub on its first tab it may show.
+    billing: ssBillingTabs().filter(([id]) => !phoneOnly || id !== "billing"),
     options: shedsOn ? ssOptionTabs() : [],
     // Keyed on the rail id, like every entry here — which for Customer Hub is `pipelines`,
     // its first tab's slug. See ssCustomerHubTabs.

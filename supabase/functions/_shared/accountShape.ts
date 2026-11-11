@@ -61,6 +61,15 @@ export const PHONE_ONLY_CONTACT_ACTIONS: ReadonlySet<string> = new Set([
   "crm_send_sms", "crm_send_email",
 ]);
 
+/** portal-billing: everything a phone-only account's Wallet needs, and NOT `subscribe`. Its Billing is
+ *  the wallet alone (calls, texts and the number are paid from it), and a plan bought while the account
+ *  is phone-only would charge them and unlock nothing: the shape still hides it. `cancel` stays, so an
+ *  account switched to phone-only while it held a subscription can still end it. To sell them more,
+ *  an operator switches the account type first (Admin > Account type). */
+export const PHONE_ONLY_BILLING_ACTIONS: ReadonlySet<string> = new Set([
+  "status", "cancel", "topup", "topup_settings", "update_card", "add_card", "request_card_email", "wallet_transactions",
+]);
+
 /** Every portal-settings action a phone-only account may call: the list above plus the contact half. */
 export const PHONE_ONLY_PORTAL_SETTINGS: ReadonlySet<string> = new Set([
   ...PHONE_ONLY_SETTINGS_ACTIONS, ...PHONE_ONLY_CONTACT_ACTIONS,

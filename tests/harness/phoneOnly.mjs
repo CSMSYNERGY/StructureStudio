@@ -193,6 +193,12 @@ try {
   ok("A: …and lists no Pipelines, Fields, Meetings, Automations, Email or Forms tab",
     !/\b(Pipelines|Fields|Meetings|Automations|Email Settings|Email Templates|Forms|Customer login)\b/.test(hubTabRow.slice(-200)),
     hubTabRow.slice(-200));
+  // Billing is the Wallet alone: no plans to buy (a plan would unlock nothing while phone-only).
+  const billAt = await settle(p, "/settings/billing");
+  const billText = await main();
+  ok("A: Settings > Billing renders the Wallet, with no Subscription tab and no plans",
+    /Wallet/.test(billText) && !/\bSubscription\b/.test(billText) && !/Choose your features/.test(billText),
+    `${billAt} :: ${billText.slice(0, 160)}`);
 
   // The record.
   await settle(p, `/contacts/c-${CONTACT.id}`);
@@ -229,6 +235,9 @@ try {
     ["Shed Designer", "Conversations", "Commissions"].every((l) => rb.all.includes(l)), rb.all.join(" | "));
   const inv = await settle(B.page, "/inventory");
   ok("B: …and its /inventory opens", inv === "/inventory", inv);
+  await settle(B.page, "/settings/billing");
+  const bBill = await B.page.evaluate(() => (document.querySelector(".ss-main") || document.body).innerText);
+  ok("B: …and its Billing still opens on Subscription, with the Wallet beside it", /Subscription/.test(bBill) && /Wallet/.test(bBill), bBill.slice(0, 160).replace(/\s+/g, " "));
   ok("B: no uncaught page errors", B.pageErrors.length === 0, B.pageErrors.join(" | "));
   await B.ctx.close();
 } finally {

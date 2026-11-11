@@ -7028,7 +7028,10 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}
       {/* Email Settings, SMS - A2P (Text Messaging until 2026-11-05) and Phone render inside CustomerHubShell since 2026-10-23
           (same slugs, same props, same canEdit rules) — see ssCustomerHubTabs. */}
-      {hubs.billing.some((t) => t[0] === sub) && (
+      {/* `sub === "billing"` on its own as well, Customer Hub's reason: it is the hub's RAIL id, and a
+          phone-only account's Billing has no Subscription tab (migration 384), so BillingShell lands it
+          on the Wallet. */}
+      {(hubs.billing.some((t) => t[0] === sub) || (sub === "billing" && hubs.billing.length > 0)) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
       {/* aiCard / viewing / onOpenPhone: the Call recording & AI transcripts card (2026-10-14). It
