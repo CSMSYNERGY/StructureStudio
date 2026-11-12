@@ -6941,7 +6941,7 @@ function MeetingTypeEditor({ draft, onChange, onSave, busy, video = null }) {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false, hubReach = null, shedsOn = true, phoneOnly = false }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false, crmUnlocked = true, crmPending = false, hubReach = null, shedsOn = true, phoneOnly = false, mods = null }) {
   const [subState, setSubState] = useState("sheds");
   const setSub = onSub || setSubState;
   // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
@@ -6949,10 +6949,10 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   // shedsOn rides into BOTH lists for the same reason phoneOffered does: the rail (12-shell)
   // and this body must offer exactly the same tabs, or the rail shows a page the clamp below
   // sends straight back to Structures. Migration 363.
-  const TABS = ssSettingsTabs({ isOwner, isAdmin, access, phoneOffered, shedsOn, phoneOnly });
+  const TABS = ssSettingsTabs({ isOwner, isAdmin, access, phoneOffered, shedsOn, phoneOnly, mods });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
   // /settings/branding, a link people hold, would fall back to Structures.
-  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked, phoneOffered, shedsOn, phoneOnly });
+  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked, phoneOffered, shedsOn, phoneOnly, mods });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /settings/color) survived as-is, and since every content branch

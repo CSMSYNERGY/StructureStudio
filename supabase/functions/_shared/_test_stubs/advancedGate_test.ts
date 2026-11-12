@@ -45,9 +45,18 @@ const ssAdvancedOnLaunched = lift(CLAMP_BLOCK.replace(LAUNCH_LINE, "const SS_ADV
 // sandbox must carry the real ssShedsOn — lifted from the same block, never a stub, so this file
 // cannot pass against a rule the portal does not run. Nothing here is about sheds.
 // …and `phoneOnly` (migration 384) the same way, from the real ssPhoneOnly.
-const { ssShedsOn, ssPhoneOnly } = new Function("window", `${CLAMP_BLOCK}; return { ssShedsOn, ssPhoneOnly };`)(
+// …and `mods` (plans as data, migrations 386 and 387) the same way: the gate reads the company's
+// tab map through the real ssModules / ssModuleOn / ssModuleOffered. Every case here leaves
+// entitlement.modules unset, so the map is null and each of them hands back the old answer; the
+// map's own cases are in accessShell_test.ts.
+const { ssShedsOn, ssPhoneOnly, ssModules, ssModuleOn, ssModuleOffered, SS_SHED_MODULES } = new Function("window",
+  `${CLAMP_BLOCK}; return { ssShedsOn, ssPhoneOnly, ssModules, ssModuleOn, ssModuleOffered, SS_SHED_MODULES };`)(
   { location: { hostname: "app.structurestudiosuite.com" } },
-) as { ssShedsOn: (e: unknown) => boolean; ssPhoneOnly: (e: unknown) => boolean };
+) as {
+  ssShedsOn: (e: unknown) => boolean; ssPhoneOnly: (e: unknown) => boolean; ssModules: (e: unknown) => unknown;
+  ssModuleOn: (m: unknown, k: string, legacy: boolean) => boolean; ssModuleOffered: (m: unknown, k: string, legacy: boolean) => boolean;
+  SS_SHED_MODULES: string[];
+};
 
 // advancedCtx … advancedClampOn, whole, ending where the URL clamp begins.
 const GATE = between(SHELL, "const advancedCtx =", "const resolvedTab = ssClampTab(", "the Advanced gate in 12-shell.jsx");
@@ -64,9 +73,11 @@ interface W {
 }
 function gate(w: W) {
   const f = new Function("ssAdvancedOn", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver", "ssShedsOn", "ssPhoneOnly",
+    "ssModules", "ssModuleOn", "ssModuleOffered", "SS_SHED_MODULES",
     `${GATE}\nreturn { advancedOn, advancedAsked, advancedClampOn };`);
   return f(w.launched ? ssAdvancedOnLaunched : ssAdvancedOn, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
-    w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, w.advancedHoldOver ?? false, ssShedsOn, ssPhoneOnly) as
+    w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, w.advancedHoldOver ?? false, ssShedsOn, ssPhoneOnly,
+    ssModules, ssModuleOn, ssModuleOffered, SS_SHED_MODULES) as
     { advancedOn: boolean; advancedAsked: boolean; advancedClampOn: boolean };
 }
 const INTERNAL = { reason: "internal", exempt: true, state: "exempt", granted: ["view_3d"] };
@@ -137,12 +148,14 @@ Deno.test("launched: the switch does not widen WHO gets the page: still owner/ad
 const SWITCH = between(SHELL, "const advancedSwitch =", "// Accounts and Admin moved INTO this rail", "advancedSwitch in 12-shell.jsx");
 function switchFor(w: W & { advancedDirty?: boolean; confirmAnswer?: boolean }) {
   const g = new Function("ssAdvancedOn", "SS_ADVANCED_FOR_BUILDERS", "viewing", "viewedCtx", "entitlement", "tab", "canAdminForUrl", "isOperator", "isSupportOp", "advancedHoldOver", "advancedDirtyRef", "navigate", "window", "ssShedsOn", "ssPhoneOnly",
+    "ssModules", "ssModuleOn", "ssModuleOffered", "SS_SHED_MODULES",
     `${GATE}\n${SWITCH}\nreturn advancedSwitch;`);
   const nav: string[] = [];
   const asked: string[] = [];
   const s = g(w.launched ? ssAdvancedOnLaunched : ssAdvancedOn, !!w.launched, w.viewing ?? null, w.viewedCtx ?? null, w.entitlement ?? null, w.tab ?? "designs",
     w.canAdminForUrl ?? true, w.isOperator ?? !!w.viewing, w.isSupportOp === undefined ? false : w.isSupportOp, false,
-    { current: !!w.advancedDirty }, (p: string) => nav.push(p), { confirm: (m: string) => { asked.push(m); return w.confirmAnswer ?? true; } }, ssShedsOn, ssPhoneOnly);
+    { current: !!w.advancedDirty }, (p: string) => nav.push(p), { confirm: (m: string) => { asked.push(m); return w.confirmAnswer ?? true; } }, ssShedsOn, ssPhoneOnly,
+    ssModules, ssModuleOn, ssModuleOffered, SS_SHED_MODULES);
   return { s, nav, asked };
 }
 
@@ -241,7 +254,8 @@ Deno.test("the nav item and the page mount both ask advancedOn, never the held c
 
 Deno.test("both route clamps are handed the gate", () => {
   // …and since migration 364 both are handed `shedsOn` after `sub`, the clamp's ninth argument, and
-  // Jack's `jackClampOn` after that, the tenth, and since 384 `phoneOnly`, the eleventh.
-  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
-  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly\);/.test(SHELL), "the render clamp must pass advancedClampOn");
+  // Jack's `jackClampOn` after that, the tenth, and since 384 `phoneOnly`, the eleventh, and since
+  // plans as data (386/387) the company's tab map `mods`, the twelfth.
+  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly, mods\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
+  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly, mods\);/.test(SHELL), "the render clamp must pass advancedClampOn");
 });

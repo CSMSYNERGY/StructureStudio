@@ -14,6 +14,8 @@
 //   access_client_plan_assign    put a company on a plan (a comp, or paid outside the card system)
 //   access_client_plan_remove    take it off one
 //   access_client_module_set     force one tab on or off for one company, or clear that
+//   access_rollout_get           whose portal obeys the new map (migration 387)
+//   access_rollout_set           name a company, un-name it, or switch every company on or off
 //
 // WHO MAY CALL, in order:
 //   * admin-catalog's checkAdminAuth: an operator JWT or the break-glass password. A support
@@ -43,10 +45,11 @@ type Identity = { via: string; userId?: string; email?: string };
 type Json = (b: unknown, s?: number) => Response;
 type Row = Record<string, unknown>;
 
-export const ACCESS_PLAN_READS: readonly string[] = ["access_plan_list", "access_client_get"];
+export const ACCESS_PLAN_READS: readonly string[] = ["access_plan_list", "access_client_get", "access_rollout_get"];
 export const ACCESS_PLAN_WRITES: readonly string[] = [
   "access_plan_save", "access_plan_set_modules", "access_plan_duplicate", "access_plan_retire",
   "access_client_plan_assign", "access_client_plan_remove", "access_client_module_set",
+  "access_rollout_set",
 ];
 export const ACCESS_PLAN_ACTIONS: readonly string[] = [...ACCESS_PLAN_READS, ...ACCESS_PLAN_WRITES];
 
@@ -194,6 +197,20 @@ async function clientAccess(sb: Db, id: string): Promise<Row> {
   return { clientId: id, tabs: detail ?? [], subscribed, assigned, exceptions };
 }
 
+/** access_config.enforce, read defensively: anything malformed is nobody enforced (387's rule). */
+async function readRollout(sb: Db): Promise<{ all: boolean; clients: string[] }> {
+  const { data, error } = await sb.from("access_config").select("key, value").eq("key", "enforce").maybeSingle();
+  if (error) throw error;
+  const v = (data as Row | null)?.value as { all?: unknown; clients?: unknown } | undefined;
+  return {
+    all: v?.all === true,
+    clients: Array.isArray(v?.clients) ? [...new Set((v!.clients as unknown[]).filter((c): c is string => typeof c === "string"))].sort() : [],
+  };
+}
+
+/** The phrase access_rollout_set needs before it switches EVERY company onto the new map. */
+export const ROLLOUT_ALL_CONFIRM = "every company";
+
 export async function handleAccessPlansAction(
   sb: Db, action: string, p: Record<string, unknown>, identity: Identity, json: Json,
   deps: { now: () => Date } = { now: () => new Date() },
@@ -240,6 +257,46 @@ export async function handleAccessPlansAction(
         const id = clientId(p.clientId);
         if (!(await companyExists(sb, id))) throw new Refuse("No company with that id.", 404);
         return json(await clientAccess(sb, id));
+      }
+
+      case "access_rollout_get": {
+        return json(await readRollout(sb));
+      }
+
+      // ── the rollout switch (migration 387) ─────────────────────────────────────────────────
+      // Whose portal obeys access_resolve. One company at a time is the normal move; `all` is the
+      // last step of the rollout and asks for a phrase, because it changes what every builder's
+      // portal reads in one call.
+      case "access_rollout_set": {
+        const before = await readRollout(sb);
+        const after = { all: before.all, clients: [...before.clients] };
+        if (p.all !== undefined) {
+          if (typeof p.all !== "boolean") throw new Refuse("all is true or false.");
+          if (p.all && p.confirm !== ROLLOUT_ALL_CONFIRM) {
+            throw new Refuse(`Switching every company on needs confirm: "${ROLLOUT_ALL_CONFIRM}".`);
+          }
+          after.all = p.all;
+        }
+        if (p.clientId !== undefined) {
+          const id = clientId(p.clientId);
+          if (typeof p.on !== "boolean") throw new Refuse("on is true or false.");
+          if (p.on) {
+            if (!(await companyExists(sb, id))) throw new Refuse("No company with that id.", 404);
+            if (!after.clients.includes(id)) after.clients.push(id);
+          } else {
+            after.clients = after.clients.filter((c) => c !== id);
+          }
+          after.clients.sort();
+        }
+        if (p.all === undefined && p.clientId === undefined) throw new Refuse("Send a clientId with on, or all.");
+        const row = {
+          key: "enforce", value: after, updated_at: now.toISOString(),
+          updated_by: identity.userId && UUID.test(identity.userId) ? identity.userId : null,
+        };
+        const { error } = await sb.from("access_config").upsert(row, { onConflict: "key" });
+        if (error) throw error;
+        await audit(sb, identity, "access_rollout_set", typeof p.clientId === "string" ? p.clientId : null, { before, after });
+        return json({ ok: true, ...after });
       }
 
       // ── plans ──────────────────────────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@
 // Run: deno test --no-check --allow-read supabase/functions/admin-catalog/accessPlans_test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
-  ACCESS_PLAN_ACTIONS, ACCESS_PLAN_READS, ACCESS_PLAN_WRITES, handleAccessPlansAction, MAX_ROWS,
+  ACCESS_PLAN_ACTIONS, ACCESS_PLAN_READS, ACCESS_PLAN_WRITES, handleAccessPlansAction, MAX_ROWS, ROLLOUT_ALL_CONFIRM,
 } from "./accessPlans.ts";
 import { ACCESS_MODULES } from "../_shared/accessModules.ts";
 
@@ -26,10 +26,11 @@ const COLUMNS: Record<string, string[]> = {
   billing_plans: ["id", "feature", "name", "price_cents", "billing_interval", "active", "availability"],
   billing_subscriptions: ["id", "client_id", "plan_id", "status"],
   admin_audit: ["id", "created_at", "action", "target_client_id", "row_count", "note", "actor_email", "actor_user_id"],
+  access_config: ["key", "value", "updated_at", "updated_by"],
 };
 const PK: Record<string, string[]> = {
   access_modules: ["key"], access_plans: ["key"], access_plan_modules: ["plan_key", "module"],
-  client_access_plans: ["client_id", "plan_key"], client_modules: ["client_id", "module"],
+  client_access_plans: ["client_id", "plan_key"], client_modules: ["client_id", "module"], access_config: ["key"],
 };
 
 interface World {
@@ -187,6 +188,7 @@ function world(extra: Record<string, Row[]> = {}): World {
       { id: "s3", client_id: "ridge-co", plan_id: "crm_annual", status: "cancelled" },
     ],
     admin_audit: [],
+    access_config: [{ key: "enforce", value: { all: false, clients: [] } }],
     ...extra,
   };
   return { rows, writes: [], rpcCalls: [] };
@@ -470,6 +472,60 @@ Deno.test("no action ever writes a billing table, a company row or the catalogue
   await call(w, "access_client_plan_remove", { clientId: "ridge-co", planKey: "gutters_basic" });
   const touched = new Set(w.writes.map((x) => x.table));
   assertEquals([...touched].sort(), ["access_plan_modules", "access_plans", "admin_audit", "client_access_plans", "client_modules"]);
+  await call(w, "access_rollout_set", { clientId: "ridge-co", on: true });
+  const touched2 = new Set(w.writes.map((x) => x.table));
+  assertEquals([...touched2].sort(), ["access_config", "access_plan_modules", "access_plans", "admin_audit", "client_access_plans", "client_modules"]);
+});
+
+// ── the rollout switch (387) ─────────────────────────────────────────────────────────────────
+const rollout = (w: World) => w.rows.access_config.find((r) => r.key === "enforce")!.value as { all: boolean; clients: string[] };
+
+Deno.test("access_rollout_set names one company at a time, and un-names it", async () => {
+  const w = world();
+  assertEquals((await call(w, "access_rollout_get")).body, { all: false, clients: [] });
+  const on = await call(w, "access_rollout_set", { clientId: "ridge-co", on: true });
+  assertEquals([on.status, on.body.all, on.body.clients], [200, false, ["ridge-co"]]);
+  await call(w, "access_rollout_set", { clientId: "acme-sheds", on: true });
+  await call(w, "access_rollout_set", { clientId: "acme-sheds", on: true });           // naming twice is one entry
+  assertEquals(rollout(w).clients, ["acme-sheds", "ridge-co"]);
+  await call(w, "access_rollout_set", { clientId: "ridge-co", on: false });
+  assertEquals(rollout(w), { all: false, clients: ["acme-sheds"] });
+  assertEquals((await call(w, "access_rollout_set", { clientId: "long-gone", on: false })).status, 200);   // un-naming a company that left is fine
+  const a = audits(w, "access_rollout_set")[0];
+  assert(String(a.note).includes('"before"') && a.target_client_id === "ridge-co");
+});
+
+Deno.test("access_rollout_set refuses an unknown company, a missing on, and nothing to do", async () => {
+  const w = world();
+  assertEquals((await call(w, "access_rollout_set", { clientId: "nobody", on: true })).status, 404);
+  assertEquals((await call(w, "access_rollout_set", { clientId: "acme-sheds" })).status, 400);
+  assertEquals((await call(w, "access_rollout_set", { clientId: "acme-sheds", on: "yes" })).status, 400);
+  assertEquals((await call(w, "access_rollout_set", {})).status, 400);
+  assertEquals((await call(w, "access_rollout_set", { all: "true" })).status, 400);
+  assertEquals(rollout(w), { all: false, clients: [] });
+  assertEquals(w.writes.length, 0);
+});
+
+Deno.test("switching EVERY company on needs the phrase; switching it back off does not", async () => {
+  const w = world();
+  assertEquals((await call(w, "access_rollout_set", { all: true })).status, 400);
+  assertEquals((await call(w, "access_rollout_set", { all: true, confirm: "yes" })).status, 400);
+  assertEquals(rollout(w).all, false);
+  assertEquals((await call(w, "access_rollout_set", { all: true, confirm: ROLLOUT_ALL_CONFIRM })).status, 200);
+  assertEquals(rollout(w).all, true);
+  assertEquals((await call(w, "access_rollout_set", { all: false })).status, 200);
+  assertEquals(rollout(w).all, false);
+});
+
+Deno.test("a malformed rollout row reads as nobody, and the next write repairs it", async () => {
+  const w = world({ access_config: [{ key: "enforce", value: { all: "true", clients: "acme-sheds" } }] });
+  assertEquals((await call(w, "access_rollout_get")).body, { all: false, clients: [] });
+  await call(w, "access_rollout_set", { clientId: "acme-sheds", on: true });
+  assertEquals(rollout(w), { all: false, clients: ["acme-sheds"] });
+  const none = world({ access_config: [] });
+  assertEquals((await call(none, "access_rollout_get")).body, { all: false, clients: [] });
+  await call(none, "access_rollout_set", { clientId: "acme-sheds", on: true });
+  assertEquals(rollout(none).clients, ["acme-sheds"]);
 });
 
 Deno.test("an unknown action is refused", async () => {
@@ -480,7 +536,7 @@ Deno.test("an unknown action is refused", async () => {
 Deno.test("admin-catalog routes every action here, lists the reads as read-only and puts the writes on the money grant", async () => {
   const src = (await Deno.readTextFile(new URL("./index.ts", import.meta.url))).replace(/\r\n/g, "\n");
   for (const a of ACCESS_PLAN_ACTIONS) assert(src.includes(`case "${a}":`), `admin-catalog has no case for ${a}`);
-  assertEquals([...ACCESS_PLAN_READS].sort(), ["access_client_get", "access_plan_list"]);
+  assertEquals([...ACCESS_PLAN_READS].sort(), ["access_client_get", "access_plan_list", "access_rollout_get"]);
   const ro = src.slice(src.indexOf("const READ_ONLY_ACTIONS = new Set(["), src.indexOf('if (identity.via === "operator" && !READ_ONLY_ACTIONS.has('));
   assert(ro.includes("...ACCESS_PLAN_READS"), "the two reads are not on READ_ONLY_ACTIONS");
   assert(!ro.includes("ACCESS_PLAN_WRITES"), "a write is on READ_ONLY_ACTIONS");

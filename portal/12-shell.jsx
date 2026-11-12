@@ -1138,13 +1138,23 @@ function Dashboard({ session }) {
   // page that could only say no. In view-as that is a platform operator — a support operator wears
   // the builder's map, not the owner's chair — and isSupportOp null (still asking) is not yet a yes.
   const advancedMayRun = viewing ? (!!isOperator && isSupportOp === false) : !!canAdminForUrl;
-  const advancedOn = ssAdvancedOn(advancedEnt) && advancedMayRun;
+  // PLANS AS DATA (migrations 386 and 387): this company's tab map, off the SAME entitlement, and
+  // only when its rollout switch is on. Null for everyone else, and then every line that reads it
+  // below gives the answer it always gave (01-core.jsx ssModules has the rules).
+  const mods = ssModules(advancedEnt);
+  // Advanced keeps its own launch rule (ssAdvancedOn); on the map it must ALSO be on there, so an
+  // operator can switch it off for one company. The map alone never launches it for a builder.
+  const advancedOn = ssAdvancedOn(advancedEnt) && ssModuleOn(mods, "advanced", true) && advancedMayRun;
   // Does this builder sell sheds (migration 364)? Read off the SAME entitlement Advanced reads —
   // the VIEWED tenant's in view-as — so an operator standing in Joe's portal sees Joe's shape and
   // not their own. Unlike Advanced there is no hold: ssShedsOn fails OPEN, so a cold load shows
   // the whole rail and then settles, which is the harmless direction. Nothing is held back while
   // the entitlement is out, and nothing flashes away for a shed builder.
-  const shedsOn = ssShedsOn(advancedEnt);
+  // On the map, "sells sheds" is: offered at least one of the shed pages. It feeds the coarse
+  // readers (Settings' shed pages, wording); the rail and the clamp ask the map tab by tab.
+  const shedsOn = mods
+    ? SS_SHED_MODULES.some((m) => ssModuleOffered(mods, m, false))
+    : ssShedsOn(advancedEnt);
   // A PHONE-ONLY account (migration 384): the same entitlement, so view-as shows the viewed account's
   // shape. ssPhoneOnly is strictly true, so a cold load shows the ordinary rail and then settles.
   const phoneOnly = ssPhoneOnly(advancedEnt);
@@ -1164,7 +1174,7 @@ function Dashboard({ session }) {
   // projects branches, so passing it here refuses those two routes to a support account on
   // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly, mods);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -1884,9 +1894,9 @@ function Dashboard({ session }) {
   // `isOperator ||` blanket showed a 3D tab on a builder who never had it. A null viewedCtx is
   // still loading and reads as on, the same rule featureOn uses. On the operator's own portal
   // the operator's own entitlement decides, exactly like any tenant.
-  const view3dUnlocked = viewing
+  const view3dUnlocked = ssModuleOn(mods, "view_3d", viewing
     ? (!viewedCtx || ssView3dOn(viewedCtx.entitlement))
-    : ssView3dOn(entitlement);
+    : ssView3dOn(entitlement));
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
@@ -1898,7 +1908,9 @@ function Dashboard({ session }) {
   const effPhoneStatus = viewing
     ? (viewedCtx && viewedCtx.clientId === viewing.clientId ? (viewedCtx.phoneStatus || null) : null)
     : (tenant && tenant !== "none" ? (tenant.phoneStatus || null) : null);
-  const phoneOffered = ssPhoneOffered(effPhoneStatus, !!viewing);
+  // On the map the phone is offered where the company's plan has it: that is how a company on a
+  // phone plan reaches the Phone page to switch its line on before it has ever made a call.
+  const phoneOffered = ssModuleOffered(mods, "phone", ssPhoneOffered(effPhoneStatus, !!viewing));
   // 3D setup contract handed to the calibration editor, which lives in Settings ->
   // Designer -> 3D since 2026-08-21 (it used to be a bar across the top of the Designer
   // TAB, over every design anyone opened). The editor itself is still rendered by the
@@ -2588,7 +2600,7 @@ function Dashboard({ session }) {
     // rather than a hand-rolled check so the two can never disagree; a null map still
     // passes (NONADMIN_TABS holds "designer"), so nothing changes for owners, admins,
     // operators or a tenant predating migration 100.
-    if (ssClampTab("designer", isOperator, canAdmin, myAccess, supportView) !== "designer") {
+    if (ssClampTab("designer", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, true, false, false, mods) !== "designer") {
       window.alert("Opening a design in the Shed Designer isn't part of your access. Ask an owner or admin to turn it on under Settings → Team.");
       return;
     }
@@ -2618,7 +2630,7 @@ function Dashboard({ session }) {
   // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub, shedsOn, jackClampOn, phoneOnly, mods);
   // The Advanced route while it is HELD (see advancedClampOn): nobody has been given the page yet,
   // so the topbar must not name it either — for a builder without Advanced that was a flash of it.
   const advancedHeld = activeTab === "advanced" && !advancedOn;
@@ -2698,9 +2710,16 @@ function Dashboard({ session }) {
   // Carolyn could not see what a builder actually had (Carolyn 2026-09-15). On the operator's
   // own tenant the operator's own entitlement decides, like any tenant — structure-studio is
   // an internal account, so that is everything.
-  const featureOn = (key) => (viewing
-    ? (!viewedCtx || !!(viewedCtx.entitlement && viewedCtx.entitlement.features && viewedCtx.entitlement.features[key]))
-    : (!!entitlement && !!(entitlement.features && entitlement.features[key])));
+  // PLANS AS DATA: for a company on the map, the tab that stands for the add-on answers
+  // (SS_FEATURE_MODULE, 01-core). `mods` is null for everyone else, and then this is the rule above.
+  const featureOn = (key) => ((mods && SS_FEATURE_MODULE[key])
+    ? ssModuleOn(mods, SS_FEATURE_MODULE[key], false)
+    : (viewing
+      ? (!viewedCtx || !!(viewedCtx.entitlement && viewedCtx.entitlement.features && viewedCtx.entitlement.features[key]))
+      : (!!entitlement && !!(entitlement.features && entitlement.features[key]))));
+  // The three scheduling pages are ONE add-on today and three tabs on the map, so each page asks for
+  // its own tab there. Off the map this is schedUnlocked for all three, as before.
+  const schedOnFor = (moduleKey) => ssModuleOn(mods, moduleKey, featureOn("schedule_builds"));
   const schedUnlocked = featureOn("schedule_builds");
   // QuickBooks Sync is a paid add-on ($75/mo) that was SOLD BUT NEVER ENFORCED — the tab was
   // gated on canAdmin alone, so any admin used it free and buying it changed nothing. Gated
@@ -2726,7 +2745,7 @@ function Dashboard({ session }) {
   // the subscription, because the phone is what they pay for. ONLY those two mounts read this; the
   // boards, Conversations, Settings > Customer Hub and My Profile keep crmUnlocked, so a surface this
   // misses stays padlocked rather than opening (the server's half is accountShape.ts).
-  const contactsUnlocked = crmUnlocked || phoneOnly;
+  const contactsUnlocked = ssModuleOn(mods, "contacts", crmUnlocked || phoneOnly);
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
@@ -2859,8 +2878,16 @@ function Dashboard({ session }) {
   // Hidden, not padlocked: a padlock means "yours when you upgrade" (the billing gate).
   // A page your access does not include is not something you can buy your way into, so
   // showing it would just be a dead end. accounts/admin are operator-gated separately.
-  const navHidden = (id) =>
-    id !== "accounts" && id !== "admin" && id !== "workbench" && !canAdmin && !ssCanSeeTab(id, myAccess);
+  //
+  // PLANS AS DATA (migrations 386 and 387): for a company on the map, a page its plan does not offer
+  // is not drawn either, and that holds for an owner too (the builder is their own admin, the reason
+  // the two account shapes sit above the canAdmin bypass). This is the ONE place the rail asks the
+  // map: every item below goes through navItem or soonItem, so the lines themselves stay as they
+  // were. `shedsOn` above is already the map's answer for such a company, which is how a single shed
+  // page switched on for a builder who sells no sheds still gets its rail entry. ssTabOffered
+  // answers true for every page when the company is not on the map, and for a page with no tab key.
+  const navHidden = (id) => !ssTabOffered(mods, id, true)
+    || (id !== "accounts" && id !== "admin" && id !== "workbench" && !canAdmin && !ssCanSeeTab(id, myAccess));
   // The operator consoles are never padlocked: they are not part of the viewed tenant's
   // product, and they are how an operator leaves a locked account (their content renders
   // outside `!gateLocked` below for the same reason).
@@ -2973,7 +3000,7 @@ function Dashboard({ session }) {
   // Needed whenever we are ON a settings page (the topbar reads them) OR the rail is up (it
   // draws them) — which are no longer the same condition.
   const settingsTabs = (settingsPage || settingsMode)
-    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered, shedsOn, phoneOnly })
+    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered, shedsOn, phoneOnly, mods })
     : null;
   // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /settings, and
   // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
@@ -2990,7 +3017,7 @@ function Dashboard({ session }) {
   // must light COMPANY and /settings/shingles must light COLORS, rather than falling
   // through the clamp to Structures. Same lists the pages themselves render, same gates.
   const hubs = (settingsPage || settingsMode)
-    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked, phoneOffered, shedsOn, phoneOnly })
+    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked, phoneOffered, shedsOn, phoneOnly, mods })
     : null;
   // Which hub owns the slug in the URL, if any: [rail id, that tab's tuple].
   const hubHit = onSettingsPage
@@ -3462,7 +3489,7 @@ function Dashboard({ session }) {
                    across tab switches, and a real navigation would throw away whatever is
                    on the canvas. ssClampTab first, same as the record page's Orders link —
                    sending someone to a tab they cannot open is its own dead end. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn, false, phoneOnly) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn, false, phoneOnly, mods) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null} />
             </div>
           )}
@@ -3649,7 +3676,7 @@ function Dashboard({ session }) {
                    ssClampTab first, because a crew leader may hold the record and not
                    Orders -- and dumping them on a list they cannot read is the same trap
                    the onNavigate comment above documents. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn, false, phoneOnly) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView, isOperator, false, null, shedsOn, false, phoneOnly, mods) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null}
                 /* THE SALES TAX CARD (Avalara stage). Three separate questions, each the area
                    its server action gates on: moving a quote to another sales location is
@@ -3983,7 +4010,9 @@ function Dashboard({ session }) {
                    /settings on the Building styles editor (found on beta, Joe's account). */
                 shedsOn={shedsOn}
                 /* Migration 384, for the same reason: the rail and the body read one list. */
-                phoneOnly={phoneOnly} />
+                phoneOnly={phoneOnly}
+                /* Plans as data (386/387), for the same reason again. Null unless this company is on the map. */
+                mods={mods} />
             )}
             {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real
                 feature lives in Settings → Structures. `available` because it HAS shipped:
@@ -4007,7 +4036,7 @@ function Dashboard({ session }) {
                 entitlement carries schedule_builds); otherwise the available-now card
                 pointing admins at Billing. */}
             {!gateLocked && activeTab === "build-schedule" && (
-              schedUnlocked ? (
+              schedOnFor("build_schedule") ? (
                 <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
                   access={mirrorAccess}
                   onOpenDesign={(code) => openInDesigner(code)}
@@ -4028,7 +4057,7 @@ function Dashboard({ session }) {
               )
             )}
             {!gateLocked && activeTab === "delivery-schedule" && (
-              schedUnlocked ? (
+              schedOnFor("delivery_schedule") ? (
                 <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
                   access={mirrorAccess}
                   customerOpener={scheduleCustomerOpener("delivery-schedule")} />
@@ -4062,7 +4091,7 @@ function Dashboard({ session }) {
                 onNew={() => openInDesigner(null, null, { blank: true })} />
             )}
             {!gateLocked && activeTab === "repairs" && (
-              schedUnlocked ? (
+              schedOnFor("repairs") ? (
                 <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
                   access={mirrorAccess} />
               ) : (

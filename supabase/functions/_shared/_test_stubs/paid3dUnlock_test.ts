@@ -295,7 +295,10 @@ Deno.test("ssView3dOn: granted OR paid names view_3d; features never counts; no 
 Deno.test("view3dUnlocked asks ssView3dOn in BOTH branches, with no operator blanket", () => {
   const block = codeBetween(SHELL, "const view3dUnlocked =", "const effClientId =", "view3dUnlocked");
   assert(block.includes("? (!viewedCtx || ssView3dOn(viewedCtx.entitlement))"), "view-as must read the VIEWED tenant through ssView3dOn");
-  assert(block.includes(": ssView3dOn(entitlement);"), "your own portal must read your own entitlement through ssView3dOn");
+  // Since plans as data (386/387) the two branches are the `legacy` answer handed to ssModuleOn: a
+  // company on the map opens 3D by its 3D tab, and everyone else (mods null) by these two lines.
+  assert(block.includes(": ssView3dOn(entitlement));"), "your own portal must read your own entitlement through ssView3dOn");
+  assert(block.includes('const view3dUnlocked = ssModuleOn(mods, "view_3d", viewing\n'), "view3dUnlocked no longer hands the old rule to ssModuleOn as its fallback");
   assert(!/granted\.indexOf|\.features/.test(block), "view3dUnlocked reads a list directly again");
   assert(!/isOperator\s*\|\|/.test(block), "view3dUnlocked has grown an `isOperator ||` blanket again");
 });

@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { PHONE_ONLY_BILLING_ACTIONS, phoneOnlyOf } from "../_shared/accountShape.ts";
+import { portalAccess } from "../_shared/accessPortal.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { paidThroughOf, unusedCreditOf } from "../_shared/billingPeriods.ts";
@@ -702,6 +703,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         : (inTransition || Boolean(featureState.get(p.feature)?.usable));
   }
 
+  // Which tabs this company has, by the new map, when its rollout switch is on (see `modules` below).
+  // Asked for `status` alone: that is the only answer that carries the entitlement to the portal, and
+  // a checkout or a top-up has no use for one more round trip.
+  const access = action === "status" ? await portalAccess(admin, clientId) : null;
+
   let entState = "active";
   let reason = "active";
   let graceEndsAt: string | null = null;
@@ -732,6 +738,16 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   if (entState === "locked" && phoneOnly) {
     entState = "active";
     reason = "phone_only";
+  }
+  // A COMPANY AN OPERATOR PUT ON A PLAN (migrations 386 and 387) is not held at the gate either, for
+  // the reason above: an assigned plan (a comp, or one paid by ACH or cheque) is not a subscription
+  // this function can see, so "has paid for something" is the wrong question for it too. Only for a
+  // company on the new map, only the LOCKED case, and only when an operator granted it something
+  // directly (`granted`: an assignment or a tab switched on, never a 3D comp or a phone switch, which
+  // did not open the gate before). `features` is untouched: what it may open is `modules` below.
+  if (entState === "locked" && access && access.granted) {
+    entState = "active";
+    reason = "assigned_plan";
   }
   // A dated free period rescues an otherwise-locked account, and ONLY that case: an active
   // or in-grace subscription already speaks for itself, and a permanent exemption was
@@ -822,6 +838,15 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // PHONE-ONLY (migration 384): My Synergy Phone and the contact list, nothing else. 01-core.jsx
     // ssPhoneOnly is the one reader, strictly `=== true`; phoneOnlyOf fails to false.
     phoneOnly,
+    // PLANS AS DATA (migrations 386 and 387). The resolver's answer for every tab
+    // ({ tab: on | locked | hidden | off }), and ONLY for a company whose rollout switch is on
+    // (access_config.enforce). For everyone else it is null, and the portal works its tabs out from
+    // the fields above exactly as before. ADDITIVE: a portal that predates this field ignores it.
+    // 01-core.jsx ssModuleState is the one reader. A failed read is null too (accessPortal.ts): it
+    // never grants and never refuses.
+    // A company still LOCKED at the gate gets null as well: it keeps today's padlocked rail and the
+    // gate page, rather than a rail the map has emptied with nothing behind it.
+    modules: (access && entState !== "locked") ? access.modules : null,
   };
 
   if (action === "status") {

@@ -2000,7 +2000,7 @@ window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: 
 // have their own nav on the side" — they are top-level items, like Designer and Contacts are
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
 function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false,
-  shedsOn = true, phoneOnly = false } = {}) {
+  shedsOn = true, phoneOnly = false, mods = null } = {}) {
   return [
     ["sheds", "Sheds", "Shed styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
@@ -2112,6 +2112,9 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     if (!shedsOn && SS_SHED_SETTINGS.indexOf(id) !== -1) return false;
     // PHONE-ONLY (migration 384): an allow-list, and above the isAdmin bypass for the shed reason.
     if (phoneOnly && SS_PHONE_ONLY_SETTINGS.indexOf(id) === -1) return false;
+    // PLANS AS DATA (386/387): for a company on the map, a Settings page follows its tab. Above the
+    // isAdmin bypass for the same reason as the two shapes. `mods` is null for everyone else.
+    if (mods && SS_SETTINGS_MODULE[id] && !ssModuleOffered(mods, SS_SETTINGS_MODULE[id], true)) return false;
     if (isAdmin || !access) return true;
     // COMPANY gated itself above, as a hub over six areas. It must be exempt here or this
     // line silently undoes that: SETTINGS_TAB_AREA.company is settings_branding, so a
@@ -2359,7 +2362,12 @@ function ssOptionTabs() {
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
 // light nothing in the rail or fall back to Structures on a valid URL.
 function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false,
-  phoneOffered = false, shedsOn = true, phoneOnly = false } = {}) {
+  phoneOffered = false, shedsOn = true, phoneOnly = false, mods = null } = {}) {
+  // PLANS AS DATA (386/387): Options and Colors are the Designer's catalogue, so for a company on
+  // the map they follow the Designer tab (a company with Inventory and no Designer has shed pages,
+  // so shedsOn is true for it, and a typed /settings/doors must still not open). Off the map this
+  // is shedsOn, as before.
+  const catalogOn = ssModuleOffered(mods, "designer", shedsOn);
   return {
     // The shed tabs are filtered HERE rather than inside each builder because this is their
     // only call site, so the rail highlight and SettingsShell's clamp read one list.
@@ -2373,12 +2381,12 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     // paint, shingles...). The rail already drops their entries for a builder who sells no sheds;
     // emptying the hubs too is what stops a typed /settings/doors or /settings/shingles from
     // still rendering, since a slug any hub knows is a page (migration 364).
-    colors: shedsOn ? ssColorTabs() : [],
+    colors: catalogOn ? ssColorTabs() : [],
     // A phone-only account's Billing is its Wallet (migration 384): no plans to choose from, because
     // a plan bought while phone-only would unlock nothing (portal-billing refuses `subscribe` too).
     // The rail's id stays `billing`; SettingsShell lands a hub on its first tab it may show.
     billing: ssBillingTabs().filter(([id]) => !phoneOnly || id !== "billing"),
-    options: shedsOn ? ssOptionTabs() : [],
+    options: catalogOn ? ssOptionTabs() : [],
     // Keyed on the rail id, like every entry here — which for Customer Hub is `pipelines`,
     // its first tab's slug. See ssCustomerHubTabs.
     // phoneOffered rides in because Phone is one of its tabs (2026-10-23); both callers pass the
@@ -2591,6 +2599,87 @@ function ssFallbackTab(access) {
   return t || "support";
 }
 
+// ══ PLANS AS DATA (migrations 386 and 387, Ahsan 2026-11-12) ═════════════════════════════
+// "Make this customizable, so I can edit or add, remove any tab that I want from a plan." Which tabs
+// a company has is becoming ROWS: plans made of tabs, the plans a company is on, and per-company
+// exceptions, all resolved by one database function (public.access_resolve). portal-billing sends
+// that answer as entitlement.modules, { tab key: "on" | "locked" | "hidden" | "off" }.
+//
+// ⚠️ ONLY FOR A COMPANY WHOSE ROLLOUT SWITCH IS ON (access_config.enforce, migration 387). For every
+// other company `modules` is null, ssModules answers null, and EVERY helper below hands back the
+// `legacy` answer it was given: the rail, the clamp and the Settings lists then behave exactly as
+// they did before this block existed. That is the whole safety case, so keep it true: a helper here
+// must never decide anything when `mods` is null.
+//
+// WHEN IT IS ON, the map replaces the two account shapes for the workspace pages (364's sheds_enabled
+// and 384's phone_only are read by the resolver as if they were rows, so it already agrees with
+// them) and adds what they could not say: any single tab, for any company.
+//
+//   on      the tab is offered and its page opens.
+//   locked  offered WITH ITS UPSELL CARD, and only on a tab that has one (SS_TEASER_MODULES). On any
+//           other tab a locked answer is treated as hidden: a page with no card of its own would
+//           simply open, and a teaser must never hand out the page.
+//   hidden  not offered, and its route lands on the first page the company does have.
+//   off     the same as hidden here. (The difference is the server's: off is also refused there.)
+//
+// The server still refuses what it refused before; this decides what is OFFERED, like the two shapes.
+//
+// The tab keys are the catalogue's (_shared/accessModules.ts and public.access_modules). The Coming
+// Soon pages are deliberately NOT mapped: they are teasers with no data, shown by ssIsBetaHost alone.
+const SS_TAB_MODULE = {
+  jack: "jack", designer: "designer", advanced: "advanced", "view-3d": "view_3d",
+  contacts: "contacts", conversations: "conversations", inventory: "inventory", orders: "orders",
+  "build-schedule": "build_schedule", "delivery-schedule": "delivery_schedule", repairs: "repairs",
+  commissions: "commissions", calls: "phone", quickbooks: "quickbooks",
+};
+// The Settings rail entries that belong to one tab. Billing, Company, Customer Hub and My Profile are
+// not here: no plan can take away the pages a company pays, manages its team and reaches us from.
+const SS_SETTINGS_MODULE = {
+  sheds: "designer", options: "designer", colors: "designer", designer: "designer",
+  "online-inventory": "inventory", connection: "ghl", quickbooks: "quickbooks",
+};
+// The tabs whose page shows an upsell card of its own when the company has not got them.
+const SS_TEASER_MODULES = ["contacts", "build_schedule", "delivery_schedule", "repairs", "view_3d", "quickbooks", "rtp"];
+// The shed product's workspace pages: a company offered none of them "sells no sheds" (364's shape).
+const SS_SHED_MODULES = ["designer", "advanced", "view_3d", "inventory", "orders", "build_schedule", "delivery_schedule", "repairs"];
+// The paid add-ons the shell asks about by billing feature, and the tab that answers for each.
+// `crm` is the WHOLE Customer Hub (boards, inbox, its Settings pages), which is what a company with
+// Pipelines has; the contact list alone is the `contacts` tab (a phone-only account has just that).
+const SS_FEATURE_MODULE = { schedule_builds: "build_schedule", quickbooks_sync: "quickbooks", on_demand_pricing: "rtp", crm: "pipelines" };
+
+// The company's map, or null when its rollout switch is off (or the entitlement has not arrived).
+function ssModules(entitlement) {
+  const m = entitlement && entitlement.modules;
+  return (m && typeof m === "object" && !Array.isArray(m)) ? m : null;
+}
+// Is this tab ON? `legacy` is the answer the old rules give, returned untouched when mods is null.
+function ssModuleOn(mods, key, legacy) {
+  if (!mods) return legacy;
+  return mods[key] === "on";
+}
+// Is this tab OFFERED (in the rail, and resolvable as a route)? On, or locked where a card exists.
+function ssModuleOffered(mods, key, legacy) {
+  if (!mods) return legacy;
+  const s = mods[key];
+  return s === "on" || (s === "locked" && SS_TEASER_MODULES.indexOf(key) !== -1);
+}
+// The same question asked by workspace page id. A page with no tab key is not the map's business.
+function ssTabOffered(mods, tab, legacy) {
+  const key = SS_TAB_MODULE[tab];
+  return (mods && key) ? ssModuleOffered(mods, key, legacy) : legacy;
+}
+// Where a company on the map lands when a page is barred: the first page it is offered that this
+// person may open, else Support (never refused to anyone). Its own, because ssFallbackTab can name
+// a page the map bars (a company with no Customer Hub must not be sent to it).
+function ssModulesFallback(mods, access, canAdmin) {
+  const order = ["contacts", "designer", "inventory", "orders", "build-schedule", "delivery-schedule",
+    "repairs", "commissions", "calls", "conversations"];
+  for (let i = 0; i < order.length; i++) {
+    if (ssTabOffered(mods, order[i], false) && (canAdmin || ssCanSeeTab(order[i], access))) return order[i];
+  }
+  return "support";
+}
+
 // "accounts", "admin" and "workbench" are operator-gated (independent of tenant role) and sit
 // OUTSIDE the role clamp; everything else keeps it. Note none of them may go in NONADMIN_TABS —
 // that array is the role escape hatch and would hand the operator surfaces to every team
@@ -2612,7 +2701,25 @@ function ssFallbackTab(access) {
 // `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /settings/myprofile.
 // The shell's two route clamps pass it; every other caller asks about a non-settings tab and
 // leaves it null, which changes nothing for them.
+// `mods` (2026-11-12, plans as data) is the company's tab map when its rollout switch is on, else
+// null. Null is the default and changes nothing: the call goes straight to ssClampTabBase, which is
+// this function exactly as it was. With a map, a page the map bars lands on the first page the
+// company IS offered, BEFORE and AFTER the base rules (they can answer with a fallback page of
+// their own, and that one has to be offered too). The base rules run with the SAME arguments: the
+// map only ever adds a refusal here. The shell hands in a `shedsOn` that is already the map's
+// answer (offered at least one shed page), which is how one shed page switched on for a company
+// that sells no sheds resolves; `phoneOnly` stays the account's own flag, so a phone-only account
+// keeps its allow-list for the routes that have no tab key at all.
 function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator,
+  advancedOn = false, sub = null, shedsOn = true, jackOn = false, phoneOnly = false, mods = null) {
+  if (!mods) {
+    return ssClampTabBase(tab, isOperator, canAdmin, access, supportView, canProjects, advancedOn, sub, shedsOn, jackOn, phoneOnly);
+  }
+  if (!ssTabOffered(mods, tab, true)) return ssModulesFallback(mods, access, canAdmin);
+  const out = ssClampTabBase(tab, isOperator, canAdmin, access, supportView, canProjects, advancedOn, sub, shedsOn, jackOn, phoneOnly);
+  return ssTabOffered(mods, out, true) ? out : ssModulesFallback(mods, access, canAdmin);
+}
+function ssClampTabBase(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator,
   advancedOn = false, sub = null, shedsOn = true, jackOn = false, phoneOnly = false) {
   // PHONE-ONLY (migration 384). FIRST, for 364's reasons (the builder is their own admin, and the
   // advanced/jack branches below recurse into pages this shape bars). An allow-list: anything not

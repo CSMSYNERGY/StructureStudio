@@ -2506,6 +2506,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "access_client_plan_assign":
       case "access_client_plan_remove":
       case "access_client_module_set":
+      case "access_rollout_get":
+      case "access_rollout_set":
         return await handleAccessPlansAction(sb, String(action), p as Record<string, unknown>, identity as { via: string; userId?: string; email?: string }, json);
 
       case "number_requests_list": {
