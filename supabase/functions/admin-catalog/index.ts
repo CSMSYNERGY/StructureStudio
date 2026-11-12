@@ -66,6 +66,8 @@ import { requestFlags } from "../_shared/numberRequestFlags.ts";
 import { handleAdminLibraryAction } from "./library.ts";
 import { ACCOUNT_TYPES, accountTypeOf } from "../_shared/accountShape.ts";
 import { handleSupportChatsAction } from "./supportChats.ts";
+// Plans as data (migration 386): the plan and company-access actions. accessPlans.ts has the rules.
+import { ACCESS_PLAN_READS, ACCESS_PLAN_WRITES, handleAccessPlansAction } from "./accessPlans.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -467,6 +469,8 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     "support_chats_list", "support_chat_get",
     // 382: the unlinked Builders-pipeline cards, for the "Link a deal" picker.
     "deal_candidates",
+    // 386: the plans with their tabs, and one company's resolved access. Reads; no money figure in either.
+    ...ACCESS_PLAN_READS,
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -489,6 +493,12 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // worse one to make quietly. Gated on the same money grant, deny-by-default, with its own
     // sentence because "cannot change billing" would send an operator to the wrong screen.
     // The ADMIN_PASSWORD break-glass path is untouched (it carries no operator row at all).
+    // 386: a plan decides what a company gets WITHOUT paying for it (an assigned plan, a tab forced
+    // on), and editing a plan's tabs changes that for every company on it. The money grant, like
+    // set_feature_grants and set_account_type above. Own sentence, so it names the right screen.
+    if (ACCESS_PLAN_WRITES.includes(String(action ?? "")) && !identity.canBill) {
+      return json({ error: "This operator account cannot change plans or a company's access." }, 403);
+    }
     if (String(action ?? "") === "set_payments" && !identity.canBill) {
       return json({ error: "This operator account cannot change payment routing." }, 403);
     }
@@ -2485,6 +2495,18 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "support_chats_list":
       case "support_chat_get":
         return await handleSupportChatsAction(sb, String(action), p as Record<string, unknown>, identity as { via: string; userId?: string; email?: string }, json);
+
+      // ── Plans as data (migration 386): plans, their tabs, and one company's access ───────────
+      case "access_plan_list":
+      case "access_client_get":
+      case "access_plan_save":
+      case "access_plan_set_modules":
+      case "access_plan_duplicate":
+      case "access_plan_retire":
+      case "access_client_plan_assign":
+      case "access_client_plan_remove":
+      case "access_client_module_set":
+        return await handleAccessPlansAction(sb, String(action), p as Record<string, unknown>, identity as { via: string; userId?: string; email?: string }, json);
 
       case "number_requests_list": {
         const since = new Date(Date.now() - 30 * 86_400_000).toISOString();

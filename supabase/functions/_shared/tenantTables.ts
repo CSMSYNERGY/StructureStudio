@@ -101,6 +101,10 @@ export const TENANT_TABLES: Readonly<Record<string, TenantTable>> = {
   tax_code_assignments: { fate: "wipe", why: "Tax codes picked per style and heading; heading keys are shared, so a recreated slug would show them as its own." },
   wallet_accounts: { fate: "wipe", why: "The prepaid balance. The movements are kept (wallet_transactions)." },
   client_feature_grants: { fate: "wipe", why: "Comped features." },
+  // 386: plans as data. Which plans an operator put the builder on, and the tabs forced on or off for it.
+  // Configuration, not money: a paid plan is a billing_subscriptions row (kept), never one of these.
+  client_access_plans: { fate: "wipe", why: "Plans an operator assigned (a comp, or paid outside the card system). Migration 386." },
+  client_modules: { fate: "wipe", why: "Tabs forced on or off for the builder. Migration 386." },
   designs: { fate: "wipe", outsideMigrations: true, why: "Saved designs and estimates. Older than the repo's migrations (supabase/CUTOVER_HANDOFF.md)." },
   design_versions: { fate: "wipe", why: "Every saved version of a design (no FK to designs)." },
   layout_item_pricing: { fate: "wipe", why: "Catalog pricing. Its style_id is nullable, so it cannot rely on the styles cascade." },
