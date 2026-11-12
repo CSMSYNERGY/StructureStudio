@@ -62,6 +62,7 @@ Deno.serve(async (req) => {
   const resolved = await resolveTenant(req, admin, {
     gates: { status: { area: "settings_quickbooks", level: "edit" } } as GateTable,
     readActions: new Set<string>(),
+    fn: "qbo-oauth-connect",
   });
   if (!resolved.ok) return json(resolved.body, resolved.status);
   const { ctx } = resolved;

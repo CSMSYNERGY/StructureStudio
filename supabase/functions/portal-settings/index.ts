@@ -1451,7 +1451,7 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   const authStart = performance.now();
   // A phone-only account (migration 384) may call only PHONE_ONLY_PORTAL_SETTINGS here; everything
   // else is refused inside resolveTenant (_shared/accountShape.ts).
-  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: PHONE_ONLY_PORTAL_SETTINGS });
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: PHONE_ONLY_PORTAL_SETTINGS, fn: "portal-settings" });
   st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
   st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held

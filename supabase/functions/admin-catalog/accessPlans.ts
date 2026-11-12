@@ -14,8 +14,8 @@
 //   access_client_plan_assign    put a company on a plan (a comp, or paid outside the card system)
 //   access_client_plan_remove    take it off one
 //   access_client_module_set     force one tab on or off for one company, or clear that
-//   access_rollout_get           whose portal obeys the new map (migration 387)
-//   access_rollout_set           name a company, un-name it, or switch every company on or off
+//   access_rollout_get           who is on the map, and how far (migrations 387 and 388)
+//   access_rollout_set           move one company a step (portal, report, server), or every company
 //
 // WHO MAY CALL, in order:
 //   * admin-catalog's checkAdminAuth: an operator JWT or the break-glass password. A support
@@ -197,16 +197,33 @@ async function clientAccess(sb: Db, id: string): Promise<Row> {
   return { clientId: id, tabs: detail ?? [], subscribed, assigned, exceptions };
 }
 
-/** access_config.enforce, read defensively: anything malformed is nobody enforced (387's rule). */
-async function readRollout(sb: Db): Promise<{ all: boolean; clients: string[] }> {
+/** access_config.enforce: whose PORTAL obeys the map (387: all, clients), and for whom the SERVER
+ *  blocks by it or only reports (388: server_all, server_clients, server_report). */
+interface Rollout { all: boolean; clients: string[]; server_all: boolean; server_clients: string[]; server_report: string[] }
+
+/** Read defensively: anything malformed is nobody (387's and 388's rule). */
+async function readRollout(sb: Db): Promise<Rollout> {
   const { data, error } = await sb.from("access_config").select("key, value").eq("key", "enforce").maybeSingle();
   if (error) throw error;
-  const v = (data as Row | null)?.value as { all?: unknown; clients?: unknown } | undefined;
+  const v = ((data as Row | null)?.value ?? {}) as Record<string, unknown>;
+  const list = (x: unknown): string[] =>
+    Array.isArray(x) ? [...new Set((x as unknown[]).filter((c): c is string => typeof c === "string"))].sort() : [];
   return {
-    all: v?.all === true,
-    clients: Array.isArray(v?.clients) ? [...new Set((v!.clients as unknown[]).filter((c): c is string => typeof c === "string"))].sort() : [],
+    all: v.all === true,
+    clients: list(v.clients),
+    server_all: v.server_all === true,
+    server_clients: list(v.server_clients),
+    server_report: list(v.server_report),
   };
 }
+
+/** The three steps a company is moved through, in this order: its portal obeys the map; the server
+ *  reports what it would refuse; the server refuses. */
+const ROLLOUT_LAYERS: Readonly<Record<string, { list: "clients" | "server_report" | "server_clients"; all: "all" | "server_all" | null }>> = {
+  portal: { list: "clients", all: "all" },
+  report: { list: "server_report", all: null },
+  server: { list: "server_clients", all: "server_all" },
+};
 
 /** The phrase access_rollout_set needs before it switches EVERY company onto the new map. */
 export const ROLLOUT_ALL_CONFIRM = "every company";
@@ -263,30 +280,40 @@ export async function handleAccessPlansAction(
         return json(await readRollout(sb));
       }
 
-      // ── the rollout switch (migration 387) ─────────────────────────────────────────────────
-      // Whose portal obeys access_resolve. One company at a time is the normal move; `all` is the
-      // last step of the rollout and asks for a phrase, because it changes what every builder's
-      // portal reads in one call.
+      // ── the rollout switch (migrations 387 and 388) ────────────────────────────────────────
+      // Which companies are on the tab map, and how far. `layer` says which step: "portal" (the
+      // default: its portal obeys the map), "report" (the server writes down what it would refuse
+      // and refuses nothing) or "server" (the server refuses). One company at a time is the normal
+      // move; `all` is the last step of a rollout and asks for a phrase, because it changes what
+      // every builder's portal reads, or what every builder's server allows, in one call. The whole
+      // row is rewritten from what was read, so a step never drops another step's list.
       case "access_rollout_set": {
+        const layerName = p.layer === undefined ? "portal" : String(p.layer);
+        const layer = ROLLOUT_LAYERS[layerName];
+        if (!layer) throw new Refuse("layer is portal, report or server.");
         const before = await readRollout(sb);
-        const after = { all: before.all, clients: [...before.clients] };
+        const after: Rollout = {
+          all: before.all, clients: [...before.clients],
+          server_all: before.server_all, server_clients: [...before.server_clients], server_report: [...before.server_report],
+        };
         if (p.all !== undefined) {
+          if (!layer.all) throw new Refuse("There is no all for report: name the companies to watch.");
           if (typeof p.all !== "boolean") throw new Refuse("all is true or false.");
           if (p.all && p.confirm !== ROLLOUT_ALL_CONFIRM) {
             throw new Refuse(`Switching every company on needs confirm: "${ROLLOUT_ALL_CONFIRM}".`);
           }
-          after.all = p.all;
+          after[layer.all] = p.all;
         }
         if (p.clientId !== undefined) {
           const id = clientId(p.clientId);
           if (typeof p.on !== "boolean") throw new Refuse("on is true or false.");
           if (p.on) {
             if (!(await companyExists(sb, id))) throw new Refuse("No company with that id.", 404);
-            if (!after.clients.includes(id)) after.clients.push(id);
+            if (!after[layer.list].includes(id)) after[layer.list].push(id);
           } else {
-            after.clients = after.clients.filter((c) => c !== id);
+            after[layer.list] = after[layer.list].filter((c) => c !== id);
           }
-          after.clients.sort();
+          after[layer.list].sort();
         }
         if (p.all === undefined && p.clientId === undefined) throw new Refuse("Send a clientId with on, or all.");
         const row = {
@@ -295,7 +322,7 @@ export async function handleAccessPlansAction(
         };
         const { error } = await sb.from("access_config").upsert(row, { onConflict: "key" });
         if (error) throw error;
-        await audit(sb, identity, "access_rollout_set", typeof p.clientId === "string" ? p.clientId : null, { before, after });
+        await audit(sb, identity, "access_rollout_set", typeof p.clientId === "string" ? p.clientId : null, { layer: layerName, before, after });
         return json({ ok: true, ...after });
       }
 

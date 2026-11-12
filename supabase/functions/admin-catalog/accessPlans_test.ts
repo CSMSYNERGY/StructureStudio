@@ -478,18 +478,19 @@ Deno.test("no action ever writes a billing table, a company row or the catalogue
 });
 
 // ── the rollout switch (387) ─────────────────────────────────────────────────────────────────
-const rollout = (w: World) => w.rows.access_config.find((r) => r.key === "enforce")!.value as { all: boolean; clients: string[] };
+const rollout = (w: World) => w.rows.access_config.find((r) => r.key === "enforce")!.value as
+  { all: boolean; clients: string[]; server_all: boolean; server_clients: string[]; server_report: string[] };
 
 Deno.test("access_rollout_set names one company at a time, and un-names it", async () => {
   const w = world();
-  assertEquals((await call(w, "access_rollout_get")).body, { all: false, clients: [] });
+  assertEquals((await call(w, "access_rollout_get")).body, { all: false, clients: [], server_all: false, server_clients: [], server_report: [] });
   const on = await call(w, "access_rollout_set", { clientId: "ridge-co", on: true });
   assertEquals([on.status, on.body.all, on.body.clients], [200, false, ["ridge-co"]]);
   await call(w, "access_rollout_set", { clientId: "acme-sheds", on: true });
   await call(w, "access_rollout_set", { clientId: "acme-sheds", on: true });           // naming twice is one entry
   assertEquals(rollout(w).clients, ["acme-sheds", "ridge-co"]);
   await call(w, "access_rollout_set", { clientId: "ridge-co", on: false });
-  assertEquals(rollout(w), { all: false, clients: ["acme-sheds"] });
+  assertEquals([rollout(w).all, rollout(w).clients], [false, ["acme-sheds"]]);
   assertEquals((await call(w, "access_rollout_set", { clientId: "long-gone", on: false })).status, 200);   // un-naming a company that left is fine
   const a = audits(w, "access_rollout_set")[0];
   assert(String(a.note).includes('"before"') && a.target_client_id === "ridge-co");
@@ -502,7 +503,7 @@ Deno.test("access_rollout_set refuses an unknown company, a missing on, and noth
   assertEquals((await call(w, "access_rollout_set", { clientId: "acme-sheds", on: "yes" })).status, 400);
   assertEquals((await call(w, "access_rollout_set", {})).status, 400);
   assertEquals((await call(w, "access_rollout_set", { all: "true" })).status, 400);
-  assertEquals(rollout(w), { all: false, clients: [] });
+  assertEquals([rollout(w).all, rollout(w).clients], [false, []]);
   assertEquals(w.writes.length, 0);
 });
 
@@ -519,13 +520,45 @@ Deno.test("switching EVERY company on needs the phrase; switching it back off do
 
 Deno.test("a malformed rollout row reads as nobody, and the next write repairs it", async () => {
   const w = world({ access_config: [{ key: "enforce", value: { all: "true", clients: "acme-sheds" } }] });
-  assertEquals((await call(w, "access_rollout_get")).body, { all: false, clients: [] });
+  assertEquals((await call(w, "access_rollout_get")).body, { all: false, clients: [], server_all: false, server_clients: [], server_report: [] });
   await call(w, "access_rollout_set", { clientId: "acme-sheds", on: true });
-  assertEquals(rollout(w), { all: false, clients: ["acme-sheds"] });
+  assertEquals(rollout(w), { all: false, clients: ["acme-sheds"], server_all: false, server_clients: [], server_report: [] });
   const none = world({ access_config: [] });
-  assertEquals((await call(none, "access_rollout_get")).body, { all: false, clients: [] });
+  assertEquals((await call(none, "access_rollout_get")).body, { all: false, clients: [], server_all: false, server_clients: [], server_report: [] });
   await call(none, "access_rollout_set", { clientId: "acme-sheds", on: true });
   assertEquals(rollout(none).clients, ["acme-sheds"]);
+});
+
+Deno.test("the three steps are three lists, and moving a company one step never drops another step's list", async () => {
+  const w = world();
+  await call(w, "access_rollout_set", { clientId: "acme-sheds", on: true });                       // portal (the default)
+  await call(w, "access_rollout_set", { layer: "report", clientId: "acme-sheds", on: true });
+  await call(w, "access_rollout_set", { layer: "report", clientId: "ridge-co", on: true });
+  await call(w, "access_rollout_set", { layer: "server", clientId: "acme-sheds", on: true });
+  assertEquals(rollout(w), { all: false, clients: ["acme-sheds"], server_all: false, server_clients: ["acme-sheds"], server_report: ["acme-sheds", "ridge-co"] });
+  // Stepping the server back off leaves the portal and the report list alone.
+  await call(w, "access_rollout_set", { layer: "server", clientId: "acme-sheds", on: false });
+  assertEquals(rollout(w), { all: false, clients: ["acme-sheds"], server_all: false, server_clients: [], server_report: ["acme-sheds", "ridge-co"] });
+  const a = audits(w, "access_rollout_set");
+  assert(String(a[a.length - 1].note).includes('"layer":"server"'));
+});
+
+Deno.test("the server's `all` needs the phrase too; report has no all; an unknown layer is refused", async () => {
+  const w = world();
+  assertEquals((await call(w, "access_rollout_set", { layer: "server", all: true })).status, 400);
+  assertEquals((await call(w, "access_rollout_set", { layer: "server", all: true, confirm: ROLLOUT_ALL_CONFIRM })).status, 200);
+  assertEquals([rollout(w).server_all, rollout(w).all], [true, false]);                              // the server's all is not the portal's
+  assertEquals((await call(w, "access_rollout_set", { layer: "server", all: false })).status, 200);
+  assertEquals(rollout(w).server_all, false);
+  assertEquals((await call(w, "access_rollout_set", { layer: "report", all: true, confirm: ROLLOUT_ALL_CONFIRM })).status, 400);
+  assertEquals((await call(w, "access_rollout_set", { layer: "everything", clientId: "acme-sheds", on: true })).status, 400);
+  assertEquals((await call(w, "access_rollout_set", { layer: "report", clientId: "nobody", on: true })).status, 404);
+});
+
+Deno.test("a row written before the server lists existed keeps its portal list when a server step is added", async () => {
+  const w = world({ access_config: [{ key: "enforce", value: { all: false, clients: ["ridge-co"] } }] });
+  await call(w, "access_rollout_set", { layer: "report", clientId: "ridge-co", on: true });
+  assertEquals(rollout(w), { all: false, clients: ["ridge-co"], server_all: false, server_clients: [], server_report: ["ridge-co"] });
 });
 
 Deno.test("an unknown action is refused", async () => {

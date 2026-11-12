@@ -319,6 +319,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     gates: GATES,
     readActions: new Set(),
     defaultAction: "build_board",
+    fn: "portal-schedule",
   });
   if (!r.ok) return json(r.body, r.status);
   // selfUserId: whose rows these are, for the contacts:'own' scope below. userId stays the

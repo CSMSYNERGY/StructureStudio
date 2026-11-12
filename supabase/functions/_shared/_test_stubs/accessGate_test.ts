@@ -20,7 +20,7 @@
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
-import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
+import { stubAuth, stubDb, stubPlanRead, stubRpc } from "./supabase_stub.ts";
 
 const NMI_ENV: Record<string, string> = {
   NMI_SECURITY_KEY: "harness-security-key",
@@ -99,6 +99,7 @@ async function status(world: World) {
   stubAuth.user = { id: "00000000-0000-4000-8000-00000000f001", email: "owner@example.test" };
   stubAuth.error = null;
   stubDb.from = (table: string) => chain(world, table);
+  stubPlanRead.on = true;
   stubRpc.rpc = world.rpc === null ? null : (fn: string, args: any) => {
     rpcCalls.push([fn, args]);
     return world.rpc ? world.rpc(fn, args) : Promise.resolve({ data: { enforced: false, modules: null, granted: false }, error: null });
@@ -119,6 +120,7 @@ async function status(world: World) {
     console.error = quiet;
     stubDb.from = null;
     stubRpc.rpc = null;
+    stubPlanRead.on = false;
     stubAuth.user = null;
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) Deno.env.delete(k);

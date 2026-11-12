@@ -39,6 +39,8 @@
 //   portal-projects/index.ts   (feature-key validation on the template editor)
 
 import { paidThroughOf } from "./billingPeriods.ts";
+import { anyModuleOn, serverModules } from "./accessEnforce.ts";
+import { FEATURE_MODULES } from "./accessActions.ts";
 
 const GRACE_DAYS = 7;
 
@@ -90,6 +92,16 @@ export async function hasPaidFeature(
   clientId: string,
   feature: string,
 ): Promise<boolean> {
+  // PLANS AS DATA, the server half (migrations 386 to 388). For a company on the tab map, "has the
+  // feature" is "has any of the tabs the feature stands for" (FEATURE_MODULES): resolveTenant has
+  // already decided the action tab by tab, so this must not then refuse a tab a plan grants because
+  // no subscription to the old feature exists. serverModules answers null for every company whose
+  // server switch is off, and for a failed read, and then everything below is unchanged.
+  const tabs = FEATURE_MODULES[feature];
+  if (tabs) {
+    const map = await serverModules(admin, clientId);
+    if (map) return anyModuleOn(map, tabs);
+  }
   // INTERNAL ACCOUNT (migration 169) and NON-BILLABLE (billing_exempt, widened 2026-09-21 —
   // migration 228) short-circuit before anything else. This is the server
   // mirror of portal-billing's `internal` branch, and the two must agree: a UI that shows the
@@ -181,8 +193,17 @@ export async function usableFeatureSet(
   clientId: string,
   features: string[],
 ): Promise<Set<string>> {
-  const want = [...new Set(features.filter(Boolean))];
+  const asked = [...new Set(features.filter(Boolean))];
   const out = new Set<string>();
+  if (!asked.length) return out;
+  // PLANS AS DATA, the server half: the same rule hasPaidFeature opens with. A feature that stands
+  // for tabs is answered by the map for a company on it; a feature with no tabs (the coming-soon
+  // ones) still goes through the billing rules below.
+  const map = asked.some((f) => FEATURE_MODULES[f]) ? await serverModules(admin, clientId) : null;
+  if (map) {
+    for (const f of asked) if (FEATURE_MODULES[f] && anyModuleOn(map, FEATURE_MODULES[f])) out.add(f);
+  }
+  const want = map ? asked.filter((f) => !FEATURE_MODULES[f]) : asked;
   if (!want.length) return out;
 
   // Our own account, and any account marked non-billable, get everything ahead of every
@@ -190,7 +211,7 @@ export async function usableFeatureSet(
   // (migrations 169 and 228).
   const csRes = await admin.from("client_settings").select("internal_account, billing_exempt").eq("client_id", clientId).maybeSingle();
   if (csRes.error) throw new Error(`client_settings read failed: ${csRes.error.message}`);
-  if (csRes.data?.internal_account || csRes.data?.billing_exempt) return new Set(want);
+  if (csRes.data?.internal_account || csRes.data?.billing_exempt) { for (const f of want) out.add(f); return out; }
 
   // Every plan that could confer any wanted feature — the feature itself plus any bundle
   // containing it. `operator_grantable` rides along for the grant arm below.

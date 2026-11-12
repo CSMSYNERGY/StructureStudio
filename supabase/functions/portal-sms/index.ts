@@ -323,7 +323,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
   );
 
   // Texting is part of the phone, so a phone-only account (migration 384) has every action here.
-  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: "all" });
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: "all", fn: "portal-sms" });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload, action, userId, audit } = r.ctx;
   if (r.ctx.operator) audit(`operator_sms_${action}`).catch(() => {});

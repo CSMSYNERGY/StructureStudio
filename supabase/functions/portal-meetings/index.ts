@@ -261,7 +261,7 @@ Deno.serve(withErrorLog("portal-meetings", async (req: Request) => {
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
-  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "overview" });
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "overview", fn: "portal-meetings" });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload, action, userId, selfUserId, access, operator } = r.ctx;
   // deno-lint-ignore no-explicit-any

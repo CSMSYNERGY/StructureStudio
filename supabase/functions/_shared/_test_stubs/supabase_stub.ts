@@ -29,6 +29,17 @@ export const stubRpc: { rpc: ((fn: string, args?: any) => any) | null } = { rpc:
  *  Left null, storage.from() throws, like from(). Reset it to null when the test is done. */
 export const stubStorage: { from: ((bucket: string) => any) | null } = { from: null };
 
+/** PLANS AS DATA (migrations 386 to 388). Every handler that resolves its tenant now asks the
+ *  database one more question, "is this company on the tab map?" (access_for_server, and
+ *  access_for_portal from portal-billing's status). For every real company that is not named in the
+ *  rollout switch the answer is null, and null changes nothing. So that is what this double answers
+ *  by default, WITHOUT handing the call to stubRpc.rpc: the many tests that record or strictly fake
+ *  their own rpc calls keep seeing exactly their own, and none of them has to learn a question that
+ *  is not theirs. A test ABOUT the map sets `on` true, and the two calls then go to stubRpc.rpc like
+ *  any other (and throw like any other when none is installed). Reset it to false when done. */
+export const stubPlanRead: { on: boolean } = { on: false };
+const PLAN_READS = new Set(["access_for_server", "access_for_portal"]);
+
 export function createClient(_url: string, _key: string, _opts?: any) {
   return {
     auth: {
@@ -50,6 +61,7 @@ export function createClient(_url: string, _key: string, _opts?: any) {
       throw new Error("supabase_stub createClient().from() is type-only — hand-roll a fake client for data paths (see makeAdmin in resolveTenant_test.ts)");
     },
     rpc: (_fn: string, _args?: any): any => {
+      if (PLAN_READS.has(_fn) && !stubPlanRead.on) return Promise.resolve({ data: null, error: null });
       if (stubRpc.rpc) return stubRpc.rpc(_fn, _args);
       throw new Error("supabase_stub createClient().rpc() has no fake installed — set stubRpc.rpc for the test that needs it");
     },

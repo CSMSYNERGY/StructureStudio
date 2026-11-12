@@ -399,6 +399,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     gates: GATES,
     readActions: new Set(["pay_options", "surcharge_probe", "reconcile"]),
     defaultAction: "pay_options",
+    fn: "portal-payments",
   });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, payload, action, userId, audit, operator, canEdit } = r.ctx;

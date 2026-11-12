@@ -139,7 +139,7 @@ Deno.serve(withErrorLog("sync-design-status", withServerTiming(async (req: Reque
   // `admin` is the timed client: every query through it lands in Server-Timing's `db`.
   const admin = createClient(supabaseUrl, serviceKey, { global: { fetch: timedFetch(st) } });
   const authStart = performance.now();
-  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "sync" });
+  const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "sync", fn: "sync-design-status" });
   st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
   st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held

@@ -19,6 +19,9 @@
 
 import { verifyCaller } from "./verifyCaller.ts";
 import { PHONE_ONLY_REFUSAL, phoneOnlyAllows, type PhoneOnlyAllowed, phoneOnlyOf } from "./accountShape.ts";
+import { anyModuleOn, firstReport, MODULE_REFUSAL, serverAccess } from "./accessEnforce.ts";
+import { modulesForAction } from "./accessActions.ts";
+import { logEdgeError } from "./logError.ts";
 import {
   canEdit,
   canRead,
@@ -188,6 +191,38 @@ export async function resolveTenant(
   if (!phoneOnlyAllows(opts.phoneOnly, r.ctx.action) && await phoneOnlyOf(admin, r.ctx.clientId)) {
     return { ok: false, status: 403, body: { error: PHONE_ONLY_REFUSAL } };
   }
+  // ── PLANS AS DATA, the server half (migrations 386 to 388, _shared/accessEnforce.ts) ──────
+  // After everything above has said yes, and for both paths again (the builder's own call and an
+  // operator viewing them): a company on the tab map may call an action only when it has the tab
+  // the action belongs to (_shared/accessActions.ts works the tab out from this function's own
+  // gate table). An action with no tab is never refused here, and neither is any action of a company
+  // whose server switch is off: serverAccess answers null for them, and for a failed read, and null
+  // means the rules above were the whole answer. The map is read only when the action HAS a tab, and
+  // is cached per isolate, so the calls every page makes (status, a person's own profile) pay nothing.
+  //
+  // REPORT MODE refuses nothing: it files what WOULD have been refused as an info row, once per
+  // isolate per action, so the calls one page makes to another tab's actions are found on a real
+  // company's traffic before its server switch is turned to block. AWAITED: the edge runtime may
+  // drop work a response does not wait for, and a report that silently never lands reads as "nothing
+  // would be refused". It costs one insert per action per isolate, and logEdgeError never throws.
+  if (opts.fn && opts.gates) {
+    const tabs = modulesForAction(opts.fn, r.ctx.action, opts.gates[r.ctx.action]);
+    if (tabs.length) {
+      const acc = await serverAccess(admin, r.ctx.clientId);
+      if (acc && !anyModuleOn(acc.modules, tabs)) {
+        if (acc.mode === "block") {
+          return { ok: false, status: 403, body: { error: MODULE_REFUSAL, code: "module_off" } };
+        }
+        if (firstReport(r.ctx.clientId, opts.fn, r.ctx.action)) {
+          await logEdgeError({
+            fn: opts.fn, severity: "info", code: "module_would_refuse", clientId: r.ctx.clientId, req,
+            message: `Report only: ${r.ctx.action} would be refused (needs ${tabs.join(" or ")}).`,
+            context: { action: r.ctx.action, tabs, states: Object.fromEntries(tabs.map((t) => [t, acc.modules[t] ?? null])) },
+          });
+        }
+      }
+    }
+  }
   return r;
 }
 
@@ -238,6 +273,12 @@ type ResolveOpts = {
      * refused every action of a function that does not say otherwise.
      */
     phoneOnly?: PhoneOnlyAllowed;
+    /**
+     * PLANS AS DATA (migrations 386 to 388): this function's name, as _shared/accessActions.ts knows
+     * it. With it (and `gates`), a company on the tab map is refused an action whose tab it has not
+     * got. Absent = this function refuses nothing by plan, which is every function until it says so.
+     */
+    fn?: string;
 };
 
 async function resolveTenantCore(

@@ -353,7 +353,7 @@ export type Resolve = (
   req: Request,
   // deno-lint-ignore no-explicit-any
   admin: any,
-  opts: { gates: GateTable; readActions: Set<string>; defaultAction: string; phoneOnly?: ReadonlySet<string> },
+  opts: { gates: GateTable; readActions: Set<string>; defaultAction: string; phoneOnly?: ReadonlySet<string>; fn?: string },
 ) => Promise<{ ok: true; ctx: CallerCtx } | { ok: false; status: number; body: Record<string, unknown> }>;
 /** What this file passes logEdgeError (../_shared/logError.ts EdgeErrorInput), the same way. */
 export interface EdgeLog { fn: string; req: Request; code: string; message: string; severity?: "error" | "warn" | "info"; clientId?: string | null; context?: Record<string, unknown> | null }
@@ -385,7 +385,7 @@ export function makeHandler(io: HandlerIO): (req: Request) => Promise<Response> 
     // A phone-only account (migration 384) has no Jack: only `enabled`, which the portal asks on every
     // load and which answers off for them, so it isn't refused three times a page. resolveTenant refuses
     // them everything else (_shared/accountShape.ts).
-    const r = await io.resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: JACK_PHONE_ONLY });
+    const r = await io.resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status", phoneOnly: JACK_PHONE_ONLY, fn: "jack-agent" });
     if (!r.ok) return json(r.body, r.status);
     const { clientId, userId, selfUserId, operator, payload, action, canRead, canEdit, audit } = r.ctx;
     // deno-lint-ignore no-explicit-any

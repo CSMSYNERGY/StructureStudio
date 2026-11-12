@@ -186,6 +186,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // A phone-only account (migration 384) pays by its wallet: everything but `subscribe`
     // (_shared/accountShape.ts says why). It gets more by an operator switching its account type.
     phoneOnly: PHONE_ONLY_BILLING_ACTIONS,
+    fn: "portal-billing",
   });
   if (!r.ok) return json(r.body, r.status);
   const { clientId, operator, payload, action, userEmail, userId, audit, auditStrict, canRead } = r.ctx;
