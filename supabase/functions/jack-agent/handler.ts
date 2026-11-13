@@ -1,4 +1,5 @@
 import { type GateTable, TITLES } from "../_shared/access.ts";
+import { type ServerAccess, serverAccess } from "../_shared/accessEnforce.ts";
 import type { PortalCall } from "./apply.ts";
 import type { Totals } from "./claude.ts";
 import type { FnCall, MemoryRow, Wallet } from "./types.ts";
@@ -419,6 +420,18 @@ export function makeHandler(io: HandlerIO): (req: Request) => Promise<Response> 
     };
     const portal: PortalCall = (a, body) => call("portal-settings", a, body);
 
+    // PLANS AS DATA (plan.ts): the company's tab map as the server enforces it, for the actions that
+    // start new work (a chat turn, a price list, an approve), and for `status` when Jack is switched
+    // on, which tells the page whether a message would be refused. LAZY and read at most once a
+    // request: `enabled` runs on every portal load and must stay one read, a card's record, cancel
+    // and Undo never ask, and nothing is read before a refusal above has returned. Through the shared
+    // helper, which never throws, answers null for a company that is not named and for a failed
+    // read, and caches for 30 seconds on the edge (a failed read for 10): for every action with the
+    // `jack` tab resolveTenant asked a moment ago, so this is a cache hit there. serverAccess, not
+    // serverModules: report mode needs the map too.
+    let planRead: Promise<ServerAccess | null> | null = null;
+    const plan = () => (planRead ??= serverAccess(admin, clientId));
+
     const deps: Deps = {
       env: (k) => io.env(k),
       store: makeStore(admin),
@@ -441,6 +454,7 @@ export function makeHandler(io: HandlerIO): (req: Request) => Promise<Response> 
       now: () => Date.now(),
       // ⚠️ SERVICE ROLE, by the row id the send route answered with, on this builder only (sends.ts).
       markSentWithJack: makeSentWithJack(admin, clientId, (e) => io.logEdgeError({ fn: FN, req, code: e.code, message: e.message, severity: e.severity, clientId, context: e.context })),
+      plan,
     };
 
     const role = await roleFor(action, operator, () => deps.store.accountLine({ ...who, userId: selfUserId }));

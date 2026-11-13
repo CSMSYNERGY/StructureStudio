@@ -96,6 +96,14 @@ const HUB_EMAIL = [
   "crm_email_tpl_duplicate", "crm_email_tpl_delete", "crm_email_tpl_test",
 ];
 // The contact list and one contact's record: what a phone-only account has too (accountShape.ts).
+// ⚠️ crm_send_sms IS ON `contacts`, NOT ON `sms`. Today only the phone Worker asks the `sms` tab
+// (workers/phone-api/src/routes/sms.ts). The portal's crm_send_sms and Jack's reply_send follow
+// `contacts`, and the rule tick's texts follow `automations`. So a company with contacts on and sms
+// switched off (an operator's override: every shipped plan with contacts has sms too) is refused a
+// text in the phone app and can still send one from these three. Making the edge ask `sms` needs
+// crm_send_sms mapped to "sms" ALONE, after the tabFor spreads below: the lists are any-of, so
+// adding "sms" to a list beside "contacts" would LOOSEN the check, not tighten it. Jack's
+// reply_send and the tick's send_sms kind would each need their own ask as well.
 const HUB_CONTACTS = [
   "crm_record", "crm_feed", "crm_create_contact", "crm_save_contact", "crm_contact_custom_save", "crm_import_ghl_contacts",
   "crm_fields_list", "crm_field_create", "crm_field_save", "crm_field_delete", "crm_fields_reorder", "crm_builtin_field_save",
@@ -129,8 +137,25 @@ export const ACTION_MODULE: Readonly<Record<string, Readonly<Record<string, Tabs
     // contacts area only because a rep needs to read it), and it reveals nothing but a status.
     status: null,
   },
-  // jack-agent needs no entry: every action but `enabled` is on the `jack` area, and `enabled` is
-  // "open" on purpose (the portal asks it for every builder to learn whether to draw Jack at all).
+  "jack-agent": {
+    // THE RECORD OF WHAT JACK ALREADY DID, AND THE WAY BACK OUT OF IT (stage D). These sit on the
+    // `jack` area like the rest, so by area they would be the Jack tab, and a company that had Jack
+    // and lost the tab could then no longer read its own record, dismiss a waiting card, or put back
+    // a change it approved. jack-agent/agent.ts rule 4 says the opposite on purpose: "Undo keeps
+    // working on purpose, so a person can always put back what they approved", switch off or not.
+    // Before stage C none of these five asked jack_on at all (status answers "not switched on" in a
+    // 200), so no tab is also exactly what they did before. A plan stops NEW work: `send`,
+    // `sheet_start`, `proposal_approve` and the rest keep the tab through their area.
+    // ⚠️ This opens JACK'S door to Undo, not the doors behind it. The put-back itself is a save in
+    // portal-settings or portal-schedule (save_pricing_cells, delete_fixture, move_job…), and those
+    // actions keep their tab in the tables above, because the same action is also new work. So in
+    // block mode an Undo whose tab is gone still fails there, line by line, and the card keeps its
+    // Undo (jack-agent/plan.ts, pinned in plan_test.ts). Open: it needs a put-back resolveTenant
+    // can tell from new work, which this table cannot say (it sees the action's name, not the call).
+    // `enabled` needs no entry: it is "open" (the portal asks it for every builder to learn whether
+    // to draw Jack at all), and an open action has no tab.
+    status: null, activity: null, proposal_get: null, proposal_cancel: null, proposal_undo: null,
+  },
 };
 
 /** The billing features the server checks today, and the tabs that answer for each on the map:

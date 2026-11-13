@@ -21,18 +21,44 @@
 //
 // CACHED PER ISOLATE FOR 30 SECONDS, like accountShape.ts's flag and for its reason: resolveTenant
 // asks on nearly every portal call, and an uncached read would add a round trip to all of them. So
-// a plan change reaches the server within 30 seconds. Only a successful read is cached, and only on
-// the edge runtime (the tests share one process, where a cache would make a test's reads depend on
-// which test ran first).
+// a plan change reaches the server within 30 seconds. Cached only on a real runtime: Supabase's
+// edge runtime, and the Cloudflare phone Worker (stage D: the Worker bundles this file through
+// featureCheck.ts and asks on a customer's phone traffic, where an uncached read was one database
+// round trip per call). Never under `deno test` or the Worker's vitest (node): the tests share one
+// process, where a cache would make a test's reads depend on which test ran first. cachesHere()
+// below is that decision.
+// A FAILED read is remembered too, as null, but only for 10 seconds (FAIL_MS). One request can ask
+// more than once: resolveTenant at the door, then jack-agent again for the turn's tools or a press.
+// With nothing remembered, a database that takes N seconds to fail made that request wait N twice.
+// WHAT THAT COSTS: for those 10 seconds the company keeps the old rules on this isolate, on every
+// call and not only the one that failed. For a company that is not named that is no change. For a
+// named one it is the old rules in both directions: a tab its plan withholds answers as it did
+// before, and a paid tab its plan grants with no subscription behind it is answered by billing for
+// the window, and billing says no. Short on purpose: a blip must not hold a company on the old
+// rules for the full 30.
+// REMEMBERING A FAILURE NEVER REPLACES AN ANSWER FROM A NEWER READ. Nothing shares one read between
+// requests (the Worker could not), so two can be reading for one company at once, and the slow one
+// may fail after the fast one has answered. Each entry is stamped with when it was stored, and a
+// failure is remembered only over an entry stored before its own read began. So an answer in hand
+// is never thrown away for a timeout that started before it arrived, and reads that overlap and
+// fail one after another hold the company for 10 seconds from the first failure, not 10 from each.
+// (A read that begins after those 10 seconds and fails again starts 10 more, as it should.)
 //
-// Dependency-free (the client is passed in). Importers: resolveTenant.ts, featureCheck.ts. Both are
-// bundled per function, so EVERY function that imports either goes out together when this changes.
+// Dependency-free (the client is passed in). Importers: resolveTenant.ts, featureCheck.ts,
+// accessCheck.ts, and jack-agent (handler.ts, agent.ts and plan.ts). All are bundled per function,
+// so EVERY function that imports any of them goes out together when this changes.
+// ⚠️ AND THE PHONE WORKER, TWICE. workers/phone-api/src/plan.ts imports this file directly
+// (anyModuleOn and serverAccessFromAnswer, for every phone route's plan check), and
+// workers/phone-api/src/routes/reads.ts imports featureCheck.ts, which imports it again, so
+// wrangler bundles both into the Worker. It deploys by hand and on its own approval: a change here
+// or in featureCheck.ts is not live for the phone until it is redeployed.
 
 // deno-lint-ignore no-explicit-any
 type Admin = any;
 
-/** What a company on the map is told when it calls an action outside its plan. 403, so app_errors
- *  files it as a refusal (info), not a fault. */
+/** What a company on the map is told when it calls an action outside its plan. Answered as a 403
+ *  with code "module_off": a refusal, not a fault, so withErrorLog (which files 5xx) writes no
+ *  app_errors row for it. */
 export const MODULE_REFUSAL =
   "This isn't part of your plan. Ask Structure Studio to add it to your account.";
 
@@ -41,9 +67,24 @@ export interface ServerAccess { mode: "block" | "report"; modules: Record<string
 const STATES: ReadonlySet<string> = new Set(["on", "locked", "hidden", "off"]);
 const KEY = /^[a-z][a-z0-9_]{1,39}$/;
 const CACHE_MS = 30_000;
-const cache = new Map<string, { value: ServerAccess | null; at: number }>();
+const FAIL_MS = 10_000;
+const cache = new Map<string, { value: ServerAccess | null; until: number; at: number }>();
+/** Is this a runtime where the 30-second cache is safe: one isolate serving real requests?
+ *  Supabase's edge runtime defines the `EdgeRuntime` global; a Cloudflare Worker's navigator says
+ *  "Cloudflare-Workers" (on for every Worker since the 2022-03-21 compatibility date). `deno test`
+ *  says "Deno/…" and node says "Node.js/…" or has no navigator, so neither caches. Pure, for the
+ *  tests: it is asked once, when the module loads. */
 // deno-lint-ignore no-explicit-any
-const onEdge = typeof (globalThis as any).EdgeRuntime !== "undefined";
+export function cachesHere(g: any): boolean {
+  if (!g) return false;
+  if (typeof g.EdgeRuntime !== "undefined") return true;
+  try {
+    return g.navigator?.userAgent === "Cloudflare-Workers";
+  } catch {
+    return false;
+  }
+}
+const onEdge = cachesHere(globalThis);
 
 /** access_for_server's answer, clean, or null. Pure, for the tests. A missing mode, an unknown
  *  mode, an empty map or one bad tab is null: a company with every tab refused is far likelier to
@@ -65,25 +106,52 @@ export function serverAccessFromAnswer(answer: unknown): ServerAccess | null {
 }
 
 /** The company's server answer (block or report), else null (the old rules). Never throws. */
-export async function serverAccess(admin: Admin, clientId: string): Promise<ServerAccess | null> {
+export function serverAccess(admin: Admin, clientId: string): Promise<ServerAccess | null> {
+  return serverAccessOn(admin, clientId, onEdge);
+}
+
+/** serverAccess with the runtime's two facts handed in, so the tests can hold the cache itself:
+ *  whether this runtime caches (never under a test, see the header) and the clock. Everything else
+ *  calls serverAccess. A good answer is remembered for CACHE_MS and a failed read, as null, for
+ *  FAIL_MS; a client that cannot ask at all is not a read and is not remembered. A failed read is
+ *  not remembered either when another read for the company stored its answer while this one was
+ *  out: that answer stays, for the time it was given. */
+export async function serverAccessOn(admin: Admin, clientId: string, caches: boolean, now: () => number = Date.now): Promise<ServerAccess | null> {
   if (!clientId) return null;
-  if (onEdge) {
+  if (caches) {
     const hit = cache.get(clientId);
-    if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+    if (hit && now() < hit.until) return hit.value;
   }
+  // Two requests can be reading for one company at once, and this one may fail after the other has
+  // answered. So a failure is remembered only over an entry that was already here when this read
+  // began (`at` is when an entry was stored): never over one stored while this read was out, good
+  // or null. `<` and not `<=`: an entry stored on the very tick this read began is either one this
+  // read would have been served from, or a sibling's.
+  const began = now();
+  const failed = (): null => {
+    if (caches) {
+      const cur = cache.get(clientId);
+      const at = now();
+      if (!cur || cur.at < began) cache.set(clientId, { value: null, until: at + FAIL_MS, at });
+    }
+    return null;
+  };
   try {
     if (!admin || typeof admin.rpc !== "function") return null;
     const { data, error } = await admin.rpc("access_for_server", { p_client_id: clientId });
     if (error) {
       console.error("access_for_server failed; this company keeps the old rules:", error.message ?? error);
-      return null;
+      return failed();
     }
     const value = serverAccessFromAnswer(data);
-    if (onEdge) cache.set(clientId, { value, at: Date.now() });
+    if (caches) {
+      const at = now();
+      cache.set(clientId, { value, until: at + CACHE_MS, at });
+    }
     return value;
   } catch (e) {
     console.error("access_for_server threw; this company keeps the old rules:", (e as Error)?.message ?? e);
-    return null;
+    return failed();
   }
 }
 

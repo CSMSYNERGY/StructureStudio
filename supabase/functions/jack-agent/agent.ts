@@ -189,6 +189,9 @@ import { GIVE_UP_MS, PRIVATE_KEEP_MS, PRIVATE_KINDS } from "./common.ts";
 import { carriedList } from "./lookups.ts";
 import { replaceOlder } from "./drafts.ts";
 import { afterCharge, ensureWelcomeCredit, gate as walletGate, settle, sweep, turnOutcome } from "./billing.ts";
+// Plans as data (plan.ts): which tab each tool and card belongs to, and the company's map for the turn.
+import { firstReport, MODULE_REFUSAL } from "../_shared/accessEnforce.ts";
+import { blockedBy, JACK_TABS, PLAN_FN, planLine, planOf, planSoon, reportRow, SHEET_START_KEY, SHEET_START_TABS, tabsOfKind, tabsOfTool, wouldBlock } from "./plan.ts";
 
 /** On an older door card that a corrected one replaced (propose_new_door). */
 export const DOOR_REPLACED = "Replaced by your newer card for this door.";
@@ -713,6 +716,9 @@ const BASE_PROPOSE = new Set(["propose_size_changes", "propose_new_door"]);
 
 /** Whether a piece's tool is offered to this person now. */
 function offered(deps: Deps, s: TurnState, t: ToolSpec): boolean {
+  // The company's plan (plan.ts), in BLOCK mode only: a tool of a tab the account hasn't got isn't
+  // offered, and isn't run if Claude calls it anyway. No plan on the turn, or report mode: no change.
+  if (blockedBy(s.plan, tabsOfTool(t.def.name))) return false;
   if (t.switchKey && s.off.includes(t.switchKey)) return false;
   if (t.noOperators && s.who.operatorEmail) return false;
   // "Look up customers..." off means no customer names or words reach Claude, from any piece.
@@ -727,10 +733,30 @@ function offered(deps: Deps, s: TurnState, t: ToolSpec): boolean {
 /** The tools offered this round. The price and door tools check their own switches and access (so a
  *  person hears why), and a piece's tools are offered only where this person's access and the switches
  *  allow. Once a customer's words are in the turn, no tool that proposes a change to settings, prices or
- *  rules is offered: a customer's email can't get Jack to put a price card in front of someone. */
+ *  rules is offered: a customer's email can't get Jack to put a price card in front of someone.
+ *  A company on the tab map in block mode is sent no tool of a tab it hasn't got (plan.ts), the three
+ *  here included; with no plan on the turn the list is exactly what it always was. */
 export function toolsFor(deps: Deps, s: TurnState): ToolDef[] {
-  const base = (TOOL_DEFS as ToolDef[]).filter((t) => !(s.customerWordsRead && BASE_PROPOSE.has(t.name)));
+  const base = (TOOL_DEFS as ToolDef[]).filter((t) => !(s.customerWordsRead && BASE_PROPOSE.has(t.name)) && !blockedBy(s.plan, tabsOfTool(t.name)));
   return withinStrictLimits([...base, ...[...PIECE_TOOLS.values()].filter((t) => offered(deps, s, t)).map((t) => t.def)]);
+}
+
+/** What a tool answers Claude when the company's plan doesn't include its tab (block mode): the same
+ *  words as a tool withheld for any other reason, so nothing about the plan is Claude's to guess at.
+ *  The turn's own system line (plan.ts planLine) is what tells Jack how to say it. */
+const NOT_IN_PLAN_TOOL = "That isn't available here right now.";
+
+/** REPORT mode (plan.ts): the tool list is exactly what it was, and each tool on it that block mode
+ *  would have hidden is filed once per isolate as an info row, so what a real company's turns would
+ *  lose is known before anything is taken away. Awaited, and in one wave: the runtime may drop work
+ *  the answer doesn't wait for. From the list as the turn starts; a tool a lock is holding back this
+ *  turn is filed by the first turn that offers it. Never throws. */
+export async function reportHiddenTools(deps: Deps, s: TurnState): Promise<void> {
+  const plan = s.plan;
+  if (!plan || plan.mode !== "report") return;
+  const due = toolsFor(deps, s).map((t) => t.name)
+    .filter((n) => wouldBlock(plan, tabsOfTool(n)) && firstReport(s.who.clientId, PLAN_FN, `tool:${n}`));
+  await Promise.all(due.map((n) => deps.log({ ...reportRow(plan, `tool:${n}`, tabsOfTool(n)), clientId: s.who.clientId }).catch(() => undefined)));
 }
 
 /** The API's limits across every strict schema in one request (structured outputs): 20 strict tools,
@@ -823,6 +849,9 @@ export async function runTool(deps: Deps, s: TurnState, name: string, input: unk
     }
     return out;
   }
+  // The three tools of this file skip offered(), so the plan is asked for them here (plan.ts). A name
+  // no tool has carries no tab and falls through to "Unknown tool" below.
+  if (blockedBy(s.plan, tabsOfTool(name))) return { content: NOT_IN_PLAN_TOOL, isError: true };
   if (s.customerWordsRead && BASE_PROPOSE.has(name)) {
     return { content: lockFromReply(s) ? SENTENCES.afterRepeat : "Not after reading a customer's words in the same turn. Ask again in a new message.", isError: true };
   }
@@ -933,6 +962,10 @@ export async function runTurn(deps: Deps, s: TurnState, apiKey: string, model: s
   const tools: string[] = [];
   let answeredBy: string | null = null;
   const done = (text: string, stopReason: string): TurnResult => ({ text, stopReason, model: answeredBy ?? model, totals, tools });
+  // The areas this account's plan leaves out, in block mode only (plan.ts planLine). Its own block,
+  // after the cached one: systemText() is one block shared by every company and must stay that way.
+  // Worked out once from the plan alone, so it is the same on every round of the turn.
+  const planNote = planLine(s.plan);
 
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     const lastChance = round === MAX_TOOL_ROUNDS;
@@ -945,6 +978,7 @@ export async function runTurn(deps: Deps, s: TurnState, apiKey: string, model: s
       tool_choice: { type: lastChance ? "none" : "auto" },
       system: [
         { type: "text", text: systemText(), cache_control: { type: "ephemeral" } },
+        ...(planNote ? [{ type: "text", text: planNote }] : []),
         { type: "text", text: person },
         ...(s.memory && Object.keys(s.memory).length ? [{ type: "text", text: memoryText(s.memory) }] : []),
         ...(carried ? [{ type: "text", text: carried }] : []),
@@ -1096,18 +1130,30 @@ export async function handleStatus(deps: Deps, who: Who, role: string | null): P
   // only: send and sheet_start refuse on it anyway.
   const usage = await usageOf(deps, who);
   const overMonth = !!usage && usage.monthCostMicros >= monthlyCapMicros(deps.env);
-  const [open, chats] = await Promise.all([
+  const [open, chats, plan] = await Promise.all([
     deps.store.openChat(who, null).catch(() => null),
     deps.store.chats(who, 50).catch(() => []),
+    // Bounded (plan.ts planSoon): this answer is for display, and before stage D status read no map
+    // at all, so a map read that stalls answers as "no plan" after a second instead of hanging the
+    // panel. send, approve and a price list act on the answer and still wait for it (planOf).
+    planSoon(deps),
   ]);
+  // THE COMPANY'S PLAN (plan.ts). `status` carries no tab: it is the record of what Jack did, and a
+  // company that lost the Jack tab still reads it and still gets its cards, Undo included. But with
+  // the switch still on, this answer used to say Jack was available, and the first message typed was
+  // then refused at the door (403 module_off). So in BLOCK mode without the Jack tab the page is told
+  // what the door will say, in the door's own sentence: the chat and its cards stay, and the box to
+  // type in is shut. Display only, like the lines below it: the door is what refuses. Report mode
+  // and a company that is not named refuse nothing, so they answer exactly as before.
+  const notInPlan = blockedBy(plan, JACK_TABS);
   const messages = forPage(open ? await deps.store.messages(who, open.id, 100).catch(() => []) ?? [] : []);
   return {
     status: 200,
     body: {
       ...base, enabled: true, off: set.off,
       canManage: (role === "owner" || role === "admin") && deps.canEdit("jack"),
-      available: !!key && !!usage && !overMonth,
-      unavailable: !key ? SENTENCES.noKey : !usage ? SENTENCES.usageUnreadOnOpen : overMonth ? SENTENCES.monthCap : null,
+      available: !notInPlan && !!key && !!usage && !overMonth,
+      unavailable: notInPlan ? MODULE_REFUSAL : !key ? SENTENCES.noKey : !usage ? SENTENCES.usageUnreadOnOpen : overMonth ? SENTENCES.monthCap : null,
       chat: open ? { id: open.id, messages, proposals: await withProposals(deps, who, messages) } : null,
       chats,
       // What Jack remembers for this builder, for the panel. Null when it couldn't be read.
@@ -1313,7 +1359,10 @@ export async function handleSend(deps: Deps, who: Who, payload: { text?: unknown
   // The customer-words lock lasts one turn more when the answer before repeated a customer's words: they
   // come back in the history, so this turn offers no tool that proposes a change either (11-09).
   const lockedByReply = lockedByLastReply(history);
-  const state: ChatTurn = { who, chatId, off: gate.off, proposalIds: [], memory, tz, ...(lockedByReply ? { customerWordsRead: true, lockedByReply: true } : {}) };
+  // The company's tab map for this turn (plan.ts), read once, now that the turn will run. Null for a
+  // company that isn't named and for a failed read, and then nothing below differs from before.
+  const plan = await planOf(deps);
+  const state: ChatTurn = { who, chatId, off: gate.off, proposalIds: [], memory, tz, ...(lockedByReply ? { customerWordsRead: true, lockedByReply: true } : {}), ...(plan ? { plan } : {}) };
   // Revising a card about a customer hands Claude its words at the start, so the turn is locked from the
   // start, as after a look at their record.
   if (revising && REVISE_AS_CUSTOMER_WORDS.has(revising.kind)) state.customerWordsRead = true;
@@ -1322,6 +1371,8 @@ export async function handleSend(deps: Deps, who: Who, payload: { text?: unknown
   // name reaches Claude from any piece.
   const carried = gate.off.includes("customers") ? null : await carriedNote(deps, who, chatId, history, tz).catch(() => null);
   const note = [carried, revising ? reviseNote(revising) : null].filter(Boolean).join("\n\n") || null;
+  // Report mode: the turn runs as it always did, and what the plan would have hidden is written down.
+  await reportHiddenTools(deps, state);
   const turn = await runTurn(deps, state, gate.apiKey, modelFrom(deps.env), person, history, userRow.body ?? text, note);
   // Marked when this answer repeats words a customer-words tool read in this turn. An answer that only
   // gives an order number or a name leaves the next turn as it was.
@@ -1354,6 +1405,10 @@ export async function handleSheetStart(deps: Deps, who: Who, payload: { fileName
   if ("sentence" in gate) return { status: 200, body: { ok: false, capped: gate.cap, reply: { role: "assistant", body: gate.sentence } } };
   if (gate.off.includes("prices")) return { status: 200, body: { ok: false, capped: "switched_off", reply: { role: "assistant", body: SENTENCES.switchedOff } } };
   if (!deps.canEdit("settings_structures")) return { status: 403, body: { error: SENTENCES.noAccess } };
+  // A price list changes the sizes table: the Designer's, besides the Jack tab resolveTenant checked
+  // (plan.ts). Before the wallet is touched, a card is made or anything is read.
+  const byPlan = await pressByPlan(deps, who, SHEET_START_KEY, SHEET_START_TABS);
+  if (byPlan) return byPlan;
   // The counts capped() read: it refused already if they couldn't be read.
   if (gate.usage.sheets24h >= SHEETS_DAILY_CAP) return { status: 200, body: { ok: false, capped: "sheets", reply: { role: "assistant", body: SENTENCES.sheetCap } } };
 
@@ -1407,6 +1462,20 @@ export async function handleSheetStart(deps: Deps, who: Who, payload: { fileName
 }
 
 const PROPOSAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A press that starts new work on a tab (an Approve, a price list), against the company's plan
+ *  (plan.ts). BLOCK and the tab isn't on: the 403 every other function answers, and nothing has been
+ *  touched. REPORT: one info row per isolate says it would have been refused, and the press goes on.
+ *  A card or action with no tab never reads the plan at all. Null means go on. */
+async function pressByPlan(deps: Deps, who: Who, key: string, tabs: readonly string[]): Promise<Reply | null> {
+  if (!tabs.length) return null;
+  const plan = await planOf(deps);
+  if (blockedBy(plan, tabs)) return { status: 403, body: { error: MODULE_REFUSAL, code: "module_off" } };
+  if (plan && wouldBlock(plan, tabs) && firstReport(who.clientId, PLAN_FN, key)) {
+    await deps.log({ ...reportRow(plan, key, tabs), clientId: who.clientId }).catch(() => undefined);
+  }
+  return null;
+}
 
 export async function handleProposalGet(deps: Deps, who: Who, payload: { id?: unknown }): Promise<Reply> {
   const id = String(payload.id ?? "");
@@ -1475,6 +1544,12 @@ export async function handleProposalApprove(deps: Deps, who: Who, payload: { id?
   if (!mayEdit(deps, now)) return { status: 403, body: { error: SENTENCES.noAccess } };
   const set = await isOn(deps, who);
   if (!set.on) return { status: 403, body: { error: SENTENCES.off } };
+  // The company's plan (plan.ts), for both kinds of card: a card made while the account had the tab
+  // isn't run once it hasn't. Before anything is claimed or saved, so the card stays as it was.
+  // Undo and cancel never ask: this door never refuses them. (Whether an Undo's put-back then
+  // lands is the downstream function's answer, and today it refuses one whose tab is gone: plan.ts.)
+  const byPlan = await pressByPlan(deps, who, `approve:${now.kind}`, tabsOfKind(now.kind));
+  if (byPlan) return byPlan;
   if (spec) return await approvePiece(deps, who, now, spec, set.off, payload.send === true, typeof payload.to === "string" ? payload.to.trim() : null);
   // What this press would touch, worked out from what the row holds: a sentence's card can hold either,
   // and a sheet can hold door boxes. A switch turned off after the card was made still counts.

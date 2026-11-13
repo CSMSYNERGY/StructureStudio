@@ -16,6 +16,7 @@
 
 import type { Totals, Fetcher } from "./claude.ts";
 import type { PortalCall } from "./apply.ts";
+import type { ServerAccess } from "../_shared/accessEnforce.ts";
 
 export interface Who { clientId: string; userId: string; operatorEmail: string | null }
 export interface Usage { monthCostMicros: number; tenant24h: number; user10m: number; sheets24h: number }
@@ -139,6 +140,13 @@ export interface Deps {
    *  null; fills sent_by with the approver only where it is null. Never throws: a failed stamp is logged
    *  and answers false, and the message still counts as sent (sends.ts). */
   markSentWithJack(table: "sms_messages" | "email_sends", id: string, by: string | null): Promise<boolean>;
+  /** PLANS AS DATA (plan.ts): this company's tab map as the server enforces it, or null when the
+   *  company is not named or the read failed (null = Jack exactly as he was). Read lazily and once per
+   *  request (handler.ts), only by the actions that start new work (a chat turn, a price list, an
+   *  approve) and by `status` once Jack is known to be switched on, which tells the page whether a
+   *  message would be refused. OPTIONAL on purpose: a Deps without it, as every test's is, reads as
+   *  null (planOf). */
+  plan?(): Promise<ServerAccess | null>;
 }
 export interface Reply { status: number; body: Record<string, unknown> }
 
@@ -160,6 +168,10 @@ export interface TurnState {
   memory?: Record<string, { value: unknown; updatedAt: string }>;
   /** The browser's IANA time zone, checked (handleSend): "today" and a build marked built are local. */
   tz?: string | null;
+  /** PLANS AS DATA (plan.ts): the company's tab map for this turn, read once at its start
+   *  (handleSend). Left out or null, every tool is offered as before. In block mode a tool whose tabs
+   *  are not on is not offered and not run; in report mode nothing changes. */
+  plan?: ServerAccess | null;
 }
 
 export interface ToolOut { content: string; isError?: boolean }

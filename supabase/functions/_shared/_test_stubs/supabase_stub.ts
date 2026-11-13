@@ -38,7 +38,9 @@ export const stubStorage: { from: ((bucket: string) => any) | null } = { from: n
  *  is not theirs. A test ABOUT the map sets `on` true, and the two calls then go to stubRpc.rpc like
  *  any other (and throw like any other when none is installed). Reset it to false when done. */
 export const stubPlanRead: { on: boolean } = { on: false };
-const PLAN_READS = new Set(["access_for_server", "access_for_portal"]);
+// access_for_public (389) is the same question asked for the public pages (accessPublic.ts: lead-form,
+// book-public, shop-checkout), with the same answer for every company that is not named: null.
+const PLAN_READS = new Set(["access_for_server", "access_for_portal", "access_for_public"]);
 
 export function createClient(_url: string, _key: string, _opts?: any) {
   return {

@@ -34,9 +34,19 @@
 //
 // ⚠️ This module is bundled PER FUNCTION. Its importers must be redeployed together, or
 // two copies of the entitlement rule disagree — which is unobservable until it matters:
-//   portal-settings/index.ts   (rtp_* / crm_* action gates)
+//   portal-settings/index.ts   (rtp_* / crm_* action gates; also portal-settings/doorGenerate.ts)
 //   portal-setup/index.ts      (the setup checklist's padlocks)
 //   portal-projects/index.ts   (feature-key validation on the template editor)
+//   book-public/index.ts       (the public booking page's Customer Hub check)
+//   portal-meetings/index.ts   (the Customer Hub check behind the Meetings page)
+//   support-agent/index.ts     (which features the assistant may talk about)
+//   (grep `_shared/featureCheck.ts` for the list as it stands: this one has gone stale before)
+// ⚠️ AND THE CLOUDFLARE PHONE WORKER, which is not an edge function and is easy to forget:
+// workers/phone-api/src/routes/reads.ts imports hasPaidFeature from this file, so wrangler bundles
+// this module AND what it imports (accessEnforce.ts, accessActions.ts, accessModules.ts) into the
+// Worker. The Worker deploys by hand, on its own approval; a change here is not live for the phone
+// until it is redeployed, and until then the Worker and the edge functions hold two copies of the
+// rule.
 
 import { paidThroughOf } from "./billingPeriods.ts";
 import { anyModuleOn, serverModules } from "./accessEnforce.ts";

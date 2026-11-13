@@ -20,11 +20,20 @@
 //   off     an operator switched it off for this company, or the company's shape excludes it (it
 //           sells no sheds). Hidden AND blocked; the data stays where it is.
 //
-// STAGE A: nothing reads this file but admin-catalog's plan actions, which use it to validate a tab
-// key before a write. The routes, settings pages, server actions and Jack tools that belong to each
-// key are added here by the stages that start enforcing them, not before.
+// WHO READS THIS FILE. In stage A only admin-catalog's plan actions did, to validate a tab key
+// before a write. Since stages C and D the server's own checks and Jack read it too, so a change
+// here (a new key, a renamed label) is not live until all of these are out:
+//   accessActions.ts and featureCheck.ts   the tab an action belongs to, and the paid-feature
+//                                          check (featureCheck.ts reaches this file through
+//                                          accessActions.ts): so every function that bundles
+//                                          either, and the phone Worker, which bundles
+//                                          featureCheck.ts and deploys by hand.
+//   jack-agent/plan.ts                     the labels in planLine ("This account's plan does not
+//                                          include: ..."), so Jack says the old label until
+//                                          jack-agent is redeployed.
+//   admin-catalog (accessPlans.ts)         the plan editor.
 //
-// Dependency-free. Importers: admin-catalog (accessPlans.ts). Deploy it when this file changes.
+// Dependency-free. All of the above go out together when this file changes.
 
 export type AccessGroup = "hub" | "sheds" | "integrations" | "soon" | "beta";
 export type AccessState = "on" | "locked" | "hidden" | "off";

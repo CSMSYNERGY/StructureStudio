@@ -305,3 +305,117 @@ Deno.test("a usage read that fails stops a send at the door, before any chat is 
   assert(!db.queries.some((q) => q.table === "jack_conversations" || q.table === "jack_messages"));
   assertEquals(t.fetches.length, 0);
 });
+
+// ── Plans as data: the company's tab map, through the door (plan.ts) ──────────────────────────────
+
+const CARD_ID = "00000000-0000-4000-8000-0000000000c1";
+/** A waiting card of `kind`, as the proposals table holds it. */
+const waitingCard = (kind: string, over: Record<string, unknown> = {}) => ({
+  id: CARD_ID, client_id: "builder-a", user_id: "u1", conversation_id: "c1", kind, status: "ready", title: "A card", file_name: null,
+  source: {}, preview: {}, payload: {}, answers: {}, result: null, undo: null, shown_hash: "h", failure: null,
+  approved_by: null, approved_by_operator: null, approved_at: null, applied_at: null, undone_at: null,
+  expires_at: new Date(Date.now() + 86_400_000).toISOString(), created_at: new Date().toISOString(), updated_at: "u0", ...over,
+});
+/** A builder with one card, whose map read answers `answer` (the server's own shape, or null). */
+function planDb(kind: string, answer: unknown, card: Record<string, unknown> = {}) {
+  return builderDb({ u1: "owner" }, (q) => {
+    if (q.table === "rpc:access_for_server") return { data: answer };
+    if (q.table === "jack_proposals" && opOf(q, "update")) return { data: [] };
+    if (q.table === "jack_proposals") return { data: opOf(q, "maybeSingle") || opOf(q, "single") ? waitingCard(kind, card) : [waitingCard(kind, card)] };
+    return undefined;
+  });
+}
+const mapReads = (db: ReturnType<typeof fakeAdmin>) => db.queries.filter((q) => q.table === "rpc:access_for_server");
+const cardWrites = (db: ReturnType<typeof fakeAdmin>) => db.queries.filter((q) => q.table === "jack_proposals" && opOf(q, "update"));
+const NO_RULES = { mode: "block", modules: { jack: "on", contacts: "on", automations: "hidden", designer: "hidden" } };
+
+Deno.test("through the door: an approve asks the company's map once, by the company's id, and block mode refuses before anything is written", async () => {
+  const db = planDb("automation_rule", NO_RULES);
+  const t = io(db.admin, gatedResolve({ jack: "edit" }));
+  const res = await makeHandler(t.io)(post({ action: "proposal_approve", id: CARD_ID, hash: "h" }));
+  assertEquals([res.status, await res.json()], [403, { error: "This isn't part of your plan. Ask Structure Studio to add it to your account.", code: "module_off" }]);
+  assertEquals(mapReads(db).map((q) => q.ops[0][1]), [{ p_client_id: "builder-a" }]);
+  assertEquals([cardWrites(db).length, t.fetches.length], [0, 0], "the card was not claimed and nothing was called downstream");
+  // "locked" is not "on".
+  const locked = planDb("automation_rule", { mode: "block", modules: { ...NO_RULES.modules, automations: "locked" } });
+  const r2 = await makeHandler(io(locked.admin, gatedResolve({ jack: "edit" })).io)(post({ action: "proposal_approve", id: CARD_ID, hash: "h" }));
+  assertEquals((await r2.json()).code, "module_off");
+});
+
+Deno.test("through the door: not named, a failed read and a malformed answer refuse nothing; report files one row and goes on", async () => {
+  for (const [name, db] of [
+    ["not named", planDb("automation_rule", null)],
+    ["the read fails", builderDb({ u1: "owner" }, (q) => (q.table === "rpc:access_for_server" ? { error: { message: "down" } } : q.table === "jack_proposals" && !opOf(q, "update") ? { data: waitingCard("automation_rule") } : undefined))],
+    ["a malformed answer", planDb("automation_rule", { mode: "block", modules: {} })],
+    ["the tab is on", planDb("automation_rule", { mode: "block", modules: { ...NO_RULES.modules, automations: "on" } })],
+  ] as const) {
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      const t = io(db.admin, gatedResolve({ jack: "edit" }));
+      const res = await makeHandler(t.io)(post({ action: "proposal_approve", id: CARD_ID, hash: "h" }));
+      const body = await res.json();
+      assert(body.code !== "module_off", `${name}: refused by a plan`);
+      assert(cardWrites(db).length > 0 || res.status === 409, `${name}: the press went on to its own approve path (${res.status})`);
+      assertEquals(t.logs.filter((c) => c === "module_would_refuse").length, 0, name);
+    } finally {
+      console.error = quiet;
+    }
+  }
+  const db = planDb("automation_rule", { ...NO_RULES, mode: "report" });
+  const t = io(db.admin, gatedResolve({ jack: "edit" }, { clientId: "report-door-co" }));
+  const res = await makeHandler(t.io)(post({ action: "proposal_approve", id: CARD_ID, hash: "h" }));
+  assert((await res.json()).code !== "module_off");
+  assertEquals(t.logs.filter((c) => c === "module_would_refuse").length, 1);
+});
+
+Deno.test("through the door: status asks the company's map once Jack is switched on, and says when a message would be refused", async () => {
+  // Block mode, the Jack tab taken away, the company's own switch still on (builderDb). The door lets
+  // status through (it has no tab), and the answer tells the page what the door will say to a message.
+  const lost = planDb("size_rule", { mode: "block", modules: { jack: "hidden", designer: "on" } });
+  const res = await makeHandler(io(lost.admin, gatedResolve({ jack: "edit" })).io)(post({ action: "status" }));
+  const body = await res.json();
+  assertEquals([res.status, body.enabled, body.available, body.unavailable], [200, true, false, "This isn't part of your plan. Ask Structure Studio to add it to your account."]);
+  assertEquals(mapReads(lost).map((q) => q.ops[0][1]), [{ p_client_id: "builder-a" }]);
+  // With the tab, in report mode and for a company that is not named, the plan says nothing.
+  for (const answer of [{ mode: "block", modules: { jack: "on", designer: "hidden" } }, { mode: "report", modules: { jack: "hidden" } }, null]) {
+    const db = planDb("size_rule", answer);
+    const b = await (await makeHandler(io(db.admin, gatedResolve({ jack: "edit" })).io)(post({ action: "status" }))).json();
+    assert(b.enabled === true && b.unavailable !== body.unavailable, JSON.stringify(answer));
+  }
+  // The company's own switch off: "not switched on", and the map is not read at all.
+  const off = builderDb({ u1: "owner" }, (q) => {
+    if (q.table === "rpc:access_for_server") return { data: { mode: "block", modules: { jack: "hidden" } } };
+    if (q.table === "client_settings" && selected(q).includes("jack_on")) return { data: { jack_on: false, jack_off: [] } };
+    return undefined;
+  });
+  const said = await (await makeHandler(io(off.admin, gatedResolve({ jack: "edit" })).io)(post({ action: "status" }))).json();
+  assertEquals([said.enabled, mapReads(off).length], [false, 0]);
+});
+
+Deno.test("through the door: a card's record, a dismissed card and Undo never ask the map, and neither does a card of every account", async () => {
+  const applied = { status: "applied", undo: { removes: [], sizes: [] }, shown_hash: "h" };
+  for (const [action, kind, card] of [
+    ["activity", "size_rule", {}], ["proposal_get", "size_rule", {}],
+    ["proposal_cancel", "size_rule", {}], ["proposal_undo", "size_rule", applied],
+    ["new", "size_rule", {}], ["set_switches", "size_rule", {}], ["enabled", "size_rule", {}],
+    // A setup card is every account's: approving it reads no map either.
+    ["proposal_approve", "setup_tick", {}],
+  ] as const) {
+    const db = planDb(kind, { mode: "block", modules: { jack: "on", designer: "hidden" } }, card);
+    const res = await makeHandler(io(db.admin, gatedResolve({ jack: "edit" })).io)(post({ action, id: CARD_ID, hash: "h", key: "prices", on: false }));
+    const body = await res.json().catch(() => ({}));
+    assertEquals(mapReads(db).length, 0, `${action} read the company's map`);
+    assert(body.code !== "module_off", `${action} was refused by a plan`);
+  }
+});
+
+Deno.test("through the door: a price list in block mode without the Designer is refused before a card or a chat is made", async () => {
+  const db = planDb("price_sheet", { mode: "block", modules: { jack: "on", designer: "off" } });
+  const t = io(db.admin, gatedResolve({ jack: "edit" }), { env: (k) => (k === "JACK_ANTHROPIC_API_KEY" ? "key" : k === "SUPABASE_URL" ? "https://project.example.test" : undefined) });
+  const res = await makeHandler(t.io)(post({ action: "sheet_start", fileName: "prices.csv", sheets: [{ name: "S", rows: [["Style", "Size", "Price"], ["Garden", "10x12", "4200"]] }] }));
+  assertEquals([res.status, (await res.json()).code], [403, "module_off"]);
+  assertEquals(mapReads(db).length, 1);
+  assert(!db.queries.some((q) => q.table === "jack_conversations" || q.table === "jack_messages" || q.table === "jack_proposals"), "nothing was opened or written");
+  assertEquals(t.fetches.length, 0);
+});

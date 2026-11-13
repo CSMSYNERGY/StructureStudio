@@ -42,6 +42,7 @@ import type { ApplyOutcome, Deps, KindSpec, Piece, ProposalRow, ToolSpec, TurnSt
 import { err, ok, putCard, SAID, saidBy } from "./common.ts";
 import { safeName, scrub } from "./redact.ts";
 import { ruleWarning } from "./ruleWarn.ts";
+import { planOf } from "./plan.ts";
 import { readList } from "./rules.ts";
 import { calendarDayIn, isTimeZone } from "../_shared/scheduleInput.ts";
 import { LIFECYCLE_RANK } from "../_shared/inventoryLifecycle.ts";
@@ -76,6 +77,7 @@ export const BS_SAID = {
   deliveryOut: "Its delivery has gone out since, so it stays built. Move it on the Build Schedule if you really need to.",
   deliveryUnseen: "I can't check its delivery without access to the Delivery Schedule, so it stays built. Someone who can open the Delivery Schedule can undo it, or move it on the Build Schedule.",
   deliveryUnread: "I couldn't check its delivery just now. Press Undo to try again.",
+  deliveryNoPlan: "I can't check its delivery here: the Delivery Schedule isn't part of this account's plan, so it stays built. Move it on the Build Schedule if you need to.",
   moved: "changed since I showed you this, so nothing was saved. Ask me again and I'll start from what's there now.",
   /** For Claude, in the look's answer: the card can't go up after customer words in the same turn. */
   cardNextMessage: "Customer names are in this answer, so a build schedule card can't go up in this same answer. Say what you'd change by its serial or size and the date, without repeating notes or a job's own title, and make the card with propose_build_schedule when they reply. Don't look again first: propose_build_schedule finds the job itself.",
@@ -201,8 +203,14 @@ const crewName = (b: Board, id: string | null) => (id ? b.crews.find((c) => c.id
 /** The one build date (Carolyn 2026-08-04): due_date, else an older row's start. */
 const buildDate = (j: Job) => j.due ?? j.start;
 
-/** The add-on, from the entitlement the portal shell reads. Null when it can't be told: that refuses. */
+/** The add-on, from the entitlement the portal shell reads. Null when it can't be told: that refuses.
+ *  For a company the server BLOCKS by its tab map (plan.ts), the map is the answer instead, as it is
+ *  for portal-schedule (featureCheck.ts): a company given the Build Schedule by a plan row alone holds
+ *  no Shed Scheduler subscription, and Jack must not refuse what the page itself allows. A company
+ *  that isn't named, a failed map read and report mode all read the entitlement as before. */
 export async function addOnOn(deps: Deps): Promise<boolean | null> {
+  const plan = await planOf(deps);
+  if (plan && plan.mode === "block") return plan.modules.build_schedule === "on";
   try {
     const r = await deps.call("portal-billing", "status", {});
     const f = r.status === 200 && r.data && r.data.entitlement && typeof r.data.entitlement === "object" ? (r.data.entitlement as Any).features : null;
@@ -903,12 +911,18 @@ async function applyBuilt(deps: Deps, p: ProposalRow): Promise<ApplyOutcome> {
  *  a lot building sold before it was hauled goes to its buyer on a stop that carries only its unit
  *  (the pool's "deliver to the buyer" row), and an order's stop keeps only its design code once its
  *  job was removed and added back (build_job_id is set null). portal-schedule `loads` has them all,
- *  for someone who can open the Delivery Schedule. "unseen" when they can't, "unread" when it failed. */
-async function deliveryOut(deps: Deps, j: Job): Promise<"out" | "clear" | "unseen" | "unread"> {
+ *  for someone who can open the Delivery Schedule. "unseen" when they can't, "unread" when it failed.
+ *  "refused" when the COMPANY's plan has no Delivery Schedule (plans as data): deps.canRead is the
+ *  person's access, not the plan, so a company blocked by its map with the Build Schedule and without
+ *  the Delivery Schedule gets here and portal-schedule's door answers 403 module_off, every time.
+ *  Only that code: any other 403 (the person's access changed, a read-only operator) is not the
+ *  plan's and stays "unread", which is all a company that is not named can ever be told. */
+async function deliveryOut(deps: Deps, j: Job): Promise<"out" | "clear" | "unseen" | "unread" | "refused"> {
   if (!j.unitId && !j.designCode) return "clear";
   if (!deps.canRead("delivery_schedule")) return "unseen";
   const r = await sched(deps, "loads", {});
   const d = r.data as Any;
+  if (r.status === 403 && d && d.code === "module_off") return "refused";
   if (r.status !== 200 || !d || !Array.isArray(d.loads) || !Array.isArray(d.stops)) return "unread";
   const status = new Map(arr(d.loads).filter((l) => l && typeof l.id === "string").map((l) => [l.id as string, String(l.status ?? "")]));
   const rides = arr(d.stops).filter((s) => s && (s.build_job_id === j.id || (!!j.unitId && s.inventory_unit_id === j.unitId) || (!!j.designCode && s.design_short_code === j.designCode)));
@@ -940,6 +954,10 @@ async function undoBuilt(deps: Deps, p: ProposalRow): Promise<UndoOutcome> {
   if (out === "out") return none("kept", BS_SAID.deliveryOut);
   if (out === "unseen") return none("kept", BS_SAID.deliveryUnseen);
   if (out === "unread") return { restored: 0, removed: 0, failed: 1, reports: [{ label, status: "error", reason: BS_SAID.deliveryUnread }] };
+  // The plan stops the check, not the Undo: failed stays 1, so the card keeps its Undo and it works
+  // the moment the tab is back (plan.ts: an Undo a plan stops is never spent). Only the words differ
+  // from "unread", because pressing again does not cure this one.
+  if (out === "refused") return { restored: 0, removed: 0, failed: 1, reports: [{ label, status: "refused", reason: BS_SAID.deliveryNoPlan }] };
   const r = await sched(deps, "move_job", { jobId: j.id, stageId: backStage, position: plan.back?.position ?? 0, ...(isTimeZone(plan.tz) ? { tz: plan.tz } : {}) });
   if (landedOk(r)) return { restored: 1, removed: 0, failed: 0, reports: [] };
   if (lost(r)) return { restored: 0, removed: 0, failed: 1, reports: [{ label, status: "error", reason: BS_SAID.tryAgain }] };

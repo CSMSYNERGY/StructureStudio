@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { verifyCaller } from "../_shared/verifyCaller.ts";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
+import { MODULE_REFUSAL, moduleVerdict } from "../_shared/accessCheck.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
 import { deactivateRosterMember, syncRosterMember, wantsRoster } from "../_shared/pmRoster.ts";
@@ -56,6 +57,39 @@ import {
 //   { action: "set_excluded", entryId, excluded }        // exclude/restore a line (owner|full_access)
 //   { action: "clawback", entryId, note? }               // negative line for one paid+cancelled line (owner)
 //   { action: "cancel_order", orderId }                   // cancel a whole order: claw back paid + exclude unpaid (owner)
+
+// ── PLANS AS DATA, the server half (migrations 386 to 388; stage D) ─────────────────────────
+// This function signs its own callers in (verifyCaller), so it never passes through resolveTenant
+// and stage C's plan check never saw it: a company whose map has no Commissions tab could still
+// compute, split and pay out the ledger with a hand-made request. The two lists below say which of
+// its actions ARE the Commissions tab and which are the Team screen, and the handler asks
+// _shared/accessCheck.ts once, after its own refusals and before the switch.
+//
+//   LEDGER_ACTIONS  the commission ledger: the tab `commissions`. Refused (403 module_off) for a
+//                   company the server blocks by its map and whose Commissions tab is not on.
+//   TEAM_ACTIONS    Settings → Team: who is on the account, what each may open, where they work.
+//                   Every account has a team (accessActions.ts: settings_team has no tab), so these
+//                   carry no tab and never read the map. set_rate and set_grants are here too, on
+//                   purpose: they are columns of the Team grid, saved from that screen, and a rate
+//                   typed while the tab is off pays nobody, because `compute` is what turns a rate
+//                   into money and compute is on the ledger list.
+//
+// A company that is not named, a failed read, and report mode all refuse nothing (report files one
+// info row per action). Deliberately NOT a gate table: an action missing from both lists carries no
+// tab and falls through to the switch's own "Unknown action".
+// _test_stubs/commissionsPlan_test.ts holds every `case` below to exactly one of the two lists.
+const LEDGER_ACTIONS: ReadonlySet<string> = new Set([
+  "compute", "list_entries", "assign_earner", "split_entry", "delete_entry", "split_order", "reset_order",
+  "adjust_amount", "set_excluded", "clawback", "cancel_order", "approve_period", "unapprove_period", "mark_paid",
+]);
+const TEAM_ACTIONS: ReadonlySet<string> = new Set([
+  "list", "add_user", "set_access", "remove_user", "set_home_location", "set_rate", "set_grants",
+]);
+const COMMISSIONS_TABS: readonly string[] = ["commissions"];
+/** The tabs an action of this function belongs to: [] = none, never refused by a plan. An action that
+ *  somehow sits on both lists carries none: when in doubt, no tab (the test keeps that from shipping). */
+const tabsForAction = (action: unknown): readonly string[] =>
+  (typeof action === "string" && LEDGER_ACTIONS.has(action) && !TEAM_ACTIONS.has(action) ? COMMISSIONS_TABS : []);
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -382,6 +416,16 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
     return json({
       error: "Commissions are per-builder and cannot be changed on another account's behalf. Ask that builder's owner to make the change.",
     }, 403);
+  }
+
+  // PLANS AS DATA (see LEDGER_ACTIONS above). After every refusal this function already made, so a
+  // caller it turns away hears the same sentence as before, and before anything is read or written
+  // for the action. Not in the parallel wave above: the action is not known until the body is read,
+  // and the Team screen's actions must not pay for a read they never need. A ledger action pays one
+  // read, cached per isolate for 30 seconds. moduleVerdict never throws and answers "ok" for a
+  // company that is not named and for a failed read.
+  if (await moduleVerdict(admin, clientId, "portal-commissions", String(action ?? ""), tabsForAction(action), req) === "refuse") {
+    return json({ error: MODULE_REFUSAL, code: "module_off" }, 403);
   }
 
   const audit = async (note: string) => {

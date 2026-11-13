@@ -12,19 +12,37 @@
 //     doesn't show them (the cautious default, 11-06).
 //   - A list that can't be read says the general sentence too, so a card never claims "no rules" on a
 //     read that failed. Customer Hub off (no rules can run) says nothing.
+//   - A company its PLAN blocks from Automations (plans as data, plan.ts) hears nothing either, and
+//     the list is not read: crm-rules-tick skips every send for that company, so no rule can text or
+//     email anyone. Without this the list read came back "This isn't part of your plan", which is
+//     not a Customer Hub sentence, and every card said "I couldn't check your rules just now" about
+//     rules that cannot send. Only BLOCK mode: a company that is not named, one in report mode and
+//     a map that could not be read are answered exactly as before (the tick still sends for them).
+//     WHAT THE CARD DOES NOT SAY: only the sends are stopped. The rule's in-database half (a card
+//     moved, a note added, a status set) still runs for this company, because crm_rules_run does
+//     not read the map (see the comment above planVerdict in crm-rules-tick/index.ts). The card
+//     says nothing about that on purpose: the list cannot be read for this company (its door
+//     answers 403), so no rule could be named, and a general sentence here would be about texts
+//     and emails that are not sent. Stopping the rule at its source is the recorded follow-up.
 
 import type { Deps } from "./types.ts";
 import { readList } from "./rules.ts";
 import { isOutboundAction } from "../_shared/crmRules.ts";
 import { scrub } from "./redact.ts";
 import { SAID } from "./common.ts";
+// plan.ts imports only _shared files and types, never this file or a piece: no cycle.
+import { blockedBy, planOf } from "./plan.ts";
+
+/** The tab a rule's sends belong to: the one crm-rules-tick asks before it sends anything. */
+const RULES_TAB = ["automations"] as const;
 
 export interface RuleWarning {
   /** The rules that would start, by name, when the person may see them. Empty otherwise. */
   named: string[];
   /** Whether a rule that would start texts or emails the customer (true when it can't be told). */
   messages: boolean;
-  /** The sentence for the card, or null when no rule would start. */
+  /** The sentence for the card, or null when no rule would start (or, for a company its plan blocks
+   *  from Automations, when no rule could send: see the header). */
   sentence: string | null;
 }
 
@@ -39,6 +57,9 @@ const quoteList = (names: string[]) =>
 /** The rules a change firing `events` would start, and the card's sentence about them. Never throws. */
 export async function ruleWarning(deps: Deps, events: string[]): Promise<RuleWarning> {
   if (!events.length) return { named: [], messages: false, sentence: null };
+  // Blocked from Automations by its plan: no rule sends for this company, so there is no text or
+  // email to warn about (the header says what a rule still does in the database, and why it is unsaid).
+  if (blockedBy(await planOf(deps), RULES_TAB)) return { named: [], messages: false, sentence: null };
   if (!deps.canRead("settings_crm")) return { named: [], messages: true, sentence: RULE_WARN_SAID.general };
   let read: Awaited<ReturnType<typeof readList>>;
   try {
@@ -85,9 +106,12 @@ export const SEND_RULE_SAID = {
 };
 
 /** The card's lines about the rules a message would set off. Names only for someone who can open
- *  Automations; anyone else hears what kind of rule, never which. Nothing when no rule would start, or
- *  when the account has no Customer Hub (no rule can run). Never throws. */
+ *  Automations; anyone else hears what kind of rule, never which. Nothing when no rule would start,
+ *  when the account has no Customer Hub (no rule can run), or when its plan blocks Automations (the
+ *  tick sends nothing for it). Never throws. */
 export async function sendRuleNotes(deps: Deps, what: SendWhat): Promise<string[]> {
+  // Blocked from Automations by its plan: as "no Customer Hub" below, no rule can run a send.
+  if (blockedBy(await planOf(deps), RULES_TAB)) return [];
   const general = [SEND_RULE_SAID[what]];
   if (!deps.canRead("settings_crm")) return general;
   let read: Awaited<ReturnType<typeof readList>>;

@@ -123,7 +123,12 @@ Deno.test("the mapping, action by action, for the ones that matter most", () => 
     ["portal-meetings", "overview", ["meetings"]], ["portal-meetings", "contact_meetings", ["meetings"]],
     ["portal-sms", "status", []], ["portal-sms", "save_intake", []],
     ["portal-payments", "charge", ["orders"]], ["portal-billing", "status", []],
-    ["jack-agent", "enabled", []], ["jack-agent", "status", ["jack"]], ["jack-agent", "send", ["jack"]],
+    ["jack-agent", "enabled", []], ["jack-agent", "send", ["jack"]], ["jack-agent", "sheet_start", ["jack"]],
+    ["jack-agent", "proposal_approve", ["jack"]],
+    // The record of what Jack did, and the way back out of it: never refused at Jack's door (stage D).
+    // An Undo's put-back is still a save behind another door, which keeps its tab: accessActions.ts.
+    ["jack-agent", "status", []], ["jack-agent", "activity", []], ["jack-agent", "proposal_get", []],
+    ["jack-agent", "proposal_cancel", []], ["jack-agent", "proposal_undo", []],
     ["support-agent", "status", []],
   ];
   for (const [fn, a, tabs] of want) {
@@ -150,9 +155,16 @@ Deno.test("a company with everything sold today is refused nothing but Jack", ()
   const suite = map([...BASE, ...HUB, ...SCHED, "view_3d", "quickbooks", "rtp"]);
   const lost = refused(suite);
   const tabs = new Set(lost.flatMap(([fn, a]) => tabsOf(fn, a)));
-  // Jack's actions are refused today too, by his own switch (jack-agent's handler asks jack_on).
+  // Jack's NEW work is refused today too, by his own switch (jack-agent's handler asks jack_on before a
+  // turn, a price list or an approve). What his switch never refused, the plan does not either: the
+  // record of what he did, dismissing a card, and Undo (ACTION_MODULE["jack-agent"]).
   assertEquals([...tabs].sort(), ["jack"], `refused: ${lost.slice(0, 12).map((x) => x.join(".")).join(", ")}`);
   assert(lost.every(([fn]) => fn === "jack-agent"), "something outside jack-agent is refused");
+  const lostJack = lost.map(([, a]) => a);
+  for (const a of ["status", "activity", "proposal_get", "proposal_cancel", "proposal_undo", "enabled"]) {
+    assert(!lostJack.includes(a), `a company without the Jack tab is refused ${a}: it could not read or undo what Jack already did`);
+  }
+  for (const a of ["send", "sheet_start", "proposal_approve"]) assert(lostJack.includes(a), `${a} is new work and must need the Jack tab`);
   // …and with his switch on, nothing at all.
   assertEquals(refused(map([...BASE, ...HUB, ...SCHED, "view_3d", "quickbooks", "rtp", "jack"])), []);
 });

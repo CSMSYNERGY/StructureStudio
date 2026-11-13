@@ -8,6 +8,7 @@ import { type Deps, handleProposalApprove, handleProposalGet, handleProposalUndo
 import { PIECE_TOOLS, register } from "./pieces.ts";
 import { leaksContactDetails } from "./redact.ts";
 import { SAID } from "./common.ts";
+import { MODULE_REFUSAL } from "../_shared/accessEnforce.ts";
 import { _test, BS_SAID, BUILD_SCHEDULE_KINDS, buildSchedulePiece, dayWords, realDay, RECORDS_SWITCH } from "./buildschedule.ts";
 
 register([buildSchedulePiece]);
@@ -956,6 +957,46 @@ Deno.test("undo mark built: a delivery on a stop build_board doesn't link to the
   // A repair's shop job and a job added by hand ride no building delivery: no read.
   const rep = await run({ deps: { canRead: (a: string) => a !== "delivery_schedule" } }, "#977", () => {});
   assertEquals([rep.r.status, rep.r.result.undo.reports, rep.moves, rep.reads], ["undone", [], 1, 0]);
+});
+
+Deno.test("undo mark built: a Delivery Schedule the plan leaves out says so and keeps the Undo; any other 403 is still 'couldn't check'", async () => {
+  // A company the server blocks by its map, with the Build Schedule and without the Delivery
+  // Schedule. The card and its put-back are the Build Schedule's, but the check that the building
+  // has not gone out reads portal-schedule `loads`, which is the Delivery Schedule's: that door
+  // answers 403 module_off, on every press. It used to be told as a read that failed ("I couldn't
+  // check its delivery just now. Press Undo to try again."), which pressing again never cures.
+  const x = setup();
+  const c = (await propose(x, input("mark_built", "#1050"))).card!;
+  await approve(x, c);
+  const had = row(x, c).undo;
+  const real = x.deps.call;
+  let loads: { status: number; data: Record<string, unknown> | null } | null = { status: 403, data: { error: MODULE_REFUSAL, code: "module_off" } };
+  x.deps.call = (fn, action, body) => ((fn as string) === "portal-schedule" && action === "loads" && loads ? Promise.resolve(loads) : real(fn, action, body));
+  const press = async () => {
+    await handleProposalUndo(x.deps, who, { id: c.id });
+    return { r: row(x, c), moves: x.writes().filter((w) => w.action === "move_job").length };
+  };
+
+  const refused = await press();
+  assertEquals(refused.r.result.undo.reports, [{ label: c.title, status: "refused", reason: BS_SAID.deliveryNoPlan }]);
+  assert(/isn't part of this account's plan/.test(BS_SAID.deliveryNoPlan) && !/try again/i.test(BS_SAID.deliveryNoPlan), BS_SAID.deliveryNoPlan);
+  // It stays built, and the Undo is NOT spent: the card is still applied with its put-back on it.
+  assertEquals([refused.r.status, refused.r.result.undo.failed, refused.r.result.undo.restored, refused.moves], ["applied", 1, 0, 0]);
+  assertEquals(refused.r.undo, had);
+  assertEquals(jobRow(x, J_LOT).stage_id, ST_DONE);
+
+  // Any other 403 on that read (a person's access changed since, a read-only operator) is not the
+  // plan's and is told as it always was. A company that is not named can only ever get these.
+  loads = { status: 403, data: { error: "You don't have access to that." } };
+  const other = await press();
+  assertEquals(other.r.result.undo.reports, [{ label: c.title, status: "error", reason: BS_SAID.deliveryUnread }]);
+  assertEquals([other.r.status, other.r.result.undo.failed, other.moves], ["applied", 1, 0]);
+
+  // The tab comes back: the same press now puts it back.
+  loads = null;
+  const back = await press();
+  assertEquals([back.r.status, back.r.result.undo.reports, back.moves], ["undone", [], 1]);
+  assert(jobRow(x, J_LOT).stage_id !== ST_DONE, "the job went back to its column");
 });
 
 // ── Access, switches, operators, the strict budget ───────────────────────────────────────────────

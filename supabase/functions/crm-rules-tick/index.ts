@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
+import { moduleVerdict } from "../_shared/accessCheck.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { fillMergeFields } from "../_shared/crmRules.ts";
@@ -204,6 +205,9 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
   let recovered = 0;
   let deferred = 0;
   const runStarted = Date.now();
+  // PLANS AS DATA (stage D): whether each company in this run still has the Automations tab, asked
+  // at most once per company per run (see the check beside the paused-rule one, below).
+  const automationsFor = new Map<string, Promise<"ok" | "refuse">>();
   for (const row of (queued ?? [])) {
     // See RUN_BUDGET_MS: what is left waits for the next tick, unclaimed and untouched.
     if (Date.now() - runStarted > RUN_BUDGET_MS) { deferred++; continue; }
@@ -271,6 +275,37 @@ Deno.serve(withErrorLog("crm-rules-tick", async (req: Request) => {
         continue;
       }
       ruleRow = rule as Record<string, unknown>;
+    }
+
+    // ⛔ A COMPANY WITHOUT THE AUTOMATIONS TAB SENDS NOTHING MORE (plans as data, stage D). The
+    // portal half hides the Automations page and portal-settings refuses its actions, but a rule
+    // written while the company had the tab kept firing and this tick kept sending for it: texts
+    // and emails to customers from a page the builder can no longer open to switch them off. So a
+    // queued row of a company the server BLOCKS by its map, whose Automations tab is not on, is
+    // settled exactly as a paused rule's row is: skipped, never retried, the reason in the run log.
+    // It is the whole outbox, whatever the kind: a text, an email, a team note, a webhook and a
+    // GoHighLevel push are all a rule's action.
+    //
+    // ⚠️ THIS STOPS THE OUTBOX ONLY. The rule itself still fires in the database (crm_rules_run
+    // does not read the map), so its card moves, notes and statuses still happen, a once-per-card
+    // guard is spent, and the skipped message is not sent later when the tab returns. Stopping the
+    // rule at its source would be a migration, and is not done here. Skipped and not held on
+    // purpose: a held row would send week-old texts the moment the tab came back.
+    //
+    // A company that is not named, and a map that cannot be read, send as they always did
+    // (moduleVerdict answers "ok" and never throws); a company in REPORT mode sends too, and one
+    // info row says it would have been stopped. After the paused-rule check, so a paused rule keeps
+    // its own reason, and with no second read of crm_rules. Asked once per company per run: on the
+    // edge the map is cached for 30 seconds anyway, and this keeps a 40-row run to one read per
+    // company even where it is not.
+    let planVerdict = automationsFor.get(clientId);
+    if (!planVerdict) {
+      planVerdict = moduleVerdict(admin, clientId, "crm-rules-tick", "send", ["automations"]);
+      automationsFor.set(clientId, planVerdict);
+    }
+    if (await planVerdict === "refuse") {
+      await fail("Automations isn't part of this account's plan, so this was not sent.", "skipped");
+      continue;
     }
 
     // A customer rule's message has no card (363); a card is read only when the row names one.
